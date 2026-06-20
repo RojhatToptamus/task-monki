@@ -94,6 +94,10 @@ textarea:focus-visible {
   background: var(--color-bg);
 }
 
+.app-shell--sidebar-collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -102,6 +106,38 @@ textarea:focus-visible {
   background: var(--color-bg-sidebar);
   border-right: 1px solid var(--color-border);
   overflow: hidden;
+}
+
+.app-shell--sidebar-collapsed .sidebar {
+  padding: 0;
+  border-right: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 0;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.sidebar-toggle:hover {
+  background: var(--color-bg-panel-2);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.sidebar-toggle__icon {
+  display: block;
 }
 
 .sidebar__workspace {
@@ -121,6 +157,21 @@ textarea:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.app-brand__icon {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 .sidebar__header h1,
@@ -459,14 +510,36 @@ textarea:focus-visible {
 }
 
 .detail--empty {
+  position: relative;
   justify-content: center;
   align-items: center;
   color: var(--color-text-muted);
   text-align: center;
 }
 
+.detail__empty-toggle {
+  position: absolute;
+  top: var(--space-5);
+  left: var(--space-5);
+}
+
 .detail__header {
   align-items: flex-start;
+}
+
+.detail__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.detail__heading .sidebar-toggle {
+  margin-top: 2px;
+}
+
+.detail__heading-text {
+  min-width: 0;
 }
 
 .detail__header p {
@@ -821,7 +894,8 @@ textarea:focus-visible {
     min-width: 0;
   }
 
-  .app-shell {
+  .app-shell,
+  .app-shell--sidebar-collapsed {
     grid-template-columns: 1fr;
   }
 
@@ -830,6 +904,10 @@ textarea:focus-visible {
     border-right: 0;
     border-bottom: 1px solid var(--color-border);
     overflow: visible;
+  }
+
+  .app-shell--sidebar-collapsed .sidebar {
+    display: none;
   }
 
   .sidebar__workspace {

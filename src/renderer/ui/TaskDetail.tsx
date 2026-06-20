@@ -28,6 +28,8 @@ import { EvidencePanel } from './EvidencePanel';
 import { StatusBadge } from './StatusBadge';
 
 interface TaskDetailProps {
+  sidebarCollapsed: boolean;
+  onToggleSidebar(): void;
   task?: Task;
   run?: RunRecord;
   worktree?: WorktreeRecord;
@@ -54,6 +56,8 @@ interface TaskDetailProps {
 }
 
 export function TaskDetail({
+  sidebarCollapsed,
+  onToggleSidebar,
   task,
   run,
   worktree,
@@ -81,8 +85,21 @@ export function TaskDetail({
   if (!task) {
     return (
       <main className="detail detail--empty">
-        <h2>Select a task</h2>
-        <p>Create or select a card to inspect isolated implementation evidence.</p>
+        {sidebarCollapsed ? (
+          <button
+            type="button"
+            className="sidebar-toggle detail__empty-toggle"
+            aria-label="Show sidebar"
+            title="Show sidebar"
+            onClick={onToggleSidebar}
+          >
+            <SidebarIcon />
+          </button>
+        ) : null}
+        <div className="detail__empty-inner">
+          <h2>Select a task</h2>
+          <p>Create or select a card to inspect isolated implementation evidence.</p>
+        </div>
       </main>
     );
   }
@@ -151,13 +168,25 @@ export function TaskDetail({
   return (
     <main className="detail">
       <header className="detail__header">
-        <div>
-          <span className="detail__eyebrow">Task #{formatShortId(task.id)}</span>
-          <h1>{task.title}</h1>
-          <div className={`task-verdict task-verdict--${verdict.tone}`}>
-            <span className="task-verdict__dot" aria-hidden="true" />
-            <strong>{formatStatus(task.projection.health)}</strong>
-            <span>{verdict.message}</span>
+        <div className="detail__heading">
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+            aria-pressed={!sidebarCollapsed}
+            title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+            onClick={onToggleSidebar}
+          >
+            <SidebarIcon />
+          </button>
+          <div className="detail__heading-text">
+            <span className="detail__eyebrow">Task #{formatShortId(task.id)}</span>
+            <h1>{task.title}</h1>
+            <div className={`task-verdict task-verdict--${verdict.tone}`}>
+              <span className="task-verdict__dot" aria-hidden="true" />
+              <strong>{formatStatus(task.projection.health)}</strong>
+              <span>{verdict.message}</span>
+            </div>
           </div>
         </div>
         <div className="detail__actions">
@@ -385,4 +414,29 @@ function getPrimaryAction(input: {
   }
 
   return undefined;
+}
+
+function SidebarIcon() {
+  return (
+    <svg
+      className="sidebar-toggle__icon"
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <rect
+        x="1.75"
+        y="2.75"
+        width="12.5"
+        height="10.5"
+        rx="2.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <line x1="6.25" y1="3" x2="6.25" y2="13" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
 }

@@ -36,12 +36,25 @@ const emptySnapshot: TaskSnapshot = {
   artifacts: []
 };
 
+const SIDEBAR_COLLAPSED_KEY = 'taskManager.sidebarCollapsed';
+
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => globalThis.localStorage?.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'
+  );
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      globalThis.localStorage?.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
@@ -221,11 +234,12 @@ export function App() {
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={`app-shell${sidebarCollapsed ? ' app-shell--sidebar-collapsed' : ''}`}>
+      <aside className="sidebar" aria-hidden={sidebarCollapsed}>
         <header className="sidebar__header">
-          <div>
-            <h1>Task Manager</h1>
+          <div className="app-brand">
+            <img className="app-brand__icon" src="/AppIcon.svg" alt="" aria-hidden="true" />
+            <h1>Task Monki</h1>
           </div>
           <span className="connection-dot" aria-label="Local runner connected" />
         </header>
@@ -258,6 +272,8 @@ export function App() {
       </aside>
 
       <TaskDetail
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={toggleSidebar}
         task={selectedTask}
         run={selectedRun}
         worktree={selectedWorktree}

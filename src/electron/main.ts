@@ -27,7 +27,7 @@ function createWindow(): void {
     height: 900,
     minWidth: 1100,
     minHeight: 720,
-    title: 'Task Manager',
+    title: 'Task Monki',
     backgroundColor: '#101217',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
