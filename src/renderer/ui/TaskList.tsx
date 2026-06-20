@@ -27,11 +27,14 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
           type="button"
           onClick={() => onSelect(task.id)}
         >
-          <span className="task-card__meta">#{formatShortId(task.id)}</span>
+          <span className="task-card__top">
+            <span className="task-card__meta">#{formatShortId(task.id)}</span>
+            <span className={`flow-badge flow-badge--${task.workflowPhase.toLowerCase()}`}>
+              {task.workflowPhase}
+            </span>
+          </span>
           <strong>{task.title}</strong>
-          <span className="task-card__summary">{task.projection.summary}</span>
           <div className="task-card__badges">
-            <StatusBadge label="Flow" value={task.workflowPhase} />
             <StatusBadge label="Git" value={task.projection.git} />
             <StatusBadge label="Tests" value={task.projection.tests} />
             <StatusBadge label="PR" value={task.projection.githubPullRequest} />

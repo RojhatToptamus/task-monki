@@ -18,6 +18,17 @@ export function StatusBadge({ label, value, tone = 'neutral', muted = false }: S
   );
 }
 
+export function StatusChip({ label, value, tone = 'neutral', muted = false }: StatusBadgeProps) {
+  const resolvedTone = tone === 'neutral' ? toneForValue(value) : tone;
+  return (
+    <span className={`status-chip status-chip--${resolvedTone} ${muted ? 'status-chip--muted' : ''}`}>
+      <span className="status-chip__dot" aria-hidden="true" />
+      <span className="status-chip__label">{label}</span>
+      <strong className="status-chip__value">{value}</strong>
+    </span>
+  );
+}
+
 function toneForValue(value: string): StatusBadgeProps['tone'] {
   if (
     ['COMPLETED', 'PASSED', 'PRESENT', 'VALID', 'HEALTHY', 'CLEAN', 'PUSHED', 'READY', 'OPEN_READY', 'MERGED', 'PASSING', 'APPROVED', 'SATISFIED'].includes(value)

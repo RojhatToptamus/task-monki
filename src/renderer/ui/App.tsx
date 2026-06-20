@@ -15,7 +15,7 @@ import {
   selectTaskEvents,
   selectTaskRuns
 } from '../model/selectors';
-import { TaskCreateForm } from './TaskCreateForm';
+import { NewTaskPanel } from './NewTaskPanel';
 import { TaskDetail } from './TaskDetail';
 import { TaskList } from './TaskList';
 
@@ -36,7 +36,7 @@ const emptySnapshot: TaskSnapshot = {
   artifacts: []
 };
 
-const SIDEBAR_COLLAPSED_KEY = 'taskManager.sidebarCollapsed';
+type View = 'detail' | 'new';
 
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
@@ -44,17 +44,10 @@ export function App() {
   const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () => globalThis.localStorage?.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'
-  );
+  const [view, setView] = useState<View>('detail');
 
-  const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed((current) => {
-      const next = !current;
-      globalThis.localStorage?.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
-      return next;
-    });
-  }, []);
+  const openNewTask = useCallback(() => setView('new'), []);
+  const closeNewTask = useCallback(() => setView('detail'), []);
 
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
@@ -126,6 +119,7 @@ export function App() {
   const createTask = async (input: CreateTaskRequest) => {
     const created = await taskManagerApi.createTask(input);
     setSelectedTaskId(created.id);
+    setView('detail');
     await refresh();
   };
 
@@ -234,46 +228,39 @@ export function App() {
   };
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? ' app-shell--sidebar-collapsed' : ''}`}>
-      <aside className="sidebar" aria-hidden={sidebarCollapsed}>
+    <div className="app-shell">
+      <aside className="sidebar">
         <header className="sidebar__header">
           <div className="app-brand">
             <img className="app-brand__icon" src="/AppIcon.svg" alt="" aria-hidden="true" />
-            <h1>Task Monki</h1>
+            <h1>Task Manager</h1>
           </div>
-          <span className="connection-dot" aria-label="Local runner connected" />
         </header>
+
+        <button
+          type="button"
+          className="sidebar__new-task"
+          onClick={openNewTask}
+          disabled={isLoading || !defaultRepositoryPath}
+        >
+          <span aria-hidden="true">+</span> New task
+        </button>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <div className="sidebar__workspace">
-          <TaskCreateForm
-            defaultRepositoryPath={defaultRepositoryPath}
-            disabled={isLoading || !defaultRepositoryPath}
-            onCreate={createTask}
-            onRefinePrompt={refinePrompt}
-          />
-
-          <section className="task-browser" aria-labelledby="tasks-heading">
-            <div className="sidebar__section-title">
-              <div>
-                <h2 id="tasks-heading">Tasks</h2>
-                <span>Select a task to inspect and continue.</span>
-              </div>
-              <strong>{snapshot.tasks.length}</strong>
-            </div>
-            <TaskList
-              tasks={snapshot.tasks}
-              selectedTaskId={selectedTaskId}
-              onSelect={setSelectedTaskId}
-            />
-          </section>
+        <div className="sidebar__section-title">
+          <span>Tasks</span>
+          <strong>{snapshot.tasks.length}</strong>
         </div>
+
+        <TaskList
+          tasks={snapshot.tasks}
+          selectedTaskId={selectedTaskId}
+          onSelect={setSelectedTaskId}
+        />
       </aside>
 
       <TaskDetail
-        sidebarCollapsed={sidebarCollapsed}
-        onToggleSidebar={toggleSidebar}
         task={selectedTask}
         run={selectedRun}
         worktree={selectedWorktree}
@@ -298,6 +285,16 @@ export function App() {
         onRefreshGitHub={refreshGitHub}
         onTransition={transitionTask}
       />
+
+      {view === 'new' ? (
+        <NewTaskPanel
+          defaultRepositoryPath={defaultRepositoryPath}
+          disabled={isLoading || !defaultRepositoryPath}
+          onCreate={createTask}
+          onRefinePrompt={refinePrompt}
+          onClose={closeNewTask}
+        />
+      ) : null}
     </div>
   );
 }

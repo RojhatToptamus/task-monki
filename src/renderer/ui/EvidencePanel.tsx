@@ -13,7 +13,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
-import { StatusBadge } from './StatusBadge';
+import { StatusChip } from './StatusBadge';
 
 interface EvidencePanelProps {
   run?: RunRecord;
@@ -89,33 +89,34 @@ export function EvidencePanel({
   }, [diffArtifact?.id, finalArtifact?.id, stderrArtifact?.id, testStdoutArtifact?.id]);
 
   return (
-    <section className="panel panel--evidence">
-      <div className="panel__header">
+    <>
+    <section className="card card--evidence">
+      <div className="card__header">
         <h3>Evidence</h3>
-        {run ? <span>Run {run.id.slice(0, 8)}</span> : <span>No run</span>}
+        {run ? <span className="card__header-mono">Run {run.id.slice(0, 8)}</span> : <span>No run</span>}
       </div>
 
       {run || worktree || gitSnapshot || testRun || pullRequest ? (
         <div className="evidence-stack">
           <div className="evidence-grid">
-            {worktree ? <StatusBadge label="Worktree" value={worktree.status} /> : null}
-            {gitSnapshot ? <StatusBadge label="Git" value={gitSnapshot.status} /> : null}
-            {testRun ? <StatusBadge label="Tests" value={testRun.status} /> : null}
-            {githubRepository ? <StatusBadge label="GitHub" value={githubRepository.status} /> : null}
-            {branchPublication ? <StatusBadge label="Publish" value={branchPublication.status} /> : null}
-            {pullRequest ? <StatusBadge label="PR" value={pullRequest.status} /> : null}
-            {ciRollup ? <StatusBadge label="Checks" value={ciRollup.status} /> : null}
-            {reviewRollup ? <StatusBadge label="Reviews" value={reviewRollup.status} /> : null}
-            {mergeSnapshot ? <StatusBadge label="Merge" value={mergeSnapshot.status} /> : null}
-            {run ? <StatusBadge label="Process" value={run.processStatus} /> : null}
-            {run ? <StatusBadge label="Codex" value={run.status} /> : null}
-            {run ? <StatusBadge label="Events" value={String(run.eventCount)} /> : null}
+            {worktree ? <StatusChip label="Worktree" value={worktree.status} /> : null}
+            {gitSnapshot ? <StatusChip label="Git" value={gitSnapshot.status} /> : null}
+            {testRun ? <StatusChip label="Tests" value={testRun.status} /> : null}
+            {githubRepository ? <StatusChip label="GitHub" value={githubRepository.status} /> : null}
+            {branchPublication ? <StatusChip label="Publish" value={branchPublication.status} /> : null}
+            {pullRequest ? <StatusChip label="PR" value={pullRequest.status} /> : null}
+            {ciRollup ? <StatusChip label="Checks" value={ciRollup.status} /> : null}
+            {reviewRollup ? <StatusChip label="Reviews" value={reviewRollup.status} /> : null}
+            {mergeSnapshot ? <StatusChip label="Merge" value={mergeSnapshot.status} /> : null}
+            {run ? <StatusChip label="Process" value={run.processStatus} /> : null}
+            {run ? <StatusChip label="Codex" value={run.status} /> : null}
+            {run ? <StatusChip label="Events" value={String(run.eventCount)} /> : null}
             {run ? (
-              <StatusBadge label="Exit" value={run.exitCode === undefined ? '—' : String(run.exitCode)} />
+              <StatusChip label="Exit" value={run.exitCode === undefined ? '—' : String(run.exitCode)} />
             ) : null}
           </div>
           {gitSnapshot ? (
-            <div className="metadata-grid metadata-grid--compact">
+            <div className="kv-grid kv-grid--compact">
               <span>Head</span>
               <strong>{gitSnapshot.headSha?.slice(0, 12) ?? 'unknown'}</strong>
               <span>Dirty fingerprint</span>
@@ -132,7 +133,7 @@ export function EvidencePanel({
             </div>
           ) : null}
           {testRun ? (
-            <div className="metadata-grid metadata-grid--compact">
+            <div className="kv-grid kv-grid--compact">
               <span>Test command</span>
               <strong>{testRun.command}</strong>
               <span>Tested head</span>
@@ -144,7 +145,7 @@ export function EvidencePanel({
             </div>
           ) : null}
           {githubRepository || pullRequest ? (
-            <div className="metadata-grid metadata-grid--compact">
+            <div className="kv-grid kv-grid--compact">
               <span>Remote</span>
               <strong>
                 {githubRepository?.owner && githubRepository.repo
@@ -169,26 +170,30 @@ export function EvidencePanel({
               </strong>
             </div>
           ) : null}
-          <div className="artifact-box">
-            <div className="artifact-box__header">
-              <strong>{artifactLabel({ finalArtifact, diffArtifact, testStdoutArtifact })}</strong>
-              <span>
-                {finalArtifact?.byteCount ??
-                  diffArtifact?.byteCount ??
-                  testStdoutArtifact?.byteCount ??
-                  stderrArtifact?.byteCount ??
-                  0}{' '}
-                bytes
-              </span>
-            </div>
-            {artifactError ? <p className="form-error">{artifactError}</p> : null}
-            <pre>{artifactText || 'No artifact content yet.'}</pre>
-          </div>
         </div>
       ) : (
         <p className="muted">Prepare a worktree to capture Git, Codex, diff, and test evidence.</p>
       )}
     </section>
+
+    {run || worktree || gitSnapshot || testRun || pullRequest ? (
+      <section className="card card--artifact">
+        <div className="card__header card__header--invert">
+          <h3>{artifactLabel({ finalArtifact, diffArtifact, testStdoutArtifact })}</h3>
+          <span className="card__header-mono">
+            {finalArtifact?.byteCount ??
+              diffArtifact?.byteCount ??
+              testStdoutArtifact?.byteCount ??
+              stderrArtifact?.byteCount ??
+              0}{' '}
+            bytes
+          </span>
+        </div>
+        {artifactError ? <p className="form-error">{artifactError}</p> : null}
+        <pre className="artifact-pre">{artifactText || 'No artifact content yet.'}</pre>
+      </section>
+    ) : null}
+    </>
   );
 }
 
