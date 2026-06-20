@@ -1,0 +1,32 @@
+{
+  "name": "task-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 1 vertical slice for a local Codex task manager.",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev:renderer": "vite --host 127.0.0.1",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "dev:api": "npm run build:main && node dist-electron/dev/server.js",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc -p tsconfig.check.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^31.7.7",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
+  }
+}

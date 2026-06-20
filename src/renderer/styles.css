@@ -1,0 +1,376 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #101217;
+  color: #f3f5f8;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1100px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(87, 111, 230, 0.18), transparent 34rem),
+    linear-gradient(135deg, #0d1015 0%, #121722 48%, #0f1218 100%);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 420px minmax(680px, 1fr);
+  gap: 1px;
+  min-height: 100vh;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px;
+  background: rgba(12, 15, 20, 0.94);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-y: auto;
+}
+
+.sidebar__header,
+.detail__header,
+.panel__header,
+.artifact-box__header,
+.sidebar__section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.sidebar__header h1,
+.detail__header h1 {
+  margin: 0;
+  letter-spacing: -0.04em;
+}
+
+.sidebar__header h1 {
+  font-size: 30px;
+}
+
+.detail__header h1 {
+  max-width: 760px;
+  font-size: 42px;
+  line-height: 1.02;
+}
+
+.app-kicker,
+.detail__eyebrow,
+.sidebar__section-title,
+.task-card__meta,
+.panel__header span,
+.artifact-box__header span {
+  color: #8d98a8;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #5ff0a7;
+  box-shadow: 0 0 0 6px rgba(95, 240, 167, 0.12);
+}
+
+.task-form,
+.panel,
+.task-card,
+.empty-state,
+.error-banner {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
+}
+
+.task-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.task-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.task-form label span {
+  color: #9ea8b7;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.task-form input,
+.task-form textarea {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(5, 7, 10, 0.65);
+  color: #f6f8fb;
+  padding: 11px 12px;
+  outline: none;
+}
+
+.task-form textarea {
+  resize: vertical;
+}
+
+.task-form input:focus,
+.task-form textarea:focus {
+  border-color: rgba(134, 156, 255, 0.8);
+  box-shadow: 0 0 0 4px rgba(113, 135, 255, 0.12);
+}
+
+.primary-button,
+.secondary-button {
+  border: 0;
+  border-radius: 14px;
+  padding: 11px 16px;
+  color: #f7f8ff;
+  font-weight: 800;
+}
+
+.primary-button {
+  background: linear-gradient(135deg, #6d7cff, #8a5cff);
+  box-shadow: 0 16px 36px rgba(109, 124, 255, 0.28);
+}
+
+.secondary-button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.task-list {
+  display: grid;
+  gap: 12px;
+}
+
+.task-card {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 16px;
+  color: inherit;
+  text-align: left;
+}
+
+.task-card--selected {
+  border-color: rgba(139, 158, 255, 0.72);
+  background: rgba(123, 143, 255, 0.12);
+}
+
+.task-card strong {
+  font-size: 16px;
+}
+
+.task-card__summary {
+  color: #b8c0cc;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.task-card__badges,
+.status-strip,
+.evidence-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #aeb8c6;
+  padding: 7px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.status-badge strong {
+  color: #f3f6fb;
+  font-size: 12px;
+}
+
+.status-badge--success {
+  background: rgba(95, 240, 167, 0.1);
+  border-color: rgba(95, 240, 167, 0.28);
+}
+
+.status-badge--warning {
+  background: rgba(255, 197, 95, 0.1);
+  border-color: rgba(255, 197, 95, 0.28);
+}
+
+.status-badge--error {
+  background: rgba(255, 99, 132, 0.11);
+  border-color: rgba(255, 99, 132, 0.28);
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.detail--empty {
+  justify-content: center;
+  align-items: center;
+  color: #aeb8c6;
+  text-align: center;
+}
+
+.detail__header p {
+  max-width: 780px;
+  color: #b8c0cc;
+}
+
+.detail__actions {
+  display: flex;
+  gap: 10px;
+}
+
+.panel {
+  padding: 18px;
+}
+
+.panel__header {
+  margin-bottom: 14px;
+}
+
+.panel__header h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.prompt-box,
+.artifact-box pre {
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(5, 7, 10, 0.62);
+  color: #dce3ec;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.prompt-box {
+  padding: 15px;
+}
+
+.detail__grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.timeline {
+  display: grid;
+  gap: 10px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.timeline__event {
+  display: grid;
+  grid-template-columns: 86px minmax(170px, 0.7fr) 1fr;
+  gap: 10px;
+  align-items: baseline;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 10px 0;
+}
+
+.timeline__event time,
+.timeline__event span,
+.muted {
+  color: #96a1b0;
+  font-size: 13px;
+}
+
+.timeline__event strong {
+  color: #f1f4f9;
+  font-size: 12px;
+}
+
+.artifact-box {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.artifact-box pre {
+  min-height: 300px;
+  max-height: 520px;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.48;
+}
+
+.finding {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid #ffc55f;
+  padding: 8px 0 8px 12px;
+}
+
+.finding span {
+  color: #bdc6d2;
+}
+
+.empty-state {
+  padding: 24px;
+  color: #b6bfcb;
+}
+
+.empty-state h2 {
+  margin-top: 0;
+  color: #f4f6fb;
+}
+
+.form-error,
+.error-banner {
+  color: #ffd3dc;
+}
+
+.error-banner {
+  padding: 12px 14px;
+  background: rgba(255, 99, 132, 0.12);
+  border-color: rgba(255, 99, 132, 0.24);
+}

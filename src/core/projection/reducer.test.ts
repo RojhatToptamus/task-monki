@@ -1,0 +1,91 @@
+import { describe, expect, it } from 'vitest';
+import { createInitialProjection } from '../../shared/contracts';
+import type { DomainEvent, RunRecord, Task } from '../../shared/contracts';
+import { reduceProjection, reduceRun } from './reducer';
+
+const now = '2026-06-20T10:00:00.000Z';
+
+describe('projection reducer', () => {
+  it('separates Codex completion from process exit', () => {
+    const projection = createInitialProjection(now);
+    const run = createRun();
+    const event = createEvent('CODEX_RUN_COMPLETED', {
+      terminalStatus: 'completed',
+      finalArtifactId: 'artifact-1'
+    });
+
+    const next = reduceProjection(projection, event, run);
+
+    expect(next.codexRun).toBe('COMPLETED');
+    expect(next.artifact).toBe('FINAL_MESSAGE_PRESENT');
+    expect(next.osProcess).toBe('UNKNOWN');
+    expect(next.summary).toContain('Review the final artifact');
+  });
+
+  it('records non-zero process exits as errors', () => {
+    const projection = createInitialProjection(now);
+    const next = reduceProjection(projection, createEvent('PROCESS_EXITED', { exitCode: 2 }));
+
+    expect(next.osProcess).toBe('EXITED');
+    expect(next.health).toBe('ERROR');
+    expect(next.findings.some((finding) => finding.code === 'PROCESS_NON_ZERO_EXIT')).toBe(true);
+  });
+
+  it('marks cancellation as waiting until a signal or terminal event arrives', () => {
+    const projection = createInitialProjection(now);
+    const next = reduceProjection(projection, createEvent('CANCEL_REQUESTED', {}));
+
+    expect(next.requestedAction).toBe('CANCEL_REQUESTED');
+    expect(next.osProcess).toBe('CANCELING');
+    expect(next.summary).toContain('waiting');
+  });
+});
+
+describe('run reducer', () => {
+  it('updates run event counts and terminal Codex state', () => {
+    const run = createRun();
+    const next = reduceRun(
+      run,
+      createEvent('CODEX_EVENT_PARSED', {
+        eventType: 'turn.completed',
+        terminalStatus: 'completed',
+        messageText: 'done'
+      })
+    );
+
+    expect(next.eventCount).toBe(1);
+    expect(next.status).toBe('COMPLETED');
+    expect(next.finalMessage).toBe('done');
+  });
+});
+
+function createRun(): RunRecord {
+  return {
+    id: 'run-1',
+    taskId: 'task-1',
+    status: 'RUNNING',
+    processStatus: 'RUNNING',
+    executable: 'codex',
+    argv: [],
+    cwd: '/tmp/repo',
+    startedAt: now,
+    stdoutArtifactId: 'stdout',
+    stderrArtifactId: 'stderr',
+    jsonlArtifactId: 'jsonl',
+    eventCount: 0
+  };
+}
+
+function createEvent(type: DomainEvent['type'], payload: unknown): DomainEvent {
+  return {
+    id: `event-${type}`,
+    type,
+    taskId: 'task-1',
+    runId: 'run-1',
+    source: 'process',
+    sourceEventId: `source-${type}`,
+    occurredAt: now,
+    receivedAt: now,
+    payload
+  };
+}

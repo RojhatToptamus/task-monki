@@ -1,0 +1,7 @@
+node_modules/
+dist-electron/
+dist-renderer/
+.task-manager-dev-store/
+.playwright-mcp/
+*.log
+.DS_Store
