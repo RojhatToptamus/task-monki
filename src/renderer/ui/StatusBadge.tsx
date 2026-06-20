@@ -2,12 +2,15 @@ interface StatusBadgeProps {
   label: string;
   value: string;
   tone?: 'neutral' | 'info' | 'success' | 'warning' | 'error';
+  muted?: boolean;
 }
 
-export function StatusBadge({ label, value, tone = 'neutral' }: StatusBadgeProps) {
+export function StatusBadge({ label, value, tone = 'neutral', muted = false }: StatusBadgeProps) {
   const resolvedTone = tone === 'neutral' ? toneForValue(value) : tone;
   return (
-    <span className={`status-badge status-badge--${resolvedTone}`}>
+    <span
+      className={`status-badge status-badge--${resolvedTone} ${muted ? 'status-badge--muted' : ''}`}
+    >
       <span className="status-badge__dot" aria-hidden="true" />
       <span>{label}</span>
       <strong>{value}</strong>

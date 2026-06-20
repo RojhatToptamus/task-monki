@@ -94,6 +94,11 @@ export function TaskDetail({
     onStart,
     onCreatePullRequest
   });
+  const verdict = getVerdict(task);
+  const deliveryStarted =
+    task.projection.branchPublication !== 'NOT_PUSHED' ||
+    task.projection.githubPullRequest !== 'UNLINKED';
+  const promptLineCount = task.prompt.split(/\r?\n/).length;
 
   const secondaryActions: Array<{
     label: string;
@@ -149,7 +154,11 @@ export function TaskDetail({
         <div>
           <span className="detail__eyebrow">Task #{formatShortId(task.id)}</span>
           <h1>{task.title}</h1>
-          <p>{task.projection.summary}</p>
+          <div className={`task-verdict task-verdict--${verdict.tone}`}>
+            <span className="task-verdict__dot" aria-hidden="true" />
+            <strong>{formatStatus(task.projection.health)}</strong>
+            <span>{verdict.message}</span>
+          </div>
         </div>
         <div className="detail__actions">
           {primaryAction ? (
@@ -178,29 +187,85 @@ export function TaskDetail({
         </div>
       </header>
 
-      <section className="status-strip" aria-label="Current status">
-        <StatusBadge label="Workflow" value={task.workflowPhase} />
-        <StatusBadge label="Worktree" value={task.projection.worktree} />
-        <StatusBadge label="Git" value={task.projection.git} />
-        <StatusBadge label="Tests" value={task.projection.tests} />
-        <StatusBadge label="GitHub" value={task.projection.githubRepository} />
-        <StatusBadge label="Publish" value={task.projection.branchPublication} />
-        <StatusBadge label="PR" value={task.projection.githubPullRequest} />
-        <StatusBadge label="Checks" value={task.projection.ciChecks} />
-        <StatusBadge label="Reviews" value={task.projection.reviews} />
-        <StatusBadge label="Merge" value={task.projection.merge} />
-        <StatusBadge label="Process" value={task.projection.osProcess} />
-        <StatusBadge label="Codex" value={task.projection.codexRun} />
-        <StatusBadge label="Repository" value={task.projection.repositoryPreflight} />
-        <StatusBadge label="Health" value={task.projection.health} />
+      <section className="status-overview" aria-label="Current status">
+        <div className="status-group">
+          <span className="status-group__label">Workflow</span>
+          <div className="status-group__items">
+            <StatusBadge label="Phase" value={task.workflowPhase} />
+            <StatusBadge label="Repository" value={task.projection.repositoryPreflight} />
+          </div>
+        </div>
+
+        <div className="status-group">
+          <span className="status-group__label">Local</span>
+          <div className="status-group__items">
+            <StatusBadge label="Worktree" value={task.projection.worktree} />
+            <StatusBadge label="Git" value={task.projection.git} />
+            <StatusBadge
+              label="Tests"
+              value={task.projection.tests}
+              muted={task.projection.tests === 'NOT_RUN'}
+            />
+            <StatusBadge label="Process" value={task.projection.osProcess} />
+            <StatusBadge label="Codex" value={task.projection.codexRun} />
+          </div>
+        </div>
+
+        <div className="status-group">
+          <span className="status-group__label">Delivery</span>
+          <div className="status-group__items">
+            <StatusBadge label="GitHub" value={task.projection.githubRepository} />
+            {deliveryStarted ? (
+              <>
+                <StatusBadge
+                  label="Publish"
+                  value={task.projection.branchPublication}
+                  muted={task.projection.branchPublication === 'NOT_PUSHED'}
+                />
+                <StatusBadge
+                  label="PR"
+                  value={task.projection.githubPullRequest}
+                  muted={task.projection.githubPullRequest === 'UNLINKED'}
+                />
+                <StatusBadge
+                  label="Checks"
+                  value={task.projection.ciChecks}
+                  muted={task.projection.ciChecks === 'NOT_APPLICABLE'}
+                />
+                <StatusBadge
+                  label="Reviews"
+                  value={task.projection.reviews}
+                  muted={task.projection.reviews === 'NOT_APPLICABLE'}
+                />
+                <StatusBadge
+                  label="Merge"
+                  value={task.projection.merge}
+                  muted={task.projection.merge === 'NOT_APPLICABLE'}
+                />
+              </>
+            ) : (
+              <span className="status-group__empty">Delivery not started</span>
+            )}
+          </div>
+        </div>
       </section>
 
-      <section className="panel">
-        <div className="panel__header">
-          <h3>Prompt</h3>
-          <span>{task.repositoryPath}</span>
-        </div>
-        <pre className="prompt-box">{task.prompt}</pre>
+      <section className="panel panel--prompt">
+        <details className="prompt-disclosure">
+          <summary>
+            <span className="prompt-disclosure__title">
+              <strong>Prompt</strong>
+              <span>{promptLineCount} lines</span>
+            </span>
+            <span className="prompt-disclosure__repository">{task.repositoryPath}</span>
+            <span className="prompt-disclosure__action">
+              <span className="prompt-disclosure__show">Show prompt</span>
+              <span className="prompt-disclosure__hide">Hide prompt</span>
+              <span className="prompt-disclosure__chevron" aria-hidden="true" />
+            </span>
+          </summary>
+          <pre className="prompt-box">{task.prompt}</pre>
+        </details>
         <div className="metadata-grid">
           <span>Test command</span>
           <strong>{task.testCommand ?? 'npm test'}</strong>
@@ -254,6 +319,36 @@ export function TaskDetail({
       </div>
     </main>
   );
+}
+
+function getVerdict(task: Task): {
+  message: string;
+  tone: 'neutral' | 'info' | 'success' | 'warning' | 'error';
+} {
+  const health = task.projection.health;
+  const matchingFinding = [...task.projection.findings]
+    .reverse()
+    .find((finding) => finding.severity === health);
+
+  return {
+    message: matchingFinding?.message ?? task.projection.summary,
+    tone:
+      health === 'HEALTHY'
+        ? 'success'
+        : health === 'WARNING'
+          ? 'warning'
+          : health === 'ERROR' || health === 'BLOCKED'
+            ? 'error'
+            : 'info'
+  };
+}
+
+function formatStatus(value: string): string {
+  return value
+    .toLowerCase()
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
 }
 
 function getPrimaryAction(input: {

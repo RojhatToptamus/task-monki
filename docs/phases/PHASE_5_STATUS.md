@@ -48,6 +48,19 @@ Changes:
 - reduced task-card badges to the most useful queue signals;
 - removed noisy visual treatments from cards and empty states.
 
+### Side-by-side task workspace
+
+The left workspace now places New task and Tasks beside each other instead of stacking the task list below the form.
+
+The task form was tightened for production use:
+
+- moved Refine beside the Prompt label;
+- reduced prompt height while preserving vertical resizing;
+- improved field spacing and visual hierarchy;
+- added a compact footer with the primary Create task action;
+- gave the task list its own bounded scrolling column;
+- retained a stacked responsive layout for narrow windows.
+
 ### Action hierarchy
 
 Updated `src/renderer/ui/TaskDetail.tsx`.
@@ -72,6 +85,25 @@ Changes:
 - changed status badges from pill blocks to dot + label/value rows;
 - kept existing status-to-tone mapping;
 - reduced color saturation and visual weight.
+
+### Task detail status and prompt density
+
+Updated:
+
+- `src/renderer/ui/TaskDetail.tsx`
+- `src/renderer/ui/StatusBadge.tsx`
+- `src/renderer/styles.css`
+
+Changes:
+
+- promoted current health and its matching summary/finding below the task title;
+- grouped technical state into Workflow, Local, and Delivery rows;
+- collapsed inactive delivery fields until branch or PR delivery begins;
+- used hollow indicators for inactive evidence without removing the underlying status;
+- kept the full prompt collapsed by default with an explicit Show/Hide control;
+- left task metadata visible while the prompt is collapsed.
+
+This remains presentation-only and preserves the existing workflow and technical evidence model.
 
 ### Production copy cleanup
 
@@ -113,12 +145,18 @@ Expected UI behavior:
 
 1. Sidebar title reads `Task Manager`; no phase label is shown.
 2. New-task form starts empty and uses direct production copy.
-3. Task cards show a compact status set.
-4. Selected-task header shows one primary contextual action.
-5. In `REVIEW`, `Create draft PR` is the primary action.
-6. Secondary actions are visually quieter and grouped.
-7. Status badges render as dot + label/value, not heavy pills.
-8. Panels use flat surfaces and hairline borders without decorative gradients or glows.
+3. New task and Tasks render as adjacent columns on a wide window.
+4. The form uses a compact prompt field with Refine beside its label.
+5. Task cards show a compact status set.
+6. Selected-task header shows one primary contextual action.
+7. In `REVIEW`, `Create draft PR` is the primary action.
+8. Secondary actions are visually quieter and grouped.
+9. Current health and its summary appear directly below the task title.
+10. Statuses are grouped into Workflow, Local, and Delivery.
+11. Inactive delivery state is condensed to `Delivery not started`.
+12. The Prompt panel starts collapsed and can be expanded without hiding task metadata.
+13. Status badges render as dot + label/value, not heavy pills.
+14. Panels use flat surfaces and hairline borders without decorative gradients or glows.
 
 ### Verification commands
 
@@ -153,11 +191,18 @@ Result:
 ```text
 typecheck passed
 14 test files passed
-33 tests passed
+35 tests passed
 build passed
 ```
 
-Rendered browser smoke was attempted after build validation. The local API and Vite renderer started successfully with elevated localhost-binding permission, but the in-app browser runtime failed before navigation with a missing `sandboxPolicy` metadata error. No Playwright fallback was used.
+The initial rendered browser smoke could not use the in-app browser because its sandbox metadata was unavailable.
+
+The side-by-side task workspace update was subsequently verified with the local browser fallback at `http://127.0.0.1:5174/`:
+
+- New task and Tasks rendered as adjacent columns;
+- the form remained compact with the task list visible;
+- the detail pane switched to its narrow-container layout without title or evidence-column crowding;
+- the page reported no browser console errors or warnings.
 
 ## 5. Known limitations
 

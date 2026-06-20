@@ -232,22 +232,29 @@ export function App() {
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <TaskCreateForm
-          defaultRepositoryPath={defaultRepositoryPath}
-          disabled={isLoading || !defaultRepositoryPath}
-          onCreate={createTask}
-          onRefinePrompt={refinePrompt}
-        />
+        <div className="sidebar__workspace">
+          <TaskCreateForm
+            defaultRepositoryPath={defaultRepositoryPath}
+            disabled={isLoading || !defaultRepositoryPath}
+            onCreate={createTask}
+            onRefinePrompt={refinePrompt}
+          />
 
-        <div className="sidebar__section-title">
-          <span>Tasks</span>
-          <strong>{snapshot.tasks.length}</strong>
+          <section className="task-browser" aria-labelledby="tasks-heading">
+            <div className="sidebar__section-title">
+              <div>
+                <h2 id="tasks-heading">Tasks</h2>
+                <span>Select a task to inspect and continue.</span>
+              </div>
+              <strong>{snapshot.tasks.length}</strong>
+            </div>
+            <TaskList
+              tasks={snapshot.tasks}
+              selectedTaskId={selectedTaskId}
+              onSelect={setSelectedTaskId}
+            />
+          </section>
         </div>
-        <TaskList
-          tasks={snapshot.tasks}
-          selectedTaskId={selectedTaskId}
-          onSelect={setSelectedTaskId}
-        />
       </aside>
 
       <TaskDetail

@@ -1,5 +1,14 @@
 # Status Row Redesign
 
+**Implementation status:** Implemented on 2026-06-20.
+
+The implementation follows the proposal with two deliberate adjustments:
+
+- `Workflow` is shown before `Local` and `Delivery` because workflow phase is the primary human-facing state.
+- The verdict line only promotes a finding whose severity matches the current health value. Historical findings remain in the Findings panel but are not presented as the current verdict after health changes.
+
+The task prompt panel was also made collapsible in the same UI slice. It is collapsed by default, shows the prompt line count and repository path, and keeps operational metadata visible.
+
 **Scope:** The status section in the task detail view — currently `.status-strip` in [`TaskDetail.tsx:184-199`](../src/renderer/ui/TaskDetail.tsx#L184-L199). This is a focused spin-off of the broader [UI redesign plan](./UI_REDESIGN_PLAN.md); it covers only the 14-badge status row.
 
 **Nature of change:** Presentation only. No change to `toneForValue` ([`StatusBadge.tsx`](../src/renderer/ui/StatusBadge.tsx)), the projection reducer ([`reducer.ts`](../src/core/projection/reducer.ts)), or the contract ([`contracts.ts`](../src/shared/contracts.ts)). Same data, better organized.
@@ -105,8 +114,26 @@ WORKFLOW  ● Phase REVIEW   ● Repository VALID
 - The verdict chip can reuse `StatusBadge` tone logic or be a small purpose-built element — either way it reads `task.projection.health` and the first `task.projection.findings` entry.
 - No new data is required: every value shown already exists on `task.projection`.
 
-## 7. Suggested order
+## 7. Implemented order
 
 1. Promote `Health` to the verdict line.
 2. Group into Local / Remote / Workflow rows.
 3. De-emphasize inactive states (hollow dot + collapse Remote).
+
+## 8. How to view or test
+
+1. Open any task detail.
+2. Confirm current health and its summary appear directly below the task title.
+3. Confirm statuses are grouped as Workflow, Local, and Delivery.
+4. On a task without a published branch or PR, confirm Delivery shows GitHub status plus `Delivery not started`.
+5. Open a task with delivery activity and confirm Publish, PR, Checks, Reviews, and Merge appear.
+6. Confirm the Prompt panel starts collapsed and toggles with `Show prompt` / `Hide prompt`.
+7. Confirm task metadata remains visible while the prompt is collapsed.
+
+Run:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```

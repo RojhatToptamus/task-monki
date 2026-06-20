@@ -56,18 +56,10 @@ export function TaskCreateForm({
       <div className="task-form__intro">
         <div>
           <strong>New task</strong>
-          <span>Describe the change and repository target.</span>
+          <span>Define the work, target repository, and verification command.</span>
         </div>
-        <button
-          className="secondary-button"
-          type="button"
-          disabled={disabled || isRefining || !prompt.trim() || !repositoryPath.trim()}
-          onClick={() => void refine()}
-        >
-          {isRefining ? 'Refining…' : 'Refine prompt'}
-        </button>
       </div>
-      <label>
+      <label className="task-form__field">
         <span>Title</span>
         <input
           value={title}
@@ -76,7 +68,7 @@ export function TaskCreateForm({
           disabled={disabled}
         />
       </label>
-      <label>
+      <label className="task-form__field">
         <span>Repository</span>
         <input
           value={repositoryPath}
@@ -85,7 +77,7 @@ export function TaskCreateForm({
           disabled={disabled}
         />
       </label>
-      <label>
+      <label className="task-form__field">
         <span>Test command</span>
         <input
           value={testCommand}
@@ -94,24 +86,38 @@ export function TaskCreateForm({
           disabled={disabled}
         />
       </label>
-      <label>
-        <span>Prompt</span>
+      <div className="task-form__field task-form__field--prompt">
+        <span className="task-form__field-header">
+          <label htmlFor="task-prompt">Prompt</label>
+          <button
+            className="task-form__refine"
+            type="button"
+            disabled={disabled || isRefining || !prompt.trim() || !repositoryPath.trim()}
+            onClick={() => void refine()}
+          >
+            {isRefining ? 'Refining…' : 'Refine'}
+          </button>
+        </span>
         <textarea
+          id="task-prompt"
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           placeholder="Describe the implementation request, constraints, and expected verification."
-          rows={5}
+          rows={7}
           disabled={disabled}
         />
-      </label>
+      </div>
       {error ? <p className="form-error">{error}</p> : null}
-      <button
-        className="primary-button"
-        type="submit"
-        disabled={disabled || !title.trim() || !prompt.trim() || !repositoryPath.trim()}
-      >
-        Create task
-      </button>
+      <div className="task-form__footer">
+        <span>Creates a task without starting implementation.</span>
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={disabled || !title.trim() || !prompt.trim() || !repositoryPath.trim()}
+        >
+          Create task
+        </button>
+      </div>
     </form>
   );
 }
