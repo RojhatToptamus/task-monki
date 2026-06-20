@@ -13,13 +13,13 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
     return (
       <div className="empty-state">
         <h2>No tasks yet</h2>
-        <p>Create an implementation task to start collecting isolated worktree evidence.</p>
+        <p>Create a task to start.</p>
       </div>
     );
   }
 
   return (
-    <div className="task-list" aria-label="Task cards">
+    <div className="task-list" aria-label="Tasks">
       {tasks.map((task) => (
         <button
           key={task.id}
@@ -31,29 +31,13 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
           <strong>{task.title}</strong>
           <span className="task-card__summary">{task.projection.summary}</span>
           <div className="task-card__badges">
-            <StatusBadge label="Worktree" value={task.projection.worktree} />
+            <StatusBadge label="Flow" value={task.workflowPhase} />
             <StatusBadge label="Git" value={task.projection.git} />
             <StatusBadge label="Tests" value={task.projection.tests} />
             <StatusBadge label="PR" value={task.projection.githubPullRequest} />
-            <StatusBadge label="Merge" value={task.projection.merge} />
-            <StatusBadge label="Process" value={task.projection.osProcess} />
-            <StatusBadge label="Codex" value={task.projection.codexRun} tone={tone(task)} />
           </div>
         </button>
       ))}
     </div>
   );
-}
-
-function tone(task: Task): 'neutral' | 'info' | 'success' | 'warning' | 'error' {
-  if (task.projection.health === 'ERROR' || task.projection.health === 'BLOCKED') {
-    return 'error';
-  }
-  if (task.projection.health === 'WARNING') {
-    return 'warning';
-  }
-  if (task.projection.codexRun === 'COMPLETED') {
-    return 'success';
-  }
-  return 'info';
 }

@@ -24,6 +24,12 @@ If you are picking up work in this repository, start here before changing code.
    Completed Phase 3 status log, verification evidence, and limitations.
 9. `docs/phases/PHASE_4_STATUS.md`  
    Phase 4 review-to-PR workflow simplification status, verification evidence, and limitations.
+10. `docs/UI_REDESIGN_PLAN.md`
+   Native macOS UI redesign plan.
+11. `docs/phases/PHASE_5_STATUS.md`
+   Native macOS UI redesign implementation status, verification evidence, and limitations.
+12. `docs/phases/PHASE_6_STATUS.md`
+   Lightweight model configuration and repository-aware prompt refinement status.
 
 ## Documentation policy
 

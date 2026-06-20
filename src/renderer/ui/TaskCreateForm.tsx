@@ -14,10 +14,8 @@ export function TaskCreateForm({
   onCreate,
   onRefinePrompt
 }: TaskCreateFormProps) {
-  const [title, setTitle] = useState('Summarize this repository');
-  const [prompt, setPrompt] = useState(
-    'Implement a small, scoped change. Keep edits inside the task worktree and summarize what changed.'
-  );
+  const [title, setTitle] = useState('');
+  const [prompt, setPrompt] = useState('');
   const [repositoryPath, setRepositoryPath] = useState(defaultRepositoryPath);
   const [testCommand, setTestCommand] = useState('npm test');
   const [error, setError] = useState<string | undefined>();
@@ -58,7 +56,7 @@ export function TaskCreateForm({
       <div className="task-form__intro">
         <div>
           <strong>New task</strong>
-          <span>Write a short request, then refine it into a scoped implementation prompt.</span>
+          <span>Describe the change and repository target.</span>
         </div>
         <button
           className="secondary-button"
@@ -66,7 +64,7 @@ export function TaskCreateForm({
           disabled={disabled || isRefining || !prompt.trim() || !repositoryPath.trim()}
           onClick={() => void refine()}
         >
-          {isRefining ? 'Refining…' : 'Refine Prompt'}
+          {isRefining ? 'Refining…' : 'Refine prompt'}
         </button>
       </div>
       <label>
@@ -74,7 +72,7 @@ export function TaskCreateForm({
         <input
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          placeholder="Task title"
+          placeholder="Add settings validation"
           disabled={disabled}
         />
       </label>
@@ -101,13 +99,17 @@ export function TaskCreateForm({
         <textarea
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          placeholder="Implementation prompt"
+          placeholder="Describe the implementation request, constraints, and expected verification."
           rows={5}
           disabled={disabled}
         />
       </label>
       {error ? <p className="form-error">{error}</p> : null}
-      <button className="primary-button" type="submit" disabled={disabled}>
+      <button
+        className="primary-button"
+        type="submit"
+        disabled={disabled || !title.trim() || !prompt.trim() || !repositoryPath.trim()}
+      >
         Create task
       </button>
     </form>

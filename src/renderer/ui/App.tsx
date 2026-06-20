@@ -225,7 +225,6 @@ export function App() {
       <aside className="sidebar">
         <header className="sidebar__header">
           <div>
-            <span className="app-kicker">Phase 2</span>
             <h1>Task Manager</h1>
           </div>
           <span className="connection-dot" aria-label="Local runner connected" />
@@ -241,7 +240,7 @@ export function App() {
         />
 
         <div className="sidebar__section-title">
-          <span>Task cards</span>
+          <span>Tasks</span>
           <strong>{snapshot.tasks.length}</strong>
         </div>
         <TaskList

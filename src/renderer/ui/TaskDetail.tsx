@@ -87,87 +87,94 @@ export function TaskDetail({
     );
   }
 
+  const primaryAction = getPrimaryAction({
+    task,
+    worktreePresent: Boolean(worktree),
+    onPrepareWorktree,
+    onStart,
+    onCreatePullRequest
+  });
+
+  const secondaryActions: Array<{
+    label: string;
+    disabled?: boolean;
+    onClick(): void;
+    tone?: 'danger';
+  }> = [
+    {
+      label: 'Move to review',
+      disabled:
+        task.workflowPhase === 'REVIEW' ||
+        task.workflowPhase === 'IN_REVIEW' ||
+        task.workflowPhase === 'DONE' ||
+        task.projection.codexRun !== 'COMPLETED',
+      onClick: () => void onTransition(task.id, 'REVIEW')
+    },
+    {
+      label: 'Run tests',
+      disabled: !canRunTests(task),
+      onClick: () => void onRunTests(task.id)
+    },
+    {
+      label: 'Refresh evidence',
+      disabled: task.projection.worktree !== 'PRESENT',
+      onClick: () => void onRefreshEvidence(task.id)
+    },
+    {
+      label: 'Check GitHub',
+      disabled: !worktree,
+      onClick: () => void onPreflightGitHub(task.id)
+    },
+    {
+      label: 'Commit changes',
+      disabled: !canCreateDeliveryCommit(task),
+      onClick: () => void onCreateDeliveryCommit(task.id)
+    },
+    {
+      label: 'Refresh GitHub',
+      disabled: !pullRequest,
+      onClick: () => void onRefreshGitHub(task.id)
+    },
+    {
+      label: 'Cancel run',
+      disabled: !canCancelRun(run),
+      tone: 'danger',
+      onClick: () => run && void onCancel(run.id)
+    }
+  ];
+
   return (
     <main className="detail">
       <header className="detail__header">
         <div>
-          <span className="detail__eyebrow">Phase 2 isolated worktree · #{formatShortId(task.id)}</span>
+          <span className="detail__eyebrow">Task #{formatShortId(task.id)}</span>
           <h1>{task.title}</h1>
           <p>{task.projection.summary}</p>
         </div>
         <div className="detail__actions">
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!canPrepareWorktree(task)}
-            onClick={() => void onPrepareWorktree(task.id)}
-          >
-            Prepare worktree
-          </button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={!canStartRun(task)}
-            onClick={() => void onStart(task.id)}
-          >
-            Start implementation
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!canCancelRun(run)}
-            onClick={() => run && void onCancel(run.id)}
-          >
-            Cancel
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={task.projection.worktree !== 'PRESENT'}
-            onClick={() => void onRefreshEvidence(task.id)}
-          >
-            Refresh evidence
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!canRunTests(task)}
-            onClick={() => void onRunTests(task.id)}
-          >
-            Run tests
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!canCreateDeliveryCommit(task)}
-            onClick={() => void onCreateDeliveryCommit(task.id)}
-          >
-            Create delivery commit
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!worktree}
-            onClick={() => void onPreflightGitHub(task.id)}
-          >
-            Check GitHub
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!canCreatePullRequest(task)}
-            onClick={() => void onCreatePullRequest(task.id)}
-          >
-            Create draft PR
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!pullRequest}
-            onClick={() => void onRefreshGitHub(task.id)}
-          >
-            Refresh GitHub
-          </button>
+          {primaryAction ? (
+            <button
+              className="primary-button"
+              type="button"
+              disabled={primaryAction.disabled}
+              onClick={primaryAction.onClick}
+            >
+              {primaryAction.label}
+            </button>
+          ) : null}
+          <div className="detail__secondary-actions">
+            {secondaryActions.map((action) => (
+              <button
+                className={`secondary-button ${action.tone === 'danger' ? 'secondary-button--danger' : ''}`}
+                key={action.label}
+                type="button"
+                disabled={action.disabled}
+                onClick={action.onClick}
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -186,30 +193,6 @@ export function TaskDetail({
         <StatusBadge label="Codex" value={task.projection.codexRun} />
         <StatusBadge label="Repository" value={task.projection.repositoryPreflight} />
         <StatusBadge label="Health" value={task.projection.health} />
-      </section>
-
-      <section className="panel">
-        <div className="panel__header">
-          <h3>Guarded workflow</h3>
-          <span>Review is the decision point</span>
-        </div>
-        <div className="transition-row">
-          {(['REVIEW'] as WorkflowPhase[]).map((phase) => (
-            <button
-              key={phase}
-              className="secondary-button"
-              type="button"
-              disabled={task.workflowPhase === phase}
-              onClick={() => void onTransition(task.id, phase)}
-            >
-              Move to {phase}
-            </button>
-          ))}
-        </div>
-        <p className="transition-help">
-          In REVIEW, use <strong>Create draft PR</strong> to commit/publish the task branch and open a
-          GitHub draft PR. Tests remain visible evidence, not a required card move.
-        </p>
       </section>
 
       <section className="panel">
@@ -271,4 +254,40 @@ export function TaskDetail({
       </div>
     </main>
   );
+}
+
+function getPrimaryAction(input: {
+  task: Task;
+  worktreePresent: boolean;
+  onPrepareWorktree(taskId: string): Promise<void>;
+  onStart(taskId: string): Promise<void>;
+  onCreatePullRequest(taskId: string): Promise<void>;
+}): { label: string; disabled?: boolean; onClick(): void } | undefined {
+  if (input.task.workflowPhase === 'REVIEW' && input.worktreePresent) {
+    return {
+      label: 'Create draft PR',
+      disabled: !canCreatePullRequest(input.task),
+      onClick: () => void input.onCreatePullRequest(input.task.id)
+    };
+  }
+
+  if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
+    return undefined;
+  }
+
+  if (canPrepareWorktree(input.task)) {
+    return {
+      label: 'Prepare worktree',
+      onClick: () => void input.onPrepareWorktree(input.task.id)
+    };
+  }
+
+  if (canStartRun(input.task)) {
+    return {
+      label: 'Start implementation',
+      onClick: () => void input.onStart(input.task.id)
+    };
+  }
+
+  return undefined;
 }

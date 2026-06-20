@@ -49,11 +49,15 @@ Added:
 - `src/core/prompt/PromptRefinementService.test.ts`
 - API wiring through service, dev server, Electron preload, and renderer client.
 
-The Create Task form now includes a `Refine Prompt` button above the form. The implementation is intentionally lightweight and deterministic:
+The Create Task form now includes a `Refine Prompt` button above the form. Phase 6 later upgraded this from deterministic-only behavior to a lightweight model-backed flow:
 
-- reads package metadata and README summary when available;
-- turns a short request into sections for goal, repository context, constraints, acceptance criteria, and verification;
+- runs `gpt-5.4-mini` with low reasoning effort in the selected repository;
+- requires read-only repository inspection before generating the prompt;
+- produces sections for goal, repository context, constraints, acceptance criteria, and verification;
+- falls back to package metadata and README context if model execution is unavailable;
 - does not introduce a separate prompt workflow product.
+
+See `docs/phases/PHASE_6_STATUS.md` for the current implementation and verification details.
 
 #### CSS custom properties and visual cleanup
 

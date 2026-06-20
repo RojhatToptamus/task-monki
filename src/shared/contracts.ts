@@ -587,7 +587,7 @@ export interface RefinePromptRequest {
 export interface RefinePromptResponse {
   prompt: string;
   titleSuggestion: string;
-  source: 'deterministic';
+  source: 'model' | 'deterministic-fallback';
 }
 
 export interface GitHubPreflightRequest {
