@@ -4,9 +4,15 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import type {
   AppUpdateEvent,
+  CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  CreatePullRequestRequest,
+  GitHubPreflightRequest,
   PrepareWorktreeRequest,
+  PublishBranchRequest,
   RefreshEvidenceRequest,
+  RefreshGitHubRequest,
+  RefinePromptRequest,
   RunTestsRequest,
   StartRunRequest,
   TransitionTaskRequest
@@ -60,6 +66,10 @@ function installIpcHandlers(): void {
     return task;
   });
 
+  ipcMain.handle('prompt:refine', async (_, input: RefinePromptRequest) => {
+    return service.refinePrompt(input);
+  });
+
   ipcMain.handle('worktree:prepare', async (_, input: PrepareWorktreeRequest) => {
     return service.prepareWorktree(input);
   });
@@ -78,6 +88,26 @@ function installIpcHandlers(): void {
 
   ipcMain.handle('evidence:refresh', async (_, input: RefreshEvidenceRequest) => {
     return service.refreshEvidence(input);
+  });
+
+  ipcMain.handle('git:deliveryCommit', async (_, input: CreateDeliveryCommitRequest) => {
+    return service.createDeliveryCommit(input);
+  });
+
+  ipcMain.handle('github:preflight', async (_, input: GitHubPreflightRequest) => {
+    return service.preflightGitHub(input);
+  });
+
+  ipcMain.handle('github:publish', async (_, input: PublishBranchRequest) => {
+    return service.publishBranch(input);
+  });
+
+  ipcMain.handle('github:createPullRequest', async (_, input: CreatePullRequestRequest) => {
+    return service.createPullRequest(input);
+  });
+
+  ipcMain.handle('github:refresh', async (_, input: RefreshGitHubRequest) => {
+    return service.refreshGitHub(input);
   });
 
   ipcMain.handle('task:transition', async (_, input: TransitionTaskRequest) => {

@@ -62,6 +62,12 @@ describe('projection reducer', () => {
         worktrees: [],
         gitSnapshots: [],
         testRuns: [],
+        githubRepositories: [],
+        branchPublications: [],
+        pullRequests: [],
+        ciRollups: [],
+        reviewRollups: [],
+        mergeSnapshots: [],
         runs: [],
         events: [],
         artifacts: []

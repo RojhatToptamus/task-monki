@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react';
-import type { CreateTaskRequest } from '../../shared/contracts';
+import type { CreateTaskRequest, RefinePromptResponse } from '../../shared/contracts';
 
 interface TaskCreateFormProps {
   defaultRepositoryPath: string;
   disabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
+  onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
 }
 
-export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: TaskCreateFormProps) {
+export function TaskCreateForm({
+  defaultRepositoryPath,
+  disabled,
+  onCreate,
+  onRefinePrompt
+}: TaskCreateFormProps) {
   const [title, setTitle] = useState('Summarize this repository');
   const [prompt, setPrompt] = useState(
     'Implement a small, scoped change. Keep edits inside the task worktree and summarize what changed.'
@@ -15,6 +21,7 @@ export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: Ta
   const [repositoryPath, setRepositoryPath] = useState(defaultRepositoryPath);
   const [testCommand, setTestCommand] = useState('npm test');
   const [error, setError] = useState<string | undefined>();
+  const [isRefining, setIsRefining] = useState(false);
 
   useEffect(() => {
     setRepositoryPath((current) => current || defaultRepositoryPath);
@@ -32,8 +39,36 @@ export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: Ta
     }
   };
 
+  const refine = async () => {
+    setError(undefined);
+    setIsRefining(true);
+    try {
+      const refined = await onRefinePrompt(repositoryPath, prompt);
+      setPrompt(refined.prompt);
+      setTitle((current) => current || refined.titleSuggestion);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not refine prompt.');
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
   return (
     <form className="task-form" onSubmit={submit}>
+      <div className="task-form__intro">
+        <div>
+          <strong>New task</strong>
+          <span>Write a short request, then refine it into a scoped implementation prompt.</span>
+        </div>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={disabled || isRefining || !prompt.trim() || !repositoryPath.trim()}
+          onClick={() => void refine()}
+        >
+          {isRefining ? 'Refining…' : 'Refine Prompt'}
+        </button>
+      </div>
       <label>
         <span>Title</span>
         <input

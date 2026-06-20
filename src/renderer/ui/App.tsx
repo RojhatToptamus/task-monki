@@ -5,6 +5,12 @@ import {
   selectActiveRun,
   selectCurrentWorktree,
   selectLatestGitSnapshot,
+  selectLatestGitHubRepository,
+  selectLatestBranchPublication,
+  selectLatestPullRequest,
+  selectLatestCiRollup,
+  selectLatestReviewRollup,
+  selectLatestMergeSnapshot,
   selectLatestTestRun,
   selectTaskEvents,
   selectTaskRuns
@@ -19,6 +25,12 @@ const emptySnapshot: TaskSnapshot = {
   worktrees: [],
   gitSnapshots: [],
   testRuns: [],
+  githubRepositories: [],
+  branchPublications: [],
+  pullRequests: [],
+  ciRollups: [],
+  reviewRollups: [],
+  mergeSnapshots: [],
   runs: [],
   events: [],
   artifacts: []
@@ -87,11 +99,25 @@ export function App() {
     ? selectLatestGitSnapshot(snapshot, selectedTask)
     : undefined;
   const selectedTestRun = selectedTask ? selectLatestTestRun(snapshot, selectedTask) : undefined;
+  const selectedGitHubRepository = selectedTask
+    ? selectLatestGitHubRepository(snapshot, selectedTask)
+    : undefined;
+  const selectedBranchPublication = selectedTask
+    ? selectLatestBranchPublication(snapshot, selectedTask)
+    : undefined;
+  const selectedPullRequest = selectedTask ? selectLatestPullRequest(snapshot, selectedTask) : undefined;
+  const selectedCiRollup = selectedTask ? selectLatestCiRollup(snapshot, selectedTask) : undefined;
+  const selectedReviewRollup = selectedTask ? selectLatestReviewRollup(snapshot, selectedTask) : undefined;
+  const selectedMergeSnapshot = selectedTask ? selectLatestMergeSnapshot(snapshot, selectedTask) : undefined;
 
   const createTask = async (input: CreateTaskRequest) => {
     const created = await taskManagerApi.createTask(input);
     setSelectedTaskId(created.id);
     await refresh();
+  };
+
+  const refinePrompt = async (repositoryPath: string, input: string) => {
+    return taskManagerApi.refinePrompt({ repositoryPath, input });
   };
 
   const startRun = async (taskId: string) => {
@@ -134,6 +160,56 @@ export function App() {
     }
   };
 
+  const createDeliveryCommit = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.createDeliveryCommit({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to create delivery commit.');
+    }
+  };
+
+  const preflightGitHub = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.preflightGitHub({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to check GitHub capability.');
+    }
+  };
+
+  const publishBranch = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.publishBranch({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to publish branch.');
+    }
+  };
+
+  const createPullRequest = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.createPullRequest({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to create pull request.');
+    }
+  };
+
+  const refreshGitHub = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.refreshGitHub({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to refresh GitHub.');
+    }
+  };
+
   const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
     setError(undefined);
     try {
@@ -171,6 +247,7 @@ export function App() {
           defaultRepositoryPath={defaultRepositoryPath}
           disabled={isLoading || !defaultRepositoryPath}
           onCreate={createTask}
+          onRefinePrompt={refinePrompt}
         />
 
         <div className="sidebar__section-title">
@@ -190,6 +267,12 @@ export function App() {
         worktree={selectedWorktree}
         gitSnapshot={selectedGitSnapshot}
         testRun={selectedTestRun}
+        githubRepository={selectedGitHubRepository}
+        branchPublication={selectedBranchPublication}
+        pullRequest={selectedPullRequest}
+        ciRollup={selectedCiRollup}
+        reviewRollup={selectedReviewRollup}
+        mergeSnapshot={selectedMergeSnapshot}
         events={selectedEvents}
         artifacts={snapshot.artifacts}
         onPrepareWorktree={prepareWorktree}
@@ -197,6 +280,11 @@ export function App() {
         onCancel={cancelRun}
         onRefreshEvidence={refreshEvidence}
         onRunTests={runTests}
+        onCreateDeliveryCommit={createDeliveryCommit}
+        onPreflightGitHub={preflightGitHub}
+        onPublishBranch={publishBranch}
+        onCreatePullRequest={createPullRequest}
+        onRefreshGitHub={refreshGitHub}
         onTransition={transitionTask}
       />
     </div>

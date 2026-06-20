@@ -15,7 +15,9 @@ export function StatusBadge({ label, value, tone = 'neutral' }: StatusBadgeProps
 }
 
 function toneForValue(value: string): StatusBadgeProps['tone'] {
-  if (['COMPLETED', 'PASSED', 'PRESENT', 'VALID', 'HEALTHY', 'CLEAN', 'PUSHED'].includes(value)) {
+  if (
+    ['COMPLETED', 'PASSED', 'PRESENT', 'VALID', 'HEALTHY', 'CLEAN', 'PUSHED', 'READY', 'OPEN_READY', 'MERGED', 'PASSING', 'APPROVED', 'SATISFIED'].includes(value)
+  ) {
     return 'success';
   }
   if (
@@ -27,15 +29,22 @@ function toneForValue(value: string): StatusBadgeProps['tone'] {
       'DIVERGED',
       'UNAVAILABLE',
       'MISSING',
-      'BLOCKED'
+      'BLOCKED',
+      'AUTH_REQUIRED',
+      'GH_MISSING',
+      'MISSING_REMOTE',
+      'CLOSED_UNMERGED',
+      'FAILING'
     ].includes(value)
   ) {
     return 'error';
   }
-  if (['WARNING', 'STALE', 'DIRTY', 'COMMITTED_UNPUSHED', 'LOCKED', 'PRUNABLE'].includes(value)) {
+  if (
+    ['WARNING', 'STALE', 'DIRTY', 'COMMITTED_UNPUSHED', 'LOCKED', 'PRUNABLE', 'OPEN_DRAFT', 'PENDING', 'REQUESTED', 'CHANGES_REQUESTED', 'AMBIGUOUS'].includes(value)
+  ) {
     return 'warning';
   }
-  if (['RUNNING', 'STARTING', 'QUEUED', 'CREATING', 'TESTING', 'IN_PROGRESS'].includes(value)) {
+  if (['RUNNING', 'STARTING', 'QUEUED', 'CREATING', 'TESTING', 'IN_PROGRESS', 'PUSHING', 'COMPUTING', 'QUEUED'].includes(value)) {
     return 'info';
   }
   return 'neutral';

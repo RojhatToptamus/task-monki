@@ -6,7 +6,8 @@ import type {
   StatusProjection,
   Task,
   TaskSnapshot,
-  TestRunRecord
+  TestRunRecord,
+  PullRequestSnapshotRecord
 } from '../../shared/contracts';
 import { createInitialProjection } from '../../shared/contracts';
 
@@ -19,6 +20,12 @@ export function createEmptyState(): StoreState {
     worktrees: [],
     gitSnapshots: [],
     testRuns: [],
+    githubRepositories: [],
+    branchPublications: [],
+    pullRequests: [],
+    ciRollups: [],
+    reviewRollups: [],
+    mergeSnapshots: [],
     runs: [],
     events: [],
     artifacts: []
@@ -32,6 +39,12 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     worktrees: [...state.worktrees],
     gitSnapshots: [...state.gitSnapshots],
     testRuns: [...state.testRuns],
+    githubRepositories: [...state.githubRepositories],
+    branchPublications: [...state.branchPublications],
+    pullRequests: [...state.pullRequests],
+    ciRollups: [...state.ciRollups],
+    reviewRollups: [...state.reviewRollups],
+    mergeSnapshots: [...state.mergeSnapshots],
     runs: [...state.runs],
     events: [...state.events, event],
     artifacts: [...state.artifacts]
@@ -204,6 +217,11 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent): Task['workflowPhas
       return 'TESTING';
     case 'TRANSITION_COMPLETED':
       return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
+    case 'MERGE_SNAPSHOT_CAPTURED':
+      if (getString(event.payload, 'status') === 'MERGED') {
+        return 'DONE';
+      }
+      return task.workflowPhase;
     default:
       return task.workflowPhase;
   }
@@ -334,6 +352,16 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'DELIVERY_COMMIT_CREATED':
+      return {
+        ...base,
+        git: 'COMMITTED_UNPUSHED',
+        tests: 'STALE',
+        health: maxHealth(base.health, 'WARNING'),
+        summary: 'Delivery commit created. Re-run tests before publishing.',
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'TEST_RUN_STARTED':
       return {
         ...base,
@@ -373,6 +401,118 @@ export function reduceProjection(
         tests: 'STALE',
         health: maxHealth(base.health, 'WARNING'),
         summary: 'Local test result is stale because the Git generation changed.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'GITHUB_PREFLIGHT_COMPLETED':
+      return {
+        ...base,
+        githubRepository: getGitHubRepositoryStatus(event.payload) ?? base.githubRepository,
+        health:
+          getGitHubRepositoryStatus(event.payload) === 'READY'
+            ? base.health
+            : maxHealth(base.health, 'WARNING'),
+        summary:
+          getGitHubRepositoryStatus(event.payload) === 'READY'
+            ? 'GitHub remote and gh authentication are ready.'
+            : 'GitHub capability check needs attention.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'BRANCH_PUBLISH_REQUESTED':
+      return {
+        ...base,
+        branchPublication: 'PUSHING',
+        summary: 'Publishing task branch to remote.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'BRANCH_PUBLISHED':
+      return {
+        ...base,
+        branchPublication: 'PUSHED',
+        git: 'PUSHED',
+        summary: 'Task branch was pushed to the remote.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'BRANCH_PUBLISH_FAILED':
+      return {
+        ...base,
+        branchPublication: getString(event.payload, 'status') === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'FAILED',
+        health: 'ERROR',
+        summary: 'Branch publication failed; reconcile remote state before retry.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'PR_CREATE_REQUESTED':
+      return {
+        ...base,
+        githubPullRequest: 'NOT_CREATED',
+        summary: 'Creating or locating a draft pull request.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'PR_SNAPSHOT_CAPTURED':
+      return {
+        ...base,
+        githubPullRequest: getPullRequestStatus(event.payload) ?? base.githubPullRequest,
+        summary: `Pull request status: ${getPullRequestStatus(event.payload) ?? 'UNKNOWN'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'CI_ROLLUP_CAPTURED':
+      return {
+        ...base,
+        ciChecks: getCiChecksStatus(event.payload) ?? base.ciChecks,
+        health:
+          getCiChecksStatus(event.payload) === 'FAILING' || getCiChecksStatus(event.payload) === 'BLOCKED'
+            ? 'ERROR'
+            : base.health,
+        summary: `GitHub checks: ${getCiChecksStatus(event.payload) ?? 'UNKNOWN'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'REVIEW_ROLLUP_CAPTURED':
+      return {
+        ...base,
+        reviews: getReviewStatus(event.payload) ?? base.reviews,
+        health: getReviewStatus(event.payload) === 'CHANGES_REQUESTED' ? 'WARNING' : base.health,
+        summary: `GitHub reviews: ${getReviewStatus(event.payload) ?? 'UNKNOWN'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'MERGE_SNAPSHOT_CAPTURED': {
+      const merge = getMergeStatus(event.payload) ?? base.merge;
+      return {
+        ...base,
+        merge,
+        health:
+          merge === 'MERGED'
+            ? 'HEALTHY'
+            : merge === 'CLOSED_UNMERGED' || merge === 'BLOCKED'
+              ? 'ERROR'
+              : base.health,
+        summary:
+          merge === 'MERGED'
+            ? 'GitHub reports the pull request merged. Completion policy is satisfied.'
+            : `GitHub merge state: ${merge}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    }
+    case 'GITHUB_SYNC_FAILED':
+      return {
+        ...base,
+        health: maxHealth(base.health, 'WARNING'),
+        summary: 'GitHub sync failed; last-known remote state may be stale.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'PROMPT_REFINED':
+      return {
+        ...base,
+        summary: 'Prompt refined into a structured implementation request.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -524,6 +664,42 @@ function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
     ];
   }
 
+  if (event.type === 'GITHUB_PREFLIGHT_COMPLETED' && getString(event.payload, 'status') !== 'READY') {
+    return [
+      {
+        id: `${event.id}:github-preflight`,
+        code: 'GITHUB_PREFLIGHT_NOT_READY',
+        severity: 'WARNING',
+        message: getString(event.payload, 'error') ?? 'GitHub remote or gh authentication is not ready.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'BRANCH_PUBLISH_FAILED') {
+    return [
+      {
+        id: `${event.id}:branch-publish`,
+        code: 'BRANCH_PUBLISH_FAILED',
+        severity: 'ERROR',
+        message: getString(event.payload, 'error') ?? 'Branch publication failed.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'MERGE_SNAPSHOT_CAPTURED' && getString(event.payload, 'status') === 'CLOSED_UNMERGED') {
+    return [
+      {
+        id: `${event.id}:closed-unmerged`,
+        code: 'PR_CLOSED_WITHOUT_MERGE',
+        severity: 'ERROR',
+        message: 'GitHub reports the pull request was closed without merge.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
   return [];
 }
 
@@ -583,6 +759,83 @@ function isWorktreeProjectionStatus(value: string | undefined): value is StatusP
     value === 'ERROR' ||
     value === 'UNKNOWN'
   );
+}
+
+function getGitHubRepositoryStatus(payload: unknown): StatusProjection['githubRepository'] | undefined {
+  const value = getString(payload, 'status');
+  return isOneOf(value, [
+    'NOT_CHECKED',
+    'READY',
+    'MISSING_REMOTE',
+    'GH_MISSING',
+    'AUTH_REQUIRED',
+    'UNSUPPORTED_HOST',
+    'ERROR',
+    'UNKNOWN'
+  ]);
+}
+
+function getPullRequestStatus(payload: unknown): PullRequestSnapshotRecord['status'] | undefined {
+  const value = getString(payload, 'status');
+  return isOneOf(value, [
+    'UNLINKED',
+    'NOT_CREATED',
+    'OPEN_DRAFT',
+    'OPEN_READY',
+    'CLOSED_UNMERGED',
+    'MERGED',
+    'UNKNOWN'
+  ]);
+}
+
+function getCiChecksStatus(payload: unknown): StatusProjection['ciChecks'] | undefined {
+  const value = getString(payload, 'status');
+  return isOneOf(value, [
+    'NOT_APPLICABLE',
+    'NO_CHECKS',
+    'EXPECTED_NOT_REPORTED',
+    'PENDING',
+    'PASSING',
+    'FAILING',
+    'CANCELED',
+    'BLOCKED',
+    'STALE',
+    'UNKNOWN'
+  ]);
+}
+
+function getReviewStatus(payload: unknown): StatusProjection['reviews'] | undefined {
+  const value = getString(payload, 'status');
+  return isOneOf(value, [
+    'NOT_APPLICABLE',
+    'NOT_REQUESTED',
+    'REQUESTED',
+    'PENDING',
+    'CHANGES_REQUESTED',
+    'APPROVED',
+    'SATISFIED',
+    'STALE',
+    'UNKNOWN'
+  ]);
+}
+
+function getMergeStatus(payload: unknown): StatusProjection['merge'] | undefined {
+  const value = getString(payload, 'status');
+  return isOneOf(value, [
+    'NOT_APPLICABLE',
+    'NOT_MERGED',
+    'COMPUTING',
+    'MERGEABLE',
+    'BLOCKED',
+    'QUEUED',
+    'MERGED',
+    'CLOSED_UNMERGED',
+    'UNKNOWN'
+  ]);
+}
+
+function isOneOf<const T extends string>(value: string | undefined, allowed: readonly T[]): T | undefined {
+  return allowed.includes(value as T) ? (value as T) : undefined;
 }
 
 function getNumber(payload: unknown, key: string): number | undefined {

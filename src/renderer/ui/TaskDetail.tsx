@@ -1,7 +1,13 @@
 import type {
   ArtifactRecord,
+  BranchPublicationRecord,
+  CiRollupRecord,
   DomainEvent,
   GitSnapshotRecord,
+  GitHubRepositoryRecord,
+  MergeSnapshotRecord,
+  PullRequestSnapshotRecord,
+  ReviewRollupRecord,
   RunRecord,
   Task,
   TestRunRecord,
@@ -10,7 +16,9 @@ import type {
 } from '../../shared/contracts';
 import {
   canCancelRun,
+  canCreateDeliveryCommit,
   canPrepareWorktree,
+  canPublishBranch,
   canRunTests,
   canStartRun,
   formatShortId
@@ -25,6 +33,12 @@ interface TaskDetailProps {
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   testRun?: TestRunRecord;
+  githubRepository?: GitHubRepositoryRecord;
+  branchPublication?: BranchPublicationRecord;
+  pullRequest?: PullRequestSnapshotRecord;
+  ciRollup?: CiRollupRecord;
+  reviewRollup?: ReviewRollupRecord;
+  mergeSnapshot?: MergeSnapshotRecord;
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
   onPrepareWorktree(taskId: string): Promise<void>;
@@ -32,6 +46,11 @@ interface TaskDetailProps {
   onCancel(runId: string): Promise<void>;
   onRefreshEvidence(taskId: string): Promise<void>;
   onRunTests(taskId: string): Promise<void>;
+  onCreateDeliveryCommit(taskId: string): Promise<void>;
+  onPreflightGitHub(taskId: string): Promise<void>;
+  onPublishBranch(taskId: string): Promise<void>;
+  onCreatePullRequest(taskId: string): Promise<void>;
+  onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
 }
 
@@ -41,6 +60,12 @@ export function TaskDetail({
   worktree,
   gitSnapshot,
   testRun,
+  githubRepository,
+  branchPublication,
+  pullRequest,
+  ciRollup,
+  reviewRollup,
+  mergeSnapshot,
   events,
   artifacts,
   onPrepareWorktree,
@@ -48,6 +73,11 @@ export function TaskDetail({
   onCancel,
   onRefreshEvidence,
   onRunTests,
+  onCreateDeliveryCommit,
+  onPreflightGitHub,
+  onPublishBranch,
+  onCreatePullRequest,
+  onRefreshGitHub,
   onTransition
 }: TaskDetailProps) {
   if (!task) {
@@ -108,6 +138,46 @@ export function TaskDetail({
           >
             Run tests
           </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!canCreateDeliveryCommit(task)}
+            onClick={() => void onCreateDeliveryCommit(task.id)}
+          >
+            Create delivery commit
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!worktree}
+            onClick={() => void onPreflightGitHub(task.id)}
+          >
+            Check GitHub
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!canPublishBranch(task)}
+            onClick={() => void onPublishBranch(task.id)}
+          >
+            Publish branch
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={branchPublication?.status !== 'PUSHED'}
+            onClick={() => void onCreatePullRequest(task.id)}
+          >
+            Create draft PR
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!pullRequest}
+            onClick={() => void onRefreshGitHub(task.id)}
+          >
+            Refresh GitHub
+          </button>
         </div>
       </header>
 
@@ -116,6 +186,12 @@ export function TaskDetail({
         <StatusBadge label="Worktree" value={task.projection.worktree} />
         <StatusBadge label="Git" value={task.projection.git} />
         <StatusBadge label="Tests" value={task.projection.tests} />
+        <StatusBadge label="GitHub" value={task.projection.githubRepository} />
+        <StatusBadge label="Publish" value={task.projection.branchPublication} />
+        <StatusBadge label="PR" value={task.projection.githubPullRequest} />
+        <StatusBadge label="Checks" value={task.projection.ciChecks} />
+        <StatusBadge label="Reviews" value={task.projection.reviews} />
+        <StatusBadge label="Merge" value={task.projection.merge} />
         <StatusBadge label="Process" value={task.projection.osProcess} />
         <StatusBadge label="Codex" value={task.projection.codexRun} />
         <StatusBadge label="Repository" value={task.projection.repositoryPreflight} />
@@ -157,6 +233,14 @@ export function TaskDetail({
           <strong>{worktree?.worktreePath ?? 'Not created'}</strong>
           <span>Git generation</span>
           <strong>{gitSnapshot?.dirtyFingerprint.slice(0, 12) ?? 'Not inspected'}</strong>
+          <span>Pull request</span>
+          <strong>{pullRequest?.url ?? 'Not created'}</strong>
+          <span>Remote</span>
+          <strong>
+            {githubRepository?.owner && githubRepository.repo
+              ? `${githubRepository.owner}/${githubRepository.repo}`
+              : 'Not checked'}
+          </strong>
         </div>
       </section>
 
@@ -182,6 +266,12 @@ export function TaskDetail({
           worktree={worktree}
           gitSnapshot={gitSnapshot}
           testRun={testRun}
+          githubRepository={githubRepository}
+          branchPublication={branchPublication}
+          pullRequest={pullRequest}
+          ciRollup={ciRollup}
+          reviewRollup={reviewRollup}
+          mergeSnapshot={mergeSnapshot}
           artifacts={artifacts}
         />
       </div>

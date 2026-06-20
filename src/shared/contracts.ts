@@ -101,6 +101,67 @@ export type TestStatus =
 
 export type RunMode = 'READ_ONLY_ANALYSIS' | 'IMPLEMENTATION';
 
+export type GitHubRepositoryStatus =
+  | 'NOT_CHECKED'
+  | 'READY'
+  | 'MISSING_REMOTE'
+  | 'GH_MISSING'
+  | 'AUTH_REQUIRED'
+  | 'UNSUPPORTED_HOST'
+  | 'ERROR'
+  | 'UNKNOWN';
+
+export type BranchPublicationStatus =
+  | 'NOT_PUSHED'
+  | 'PUSHING'
+  | 'PUSHED'
+  | 'FAILED'
+  | 'AMBIGUOUS'
+  | 'UNKNOWN';
+
+export type PullRequestStatus =
+  | 'UNLINKED'
+  | 'NOT_CREATED'
+  | 'OPEN_DRAFT'
+  | 'OPEN_READY'
+  | 'CLOSED_UNMERGED'
+  | 'MERGED'
+  | 'UNKNOWN';
+
+export type CiChecksStatus =
+  | 'NOT_APPLICABLE'
+  | 'NO_CHECKS'
+  | 'EXPECTED_NOT_REPORTED'
+  | 'PENDING'
+  | 'PASSING'
+  | 'FAILING'
+  | 'CANCELED'
+  | 'BLOCKED'
+  | 'STALE'
+  | 'UNKNOWN';
+
+export type ReviewStatus =
+  | 'NOT_APPLICABLE'
+  | 'NOT_REQUESTED'
+  | 'REQUESTED'
+  | 'PENDING'
+  | 'CHANGES_REQUESTED'
+  | 'APPROVED'
+  | 'SATISFIED'
+  | 'STALE'
+  | 'UNKNOWN';
+
+export type MergeStatus =
+  | 'NOT_APPLICABLE'
+  | 'NOT_MERGED'
+  | 'COMPUTING'
+  | 'MERGEABLE'
+  | 'BLOCKED'
+  | 'QUEUED'
+  | 'MERGED'
+  | 'CLOSED_UNMERGED'
+  | 'UNKNOWN';
+
 export type DomainEventType =
   | 'TASK_CREATED'
   | 'TASK_ITERATION_CREATED'
@@ -113,6 +174,7 @@ export type DomainEventType =
   | 'WORKTREE_VERIFIED'
   | 'WORKTREE_FAILED'
   | 'GIT_SNAPSHOT_CAPTURED'
+  | 'DELIVERY_COMMIT_CREATED'
   | 'DIFF_ARTIFACT_CREATED'
   | 'TEST_RUN_STARTED'
   | 'TEST_PROCESS_STARTED'
@@ -120,6 +182,18 @@ export type DomainEventType =
   | 'TEST_STDERR_CHUNK'
   | 'TEST_RUN_COMPLETED'
   | 'TEST_RESULT_STALE'
+  | 'PROMPT_REFINED'
+  | 'GITHUB_PREFLIGHT_COMPLETED'
+  | 'BRANCH_PUBLISH_REQUESTED'
+  | 'BRANCH_PUBLISHED'
+  | 'BRANCH_PUBLISH_FAILED'
+  | 'PR_CREATE_REQUESTED'
+  | 'PR_BODY_ARTIFACT_CREATED'
+  | 'PR_SNAPSHOT_CAPTURED'
+  | 'CI_ROLLUP_CAPTURED'
+  | 'REVIEW_ROLLUP_CAPTURED'
+  | 'MERGE_SNAPSHOT_CAPTURED'
+  | 'GITHUB_SYNC_FAILED'
   | 'PROCESS_STARTED'
   | 'CODEX_STDOUT_LINE'
   | 'CODEX_EVENT_PARSED'
@@ -141,7 +215,8 @@ export type ArtifactKind =
   | 'diff'
   | 'git-snapshot'
   | 'test-stdout'
-  | 'test-stderr';
+  | 'test-stderr'
+  | 'pr-body';
 
 export interface Finding {
   id: string;
@@ -160,6 +235,12 @@ export interface StatusProjection {
   worktree: WorktreeStatus;
   git: GitStatus;
   tests: TestStatus;
+  githubRepository: GitHubRepositoryStatus;
+  branchPublication: BranchPublicationStatus;
+  githubPullRequest: PullRequestStatus;
+  ciChecks: CiChecksStatus;
+  reviews: ReviewStatus;
+  merge: MergeStatus;
   artifact: ArtifactStatus;
   health: HealthStatus;
   summary: string;
@@ -298,6 +379,102 @@ export interface TestRunRecord {
   staleReason?: string;
 }
 
+export interface GitHubRepositoryRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  remoteName?: string;
+  remoteUrl?: string;
+  host?: string;
+  owner?: string;
+  repo?: string;
+  ghVersion?: string;
+  authStatus?: 'AUTHENTICATED' | 'UNAUTHENTICATED' | 'UNKNOWN';
+  status: GitHubRepositoryStatus;
+  error?: string;
+  checkedAt: string;
+}
+
+export interface BranchPublicationRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  remoteName: string;
+  branchName: string;
+  remoteRef: string;
+  headSha?: string;
+  status: BranchPublicationStatus;
+  error?: string;
+  requestedAt: string;
+  updatedAt: string;
+}
+
+export interface PullRequestSnapshotRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  number?: number;
+  url?: string;
+  status: PullRequestStatus;
+  state?: 'OPEN' | 'CLOSED' | 'MERGED' | string;
+  isDraft?: boolean;
+  headRefName?: string;
+  headRefOid?: string;
+  baseRefName?: string;
+  mergedAt?: string | null;
+  title?: string;
+  bodyArtifactId?: string;
+  observedAt: string;
+  raw?: unknown;
+}
+
+export interface CiRollupRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  pullRequestNumber?: number;
+  headSha?: string;
+  status: CiChecksStatus;
+  requiredStatus: CiChecksStatus;
+  totalCount: number;
+  pendingCount: number;
+  passingCount: number;
+  failingCount: number;
+  skippedCount: number;
+  observedAt: string;
+  raw?: unknown;
+}
+
+export interface ReviewRollupRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  pullRequestNumber?: number;
+  headSha?: string;
+  status: ReviewStatus;
+  reviewDecision?: string;
+  observedAt: string;
+  raw?: unknown;
+}
+
+export interface MergeSnapshotRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  pullRequestNumber?: number;
+  headSha?: string;
+  status: MergeStatus;
+  mergedAt?: string | null;
+  observedAt: string;
+  raw?: unknown;
+}
+
 export interface ArtifactRecord {
   id: string;
   taskId: string;
@@ -318,7 +495,17 @@ export interface DomainEvent {
   runId?: string;
   testRunId?: string;
   worktreeId?: string;
-  source: 'ui' | 'codex' | 'process' | 'storage' | 'repository' | 'projection' | 'git' | 'test';
+  source:
+    | 'ui'
+    | 'codex'
+    | 'process'
+    | 'storage'
+    | 'repository'
+    | 'projection'
+    | 'git'
+    | 'test'
+    | 'github'
+    | 'prompt';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -342,6 +529,12 @@ export interface TaskSnapshot {
   worktrees: WorktreeRecord[];
   gitSnapshots: GitSnapshotRecord[];
   testRuns: TestRunRecord[];
+  githubRepositories: GitHubRepositoryRecord[];
+  branchPublications: BranchPublicationRecord[];
+  pullRequests: PullRequestSnapshotRecord[];
+  ciRollups: CiRollupRecord[];
+  reviewRollups: ReviewRollupRecord[];
+  mergeSnapshots: MergeSnapshotRecord[];
   runs: RunRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
@@ -375,6 +568,10 @@ export interface RefreshEvidenceRequest {
   taskId: string;
 }
 
+export interface CreateDeliveryCommitRequest {
+  taskId: string;
+}
+
 export interface TransitionTaskRequest {
   taskId: string;
   toPhase: WorkflowPhase;
@@ -382,6 +579,33 @@ export interface TransitionTaskRequest {
 
 export interface ReadArtifactRequest {
   artifactId: string;
+}
+
+export interface RefinePromptRequest {
+  repositoryPath: string;
+  input: string;
+}
+
+export interface RefinePromptResponse {
+  prompt: string;
+  titleSuggestion: string;
+  source: 'deterministic';
+}
+
+export interface GitHubPreflightRequest {
+  taskId: string;
+}
+
+export interface PublishBranchRequest {
+  taskId: string;
+}
+
+export interface CreatePullRequestRequest {
+  taskId: string;
+}
+
+export interface RefreshGitHubRequest {
+  taskId: string;
 }
 
 export interface AppUpdateEvent {
@@ -397,6 +621,8 @@ export interface AppUpdateEvent {
     | 'test.started'
     | 'test.output'
     | 'test.terminal'
+    | 'github.updated'
+    | 'prompt.refined'
     | 'projection.updated'
     | 'finding.updated';
   taskId: string;
@@ -413,11 +639,17 @@ export interface TaskManagerApi {
   validateRepository(path: string): Promise<RepositoryPreflight>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;
+  refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
   cancelRun(input: CancelRunRequest): Promise<void>;
   runTests(input: RunTestsRequest): Promise<TestRunRecord>;
   refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord>;
+  createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord>;
+  preflightGitHub(input: GitHubPreflightRequest): Promise<GitHubRepositoryRecord>;
+  publishBranch(input: PublishBranchRequest): Promise<BranchPublicationRecord>;
+  createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
+  refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;
   onUpdate(listener: (event: AppUpdateEvent) => void): () => void;
@@ -432,6 +664,12 @@ export function createInitialProjection(now: string): StatusProjection {
     worktree: 'NOT_CREATED',
     git: 'NOT_INSPECTED',
     tests: 'NOT_RUN',
+    githubRepository: 'NOT_CHECKED',
+    branchPublication: 'NOT_PUSHED',
+    githubPullRequest: 'UNLINKED',
+    ciChecks: 'NOT_APPLICABLE',
+    reviews: 'NOT_APPLICABLE',
+    merge: 'NOT_APPLICABLE',
     artifact: 'NONE',
     health: 'INFO',
     summary: 'Ready for isolated implementation.',

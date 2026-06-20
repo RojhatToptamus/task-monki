@@ -34,6 +34,8 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
             <StatusBadge label="Worktree" value={task.projection.worktree} />
             <StatusBadge label="Git" value={task.projection.git} />
             <StatusBadge label="Tests" value={task.projection.tests} />
+            <StatusBadge label="PR" value={task.projection.githubPullRequest} />
+            <StatusBadge label="Merge" value={task.projection.merge} />
             <StatusBadge label="Process" value={task.projection.osProcess} />
             <StatusBadge label="Codex" value={task.projection.codexRun} tone={tone(task)} />
           </div>

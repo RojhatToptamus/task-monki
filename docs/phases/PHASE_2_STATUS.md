@@ -2,7 +2,7 @@
 
 Date: 2026-06-20  
 Status: Implemented and verified  
-Commit status: Not committed
+Commit status: Committed and pushed on `main`
 
 ## 1. Current implementation state
 
@@ -257,6 +257,8 @@ Focused test count:
 ## 6. Next phase
 
 Phase 3 should implement GitHub delivery on top of Phase 2 evidence:
+
+Planning document: `docs/phases/PHASE_3_PLAN.md`
 
 - detect GitHub remote;
 - push the task branch;

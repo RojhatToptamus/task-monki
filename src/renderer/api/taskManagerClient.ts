@@ -1,9 +1,16 @@
 import type {
   AppUpdateEvent,
   CancelRunRequest,
+  BranchPublicationRecord,
+  CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  CreatePullRequestRequest,
   GitSnapshotRecord,
+  GitHubPreflightRequest,
+  GitHubRepositoryRecord,
   PrepareWorktreeRequest,
+  PublishBranchRequest,
+  PullRequestSnapshotRecord,
   ReadArtifactRequest,
   RepositoryPreflight,
   RunTestsRequest,
@@ -15,7 +22,10 @@ import type {
   TestRunRecord,
   TransitionTaskRequest,
   WorktreeRecord,
-  RefreshEvidenceRequest
+  RefreshEvidenceRequest,
+  RefreshGitHubRequest,
+  RefinePromptRequest,
+  RefinePromptResponse
 } from '../../shared/contracts';
 
 const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
@@ -47,6 +57,8 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
+    refinePrompt: (input: RefinePromptRequest) =>
+      post<RefinePromptResponse>(baseUrl, '/api/prompt/refine', input),
     prepareWorktree: (input: PrepareWorktreeRequest) =>
       post<WorktreeRecord>(baseUrl, '/api/worktrees/prepare', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
@@ -54,6 +66,16 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     runTests: (input: RunTestsRequest) => post<TestRunRecord>(baseUrl, '/api/tests/run', input),
     refreshEvidence: (input: RefreshEvidenceRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
+    createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
+      post<GitSnapshotRecord>(baseUrl, '/api/git/delivery-commit', input),
+    preflightGitHub: (input: GitHubPreflightRequest) =>
+      post<GitHubRepositoryRecord>(baseUrl, '/api/github/preflight', input),
+    publishBranch: (input: PublishBranchRequest) =>
+      post<BranchPublicationRecord>(baseUrl, '/api/github/publish', input),
+    createPullRequest: (input: CreatePullRequestRequest) =>
+      post<PullRequestSnapshotRecord>(baseUrl, '/api/github/pr/create', input),
+    refreshGitHub: (input: RefreshGitHubRequest) =>
+      post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     readArtifact: (input: ReadArtifactRequest) => post<string>(baseUrl, '/api/artifact/read', input),

@@ -13,9 +13,15 @@ If you are picking up work in this repository, start here before changing code.
 3. `PHASE_1_STATUS.md`  
    Completed Phase 1 implementation status, verification evidence, and known limitations.
 4. `docs/phases/PHASE_2_PLAN.md`  
-   Current Phase 2 implementation plan.
+   Completed Phase 2 implementation plan.
 5. `docs/phases/PHASE_2_STATUS.md`  
-   Current Phase 2 status log. Update this after every Phase 2 implementation slice.
+   Completed Phase 2 status log, verification evidence, and limitations.
+6. `docs/feedback.md`  
+   Active user feedback that must be incorporated into the next planning/implementation cycle.
+7. `docs/phases/PHASE_3_PLAN.md`  
+   Completed Phase 3 implementation plan.
+8. `docs/phases/PHASE_3_STATUS.md`  
+   Completed Phase 3 status log, verification evidence, and limitations.
 
 ## Documentation policy
 
@@ -28,6 +34,17 @@ Every implementation phase must have:
 - known limitations and unresolved decisions.
 
 Do not let important design intent live only in chat. If a future agent needs the information to avoid re-deciding or accidentally reversing architecture, persist it in this documentation set.
+
+## Feedback policy
+
+`docs/feedback.md` is an active planning input, not an archival note.
+
+Before starting a new phase or implementation slice:
+
+- read `docs/feedback.md`;
+- copy relevant tasks into the phase plan or status document;
+- mark the task implemented, deferred, or intentionally out of scope in the phase status document;
+- do not delete feedback merely because it was mentioned in chat.
 
 ## Status model guardrail
 

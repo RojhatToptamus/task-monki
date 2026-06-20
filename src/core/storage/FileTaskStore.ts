@@ -4,9 +4,15 @@ import path from 'node:path';
 import type {
   ArtifactKind,
   ArtifactRecord,
+  BranchPublicationRecord,
+  CiRollupRecord,
   CreateTaskRequest,
   DomainEvent,
   GitSnapshotRecord,
+  GitHubRepositoryRecord,
+  MergeSnapshotRecord,
+  PullRequestSnapshotRecord,
+  ReviewRollupRecord,
   RunRecord,
   Task,
   TaskIteration,
@@ -34,6 +40,13 @@ interface CreateTestRunInput {
   commandLine: string;
   executable: string;
   argv: string[];
+}
+
+interface PrSyncInput {
+  pullRequest: Omit<PullRequestSnapshotRecord, 'id' | 'observedAt'>;
+  ci: Omit<CiRollupRecord, 'id' | 'observedAt'>;
+  reviews: Omit<ReviewRollupRecord, 'id' | 'observedAt'>;
+  merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
 }
 
 interface PersistedState extends StoreState {}
@@ -106,6 +119,16 @@ export class FileTaskStore {
       this.state.gitSnapshots
         .filter((snapshot) => snapshot.taskId === taskId && snapshot.iterationId === iterationId)
         .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0]
+    );
+  }
+
+  async getLatestPullRequest(taskId: string): Promise<PullRequestSnapshotRecord | undefined> {
+    await this.init();
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    return clone(
+      this.state.pullRequests
+        .filter((pr) => pr.taskId === taskId && pr.iterationId === task?.currentIterationId)
+        .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0]
     );
   }
 
@@ -546,6 +569,212 @@ export class FileTaskStore {
     );
   }
 
+  async recordGitHubPreflight(
+    record: Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>
+  ): Promise<GitHubRepositoryRecord> {
+    await this.init();
+    const stored: GitHubRepositoryRecord = {
+      id: randomUUID(),
+      ...record,
+      checkedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      githubRepositories: [stored, ...this.state.githubRepositories]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'GITHUB_PREFLIGHT_COMPLETED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        worktreeId: stored.worktreeId,
+        source: 'github',
+        payload: stored
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async recordBranchPublishRequested(task: Task, worktree: WorktreeRecord): Promise<void> {
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'BRANCH_PUBLISH_REQUESTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'github',
+        payload: { branchName: worktree.branchName }
+      })
+    );
+  }
+
+  async recordBranchPublication(
+    record: Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>
+  ): Promise<BranchPublicationRecord> {
+    await this.init();
+    const now = new Date().toISOString();
+    const stored: BranchPublicationRecord = {
+      id: randomUUID(),
+      ...record,
+      requestedAt: now,
+      updatedAt: now
+    };
+    this.state = {
+      ...this.state,
+      branchPublications: [stored, ...this.state.branchPublications]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: stored.status === 'PUSHED' ? 'BRANCH_PUBLISHED' : 'BRANCH_PUBLISH_FAILED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        worktreeId: stored.worktreeId,
+        source: 'github',
+        payload: stored
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async recordPullRequestCreateRequested(task: Task, worktree: WorktreeRecord): Promise<void> {
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PR_CREATE_REQUESTED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'github',
+        payload: { branchName: worktree.branchName }
+      })
+    );
+  }
+
+  async recordPullRequestBodyArtifact(task: Task, content: string): Promise<ArtifactRecord> {
+    const artifact = await this.writeTextArtifact(task.id, 'pr-body', content);
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PR_BODY_ARTIFACT_CREATED',
+        taskId: task.id,
+        iterationId: task.currentIterationId,
+        worktreeId: task.currentWorktreeId,
+        source: 'storage',
+        payload: { artifactId: artifact.id, byteCount: artifact.byteCount }
+      })
+    );
+    return artifact;
+  }
+
+  async recordPullRequestSync(input: PrSyncInput): Promise<PullRequestSnapshotRecord> {
+    await this.init();
+    const observedAt = new Date().toISOString();
+    const pullRequest: PullRequestSnapshotRecord = {
+      id: randomUUID(),
+      ...input.pullRequest,
+      observedAt
+    };
+    const ci: CiRollupRecord = {
+      id: randomUUID(),
+      ...input.ci,
+      observedAt
+    };
+    const reviews: ReviewRollupRecord = {
+      id: randomUUID(),
+      ...input.reviews,
+      observedAt
+    };
+    const merge: MergeSnapshotRecord = {
+      id: randomUUID(),
+      ...input.merge,
+      observedAt
+    };
+
+    this.state = {
+      ...this.state,
+      tasks: this.state.tasks.map((task) =>
+        task.id === pullRequest.taskId && pullRequest.status !== 'UNLINKED'
+          ? {
+              ...task,
+              completionPolicy: 'MERGED'
+            }
+          : task
+      ),
+      pullRequests: [pullRequest, ...this.state.pullRequests],
+      ciRollups: [ci, ...this.state.ciRollups],
+      reviewRollups: [reviews, ...this.state.reviewRollups],
+      mergeSnapshots: [merge, ...this.state.mergeSnapshots]
+    };
+
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PR_SNAPSHOT_CAPTURED',
+        taskId: pullRequest.taskId,
+        iterationId: pullRequest.iterationId,
+        worktreeId: pullRequest.worktreeId,
+        source: 'github',
+        payload: pullRequest
+      }),
+      false
+    );
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'CI_ROLLUP_CAPTURED',
+        taskId: ci.taskId,
+        iterationId: ci.iterationId,
+        worktreeId: ci.worktreeId,
+        source: 'github',
+        payload: ci
+      }),
+      false
+    );
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'REVIEW_ROLLUP_CAPTURED',
+        taskId: reviews.taskId,
+        iterationId: reviews.iterationId,
+        worktreeId: reviews.worktreeId,
+        source: 'github',
+        payload: reviews
+      }),
+      false
+    );
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'MERGE_SNAPSHOT_CAPTURED',
+        taskId: merge.taskId,
+        iterationId: merge.iterationId,
+        worktreeId: merge.worktreeId,
+        source: 'github',
+        payload: merge
+      }),
+      false
+    );
+
+    if (merge.status === 'MERGED') {
+      const now = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        tasks: this.state.tasks.map((task) =>
+          task.id === merge.taskId
+            ? {
+                ...task,
+                workflowPhase: 'DONE',
+                resolution: 'COMPLETED',
+                updatedAt: now,
+                phaseVersion: task.phaseVersion + 1
+              }
+            : task
+        )
+      };
+    }
+
+    await this.persistQueued();
+    return clone(pullRequest);
+  }
+
   async appendEvent(event: DomainEvent, persist = true): Promise<void> {
     await this.init();
     this.state = applyEventToState(this.state, event);
@@ -747,14 +976,32 @@ export class FileTaskStore {
 
 function normalizeState(state: PersistedState): StoreState {
   return {
-    tasks: Array.isArray(state.tasks) ? state.tasks : [],
+    tasks: Array.isArray(state.tasks) ? state.tasks.map(normalizeTask) : [],
     iterations: Array.isArray(state.iterations) ? state.iterations : [],
     worktrees: Array.isArray(state.worktrees) ? state.worktrees : [],
     gitSnapshots: Array.isArray(state.gitSnapshots) ? state.gitSnapshots : [],
     testRuns: Array.isArray(state.testRuns) ? state.testRuns : [],
+    githubRepositories: Array.isArray(state.githubRepositories) ? state.githubRepositories : [],
+    branchPublications: Array.isArray(state.branchPublications) ? state.branchPublications : [],
+    pullRequests: Array.isArray(state.pullRequests) ? state.pullRequests : [],
+    ciRollups: Array.isArray(state.ciRollups) ? state.ciRollups : [],
+    reviewRollups: Array.isArray(state.reviewRollups) ? state.reviewRollups : [],
+    mergeSnapshots: Array.isArray(state.mergeSnapshots) ? state.mergeSnapshots : [],
     runs: Array.isArray(state.runs) ? state.runs : [],
     events: Array.isArray(state.events) ? state.events : [],
     artifacts: Array.isArray(state.artifacts) ? state.artifacts : []
+  };
+}
+
+function normalizeTask(task: Task): Task {
+  const defaults = createInitialProjection(task.updatedAt ?? new Date().toISOString());
+  return {
+    ...task,
+    projection: {
+      ...defaults,
+      ...task.projection,
+      findings: Array.isArray(task.projection?.findings) ? task.projection.findings : []
+    }
   };
 }
 

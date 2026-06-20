@@ -1,6 +1,12 @@
 import type {
   DomainEvent,
   GitSnapshotRecord,
+  GitHubRepositoryRecord,
+  BranchPublicationRecord,
+  PullRequestSnapshotRecord,
+  CiRollupRecord,
+  ReviewRollupRecord,
+  MergeSnapshotRecord,
   RunRecord,
   Task,
   TaskSnapshot,
@@ -43,6 +49,57 @@ export function selectLatestTestRun(snapshot: TaskSnapshot, task: Task): TestRun
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
 }
 
+export function selectLatestGitHubRepository(
+  snapshot: TaskSnapshot,
+  task: Task
+): GitHubRepositoryRecord | undefined {
+  return snapshot.githubRepositories
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.checkedAt.localeCompare(a.checkedAt))[0];
+}
+
+export function selectLatestBranchPublication(
+  snapshot: TaskSnapshot,
+  task: Task
+): BranchPublicationRecord | undefined {
+  return snapshot.branchPublications
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+}
+
+export function selectLatestPullRequest(
+  snapshot: TaskSnapshot,
+  task: Task
+): PullRequestSnapshotRecord | undefined {
+  return snapshot.pullRequests
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+}
+
+export function selectLatestCiRollup(snapshot: TaskSnapshot, task: Task): CiRollupRecord | undefined {
+  return snapshot.ciRollups
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+}
+
+export function selectLatestReviewRollup(
+  snapshot: TaskSnapshot,
+  task: Task
+): ReviewRollupRecord | undefined {
+  return snapshot.reviewRollups
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+}
+
+export function selectLatestMergeSnapshot(
+  snapshot: TaskSnapshot,
+  task: Task
+): MergeSnapshotRecord | undefined {
+  return snapshot.mergeSnapshots
+    .filter((record) => record.taskId === task.id && record.iterationId === task.currentIterationId)
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+}
+
 export function canStartRun(task: Task): boolean {
   return !['RUNNING', 'STARTING', 'QUEUED'].includes(task.projection.codexRun);
 }
@@ -53,6 +110,14 @@ export function canPrepareWorktree(task: Task): boolean {
 
 export function canRunTests(task: Task): boolean {
   return task.projection.worktree === 'PRESENT' && task.projection.tests !== 'RUNNING';
+}
+
+export function canCreateDeliveryCommit(task: Task): boolean {
+  return task.projection.worktree === 'PRESENT' && task.projection.git === 'DIRTY';
+}
+
+export function canPublishBranch(task: Task): boolean {
+  return task.workflowPhase === 'PR_READY' && task.projection.branchPublication !== 'PUSHING';
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {

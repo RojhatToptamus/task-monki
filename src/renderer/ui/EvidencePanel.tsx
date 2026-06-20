@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import type {
   ArtifactRecord,
+  BranchPublicationRecord,
+  CiRollupRecord,
   GitSnapshotRecord,
+  GitHubRepositoryRecord,
+  MergeSnapshotRecord,
+  PullRequestSnapshotRecord,
+  ReviewRollupRecord,
   RunRecord,
   TestRunRecord,
   WorktreeRecord
@@ -14,10 +20,28 @@ interface EvidencePanelProps {
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   testRun?: TestRunRecord;
+  githubRepository?: GitHubRepositoryRecord;
+  branchPublication?: BranchPublicationRecord;
+  pullRequest?: PullRequestSnapshotRecord;
+  ciRollup?: CiRollupRecord;
+  reviewRollup?: ReviewRollupRecord;
+  mergeSnapshot?: MergeSnapshotRecord;
   artifacts: ArtifactRecord[];
 }
 
-export function EvidencePanel({ run, worktree, gitSnapshot, testRun, artifacts }: EvidencePanelProps) {
+export function EvidencePanel({
+  run,
+  worktree,
+  gitSnapshot,
+  testRun,
+  githubRepository,
+  branchPublication,
+  pullRequest,
+  ciRollup,
+  reviewRollup,
+  mergeSnapshot,
+  artifacts
+}: EvidencePanelProps) {
   const [artifactText, setArtifactText] = useState('');
   const [artifactError, setArtifactError] = useState<string | undefined>();
 
@@ -71,12 +95,18 @@ export function EvidencePanel({ run, worktree, gitSnapshot, testRun, artifacts }
         {run ? <span>Run {run.id.slice(0, 8)}</span> : <span>No run</span>}
       </div>
 
-      {run || worktree || gitSnapshot || testRun ? (
+      {run || worktree || gitSnapshot || testRun || pullRequest ? (
         <div className="evidence-stack">
           <div className="evidence-grid">
             {worktree ? <StatusBadge label="Worktree" value={worktree.status} /> : null}
             {gitSnapshot ? <StatusBadge label="Git" value={gitSnapshot.status} /> : null}
             {testRun ? <StatusBadge label="Tests" value={testRun.status} /> : null}
+            {githubRepository ? <StatusBadge label="GitHub" value={githubRepository.status} /> : null}
+            {branchPublication ? <StatusBadge label="Publish" value={branchPublication.status} /> : null}
+            {pullRequest ? <StatusBadge label="PR" value={pullRequest.status} /> : null}
+            {ciRollup ? <StatusBadge label="Checks" value={ciRollup.status} /> : null}
+            {reviewRollup ? <StatusBadge label="Reviews" value={reviewRollup.status} /> : null}
+            {mergeSnapshot ? <StatusBadge label="Merge" value={mergeSnapshot.status} /> : null}
             {run ? <StatusBadge label="Process" value={run.processStatus} /> : null}
             {run ? <StatusBadge label="Codex" value={run.status} /> : null}
             {run ? <StatusBadge label="Events" value={String(run.eventCount)} /> : null}
@@ -111,6 +141,32 @@ export function EvidencePanel({ run, worktree, gitSnapshot, testRun, artifacts }
               <strong>{testRun.testedDirtyFingerprint?.slice(0, 12) ?? 'unknown'}</strong>
               <span>Exit</span>
               <strong>{testRun.exitCode === undefined ? '—' : String(testRun.exitCode)}</strong>
+            </div>
+          ) : null}
+          {githubRepository || pullRequest ? (
+            <div className="metadata-grid metadata-grid--compact">
+              <span>Remote</span>
+              <strong>
+                {githubRepository?.owner && githubRepository.repo
+                  ? `${githubRepository.owner}/${githubRepository.repo}`
+                  : githubRepository?.status ?? 'unknown'}
+              </strong>
+              <span>Published branch</span>
+              <strong>{branchPublication?.remoteRef ?? 'not pushed'}</strong>
+              <span>Pull request</span>
+              <strong>{pullRequest?.url ?? 'not created'}</strong>
+              <span>PR head</span>
+              <strong>{pullRequest?.headRefOid?.slice(0, 12) ?? 'unknown'}</strong>
+              <span>Checks</span>
+              <strong>
+                {ciRollup
+                  ? `${ciRollup.status}: ${ciRollup.passingCount} passing, ${ciRollup.failingCount} failing, ${ciRollup.pendingCount} pending`
+                  : 'not synced'}
+              </strong>
+              <span>Reviews / merge</span>
+              <strong>
+                {reviewRollup?.status ?? 'not synced'} / {mergeSnapshot?.status ?? 'not synced'}
+              </strong>
             </div>
           ) : null}
           <div className="artifact-box">

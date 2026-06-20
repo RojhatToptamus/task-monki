@@ -1,9 +1,15 @@
 import type {
   CancelRunRequest,
+  CreateDeliveryCommitRequest,
   CreateTaskRequest,
   GitSnapshotRecord,
+  GitHubPreflightRequest,
   PrepareWorktreeRequest,
+  PublishBranchRequest,
+  PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  RefinePromptRequest,
+  RefinePromptResponse,
   RepositoryPreflight,
   RunRecord,
   RunTestsRequest,
@@ -12,11 +18,16 @@ import type {
   TaskSnapshot,
   TransitionTaskRequest,
   WorktreeRecord,
-  RefreshEvidenceRequest
+  RefreshEvidenceRequest,
+  CreatePullRequestRequest,
+  RefreshGitHubRequest
 } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
+import { git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
+import { GitHubService } from '../github/GitHubService';
+import { PromptRefinementService } from '../prompt/PromptRefinementService';
 import { LocalTestRunner } from '../test/LocalTestRunner';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
@@ -30,12 +41,14 @@ export class TaskManagerService {
   private readonly runner: CodexExecRunner;
   private readonly testRunner: LocalTestRunner;
   private readonly worktrees: WorktreeService;
+  private readonly github: GitHubService;
+  private readonly promptRefiner = new PromptRefinementService();
 
   constructor(
     private readonly store: FileTaskStore,
     private readonly defaultRepositoryPath: string,
     events = new AppEventBus(),
-    options: { worktreeRoot?: string } = {}
+    options: { worktreeRoot?: string; ghPath?: string } = {}
   ) {
     this.events = events;
     this.runner = new CodexExecRunner(store, events);
@@ -45,6 +58,7 @@ export class TaskManagerService {
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
         path.join(os.tmpdir(), 'task-manager-worktrees')
     );
+    this.github = new GitHubService(options.ghPath);
     this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         void this.capturePostRunEvidence(event.runId);
@@ -70,6 +84,17 @@ export class TaskManagerService {
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
     return this.store.createTask(input);
+  }
+
+  async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
+    const refined = await this.promptRefiner.refine(input.repositoryPath, input.input);
+    this.events.emit({
+      type: 'prompt.refined',
+      taskId: 'prompt-preview',
+      payload: refined,
+      at: new Date().toISOString()
+    });
+    return refined;
   }
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
@@ -181,6 +206,148 @@ export class TaskManagerService {
     return storedSnapshot;
   }
 
+  async createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord> {
+    const task = await this.requireTask(input.taskId);
+    const worktree = await this.requireWorktree(task);
+    const latestGit = await this.refreshEvidence({ taskId: task.id });
+    if (latestGit.status === 'CONFLICTED' || latestGit.status === 'UNAVAILABLE') {
+      throw new Error(`Cannot create delivery commit while Git status is ${latestGit.status}.`);
+    }
+    if (latestGit.workingDiffFileCount === 0 && latestGit.stagedCount === 0 && latestGit.untrackedCount === 0) {
+      throw new Error('No uncommitted task changes are available to commit.');
+    }
+
+    await git(worktree.worktreePath, ['add', '-A']);
+    const hasStagedChanges = !(await gitSucceeds(worktree.worktreePath, ['diff', '--cached', '--quiet']));
+    if (!hasStagedChanges) {
+      throw new Error('No staged changes are available to commit.');
+    }
+    await git(worktree.worktreePath, ['commit', '-m', `Task: ${task.title}`], 120_000);
+    const headSha = (await git(worktree.worktreePath, ['rev-parse', 'HEAD'])).trim();
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'DELIVERY_COMMIT_CREATED',
+        taskId: task.id,
+        iterationId: worktree.iterationId,
+        worktreeId: worktree.id,
+        source: 'git',
+        payload: { headSha, branchName: worktree.branchName }
+      })
+    );
+    return this.refreshEvidence({ taskId: task.id });
+  }
+
+  async preflightGitHub(input: GitHubPreflightRequest) {
+    const task = await this.requireTask(input.taskId);
+    const worktree = await this.requireWorktree(task);
+    const preflight = await this.github.preflight(task, worktree);
+    const stored = await this.store.recordGitHubPreflight(preflight);
+    this.emitGitHubUpdate(task.id, worktree, stored);
+    return stored;
+  }
+
+  async publishBranch(input: PublishBranchRequest) {
+    const task = await this.requireTask(input.taskId);
+    const worktree = await this.requireWorktree(task);
+    const latestGit = await this.refreshEvidence({ taskId: task.id });
+    const snapshot = await this.store.snapshot();
+    const latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
+
+    assertPublishReady(latestGit, latestTest);
+
+    const githubReady = await this.preflightGitHub({ taskId: task.id });
+    if (githubReady.status !== 'READY') {
+      throw new Error(githubReady.error ?? `GitHub preflight is ${githubReady.status}.`);
+    }
+
+    await this.store.recordBranchPublishRequested(task, worktree);
+    const publication = await this.github.publishBranch({
+      task,
+      worktree,
+      remoteName: githubReady.remoteName
+    });
+    const stored = await this.store.recordBranchPublication(publication);
+    this.emitGitHubUpdate(task.id, worktree, stored);
+    if (stored.status !== 'PUSHED') {
+      throw new Error(stored.error ?? 'Branch publication failed.');
+    }
+    await this.refreshEvidence({ taskId: task.id });
+    return stored;
+  }
+
+  async createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord> {
+    const task = await this.requireTask(input.taskId);
+    const worktree = await this.requireWorktree(task);
+    const snapshot = await this.store.snapshot();
+    const latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
+    const latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
+    const latestPublication = latestForIteration(
+      snapshot.branchPublications,
+      task.currentIterationId,
+      'updatedAt'
+    );
+
+    if (latestPublication?.status !== 'PUSHED') {
+      throw new Error('Publish the task branch before creating a pull request.');
+    }
+    assertPublishReady(latestGit, latestTest);
+
+    const prBodyContent = await this.github.writePullRequestBody({
+      filePath: path.join(os.tmpdir(), `task-manager-pr-${task.id}.md`),
+      task,
+      gitDiffStat: latestGit?.diffStat,
+      testStatus: latestTest?.status,
+      codexSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
+    });
+    const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
+    const bodyPath = await this.store.getArtifactPath(bodyArtifact.id);
+
+    await this.store.recordPullRequestCreateRequested(task, worktree);
+    const sync = await this.github.createOrFindDraftPullRequest({
+      task,
+      worktree,
+      headSha: latestGit?.headSha,
+      baseRef: worktree.baseRef,
+      bodyFilePath: bodyPath
+    });
+    sync.pullRequest.bodyArtifactId = bodyArtifact.id;
+    const pullRequest = await this.store.recordPullRequestSync(sync);
+    this.emitGitHubUpdate(task.id, worktree, pullRequest);
+
+    if (pullRequest.status === 'OPEN_DRAFT' || pullRequest.status === 'OPEN_READY') {
+      await this.store.transitionTask(task.id, 'IN_REVIEW', 'GitHub confirmed a matching open pull request.');
+    }
+
+    return pullRequest;
+  }
+
+  async refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined> {
+    const task = await this.requireTask(input.taskId);
+    const worktree = await this.requireWorktree(task);
+    const latest = await this.store.getLatestPullRequest(task.id);
+    if (!latest?.number && !latest?.url) {
+      return undefined;
+    }
+    try {
+      const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
+      const stored = await this.store.recordPullRequestSync(sync);
+      this.emitGitHubUpdate(task.id, worktree, stored);
+      return stored;
+    } catch (error) {
+      await this.store.appendEvent(
+        createDomainEvent({
+          type: 'GITHUB_SYNC_FAILED',
+          taskId: task.id,
+          iterationId: worktree.iterationId,
+          worktreeId: worktree.id,
+          source: 'github',
+          payload: { error: error instanceof Error ? error.message : String(error) }
+        })
+      );
+      throw error;
+    }
+  }
+
   async transitionTask(input: TransitionTaskRequest): Promise<Task> {
     const task = await this.requireTask(input.taskId);
     const snapshot = await this.store.snapshot();
@@ -190,11 +357,24 @@ export class TaskManagerService {
     const latestTest = snapshot.testRuns
       .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    const latestPr = snapshot.pullRequests
+      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+      .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+    const latestMerge = snapshot.mergeSnapshots
+      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+      .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
 
     const blockedReason = transitionBlocker(task, input.toPhase, {
       hasWorktree: Boolean(task.currentWorktreeId),
       gitStatus: latestGit?.status,
-      testStatus: latestTest?.status
+      testStatus: latestTest?.status,
+      gitHeadSha: latestGit?.headSha,
+      testHeadSha: latestTest?.testedHeadSha,
+      testDirtyFingerprint: latestTest?.testedDirtyFingerprint,
+      gitDirtyFingerprint: latestGit?.dirtyFingerprint,
+      pullRequestStatus: latestPr?.status,
+      pullRequestHeadSha: latestPr?.headRefOid,
+      mergeStatus: latestMerge?.status
     });
     if (blockedReason) {
       await this.store.recordBlockedTransition(task, input.toPhase, blockedReason);
@@ -253,12 +433,34 @@ export class TaskManagerService {
     }
     return worktree;
   }
+
+  private emitGitHubUpdate(taskId: string, worktree: WorktreeRecord, payload: unknown): void {
+    this.events.emit({
+      type: 'github.updated',
+      taskId,
+      iterationId: worktree.iterationId,
+      worktreeId: worktree.id,
+      payload,
+      at: new Date().toISOString()
+    });
+  }
 }
 
-function transitionBlocker(
+export function transitionBlocker(
   task: Task,
   toPhase: Task['workflowPhase'],
-  evidence: { hasWorktree: boolean; gitStatus?: string; testStatus?: string }
+  evidence: {
+    hasWorktree: boolean;
+    gitStatus?: string;
+    testStatus?: string;
+    gitHeadSha?: string;
+    testHeadSha?: string;
+    testDirtyFingerprint?: string;
+    gitDirtyFingerprint?: string;
+    pullRequestStatus?: string;
+    pullRequestHeadSha?: string;
+    mergeStatus?: string;
+  }
 ): string | undefined {
   if (toPhase === 'IN_PROGRESS') {
     return evidence.hasWorktree ? undefined : 'A task worktree is required before implementation starts.';
@@ -285,10 +487,68 @@ function transitionBlocker(
     if (evidence.testStatus !== 'PASSED') {
       return 'Current-generation local tests must pass before PR_READY.';
     }
+    if (
+      evidence.gitHeadSha !== evidence.testHeadSha ||
+      evidence.gitDirtyFingerprint !== evidence.testDirtyFingerprint
+    ) {
+      return 'Local tests must match the current Git generation before PR_READY.';
+    }
     if (evidence.gitStatus === 'CONFLICTED' || evidence.gitStatus === 'UNAVAILABLE') {
       return `Git state ${evidence.gitStatus} blocks PR readiness.`;
     }
     return undefined;
   }
+  if (toPhase === 'IN_REVIEW') {
+    if (evidence.pullRequestStatus !== 'OPEN_DRAFT' && evidence.pullRequestStatus !== 'OPEN_READY') {
+      return 'A matching open GitHub pull request is required before IN_REVIEW.';
+    }
+    if (evidence.gitHeadSha && evidence.pullRequestHeadSha && evidence.gitHeadSha !== evidence.pullRequestHeadSha) {
+      return 'GitHub pull request head SHA does not match the current task branch HEAD.';
+    }
+    return undefined;
+  }
+  if (toPhase === 'DONE') {
+    if (task.completionPolicy === 'MERGED' && evidence.mergeStatus !== 'MERGED') {
+      return 'GitHub must report the pull request merged before DONE.';
+    }
+    return undefined;
+  }
   return undefined;
+}
+
+function latestForIteration<T extends { iterationId: string }>(
+  rows: T[],
+  iterationId: string | undefined,
+  dateKey: keyof T
+): T | undefined {
+  return rows
+    .filter((row) => row.iterationId === iterationId)
+    .sort((a, b) => String(b[dateKey]).localeCompare(String(a[dateKey])))[0];
+}
+
+export function assertPublishReady(
+  latestGit: GitSnapshotRecord | undefined,
+  latestTest: { status: string; testedHeadSha?: string; testedDirtyFingerprint?: string } | undefined
+): void {
+  if (!latestGit) {
+    throw new Error('Refresh Git evidence before publishing.');
+  }
+  if (latestGit.status === 'DIRTY') {
+    throw new Error('Create a delivery commit before publishing. Dirty worktree changes cannot be pushed.');
+  }
+  if (latestGit.status === 'CONFLICTED' || latestGit.status === 'UNAVAILABLE') {
+    throw new Error(`Git status ${latestGit.status} blocks publication.`);
+  }
+  if (latestGit.commitsAheadOfBase <= 0) {
+    throw new Error('The task branch has no committed changes to publish.');
+  }
+  if (latestTest?.status !== 'PASSED') {
+    throw new Error('Current-generation local tests must pass before publishing.');
+  }
+  if (
+    latestTest.testedHeadSha !== latestGit.headSha ||
+    latestTest.testedDirtyFingerprint !== latestGit.dirtyFingerprint
+  ) {
+    throw new Error('Local test result is stale for the current Git generation.');
+  }
 }

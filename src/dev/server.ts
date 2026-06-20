@@ -78,6 +78,11 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/prompt/refine') {
+      sendJson(response, 200, await service.refinePrompt((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/worktrees/prepare') {
       sendJson(response, 200, await service.prepareWorktree((await readJson(request)) as never));
       return;
@@ -101,6 +106,31 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
 
     if (request.method === 'POST' && url.pathname === '/api/evidence/refresh') {
       sendJson(response, 200, await service.refreshEvidence((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/git/delivery-commit') {
+      sendJson(response, 200, await service.createDeliveryCommit((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/github/preflight') {
+      sendJson(response, 200, await service.preflightGitHub((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/github/publish') {
+      sendJson(response, 200, await service.publishBranch((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/github/pr/create') {
+      sendJson(response, 200, await service.createPullRequest((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/github/refresh') {
+      sendJson(response, 200, await service.refreshGitHub((await readJson(request)) as never));
       return;
     }
 
