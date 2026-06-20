@@ -19,6 +19,23 @@ import { TaskCreateForm } from './TaskCreateForm';
 import { TaskDetail } from './TaskDetail';
 import { TaskList } from './TaskList';
 
+type ThemePreference = 'system' | 'midnight' | 'porcelain' | 'sage';
+
+const themeStorageKey = 'task-manager.theme.v1';
+const themeOptions: Array<{ value: ThemePreference; label: string }> = [
+  { value: 'system', label: 'System' },
+  { value: 'midnight', label: 'Midnight' },
+  { value: 'porcelain', label: 'Porcelain' },
+  { value: 'sage', label: 'Sage' }
+];
+
+function readThemePreference(): ThemePreference {
+  const stored = window.localStorage.getItem(themeStorageKey);
+  return themeOptions.some((option) => option.value === stored)
+    ? (stored as ThemePreference)
+    : 'system';
+}
+
 const emptySnapshot: TaskSnapshot = {
   tasks: [],
   iterations: [],
@@ -37,11 +54,23 @@ const emptySnapshot: TaskSnapshot = {
 };
 
 export function App() {
+  const [theme, setTheme] = useState<ThemePreference>(readThemePreference);
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'system') {
+      delete root.dataset.theme;
+      window.localStorage.removeItem(themeStorageKey);
+    } else {
+      root.dataset.theme = theme;
+      window.localStorage.setItem(themeStorageKey, theme);
+    }
+  }, [theme]);
 
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
@@ -228,7 +257,23 @@ export function App() {
             <span className="app-kicker">Phase 2</span>
             <h1>Task Manager</h1>
           </div>
-          <span className="connection-dot" aria-label="Local runner connected" />
+          <div className="sidebar__controls">
+            <label className="theme-picker">
+              <span>Theme</span>
+              <select
+                aria-label="Theme"
+                value={theme}
+                onChange={(event) => setTheme(event.target.value as ThemePreference)}
+              >
+                {themeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="connection-dot" aria-label="Local runner connected" />
+          </div>
         </header>
 
         {error ? <div className="error-banner">{error}</div> : null}
