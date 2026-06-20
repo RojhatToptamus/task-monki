@@ -39,7 +39,11 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
     case 'CODEX_EVENT_PARSED':
       return {
         label: 'Codex update',
-        detail: summarizeCodexEvent(stringField(payload, 'eventType'), stringField(payload, 'messageText'))
+        detail: summarizeCodexEvent(
+          stringField(payload, 'eventType'),
+          stringField(payload, 'messageText'),
+          stringField(payload, 'terminalStatus')
+        )
       };
     case 'CODEX_RUN_COMPLETED':
       return { label: 'Codex completed', detail: 'Final response and evidence were captured.' };
@@ -82,20 +86,58 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
   }
 }
 
-function summarizeCodexEvent(eventType: string | undefined, messageText: string | undefined): string {
-  if (messageText) {
-    return messageText.trim().slice(0, 140);
+function summarizeCodexEvent(
+  eventType: string | undefined,
+  messageText: string | undefined,
+  terminalStatus: string | undefined
+): string {
+  const trimmedMessage = cleanSummaryText(messageText);
+  if (trimmedMessage) {
+    return trimmedMessage;
   }
-  if (eventType === 'turn.completed') {
-    return 'Codex turn completed.';
+
+  switch (eventType) {
+    case 'thread.started':
+      return 'Codex thread started.';
+    case 'thread.completed':
+      return 'Codex thread completed.';
+    case 'thread.failed':
+      return 'Codex thread failed.';
+    case 'turn.started':
+      return 'Codex started a turn.';
+    case 'turn.completed':
+      return 'Codex turn completed.';
+    case 'turn.failed':
+      return 'Codex turn failed.';
+    case 'turn.interrupted':
+      return 'Codex turn was interrupted.';
+    case 'exec_command.started':
+    case 'command.started':
+      return 'Codex started a command.';
+    case 'exec_command.completed':
+    case 'command.completed':
+      return 'Codex command completed.';
+    case 'exec_command.failed':
+    case 'command.failed':
+      return 'Codex command failed.';
+    case 'file_change.started':
+    case 'patch.started':
+      return 'Codex started editing files.';
+    case 'file_change.completed':
+    case 'patch.completed':
+      return 'Codex finished editing files.';
+    default:
+      if (terminalStatus === 'completed') {
+        return 'Codex completed an event.';
+      }
+      if (terminalStatus === 'failed') {
+        return 'Codex reported a failed event.';
+      }
+      if (terminalStatus === 'interrupted') {
+        return 'Codex reported an interrupted event.';
+      }
+      return eventType ? `Codex event: ${humanizeCodexEventType(eventType)}.` : 'Codex event received.';
   }
-  if (eventType === 'turn.failed') {
-    return 'Codex turn failed.';
-  }
-  if (eventType === 'thread.started') {
-    return 'Codex thread started.';
-  }
-  return eventType ?? 'Codex event received.';
 }
 
 function humanizeEventType(type: string): string {
@@ -108,7 +150,7 @@ function humanizeEventType(type: string): string {
 
 function summarizePayload(payload: Record<string, unknown>): string {
   if (typeof payload.text === 'string') {
-    return payload.text.trim().slice(0, 140);
+    return cleanSummaryText(payload.text);
   }
   if (typeof payload.error === 'string') {
     return payload.error;
@@ -117,6 +159,19 @@ function summarizePayload(payload: Record<string, unknown>): string {
     return payload.status;
   }
   return '';
+}
+
+function cleanSummaryText(value: string | undefined): string {
+  return value
+    ? value
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 140)
+    : '';
+}
+
+function humanizeCodexEventType(type: string): string {
+  return type.replace(/[._-]+/g, ' ');
 }
 
 function objectPayload(payload: unknown): Record<string, unknown> {

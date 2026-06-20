@@ -19,6 +19,34 @@ describe('summarizeEvent', () => {
       })).detail
     ).toContain('openai/task-manager');
   });
+
+  it('summarizes common Codex command events without exposing raw event names', () => {
+    expect(
+      summarizeEvent(createEvent('CODEX_EVENT_PARSED', { eventType: 'exec_command.started' }))
+    ).toEqual({
+      label: 'Codex update',
+      detail: 'Codex started a command.'
+    });
+
+    expect(
+      summarizeEvent(createEvent('CODEX_EVENT_PARSED', { eventType: 'command.failed' }))
+    ).toEqual({
+      label: 'Codex update',
+      detail: 'Codex command failed.'
+    });
+  });
+
+  it('normalizes multiline Codex message text for the timeline', () => {
+    expect(
+      summarizeEvent(createEvent('CODEX_EVENT_PARSED', {
+        eventType: 'turn.started',
+        messageText: 'Inspecting files\n\nRunning tests'
+      }))
+    ).toEqual({
+      label: 'Codex update',
+      detail: 'Inspecting files Running tests'
+    });
+  });
 });
 
 function createEvent(type: DomainEvent['type'], payload: unknown): DomainEvent {
