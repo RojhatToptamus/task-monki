@@ -10,9 +10,10 @@ interface TaskCreateFormProps {
 export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: TaskCreateFormProps) {
   const [title, setTitle] = useState('Summarize this repository');
   const [prompt, setPrompt] = useState(
-    'Summarize the repository files, identify the current project state, and do not modify anything.'
+    'Implement a small, scoped change. Keep edits inside the task worktree and summarize what changed.'
   );
   const [repositoryPath, setRepositoryPath] = useState(defaultRepositoryPath);
+  const [testCommand, setTestCommand] = useState('npm test');
   const [error, setError] = useState<string | undefined>();
 
   useEffect(() => {
@@ -23,7 +24,7 @@ export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: Ta
     event.preventDefault();
     setError(undefined);
     try {
-      await onCreate({ title, prompt, repositoryPath });
+      await onCreate({ title, prompt, repositoryPath, testCommand });
       setTitle('');
       setPrompt('');
     } catch (caught) {
@@ -52,11 +53,20 @@ export function TaskCreateForm({ defaultRepositoryPath, disabled, onCreate }: Ta
         />
       </label>
       <label>
+        <span>Test command</span>
+        <input
+          value={testCommand}
+          onChange={(event) => setTestCommand(event.target.value)}
+          placeholder="npm test"
+          disabled={disabled}
+        />
+      </label>
+      <label>
         <span>Prompt</span>
         <textarea
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
-          placeholder="Read-only Codex prompt"
+          placeholder="Implementation prompt"
           rows={5}
           disabled={disabled}
         />

@@ -4,12 +4,14 @@ import { parseCodexJsonLine, type ParsedJsonLine } from '../codex/jsonlParser';
 import { ProcessSupervisor, type SupervisedProcess } from '../process/ProcessSupervisor';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
-import type { AppUpdateEvent, RunRecord, Task } from '../../shared/contracts';
+import type { AppUpdateEvent, RunMode, RunRecord, Task } from '../../shared/contracts';
 import { AppEventBus } from './AppEventBus';
 
 interface ActiveRun {
   taskId: string;
   runId: string;
+  iterationId?: string;
+  worktreeId?: string;
   process: SupervisedProcess;
 }
 
@@ -18,6 +20,17 @@ interface StdoutParseState {
   pendingJsonText: string;
   terminalCodexEvent?: ParsedJsonLine;
   lastMessage?: string;
+}
+
+export interface CodexRunOptions {
+  cwd?: string;
+  sandboxMode?: 'read-only' | 'workspace-write';
+  approvalPolicy?: 'never' | 'on-request' | 'untrusted';
+  mode?: RunMode;
+  iterationId?: string;
+  worktreeId?: string;
+  generationKey?: string;
+  promptSuffix?: string;
 }
 
 export class CodexExecRunner {
@@ -29,28 +42,40 @@ export class CodexExecRunner {
     private readonly events: AppEventBus
   ) {}
 
-  async start(task: Task): Promise<RunRecord> {
+  async start(task: Task, options: CodexRunOptions = {}): Promise<RunRecord> {
     if (this.activeRuns.has(task.id)) {
       throw new Error('A run is already active for this task.');
     }
 
     const command = buildCodexExecCommand({
-      repositoryPath: task.repositoryPath,
-      sandboxMode: 'read-only',
-      approvalPolicy: 'never'
+      repositoryPath: options.cwd ?? task.repositoryPath,
+      sandboxMode: options.sandboxMode ?? 'read-only',
+      approvalPolicy: options.approvalPolicy ?? 'never'
     });
 
-    const run = await this.store.createRun(task, command);
+    const run = await this.store.createRun(task, command, {
+      cwd: options.cwd,
+      mode: options.mode ?? 'READ_ONLY_ANALYSIS',
+      iterationId: options.iterationId,
+      worktreeId: options.worktreeId,
+      generationKey: options.generationKey
+    });
     this.emitUpdate('run.started', task.id, run.id, run);
 
     const process = this.supervisor.start({
       executable: command.executable,
       argv: command.argv,
-      cwd: task.repositoryPath,
-      stdin: `${task.prompt}\n\nRemember: this is a read-only analysis run. Do not modify files.\n`
+      cwd: options.cwd ?? task.repositoryPath,
+      stdin: `${task.prompt}\n\n${options.promptSuffix ?? 'Remember: this is a read-only analysis run. Do not modify files.'}\n`
     });
 
-    this.activeRuns.set(task.id, { taskId: task.id, runId: run.id, process });
+    this.activeRuns.set(task.id, {
+      taskId: task.id,
+      runId: run.id,
+      iterationId: run.iterationId,
+      worktreeId: run.worktreeId,
+      process
+    });
 
     const stdoutState: StdoutParseState = {
       lineBuffer: '',
@@ -63,7 +88,9 @@ export class CodexExecRunner {
         createDomainEvent({
           type: 'PROCESS_STARTED',
           taskId: task.id,
+          iterationId: options.iterationId,
           runId: run.id,
+          worktreeId: options.worktreeId,
           source: 'process',
           payload: { pid }
         })
@@ -114,7 +141,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CANCEL_REQUESTED',
         taskId: active.taskId,
+        iterationId: active.iterationId,
         runId,
+        worktreeId: active.worktreeId,
         source: 'ui',
         payload: {}
       })
@@ -185,7 +214,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CODEX_STDOUT_LINE',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'codex',
         payload: { line: candidate, parseable: true }
       })
@@ -202,7 +233,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CODEX_EVENT_PARSED',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'codex',
         sourceEventId: `${run.id}:${parsed.eventType}:${randomUUID()}`,
         payload: {
@@ -223,7 +256,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CODEX_STDERR_CHUNK',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'process',
         payload: { text }
       })
@@ -241,7 +276,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CODEX_RUN_FAILED',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'process',
         payload: { error: error.message, finalArtifactId: finalArtifact.id }
       })
@@ -274,7 +311,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: details.signal ? 'PROCESS_SIGNALED' : 'PROCESS_EXITED',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'process',
         payload: { exitCode: details.exitCode, signal: details.signal }
       })
@@ -297,7 +336,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: isSuccess ? 'CODEX_RUN_COMPLETED' : 'CODEX_RUN_FAILED',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'codex',
         payload: {
           exitCode: details.exitCode,
@@ -341,7 +382,9 @@ export class CodexExecRunner {
       createDomainEvent({
         type: 'CODEX_STDOUT_LINE',
         taskId: task.id,
+        iterationId: run.iterationId,
         runId: run.id,
+        worktreeId: run.worktreeId,
         source: 'codex',
         payload: { line, parseable: false, ...extraPayload }
       })
@@ -364,11 +407,13 @@ function formatFinalArtifact(input: {
 }): string {
   const status = input.isSuccess ? 'completed' : 'failed';
   return [
-    `# Read-only Codex run ${status}`,
+    `# Codex ${input.run.mode === 'IMPLEMENTATION' ? 'implementation' : 'read-only'} run ${status}`,
     '',
     `Task: ${input.task.title}`,
     `Run: ${input.run.id}`,
     `Repository: ${input.task.repositoryPath}`,
+    `Working directory: ${input.run.cwd}`,
+    `Mode: ${input.run.mode}`,
     `Exit code: ${input.exitCode ?? 'null'}`,
     `Signal: ${input.signal ?? 'null'}`,
     `Terminal Codex status: ${input.terminalCodexEvent?.terminalStatus ?? 'unknown'}`,

@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { CreateTaskRequest, TaskSnapshot } from '../../shared/contracts';
+import type { CreateTaskRequest, TaskSnapshot, WorkflowPhase } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
-import { selectActiveRun, selectTaskEvents, selectTaskRuns } from '../model/selectors';
+import {
+  selectActiveRun,
+  selectCurrentWorktree,
+  selectLatestGitSnapshot,
+  selectLatestTestRun,
+  selectTaskEvents,
+  selectTaskRuns
+} from '../model/selectors';
 import { TaskCreateForm } from './TaskCreateForm';
 import { TaskDetail } from './TaskDetail';
 import { TaskList } from './TaskList';
 
 const emptySnapshot: TaskSnapshot = {
   tasks: [],
+  iterations: [],
+  worktrees: [],
+  gitSnapshots: [],
+  testRuns: [],
   runs: [],
   events: [],
   artifacts: []
@@ -71,6 +82,11 @@ export function App() {
     () => (selectedTask ? selectTaskEvents(snapshot, selectedTask.id) : []),
     [selectedTask, snapshot]
   );
+  const selectedWorktree = selectedTask ? selectCurrentWorktree(snapshot, selectedTask) : undefined;
+  const selectedGitSnapshot = selectedTask
+    ? selectLatestGitSnapshot(snapshot, selectedTask)
+    : undefined;
+  const selectedTestRun = selectedTask ? selectLatestTestRun(snapshot, selectedTask) : undefined;
 
   const createTask = async (input: CreateTaskRequest) => {
     const created = await taskManagerApi.createTask(input);
@@ -81,10 +97,50 @@ export function App() {
   const startRun = async (taskId: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.startRun({ taskId });
+      await taskManagerApi.startRun({ taskId, mode: 'IMPLEMENTATION' });
       await refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to start run.');
+    }
+  };
+
+  const prepareWorktree = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.prepareWorktree({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to prepare worktree.');
+    }
+  };
+
+  const refreshEvidence = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.refreshEvidence({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to refresh evidence.');
+    }
+  };
+
+  const runTests = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.runTests({ taskId });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to run tests.');
+    }
+  };
+
+  const transitionTask = async (taskId: string, toPhase: WorkflowPhase) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.transitionTask({ taskId, toPhase });
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Transition blocked.');
     }
   };
 
@@ -103,7 +159,7 @@ export function App() {
       <aside className="sidebar">
         <header className="sidebar__header">
           <div>
-            <span className="app-kicker">Phase 1</span>
+            <span className="app-kicker">Phase 2</span>
             <h1>Task Manager</h1>
           </div>
           <span className="connection-dot" aria-label="Local runner connected" />
@@ -131,10 +187,17 @@ export function App() {
       <TaskDetail
         task={selectedTask}
         run={selectedRun}
+        worktree={selectedWorktree}
+        gitSnapshot={selectedGitSnapshot}
+        testRun={selectedTestRun}
         events={selectedEvents}
         artifacts={snapshot.artifacts}
+        onPrepareWorktree={prepareWorktree}
         onStart={startRun}
         onCancel={cancelRun}
+        onRefreshEvidence={refreshEvidence}
+        onRunTests={runTests}
+        onTransition={transitionTask}
       />
     </div>
   );

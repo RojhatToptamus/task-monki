@@ -5,7 +5,8 @@ import type {
   RunRecord,
   StatusProjection,
   Task,
-  TaskSnapshot
+  TaskSnapshot,
+  TestRunRecord
 } from '../../shared/contracts';
 import { createInitialProjection } from '../../shared/contracts';
 
@@ -14,6 +15,10 @@ export interface StoreState extends TaskSnapshot {}
 export function createEmptyState(): StoreState {
   return {
     tasks: [],
+    iterations: [],
+    worktrees: [],
+    gitSnapshots: [],
+    testRuns: [],
     runs: [],
     events: [],
     artifacts: []
@@ -23,6 +28,10 @@ export function createEmptyState(): StoreState {
 export function applyEventToState(state: StoreState, event: DomainEvent): StoreState {
   const next: StoreState = {
     tasks: [...state.tasks],
+    iterations: [...state.iterations],
+    worktrees: [...state.worktrees],
+    gitSnapshots: [...state.gitSnapshots],
+    testRuns: [...state.testRuns],
     runs: [...state.runs],
     events: [...state.events, event],
     artifacts: [...state.artifacts]
@@ -30,6 +39,9 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
 
   const taskIndex = next.tasks.findIndex((task) => task.id === event.taskId);
   const runIndex = event.runId ? next.runs.findIndex((run) => run.id === event.runId) : -1;
+  const testRunIndex = event.testRunId
+    ? next.testRuns.findIndex((testRun) => testRun.id === event.testRunId)
+    : -1;
 
   if (taskIndex === -1 && event.type !== 'TASK_CREATED') {
     return next;
@@ -43,8 +55,17 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     next.runs[runIndex] = reduceRun(next.runs[runIndex], event);
   }
 
+  if (testRunIndex >= 0) {
+    next.testRuns[testRunIndex] = reduceTestRun(next.testRuns[testRunIndex], event);
+  }
+
   if (taskIndex >= 0) {
     const task = next.tasks[taskIndex];
+    const eventTargetsCurrentIteration =
+      !event.iterationId || !task.currentIterationId || event.iterationId === task.currentIterationId;
+    if (!eventTargetsCurrentIteration) {
+      return next;
+    }
     const currentRun = event.runId
       ? next.runs.find((run) => run.id === event.runId)
       : next.runs.find((run) => run.id === task.currentRunId);
@@ -58,6 +79,38 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
   }
 
   return next;
+}
+
+export function reduceTestRun(testRun: TestRunRecord, event: DomainEvent): TestRunRecord {
+  switch (event.type) {
+    case 'TEST_PROCESS_STARTED':
+      return {
+        ...testRun,
+        status: 'RUNNING',
+        processStatus: 'RUNNING'
+      };
+    case 'TEST_RUN_COMPLETED': {
+      const exitCode = getNullableNumber(event.payload, 'exitCode');
+      const signal = getString(event.payload, 'signal') as NodeJS.Signals | undefined;
+      const error = getString(event.payload, 'error');
+      return {
+        ...testRun,
+        status: error ? 'ERROR' : signal ? 'CANCELED' : exitCode === 0 ? 'PASSED' : 'FAILED',
+        processStatus: signal ? 'SIGNALED' : 'EXITED',
+        exitCode,
+        signal: signal ?? null,
+        endedAt: event.receivedAt
+      };
+    }
+    case 'TEST_RESULT_STALE':
+      return {
+        ...testRun,
+        status: 'STALE',
+        staleReason: getString(event.payload, 'reason')
+      };
+    default:
+      return testRun;
+  }
 }
 
 export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
@@ -146,6 +199,11 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent): Task['workflowPhas
     case 'PROCESS_EXITED':
     case 'PROCESS_SIGNALED':
       return task.workflowPhase === 'IN_PROGRESS' ? 'REVIEW' : task.workflowPhase;
+    case 'TEST_RUN_STARTED':
+    case 'TEST_PROCESS_STARTED':
+      return 'TESTING';
+    case 'TRANSITION_COMPLETED':
+      return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
     default:
       return task.workflowPhase;
   }
@@ -172,11 +230,71 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'TASK_ITERATION_CREATED':
+      return {
+        ...base,
+        requestedAction: 'REQUESTED',
+        worktree: 'CREATING',
+        git: 'NOT_INSPECTED',
+        tests: 'NOT_RUN',
+        summary: 'Task iteration created; preparing isolated worktree.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'WORKTREE_CREATE_REQUESTED':
+      return {
+        ...base,
+        worktree: 'CREATING',
+        summary: 'Creating isolated Git worktree for this task.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'WORKTREE_CREATED':
+    case 'WORKTREE_VERIFIED': {
+      const status = getString(event.payload, 'status');
+      return {
+        ...base,
+        worktree: isWorktreeProjectionStatus(status) ? status : 'PRESENT',
+        health: status === 'ERROR' || status === 'MISSING' ? 'ERROR' : base.health,
+        summary:
+          event.type === 'WORKTREE_CREATED'
+            ? 'Isolated worktree is ready.'
+            : 'Worktree verification completed.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    }
+    case 'WORKTREE_FAILED':
+      return {
+        ...base,
+        worktree: 'ERROR',
+        health: 'ERROR',
+        summary: 'Worktree creation or verification failed.',
+        findings,
+        updatedAt: event.receivedAt
+      };
     case 'TRANSITION_REQUESTED':
       return {
         ...base,
         requestedAction: 'REQUESTED',
-        summary: 'Read-only Codex run requested.',
+        summary: 'Codex run requested.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'TRANSITION_COMPLETED':
+      return {
+        ...base,
+        requestedAction: 'SUCCEEDED',
+        summary: `Workflow moved to ${getString(event.payload, 'toPhase') ?? 'the requested phase'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'TRANSITION_BLOCKED':
+      return {
+        ...base,
+        requestedAction: 'FAILED',
+        health: 'BLOCKED',
+        summary: getString(event.payload, 'reason') ?? 'Workflow transition blocked by missing evidence.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -186,7 +304,10 @@ export function reduceProjection(
         requestedAction: 'STARTING',
         codexRun: 'STARTING',
         osProcess: 'SPAWNING',
-        summary: 'Starting read-only Codex run.',
+        summary:
+          getString(event.payload, 'mode') === 'IMPLEMENTATION'
+            ? 'Starting implementation Codex run in the task worktree.'
+            : 'Starting read-only Codex run.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -197,7 +318,61 @@ export function reduceProjection(
         codexRun: 'RUNNING',
         osProcess: 'RUNNING',
         health: 'INFO',
-        summary: 'Read-only Codex run is active.',
+        summary: 'Codex run is active.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'GIT_SNAPSHOT_CAPTURED':
+      return {
+        ...base,
+        git: getGitStatus(event.payload) ?? base.git,
+        health:
+          getGitStatus(event.payload) === 'CONFLICTED' || getGitStatus(event.payload) === 'UNAVAILABLE'
+            ? 'ERROR'
+            : base.health,
+        summary: `Git snapshot captured: ${getGitStatus(event.payload) ?? 'UNKNOWN'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'TEST_RUN_STARTED':
+      return {
+        ...base,
+        tests: 'QUEUED',
+        summary: 'Local test command queued.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'TEST_PROCESS_STARTED':
+      return {
+        ...base,
+        tests: 'RUNNING',
+        summary: 'Local test command is running.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'TEST_RUN_COMPLETED': {
+      const exitCode = getNullableNumber(event.payload, 'exitCode');
+      const signal = getString(event.payload, 'signal');
+      const error = getString(event.payload, 'error');
+      const tests = error ? 'ERROR' : signal ? 'CANCELED' : exitCode === 0 ? 'PASSED' : 'FAILED';
+      return {
+        ...base,
+        tests,
+        health: tests === 'PASSED' ? base.health : tests === 'FAILED' || tests === 'ERROR' ? 'ERROR' : 'WARNING',
+        summary:
+          tests === 'PASSED'
+            ? 'Local tests passed for the current Git generation.'
+            : `Local tests ended with ${tests}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    }
+    case 'TEST_RESULT_STALE':
+      return {
+        ...base,
+        tests: 'STALE',
+        health: maxHealth(base.health, 'WARNING'),
+        summary: 'Local test result is stale because the Git generation changed.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -234,7 +409,7 @@ export function reduceProjection(
         codexRun: 'COMPLETED',
         artifact: 'FINAL_MESSAGE_PRESENT',
         health: findings.some((finding) => finding.severity === 'WARNING') ? 'WARNING' : 'HEALTHY',
-        summary: 'Read-only Codex run completed. Review the final artifact.',
+        summary: 'Codex run completed. Review the final artifact and Git evidence.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -313,6 +488,42 @@ function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
     ];
   }
 
+  if (event.type === 'WORKTREE_FAILED') {
+    return [
+      {
+        id: `${event.id}:worktree`,
+        code: 'WORKTREE_OPERATION_FAILED',
+        severity: 'ERROR',
+        message: getString(event.payload, 'error') ?? 'Worktree operation failed.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'TRANSITION_BLOCKED') {
+    return [
+      {
+        id: `${event.id}:transition-blocked`,
+        code: 'WORKFLOW_TRANSITION_BLOCKED',
+        severity: 'BLOCKED',
+        message: getString(event.payload, 'reason') ?? 'Transition blocked.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'TEST_RUN_COMPLETED' && getNullableNumber(event.payload, 'exitCode') !== 0) {
+    return [
+      {
+        id: `${event.id}:test-failed`,
+        code: 'LOCAL_TESTS_NOT_PASSING',
+        severity: 'ERROR',
+        message: `Local tests exited with code ${getNullableNumber(event.payload, 'exitCode') ?? 'unknown'}.`,
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
   return [];
 }
 
@@ -339,6 +550,39 @@ function getString(payload: unknown, key: string): string | undefined {
   }
   const value = (payload as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function getGitStatus(payload: unknown): StatusProjection['git'] | undefined {
+  const value = getString(payload, 'status');
+  if (
+    value === 'NOT_INSPECTED' ||
+    value === 'CLEAN' ||
+    value === 'DIRTY' ||
+    value === 'COMMITTED_UNPUSHED' ||
+    value === 'PUSHED' ||
+    value === 'CONFLICTED' ||
+    value === 'DIVERGED' ||
+    value === 'UNAVAILABLE' ||
+    value === 'UNKNOWN'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function isWorktreeProjectionStatus(value: string | undefined): value is StatusProjection['worktree'] {
+  return (
+    value === 'NOT_CREATED' ||
+    value === 'CREATING' ||
+    value === 'PRESENT' ||
+    value === 'LOCKED' ||
+    value === 'PRUNABLE' ||
+    value === 'MISSING' ||
+    value === 'REMOVING' ||
+    value === 'REMOVED' ||
+    value === 'ERROR' ||
+    value === 'UNKNOWN'
+  );
 }
 
 function getNumber(payload: unknown, key: string): number | undefined {

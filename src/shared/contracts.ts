@@ -3,13 +3,28 @@ export type WorkflowPhase =
   | 'READY'
   | 'IN_PROGRESS'
   | 'REVIEW'
+  | 'TESTING'
+  | 'PR_READY'
+  | 'IN_REVIEW'
   | 'DONE'
   | 'BLOCKED'
-  | 'CANCELED';
+  | 'CANCELED'
+  | 'ARCHIVED';
 
-export type Resolution = 'NONE' | 'COMPLETED' | 'CANCELED';
+export type Resolution =
+  | 'NONE'
+  | 'COMPLETED'
+  | 'CANCELED'
+  | 'NOT_PLANNED'
+  | 'DUPLICATE'
+  | 'SUPERSEDED';
 
-export type CompletionPolicy = 'ARTIFACT_ACCEPTANCE';
+export type CompletionPolicy =
+  | 'ARTIFACT_ACCEPTANCE'
+  | 'LOCAL_ACCEPTANCE'
+  | 'MERGED'
+  | 'MERGED_AND_VERIFIED'
+  | 'MANUAL';
 
 export type RequestedActionStatus =
   | 'NONE'
@@ -25,9 +40,12 @@ export type CodexRunStatus =
   | 'QUEUED'
   | 'STARTING'
   | 'RUNNING'
+  | 'AWAITING_APPROVAL'
   | 'COMPLETED'
   | 'FAILED'
+  | 'INTERRUPTED'
   | 'CANCELED'
+  | 'LOST'
   | 'UNKNOWN';
 
 export type ProcessStatus =
@@ -46,10 +64,62 @@ export type ArtifactStatus = 'NONE' | 'FINAL_MESSAGE_PRESENT' | 'MISSING';
 
 export type HealthStatus = 'HEALTHY' | 'INFO' | 'WARNING' | 'ERROR' | 'BLOCKED';
 
+export type WorktreeStatus =
+  | 'NOT_CREATED'
+  | 'CREATING'
+  | 'PRESENT'
+  | 'LOCKED'
+  | 'PRUNABLE'
+  | 'MISSING'
+  | 'REMOVING'
+  | 'REMOVED'
+  | 'ERROR'
+  | 'UNKNOWN';
+
+export type GitStatus =
+  | 'NOT_INSPECTED'
+  | 'CLEAN'
+  | 'DIRTY'
+  | 'COMMITTED_UNPUSHED'
+  | 'PUSHED'
+  | 'CONFLICTED'
+  | 'DIVERGED'
+  | 'UNAVAILABLE'
+  | 'UNKNOWN';
+
+export type TestStatus =
+  | 'NOT_CONFIGURED'
+  | 'NOT_RUN'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'PASSED'
+  | 'FAILED'
+  | 'ERROR'
+  | 'CANCELED'
+  | 'STALE'
+  | 'UNKNOWN';
+
+export type RunMode = 'READ_ONLY_ANALYSIS' | 'IMPLEMENTATION';
+
 export type DomainEventType =
   | 'TASK_CREATED'
+  | 'TASK_ITERATION_CREATED'
   | 'TRANSITION_REQUESTED'
+  | 'TRANSITION_COMPLETED'
+  | 'TRANSITION_BLOCKED'
   | 'ACTION_ATTEMPT_STARTED'
+  | 'WORKTREE_CREATE_REQUESTED'
+  | 'WORKTREE_CREATED'
+  | 'WORKTREE_VERIFIED'
+  | 'WORKTREE_FAILED'
+  | 'GIT_SNAPSHOT_CAPTURED'
+  | 'DIFF_ARTIFACT_CREATED'
+  | 'TEST_RUN_STARTED'
+  | 'TEST_PROCESS_STARTED'
+  | 'TEST_STDOUT_CHUNK'
+  | 'TEST_STDERR_CHUNK'
+  | 'TEST_RUN_COMPLETED'
+  | 'TEST_RESULT_STALE'
   | 'PROCESS_STARTED'
   | 'CODEX_STDOUT_LINE'
   | 'CODEX_EVENT_PARSED'
@@ -63,7 +133,15 @@ export type DomainEventType =
   | 'PROJECTION_UPDATED'
   | 'REPOSITORY_PREFLIGHT_COMPLETED';
 
-export type ArtifactKind = 'stdout' | 'stderr' | 'jsonl' | 'final-message';
+export type ArtifactKind =
+  | 'stdout'
+  | 'stderr'
+  | 'jsonl'
+  | 'final-message'
+  | 'diff'
+  | 'git-snapshot'
+  | 'test-stdout'
+  | 'test-stderr';
 
 export interface Finding {
   id: string;
@@ -79,6 +157,9 @@ export interface StatusProjection {
   codexRun: CodexRunStatus;
   osProcess: ProcessStatus;
   repositoryPreflight: RepositoryPreflightStatus;
+  worktree: WorktreeStatus;
+  git: GitStatus;
+  tests: TestStatus;
   artifact: ArtifactStatus;
   health: HealthStatus;
   summary: string;
@@ -96,14 +177,84 @@ export interface Task {
   completionPolicy: CompletionPolicy;
   phaseVersion: number;
   currentRunId?: string;
+  currentIterationId?: string;
+  currentWorktreeId?: string;
+  currentTestRunId?: string;
+  testCommand?: string;
   createdAt: string;
   updatedAt: string;
   projection: StatusProjection;
 }
 
+export interface TaskIteration {
+  id: string;
+  taskId: string;
+  actionRequestId: string;
+  generationKey: string;
+  status: 'ACTIVE' | 'SUPERSEDED' | 'COMPLETED' | 'CANCELED';
+  branchName: string;
+  baseRef?: string;
+  baseSha: string;
+  worktreeId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorktreeRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  repositoryPath: string;
+  worktreePath: string;
+  branchName: string;
+  baseRef?: string;
+  baseSha: string;
+  headSha?: string;
+  status: WorktreeStatus;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastVerifiedAt?: string;
+}
+
+export interface GitSnapshotRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  worktreePath: string;
+  repoRoot: string;
+  gitCommonDir: string;
+  headSha?: string;
+  branch?: string;
+  baseRef?: string;
+  baseSha?: string;
+  upstreamRef?: string;
+  upstreamSha?: string;
+  aheadCount: number;
+  behindCount: number;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+  conflictedCount: number;
+  operationInProgress?: string;
+  commitsAheadOfBase: number;
+  committedDiffFileCount: number;
+  workingDiffFileCount: number;
+  diffStat: string;
+  dirtyFingerprint: string;
+  status: GitStatus;
+  capturedAt: string;
+  diffArtifactId?: string;
+}
+
 export interface RunRecord {
   id: string;
   taskId: string;
+  iterationId?: string;
+  worktreeId?: string;
+  mode: RunMode;
+  generationKey?: string;
   status: CodexRunStatus;
   processStatus: ProcessStatus;
   executable: string;
@@ -124,10 +275,34 @@ export interface RunRecord {
   finalMessage?: string;
 }
 
+export interface TestRunRecord {
+  id: string;
+  taskId: string;
+  iterationId: string;
+  worktreeId: string;
+  generationKey: string;
+  command: string;
+  executable: string;
+  argv: string[];
+  cwd: string;
+  status: TestStatus;
+  processStatus: ProcessStatus;
+  stdoutArtifactId: string;
+  stderrArtifactId: string;
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  testedHeadSha?: string;
+  testedDirtyFingerprint?: string;
+  staleReason?: string;
+}
+
 export interface ArtifactRecord {
   id: string;
   taskId: string;
   runId?: string;
+  testRunId?: string;
   kind: ArtifactKind;
   path: string;
   byteCount: number;
@@ -139,8 +314,11 @@ export interface DomainEvent {
   id: string;
   type: DomainEventType;
   taskId: string;
+  iterationId?: string;
   runId?: string;
-  source: 'ui' | 'codex' | 'process' | 'storage' | 'repository' | 'projection';
+  testRunId?: string;
+  worktreeId?: string;
+  source: 'ui' | 'codex' | 'process' | 'storage' | 'repository' | 'projection' | 'git' | 'test';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -160,6 +338,10 @@ export interface RepositoryPreflight {
 
 export interface TaskSnapshot {
   tasks: Task[];
+  iterations: TaskIteration[];
+  worktrees: WorktreeRecord[];
+  gitSnapshots: GitSnapshotRecord[];
+  testRuns: TestRunRecord[];
   runs: RunRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
@@ -169,14 +351,33 @@ export interface CreateTaskRequest {
   title: string;
   prompt: string;
   repositoryPath: string;
+  testCommand?: string;
 }
 
 export interface StartRunRequest {
   taskId: string;
+  mode?: RunMode;
 }
 
 export interface CancelRunRequest {
   runId: string;
+}
+
+export interface PrepareWorktreeRequest {
+  taskId: string;
+}
+
+export interface RunTestsRequest {
+  taskId: string;
+}
+
+export interface RefreshEvidenceRequest {
+  taskId: string;
+}
+
+export interface TransitionTaskRequest {
+  taskId: string;
+  toPhase: WorkflowPhase;
 }
 
 export interface ReadArtifactRequest {
@@ -191,10 +392,18 @@ export interface AppUpdateEvent {
     | 'run.eventParsed'
     | 'run.stderr'
     | 'run.terminal'
+    | 'worktree.updated'
+    | 'git.updated'
+    | 'test.started'
+    | 'test.output'
+    | 'test.terminal'
     | 'projection.updated'
     | 'finding.updated';
   taskId: string;
+  iterationId?: string;
   runId?: string;
+  testRunId?: string;
+  worktreeId?: string;
   payload: unknown;
   at: string;
 }
@@ -204,8 +413,12 @@ export interface TaskManagerApi {
   validateRepository(path: string): Promise<RepositoryPreflight>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;
+  prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
   cancelRun(input: CancelRunRequest): Promise<void>;
+  runTests(input: RunTestsRequest): Promise<TestRunRecord>;
+  refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord>;
+  transitionTask(input: TransitionTaskRequest): Promise<Task>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;
   onUpdate(listener: (event: AppUpdateEvent) => void): () => void;
 }
@@ -216,9 +429,12 @@ export function createInitialProjection(now: string): StatusProjection {
     codexRun: 'UNKNOWN',
     osProcess: 'UNKNOWN',
     repositoryPreflight: 'UNKNOWN',
+    worktree: 'NOT_CREATED',
+    git: 'NOT_INSPECTED',
+    tests: 'NOT_RUN',
     artifact: 'NONE',
     health: 'INFO',
-    summary: 'Ready for a read-only Codex run.',
+    summary: 'Ready for isolated implementation.',
     findings: [],
     updatedAt: now
   };

@@ -2,13 +2,20 @@ import type {
   AppUpdateEvent,
   CancelRunRequest,
   CreateTaskRequest,
+  GitSnapshotRecord,
+  PrepareWorktreeRequest,
   ReadArtifactRequest,
   RepositoryPreflight,
+  RunTestsRequest,
   RunRecord,
   StartRunRequest,
   Task,
   TaskManagerApi,
-  TaskSnapshot
+  TaskSnapshot,
+  TestRunRecord,
+  TransitionTaskRequest,
+  WorktreeRecord,
+  RefreshEvidenceRequest
 } from '../../shared/contracts';
 
 const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
@@ -40,8 +47,15 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
+    prepareWorktree: (input: PrepareWorktreeRequest) =>
+      post<WorktreeRecord>(baseUrl, '/api/worktrees/prepare', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),
+    runTests: (input: RunTestsRequest) => post<TestRunRecord>(baseUrl, '/api/tests/run', input),
+    refreshEvidence: (input: RefreshEvidenceRequest) =>
+      post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
+    transitionTask: (input: TransitionTaskRequest) =>
+      post<Task>(baseUrl, '/api/tasks/transition', input),
     readArtifact: (input: ReadArtifactRequest) => post<string>(baseUrl, '/api/artifact/read', input),
     onUpdate: (listener) => {
       listeners.add(listener);

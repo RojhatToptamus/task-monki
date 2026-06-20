@@ -8,7 +8,7 @@ import type { AppUpdateEvent } from '../shared/contracts';
 const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
 const storeDir =
-  process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-manager-phase1-dev-store');
+  process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-manager-phase2-dev-store');
 
 const service = new TaskManagerService(new FileTaskStore(storeDir), defaultRepositoryPath);
 const clients = new Set<http.ServerResponse>();
@@ -78,6 +78,11 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/worktrees/prepare') {
+      sendJson(response, 200, await service.prepareWorktree((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/runs/start') {
       sendJson(response, 200, await service.startRun((await readJson(request)) as never));
       return;
@@ -86,6 +91,21 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') {
       await service.cancelRun((await readJson(request)) as never);
       sendJson(response, 200, {});
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/tests/run') {
+      sendJson(response, 200, await service.runTests((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/evidence/refresh') {
+      sendJson(response, 200, await service.refreshEvidence((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
+      sendJson(response, 200, await service.transitionTask((await readJson(request)) as never));
       return;
     }
 

@@ -1,8 +1,10 @@
 # Phase 2 Plan: Isolated Mutating Local Delivery Loop
 
 Date: 2026-06-20  
-Status: Planned  
+Status: Implemented  
 Depends on: Phase 1 read-only Codex run monitor
+
+Implementation evidence: `docs/phases/PHASE_2_STATUS.md`
 
 ## 1. Phase objective
 

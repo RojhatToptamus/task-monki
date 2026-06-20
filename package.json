@@ -2,7 +2,7 @@
   "name": "task-manager",
   "version": "0.1.0",
   "private": true,
-  "description": "Phase 1 vertical slice for a local Codex task manager.",
+  "description": "Local Codex task manager with isolated worktree execution evidence.",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev:renderer": "vite --host 127.0.0.1",

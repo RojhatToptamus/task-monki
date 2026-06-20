@@ -13,7 +13,7 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
     return (
       <div className="empty-state">
         <h2>No tasks yet</h2>
-        <p>Create a read-only Codex run to start collecting evidence.</p>
+        <p>Create an implementation task to start collecting isolated worktree evidence.</p>
       </div>
     );
   }
@@ -31,6 +31,9 @@ export function TaskList({ tasks, selectedTaskId, onSelect }: TaskListProps) {
           <strong>{task.title}</strong>
           <span className="task-card__summary">{task.projection.summary}</span>
           <div className="task-card__badges">
+            <StatusBadge label="Worktree" value={task.projection.worktree} />
+            <StatusBadge label="Git" value={task.projection.git} />
+            <StatusBadge label="Tests" value={task.projection.tests} />
             <StatusBadge label="Process" value={task.projection.osProcess} />
             <StatusBadge label="Codex" value={task.projection.codexRun} tone={tone(task)} />
           </div>

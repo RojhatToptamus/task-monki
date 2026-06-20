@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
 import type { DomainEvent, RunRecord, Task } from '../../shared/contracts';
-import { reduceProjection, reduceRun } from './reducer';
+import { applyEventToState, reduceProjection, reduceRun } from './reducer';
 
 const now = '2026-06-20T10:00:00.000Z';
 
@@ -39,6 +39,45 @@ describe('projection reducer', () => {
     expect(next.osProcess).toBe('CANCELING');
     expect(next.summary).toContain('waiting');
   });
+
+  it('does not let an old iteration event overwrite the current task projection', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'IN_PROGRESS',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-new',
+      createdAt: now,
+      updatedAt: now,
+      projection: createInitialProjection(now)
+    };
+    const state = applyEventToState(
+      {
+        tasks: [task],
+        iterations: [],
+        worktrees: [],
+        gitSnapshots: [],
+        testRuns: [],
+        runs: [],
+        events: [],
+        artifacts: []
+      },
+      {
+        ...createEvent('CODEX_RUN_COMPLETED', {
+          terminalStatus: 'completed',
+          finalArtifactId: 'artifact-old'
+        }),
+        iterationId: 'iteration-old'
+      }
+    );
+
+    expect(state.tasks[0].projection.codexRun).toBe('UNKNOWN');
+    expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+  });
 });
 
 describe('run reducer', () => {
@@ -63,6 +102,7 @@ function createRun(): RunRecord {
   return {
     id: 'run-1',
     taskId: 'task-1',
+    mode: 'READ_ONLY_ANALYSIS',
     status: 'RUNNING',
     processStatus: 'RUNNING',
     executable: 'codex',

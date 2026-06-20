@@ -2,7 +2,15 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
-import type { AppUpdateEvent, CreateTaskRequest } from '../shared/contracts';
+import type {
+  AppUpdateEvent,
+  CreateTaskRequest,
+  PrepareWorktreeRequest,
+  RefreshEvidenceRequest,
+  RunTestsRequest,
+  StartRunRequest,
+  TransitionTaskRequest
+} from '../shared/contracts';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
@@ -52,12 +60,28 @@ function installIpcHandlers(): void {
     return task;
   });
 
-  ipcMain.handle('codex:startRun', async (_, { taskId }: { taskId: string }) => {
-    return service.startRun({ taskId });
+  ipcMain.handle('worktree:prepare', async (_, input: PrepareWorktreeRequest) => {
+    return service.prepareWorktree(input);
+  });
+
+  ipcMain.handle('codex:startRun', async (_, input: StartRunRequest) => {
+    return service.startRun(input);
   });
 
   ipcMain.handle('codex:cancelRun', async (_, { runId }: { runId: string }) => {
     await service.cancelRun({ runId });
+  });
+
+  ipcMain.handle('test:run', async (_, input: RunTestsRequest) => {
+    return service.runTests(input);
+  });
+
+  ipcMain.handle('evidence:refresh', async (_, input: RefreshEvidenceRequest) => {
+    return service.refreshEvidence(input);
+  });
+
+  ipcMain.handle('task:transition', async (_, input: TransitionTaskRequest) => {
+    return service.transitionTask(input);
   });
 
   ipcMain.handle('artifact:read', async (_, { artifactId }: { artifactId: string }) => {
@@ -71,7 +95,7 @@ function broadcast(event: AppUpdateEvent): void {
 
 app.whenReady().then(async () => {
   service = new TaskManagerService(
-    new FileTaskStore(path.join(app.getPath('userData'), 'phase1-store')),
+    new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
     process.cwd()
   );
   await service.init();

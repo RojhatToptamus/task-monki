@@ -262,6 +262,14 @@ button:disabled {
 
 .detail__actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.transition-row {
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -292,6 +300,34 @@ button:disabled {
 
 .prompt-box {
   padding: 15px;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 8px 14px;
+  margin-top: 14px;
+  color: #aeb8c6;
+  font-size: 13px;
+}
+
+.metadata-grid span {
+  color: #7f8a9a;
+  font-weight: 700;
+}
+
+.metadata-grid strong {
+  min-width: 0;
+  color: #eef3fa;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.metadata-grid--compact {
+  grid-template-columns: 130px minmax(0, 1fr);
+  margin-top: 0;
 }
 
 .detail__grid {
@@ -333,6 +369,11 @@ button:disabled {
   display: grid;
   gap: 12px;
   margin-top: 16px;
+}
+
+.evidence-stack {
+  display: grid;
+  gap: 16px;
 }
 
 .artifact-box pre {
