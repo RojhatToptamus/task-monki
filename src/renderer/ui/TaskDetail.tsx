@@ -17,8 +17,8 @@ import type {
 import {
   canCancelRun,
   canCreateDeliveryCommit,
+  canCreatePullRequest,
   canPrepareWorktree,
-  canPublishBranch,
   canRunTests,
   canStartRun,
   formatShortId
@@ -48,7 +48,6 @@ interface TaskDetailProps {
   onRunTests(taskId: string): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
   onPreflightGitHub(taskId: string): Promise<void>;
-  onPublishBranch(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
@@ -75,7 +74,6 @@ export function TaskDetail({
   onRunTests,
   onCreateDeliveryCommit,
   onPreflightGitHub,
-  onPublishBranch,
   onCreatePullRequest,
   onRefreshGitHub,
   onTransition
@@ -157,15 +155,7 @@ export function TaskDetail({
           <button
             className="secondary-button"
             type="button"
-            disabled={!canPublishBranch(task)}
-            onClick={() => void onPublishBranch(task.id)}
-          >
-            Publish branch
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={branchPublication?.status !== 'PUSHED'}
+            disabled={!canCreatePullRequest(task)}
             onClick={() => void onCreatePullRequest(task.id)}
           >
             Create draft PR
@@ -201,10 +191,10 @@ export function TaskDetail({
       <section className="panel">
         <div className="panel__header">
           <h3>Guarded workflow</h3>
-          <span>Evidence-backed transitions</span>
+          <span>Review is the decision point</span>
         </div>
         <div className="transition-row">
-          {(['REVIEW', 'TESTING', 'PR_READY'] as WorkflowPhase[]).map((phase) => (
+          {(['REVIEW'] as WorkflowPhase[]).map((phase) => (
             <button
               key={phase}
               className="secondary-button"
@@ -216,6 +206,10 @@ export function TaskDetail({
             </button>
           ))}
         </div>
+        <p className="transition-help">
+          In REVIEW, use <strong>Create draft PR</strong> to commit/publish the task branch and open a
+          GitHub draft PR. Tests remain visible evidence, not a required card move.
+        </p>
       </section>
 
       <section className="panel">

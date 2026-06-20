@@ -3,8 +3,6 @@ export type WorkflowPhase =
   | 'READY'
   | 'IN_PROGRESS'
   | 'REVIEW'
-  | 'TESTING'
-  | 'PR_READY'
   | 'IN_REVIEW'
   | 'DONE'
   | 'BLOCKED'

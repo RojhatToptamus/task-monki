@@ -44,7 +44,7 @@ function toneForValue(value: string): StatusBadgeProps['tone'] {
   ) {
     return 'warning';
   }
-  if (['RUNNING', 'STARTING', 'QUEUED', 'CREATING', 'TESTING', 'IN_PROGRESS', 'PUSHING', 'COMPUTING', 'QUEUED'].includes(value)) {
+  if (['RUNNING', 'STARTING', 'QUEUED', 'CREATING', 'IN_PROGRESS', 'PUSHING', 'COMPUTING', 'QUEUED'].includes(value)) {
     return 'info';
   }
   return 'neutral';

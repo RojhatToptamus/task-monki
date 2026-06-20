@@ -480,10 +480,8 @@ export class FileTaskStore {
         existing.id === input.task.id
           ? {
               ...existing,
-              workflowPhase: 'TESTING',
               currentTestRunId: testRun.id,
-              updatedAt: now,
-              phaseVersion: existing.phaseVersion + 1
+              updatedAt: now
             }
           : existing
       ),

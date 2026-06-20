@@ -8,12 +8,12 @@ Implementation status log: `docs/phases/PHASE_3_STATUS.md`
 
 ## 1. Phase objective
 
-Phase 3 should turn a locally verified `PR_READY` task into a GitHub-backed delivery flow while preserving the evidence-first status model.
+Phase 3 should turn a reviewed task into a GitHub-backed delivery flow while preserving the evidence-first status model.
 
 Target flow:
 
 ```text
-PR_READY local task
+REVIEW local task
   → verify fresh local Git/test evidence
   → detect GitHub remote/auth
   → push task branch
@@ -218,7 +218,7 @@ Connect GitHub evidence to workflow movement without corrupting technical truth.
 
 Deliverables:
 
-- `PR_READY → IN_REVIEW` guard requires matching open PR for intended branch/head SHA.
+- `REVIEW → IN_REVIEW` delivery requires creating or observing a matching open PR for intended branch/head SHA.
 - `IN_REVIEW → DONE` guard requires configured completion policy.
 - Default PR-based completion policy: `MERGED`.
 - Closed-unmerged PR creates a blocked/warning finding, not `DONE`.
@@ -246,7 +246,7 @@ Phase 3 is complete only when all are true:
 - The app can create or locate a draft PR idempotently.
 - The app persists GitHub PR, check/status, review, and merge evidence separately from local Git/tests/Codex.
 - The UI shows GitHub evidence as separate dimensions.
-- `PR_READY → IN_REVIEW` is blocked until a matching GitHub PR exists.
+- `IN_REVIEW` is blocked until a matching GitHub PR exists.
 - `IN_REVIEW → DONE` is blocked until the configured completion policy is satisfied.
 - GitHub stale/offline/unknown states do not become success.
 - Focused tests cover parsing, idempotency, rollups, and transition guards.

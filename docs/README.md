@@ -22,6 +22,8 @@ If you are picking up work in this repository, start here before changing code.
    Completed Phase 3 implementation plan.
 8. `docs/phases/PHASE_3_STATUS.md`  
    Completed Phase 3 status log, verification evidence, and limitations.
+9. `docs/phases/PHASE_4_STATUS.md`  
+   Phase 4 review-to-PR workflow simplification status, verification evidence, and limitations.
 
 ## Documentation policy
 
@@ -52,6 +54,7 @@ The app must continue to preserve these separations:
 
 - workflow phase is the human-facing board state;
 - Codex/process/Git/tests/GitHub are technical evidence dimensions;
+- local tests are an explicit evidence action/badge, not a workflow phase;
 - readiness, health, warnings, and recommended actions are derived projections;
 - Codex completion is not delivery truth;
 - GitHub merge observation is the default delivery truth for PR-based tasks.

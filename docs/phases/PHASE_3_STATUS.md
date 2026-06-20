@@ -21,7 +21,7 @@ The app can now:
 - generate a PR body artifact from task, test, diff, and Codex evidence;
 - create or locate a draft pull request through `gh`;
 - fetch and persist PR, check/status, review, and merge evidence separately;
-- guard `PR_READY → IN_REVIEW` on a matching open GitHub PR;
+- move to `IN_REVIEW` when a matching open GitHub PR is created or observed;
 - guard `IN_REVIEW → DONE` on merge evidence under the default `MERGED` policy.
 
 ## 2. Implemented in this update
@@ -164,7 +164,7 @@ The UI now exposes:
 - Refine Prompt;
 - Create delivery commit;
 - Check GitHub;
-- Publish branch;
+- branch publication as part of GitHub delivery;
 - Create draft PR;
 - Refresh GitHub;
 - GitHub, Publish, PR, Checks, Reviews, and Merge badges;
@@ -223,15 +223,13 @@ Recommended manual flow:
 4. Prepare worktree.
 5. Start implementation.
 6. Refresh evidence.
-7. Run tests.
+7. Run tests from the explicit test evidence action.
 8. If Git is `DIRTY`, click `Create delivery commit`.
 9. Run tests again because the commit creates a new Git generation.
-10. Move to `PR_READY`.
-11. Click `Check GitHub`.
-12. Click `Publish branch`.
-13. Click `Create draft PR`.
-14. Confirm the task moves to `IN_REVIEW` after a matching open PR is observed.
-15. Use `Refresh GitHub` to update PR/check/review/merge facts.
+10. Click `Check GitHub` if you want an explicit preflight.
+11. Click `Create draft PR`.
+12. Confirm the task moves to `IN_REVIEW` after a matching open PR is created or observed.
+13. Use `Refresh GitHub` to update PR/check/review/merge facts.
 
 ### Live GitHub safety
 

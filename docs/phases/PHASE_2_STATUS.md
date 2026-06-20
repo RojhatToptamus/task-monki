@@ -20,7 +20,8 @@ The app can now:
 - run a configured local test command in the task worktree;
 - bind test results to the exact Git generation they verified;
 - mark prior test results `STALE` when a later Git snapshot changes;
-- guard workflow transitions into `REVIEW`, `TESTING`, and `PR_READY`;
+- guard workflow transitions into `REVIEW`;
+- keep local tests as a technical evidence badge/action instead of a workflow phase;
 - show worktree, Git, test, Codex, process, repository, and health badges in the UI.
 
 GitHub delivery remains intentionally deferred to the next phase.
@@ -31,7 +32,7 @@ GitHub delivery remains intentionally deferred to the next phase.
 
 Updated `src/shared/contracts.ts` with Phase 2 dimensions:
 
-- workflow phases through `PR_READY`;
+- workflow phases through `REVIEW`, with tests and PR creation handled as evidence/actions;
 - task iterations;
 - worktree records;
 - Git snapshots;
@@ -197,7 +198,7 @@ Then:
 9. Confirm Git evidence is visible.
 10. Click `Run tests`.
 11. Confirm test status becomes `PASSED`, `FAILED`, or `ERROR`.
-12. Try moving to `PR_READY`; it should be accepted only when current-generation tests passed.
+12. Use review-time actions such as `Run tests` or `Create draft PR`; there is no separate testing or PR-ready card phase.
 
 ### Run the isolated service smoke
 
@@ -207,7 +208,7 @@ Smoke result:
 
 ```json
 {
-  "workflowPhase": "PR_READY",
+  "workflowPhase": "REVIEW",
   "worktreeStatus": "PRESENT",
   "gitStatus": "DIRTY",
   "testStatus": "PASSED",

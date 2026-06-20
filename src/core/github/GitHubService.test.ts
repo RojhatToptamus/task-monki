@@ -108,7 +108,7 @@ function taskFixture(repositoryPath: string): Task {
     title: 'Test task',
     prompt: 'Do work.',
     repositoryPath,
-    workflowPhase: 'PR_READY',
+    workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
     phaseVersion: 1,

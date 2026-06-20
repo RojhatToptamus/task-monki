@@ -180,16 +180,6 @@ export function App() {
     }
   };
 
-  const publishBranch = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.publishBranch({ taskId });
-      await refresh();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to publish branch.');
-    }
-  };
-
   const createPullRequest = async (taskId: string) => {
     setError(undefined);
     try {
@@ -282,7 +272,6 @@ export function App() {
         onRunTests={runTests}
         onCreateDeliveryCommit={createDeliveryCommit}
         onPreflightGitHub={preflightGitHub}
-        onPublishBranch={publishBranch}
         onCreatePullRequest={createPullRequest}
         onRefreshGitHub={refreshGitHub}
         onTransition={transitionTask}

@@ -3,14 +3,14 @@ import type { GitSnapshotRecord } from '../../shared/contracts';
 import { assertPublishReady, transitionBlocker } from './TaskManagerService';
 
 describe('Phase 3 delivery guards', () => {
-  it('blocks publish when local tests are stale for the current git generation', () => {
+  it('allows draft PR publication readiness without local test evidence', () => {
+    expect(() => assertPublishReady(gitSnapshot('head-1', 'fingerprint-1'))).not.toThrow();
+  });
+
+  it('blocks draft PR publication readiness when there are no committed task changes', () => {
     expect(() =>
-      assertPublishReady(gitSnapshot('head-2', 'fingerprint-2'), {
-        status: 'PASSED',
-        testedHeadSha: 'head-1',
-        testedDirtyFingerprint: 'fingerprint-1'
-      })
-    ).toThrow('stale');
+      assertPublishReady(gitSnapshot('head-1', 'fingerprint-1', { commitsAheadOfBase: 0 }))
+    ).toThrow('no committed changes');
   });
 
   it('allows IN_REVIEW only for a matching open pull request', () => {
@@ -39,7 +39,11 @@ describe('Phase 3 delivery guards', () => {
   });
 });
 
-function gitSnapshot(headSha: string, dirtyFingerprint: string): GitSnapshotRecord {
+function gitSnapshot(
+  headSha: string,
+  dirtyFingerprint: string,
+  overrides: Partial<GitSnapshotRecord> = {}
+): GitSnapshotRecord {
   return {
     id: 'git-1',
     taskId: 'task-1',
@@ -62,6 +66,7 @@ function gitSnapshot(headSha: string, dirtyFingerprint: string): GitSnapshotReco
     diffStat: '1 file changed',
     dirtyFingerprint,
     status: 'COMMITTED_UNPUSHED',
-    capturedAt: '2026-06-20T10:00:00.000Z'
+    capturedAt: '2026-06-20T10:00:00.000Z',
+    ...overrides
   };
 }

@@ -212,9 +212,6 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent): Task['workflowPhas
     case 'PROCESS_EXITED':
     case 'PROCESS_SIGNALED':
       return task.workflowPhase === 'IN_PROGRESS' ? 'REVIEW' : task.workflowPhase;
-    case 'TEST_RUN_STARTED':
-    case 'TEST_PROCESS_STARTED':
-      return 'TESTING';
     case 'TRANSITION_COMPLETED':
       return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
     case 'MERGE_SNAPSHOT_CAPTURED':
@@ -303,7 +300,7 @@ export function reduceProjection(
       return {
         ...base,
         requestedAction: 'SUCCEEDED',
-        summary: `Workflow moved to ${getString(event.payload, 'toPhase') ?? 'the requested phase'}.`,
+        summary: transitionCompletedSummary(event.payload),
         findings,
         updatedAt: event.receivedAt
       };
@@ -836,6 +833,11 @@ function getMergeStatus(payload: unknown): StatusProjection['merge'] | undefined
 
 function isOneOf<const T extends string>(value: string | undefined, allowed: readonly T[]): T | undefined {
   return allowed.includes(value as T) ? (value as T) : undefined;
+}
+
+function transitionCompletedSummary(payload: unknown): string {
+  const toPhase = getString(payload, 'toPhase');
+  return `Workflow moved to ${toPhase ?? 'the requested phase'}.`;
 }
 
 function getNumber(payload: unknown, key: string): number | undefined {

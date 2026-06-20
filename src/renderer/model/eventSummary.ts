@@ -74,7 +74,7 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
     case 'PROMPT_REFINED':
       return { label: 'Prompt refined', detail: 'Structured prompt generated from short input.' };
     case 'TRANSITION_COMPLETED':
-      return { label: 'Workflow moved', detail: `Moved to ${stringField(payload, 'toPhase') ?? 'next phase'}.` };
+      return { label: 'Workflow moved', detail: transitionCompletedDetail(payload) };
     case 'TRANSITION_BLOCKED':
       return { label: 'Transition blocked', detail: stringField(payload, 'reason') ?? 'Missing evidence.' };
     default:
@@ -104,6 +104,11 @@ function humanizeEventType(type: string): string {
     .split('_')
     .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
     .join(' ');
+}
+
+function transitionCompletedDetail(payload: Record<string, unknown>): string {
+  const toPhase = stringField(payload, 'toPhase');
+  return `Moved to ${toPhase ?? 'next phase'}.`;
 }
 
 function summarizePayload(payload: Record<string, unknown>): string {

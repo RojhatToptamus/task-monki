@@ -249,11 +249,9 @@ export class TaskManagerService {
   async publishBranch(input: PublishBranchRequest) {
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
-    const latestGit = await this.refreshEvidence({ taskId: task.id });
-    const snapshot = await this.store.snapshot();
-    const latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
+    const latestGit = await this.ensureCommittedPublishableGit(task);
 
-    assertPublishReady(latestGit, latestTest);
+    assertPublishReady(latestGit);
 
     const githubReady = await this.preflightGitHub({ taskId: task.id });
     if (githubReady.status !== 'READY') {
@@ -278,19 +276,22 @@ export class TaskManagerService {
   async createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
-    const snapshot = await this.store.snapshot();
-    const latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
-    const latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
-    const latestPublication = latestForIteration(
+    let snapshot = await this.store.snapshot();
+    let latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
+    let latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
+    let latestPublication = latestForIteration(
       snapshot.branchPublications,
       task.currentIterationId,
       'updatedAt'
     );
 
     if (latestPublication?.status !== 'PUSHED') {
-      throw new Error('Publish the task branch before creating a pull request.');
+      latestPublication = await this.publishBranch({ taskId: task.id });
+      snapshot = await this.store.snapshot();
+      latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
+      latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
     }
-    assertPublishReady(latestGit, latestTest);
+    assertPublishReady(latestGit);
 
     const prBodyContent = await this.github.writePullRequestBody({
       filePath: path.join(os.tmpdir(), `task-manager-pr-${task.id}.md`),
@@ -366,8 +367,10 @@ export class TaskManagerService {
 
     const blockedReason = transitionBlocker(task, input.toPhase, {
       hasWorktree: Boolean(task.currentWorktreeId),
-      gitStatus: latestGit?.status,
-      testStatus: latestTest?.status,
+      hasGitSnapshot: Boolean(latestGit),
+      hasTestRun: Boolean(latestTest),
+      gitStatus: latestGit?.status ?? task.projection.git,
+      testStatus: latestTest?.status ?? task.projection.tests,
       gitHeadSha: latestGit?.headSha,
       testHeadSha: latestTest?.testedHeadSha,
       testDirtyFingerprint: latestTest?.testedDirtyFingerprint,
@@ -444,6 +447,14 @@ export class TaskManagerService {
       at: new Date().toISOString()
     });
   }
+
+  private async ensureCommittedPublishableGit(task: Task): Promise<GitSnapshotRecord> {
+    const latestGit = await this.refreshEvidence({ taskId: task.id });
+    if (latestGit.status === 'DIRTY') {
+      return this.createDeliveryCommit({ taskId: task.id });
+    }
+    return latestGit;
+  }
 }
 
 export function transitionBlocker(
@@ -451,6 +462,8 @@ export function transitionBlocker(
   toPhase: Task['workflowPhase'],
   evidence: {
     hasWorktree: boolean;
+    hasGitSnapshot?: boolean;
+    hasTestRun?: boolean;
     gitStatus?: string;
     testStatus?: string;
     gitHeadSha?: string;
@@ -471,30 +484,6 @@ export function transitionBlocker(
     }
     if (task.projection.codexRun !== 'COMPLETED') {
       return 'Codex must complete before moving to review.';
-    }
-    return undefined;
-  }
-  if (toPhase === 'TESTING') {
-    if (!evidence.hasWorktree) {
-      return 'A task worktree is required before testing.';
-    }
-    if (evidence.gitStatus === 'CONFLICTED' || evidence.gitStatus === 'UNAVAILABLE') {
-      return `Git state ${evidence.gitStatus} blocks testing.`;
-    }
-    return undefined;
-  }
-  if (toPhase === 'PR_READY') {
-    if (evidence.testStatus !== 'PASSED') {
-      return 'Current-generation local tests must pass before PR_READY.';
-    }
-    if (
-      evidence.gitHeadSha !== evidence.testHeadSha ||
-      evidence.gitDirtyFingerprint !== evidence.testDirtyFingerprint
-    ) {
-      return 'Local tests must match the current Git generation before PR_READY.';
-    }
-    if (evidence.gitStatus === 'CONFLICTED' || evidence.gitStatus === 'UNAVAILABLE') {
-      return `Git state ${evidence.gitStatus} blocks PR readiness.`;
     }
     return undefined;
   }
@@ -527,28 +516,18 @@ function latestForIteration<T extends { iterationId: string }>(
 }
 
 export function assertPublishReady(
-  latestGit: GitSnapshotRecord | undefined,
-  latestTest: { status: string; testedHeadSha?: string; testedDirtyFingerprint?: string } | undefined
+  latestGit: GitSnapshotRecord | undefined
 ): void {
   if (!latestGit) {
-    throw new Error('Refresh Git evidence before publishing.');
+    throw new Error('Refresh Git evidence before opening a draft PR.');
   }
   if (latestGit.status === 'DIRTY') {
-    throw new Error('Create a delivery commit before publishing. Dirty worktree changes cannot be pushed.');
+    throw new Error('Create a delivery commit before opening a draft PR. Dirty worktree changes cannot be pushed.');
   }
   if (latestGit.status === 'CONFLICTED' || latestGit.status === 'UNAVAILABLE') {
-    throw new Error(`Git status ${latestGit.status} blocks publication.`);
+    throw new Error(`Git status ${latestGit.status} blocks draft PR creation.`);
   }
   if (latestGit.commitsAheadOfBase <= 0) {
-    throw new Error('The task branch has no committed changes to publish.');
-  }
-  if (latestTest?.status !== 'PASSED') {
-    throw new Error('Current-generation local tests must pass before publishing.');
-  }
-  if (
-    latestTest.testedHeadSha !== latestGit.headSha ||
-    latestTest.testedDirtyFingerprint !== latestGit.dirtyFingerprint
-  ) {
-    throw new Error('Local test result is stale for the current Git generation.');
+    throw new Error('The task branch has no committed changes to open a draft PR for.');
   }
 }

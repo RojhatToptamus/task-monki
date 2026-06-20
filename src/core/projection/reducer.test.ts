@@ -84,6 +84,49 @@ describe('projection reducer', () => {
     expect(state.tasks[0].projection.codexRun).toBe('UNKNOWN');
     expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
   });
+
+  it('keeps test execution as evidence without moving workflow phase', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-1',
+      createdAt: now,
+      updatedAt: now,
+      projection: createInitialProjection(now)
+    };
+
+    const state = applyEventToState(
+      {
+        tasks: [task],
+        iterations: [],
+        worktrees: [],
+        gitSnapshots: [],
+        testRuns: [],
+        githubRepositories: [],
+        branchPublications: [],
+        pullRequests: [],
+        ciRollups: [],
+        reviewRollups: [],
+        mergeSnapshots: [],
+        runs: [],
+        events: [],
+        artifacts: []
+      },
+      {
+        ...createEvent('TEST_RUN_STARTED', { command: 'npm test' }),
+        iterationId: 'iteration-1'
+      }
+    );
+
+    expect(state.tasks[0].workflowPhase).toBe('REVIEW');
+    expect(state.tasks[0].projection.tests).toBe('QUEUED');
+  });
 });
 
 describe('run reducer', () => {

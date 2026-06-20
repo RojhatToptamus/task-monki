@@ -32,6 +32,7 @@ describe('FileTaskStore Phase 2 evidence', () => {
       executable: 'node',
       argv: ['--version']
     });
+    expect((await store.getTask(task.id))?.workflowPhase).toBe('READY');
     await store.appendEvent(
       createDomainEvent({
         type: 'TEST_RUN_COMPLETED',

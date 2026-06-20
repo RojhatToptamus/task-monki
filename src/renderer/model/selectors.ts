@@ -116,8 +116,8 @@ export function canCreateDeliveryCommit(task: Task): boolean {
   return task.projection.worktree === 'PRESENT' && task.projection.git === 'DIRTY';
 }
 
-export function canPublishBranch(task: Task): boolean {
-  return task.workflowPhase === 'PR_READY' && task.projection.branchPublication !== 'PUSHING';
+export function canCreatePullRequest(task: Task): boolean {
+  return task.projection.worktree === 'PRESENT' && task.projection.branchPublication !== 'PUSHING';
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {

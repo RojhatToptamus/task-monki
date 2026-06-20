@@ -147,7 +147,8 @@ Make card movement reflect evidence-backed workflow, not direct technical mutati
 
 Deliverables:
 
-- Guarded transition rules for `READY → IN_PROGRESS`, `IN_PROGRESS → REVIEW`, `REVIEW → TESTING`, and `TESTING → PR_READY`.
+- Guarded transition rules for `READY → IN_PROGRESS` and `IN_PROGRESS → REVIEW`.
+- Local tests and PR readiness are represented as technical evidence/actions, not as separate workflow phases.
 - Clear blocked/warning findings when evidence is missing or contradictory.
 - No general `FAILED` workflow phase.
 - Retry and refresh actions that re-run evidence gathering without erasing history.

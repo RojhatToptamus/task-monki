@@ -19,6 +19,18 @@ describe('summarizeEvent', () => {
       })).detail
     ).toContain('openai/task-manager');
   });
+
+  it('summarizes draft PR evidence as the delivery event', () => {
+    expect(
+      summarizeEvent(createEvent('PR_SNAPSHOT_CAPTURED', {
+        number: 12,
+        status: 'OPEN_DRAFT'
+      }))
+    ).toEqual({
+      label: 'Pull request synced',
+      detail: 'PR #12 OPEN_DRAFT.'
+    });
+  });
 });
 
 function createEvent(type: DomainEvent['type'], payload: unknown): DomainEvent {
