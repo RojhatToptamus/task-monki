@@ -3,5 +3,11 @@ dist-electron/
 dist-renderer/
 .task-manager-dev-store/
 .playwright-mcp/
+.local/
+/docs/
+/ui-spec.md
+/Task Manager (standalone).html
+/*_REPORT.md
+/PHASE_*_STATUS.md
 *.log
 .DS_Store

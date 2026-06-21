@@ -1,8 +1,11 @@
 {
-  "name": "task-manager",
+  "name": "task-monki",
   "version": "0.1.0",
   "private": true,
-  "description": "Local Codex task manager with isolated worktree execution evidence.",
+  "description": "Experimental local task board for running Codex in isolated Git worktrees.",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev:renderer": "vite --host 127.0.0.1",

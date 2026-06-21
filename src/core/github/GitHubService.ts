@@ -214,7 +214,7 @@ export class GitHubService {
       '',
       '## Delivery note',
       '',
-      'Created by Task Manager as a draft PR. Merge remains a human/GitHub decision.',
+      'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
       ''
     ].join('\n');
     await fs.writeFile(input.filePath, body, 'utf8');

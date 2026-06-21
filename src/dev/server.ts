@@ -8,7 +8,7 @@ import type { AppUpdateEvent } from '../shared/contracts';
 const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
 const storeDir =
-  process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-manager-phase2-dev-store');
+  process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-monki-dev-store');
 
 const service = new TaskManagerService(new FileTaskStore(storeDir), defaultRepositoryPath);
 const clients = new Set<http.ServerResponse>();
@@ -161,7 +161,7 @@ service.events.on((event) => {
 
 service.init().then(() => {
   http.createServer((request, response) => void route(request, response)).listen(port, '127.0.0.1', () => {
-    console.log(`Task Manager dev API listening on http://127.0.0.1:${port}`);
+    console.log(`Task Monki dev API listening on http://127.0.0.1:${port}`);
     console.log(`Store: ${storeDir}`);
     console.log(`Default repository: ${defaultRepositoryPath}`);
   });

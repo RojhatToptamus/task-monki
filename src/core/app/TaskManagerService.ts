@@ -56,7 +56,7 @@ export class TaskManagerService {
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
-        path.join(os.tmpdir(), 'task-manager-worktrees')
+        path.join(os.tmpdir(), 'task-monki-worktrees')
     );
     this.github = new GitHubService(options.ghPath);
     this.events.on((event) => {
@@ -294,7 +294,7 @@ export class TaskManagerService {
     assertPublishReady(latestGit);
 
     const prBodyContent = await this.github.writePullRequestBody({
-      filePath: path.join(os.tmpdir(), `task-manager-pr-${task.id}.md`),
+      filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
       task,
       gitDiffStat: latestGit?.diffStat,
       testStatus: latestTest?.status,

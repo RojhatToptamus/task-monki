@@ -232,8 +232,13 @@ export function App() {
       <aside className="sidebar">
         <header className="sidebar__header">
           <div className="app-brand">
-            <img className="app-brand__icon" src="/AppIcon.svg" alt="" aria-hidden="true" />
-            <h1>Task Manager</h1>
+            <img
+              className="app-brand__icon"
+              src="/assets/brand/task-monki-logo.svg"
+              alt=""
+              aria-hidden="true"
+            />
+            <h1>Task Monki</h1>
           </div>
         </header>
 
