@@ -2,6 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  AgentExecutionSettings,
+  AgentGoalSnapshotRecord,
+  AgentItemRecord,
+  AgentItemStatus,
+  AgentProtocolMessageReference,
+  AgentPlanRevisionRecord,
+  AgentRunMode,
+  AgentServerInstance,
+  AgentServerStatus,
+  AgentSessionRecord,
+  AgentSettingsObservationRecord,
+  AgentSubagentObservationRecord,
+  AgentSubagentStatus,
+  AgentUsageSnapshotRecord,
   ArtifactKind,
   ArtifactRecord,
   BranchPublicationRecord,
@@ -10,6 +24,8 @@ import type {
   DomainEvent,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
+  InteractionRequestRecord,
+  InteractionRequestStatus,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   ReviewRollupRecord,
@@ -20,17 +36,71 @@ import type {
   TestRunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
-import { createInitialProjection } from '../../shared/contracts';
+import { TASK_STORE_SCHEMA_VERSION, createInitialProjection } from '../../shared/contracts';
+import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
-import type { CodexCommand } from '../codex/commandBuilder';
 import { createDomainEvent } from './domainEvent';
 
-interface CreateRunOptions {
-  cwd?: string;
-  mode?: RunRecord['mode'];
-  iterationId?: string;
-  worktreeId?: string;
+export interface CreateAgentSessionInput {
+  task: Task;
+  iteration: TaskIteration;
+  worktree: WorktreeRecord;
+  provider: string;
+  role?: AgentSessionRecord['role'];
+  requestedSettings?: AgentExecutionSettings;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+}
+
+export interface CreateRunInput {
+  task: Task;
+  session: AgentSessionRecord;
+  mode: AgentRunMode;
+  prompt: string;
+  serverInstanceId?: string;
   generationKey?: string;
+  retryOfRunId?: string;
+  continuedFromRunId?: string;
+  requestedSettings?: AgentExecutionSettings;
+  beforeGitSnapshotId?: string;
+}
+
+export interface CreateObservedSubagentRunInput {
+  session: AgentSessionRecord;
+  providerTurnId: string;
+  serverInstanceId: string;
+  parentRunId?: string;
+  prompt?: string;
+  requestedSettings?: AgentExecutionSettings;
+}
+
+export interface ObserveSubagentInput {
+  parentSessionId: string;
+  parentRunId?: string;
+  providerChildSessionId: string;
+  providerParentSessionId?: string;
+  providerForkedFromSessionId?: string;
+  source: AgentSubagentObservationRecord['source'];
+  status?: AgentSubagentStatus;
+  delegatedPrompt?: string;
+  requestedSettings?: AgentExecutionSettings;
+  providerSessionTreeId?: string;
+  providerNickname?: string;
+  providerRole?: string;
+  agentPath?: string;
+  materialized?: boolean;
+  rawMessage: AgentProtocolMessageReference;
+}
+
+export interface CreateAgentServerInput {
+  provider: string;
+  runtimeKind: AgentServerInstance['runtimeKind'];
+  transport: AgentServerInstance['transport'];
+  executable: string;
+  argv: string[];
+  runtimeVersion?: string;
+  schemaVersion?: string;
+  schemaHash?: string;
 }
 
 interface CreateTestRunInput {
@@ -54,6 +124,7 @@ interface PersistedState extends StoreState {}
 export class FileTaskStore {
   private readonly storePath: string;
   private readonly artifactsDir: string;
+  private readonly protocolJournal: AgentProtocolJournal;
   private state: StoreState = createEmptyState();
   private loaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
@@ -61,6 +132,7 @@ export class FileTaskStore {
   constructor(private readonly baseDir: string) {
     this.storePath = path.join(baseDir, 'store.json');
     this.artifactsDir = path.join(baseDir, 'artifacts');
+    this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
   }
 
   async init(): Promise<void> {
@@ -72,7 +144,7 @@ export class FileTaskStore {
 
     try {
       const raw = await fs.readFile(this.storePath, 'utf8');
-      this.state = normalizeState(JSON.parse(raw) as PersistedState);
+      this.state = requireCurrentState(JSON.parse(raw) as PersistedState);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
@@ -97,6 +169,161 @@ export class FileTaskStore {
   async getRun(runId: string): Promise<RunRecord | undefined> {
     await this.init();
     return clone(this.state.runs.find((run) => run.id === runId));
+  }
+
+  async getRunByProviderTurnId(providerTurnId: string): Promise<RunRecord | undefined> {
+    await this.init();
+    return clone(this.state.runs.find((run) => run.providerTurnId === providerTurnId));
+  }
+
+  async getActiveRunForSession(sessionId: string): Promise<RunRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.runs.find(
+        (run) =>
+          run.sessionId === sessionId &&
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT',
+            'INTERRUPTING'
+          ].includes(run.status)
+      )
+    );
+  }
+
+  async updateRun(
+    runId: string,
+    update: Partial<
+      Pick<
+        RunRecord,
+        | 'providerTurnId'
+        | 'serverInstanceId'
+        | 'status'
+        | 'observedSettings'
+        | 'recoveryState'
+        | 'afterGitSnapshotId'
+        | 'terminalReason'
+        | 'providerTerminalSource'
+        | 'providerTerminalRawMessage'
+        | 'lastEventAt'
+        | 'endedAt'
+        | 'finalArtifactId'
+        | 'finalMessage'
+      >
+    >
+  ): Promise<RunRecord> {
+    await this.init();
+    const existing = this.state.runs.find((run) => run.id === runId);
+    if (!existing) {
+      throw new Error(`Run not found: ${runId}`);
+    }
+    const stored = { ...existing, ...update };
+    this.state = {
+      ...this.state,
+      runs: this.state.runs.map((run) => (run.id === runId ? stored : run))
+    };
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async getAgentServer(serverInstanceId: string): Promise<AgentServerInstance | undefined> {
+    await this.init();
+    return clone(this.state.agentServers.find((server) => server.id === serverInstanceId));
+  }
+
+  async getAgentSession(sessionId: string): Promise<AgentSessionRecord | undefined> {
+    await this.init();
+    return clone(this.state.agentSessions.find((session) => session.id === sessionId));
+  }
+
+  async getAgentSessionByProviderId(
+    providerSessionId: string
+  ): Promise<AgentSessionRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.agentSessions.find(
+        (session) => session.providerSessionId === providerSessionId
+      )
+    );
+  }
+
+  async getInteractionRequestByProviderId(
+    serverInstanceId: string,
+    providerRequestId: string | number
+  ): Promise<InteractionRequestRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.interactionRequests.find(
+        (request) =>
+          request.serverInstanceId === serverInstanceId &&
+          request.providerRequestId === providerRequestId
+      )
+    );
+  }
+
+  async getInteractionRequest(
+    interactionRequestId: string
+  ): Promise<InteractionRequestRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.interactionRequests.find(
+        (request) => request.id === interactionRequestId
+      )
+    );
+  }
+
+  async getAgentItemsForRun(runId: string): Promise<AgentItemRecord[]> {
+    await this.init();
+    return clone(this.state.agentItems.filter((item) => item.runId === runId));
+  }
+
+  async getAgentItemByProviderId(
+    runId: string,
+    providerItemId: string
+  ): Promise<AgentItemRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.agentItems.find(
+        (item) => item.runId === runId && item.providerItemId === providerItemId
+      )
+    );
+  }
+
+  async getRunsRequiringRecovery(): Promise<RunRecord[]> {
+    await this.init();
+    return clone(
+      this.state.runs.filter((run) =>
+        ['RECOVERY_REQUIRED', 'RUNNING', 'STARTING', 'INTERRUPTING'].includes(run.status)
+      )
+    );
+  }
+
+  async getIteration(iterationId: string): Promise<TaskIteration | undefined> {
+    await this.init();
+    return clone(this.state.iterations.find((iteration) => iteration.id === iterationId));
+  }
+
+  async getWorktree(worktreeId: string): Promise<WorktreeRecord | undefined> {
+    await this.init();
+    return clone(this.state.worktrees.find((worktree) => worktree.id === worktreeId));
+  }
+
+  async getPrimaryAgentSession(
+    taskId: string,
+    iterationId: string
+  ): Promise<AgentSessionRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.agentSessions.find(
+        (session) =>
+          session.taskId === taskId &&
+          session.iterationId === iterationId &&
+          session.role === 'PRIMARY'
+      )
+    );
   }
 
   async getCurrentIteration(taskId: string): Promise<TaskIteration | undefined> {
@@ -146,6 +373,7 @@ export class FileTaskStore {
       completionPolicy: 'LOCAL_ACCEPTANCE',
       phaseVersion: 1,
       testCommand: input.testCommand?.trim() || 'npm test',
+      agentSettings: input.agentSettings ?? {},
       createdAt: now,
       updatedAt: now,
       projection: createInitialProjection(now)
@@ -180,85 +408,655 @@ export class FileTaskStore {
     return clone(task);
   }
 
-  async createRun(task: Task, command: CodexCommand, options: CreateRunOptions = {}): Promise<RunRecord> {
+  async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
     await this.init();
 
     const now = new Date().toISOString();
+    const id = randomUUID();
+    const server: AgentServerInstance = {
+      id,
+      provider: input.provider,
+      runtimeKind: input.runtimeKind,
+      transport: input.transport,
+      status: 'STARTING',
+      executable: input.executable,
+      argv: [...input.argv],
+      runtimeVersion: input.runtimeVersion,
+      schemaVersion: input.schemaVersion,
+      schemaHash: input.schemaHash,
+      protocolJournalPath: this.protocolJournal.pathFor(id),
+      startedAt: now
+    };
+
+    this.state = {
+      ...this.state,
+      agentServers: [server, ...this.state.agentServers]
+    };
+    await this.persistQueued();
+    return clone(server);
+  }
+
+  async updateAgentServer(
+    serverInstanceId: string,
+    update: Partial<
+      Pick<
+        AgentServerInstance,
+        | 'status'
+        | 'pid'
+        | 'runtimeVersion'
+        | 'schemaVersion'
+        | 'schemaHash'
+        | 'initializedAt'
+        | 'lastHealthAt'
+        | 'disconnectedAt'
+        | 'exitedAt'
+        | 'exitCode'
+        | 'signal'
+        | 'exitReason'
+      >
+    >
+  ): Promise<AgentServerInstance> {
+    await this.init();
+    const existing = this.state.agentServers.find((server) => server.id === serverInstanceId);
+    if (!existing) {
+      throw new Error(`Agent server instance not found: ${serverInstanceId}`);
+    }
+    validateAgentServerTransition(existing.status, update.status);
+    const stored = { ...existing, ...update };
+    this.state = {
+      ...this.state,
+      agentServers: this.state.agentServers.map((server) =>
+        server.id === serverInstanceId ? stored : server
+      )
+    };
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  appendProtocolMessage(
+    serverInstanceId: string,
+    direction: AgentProtocolMessageReference['direction'],
+    raw: string,
+    metadata?: Record<string, unknown>
+  ): Promise<AgentProtocolMessageReference> {
+    return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
+  }
+
+  async readProtocolMessage(reference: AgentProtocolMessageReference) {
+    await this.init();
+    if (
+      !Number.isInteger(reference.sequence) ||
+      reference.sequence <= 0 ||
+      !Number.isInteger(reference.byteOffset) ||
+      reference.byteOffset < 0 ||
+      !Number.isInteger(reference.byteLength) ||
+      reference.byteLength <= 0 ||
+      reference.byteLength > 10 * 1024 * 1024
+    ) {
+      throw new Error('Protocol journal reference is invalid.');
+    }
+    if (!this.state.agentServers.some((server) => server.id === reference.serverInstanceId)) {
+      throw new Error('Protocol journal server instance is not owned by this store.');
+    }
+    return this.protocolJournal.read(reference);
+  }
+
+  async getLatestAgentGoalSnapshot(
+    sessionId: string
+  ): Promise<AgentGoalSnapshotRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.agentGoalSnapshots
+        .filter((record) => record.sessionId === sessionId)
+        .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0]
+    );
+  }
+
+  async recordAgentGoalSnapshot(
+    record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
+  ): Promise<AgentGoalSnapshotRecord> {
+    await this.init();
+    const stored: AgentGoalSnapshotRecord = {
+      ...record,
+      id: randomUUID(),
+      observedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      agentGoalSnapshots: [stored, ...this.state.agentGoalSnapshots]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type:
+          stored.source === 'PROVIDER_CLEARED'
+            ? 'AGENT_GOAL_CLEARED'
+            : stored.source === 'SYNC_ERROR'
+              ? 'AGENT_GOAL_SYNC_FAILED'
+              : 'AGENT_GOAL_UPDATED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        agentSessionId: stored.sessionId,
+        source: 'provider',
+        payload: {
+          syncState: stored.syncState,
+          providerStatus: stored.providerStatus,
+          source: stored.source
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async recordAgentPlanRevision(
+    record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
+  ): Promise<AgentPlanRevisionRecord> {
+    await this.init();
+    const revision =
+      this.state.agentPlanRevisions.filter((item) => item.runId === record.runId)
+        .length + 1;
+    const stored: AgentPlanRevisionRecord = {
+      ...record,
+      id: randomUUID(),
+      revision,
+      observedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      agentPlanRevisions: [stored, ...this.state.agentPlanRevisions]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_PLAN_REVISED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: stored.runId,
+        agentSessionId: stored.sessionId,
+        source: 'provider',
+        payload: { revision: stored.revision, stepCount: stored.steps.length }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async recordAgentUsageSnapshot(
+    record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
+  ): Promise<AgentUsageSnapshotRecord> {
+    await this.init();
+    const stored: AgentUsageSnapshotRecord = {
+      ...record,
+      id: randomUUID(),
+      observedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      agentUsageSnapshots: [stored, ...this.state.agentUsageSnapshots]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_USAGE_UPDATED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: stored.runId,
+        agentSessionId: stored.sessionId,
+        source: 'provider',
+        payload: {
+          totalTokens: stored.total.totalTokens,
+          modelContextWindow: stored.modelContextWindow
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async recordAgentSettingsObservation(
+    record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
+  ): Promise<AgentSettingsObservationRecord> {
+    await this.init();
+    const stored: AgentSettingsObservationRecord = {
+      ...record,
+      id: randomUUID(),
+      observedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      agentSettingsObservations: [
+        stored,
+        ...this.state.agentSettingsObservations
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_SETTINGS_OBSERVED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: stored.runId,
+        agentSessionId: stored.sessionId,
+        source: 'provider',
+        payload: { source: stored.source, settings: stored.settings }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async createAgentSession(input: CreateAgentSessionInput): Promise<AgentSessionRecord> {
+    await this.init();
+    if (input.iteration.taskId !== input.task.id || input.worktree.taskId !== input.task.id) {
+      throw new Error('Agent session task, iteration, and worktree must have the same owner.');
+    }
+    if (input.worktree.iterationId !== input.iteration.id) {
+      throw new Error('Agent session worktree must belong to the selected iteration.');
+    }
+
+    const role = input.role ?? 'PRIMARY';
+    const existing =
+      role === 'PRIMARY'
+        ? this.state.agentSessions.find(
+            (session) =>
+              session.taskId === input.task.id &&
+              session.iterationId === input.iteration.id &&
+              session.role === 'PRIMARY'
+          )
+        : undefined;
+    if (existing) {
+      return clone(existing);
+    }
+
+    const now = new Date().toISOString();
+    const session: AgentSessionRecord = {
+      id: randomUUID(),
+      taskId: input.task.id,
+      iterationId: input.iteration.id,
+      worktreeId: input.worktree.id,
+      provider: input.provider,
+      role,
+      parentSessionId: input.parentSessionId,
+      forkedFromSessionId: input.forkedFromSessionId,
+      relationshipState:
+        role === 'SUBAGENT'
+          ? input.parentSessionId
+            ? 'RESOLVED'
+            : 'UNRESOLVED'
+          : input.parentSessionId || input.forkedFromSessionId
+            ? 'RESOLVED'
+            : 'ROOT',
+      worktreePath: input.worktree.worktreePath,
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      requestedSettings: input.requestedSettings ?? {},
+      ownership: 'TASK_MONKI',
+      createdAt: now,
+      updatedAt: now
+    };
+
+    this.state = {
+      ...this.state,
+      agentSessions: [session, ...this.state.agentSessions],
+      tasks: this.state.tasks.map((task) =>
+        task.id === input.task.id && role === 'PRIMARY'
+          ? { ...task, currentAgentSessionId: session.id, updatedAt: now }
+          : task
+      )
+    };
+
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_SESSION_CREATED',
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        agentSessionId: session.id,
+        source: 'provider',
+        payload: {
+          provider: session.provider,
+          role: session.role,
+          worktreePath: session.worktreePath
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(session);
+  }
+
+  async updateAgentSession(
+    sessionId: string,
+    update: Partial<
+      Pick<
+        AgentSessionRecord,
+        | 'providerSessionId'
+        | 'providerSessionTreeId'
+        | 'parentSessionId'
+        | 'forkedFromSessionId'
+        | 'providerParentSessionId'
+        | 'providerForkedFromSessionId'
+        | 'parentRunId'
+        | 'relationshipState'
+        | 'relationshipDetail'
+        | 'providerNickname'
+        | 'providerRole'
+        | 'delegatedPrompt'
+        | 'agentPath'
+        | 'subagentStatus'
+        | 'status'
+        | 'materialized'
+        | 'observedSettings'
+        | 'requestedSettings'
+        | 'lastAttachedAt'
+      >
+    >
+  ): Promise<AgentSessionRecord> {
+    await this.init();
+    const existing = this.state.agentSessions.find((session) => session.id === sessionId);
+    if (!existing) {
+      throw new Error(`Agent session not found: ${sessionId}`);
+    }
+    const stored: AgentSessionRecord = {
+      ...existing,
+      ...update,
+      updatedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      agentSessions: this.state.agentSessions.map((session) =>
+        session.id === sessionId ? stored : session
+      )
+    };
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async observeSubagent(
+    input: ObserveSubagentInput
+  ): Promise<{
+    session: AgentSessionRecord;
+    observation: AgentSubagentObservationRecord;
+  }> {
+    await this.init();
+    const parent = this.state.agentSessions.find(
+      (session) => session.id === input.parentSessionId
+    );
+    if (!parent) {
+      throw new Error(`Parent agent session not found: ${input.parentSessionId}`);
+    }
+
+    const existing = this.state.agentSessions.find(
+      (session) => session.providerSessionId === input.providerChildSessionId
+    );
+    if (existing && existing.taskId !== parent.taskId) {
+      throw new Error(
+        `Provider child thread ${input.providerChildSessionId} is already owned by another task.`
+      );
+    }
+
+    const relationshipProblems = [
+      input.providerChildSessionId === parent.providerSessionId
+        ? 'Provider reported a thread as its own child.'
+        : undefined,
+      input.providerParentSessionId &&
+      parent.providerSessionId &&
+      input.providerParentSessionId !== parent.providerSessionId
+        ? `Supplied parent thread ${input.providerParentSessionId} does not match local parent ${parent.providerSessionId}.`
+        : undefined,
+      existing?.parentSessionId && existing.parentSessionId !== parent.id
+        ? `Child was already linked to local parent ${existing.parentSessionId}.`
+        : undefined,
+      existing?.parentRunId &&
+      input.parentRunId &&
+      existing.parentRunId !== input.parentRunId
+        ? `Child was already linked to parent run ${existing.parentRunId}.`
+        : undefined
+    ].filter((problem): problem is string => Boolean(problem));
+    const relationshipState =
+      relationshipProblems.length > 0 ? 'CONTRADICTORY' : 'RESOLVED';
+    const now = new Date().toISOString();
+    const requestedSettings = {
+      ...(existing?.requestedSettings ?? {}),
+      ...(input.requestedSettings ?? {})
+    };
+    const stored: AgentSessionRecord = existing
+      ? {
+          ...existing,
+          role: 'SUBAGENT',
+          providerSessionTreeId:
+            input.providerSessionTreeId ?? existing.providerSessionTreeId,
+          parentSessionId:
+            relationshipState === 'RESOLVED'
+              ? existing.parentSessionId ?? parent.id
+              : existing.parentSessionId,
+          providerParentSessionId:
+            input.providerParentSessionId ?? existing.providerParentSessionId,
+          providerForkedFromSessionId:
+            input.providerForkedFromSessionId ??
+            existing.providerForkedFromSessionId,
+          parentRunId:
+            relationshipState === 'RESOLVED'
+              ? existing.parentRunId ?? input.parentRunId
+              : existing.parentRunId,
+          relationshipState,
+          relationshipDetail:
+            relationshipProblems.join(' ') || existing.relationshipDetail,
+          providerNickname: input.providerNickname ?? existing.providerNickname,
+          providerRole: input.providerRole ?? existing.providerRole,
+          delegatedPrompt:
+            existing.delegatedPrompt ?? input.delegatedPrompt,
+          agentPath: input.agentPath ?? existing.agentPath,
+          subagentStatus: input.status ?? existing.subagentStatus,
+          status:
+            input.status === 'RUNNING'
+              ? 'ACTIVE'
+              : input.status === 'ERRORED'
+                ? 'SYSTEM_ERROR'
+                : existing.status,
+          materialized: input.materialized ?? existing.materialized,
+          requestedSettings,
+          updatedAt: now
+        }
+      : {
+          id: randomUUID(),
+          taskId: parent.taskId,
+          iterationId: parent.iterationId,
+          worktreeId: parent.worktreeId,
+          provider: parent.provider,
+          role: 'SUBAGENT',
+          providerSessionId: input.providerChildSessionId,
+          providerSessionTreeId: input.providerSessionTreeId,
+          parentSessionId: relationshipState === 'RESOLVED' ? parent.id : undefined,
+          providerParentSessionId: input.providerParentSessionId,
+          providerForkedFromSessionId: input.providerForkedFromSessionId,
+          parentRunId:
+            relationshipState === 'RESOLVED' ? input.parentRunId : undefined,
+          relationshipState,
+          relationshipDetail: relationshipProblems.join(' ') || undefined,
+          providerNickname: input.providerNickname,
+          providerRole: input.providerRole,
+          delegatedPrompt: input.delegatedPrompt,
+          agentPath: input.agentPath,
+          subagentStatus: input.status,
+          worktreePath: parent.worktreePath,
+          status:
+            input.status === 'RUNNING'
+              ? 'ACTIVE'
+              : input.status === 'ERRORED'
+                ? 'SYSTEM_ERROR'
+                : 'UNKNOWN',
+          materialized: input.materialized ?? false,
+          requestedSettings,
+          ownership: 'TASK_MONKI',
+          createdAt: now,
+          updatedAt: now
+        };
+
+    const observation: AgentSubagentObservationRecord = {
+      id: randomUUID(),
+      taskId: stored.taskId,
+      iterationId: stored.iterationId,
+      sessionId: stored.id,
+      parentSessionId: parent.id,
+      parentRunId: input.parentRunId,
+      providerChildSessionId: input.providerChildSessionId,
+      providerParentSessionId: input.providerParentSessionId,
+      providerForkedFromSessionId: input.providerForkedFromSessionId,
+      source: input.source,
+      relationshipState,
+      status: input.status,
+      delegatedPrompt: input.delegatedPrompt,
+      requestedSettings: input.requestedSettings,
+      providerNickname: input.providerNickname,
+      providerRole: input.providerRole,
+      agentPath: input.agentPath,
+      detail: relationshipProblems.join(' ') || undefined,
+      rawMessage: input.rawMessage,
+      observedAt: now
+    };
+
+    this.state = {
+      ...this.state,
+      agentSessions: existing
+        ? this.state.agentSessions.map((session) =>
+            session.id === existing.id ? stored : session
+          )
+        : [stored, ...this.state.agentSessions],
+      agentSubagentObservations: [
+        observation,
+        ...this.state.agentSubagentObservations
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type:
+          relationshipState === 'CONTRADICTORY'
+            ? 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED'
+            : existing
+              ? 'AGENT_SUBAGENT_UPDATED'
+              : 'AGENT_SUBAGENT_DISCOVERED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: input.parentRunId,
+        worktreeId: stored.worktreeId,
+        agentSessionId: stored.id,
+        source: 'provider',
+        payload: {
+          parentSessionId: parent.id,
+          providerChildSessionId: input.providerChildSessionId,
+          providerParentSessionId: input.providerParentSessionId,
+          source: input.source,
+          relationshipState,
+          status: input.status,
+          detail: observation.detail
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return { session: clone(stored), observation: clone(observation) };
+  }
+
+  async createRun(input: CreateRunInput): Promise<RunRecord> {
+    await this.init();
+
+    if (input.session.taskId !== input.task.id) {
+      throw new Error('Run session must belong to the task.');
+    }
+
+    const now = new Date().toISOString();
     const runId = randomUUID();
-    const stdoutArtifact = await this.createArtifactRecord(task.id, 'stdout', { runId });
-    const stderrArtifact = await this.createArtifactRecord(task.id, 'stderr', { runId });
-    const jsonlArtifact = await this.createArtifactRecord(task.id, 'jsonl', { runId });
+    const promptArtifact = await this.createArtifactRecord(input.task.id, 'agent-prompt', { runId });
+    const outputArtifact = await this.createArtifactRecord(input.task.id, 'agent-output', { runId });
+    const diagnosticArtifact = await this.createArtifactRecord(input.task.id, 'agent-diagnostics', {
+      runId
+    });
     await Promise.all([
-      fs.writeFile(stdoutArtifact.path, '', 'utf8'),
-      fs.writeFile(stderrArtifact.path, '', 'utf8'),
-      fs.writeFile(jsonlArtifact.path, '', 'utf8')
+      fs.writeFile(promptArtifact.path, input.prompt, { encoding: 'utf8', mode: 0o600 }),
+      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
+      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
     ]);
+    promptArtifact.byteCount = Buffer.byteLength(input.prompt);
 
     const run: RunRecord = {
       id: runId,
-      taskId: task.id,
-      iterationId: options.iterationId,
-      worktreeId: options.worktreeId,
-      mode: options.mode ?? 'READ_ONLY_ANALYSIS',
-      generationKey: options.generationKey,
+      taskId: input.task.id,
+      iterationId: input.session.iterationId,
+      worktreeId: input.session.worktreeId,
+      sessionId: input.session.id,
+      serverInstanceId: input.serverInstanceId,
+      mode: input.mode,
+      origin: 'TASK_MONKI',
+      generationKey: input.generationKey,
+      retryOfRunId: input.retryOfRunId,
+      continuedFromRunId: input.continuedFromRunId,
       status: 'QUEUED',
-      processStatus: 'CREATED',
-      executable: command.executable,
-      argv: command.argv,
-      cwd: options.cwd ?? task.repositoryPath,
+      recoveryState: 'NONE',
+      requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
+      promptArtifactId: promptArtifact.id,
+      outputArtifactId: outputArtifact.id,
+      diagnosticArtifactId: diagnosticArtifact.id,
+      beforeGitSnapshotId: input.beforeGitSnapshotId,
       startedAt: now,
-      stdoutArtifactId: stdoutArtifact.id,
-      stderrArtifactId: stderrArtifact.id,
-      jsonlArtifactId: jsonlArtifact.id,
       eventCount: 0
     };
 
     this.state = {
       ...this.state,
       tasks: this.state.tasks.map((existing) =>
-        existing.id === task.id
+        existing.id === input.task.id
           ? {
               ...existing,
               workflowPhase: 'IN_PROGRESS',
               currentRunId: run.id,
-              currentIterationId: options.iterationId ?? existing.currentIterationId,
-              currentWorktreeId: options.worktreeId ?? existing.currentWorktreeId,
+              currentAgentSessionId: input.session.id,
+              currentIterationId: input.session.iterationId,
+              currentWorktreeId: input.session.worktreeId,
               phaseVersion: existing.phaseVersion + 1,
               updatedAt: now
             }
           : existing
       ),
       runs: [run, ...this.state.runs],
-      artifacts: [stdoutArtifact, stderrArtifact, jsonlArtifact, ...this.state.artifacts]
+      artifacts: [
+        promptArtifact,
+        outputArtifact,
+        diagnosticArtifact,
+        ...this.state.artifacts
+      ]
     };
 
     await this.appendEvent(
       createDomainEvent({
         type: 'TRANSITION_REQUESTED',
-        taskId: task.id,
-        iterationId: options.iterationId,
+        taskId: input.task.id,
+        iterationId: input.session.iterationId,
         runId: run.id,
-        worktreeId: options.worktreeId,
+        worktreeId: input.session.worktreeId,
+        agentSessionId: input.session.id,
+        serverInstanceId: input.serverInstanceId,
         source: 'ui',
-        payload: { fromPhase: task.workflowPhase, toPhase: 'IN_PROGRESS' }
+        payload: { fromPhase: input.task.workflowPhase, toPhase: 'IN_PROGRESS' }
       }),
       false
     );
 
     await this.appendEvent(
       createDomainEvent({
-        type: 'ACTION_ATTEMPT_STARTED',
-        taskId: task.id,
-        iterationId: options.iterationId,
+        type: 'AGENT_RUN_STARTED',
+        taskId: input.task.id,
+        iterationId: input.session.iterationId,
         runId: run.id,
-        worktreeId: options.worktreeId,
-        source: 'process',
+        worktreeId: input.session.worktreeId,
+        agentSessionId: input.session.id,
+        serverInstanceId: input.serverInstanceId,
+        source: 'provider',
         payload: {
-          executable: command.executable,
-          argv: command.argv,
-          cwd: options.cwd ?? task.repositoryPath,
           mode: run.mode,
-          generationKey: run.generationKey
+          generationKey: run.generationKey,
+          requestedSettings: run.requestedSettings
         }
       }),
       false
@@ -266,6 +1064,285 @@ export class FileTaskStore {
 
     await this.persistQueued();
     return clone(run);
+  }
+
+  async createObservedSubagentRun(
+    input: CreateObservedSubagentRunInput
+  ): Promise<RunRecord> {
+    await this.init();
+    const existing = this.state.runs.find(
+      (run) => run.providerTurnId === input.providerTurnId
+    );
+    if (existing) {
+      return clone(existing);
+    }
+    if (input.session.role !== 'SUBAGENT') {
+      throw new Error('Only observed subagent sessions may create observed child runs.');
+    }
+
+    const now = new Date().toISOString();
+    const runId = randomUUID();
+    const prompt =
+      input.prompt ??
+      input.session.delegatedPrompt ??
+      'Provider-observed subagent turn.';
+    const promptArtifact = await this.createArtifactRecord(
+      input.session.taskId,
+      'agent-prompt',
+      { runId }
+    );
+    const outputArtifact = await this.createArtifactRecord(
+      input.session.taskId,
+      'agent-output',
+      { runId }
+    );
+    const diagnosticArtifact = await this.createArtifactRecord(
+      input.session.taskId,
+      'agent-diagnostics',
+      { runId }
+    );
+    await Promise.all([
+      fs.writeFile(promptArtifact.path, prompt, { encoding: 'utf8', mode: 0o600 }),
+      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
+      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
+    ]);
+    promptArtifact.byteCount = Buffer.byteLength(prompt);
+
+    const run: RunRecord = {
+      id: runId,
+      taskId: input.session.taskId,
+      iterationId: input.session.iterationId,
+      worktreeId: input.session.worktreeId,
+      sessionId: input.session.id,
+      serverInstanceId: input.serverInstanceId,
+      providerTurnId: input.providerTurnId,
+      mode: 'SUBAGENT',
+      origin: 'PROVIDER_SUBAGENT',
+      parentRunId: input.parentRunId ?? input.session.parentRunId,
+      status: 'RUNNING',
+      recoveryState: 'NONE',
+      requestedSettings:
+        input.requestedSettings ?? input.session.requestedSettings,
+      promptArtifactId: promptArtifact.id,
+      outputArtifactId: outputArtifact.id,
+      diagnosticArtifactId: diagnosticArtifact.id,
+      startedAt: now,
+      lastEventAt: now,
+      eventCount: 0
+    };
+    this.state = {
+      ...this.state,
+      runs: [run, ...this.state.runs],
+      artifacts: [
+        promptArtifact,
+        outputArtifact,
+        diagnosticArtifact,
+        ...this.state.artifacts
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_STARTED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        serverInstanceId: run.serverInstanceId,
+        source: 'provider',
+        payload: {
+          mode: run.mode,
+          origin: run.origin,
+          parentRunId: run.parentRunId,
+          providerTurnId: run.providerTurnId,
+          observedSubagent: true,
+          requestedSettings: run.requestedSettings
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(run);
+  }
+
+  async upsertAgentItem(
+    item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
+  ): Promise<AgentItemRecord> {
+    await this.init();
+    const run = this.state.runs.find((candidate) => candidate.id === item.runId);
+    if (
+      !run ||
+      run.taskId !== item.taskId ||
+      run.iterationId !== item.iterationId ||
+      run.sessionId !== item.sessionId
+    ) {
+      throw new Error('Agent item ownership does not match its run.');
+    }
+
+    const existing = this.state.agentItems.find(
+      (candidate) =>
+        candidate.runId === item.runId &&
+        candidate.providerItemId === item.providerItemId
+    );
+    if (existing) {
+      validateAgentItemTransition(existing.status, item.status);
+    }
+    const now = new Date().toISOString();
+    const stored: AgentItemRecord = existing
+      ? {
+          ...existing,
+          ...item,
+          id: existing.id,
+          createdAt: existing.createdAt,
+          updatedAt: now
+        }
+      : {
+          ...item,
+          id: item.id ?? randomUUID(),
+          createdAt: now,
+          updatedAt: now
+        };
+
+    this.state = {
+      ...this.state,
+      agentItems: existing
+        ? this.state.agentItems.map((candidate) =>
+            candidate.id === existing.id ? stored : candidate
+          )
+        : [stored, ...this.state.agentItems]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_ITEM_UPDATED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: stored.runId,
+        worktreeId: run.worktreeId,
+        agentSessionId: stored.sessionId,
+        agentItemId: stored.id,
+        source: 'provider',
+        payload: {
+          providerItemId: stored.providerItemId,
+          type: stored.type,
+          status: stored.status
+        }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async createInteractionRequest(
+    input: Omit<InteractionRequestRecord, 'id' | 'status' | 'requestedAt'>
+  ): Promise<InteractionRequestRecord> {
+    await this.init();
+    const run = this.state.runs.find((candidate) => candidate.id === input.runId);
+    if (
+      !run ||
+      run.taskId !== input.taskId ||
+      run.iterationId !== input.iterationId ||
+      run.sessionId !== input.sessionId ||
+      run.serverInstanceId !== input.serverInstanceId
+    ) {
+      throw new Error('Interaction request ownership does not match its run.');
+    }
+    const duplicate = this.state.interactionRequests.find(
+      (request) =>
+        request.serverInstanceId === input.serverInstanceId &&
+        request.providerRequestId === input.providerRequestId
+    );
+    if (duplicate) {
+      return clone(duplicate);
+    }
+
+    const stored: InteractionRequestRecord = {
+      ...input,
+      id: randomUUID(),
+      status: 'PENDING',
+      requestedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      interactionRequests: [stored, ...this.state.interactionRequests]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_INTERACTION_REQUESTED',
+        taskId: stored.taskId,
+        iterationId: stored.iterationId,
+        runId: stored.runId,
+        worktreeId: run.worktreeId,
+        agentSessionId: stored.sessionId,
+        serverInstanceId: stored.serverInstanceId,
+        interactionRequestId: stored.id,
+        source: 'provider',
+        payload: { type: stored.type, providerRequestId: stored.providerRequestId }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(stored);
+  }
+
+  async transitionInteractionRequest(
+    interactionRequestId: string,
+    expectedStatus: InteractionRequestStatus,
+    update: Partial<
+      Pick<
+        InteractionRequestRecord,
+        | 'status'
+        | 'decision'
+        | 'responseRawMessage'
+        | 'resolution'
+        | 'respondedAt'
+        | 'resolvedAt'
+      >
+    >
+  ): Promise<InteractionRequestRecord> {
+    await this.init();
+    const existing = this.state.interactionRequests.find(
+      (request) => request.id === interactionRequestId
+    );
+    if (!existing) {
+      throw new Error(`Interaction request not found: ${interactionRequestId}`);
+    }
+    if (existing.status !== expectedStatus) {
+      throw new Error(
+        `Interaction request ${interactionRequestId} is ${existing.status}; expected ${expectedStatus}.`
+      );
+    }
+    const nextStatus = update.status ?? existing.status;
+    validateInteractionTransition(existing.status, nextStatus);
+    const stored: InteractionRequestRecord = { ...existing, ...update, status: nextStatus };
+    this.state = {
+      ...this.state,
+      interactionRequests: this.state.interactionRequests.map((request) =>
+        request.id === interactionRequestId ? stored : request
+      )
+    };
+
+    if (isInteractionTerminal(nextStatus)) {
+      const run = this.state.runs.find((candidate) => candidate.id === stored.runId);
+      await this.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_INTERACTION_RESOLVED',
+          taskId: stored.taskId,
+          iterationId: stored.iterationId,
+          runId: stored.runId,
+          worktreeId: run?.worktreeId,
+          agentSessionId: stored.sessionId,
+          serverInstanceId: stored.serverInstanceId,
+          interactionRequestId: stored.id,
+          source: 'provider',
+          payload: { type: stored.type, status: stored.status }
+        }),
+        false
+      );
+    }
+
+    await this.persistQueued();
+    return clone(stored);
   }
 
   async createIterationAndWorktree(input: {
@@ -802,13 +1879,12 @@ export class FileTaskStore {
           : candidate
       )
     };
-    await this.persistQueued();
   }
 
   async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
     await this.init();
 
-    const artifact = await this.createArtifactRecord(taskId, 'final-message', { runId });
+    const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
     await fs.writeFile(artifact.path, content, 'utf8');
 
     const hash = createHash('sha256').update(content).digest('hex');
@@ -967,40 +2043,53 @@ export class FileTaskStore {
   private async persist(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true });
     const tmpPath = `${this.storePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
+    await fs.writeFile(tmpPath, `${JSON.stringify(this.state, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    await fs.chmod(tmpPath, 0o600);
     await fs.rename(tmpPath, this.storePath);
   }
 }
 
-function normalizeState(state: PersistedState): StoreState {
-  return {
-    tasks: Array.isArray(state.tasks) ? state.tasks.map(normalizeTask) : [],
-    iterations: Array.isArray(state.iterations) ? state.iterations : [],
-    worktrees: Array.isArray(state.worktrees) ? state.worktrees : [],
-    gitSnapshots: Array.isArray(state.gitSnapshots) ? state.gitSnapshots : [],
-    testRuns: Array.isArray(state.testRuns) ? state.testRuns : [],
-    githubRepositories: Array.isArray(state.githubRepositories) ? state.githubRepositories : [],
-    branchPublications: Array.isArray(state.branchPublications) ? state.branchPublications : [],
-    pullRequests: Array.isArray(state.pullRequests) ? state.pullRequests : [],
-    ciRollups: Array.isArray(state.ciRollups) ? state.ciRollups : [],
-    reviewRollups: Array.isArray(state.reviewRollups) ? state.reviewRollups : [],
-    mergeSnapshots: Array.isArray(state.mergeSnapshots) ? state.mergeSnapshots : [],
-    runs: Array.isArray(state.runs) ? state.runs : [],
-    events: Array.isArray(state.events) ? state.events : [],
-    artifacts: Array.isArray(state.artifacts) ? state.artifacts : []
-  };
-}
-
-function normalizeTask(task: Task): Task {
-  const defaults = createInitialProjection(task.updatedAt ?? new Date().toISOString());
-  return {
-    ...task,
-    projection: {
-      ...defaults,
-      ...task.projection,
-      findings: Array.isArray(task.projection?.findings) ? task.projection.findings : []
+function requireCurrentState(state: PersistedState): StoreState {
+  if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported Task Monki store schema ${String(state.schemaVersion)}. ` +
+        `Delete the local store and restart; migrations are intentionally not supported.`
+    );
+  }
+  const requiredCollections: Array<keyof StoreState> = [
+    'tasks',
+    'iterations',
+    'worktrees',
+    'gitSnapshots',
+    'testRuns',
+    'githubRepositories',
+    'branchPublications',
+    'pullRequests',
+    'ciRollups',
+    'reviewRollups',
+    'mergeSnapshots',
+    'runs',
+    'agentServers',
+    'agentSessions',
+    'agentItems',
+    'agentGoalSnapshots',
+    'agentPlanRevisions',
+    'agentUsageSnapshots',
+    'agentSettingsObservations',
+    'agentSubagentObservations',
+    'interactionRequests',
+    'events',
+    'artifacts'
+  ];
+  for (const key of requiredCollections) {
+    if (!Array.isArray(state[key])) {
+      throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
     }
-  };
+  }
+  return state;
 }
 
 function clone<T>(value: T): T {
@@ -1008,4 +2097,81 @@ function clone<T>(value: T): T {
     return value;
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function validateAgentServerTransition(
+  current: AgentServerStatus,
+  next: AgentServerStatus | undefined
+): void {
+  if (!next || next === current) {
+    return;
+  }
+  const allowed: Record<AgentServerStatus, AgentServerStatus[]> = {
+    STARTING: ['READY', 'RUNNING', 'FAILED', 'EXITED', 'LOST'],
+    READY: ['RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
+    RUNNING: ['READY', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
+    DEGRADED: ['READY', 'RUNNING', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
+    STOPPING: ['EXITED', 'FAILED', 'LOST'],
+    EXITED: [],
+    FAILED: [],
+    LOST: []
+  };
+  if (!allowed[current].includes(next)) {
+    throw new Error(`Invalid agent server transition: ${current} -> ${next}`);
+  }
+}
+
+function validateInteractionTransition(
+  current: InteractionRequestStatus,
+  next: InteractionRequestStatus
+): void {
+  if (current === next) {
+    return;
+  }
+  const allowed: Record<InteractionRequestStatus, InteractionRequestStatus[]> = {
+    PENDING: [
+      'RESPONDING',
+      'DECLINED',
+      'CANCELED',
+      'ABORTED_SERVER_LOST',
+      'STALE'
+    ],
+    RESPONDING: [
+      'RESOLVED',
+      'DECLINED',
+      'CANCELED',
+      'ABORTED_SERVER_LOST',
+      'STALE'
+    ],
+    RESOLVED: [],
+    DECLINED: [],
+    CANCELED: [],
+    ABORTED_SERVER_LOST: [],
+    STALE: []
+  };
+  if (!allowed[current].includes(next)) {
+    throw new Error(`Invalid interaction transition: ${current} -> ${next}`);
+  }
+}
+
+function validateAgentItemTransition(current: AgentItemStatus, next: AgentItemStatus): void {
+  if (current === next) {
+    return;
+  }
+  const allowed: Record<AgentItemStatus, AgentItemStatus[]> = {
+    STARTED: ['IN_PROGRESS', 'COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED', 'UNKNOWN'],
+    IN_PROGRESS: ['COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED', 'UNKNOWN'],
+    COMPLETED: [],
+    FAILED: [],
+    DECLINED: [],
+    INTERRUPTED: [],
+    UNKNOWN: ['STARTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'DECLINED', 'INTERRUPTED']
+  };
+  if (!allowed[current].includes(next)) {
+    throw new Error(`Invalid agent item transition: ${current} -> ${next}`);
+  }
+}
+
+function isInteractionTerminal(status: InteractionRequestStatus): boolean {
+  return !['PENDING', 'RESPONDING'].includes(status);
 }

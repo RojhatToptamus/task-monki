@@ -1,3 +1,25 @@
+import type {
+  AgentExecutionSettings,
+  AgentGoalSnapshotRecord,
+  AgentItemRecord,
+  AgentPlanRevisionRecord,
+  AgentReviewTarget,
+  AgentRetryStrategy,
+  AgentRecoveryState,
+  AgentRunMode,
+  AgentRunStatus,
+  AgentServerInstance,
+  AgentSessionRecord,
+  AgentSettingsObservationRecord,
+  AgentSubagentObservationRecord,
+  AgentUsageSnapshotRecord,
+  InteractionRequestRecord
+} from './agent';
+
+export * from './agent';
+
+export const TASK_STORE_SCHEMA_VERSION = 7 as const;
+
 export type WorkflowPhase =
   | 'BACKLOG'
   | 'READY'
@@ -33,18 +55,6 @@ export type RequestedActionStatus =
   | 'FAILED'
   | 'CANCEL_REQUESTED'
   | 'CANCELED';
-
-export type CodexRunStatus =
-  | 'QUEUED'
-  | 'STARTING'
-  | 'RUNNING'
-  | 'AWAITING_APPROVAL'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'INTERRUPTED'
-  | 'CANCELED'
-  | 'LOST'
-  | 'UNKNOWN';
 
 export type ProcessStatus =
   | 'CREATED'
@@ -96,8 +106,6 @@ export type TestStatus =
   | 'CANCELED'
   | 'STALE'
   | 'UNKNOWN';
-
-export type RunMode = 'READ_ONLY_ANALYSIS' | 'IMPLEMENTATION';
 
 export type GitHubRepositoryStatus =
   | 'NOT_CHECKED'
@@ -166,7 +174,6 @@ export type DomainEventType =
   | 'TRANSITION_REQUESTED'
   | 'TRANSITION_COMPLETED'
   | 'TRANSITION_BLOCKED'
-  | 'ACTION_ATTEMPT_STARTED'
   | 'WORKTREE_CREATE_REQUESTED'
   | 'WORKTREE_CREATED'
   | 'WORKTREE_VERIFIED'
@@ -193,11 +200,29 @@ export type DomainEventType =
   | 'MERGE_SNAPSHOT_CAPTURED'
   | 'GITHUB_SYNC_FAILED'
   | 'PROCESS_STARTED'
-  | 'CODEX_STDOUT_LINE'
-  | 'CODEX_EVENT_PARSED'
-  | 'CODEX_STDERR_CHUNK'
-  | 'CODEX_RUN_COMPLETED'
-  | 'CODEX_RUN_FAILED'
+  | 'AGENT_SESSION_CREATED'
+  | 'AGENT_RUN_STARTED'
+  | 'AGENT_ACTIVITY_RECEIVED'
+  | 'AGENT_GOAL_UPDATED'
+  | 'AGENT_GOAL_CLEARED'
+  | 'AGENT_GOAL_SYNC_FAILED'
+  | 'AGENT_PLAN_REVISED'
+  | 'AGENT_USAGE_UPDATED'
+  | 'AGENT_SETTINGS_OBSERVED'
+  | 'AGENT_SUBAGENT_DISCOVERED'
+  | 'AGENT_SUBAGENT_UPDATED'
+  | 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED'
+  | 'AGENT_PROTOCOL_INCIDENT'
+  | 'AGENT_ITEM_UPDATED'
+  | 'AGENT_INTERACTION_REQUESTED'
+  | 'AGENT_INTERACTION_RESOLVED'
+  | 'AGENT_RUN_COMPLETED'
+  | 'AGENT_RUN_FAILED'
+  | 'AGENT_RUN_INTERRUPTED'
+  | 'AGENT_MUTATION_AMBIGUOUS'
+  | 'AGENT_REVIEW_POLICY_VIOLATION'
+  | 'AGENT_RUNTIME_LOST'
+  | 'AGENT_RUNTIME_RECONCILED'
   | 'PROCESS_EXITED'
   | 'PROCESS_SIGNALED'
   | 'CANCEL_REQUESTED'
@@ -206,10 +231,10 @@ export type DomainEventType =
   | 'REPOSITORY_PREFLIGHT_COMPLETED';
 
 export type ArtifactKind =
-  | 'stdout'
-  | 'stderr'
-  | 'jsonl'
-  | 'final-message'
+  | 'agent-prompt'
+  | 'agent-output'
+  | 'agent-diagnostics'
+  | 'agent-final'
   | 'diff'
   | 'git-snapshot'
   | 'test-stdout'
@@ -227,7 +252,7 @@ export interface Finding {
 
 export interface StatusProjection {
   requestedAction: RequestedActionStatus;
-  codexRun: CodexRunStatus;
+  agentRun: AgentRunStatus | 'IDLE';
   osProcess: ProcessStatus;
   repositoryPreflight: RepositoryPreflightStatus;
   worktree: WorktreeStatus;
@@ -256,9 +281,11 @@ export interface Task {
   completionPolicy: CompletionPolicy;
   phaseVersion: number;
   currentRunId?: string;
+  currentAgentSessionId?: string;
   currentIterationId?: string;
   currentWorktreeId?: string;
   currentTestRunId?: string;
+  agentSettings: AgentExecutionSettings;
   testCommand?: string;
   createdAt: string;
   updatedAt: string;
@@ -330,24 +357,32 @@ export interface GitSnapshotRecord {
 export interface RunRecord {
   id: string;
   taskId: string;
-  iterationId?: string;
-  worktreeId?: string;
-  mode: RunMode;
+  iterationId: string;
+  worktreeId: string;
+  sessionId: string;
+  serverInstanceId?: string;
+  providerTurnId?: string;
+  mode: AgentRunMode;
+  origin: import('./agent').AgentRunOrigin;
+  parentRunId?: string;
   generationKey?: string;
-  status: CodexRunStatus;
-  processStatus: ProcessStatus;
-  executable: string;
-  argv: string[];
-  cwd: string;
-  pid?: number;
+  retryOfRunId?: string;
+  continuedFromRunId?: string;
+  status: AgentRunStatus;
+  recoveryState: AgentRecoveryState;
+  requestedSettings: AgentExecutionSettings;
+  observedSettings?: AgentExecutionSettings;
+  promptArtifactId: string;
+  outputArtifactId: string;
+  diagnosticArtifactId: string;
+  beforeGitSnapshotId?: string;
+  afterGitSnapshotId?: string;
+  terminalReason?: string;
+  providerTerminalSource?: 'TURN_COMPLETED_NOTIFICATION' | 'RECOVERY_RESUME_RESPONSE';
+  providerTerminalRawMessage?: import('./agent').AgentProtocolMessageReference;
   startedAt: string;
   lastEventAt?: string;
   endedAt?: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-  stdoutArtifactId: string;
-  stderrArtifactId: string;
-  jsonlArtifactId: string;
   finalArtifactId?: string;
   eventCount: number;
   lastEventType?: string;
@@ -491,11 +526,15 @@ export interface DomainEvent {
   taskId: string;
   iterationId?: string;
   runId?: string;
+  agentSessionId?: string;
+  serverInstanceId?: string;
+  agentItemId?: string;
+  interactionRequestId?: string;
   testRunId?: string;
   worktreeId?: string;
   source:
     | 'ui'
-    | 'codex'
+    | 'provider'
     | 'process'
     | 'storage'
     | 'repository'
@@ -522,6 +561,7 @@ export interface RepositoryPreflight {
 }
 
 export interface TaskSnapshot {
+  schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
   tasks: Task[];
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
@@ -534,6 +574,15 @@ export interface TaskSnapshot {
   reviewRollups: ReviewRollupRecord[];
   mergeSnapshots: MergeSnapshotRecord[];
   runs: RunRecord[];
+  agentServers: AgentServerInstance[];
+  agentSessions: AgentSessionRecord[];
+  agentItems: AgentItemRecord[];
+  agentGoalSnapshots: AgentGoalSnapshotRecord[];
+  agentPlanRevisions: AgentPlanRevisionRecord[];
+  agentUsageSnapshots: AgentUsageSnapshotRecord[];
+  agentSettingsObservations: AgentSettingsObservationRecord[];
+  agentSubagentObservations: AgentSubagentObservationRecord[];
+  interactionRequests: InteractionRequestRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
 }
@@ -543,15 +592,57 @@ export interface CreateTaskRequest {
   prompt: string;
   repositoryPath: string;
   testCommand?: string;
+  agentSettings?: AgentExecutionSettings;
 }
 
 export interface StartRunRequest {
   taskId: string;
-  mode?: RunMode;
+  mode?: AgentRunMode;
+  settings?: AgentExecutionSettings;
 }
 
 export interface CancelRunRequest {
   runId: string;
+}
+
+export interface SteerRunRequest {
+  taskId: string;
+  runId: string;
+  instruction: string;
+}
+
+export interface ContinueRunRequest {
+  taskId: string;
+  runId: string;
+  instruction?: string;
+  settings?: AgentExecutionSettings;
+}
+
+export interface RetryRunRequest {
+  taskId: string;
+  runId: string;
+  strategy: AgentRetryStrategy;
+  instruction?: string;
+  settings?: AgentExecutionSettings;
+}
+
+export interface StartReviewRequest {
+  taskId: string;
+  runId?: string;
+  target?: AgentReviewTarget;
+  settings?: AgentExecutionSettings;
+}
+
+export interface SyncAgentGoalRequest {
+  taskId: string;
+  sessionId: string;
+}
+
+export interface RespondToInteractionRequest {
+  taskId: string;
+  runId: string;
+  interactionRequestId: string;
+  decision: import('./agent').AgentInteractionDecision;
 }
 
 export interface PrepareWorktreeRequest {
@@ -577,6 +668,15 @@ export interface TransitionTaskRequest {
 
 export interface ReadArtifactRequest {
   artifactId: string;
+}
+
+export interface ReadProtocolMessageRequest {
+  reference: import('./agent').AgentProtocolMessageReference;
+}
+
+export interface ProtocolMessageRecord {
+  raw: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface RefinePromptRequest {
@@ -611,9 +711,11 @@ export interface AppUpdateEvent {
     | 'task.updated'
     | 'run.started'
     | 'run.output'
-    | 'run.eventParsed'
-    | 'run.stderr'
+    | 'run.activity'
+    | 'agent.goal.updated'
+    | 'run.diagnostic'
     | 'run.terminal'
+    | 'interaction.updated'
     | 'worktree.updated'
     | 'git.updated'
     | 'test.started'
@@ -621,6 +723,7 @@ export interface AppUpdateEvent {
     | 'test.terminal'
     | 'github.updated'
     | 'prompt.refined'
+    | 'provider.updated'
     | 'projection.updated'
     | 'finding.updated';
   taskId: string;
@@ -635,12 +738,21 @@ export interface AppUpdateEvent {
 export interface TaskManagerApi {
   getDefaultRepositoryPath(): Promise<string>;
   validateRepository(path: string): Promise<RepositoryPreflight>;
+  getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
   startRun(input: StartRunRequest): Promise<RunRecord>;
+  steerRun(input: SteerRunRequest): Promise<void>;
+  continueRun(input: ContinueRunRequest): Promise<RunRecord>;
+  retryRun(input: RetryRunRequest): Promise<RunRecord>;
+  startReview(input: StartReviewRequest): Promise<RunRecord>;
+  syncAgentGoal(input: SyncAgentGoalRequest): Promise<AgentGoalSnapshotRecord>;
   cancelRun(input: CancelRunRequest): Promise<void>;
+  respondToInteraction(
+    input: RespondToInteractionRequest
+  ): Promise<InteractionRequestRecord>;
   runTests(input: RunTestsRequest): Promise<TestRunRecord>;
   refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord>;
   createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord>;
@@ -650,13 +762,16 @@ export interface TaskManagerApi {
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;
+  readProtocolMessage(
+    input: ReadProtocolMessageRequest
+  ): Promise<ProtocolMessageRecord>;
   onUpdate(listener: (event: AppUpdateEvent) => void): () => void;
 }
 
 export function createInitialProjection(now: string): StatusProjection {
   return {
     requestedAction: 'NONE',
-    codexRun: 'UNKNOWN',
+    agentRun: 'IDLE',
     osProcess: 'UNKNOWN',
     repositoryPreflight: 'UNKNOWN',
     worktree: 'NOT_CREATED',

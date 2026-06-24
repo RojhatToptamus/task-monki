@@ -127,7 +127,7 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
   });
 }
 
-function sanitizeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function sanitizeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const allowedKeys = [
     'PATH',
     'HOME',

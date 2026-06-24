@@ -4,6 +4,7 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import type {
   AppUpdateEvent,
+  ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
@@ -12,14 +13,23 @@ import type {
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
+  RespondToInteractionRequest,
   RefinePromptRequest,
   RunTestsRequest,
   StartRunRequest,
+  StartReviewRequest,
+  SteerRunRequest,
+  RetryRunRequest,
+  SyncAgentGoalRequest,
+  ReadProtocolMessageRequest,
   TransitionTaskRequest
 } from '../shared/contracts';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
+let serviceCreated = false;
+let quitAfterShutdown = false;
+let shutdownPromise: Promise<void> | undefined;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -46,6 +56,7 @@ function createWindow(): void {
 
 function installIpcHandlers(): void {
   ipcMain.handle('repository:defaultPath', () => service.getDefaultRepositoryPath());
+  ipcMain.handle('agent:providerState', () => service.getAgentProviderState());
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {
     return service.validateRepository(repositoryPath);
@@ -78,9 +89,36 @@ function installIpcHandlers(): void {
     return service.startRun(input);
   });
 
+  ipcMain.handle('codex:steerRun', async (_, input: SteerRunRequest) => {
+    return service.steerRun(input);
+  });
+
+  ipcMain.handle('codex:continueRun', async (_, input: ContinueRunRequest) => {
+    return service.continueRun(input);
+  });
+
+  ipcMain.handle('codex:retryRun', async (_, input: RetryRunRequest) => {
+    return service.retryRun(input);
+  });
+
+  ipcMain.handle('codex:startReview', async (_, input: StartReviewRequest) => {
+    return service.startReview(input);
+  });
+
+  ipcMain.handle('agent:syncGoal', async (_, input: SyncAgentGoalRequest) => {
+    return service.syncAgentGoal(input);
+  });
+
   ipcMain.handle('codex:cancelRun', async (_, { runId }: { runId: string }) => {
     await service.cancelRun({ runId });
   });
+
+  ipcMain.handle(
+    'agent:respondToInteraction',
+    async (_, input: RespondToInteractionRequest) => {
+      return service.respondToInteraction(input);
+    }
+  );
 
   ipcMain.handle('test:run', async (_, input: RunTestsRequest) => {
     return service.runTests(input);
@@ -117,6 +155,13 @@ function installIpcHandlers(): void {
   ipcMain.handle('artifact:read', async (_, { artifactId }: { artifactId: string }) => {
     return service.readArtifact({ artifactId });
   });
+
+  ipcMain.handle(
+    'agent:readProtocolMessage',
+    async (_, input: ReadProtocolMessageRequest) => {
+      return service.readProtocolMessage(input);
+    }
+  );
 }
 
 function broadcast(event: AppUpdateEvent): void {
@@ -128,6 +173,7 @@ app.whenReady().then(async () => {
     new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
     process.cwd()
   );
+  serviceCreated = true;
   await service.init();
   service.events.on((event) => {
     broadcast(event);
@@ -140,6 +186,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', (event) => {
+  if (quitAfterShutdown || !serviceCreated) {
+    return;
+  }
+  event.preventDefault();
+  shutdownPromise ??= service
+    .shutdown()
+    .catch((error: unknown) => {
+      console.error('Failed to shut down the Codex App Server cleanly.', error);
+    })
+    .then(() => {
+      quitAfterShutdown = true;
+      app.quit();
+    });
 });
 
 app.on('activate', () => {

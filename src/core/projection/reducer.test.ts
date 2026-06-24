@@ -1,25 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
 import type { DomainEvent, RunRecord, Task } from '../../shared/contracts';
-import { applyEventToState, reduceProjection, reduceRun } from './reducer';
+import { applyEventToState, createEmptyState, reduceProjection, reduceRun } from './reducer';
 
 const now = '2026-06-20T10:00:00.000Z';
 
 describe('projection reducer', () => {
-  it('separates Codex completion from process exit', () => {
+  it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();
-    const event = createEvent('CODEX_RUN_COMPLETED', {
+    const event = createEvent('AGENT_RUN_COMPLETED', {
       terminalStatus: 'completed',
       finalArtifactId: 'artifact-1'
     });
 
     const next = reduceProjection(projection, event, run);
 
-    expect(next.codexRun).toBe('COMPLETED');
+    expect(next.agentRun).toBe('COMPLETED');
     expect(next.artifact).toBe('FINAL_MESSAGE_PRESENT');
     expect(next.osProcess).toBe('UNKNOWN');
-    expect(next.summary).toContain('Review the final artifact');
+    expect(next.summary).toContain('independent Git evidence');
   });
 
   it('records non-zero process exits as errors', () => {
@@ -51,29 +51,15 @@ describe('projection reducer', () => {
       completionPolicy: 'LOCAL_ACCEPTANCE',
       phaseVersion: 2,
       currentIterationId: 'iteration-new',
+      agentSettings: {},
       createdAt: now,
       updatedAt: now,
       projection: createInitialProjection(now)
     };
     const state = applyEventToState(
+      { ...createEmptyState(), tasks: [task] },
       {
-        tasks: [task],
-        iterations: [],
-        worktrees: [],
-        gitSnapshots: [],
-        testRuns: [],
-        githubRepositories: [],
-        branchPublications: [],
-        pullRequests: [],
-        ciRollups: [],
-        reviewRollups: [],
-        mergeSnapshots: [],
-        runs: [],
-        events: [],
-        artifacts: []
-      },
-      {
-        ...createEvent('CODEX_RUN_COMPLETED', {
+        ...createEvent('AGENT_RUN_COMPLETED', {
           terminalStatus: 'completed',
           finalArtifactId: 'artifact-old'
         }),
@@ -81,7 +67,7 @@ describe('projection reducer', () => {
       }
     );
 
-    expect(state.tasks[0].projection.codexRun).toBe('UNKNOWN');
+    expect(state.tasks[0].projection.agentRun).toBe('IDLE');
     expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
   });
 
@@ -96,28 +82,14 @@ describe('projection reducer', () => {
       completionPolicy: 'LOCAL_ACCEPTANCE',
       phaseVersion: 2,
       currentIterationId: 'iteration-1',
+      agentSettings: {},
       createdAt: now,
       updatedAt: now,
       projection: createInitialProjection(now)
     };
 
     const state = applyEventToState(
-      {
-        tasks: [task],
-        iterations: [],
-        worktrees: [],
-        gitSnapshots: [],
-        testRuns: [],
-        githubRepositories: [],
-        branchPublications: [],
-        pullRequests: [],
-        ciRollups: [],
-        reviewRollups: [],
-        mergeSnapshots: [],
-        runs: [],
-        events: [],
-        artifacts: []
-      },
+      { ...createEmptyState(), tasks: [task] },
       {
         ...createEvent('TEST_RUN_STARTED', { command: 'npm test' }),
         iterationId: 'iteration-1'
@@ -127,14 +99,54 @@ describe('projection reducer', () => {
     expect(state.tasks[0].workflowPhase).toBe('REVIEW');
     expect(state.tasks[0].projection.tests).toBe('QUEUED');
   });
+
+  it('keeps provider plans, usage, and goals separate from workflow and verified tests', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'IN_PROGRESS',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-1',
+      currentRunId: 'run-1',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: createInitialProjection(now)
+    };
+    const initial = {
+      ...createEmptyState(),
+      tasks: [task],
+      runs: [createRun()]
+    };
+    const withPlan = applyEventToState(initial, {
+      ...createEvent('AGENT_PLAN_REVISED', { revision: 1, stepCount: 1 }),
+      iterationId: 'iteration-1'
+    });
+    const withUsage = applyEventToState(withPlan, {
+      ...createEvent('AGENT_USAGE_UPDATED', { totalTokens: 100 }),
+      iterationId: 'iteration-1'
+    });
+    const withDivergence = applyEventToState(withUsage, {
+      ...createEvent('AGENT_GOAL_UPDATED', { syncState: 'DIVERGED' }),
+      iterationId: 'iteration-1'
+    });
+
+    expect(withDivergence.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(withDivergence.tasks[0].projection.tests).toBe('NOT_RUN');
+    expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
+  });
 });
 
 describe('run reducer', () => {
-  it('updates run event counts and terminal Codex state', () => {
+  it('updates run event counts and terminal agent state', () => {
     const run = createRun();
     const next = reduceRun(
       run,
-      createEvent('CODEX_EVENT_PARSED', {
+      createEvent('AGENT_ACTIVITY_RECEIVED', {
         eventType: 'turn.completed',
         terminalStatus: 'completed',
         messageText: 'done'
@@ -145,22 +157,44 @@ describe('run reducer', () => {
     expect(next.status).toBe('COMPLETED');
     expect(next.finalMessage).toBe('done');
   });
+
+  it('waits for authoritative progress after an interaction resolves', () => {
+    const waiting = { ...createRun(), status: 'AWAITING_APPROVAL' as const };
+    const resolved = reduceRun(
+      waiting,
+      createEvent('AGENT_INTERACTION_RESOLVED', { status: 'RESOLVED' })
+    );
+    const resumed = reduceRun(
+      resolved,
+      createEvent('AGENT_ACTIVITY_RECEIVED', { eventType: 'item/started' })
+    );
+    const unrelated = reduceRun(
+      resolved,
+      createEvent('AGENT_ACTIVITY_RECEIVED', { eventType: 'thread/name/updated' })
+    );
+
+    expect(resolved.status).toBe('AWAITING_APPROVAL');
+    expect(resumed.status).toBe('RUNNING');
+    expect(unrelated.status).toBe('AWAITING_APPROVAL');
+  });
 });
 
 function createRun(): RunRecord {
   return {
     id: 'run-1',
     taskId: 'task-1',
-    mode: 'READ_ONLY_ANALYSIS',
+    iterationId: 'iteration-1',
+    worktreeId: 'worktree-1',
+    sessionId: 'session-1',
+    mode: 'ANALYSIS',
+    origin: 'TASK_MONKI',
     status: 'RUNNING',
-    processStatus: 'RUNNING',
-    executable: 'codex',
-    argv: [],
-    cwd: '/tmp/repo',
+    recoveryState: 'NONE',
+    requestedSettings: {},
+    promptArtifactId: 'prompt',
+    outputArtifactId: 'output',
+    diagnosticArtifactId: 'diagnostic',
     startedAt: now,
-    stdoutArtifactId: 'stdout',
-    stderrArtifactId: 'stderr',
-    jsonlArtifactId: 'jsonl',
     eventCount: 0
   };
 }

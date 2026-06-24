@@ -12,6 +12,8 @@ const storeDir =
 
 const service = new TaskManagerService(new FileTaskStore(storeDir), defaultRepositoryPath);
 const clients = new Set<http.ServerResponse>();
+let server: http.Server | undefined;
+let shutdownPromise: Promise<void> | undefined;
 
 function sendEvent(response: http.ServerResponse, event: AppUpdateEvent): void {
   response.write(`event: update\n`);
@@ -62,6 +64,11 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/agent/provider') {
+      sendJson(response, 200, await service.getAgentProviderState());
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/tasks') {
       sendJson(response, 200, await service.listTasks());
       return;
@@ -93,9 +100,44 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/runs/steer') {
+      await service.steerRun((await readJson(request)) as never);
+      sendJson(response, 200, {});
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/runs/continue') {
+      sendJson(response, 200, await service.continueRun((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/runs/retry') {
+      sendJson(response, 200, await service.retryRun((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/runs/review') {
+      sendJson(response, 200, await service.startReview((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/agent/goal/sync') {
+      sendJson(response, 200, await service.syncAgentGoal((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/runs/cancel') {
       await service.cancelRun((await readJson(request)) as never);
       sendJson(response, 200, {});
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/interactions/respond') {
+      sendJson(
+        response,
+        200,
+        await service.respondToInteraction((await readJson(request)) as never)
+      );
       return;
     }
 
@@ -145,6 +187,15 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/agent/protocol/read') {
+      sendJson(
+        response,
+        200,
+        await service.readProtocolMessage((await readJson(request)) as never)
+      );
+      return;
+    }
+
     sendJson(response, 404, { error: 'Not found' });
   } catch (error) {
     sendJson(response, 500, {
@@ -159,10 +210,41 @@ service.events.on((event) => {
   }
 });
 
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+  shutdownPromise ??= (async () => {
+    console.log(`Received ${signal}; shutting down.`);
+    for (const client of clients) {
+      client.end();
+    }
+    clients.clear();
+    if (server) {
+      await new Promise<void>((resolve, reject) => {
+        server?.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+    await service.shutdown();
+  })();
+  await shutdownPromise;
+}
+
+function handleSignal(signal: NodeJS.Signals): void {
+  void shutdown(signal).catch((error: unknown) => {
+    console.error('Task Monki dev API failed to shut down cleanly.', error);
+    process.exitCode = 1;
+  });
+}
+
+process.on('SIGINT', () => handleSignal('SIGINT'));
+process.on('SIGTERM', () => handleSignal('SIGTERM'));
+
 service.init().then(() => {
-  http.createServer((request, response) => void route(request, response)).listen(port, '127.0.0.1', () => {
+  server = http.createServer((request, response) => void route(request, response));
+  server.listen(port, '127.0.0.1', () => {
     console.log(`Task Monki dev API listening on http://127.0.0.1:${port}`);
     console.log(`Store: ${storeDir}`);
     console.log(`Default repository: ${defaultRepositoryPath}`);
   });
+}).catch((error: unknown) => {
+  console.error('Task Monki dev API failed to start.', error);
+  process.exitCode = 1;
 });

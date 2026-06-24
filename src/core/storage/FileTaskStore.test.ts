@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildCodexExecCommand } from '../codex/commandBuilder';
 import { FileTaskStore } from './FileTaskStore';
 
 describe('FileTaskStore', () => {
@@ -15,12 +14,26 @@ describe('FileTaskStore', () => {
       prompt: 'Summarize and do not write.',
       repositoryPath: dir
     });
-    const run = await store.createRun(
+    const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
-      buildCodexExecCommand({ repositoryPath: dir, sandboxMode: 'read-only' })
-    );
+      branchName: 'codex/test',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'ANALYSIS',
+      prompt: task.prompt
+    });
 
-    await store.appendArtifact(run.stdoutArtifactId, '{"type":"turn.started"}\n');
+    await store.appendArtifact(run.outputArtifactId, '{"type":"turn.started"}\n');
     const final = await store.writeFinalArtifact(task.id, run.id, '# Final\n');
 
     const reloaded = new FileTaskStore(dir);
@@ -28,6 +41,7 @@ describe('FileTaskStore', () => {
 
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.runs).toHaveLength(1);
+    expect(snapshot.agentSessions).toHaveLength(1);
     expect(snapshot.events.some((event) => event.type === 'TASK_CREATED')).toBe(true);
     expect(snapshot.artifacts.some((artifact) => artifact.id === final.id)).toBe(true);
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');

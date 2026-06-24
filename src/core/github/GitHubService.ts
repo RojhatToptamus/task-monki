@@ -196,7 +196,7 @@ export class GitHubService {
     task: Task;
     gitDiffStat?: string;
     testStatus?: string;
-    codexSummary?: string;
+    agentSummary?: string;
   }): Promise<string> {
     const body = [
       `## Summary`,
@@ -208,9 +208,9 @@ export class GitHubService {
       `- Test status: ${input.testStatus ?? 'unknown'}`,
       `- Diff stat: ${input.gitDiffStat?.trim() || 'No diff stat captured.'}`,
       '',
-      '## Codex summary',
+      '## Agent summary',
       '',
-      input.codexSummary?.trim() || 'No Codex final summary captured.',
+      input.agentSummary?.trim() || 'No agent final summary captured.',
       '',
       '## Delivery note',
       '',

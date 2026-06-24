@@ -9,7 +9,12 @@ export function ActivityTimeline({ events }: ActivityTimelineProps) {
   return (
     <section className="card card--activity">
       <div className="card__header">
-        <h3>Activity</h3>
+        <div>
+          <h3>Task Monki audit trail</h3>
+          <p className="provider-subtitle">
+            Normalized application, provider, Git, test, and GitHub events.
+          </p>
+        </div>
         <span className="count-pill">{events.length} events</span>
       </div>
       <div className="timeline">
@@ -42,14 +47,14 @@ function toneForEvent(type: string): 'success' | 'error' | 'info' | 'neutral' {
   if (
     type.endsWith('_FAILED') ||
     type.endsWith('_BLOCKED') ||
-    type === 'CODEX_RUN_FAILED'
+    type === 'AGENT_RUN_FAILED'
   ) {
     return 'error';
   }
   if (
     type === 'WORKTREE_CREATED' ||
     type === 'GIT_SNAPSHOT_CAPTURED' ||
-    type === 'CODEX_RUN_COMPLETED' ||
+    type === 'AGENT_RUN_COMPLETED' ||
     type === 'TEST_RUN_COMPLETED' ||
     type === 'BRANCH_PUBLISHED' ||
     type === 'TRANSITION_COMPLETED'
@@ -60,7 +65,7 @@ function toneForEvent(type: string): 'success' | 'error' | 'info' | 'neutral' {
     type === 'TASK_ITERATION_CREATED' ||
     type === 'PROCESS_STARTED' ||
     type === 'TEST_RUN_STARTED' ||
-    type === 'CODEX_EVENT_PARSED'
+    type === 'AGENT_ACTIVITY_RECEIVED'
   ) {
     return 'info';
   }

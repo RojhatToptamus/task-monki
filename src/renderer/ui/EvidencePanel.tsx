@@ -14,6 +14,7 @@ import type {
 } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import { StatusChip } from './StatusBadge';
+import { humanizeEnum } from './display';
 
 interface EvidencePanelProps {
   run?: RunRecord;
@@ -45,12 +46,6 @@ export function EvidencePanel({
   const [artifactText, setArtifactText] = useState('');
   const [artifactError, setArtifactError] = useState<string | undefined>();
 
-  const finalArtifact = run?.finalArtifactId
-    ? artifacts.find((artifact) => artifact.id === run.finalArtifactId)
-    : undefined;
-  const stderrArtifact = run
-    ? artifacts.find((artifact) => artifact.id === run.stderrArtifactId)
-    : undefined;
   const diffArtifact = gitSnapshot?.diffArtifactId
     ? artifacts.find((artifact) => artifact.id === gitSnapshot.diffArtifactId)
     : undefined;
@@ -65,7 +60,7 @@ export function EvidencePanel({
       setArtifactError(undefined);
       setArtifactText('');
 
-      const artifactId = finalArtifact?.id ?? diffArtifact?.id ?? testStdoutArtifact?.id ?? stderrArtifact?.id;
+      const artifactId = diffArtifact?.id ?? testStdoutArtifact?.id;
       if (!artifactId) {
         return;
       }
@@ -86,13 +81,18 @@ export function EvidencePanel({
     return () => {
       canceled = true;
     };
-  }, [diffArtifact?.id, finalArtifact?.id, stderrArtifact?.id, testStdoutArtifact?.id]);
+  }, [diffArtifact?.id, testStdoutArtifact?.id]);
 
   return (
     <>
     <section className="card card--evidence">
       <div className="card__header">
-        <h3>Evidence</h3>
+        <div>
+          <h3>Verified locally by Task Monki</h3>
+          <p className="provider-subtitle">
+            Git, tests, and delivery state observed independently of Codex.
+          </p>
+        </div>
         {run ? <span className="card__header-mono">Run {run.id.slice(0, 8)}</span> : <span>No run</span>}
       </div>
 
@@ -108,12 +108,6 @@ export function EvidencePanel({
             {ciRollup ? <StatusChip label="Checks" value={ciRollup.status} /> : null}
             {reviewRollup ? <StatusChip label="Reviews" value={reviewRollup.status} /> : null}
             {mergeSnapshot ? <StatusChip label="Merge" value={mergeSnapshot.status} /> : null}
-            {run ? <StatusChip label="Process" value={run.processStatus} /> : null}
-            {run ? <StatusChip label="Codex" value={run.status} /> : null}
-            {run ? <StatusChip label="Events" value={String(run.eventCount)} /> : null}
-            {run ? (
-              <StatusChip label="Exit" value={run.exitCode === undefined ? '—' : String(run.exitCode)} />
-            ) : null}
           </div>
           {gitSnapshot ? (
             <div className="kv-grid kv-grid--compact">
@@ -150,7 +144,9 @@ export function EvidencePanel({
               <strong>
                 {githubRepository?.owner && githubRepository.repo
                   ? `${githubRepository.owner}/${githubRepository.repo}`
-                  : githubRepository?.status ?? 'unknown'}
+                  : githubRepository?.status
+                    ? humanizeEnum(githubRepository.status)
+                    : 'unknown'}
               </strong>
               <span>Published branch</span>
               <strong>{branchPublication?.remoteRef ?? 'not pushed'}</strong>
@@ -161,31 +157,28 @@ export function EvidencePanel({
               <span>Checks</span>
               <strong>
                 {ciRollup
-                  ? `${ciRollup.status}: ${ciRollup.passingCount} passing, ${ciRollup.failingCount} failing, ${ciRollup.pendingCount} pending`
+                  ? `${humanizeEnum(ciRollup.status)}: ${ciRollup.passingCount} passing, ${ciRollup.failingCount} failing, ${ciRollup.pendingCount} pending`
                   : 'not synced'}
               </strong>
               <span>Reviews / merge</span>
               <strong>
-                {reviewRollup?.status ?? 'not synced'} / {mergeSnapshot?.status ?? 'not synced'}
+                {reviewRollup?.status ? humanizeEnum(reviewRollup.status) : 'not synced'} /{' '}
+                {mergeSnapshot?.status ? humanizeEnum(mergeSnapshot.status) : 'not synced'}
               </strong>
             </div>
           ) : null}
         </div>
       ) : (
-        <p className="muted">Prepare a worktree to capture Git, Codex, diff, and test evidence.</p>
+        <p className="muted">Prepare a worktree to capture Git, agent, diff, and test evidence.</p>
       )}
     </section>
 
-    {run || worktree || gitSnapshot || testRun || pullRequest ? (
+    {diffArtifact || testStdoutArtifact ? (
       <section className="card card--artifact">
         <div className="card__header card__header--invert">
-          <h3>{artifactLabel({ finalArtifact, diffArtifact, testStdoutArtifact })}</h3>
+          <h3>{artifactLabel({ diffArtifact, testStdoutArtifact })}</h3>
           <span className="card__header-mono">
-            {finalArtifact?.byteCount ??
-              diffArtifact?.byteCount ??
-              testStdoutArtifact?.byteCount ??
-              stderrArtifact?.byteCount ??
-              0}{' '}
+            {diffArtifact?.byteCount ?? testStdoutArtifact?.byteCount ?? 0}{' '}
             bytes
           </span>
         </div>
@@ -198,18 +191,14 @@ export function EvidencePanel({
 }
 
 function artifactLabel(input: {
-  finalArtifact?: ArtifactRecord;
   diffArtifact?: ArtifactRecord;
   testStdoutArtifact?: ArtifactRecord;
 }): string {
-  if (input.finalArtifact) {
-    return 'Codex final artifact';
-  }
   if (input.diffArtifact) {
     return 'Git diff artifact';
   }
   if (input.testStdoutArtifact) {
     return 'Test stdout artifact';
   }
-  return 'stderr / diagnostics';
+  return 'Local evidence artifact';
 }

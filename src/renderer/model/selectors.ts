@@ -101,7 +101,17 @@ export function selectLatestMergeSnapshot(
 }
 
 export function canStartRun(task: Task): boolean {
-  return !['RUNNING', 'STARTING', 'QUEUED'].includes(task.projection.codexRun);
+  if (task.currentRunId) {
+    return false;
+  }
+  return ![
+    'RUNNING',
+    'STARTING',
+    'QUEUED',
+    'AWAITING_APPROVAL',
+    'AWAITING_USER_INPUT',
+    'INTERRUPTING'
+  ].includes(task.projection.agentRun);
 }
 
 export function canPrepareWorktree(task: Task): boolean {
@@ -121,7 +131,12 @@ export function canCreatePullRequest(task: Task): boolean {
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {
-  return run?.processStatus === 'RUNNING';
+  return Boolean(
+    run &&
+      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
+        run.status
+      )
+  );
 }
 
 export function formatShortId(id: string): string {

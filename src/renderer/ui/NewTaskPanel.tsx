@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react';
-import type { CreateTaskRequest, RefinePromptResponse } from '../../shared/contracts';
+import type {
+  AgentExecutionSettings,
+  AgentModel,
+  AgentPreflight,
+  CreateTaskRequest,
+  RefinePromptResponse
+} from '../../shared/contracts';
 
 interface NewTaskPanelProps {
   defaultRepositoryPath: string;
+  models: AgentModel[];
+  preflight?: AgentPreflight;
   disabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
   onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
@@ -11,6 +19,8 @@ interface NewTaskPanelProps {
 
 export function NewTaskPanel({
   defaultRepositoryPath,
+  models,
+  preflight,
   disabled,
   onCreate,
   onRefinePrompt,
@@ -20,12 +30,31 @@ export function NewTaskPanel({
   const [prompt, setPrompt] = useState('');
   const [repositoryPath, setRepositoryPath] = useState(defaultRepositoryPath);
   const [testCommand, setTestCommand] = useState('npm test');
+  const [model, setModel] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
+  const [sandbox, setSandbox] =
+    useState<NonNullable<AgentExecutionSettings['sandbox']>>('WORKSPACE_WRITE');
+  const [networkAccess, setNetworkAccess] = useState(false);
+  const [approvalPolicy, setApprovalPolicy] = useState('on-request');
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
 
   useEffect(() => {
     setRepositoryPath((current) => current || defaultRepositoryPath);
   }, [defaultRepositoryPath]);
+
+  useEffect(() => {
+    if (model) {
+      return;
+    }
+    const defaultModel = models.find((candidate) => candidate.isDefault) ?? models[0];
+    if (defaultModel) {
+      setModel(defaultModel.model);
+      setReasoningEffort(defaultModel.defaultReasoningEffort ?? '');
+    }
+  }, [model, models]);
+
+  const selectedModel = models.find((candidate) => candidate.model === model);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -41,7 +70,20 @@ export function NewTaskPanel({
     event.preventDefault();
     setError(undefined);
     try {
-      await onCreate({ title, prompt, repositoryPath, testCommand });
+      await onCreate({
+        title,
+        prompt,
+        repositoryPath,
+        testCommand,
+        agentSettings: {
+          model: model || undefined,
+          modelProvider: 'openai',
+          reasoningEffort: reasoningEffort || undefined,
+          sandbox,
+          networkAccess,
+          approvalPolicy
+        }
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not create task.');
     }
@@ -108,6 +150,42 @@ export function NewTaskPanel({
             />
           </label>
           <label className="field">
+            <span>Codex model</span>
+            <select
+              value={model}
+              onChange={(event) => {
+                const nextModel = models.find(
+                  (candidate) => candidate.model === event.target.value
+                );
+                setModel(event.target.value);
+                setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+              }}
+              disabled={disabled || models.length === 0}
+            >
+              {models
+                .filter((candidate) => !candidate.hidden || candidate.model === model)
+                .map((candidate) => (
+                  <option key={candidate.id} value={candidate.model}>
+                    {candidate.displayName}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Reasoning effort</span>
+            <select
+              value={reasoningEffort}
+              onChange={(event) => setReasoningEffort(event.target.value)}
+              disabled={disabled || !selectedModel}
+            >
+              {(selectedModel?.supportedReasoningEfforts ?? []).map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
             <span>Test command</span>
             <input
               className="field__mono"
@@ -116,6 +194,54 @@ export function NewTaskPanel({
               placeholder="npm test"
               disabled={disabled}
             />
+          </label>
+          <label className="field">
+            <span>Sandbox</span>
+            <select
+              value={sandbox}
+              onChange={(event) =>
+                setSandbox(event.target.value as NonNullable<AgentExecutionSettings['sandbox']>)
+              }
+              disabled={disabled}
+            >
+              <option value="WORKSPACE_WRITE">Workspace write</option>
+              <option value="READ_ONLY">Read only</option>
+              <option value="DANGER_FULL_ACCESS">Full access</option>
+            </select>
+            <small>
+              Implementation runs default to workspace-write. Analysis and review runs still
+              enforce read-only.
+            </small>
+          </label>
+          <label className="field">
+            <span>Approval policy</span>
+            <select
+              value={approvalPolicy}
+              onChange={(event) => setApprovalPolicy(event.target.value)}
+              disabled={disabled}
+            >
+              <option value="on-request">Ask before privileged actions</option>
+              <option value="never">Never ask</option>
+            </select>
+            <small>
+              Keep approvals on unless you are comfortable with the selected sandbox and
+              repository access.
+            </small>
+          </label>
+          <label className="field field--checkbox">
+            <input
+              type="checkbox"
+              checked={networkAccess}
+              onChange={(event) => setNetworkAccess(event.target.checked)}
+              disabled={disabled}
+            />
+            <span>
+              <strong>Allow network access</strong>
+              <small>
+                Off by default. The agent must request approval before network use unless
+                this is enabled.
+              </small>
+            </span>
           </label>
           <div className="field field--prompt">
             <span className="field__header">
@@ -138,6 +264,17 @@ export function NewTaskPanel({
             />
           </div>
           {error ? <p className="form-error">{error}</p> : null}
+          {!preflight?.ready ? (
+            <p className="form-error">
+              {preflight?.problems.join(' ') ||
+                'Codex App Server is unavailable. You can create the task now and start it after Codex is ready.'}
+            </p>
+          ) : null}
+          {preflight?.warnings.map((warning) => (
+            <p className="form-warning" key={warning}>
+              {warning}
+            </p>
+          ))}
         </div>
 
         <footer className="slideover__footer">
@@ -149,7 +286,12 @@ export function NewTaskPanel({
             <button
               className="primary-button"
               type="submit"
-              disabled={disabled || !title.trim() || !prompt.trim() || !repositoryPath.trim()}
+              disabled={
+                disabled ||
+                !title.trim() ||
+                !prompt.trim() ||
+                !repositoryPath.trim()
+              }
             >
               Create task
             </button>

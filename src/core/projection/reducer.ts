@@ -9,12 +9,13 @@ import type {
   TestRunRecord,
   PullRequestSnapshotRecord
 } from '../../shared/contracts';
-import { createInitialProjection } from '../../shared/contracts';
+import { TASK_STORE_SCHEMA_VERSION, createInitialProjection } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
 
 export function createEmptyState(): StoreState {
   return {
+    schemaVersion: TASK_STORE_SCHEMA_VERSION,
     tasks: [],
     iterations: [],
     worktrees: [],
@@ -27,6 +28,15 @@ export function createEmptyState(): StoreState {
     reviewRollups: [],
     mergeSnapshots: [],
     runs: [],
+    agentServers: [],
+    agentSessions: [],
+    agentItems: [],
+    agentGoalSnapshots: [],
+    agentPlanRevisions: [],
+    agentUsageSnapshots: [],
+    agentSettingsObservations: [],
+    agentSubagentObservations: [],
+    interactionRequests: [],
     events: [],
     artifacts: []
   };
@@ -34,6 +44,7 @@ export function createEmptyState(): StoreState {
 
 export function applyEventToState(state: StoreState, event: DomainEvent): StoreState {
   const next: StoreState = {
+    schemaVersion: state.schemaVersion,
     tasks: [...state.tasks],
     iterations: [...state.iterations],
     worktrees: [...state.worktrees],
@@ -46,6 +57,15 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     reviewRollups: [...state.reviewRollups],
     mergeSnapshots: [...state.mergeSnapshots],
     runs: [...state.runs],
+    agentServers: [...state.agentServers],
+    agentSessions: [...state.agentSessions],
+    agentItems: [...state.agentItems],
+    agentGoalSnapshots: [...state.agentGoalSnapshots],
+    agentPlanRevisions: [...state.agentPlanRevisions],
+    agentUsageSnapshots: [...state.agentUsageSnapshots],
+    agentSettingsObservations: [...state.agentSettingsObservations],
+    agentSubagentObservations: [...state.agentSubagentObservations],
+    interactionRequests: [...state.interactionRequests],
     events: [...state.events, event],
     artifacts: [...state.artifacts]
   };
@@ -79,6 +99,13 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     if (!eventTargetsCurrentIteration) {
       return next;
     }
+    if (
+      event.runId &&
+      event.runId !== task.currentRunId &&
+      isAgentRunScopedEvent(event.type)
+    ) {
+      return next;
+    }
     const currentRun = event.runId
       ? next.runs.find((run) => run.id === event.runId)
       : next.runs.find((run) => run.id === task.currentRunId);
@@ -92,6 +119,16 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
   }
 
   return next;
+}
+
+function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {
+  return (
+    eventType.startsWith('AGENT_') ||
+    eventType === 'PROCESS_STARTED' ||
+    eventType === 'PROCESS_EXITED' ||
+    eventType === 'PROCESS_SIGNALED' ||
+    eventType === 'CANCEL_REQUESTED'
+  );
 }
 
 export function reduceTestRun(testRun: TestRunRecord, event: DomainEvent): TestRunRecord {
@@ -131,12 +168,10 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
     case 'PROCESS_STARTED':
       return {
         ...run,
-        processStatus: 'RUNNING',
         status: 'RUNNING',
-        pid: getNumber(event.payload, 'pid'),
         lastEventAt: event.receivedAt
       };
-    case 'CODEX_EVENT_PARSED': {
+    case 'AGENT_ACTIVITY_RECEIVED': {
       const terminalStatus = getString(event.payload, 'terminalStatus');
       const eventType = getString(event.payload, 'eventType');
       const messageText = getString(event.payload, 'messageText');
@@ -152,66 +187,128 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
             : terminalStatus === 'failed'
               ? 'FAILED'
               : terminalStatus === 'interrupted'
-                ? 'CANCELED'
-                : run.status === 'QUEUED' || run.status === 'STARTING'
+                ? 'INTERRUPTED'
+                : [
+                      'QUEUED',
+                      'STARTING'
+                    ].includes(run.status)
                   ? 'RUNNING'
+                  : ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status) &&
+                      (getBoolean(event.payload, 'resumeConfirmed') === true ||
+                        isAuthoritativeAgentProgress(eventType))
+                    ? 'RUNNING'
                   : run.status,
         finalMessage: messageText ?? run.finalMessage
       };
     }
-    case 'CODEX_RUN_COMPLETED':
+    case 'AGENT_INTERACTION_REQUESTED':
+      return {
+        ...run,
+        status:
+          getString(event.payload, 'type') === 'USER_INPUT'
+            ? 'AWAITING_USER_INPUT'
+            : 'AWAITING_APPROVAL',
+        lastEventAt: event.receivedAt
+      };
+    case 'AGENT_INTERACTION_RESOLVED':
+      return {
+        ...run,
+        status: getBoolean(event.payload, 'resumeConfirmed') ? 'RUNNING' : run.status,
+        lastEventAt: event.receivedAt
+      };
+    case 'AGENT_RUN_COMPLETED':
       return {
         ...run,
         status: 'COMPLETED',
         endedAt: event.receivedAt,
-        finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId
+        finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
+        terminalReason: getString(event.payload, 'terminalReason') ?? run.terminalReason
       };
-    case 'CODEX_RUN_FAILED':
+    case 'AGENT_RUN_FAILED':
       return {
         ...run,
         status: 'FAILED',
         endedAt: event.receivedAt,
-        finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId
+        finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
+        terminalReason:
+          getString(event.payload, 'error') ??
+          getString(event.payload, 'terminalReason') ??
+          run.terminalReason
       };
-    case 'PROCESS_EXITED':
+    case 'AGENT_RUN_INTERRUPTED':
       return {
         ...run,
-        processStatus: 'EXITED',
-        exitCode: getNullableNumber(event.payload, 'exitCode'),
-        signal: null,
-        endedAt: event.receivedAt
-      };
-    case 'PROCESS_SIGNALED':
-      return {
-        ...run,
-        processStatus: 'SIGNALED',
-        signal: getString(event.payload, 'signal') as NodeJS.Signals | null,
-        exitCode: null,
+        status: 'INTERRUPTED',
         endedAt: event.receivedAt,
-        status: run.status === 'COMPLETED' ? run.status : 'CANCELED'
+        terminalReason:
+          getString(event.payload, 'terminalReason') ??
+          getString(event.payload, 'signal') ??
+          'interrupted'
+      };
+    case 'AGENT_MUTATION_AMBIGUOUS':
+      return {
+        ...run,
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason:
+          getString(event.payload, 'reason') ??
+          'Provider mutation delivery could not be confirmed.'
+      };
+    case 'AGENT_RUNTIME_LOST':
+      return {
+        ...run,
+        status: 'RECOVERY_REQUIRED',
+        recoveryState: 'RECONCILING',
+        terminalReason: getString(event.payload, 'reason') ?? 'Agent runtime exited.'
+      };
+    case 'AGENT_RUNTIME_RECONCILED':
+      return {
+        ...run,
+        status:
+          (getString(event.payload, 'status') as RunRecord['status'] | undefined) ??
+          run.status,
+        recoveryState:
+          (getString(
+            event.payload,
+            'recoveryState'
+          ) as RunRecord['recoveryState'] | undefined) ?? run.recoveryState,
+        endedAt:
+          getBoolean(event.payload, 'terminal') === true ? event.receivedAt : run.endedAt
       };
     case 'CANCEL_REQUESTED':
       return {
         ...run,
-        processStatus: 'CANCELING',
-        status: run.status === 'COMPLETED' ? run.status : 'CANCELED'
+        status: run.status === 'COMPLETED' ? run.status : 'INTERRUPTING'
       };
     default:
       return run;
   }
 }
 
+function isAuthoritativeAgentProgress(eventType: string | undefined): boolean {
+  return (
+    eventType === 'turn/started' ||
+    eventType === 'turn/plan/updated' ||
+    eventType === 'model/rerouted' ||
+    eventType?.startsWith('item/') === true
+  );
+}
+
 function reduceWorkflowPhase(task: Task, event: DomainEvent): Task['workflowPhase'] {
   switch (event.type) {
     case 'TRANSITION_REQUESTED':
-    case 'ACTION_ATTEMPT_STARTED':
+    case 'AGENT_RUN_STARTED':
     case 'PROCESS_STARTED':
       return 'IN_PROGRESS';
-    case 'CODEX_RUN_COMPLETED':
-    case 'CODEX_RUN_FAILED':
-    case 'PROCESS_EXITED':
-    case 'PROCESS_SIGNALED':
+    case 'AGENT_RUN_COMPLETED':
+    case 'AGENT_RUN_FAILED':
+    case 'AGENT_RUN_INTERRUPTED':
       return task.workflowPhase === 'IN_PROGRESS' ? 'REVIEW' : task.workflowPhase;
+    case 'AGENT_RUNTIME_RECONCILED':
+      return getBoolean(event.payload, 'terminal') === true &&
+        task.workflowPhase === 'IN_PROGRESS'
+        ? 'REVIEW'
+        : task.workflowPhase;
     case 'TRANSITION_COMPLETED':
       return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
     case 'MERGE_SNAPSHOT_CAPTURED':
@@ -292,7 +389,7 @@ export function reduceProjection(
       return {
         ...base,
         requestedAction: 'REQUESTED',
-        summary: 'Codex run requested.',
+        summary: 'Agent turn requested.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -313,16 +410,16 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
-    case 'ACTION_ATTEMPT_STARTED':
+    case 'AGENT_RUN_STARTED':
       return {
         ...base,
         requestedAction: 'STARTING',
-        codexRun: 'STARTING',
+        agentRun: 'STARTING',
         osProcess: 'SPAWNING',
         summary:
           getString(event.payload, 'mode') === 'IMPLEMENTATION'
-            ? 'Starting implementation Codex run in the task worktree.'
-            : 'Starting read-only Codex run.',
+            ? 'Starting an implementation turn in the task worktree.'
+            : 'Starting an agent turn.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -330,10 +427,10 @@ export function reduceProjection(
       return {
         ...base,
         requestedAction: 'RUNNING',
-        codexRun: 'RUNNING',
+        agentRun: 'RUNNING',
         osProcess: 'RUNNING',
         health: 'INFO',
-        summary: 'Codex run is active.',
+        summary: 'Agent turn is active.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -513,19 +610,72 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
-    case 'CODEX_EVENT_PARSED':
+    case 'AGENT_INTERACTION_REQUESTED':
       return {
         ...base,
-        codexRun: run?.status ?? base.codexRun,
-        summary: `Latest Codex event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
+        agentRun:
+          getString(event.payload, 'type') === 'USER_INPUT'
+            ? 'AWAITING_USER_INPUT'
+            : 'AWAITING_APPROVAL',
+        health: 'WARNING',
+        summary:
+          getString(event.payload, 'type') === 'USER_INPUT'
+            ? 'Agent turn is waiting for user input.'
+            : 'Agent turn is waiting for an approval decision.',
         findings,
         updatedAt: event.receivedAt
       };
-    case 'CODEX_STDERR_CHUNK':
+    case 'AGENT_INTERACTION_RESOLVED':
+      return {
+        ...base,
+        agentRun: run?.status ?? base.agentRun,
+        summary:
+          run?.status === 'RUNNING'
+            ? 'Agent interaction was resolved and the turn resumed.'
+            : 'Agent interaction was resolved; waiting for authoritative turn progress.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_ACTIVITY_RECEIVED':
+      return {
+        ...base,
+        agentRun: run?.status ?? base.agentRun,
+        health: run?.status === 'RUNNING' ? 'INFO' : base.health,
+        summary: `Latest agent event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_GOAL_UPDATED':
+      return {
+        ...base,
+        health:
+          getString(event.payload, 'syncState') === 'DIVERGED'
+            ? maxHealth(base.health, 'WARNING')
+            : base.health,
+        summary:
+          getString(event.payload, 'syncState') === 'DIVERGED'
+            ? 'The provider goal diverges from Task Monki’s authoritative goal.'
+            : 'Provider goal state updated.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_GOAL_CLEARED':
+    case 'AGENT_GOAL_SYNC_FAILED':
       return {
         ...base,
         health: maxHealth(base.health, 'WARNING'),
-        summary: 'Codex wrote diagnostic output to stderr.',
+        summary:
+          event.type === 'AGENT_GOAL_CLEARED'
+            ? 'The provider goal was cleared; Task Monki’s goal remains authoritative.'
+            : 'Task Monki could not confirm provider goal synchronization.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_PROTOCOL_INCIDENT':
+      return {
+        ...base,
+        health: maxHealth(base.health, 'WARNING'),
+        summary: 'The agent runtime emitted malformed or incomplete protocol output.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -533,30 +683,88 @@ export function reduceProjection(
       return {
         ...base,
         requestedAction: 'CANCEL_REQUESTED',
+        agentRun: base.agentRun === 'COMPLETED' ? base.agentRun : 'INTERRUPTING',
         osProcess: 'CANCELING',
         health: 'WARNING',
-        summary: 'Cancellation requested; waiting for process termination.',
+        summary: 'Interruption requested; waiting for an authoritative terminal event.',
         findings,
         updatedAt: event.receivedAt
       };
-    case 'CODEX_RUN_COMPLETED':
+    case 'AGENT_RUN_COMPLETED':
       return {
         ...base,
         requestedAction: 'SUCCEEDED',
-        codexRun: 'COMPLETED',
+        agentRun: 'COMPLETED',
         artifact: 'FINAL_MESSAGE_PRESENT',
         health: findings.some((finding) => finding.severity === 'WARNING') ? 'WARNING' : 'HEALTHY',
-        summary: 'Codex run completed. Review the final artifact and Git evidence.',
+        summary: 'Agent turn completed. Review the provider result and independent Git evidence.',
         findings,
         updatedAt: event.receivedAt
       };
-    case 'CODEX_RUN_FAILED':
+    case 'AGENT_RUN_FAILED':
       return {
         ...base,
         requestedAction: 'FAILED',
-        codexRun: 'FAILED',
+        agentRun: 'FAILED',
         health: 'ERROR',
-        summary: 'Codex run failed. Review logs for details.',
+        summary: 'Agent turn failed. Review provider activity and diagnostics.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_RUN_INTERRUPTED':
+      return {
+        ...base,
+        requestedAction: 'CANCELED',
+        agentRun: 'INTERRUPTED',
+        health: 'WARNING',
+        summary: 'Agent turn was interrupted; the session remains available for continuation.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_MUTATION_AMBIGUOUS':
+      return {
+        ...base,
+        requestedAction: 'FAILED',
+        agentRun: 'RECOVERY_REQUIRED',
+        health: 'WARNING',
+        summary:
+          'Turn submission may have reached the provider. Task Monki will not resubmit it automatically.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_REVIEW_POLICY_VIOLATION':
+      return {
+        ...base,
+        health: 'ERROR',
+        summary: 'A read-only review changed independent Git state.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_RUNTIME_LOST':
+      return {
+        ...base,
+        requestedAction: 'FAILED',
+        agentRun: 'RECOVERY_REQUIRED',
+        osProcess: 'ORPHANED',
+        health: 'WARNING',
+        summary: 'The agent runtime exited; Task Monki is reconciling the persisted session.',
+        findings,
+        updatedAt: event.receivedAt
+      };
+    case 'AGENT_RUNTIME_RECONCILED':
+      return {
+        ...base,
+        agentRun:
+          (getString(event.payload, 'status') as StatusProjection['agentRun'] | undefined) ??
+          base.agentRun,
+        health:
+          getString(event.payload, 'recoveryState') === 'RECOVERED'
+            ? base.health
+            : 'WARNING',
+        summary:
+          getString(event.payload, 'recoveryState') === 'RECOVERED'
+            ? 'Agent session state was reconciled after runtime restart.'
+            : 'Agent session recovery requires user action.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -573,9 +781,8 @@ export function reduceProjection(
         ...base,
         requestedAction: 'CANCELED',
         osProcess: 'SIGNALED',
-        codexRun: base.codexRun === 'COMPLETED' ? base.codexRun : 'CANCELED',
         health: 'WARNING',
-        summary: 'Run ended after a cancellation signal.',
+        summary: 'The local runtime ended after a signal.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -589,13 +796,41 @@ export function reduceProjection(
 }
 
 function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
-  if (event.type === 'CODEX_STDERR_CHUNK') {
+  if (event.type === 'AGENT_PROTOCOL_INCIDENT') {
     return [
       {
-        id: `${event.id}:stderr`,
-        code: 'CODEX_STDERR_OUTPUT',
+        id: `${event.id}:protocol`,
+        code: 'AGENT_PROTOCOL_INCIDENT',
         severity: 'WARNING',
-        message: 'Codex produced stderr output; inspect diagnostics.',
+        message:
+          getString(event.payload, 'parseError') ??
+          'The agent runtime emitted malformed or incomplete protocol output.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'AGENT_MUTATION_AMBIGUOUS') {
+    return [
+      {
+        id: `${event.id}:ambiguous-mutation`,
+        code: 'AGENT_MUTATION_AMBIGUOUS',
+        severity: 'WARNING',
+        message:
+          getString(event.payload, 'reason') ??
+          'Provider mutation delivery is ambiguous; automatic resubmission is disabled.',
+        createdAt: event.receivedAt
+      }
+    ];
+  }
+
+  if (event.type === 'AGENT_REVIEW_POLICY_VIOLATION') {
+    return [
+      {
+        id: `${event.id}:review-policy`,
+        code: 'AGENT_REVIEW_CHANGED_GIT',
+        severity: 'ERROR',
+        message: 'The provider review changed Git state despite a read-only policy.',
         createdAt: event.receivedAt
       }
     ];
@@ -613,13 +848,17 @@ function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
     ];
   }
 
-  if (event.type === 'PROCESS_EXITED' && run?.status === 'UNKNOWN') {
+  if (
+    event.type === 'PROCESS_EXITED' &&
+    run &&
+    !['COMPLETED', 'FAILED', 'INTERRUPTED'].includes(run.status)
+  ) {
     return [
       {
-        id: `${event.id}:unknown-codex-terminal`,
-        code: 'PROCESS_EXITED_WITHOUT_CODEX_TERMINAL_EVENT',
+        id: `${event.id}:unknown-agent-terminal`,
+        code: 'PROCESS_EXITED_WITHOUT_AGENT_TERMINAL_EVENT',
         severity: 'WARNING',
-        message: 'Process exited before a terminal Codex event was observed.',
+        message: 'The runtime exited before an authoritative agent terminal event was observed.',
         createdAt: event.receivedAt
       }
     ];
@@ -723,6 +962,14 @@ function getString(payload: unknown, key: string): string | undefined {
   }
   const value = (payload as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function getBoolean(payload: unknown, key: string): boolean | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function getGitStatus(payload: unknown): StatusProjection['git'] | undefined {

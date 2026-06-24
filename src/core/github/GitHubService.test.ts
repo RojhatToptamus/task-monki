@@ -114,11 +114,12 @@ function taskFixture(repositoryPath: string): Task {
     phaseVersion: 1,
     currentIterationId: 'iteration-1',
     currentWorktreeId: 'worktree-1',
+    agentSettings: {},
     createdAt: now,
     updatedAt: now,
     projection: {
       requestedAction: 'NONE',
-      codexRun: 'COMPLETED',
+      agentRun: 'COMPLETED',
       osProcess: 'EXITED',
       repositoryPreflight: 'VALID',
       worktree: 'PRESENT',

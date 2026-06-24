@@ -16,7 +16,9 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
+    "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check"
   },
   "dependencies": {
     "react": "^19.2.7",

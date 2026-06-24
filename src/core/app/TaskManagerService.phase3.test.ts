@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
-import { assertPublishReady, transitionBlocker } from './TaskManagerService';
+import {
+  assertPublishReady,
+  mergeRunSettings,
+  transitionBlocker
+} from './TaskManagerService';
 
 describe('Phase 3 delivery guards', () => {
   it('allows draft PR publication readiness without local test evidence', () => {
@@ -36,6 +40,44 @@ describe('Phase 3 delivery guards', () => {
         mergeStatus: 'NOT_MERGED'
       })
     ).toContain('merged');
+  });
+
+  it('preserves explicit implementation run safety settings', () => {
+    expect(
+      mergeRunSettings({
+        readOnly: false,
+        settings: [
+          {
+            sandbox: 'DANGER_FULL_ACCESS',
+            networkAccess: true,
+            approvalPolicy: 'never'
+          }
+        ]
+      })
+    ).toEqual({
+      sandbox: 'DANGER_FULL_ACCESS',
+      networkAccess: true,
+      approvalPolicy: 'never'
+    });
+  });
+
+  it('enforces read-only sandbox for analysis and review runs', () => {
+    expect(
+      mergeRunSettings({
+        readOnly: true,
+        settings: [
+          {
+            sandbox: 'DANGER_FULL_ACCESS',
+            networkAccess: true,
+            approvalPolicy: 'never'
+          }
+        ]
+      })
+    ).toEqual({
+      sandbox: 'READ_ONLY',
+      networkAccess: true,
+      approvalPolicy: 'never'
+    });
   });
 });
 

@@ -1,5 +1,6 @@
 import type {
   CancelRunRequest,
+  ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   GitSnapshotRecord,
@@ -8,6 +9,7 @@ import type {
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  ReadProtocolMessageRequest,
   RefinePromptRequest,
   RefinePromptResponse,
   RepositoryPreflight,
@@ -20,7 +22,13 @@ import type {
   WorktreeRecord,
   RefreshEvidenceRequest,
   CreatePullRequestRequest,
-  RefreshGitHubRequest
+  RefreshGitHubRequest,
+  RespondToInteractionRequest,
+  RetryRunRequest,
+  StartReviewRequest,
+  SteerRunRequest,
+  SyncAgentGoalRequest,
+  AgentExecutionSettings
 } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,14 +39,15 @@ import { PromptRefinementService } from '../prompt/PromptRefinementService';
 import { LocalTestRunner } from '../test/LocalTestRunner';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
-import { CodexExecRunner } from '../runner/CodexExecRunner';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { AgentOrchestrator } from '../agent/AgentOrchestrator';
+import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
-  private readonly runner: CodexExecRunner;
+  private readonly agents: AgentOrchestrator;
   private readonly testRunner: LocalTestRunner;
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
@@ -48,10 +57,17 @@ export class TaskManagerService {
     private readonly store: FileTaskStore,
     private readonly defaultRepositoryPath: string,
     events = new AppEventBus(),
-    options: { worktreeRoot?: string; ghPath?: string } = {}
+    options: { worktreeRoot?: string; ghPath?: string; codexPath?: string } = {}
   ) {
     this.events = events;
-    this.runner = new CodexExecRunner(store, events);
+    this.agents = new AgentOrchestrator(
+      store,
+      events,
+      new CodexAppServerAdapter(store, events, {
+        cwd: defaultRepositoryPath,
+        executable: options.codexPath
+      })
+    );
     this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
@@ -68,6 +84,18 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
+    await this.agents.initialize();
+    const snapshot = await this.store.snapshot();
+    const recoveryTaskIds = new Set(
+      snapshot.runs
+        .filter((run) => run.recoveryState !== 'NONE')
+        .map((run) => run.taskId)
+    );
+    await Promise.all(
+      [...recoveryTaskIds].map((taskId) =>
+        this.refreshEvidence({ taskId }).catch(() => undefined)
+      )
+    );
   }
 
   getDefaultRepositoryPath(): string {
@@ -76,6 +104,10 @@ export class TaskManagerService {
 
   validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
     return validateRepositoryPath(repositoryPath);
+  }
+
+  getAgentProviderState() {
+    return this.agents.getProviderState();
   }
 
   listTasks(): Promise<TaskSnapshot> {
@@ -142,38 +174,175 @@ export class TaskManagerService {
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     const task = await this.requireTask(input.taskId);
-    if (input.mode === 'READ_ONLY_ANALYSIS') {
-      await this.validateAndRecordRepository(task);
-      return this.runner.start(task);
-    }
-
     const worktree = await this.prepareWorktree({ taskId: task.id });
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
       throw new Error('Task iteration was not created.');
     }
     const snapshot = await this.refreshEvidence({ taskId: task.id });
+    const mode = input.mode ?? 'IMPLEMENTATION';
+    const readOnlyMode = mode === 'ANALYSIS' || mode === 'REVIEW';
+    const settings = mergeRunSettings({
+      readOnly: readOnlyMode,
+      settings: [task.agentSettings, input.settings]
+    });
+    const prompt = [
+      task.prompt,
+      '',
+      readOnlyMode
+        ? 'Analyze this task in an isolated Git worktree without modifying files.'
+        : 'You are implementing this task in an isolated Git worktree.',
+      `Repository root: ${worktree.worktreePath}`,
+      settings.sandbox === 'WORKSPACE_WRITE'
+        ? 'Only modify files inside this worktree.'
+        : 'Do not modify repository files.',
+      'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
+      'When finished, summarize the files changed and verification you performed.'
+    ].join('\n');
 
-    return this.runner.start(task, {
-      cwd: worktree.worktreePath,
-      sandboxMode: 'workspace-write',
-      approvalPolicy: 'never',
-      mode: 'IMPLEMENTATION',
-      iterationId: iteration.id,
-      worktreeId: worktree.id,
+    return this.agents.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode,
+      prompt,
+      settings,
       generationKey: snapshot.dirtyFingerprint,
-      promptSuffix: [
-        'You are implementing this task in an isolated Git worktree.',
-        `Repository root: ${worktree.worktreePath}`,
-        'Only modify files inside this worktree.',
-        'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-        'When finished, summarize the files changed and verification you performed.'
-      ].join('\n')
+      beforeGitSnapshotId: snapshot.id
     });
   }
 
   cancelRun(input: CancelRunRequest): Promise<void> {
-    return this.runner.cancel(input.runId);
+    return this.agents.interruptRun(input.runId);
+  }
+
+  async steerRun(input: SteerRunRequest): Promise<void> {
+    const run = await this.requireRunForTask(input.runId, input.taskId);
+    return this.agents.steerRun(run.id, input.instruction);
+  }
+
+  async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
+    const { task, run, iteration, worktree } = await this.requireContinuationContext(
+      input.taskId,
+      input.runId
+    );
+    assertContinuable(run);
+    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+    const settings = followUpSettings(task, run, input.settings, false);
+    const prompt = buildContinuationPrompt({
+      task,
+      run,
+      gitSnapshot,
+      instruction: input.instruction,
+      kind: 'continuation'
+    });
+    return this.agents.startTurn({
+      task,
+      iteration,
+      worktree,
+      sessionId: run.sessionId,
+      mode: 'FOLLOW_UP',
+      prompt,
+      settings,
+      generationKey: gitSnapshot.dirtyFingerprint,
+      beforeGitSnapshotId: gitSnapshot.id,
+      continuedFromRunId: run.id
+    });
+  }
+
+  async retryRun(input: RetryRunRequest): Promise<RunRecord> {
+    const { task, run, iteration, worktree } = await this.requireContinuationContext(
+      input.taskId,
+      input.runId
+    );
+    assertRetryable(run);
+    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+    const settings = followUpSettings(task, run, input.settings, false);
+    const prompt = buildContinuationPrompt({
+      task,
+      run,
+      gitSnapshot,
+      instruction: input.instruction,
+      kind: input.strategy === 'FORK' ? 'forked retry' : 'retry'
+    });
+    if (input.strategy === 'FORK') {
+      return this.agents.forkAndStartTurn({
+        task,
+        iteration,
+        worktree,
+        sourceRun: run,
+        retryStrategy: 'FORK',
+        mode: 'RETRY',
+        prompt,
+        settings,
+        generationKey: gitSnapshot.dirtyFingerprint,
+        beforeGitSnapshotId: gitSnapshot.id,
+        retryOfRunId: run.id
+      });
+    }
+    return this.agents.startTurn({
+      task,
+      iteration,
+      worktree,
+      sessionId: run.sessionId,
+      mode: 'RETRY',
+      prompt,
+      settings,
+      generationKey: gitSnapshot.dirtyFingerprint,
+      beforeGitSnapshotId: gitSnapshot.id,
+      retryOfRunId: run.id
+    });
+  }
+
+  async startReview(input: StartReviewRequest): Promise<RunRecord> {
+    const task = await this.requireTask(input.taskId);
+    const snapshot = await this.store.snapshot();
+    const runId = input.runId ?? task.currentRunId;
+    if (!runId) {
+      throw new Error('Complete an agent turn before starting a detached review.');
+    }
+    const run = await this.requireRunForTask(runId, task.id);
+    if (
+      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
+        run.status
+      )
+    ) {
+      throw new Error('Wait for the active turn to finish before starting a review.');
+    }
+    const iteration = snapshot.iterations.find(
+      (candidate) => candidate.id === run.iterationId
+    );
+    const worktree = snapshot.worktrees.find(
+      (candidate) => candidate.id === run.worktreeId
+    );
+    if (!iteration || !worktree) {
+      throw new Error('The source run no longer has a valid task iteration.');
+    }
+    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+    const settings = followUpSettings(task, run, input.settings, true);
+    return this.agents.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun: run,
+      target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+      settings,
+      generationKey: gitSnapshot.dirtyFingerprint,
+      beforeGitSnapshotId: gitSnapshot.id
+    });
+  }
+
+  async syncAgentGoal(input: SyncAgentGoalRequest) {
+    const task = await this.requireTask(input.taskId);
+    return this.agents.syncGoal(task, input.sessionId);
+  }
+
+  respondToInteraction(input: RespondToInteractionRequest) {
+    return this.agents.respondToInteraction(input);
+  }
+
+  shutdown(): Promise<void> {
+    return this.agents.shutdown();
   }
 
   async runTests(input: RunTestsRequest) {
@@ -298,7 +467,7 @@ export class TaskManagerService {
       task,
       gitDiffStat: latestGit?.diffStat,
       testStatus: latestTest?.status,
-      codexSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
+      agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
     const bodyPath = await this.store.getArtifactPath(bodyArtifact.id);
@@ -391,6 +560,10 @@ export class TaskManagerService {
     return this.store.readArtifact(input.artifactId);
   }
 
+  readProtocolMessage(input: ReadProtocolMessageRequest) {
+    return this.store.readProtocolMessage(input.reference);
+  }
+
   private async validateAndRecordRepository(task: Task): Promise<RepositoryPreflight> {
     const preflight = await validateRepositoryPath(task.repositoryPath);
     await this.store.appendEvent(
@@ -410,14 +583,41 @@ export class TaskManagerService {
 
   private async capturePostRunEvidence(runId: string): Promise<void> {
     const run = await this.store.getRun(runId);
-    if (!run || run.mode !== 'IMPLEMENTATION') {
+    if (
+      !run ||
+      !['IMPLEMENTATION', 'FOLLOW_UP', 'RETRY', 'REVIEW'].includes(run.mode)
+    ) {
       return;
     }
     try {
-      await this.refreshEvidence({ taskId: run.taskId });
+      const snapshot = await this.refreshEvidence({ taskId: run.taskId });
+      await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
+      if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
+        const state = await this.store.snapshot();
+        const before = state.gitSnapshots.find(
+          (candidate) => candidate.id === run.beforeGitSnapshotId
+        );
+        if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
+          await this.store.appendEvent(
+            createDomainEvent({
+              type: 'AGENT_REVIEW_POLICY_VIOLATION',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              agentSessionId: run.sessionId,
+              source: 'git',
+              payload: {
+                beforeDirtyFingerprint: before.dirtyFingerprint,
+                afterDirtyFingerprint: snapshot.dirtyFingerprint
+              }
+            })
+          );
+        }
+      }
     } catch {
       // The terminal event already completed the run. Evidence refresh failures remain visible
-      // through explicit refresh attempts and stored process/Codex artifacts.
+      // through explicit refresh attempts and stored runtime/provider artifacts.
     }
   }
 
@@ -427,6 +627,37 @@ export class TaskManagerService {
       throw new Error(`Task not found: ${taskId}`);
     }
     return task;
+  }
+
+  private async requireRunForTask(runId: string, taskId: string): Promise<RunRecord> {
+    const run = await this.store.getRun(runId);
+    if (!run || run.taskId !== taskId) {
+      throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
+    }
+    return run;
+  }
+
+  private async requireContinuationContext(taskId: string, runId: string) {
+    const [task, snapshot] = await Promise.all([
+      this.requireTask(taskId),
+      this.store.snapshot()
+    ]);
+    const run = snapshot.runs.find(
+      (candidate) => candidate.id === runId && candidate.taskId === taskId
+    );
+    if (!run) {
+      throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
+    }
+    const iteration = snapshot.iterations.find(
+      (candidate) => candidate.id === run.iterationId
+    );
+    const worktree = snapshot.worktrees.find(
+      (candidate) => candidate.id === run.worktreeId
+    );
+    if (!iteration || !worktree) {
+      throw new Error('The source run no longer has a valid task iteration.');
+    }
+    return { task, run, iteration, worktree };
   }
 
   private async requireWorktree(task: Task): Promise<WorktreeRecord> {
@@ -457,6 +688,89 @@ export class TaskManagerService {
   }
 }
 
+function followUpSettings(
+  task: Task,
+  run: RunRecord,
+  overrides: AgentExecutionSettings | undefined,
+  readOnly: boolean
+): AgentExecutionSettings {
+  return mergeRunSettings({
+    readOnly,
+    settings: [run.requestedSettings, task.agentSettings, overrides]
+  });
+}
+
+export function mergeRunSettings(input: {
+  readOnly: boolean;
+  settings: Array<AgentExecutionSettings | undefined>;
+}): AgentExecutionSettings {
+  const defaultSandbox: NonNullable<AgentExecutionSettings['sandbox']> = input.readOnly
+    ? 'READ_ONLY'
+    : 'WORKSPACE_WRITE';
+  const requestedSettings: AgentExecutionSettings = Object.assign(
+    {
+      sandbox: defaultSandbox,
+      networkAccess: false,
+      approvalPolicy: 'on-request'
+    } satisfies AgentExecutionSettings,
+    ...input.settings.filter(Boolean)
+  );
+  return {
+    ...requestedSettings,
+    sandbox: input.readOnly
+      ? 'READ_ONLY'
+      : (requestedSettings.sandbox ?? defaultSandbox),
+    networkAccess: requestedSettings.networkAccess ?? false,
+    approvalPolicy: requestedSettings.approvalPolicy ?? 'on-request'
+  };
+}
+
+function buildContinuationPrompt(input: {
+  task: Task;
+  run: RunRecord;
+  gitSnapshot: GitSnapshotRecord;
+  instruction?: string;
+  kind: 'continuation' | 'retry' | 'forked retry';
+}): string {
+  const instruction = input.instruction?.trim();
+  return [
+    `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    '',
+    `This is a ${input.kind} after run ${input.run.id} ended with ${input.run.status}.`,
+    `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
+    instruction ? `Additional user instruction:\n${instruction}` : undefined,
+    '',
+    `Repository root: ${input.gitSnapshot.worktreePath}`,
+    'Continue in the existing isolated task worktree.',
+    'Only modify files inside this worktree.',
+    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
+    'Reinspect the current repository state instead of assuming the prior turn completed every step.',
+    'When finished, summarize the files changed and verification you performed.'
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join('\n');
+}
+
+function assertContinuable(run: RunRecord): void {
+  if (
+    !['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+      run.status
+    )
+  ) {
+    throw new Error(`Run ${run.id} cannot continue while it is ${run.status}.`);
+  }
+}
+
+function assertRetryable(run: RunRecord): void {
+  if (
+    !['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+      run.status
+    )
+  ) {
+    throw new Error(`Run ${run.id} cannot be retried while it is ${run.status}.`);
+  }
+}
+
 export function transitionBlocker(
   task: Task,
   toPhase: Task['workflowPhase'],
@@ -482,8 +796,8 @@ export function transitionBlocker(
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
     }
-    if (task.projection.codexRun !== 'COMPLETED') {
-      return 'Codex must complete before moving to review.';
+    if (task.projection.agentRun !== 'COMPLETED') {
+      return 'The agent turn must complete before moving to review.';
     }
     return undefined;
   }

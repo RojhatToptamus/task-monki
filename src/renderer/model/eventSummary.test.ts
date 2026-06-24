@@ -5,10 +5,10 @@ import { summarizeEvent } from './eventSummary';
 describe('summarizeEvent', () => {
   it('converts raw event names into human-readable activity text', () => {
     expect(
-      summarizeEvent(createEvent('CODEX_EVENT_PARSED', { eventType: 'turn.completed' }))
+      summarizeEvent(createEvent('AGENT_ACTIVITY_RECEIVED', { eventType: 'turn.completed' }))
     ).toEqual({
-      label: 'Codex update',
-      detail: 'Codex turn completed.'
+      label: 'Agent update',
+      detail: 'Agent turn completed.'
     });
 
     expect(
@@ -30,6 +30,63 @@ describe('summarizeEvent', () => {
       label: 'Pull request synced',
       detail: 'PR #12 OPEN_DRAFT.'
     });
+  });
+
+  it('summarizes interactive approval lifecycle events', () => {
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_INTERACTION_REQUESTED', {
+          type: 'COMMAND_APPROVAL'
+        })
+      )
+    ).toEqual({
+      label: 'Approval requested',
+      detail: 'COMMAND_APPROVAL is waiting for review.'
+    });
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_INTERACTION_RESOLVED', {
+          status: 'DECLINED'
+        })
+    ).detail
+    ).toBe('DECLINED');
+  });
+
+  it('labels rich provider observations explicitly', () => {
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_PLAN_REVISED', { revision: 2, stepCount: 3 })
+      )
+    ).toEqual({
+      label: 'Provider plan revised',
+      detail: 'Revision 2, 3 steps.'
+    });
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_USAGE_UPDATED', { totalTokens: 1234 })
+      ).detail
+    ).toContain('1,234');
+  });
+
+  it('surfaces observed and contradictory subagent relationships', () => {
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_SUBAGENT_DISCOVERED', {
+          providerChildSessionId: 'thread-child',
+          source: 'COLLAB_RECEIVER'
+        })
+      )
+    ).toEqual({
+      label: 'Subagent discovered',
+      detail: 'thread-child · COLLAB_RECEIVER'
+    });
+    expect(
+      summarizeEvent(
+        createEvent('AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED', {
+          detail: 'Child already has another parent.'
+        })
+      ).detail
+    ).toContain('another parent');
   });
 });
 

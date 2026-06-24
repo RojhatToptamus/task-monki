@@ -6,6 +6,10 @@ export interface CreateDomainEventInput {
   taskId: string;
   iterationId?: string;
   runId?: string;
+  agentSessionId?: string;
+  serverInstanceId?: string;
+  agentItemId?: string;
+  interactionRequestId?: string;
   testRunId?: string;
   worktreeId?: string;
   source: DomainEvent['source'];
@@ -22,6 +26,10 @@ export function createDomainEvent(input: CreateDomainEventInput): DomainEvent {
     taskId: input.taskId,
     iterationId: input.iterationId,
     runId: input.runId,
+    agentSessionId: input.agentSessionId,
+    serverInstanceId: input.serverInstanceId,
+    agentItemId: input.agentItemId,
+    interactionRequestId: input.interactionRequestId,
     testRunId: input.testRunId,
     worktreeId: input.worktreeId,
     source: input.source,

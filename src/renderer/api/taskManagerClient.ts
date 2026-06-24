@@ -1,6 +1,7 @@
 import type {
   AppUpdateEvent,
   CancelRunRequest,
+  ContinueRunRequest,
   BranchPublicationRecord,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
@@ -25,7 +26,13 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RefinePromptRequest,
-  RefinePromptResponse
+  RefinePromptResponse,
+  RespondToInteractionRequest,
+  RetryRunRequest,
+  SyncAgentGoalRequest,
+  ReadProtocolMessageRequest,
+  StartReviewRequest,
+  SteerRunRequest
 } from '../../shared/contracts';
 
 const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
@@ -53,6 +60,7 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
 
   return {
     getDefaultRepositoryPath: () => get<string>(baseUrl, '/api/defaultRepositoryPath'),
+    getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
@@ -62,7 +70,18 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     prepareWorktree: (input: PrepareWorktreeRequest) =>
       post<WorktreeRecord>(baseUrl, '/api/worktrees/prepare', input),
     startRun: (input: StartRunRequest) => post<RunRecord>(baseUrl, '/api/runs/start', input),
+    steerRun: (input: SteerRunRequest) => post<void>(baseUrl, '/api/runs/steer', input),
+    continueRun: (input: ContinueRunRequest) =>
+      post<RunRecord>(baseUrl, '/api/runs/continue', input),
+    retryRun: (input: RetryRunRequest) =>
+      post<RunRecord>(baseUrl, '/api/runs/retry', input),
+    startReview: (input: StartReviewRequest) =>
+      post<RunRecord>(baseUrl, '/api/runs/review', input),
+    syncAgentGoal: (input: SyncAgentGoalRequest) =>
+      post(baseUrl, '/api/agent/goal/sync', input),
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),
+    respondToInteraction: (input: RespondToInteractionRequest) =>
+      post(baseUrl, '/api/interactions/respond', input),
     runTests: (input: RunTestsRequest) => post<TestRunRecord>(baseUrl, '/api/tests/run', input),
     refreshEvidence: (input: RefreshEvidenceRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
@@ -79,6 +98,8 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     readArtifact: (input: ReadArtifactRequest) => post<string>(baseUrl, '/api/artifact/read', input),
+    readProtocolMessage: (input: ReadProtocolMessageRequest) =>
+      post(baseUrl, '/api/agent/protocol/read', input),
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureEventSource();

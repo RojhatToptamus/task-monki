@@ -36,15 +36,96 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
       };
     case 'TEST_RESULT_STALE':
       return { label: 'Tests stale', detail: stringField(payload, 'reason') ?? 'Git generation changed.' };
-    case 'CODEX_EVENT_PARSED':
+    case 'AGENT_ACTIVITY_RECEIVED':
       return {
-        label: 'Codex update',
-        detail: summarizeCodexEvent(stringField(payload, 'eventType'), stringField(payload, 'messageText'))
+        label: 'Agent update',
+        detail: summarizeAgentEvent(stringField(payload, 'eventType'), stringField(payload, 'messageText'))
       };
-    case 'CODEX_RUN_COMPLETED':
-      return { label: 'Codex completed', detail: 'Final response and evidence were captured.' };
-    case 'CODEX_RUN_FAILED':
-      return { label: 'Codex failed', detail: stringField(payload, 'error') ?? 'Inspect run evidence.' };
+    case 'AGENT_GOAL_UPDATED':
+      return {
+        label: 'Provider goal updated',
+        detail: `${stringField(payload, 'syncState') ?? 'UNKNOWN'} · ${stringField(payload, 'providerStatus') ?? 'status unknown'}`
+      };
+    case 'AGENT_GOAL_CLEARED':
+      return {
+        label: 'Provider goal cleared',
+        detail: 'Task Monki’s task goal remains authoritative.'
+      };
+    case 'AGENT_GOAL_SYNC_FAILED':
+      return {
+        label: 'Provider goal sync unconfirmed',
+        detail: 'The task goal was not automatically resubmitted.'
+      };
+    case 'AGENT_PLAN_REVISED':
+      return {
+        label: 'Provider plan revised',
+        detail: `Revision ${numberField(payload, 'revision') ?? 'unknown'}, ${numberField(payload, 'stepCount') ?? 0} steps.`
+      };
+    case 'AGENT_USAGE_UPDATED':
+      return {
+        label: 'Provider usage updated',
+        detail: `${numberField(payload, 'totalTokens')?.toLocaleString() ?? 'unknown'} total tokens.`
+      };
+    case 'AGENT_SETTINGS_OBSERVED':
+      return {
+        label: 'Provider settings observed',
+        detail: stringField(payload, 'source') ?? 'Provider settings source unknown.'
+      };
+    case 'AGENT_SUBAGENT_DISCOVERED':
+      return {
+        label: 'Subagent discovered',
+        detail: `${stringField(payload, 'providerChildSessionId') ?? 'unknown child'} · ${stringField(payload, 'source') ?? 'source unknown'}`
+      };
+    case 'AGENT_SUBAGENT_UPDATED':
+      return {
+        label: 'Subagent updated',
+        detail: `${stringField(payload, 'status') ?? 'status unknown'} · ${stringField(payload, 'providerChildSessionId') ?? 'unknown child'}`
+      };
+    case 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED':
+      return {
+        label: 'Subagent relationship unresolved',
+        detail:
+          stringField(payload, 'detail') ??
+          'Provider child identifiers are missing or contradictory.'
+      };
+    case 'AGENT_INTERACTION_REQUESTED':
+      return {
+        label: 'Approval requested',
+        detail: `${stringField(payload, 'type') ?? 'Agent interaction'} is waiting for review.`
+      };
+    case 'AGENT_INTERACTION_RESOLVED':
+      return {
+        label: 'Approval resolved',
+        detail: stringField(payload, 'status') ?? 'The provider request was cleared.'
+      };
+    case 'AGENT_RUN_COMPLETED':
+      return { label: 'Agent completed', detail: 'Final response and evidence were captured.' };
+    case 'AGENT_RUN_FAILED':
+      return { label: 'Agent failed', detail: stringField(payload, 'error') ?? 'Inspect run evidence.' };
+    case 'AGENT_RUN_INTERRUPTED':
+      return { label: 'Agent interrupted', detail: 'The session can continue with a new turn.' };
+    case 'AGENT_MUTATION_AMBIGUOUS':
+      return {
+        label: 'Provider delivery ambiguous',
+        detail:
+          stringField(payload, 'reason') ??
+          'Task Monki will not automatically resubmit this mutation.'
+      };
+    case 'AGENT_REVIEW_POLICY_VIOLATION':
+      return {
+        label: 'Review changed Git state',
+        detail: 'Independent Git evidence changed during a read-only review.'
+      };
+    case 'AGENT_RUNTIME_LOST':
+      return {
+        label: 'Agent runtime lost',
+        detail: stringField(payload, 'reason') ?? 'Persisted session recovery started.'
+      };
+    case 'AGENT_RUNTIME_RECONCILED':
+      return {
+        label: 'Agent runtime reconciled',
+        detail: `${stringField(payload, 'status') ?? 'unknown'} · ${stringField(payload, 'recoveryState') ?? 'unknown'}`
+      };
     case 'PROCESS_STARTED':
       return { label: 'Process started', detail: `PID ${numberField(payload, 'pid') ?? 'unknown'}.` };
     case 'PROCESS_EXITED':
@@ -82,20 +163,20 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
   }
 }
 
-function summarizeCodexEvent(eventType: string | undefined, messageText: string | undefined): string {
+function summarizeAgentEvent(eventType: string | undefined, messageText: string | undefined): string {
   if (messageText) {
     return messageText.trim().slice(0, 140);
   }
   if (eventType === 'turn.completed') {
-    return 'Codex turn completed.';
+    return 'Agent turn completed.';
   }
   if (eventType === 'turn.failed') {
-    return 'Codex turn failed.';
+    return 'Agent turn failed.';
   }
   if (eventType === 'thread.started') {
-    return 'Codex thread started.';
+    return 'Agent session started.';
   }
-  return eventType ?? 'Codex event received.';
+  return eventType ?? 'Agent event received.';
 }
 
 function humanizeEventType(type: string): string {
