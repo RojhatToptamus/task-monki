@@ -13,12 +13,13 @@ import {
   type TaskCardVM,
   type Tone
 } from './taskView';
+import { THEME_OPTIONS, type ThemePreference } from './theme';
 
 interface MainColumnProps {
   view: NavView;
   tasks: Task[];
-  theme: 'light' | 'dark';
-  onSetTheme(theme: 'light' | 'dark'): void;
+  theme: ThemePreference;
+  onSetTheme(theme: ThemePreference): void;
   error?: string;
   models: AgentModel[];
   defaultRepositoryPath: string;
@@ -222,8 +223,8 @@ function Settings({
   models,
   defaultRepositoryPath
 }: {
-  theme: 'light' | 'dark';
-  onSetTheme(theme: 'light' | 'dark'): void;
+  theme: ThemePreference;
+  onSetTheme(theme: ThemePreference): void;
   models: AgentModel[];
   defaultRepositoryPath: string;
 }) {
@@ -255,20 +256,19 @@ function Settings({
             <div className="tm-settings__hint">App appearance</div>
           </div>
           <div className="tm-segtoggle" role="group" aria-label="Theme">
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'light' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('light')}
-            >
-              Light
-            </button>
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'dark' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('dark')}
-            >
-              Dark
-            </button>
+            {THEME_OPTIONS.map((option) => (
+              <button
+                type="button"
+                className={`tm-segtoggle__btn ${
+                  theme === option.value ? 'tm-segtoggle__btn--active' : ''
+                }`}
+                onClick={() => onSetTheme(option.value)}
+                aria-pressed={theme === option.value}
+                key={option.value}
+              >
+                {option.label}
+              </button>
+            ))}
           </div>
         </div>
         {rows.map((row) => (

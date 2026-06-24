@@ -28,6 +28,7 @@ import { MainColumn } from './MainColumn';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
 import { TaskDetail } from './TaskDetail';
+import { getInitialTheme, THEME_STORAGE_KEY, type ThemePreference } from './theme';
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -56,8 +57,6 @@ const emptySnapshot: TaskSnapshot = {
   artifacts: []
 };
 
-type ThemePreference = 'light' | 'dark';
-
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
@@ -83,7 +82,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem('task-monki-theme', theme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
 
   useEffect(() => {
@@ -665,14 +664,6 @@ export function App() {
       ) : null}
     </div>
   );
-}
-
-function getInitialTheme(): ThemePreference {
-  const stored = window.localStorage.getItem('task-monki-theme');
-  if (stored === 'light' || stored === 'dark') {
-    return stored;
-  }
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 function getInitialCollapsed(): boolean {

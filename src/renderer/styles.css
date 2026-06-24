@@ -79,6 +79,40 @@
   --shadow-menu: 0 14px 38px rgba(0, 0, 0, 0.38);
 }
 
+.app-shell[data-theme='sunset'] {
+  color-scheme: light;
+
+  --bg: #f8f1e8;
+  --surface: #fff9f3;
+  --surface2: #f3e8dd;
+  --hair: #e9ddd1;
+  --border: #ddccb8;
+  --border-strong: #ccb29a;
+  --text: #30231f;
+  --text-soft: #4a3a33;
+  --muted: #6d5b4f;
+  --faint: #9f8c7d;
+  --accent: #33261e;
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #fff);
+  --on-accent: #fffaf2;
+  --code-bg: #2b211b;
+  --code-text: #d9ccbe;
+  --action-ink: #8a5a08;
+  --success-bright: #1d7a52;
+  --neutral: #998d84;
+  --info: #4b3a2f;
+  --action: #bf6418;
+  --success: #1d7a52;
+  --error: #cf4640;
+  --evidence: #0f8a68;
+
+  --border-hover: color-mix(in srgb, var(--accent) 28%, var(--border));
+  --success-ink: color-mix(in srgb, var(--success) 72%, var(--text));
+  --error-ink: color-mix(in srgb, var(--error) 72%, var(--text));
+  --error-soft: color-mix(in srgb, var(--error) 10%, var(--surface));
+  --shadow-menu: 0 12px 34px rgba(56, 41, 32, 0.2);
+}
+
 * {
   box-sizing: border-box;
 }
