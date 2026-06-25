@@ -84,6 +84,13 @@ Expected UI:
 6. Reducer keeps the task workflow phase in Review.
 7. `projection.codexReview.status` becomes `RUNNING`.
 
+The review fork must carry the configured review model, service tier, and
+reasoning effort. Codex exposes reasoning effort for `thread/fork` through the
+request `config.model_reasoning_effort` field rather than a top-level `effort`
+field. If that config is omitted, the fork can run at the provider default or an
+inherited effort such as `xhigh`, making reviews much slower than the user's
+selected review setting.
+
 Expected UI:
 
 - Board column: Review.

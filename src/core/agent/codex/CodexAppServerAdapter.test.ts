@@ -422,6 +422,76 @@ describe('CodexAppServerAdapter', () => {
     await orchestrator.shutdown();
   });
 
+  it('passes configured reasoning effort to detached review thread forks', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-effort-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('review-interrupt-no-active'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+
+    const reviewSettings = { ...task.agentSettings, reasoningEffort: 'low' };
+    const reviewRun = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: reviewSettings
+    });
+
+    const snapshot = await store.snapshot();
+    const reviewSession = snapshot.agentSessions.find(
+      (session) => session.id === reviewRun.sessionId
+    );
+    const reviewObservation = snapshot.agentSettingsObservations.find(
+      (observation) =>
+        observation.sessionId === reviewRun.sessionId &&
+        observation.source === 'THREAD_FORK_RESPONSE'
+    );
+    expect(reviewSession?.requestedSettings.reasoningEffort).toBe('low');
+    expect(reviewObservation?.settings.reasoningEffort).toBe('low');
+
+    const server = snapshot.agentServers[0];
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const reviewFork = readOutboundMessages(journal).find(
+      (message) => message.method === 'thread/fork'
+    );
+    expect(
+      (
+        reviewFork?.params as {
+          config?: { model_reasoning_effort?: string } | null;
+        }
+      )?.config?.model_reasoning_effort
+    ).toBe('low');
+
+    await orchestrator.interruptRun(reviewRun.id);
+    await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
+    await orchestrator.shutdown();
+  });
+
   it('recovers when stopping a detached review with a stale provider turn id', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-interrupt-')
@@ -908,7 +978,12 @@ const reviewThread = () => ({
   preview: 'Review current changes.',
   source: { subAgent: 'review' }
 });
-const threadResponse = () => ({
+const threadResponse = (request = {}) => {
+  const configuredEffort =
+    request.config && typeof request.config.model_reasoning_effort === 'string'
+      ? request.config.model_reasoning_effort
+      : 'high';
+  return {
   thread: thread(),
   model: 'fake-model',
   modelProvider: 'openai',
@@ -924,8 +999,9 @@ const threadResponse = () => ({
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false
   },
-  reasoningEffort: 'high'
-});
+  reasoningEffort: configuredEffort
+  };
+};
 
 rl.on('line', (line) => {
   const message = JSON.parse(line);
@@ -1073,16 +1149,16 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
-      send({ id: message.id, result: threadResponse() });
+      send({ id: message.id, result: threadResponse(message.params) });
       break;
     case 'thread/resume':
-      send({ id: message.id, result: { ...threadResponse(), thread: thread([turn('completed')]) } });
+      send({ id: message.id, result: { ...threadResponse(message.params), thread: thread([turn('completed')]) } });
       break;
     case 'thread/read':
       send({ id: message.id, result: { thread: thread([turn('completed')]) } });
       break;
     case 'thread/fork':
-      send({ id: message.id, result: { ...threadResponse(), thread: reviewThread() } });
+      send({ id: message.id, result: { ...threadResponse(message.params), thread: reviewThread() } });
       break;
     case 'thread/goal/set': {
       const goal = {

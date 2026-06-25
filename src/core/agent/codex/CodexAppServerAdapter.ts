@@ -117,6 +117,15 @@ function isNoActiveTurnToInterrupt(error: Error): boolean {
   return /no active turn to interrupt/i.test(error.message);
 }
 
+function toThreadConfig(
+  settings: AgentExecutionSettings
+): Record<string, string> | null {
+  if (!settings.reasoningEffort) {
+    return null;
+  }
+  return { model_reasoning_effort: settings.reasoningEffort };
+}
+
 export interface CodexAppServerAdapterOptions
   extends Omit<CodexAppServerSupervisorOptions, 'appVersion'> {
   appVersion?: string;
@@ -222,6 +231,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       approvalPolicy: toApprovalPolicy(settings),
       approvalsReviewer: 'user',
       sandbox: toSandboxMode(settings),
+      config: toThreadConfig(settings),
       ephemeral: false
     });
 
@@ -258,7 +268,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       cwd: session.worktreePath,
       approvalPolicy: toApprovalPolicy(session.requestedSettings),
       approvalsReviewer: 'user',
-      sandbox: toSandboxMode(session.requestedSettings)
+      sandbox: toSandboxMode(session.requestedSettings),
+      config: toThreadConfig(session.requestedSettings)
     });
 
     const stored = await this.store.updateAgentSession(session.id, {
@@ -509,6 +520,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         approvalPolicy: toApprovalPolicy(input.settings),
         approvalsReviewer: 'user',
         sandbox: toSandboxMode(input.settings),
+        config: toThreadConfig(input.settings),
         ephemeral: false
       });
     } catch (error) {
@@ -561,6 +573,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: 'user',
         sandbox: toSandboxMode(settings),
+        config: toThreadConfig(settings),
         developerInstructions: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
         ephemeral: false
       });

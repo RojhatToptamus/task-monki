@@ -123,6 +123,14 @@ Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
 
+Codex protocol detail:
+
+- `turn/start` has a first-class `effort` field.
+- `thread/start`, `thread/resume`, and `thread/fork` do not; they must pass
+  `model_reasoning_effort` through the request `config` object.
+- Detached reviews use `thread/fork` before `review/start`, so review latency
+  depends on this config being set correctly.
+
 ## Recovery rules
 
 Provider delivery can be ambiguous. The app must handle:
