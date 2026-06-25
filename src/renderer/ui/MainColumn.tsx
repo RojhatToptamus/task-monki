@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import type { Task } from '../../shared/contracts';
 import type { AgentModel } from '../../shared/agent';
+import { resolveReasoningEffort } from '../model/agentExecutionSettings';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
 import {
@@ -19,10 +20,19 @@ interface MainColumnProps {
   tasks: Task[];
   theme: 'light' | 'dark';
   onSetTheme(theme: 'light' | 'dark'): void;
+  appSettings: AppSettings;
+  onSetAppSettings(settings: AppSettings): void;
   error?: string;
   models: AgentModel[];
   defaultRepositoryPath: string;
   onSelect(taskId: string): void;
+}
+
+export interface AppSettings {
+  defaultModel?: string;
+  defaultReasoningEffort?: string;
+  reviewModel?: string;
+  reviewReasoningEffort?: string;
 }
 
 const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
@@ -59,6 +69,8 @@ export function MainColumn({
   tasks,
   theme,
   onSetTheme,
+  appSettings,
+  onSetAppSettings,
   error,
   models,
   defaultRepositoryPath,
@@ -87,6 +99,8 @@ export function MainColumn({
         <Settings
           theme={theme}
           onSetTheme={onSetTheme}
+          appSettings={appSettings}
+          onSetAppSettings={onSetAppSettings}
           models={models}
           defaultRepositoryPath={defaultRepositoryPath}
         />
@@ -219,25 +233,28 @@ function Inbox({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void 
 function Settings({
   theme,
   onSetTheme,
+  appSettings,
+  onSetAppSettings,
   models,
   defaultRepositoryPath
 }: {
   theme: 'light' | 'dark';
   onSetTheme(theme: 'light' | 'dark'): void;
+  appSettings: AppSettings;
+  onSetAppSettings(settings: AppSettings): void;
   models: AgentModel[];
   defaultRepositoryPath: string;
 }) {
   const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+  const selectedDefaultModel =
+    models.find((model) => model.model === appSettings.defaultModel) ?? defaultModel;
+  const selectedReviewModel =
+    models.find((model) => model.model === appSettings.reviewModel) ?? selectedDefaultModel;
+  const selectedDefaultEffort =
+    resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
+  const selectedReviewEffort =
+    resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '';
   const rows: Array<{ k: string; hint: string; v: string }> = [
-    {
-      k: 'Default model',
-      hint: 'Used for new tasks',
-      v: defaultModel
-        ? `${defaultModel.displayName}${
-            defaultModel.defaultReasoningEffort ? ` · ${defaultModel.defaultReasoningEffort}` : ''
-          }`
-        : 'Not detected'
-    },
     {
       k: 'Repository',
       hint: 'Default working repository',
@@ -271,6 +288,54 @@ function Settings({
             </button>
           </div>
         </div>
+        <ModelSettingRow
+          label="Default task model"
+          hint="Used for new implementation tasks"
+          value={selectedDefaultModel?.model ?? ''}
+          effortValue={selectedDefaultEffort}
+          models={models}
+          onModelChange={(model) => {
+            const nextModel = models.find((candidate) => candidate.model === model);
+            onSetAppSettings({
+              ...appSettings,
+              defaultModel: model || undefined,
+              defaultReasoningEffort: resolveReasoningEffort(
+                nextModel,
+                appSettings.defaultReasoningEffort
+              )
+            });
+          }}
+          onEffortChange={(reasoningEffort) =>
+            onSetAppSettings({
+              ...appSettings,
+              defaultReasoningEffort: reasoningEffort || undefined
+            })
+          }
+        />
+        <ModelSettingRow
+          label="Codex review model"
+          hint="Used for AI quality-gate reviews"
+          value={selectedReviewModel?.model ?? ''}
+          effortValue={selectedReviewEffort}
+          models={models}
+          onModelChange={(model) => {
+            const nextModel = models.find((candidate) => candidate.model === model);
+            onSetAppSettings({
+              ...appSettings,
+              reviewModel: model || undefined,
+              reviewReasoningEffort: resolveReasoningEffort(
+                nextModel,
+                appSettings.reviewReasoningEffort
+              )
+            });
+          }}
+          onEffortChange={(reasoningEffort) =>
+            onSetAppSettings({
+              ...appSettings,
+              reviewReasoningEffort: reasoningEffort || undefined
+            })
+          }
+        />
         {rows.map((row) => (
           <div className="tm-settings__row" key={row.k}>
             <div style={{ minWidth: 0 }}>
@@ -280,6 +345,76 @@ function Settings({
             <span className="tm-settings__v">{row.v}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ModelSettingRow({
+  label,
+  hint,
+  value,
+  effortValue,
+  models,
+  onModelChange,
+  onEffortChange
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  effortValue: string;
+  models: AgentModel[];
+  onModelChange(value: string): void;
+  onEffortChange(value: string): void;
+}) {
+  const selected = models.find((model) => model.model === value);
+  const efforts = [
+    ...new Set(
+      [
+        ...(selected?.supportedReasoningEfforts ?? []),
+        selected?.defaultReasoningEffort,
+        effortValue
+      ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
+    )
+  ];
+  return (
+    <div className="tm-settings__row">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">{label}</div>
+        <div className="tm-settings__hint">
+          {hint}
+          {effortValue ? ` · ${effortValue}` : ''}
+        </div>
+      </div>
+      <div className="tm-settings__controls">
+        <select
+          className="tm-settings__select tm-settings__select--model"
+          value={value}
+          onChange={(event) => onModelChange(event.target.value)}
+          disabled={models.length === 0}
+          aria-label={`${label} model`}
+        >
+          {models
+            .filter((model) => !model.hidden || model.model === value)
+            .map((model) => (
+              <option key={model.id} value={model.model}>
+                {model.displayName}
+              </option>
+            ))}
+        </select>
+        <select
+          className="tm-settings__select tm-settings__select--effort"
+          value={effortValue}
+          onChange={(event) => onEffortChange(event.target.value)}
+          disabled={efforts.length === 0}
+          aria-label={`${label} reasoning effort`}
+        >
+          {efforts.map((effort) => (
+            <option key={effort} value={effort}>
+              {effort}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   );

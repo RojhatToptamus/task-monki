@@ -7,6 +7,8 @@ import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 
+const APP_SERVER_INTEGRATION_TIMEOUT_MS = 10_000;
+
 describe('CodexAppServerAdapter', () => {
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
@@ -73,7 +75,14 @@ describe('CodexAppServerAdapter', () => {
     });
     await terminal;
 
-    const snapshot = await store.snapshot();
+    const snapshot = await waitForSnapshot(
+      store,
+      (candidate) =>
+        candidate.agentUsageSnapshots.length > 0 &&
+        candidate.agentGoalSnapshots.length > 0 &&
+        candidate.agentSettingsObservations.length > 0,
+      'provider observations'
+    );
     const completed = snapshot.runs.find((candidate) => candidate.id === run.id);
     expect(completed?.status).toBe('COMPLETED');
     expect(completed?.providerTurnId).toBe('turn-1');
@@ -95,7 +104,7 @@ describe('CodexAppServerAdapter', () => {
     ).toBe(false);
 
     await orchestrator.shutdown();
-  });
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('submits one typed approval response and waits for server resolution', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-'));
@@ -350,6 +359,324 @@ describe('CodexAppServerAdapter', () => {
 
     await orchestrator.shutdown();
   });
+
+  it('keeps the review response turn for item correlation when turn started differs', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-retarget-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('review-turn-start-mismatch'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+
+    const reviewRun = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: task.agentSettings
+    });
+    const item = await waitForAgentItem(store, reviewRun.id, 'review-message');
+    expect(item.type).toBe('AGENT_MESSAGE');
+    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
+      'review-response-turn'
+    );
+
+    await orchestrator.interruptRun(reviewRun.id);
+
+    const server = (await store.snapshot()).agentServers[0];
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const interruptTurnIds = readOutboundMessages(journal)
+      .filter((message) => message.method === 'turn/interrupt')
+      .map((message) => (message.params as { turnId: string }).turnId);
+    expect(interruptTurnIds).toEqual([
+      'review-response-turn',
+      'review-active-turn'
+    ]);
+    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
+      'review-active-turn'
+    );
+
+    await orchestrator.shutdown();
+  });
+
+  it('recovers when stopping a detached review with a stale provider turn id', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-interrupt-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('review-interrupt-mismatch'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+
+    const reviewRun = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: task.agentSettings
+    });
+    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
+      'review-response-turn'
+    );
+
+    await orchestrator.interruptRun(reviewRun.id);
+
+    const server = (await store.snapshot()).agentServers[0];
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const interruptTurnIds = readOutboundMessages(journal)
+      .filter((message) => message.method === 'turn/interrupt')
+      .map((message) => (message.params as { turnId: string }).turnId);
+    expect(interruptTurnIds).toEqual([
+      'review-response-turn',
+      'review-active-turn'
+    ]);
+    expect((await store.getRun(reviewRun.id))?.providerTurnId).toBe(
+      'review-active-turn'
+    );
+
+    await orchestrator.shutdown();
+  });
+
+  it('locally stops a detached review when the provider never confirms the interrupt', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-interrupt-timeout-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(
+      executable,
+      fakeCodexScript('review-interrupt-ambiguous-no-terminal'),
+      { mode: 0o755 }
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      interruptRequestTimeoutMs: 40,
+      interruptCompletionTimeoutMs: 40
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+    const reviewRun = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: task.agentSettings
+    });
+
+    await orchestrator.interruptRun(reviewRun.id);
+    const interrupted = await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
+    const storedTask = await store.getTask(task.id);
+
+    expect(interrupted.recoveryState).toBe('NONE');
+    expect(interrupted.terminalReason).toContain('did not emit a terminal event');
+    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentRun).toBe('COMPLETED');
+    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+      'AGENT_MUTATION_AMBIGUOUS'
+    );
+    await orchestrator.shutdown();
+  });
+
+  it('locally stops a detached review when the provider has no active turn', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-interrupt-idle-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('review-interrupt-no-active'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+    const reviewRun = await orchestrator.startReview({
+      task,
+      iteration,
+      worktree,
+      sourceRun,
+      target: { type: 'UNCOMMITTED_CHANGES' },
+      settings: task.agentSettings
+    });
+
+    await orchestrator.interruptRun(reviewRun.id);
+    const interrupted = await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
+    const storedTask = await store.getTask(task.id);
+    const storedSession = (await store.snapshot()).agentSessions.find(
+      (session) => session.id === interrupted.sessionId
+    );
+
+    expect(interrupted.recoveryState).toBe('NONE');
+    expect(interrupted.terminalReason).toContain('no active turn to interrupt');
+    expect(storedSession?.status).toBe('IDLE');
+    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentRun).toBe('COMPLETED');
+    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+      'AGENT_MUTATION_AMBIGUOUS'
+    );
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps an ambiguous implementation interrupt in the cancel path until the provider terminal event arrives', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-interrupt-terminal-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('interrupt-ambiguous-then-terminal'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      interruptRequestTimeoutMs: 40,
+      interruptCompletionTimeoutMs: 200
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+
+    await orchestrator.interruptRun(run.id);
+    const interrupted = await waitForRunStatus(store, run.id, 'INTERRUPTED');
+
+    expect(interrupted.recoveryState).toBe('NONE');
+    expect(interrupted.terminalReason).toBe('interrupted');
+    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+      'AGENT_MUTATION_AMBIGUOUS'
+    );
+    await orchestrator.shutdown();
+  });
+
+  it('locally interrupts an implementation run when the provider never confirms the stop', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-interrupt-timeout-')
+    );
+    const executable = path.join(dir, 'fake-codex');
+    await fs.writeFile(executable, fakeCodexScript('interrupt-ambiguous-no-terminal'), {
+      mode: 0o755
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      interruptRequestTimeoutMs: 40,
+      interruptCompletionTimeoutMs: 40
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+
+    await orchestrator.interruptRun(run.id);
+    const interrupted = await waitForRunStatus(store, run.id, 'INTERRUPTED');
+
+    expect(interrupted.recoveryState).toBe('NONE');
+    expect(interrupted.terminalReason).toContain('did not emit a terminal event');
+    expect(interrupted.finalArtifactId).toBeTruthy();
+    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+      'AGENT_MUTATION_AMBIGUOUS'
+    );
+    await orchestrator.shutdown();
+  });
 });
 
 async function createTaskContext(store: FileTaskStore, dir: string) {
@@ -378,7 +705,7 @@ async function waitForInteraction(
   store: FileTaskStore,
   status: 'PENDING' | 'ABORTED_SERVER_LOST' | 'STALE'
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     const interaction = (await store.snapshot()).interactionRequests.find(
       (candidate) => candidate.status === status
     );
@@ -393,9 +720,9 @@ async function waitForInteraction(
 async function waitForRunStatus(
   store: FileTaskStore,
   runId: string,
-  status: 'COMPLETED'
+  status: 'COMPLETED' | 'INTERRUPTED'
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     const run = await store.getRun(runId);
     if (run?.status === status) {
       return run;
@@ -403,6 +730,58 @@ async function waitForRunStatus(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for run ${runId} to reach ${status}.`);
+}
+
+async function waitForSnapshot(
+  store: FileTaskStore,
+  predicate: (snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>) => boolean,
+  description: string
+) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const snapshot = await store.snapshot();
+    if (predicate(snapshot)) {
+      return snapshot;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for snapshot: ${description}.`);
+}
+
+async function waitForRunProviderTurnId(
+  store: FileTaskStore,
+  runId: string,
+  providerTurnId: string
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const run = await store.getRun(runId);
+    if (run?.providerTurnId === providerTurnId) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Timed out waiting for run ${runId} to use provider turn ${providerTurnId}.`
+  );
+}
+
+async function waitForAgentItem(
+  store: FileTaskStore,
+  runId: string,
+  providerItemId: string
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const item = (await store.snapshot()).agentItems.find(
+      (candidate) =>
+        candidate.runId === runId && candidate.providerItemId === providerItemId
+    );
+    if (item) {
+      return item;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Timed out waiting for run ${runId} to receive item ${providerItemId}.`
+  );
 }
 
 function waitForAppEvent(events: AppEventBus, type: 'run.terminal'): Promise<void> {
@@ -427,8 +806,31 @@ function readOutboundMethods(journal: string): string[] {
     .filter((method): method is string => typeof method === 'string');
 }
 
+function readOutboundMessages(
+  journal: string
+): Array<{ method?: string; params?: unknown }> {
+  return journal
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { direction: string; raw: string })
+    .filter((entry) => entry.direction === 'OUTBOUND')
+    .map((entry) => JSON.parse(entry.raw) as { method?: string; params?: unknown });
+}
+
 function fakeCodexScript(
-  mode: 'normal' | 'approval' | 'exit' | 'clear' | 'subagent' = 'normal'
+  mode:
+    | 'normal'
+    | 'approval'
+    | 'exit'
+    | 'clear'
+    | 'subagent'
+    | 'review-turn-start-mismatch'
+    | 'review-interrupt-mismatch'
+    | 'review-interrupt-ambiguous-no-terminal'
+    | 'review-interrupt-no-active'
+    | 'interrupt-ambiguous-then-terminal'
+    | 'interrupt-ambiguous-no-terminal' = 'normal'
 ): string {
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
@@ -440,6 +842,13 @@ const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 const mode = ${JSON.stringify(mode)};
+const reviewMode = mode === 'review-turn-start-mismatch' || mode === 'review-interrupt-mismatch';
+const reviewInterruptTimeoutMode = mode === 'review-interrupt-ambiguous-no-terminal';
+const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
+const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
+const approvalMode = mode === 'approval' || mode === 'exit' || mode === 'clear' || mode === 'subagent';
+const reviewResponseTurnId = 'review-response-turn';
+const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
   id: 'turn-1',
   items: [],
@@ -506,7 +915,7 @@ const threadResponse = () => ({
   serviceTier: null,
   cwd: process.cwd(),
   instructionSources: [],
-  approvalPolicy: mode === 'normal' ? 'never' : 'on-request',
+  approvalPolicy: approvalMode ? 'on-request' : 'never',
   approvalsReviewer: 'user',
   sandbox: {
     type: 'workspaceWrite',
@@ -672,6 +1081,9 @@ rl.on('line', (line) => {
     case 'thread/read':
       send({ id: message.id, result: { thread: thread([turn('completed')]) } });
       break;
+    case 'thread/fork':
+      send({ id: message.id, result: { ...threadResponse(), thread: reviewThread() } });
+      break;
     case 'thread/goal/set': {
       const goal = {
         threadId: 'thread-1',
@@ -691,10 +1103,51 @@ rl.on('line', (line) => {
       } });
       break;
     }
+    case 'review/start':
+      send({ id: message.id, result: {
+        turn: { ...turn('inProgress'), id: reviewResponseTurnId },
+        reviewThreadId: 'thread-review'
+      } });
+      if (mode === 'review-turn-start-mismatch') {
+        setTimeout(() => {
+          send({ method: 'turn/started', params: {
+            threadId: 'thread-review',
+            turn: { ...turn('inProgress'), id: reviewActiveTurnId }
+          } });
+          send({ method: 'item/started', params: {
+            threadId: 'thread-review',
+            turnId: reviewResponseTurnId,
+            startedAtMs: Date.now(),
+            item: {
+              type: 'agentMessage',
+              id: 'review-message',
+              text: '',
+              phase: null,
+              memoryCitation: null
+            }
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-review',
+            turnId: reviewResponseTurnId,
+            completedAtMs: Date.now(),
+            item: {
+              type: 'agentMessage',
+              id: 'review-message',
+              text: 'Review is inspecting the current diff.',
+              phase: null,
+              memoryCitation: null
+            }
+          } });
+        }, 10);
+      }
+      break;
     case 'turn/start':
       send({ id: message.id, result: { turn: turn('inProgress') } });
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
+        if (interruptMode) {
+          return;
+        }
         if (mode === 'subagent') {
           send({ method: 'item/started', params: {
             threadId: 'thread-1',
@@ -751,7 +1204,7 @@ rl.on('line', (line) => {
           } });
           return;
         }
-        if (mode !== 'normal') {
+        if (approvalMode) {
           send({ method: 'item/started', params: {
             threadId: 'thread-1',
             turnId: 'turn-1',
@@ -886,6 +1339,36 @@ rl.on('line', (line) => {
       }, 10);
       break;
     case 'turn/interrupt':
+      if (interruptMode && message.params.threadId === 'thread-1') {
+        if (mode === 'interrupt-ambiguous-then-terminal') {
+          setTimeout(() => {
+            send({ method: 'turn/completed', params: {
+              threadId: 'thread-1',
+              turn: turn('interrupted')
+            } });
+          }, 25);
+        }
+        break;
+      }
+      if (reviewInterruptTimeoutMode && message.params.threadId === 'thread-review') {
+        break;
+      }
+      if (reviewInterruptNoActiveMode && message.params.threadId === 'thread-review') {
+        send({ id: message.id, error: {
+          code: -32600,
+          message: 'no active turn to interrupt'
+        } });
+        break;
+      }
+      if (reviewMode && message.params.threadId === 'thread-review') {
+        if (message.params.turnId !== reviewActiveTurnId) {
+          send({ id: message.id, error: {
+            code: -32602,
+            message: 'expected active turn id ' + message.params.turnId + ' but found ' + reviewActiveTurnId
+          } });
+          break;
+        }
+      }
       send({ id: message.id, result: {} });
       break;
     default:

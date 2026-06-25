@@ -32,7 +32,10 @@ import type {
   SyncAgentGoal,
   SteerAgentTurn
 } from '../AgentProviderAdapter';
-import { AgentMutationAmbiguousError } from '../AgentProviderAdapter';
+import {
+  AgentMutationAmbiguousError,
+  AgentProviderSessionMissingError
+} from '../AgentProviderAdapter';
 import { codexCapabilities } from './codexCapabilities';
 import {
   CodexAppServerSupervisor,
@@ -83,6 +86,11 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
+import {
+  CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
+  codexReviewStatusFromResult,
+  parseCodexReviewResult
+} from '../../review/CodexReviewContract';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -94,10 +102,26 @@ const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'RECOVERY_REQUIRED'
 ];
 
+function canRetargetReviewTurn(
+  run: RunRecord,
+  session: AgentSessionRecord
+): boolean {
+  return (
+    session.role === 'REVIEW' &&
+    run.mode === 'REVIEW' &&
+    ACTIVE_RUN_STATES.includes(run.status)
+  );
+}
+
+function isNoActiveTurnToInterrupt(error: Error): boolean {
+  return /no active turn to interrupt/i.test(error.message);
+}
+
 export interface CodexAppServerAdapterOptions
   extends Omit<CodexAppServerSupervisorOptions, 'appVersion'> {
   appVersion?: string;
   restartDelaysMs?: number[];
+  interruptRequestTimeoutMs?: number;
   interruptCompletionTimeoutMs?: number;
 }
 
@@ -116,6 +140,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private restartAttempt = 0;
   private restartTimer?: NodeJS.Timeout;
   private inboundQueue: Promise<void> = Promise.resolve();
+  private readonly interruptRequestTimeoutMs: number;
   private readonly interruptCompletionTimeoutMs: number;
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
@@ -126,6 +151,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     options: CodexAppServerAdapterOptions
   ) {
     this.restartDelaysMs = options.restartDelaysMs ?? [500, 1_000, 2_000];
+    this.interruptRequestTimeoutMs = options.interruptRequestTimeoutMs ?? 5_000;
     this.interruptCompletionTimeoutMs = options.interruptCompletionTimeoutMs ?? 15_000;
     this.supervisor = new CodexAppServerSupervisor(store, {
       ...options,
@@ -386,14 +412,79 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (!session.providerSessionId) {
       throw new Error('Cannot interrupt a session without a provider thread id.');
     }
+    const providerSessionId = session.providerSessionId;
     const client = await this.ensureClient();
+    const interrupt = async (providerTurnId: string): Promise<void> => {
+      await client.requestMutation(
+        'turn/interrupt',
+        {
+          threadId: providerSessionId,
+          turnId: providerTurnId
+        },
+        this.interruptRequestTimeoutMs
+      );
+    };
+    const stopAlreadyInactiveReview = async (
+      providerTurnId: string,
+      error: Error
+    ): Promise<boolean> => {
+      if (!isNoActiveTurnToInterrupt(error)) {
+        return false;
+      }
+      const run = await this.store.getRunByProviderTurnId(providerTurnId);
+      if (!run || !canRetargetReviewTurn(run, session)) {
+        return false;
+      }
+      await this.recordLocalInterruption(
+        run,
+        'Codex reported no active turn to interrupt; treating the review as already stopped.'
+      );
+      await this.store.updateAgentSession(run.sessionId, { status: 'IDLE' });
+      return true;
+    };
     try {
-      await client.requestMutation('turn/interrupt', {
-        threadId: session.providerSessionId,
-        turnId: input.providerTurnId
-      });
+      await interrupt(input.providerTurnId);
     } catch (error) {
-      throw mapMutationError('turn/interrupt', error);
+      const mapped = mapMutationError('turn/interrupt', error);
+      if (mapped instanceof AgentMutationAmbiguousError) {
+        await this.recordInterruptAmbiguity(input.providerTurnId, mapped.message);
+        this.armInterruptDeadline(input.providerTurnId);
+        return;
+      }
+      if (await stopAlreadyInactiveReview(input.providerTurnId, mapped)) {
+        return;
+      }
+      const activeTurnId = activeTurnIdFromInterruptMismatch(mapped);
+      if (activeTurnId && activeTurnId !== input.providerTurnId) {
+        const run = await this.store.getRunByProviderTurnId(input.providerTurnId);
+        if (run && canRetargetReviewTurn(run, session)) {
+          const updatedRun = await this.store.updateRun(run.id, {
+            providerTurnId: activeTurnId,
+            lastEventAt: new Date().toISOString()
+          });
+          await this.recordRunActivity(updatedRun, 'turn/interrupt/retargeted', {
+            previousProviderTurnId: input.providerTurnId,
+            providerTurnId: activeTurnId
+          });
+          try {
+            await interrupt(activeTurnId);
+          } catch (retryError) {
+            const retryMapped = mapMutationError('turn/interrupt', retryError);
+            if (retryMapped instanceof AgentMutationAmbiguousError) {
+              await this.recordInterruptAmbiguity(activeTurnId, retryMapped.message);
+              this.armInterruptDeadline(activeTurnId);
+              return;
+            }
+            if (await stopAlreadyInactiveReview(activeTurnId, retryMapped)) {
+              return;
+            }
+            throw retryMapped;
+          }
+          this.armInterruptDeadline(activeTurnId);
+          return;
+        }
+      }
+      throw mapped;
     }
     this.armInterruptDeadline(input.providerTurnId);
   }
@@ -470,6 +561,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: 'user',
         sandbox: toSandboxMode(settings),
+        developerInstructions: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
         ephemeral: false
       });
       await this.recordSettingsObservation(
@@ -1084,6 +1176,12 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (existing) {
       return existing;
     }
+    if (session.role === 'REVIEW') {
+      const activeReviewRun = await this.store.getActiveRunForSession(session.id);
+      if (activeReviewRun?.mode === 'REVIEW') {
+        return activeReviewRun;
+      }
+    }
     if (session.role !== 'SUBAGENT') {
       return undefined;
     }
@@ -1243,11 +1341,35 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (!run) {
       run = await this.store.getActiveRunForSession(session.id);
       if (run) {
-        run = await this.store.updateRun(run.id, {
-          providerTurnId: turn.id,
-          status: 'RUNNING',
-          lastEventAt: new Date().toISOString()
-        });
+        if (!run.providerTurnId) {
+          run = await this.store.updateRun(run.id, {
+            providerTurnId: turn.id,
+            status: 'RUNNING',
+            lastEventAt: new Date().toISOString()
+          });
+        } else if (run.providerTurnId === turn.id) {
+          run = await this.store.updateRun(run.id, {
+            status: 'RUNNING',
+            lastEventAt: new Date().toISOString()
+          });
+        } else {
+          await this.store.appendEvent(
+            createDomainEvent({
+              type: 'AGENT_PROTOCOL_INCIDENT',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              agentSessionId: run.sessionId,
+              serverInstanceId: run.serverInstanceId,
+              source: 'provider',
+              payload: {
+                parseError: `Ignoring turn/started for ${turn.id}; active run already tracks ${run.providerTurnId}.`
+              }
+            })
+          );
+          return;
+        }
       }
     }
     if (!run) {
@@ -1596,6 +1718,72 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     );
   }
 
+  private async recordInterruptAmbiguity(
+    providerTurnId: string,
+    reason: string
+  ): Promise<void> {
+    const run = await this.store.getRunByProviderTurnId(providerTurnId);
+    if (!run) {
+      return;
+    }
+    if (
+      ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+        run.status
+      )
+    ) {
+      return;
+    }
+    await this.recordRunActivity(run, 'turn/interrupt/ambiguous', {
+      providerTurnId,
+      reason
+    });
+  }
+
+  private async recordLocalInterruption(
+    run: RunRecord,
+    terminalReason: string
+  ): Promise<void> {
+    const current = (await this.store.getRun(run.id)) ?? run;
+    if (
+      ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+        current.status
+      )
+    ) {
+      return;
+    }
+    const finalArtifact = await this.store.writeFinalArtifact(
+      current.taskId,
+      current.id,
+      `# Agent turn interrupted\n\n${terminalReason}\n`
+    );
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_INTERRUPTED',
+        taskId: current.taskId,
+        iterationId: current.iterationId,
+        runId: current.id,
+        worktreeId: current.worktreeId,
+        agentSessionId: current.sessionId,
+        serverInstanceId: current.serverInstanceId,
+        source: 'provider',
+        payload: {
+          terminalStatus: 'interrupted',
+          terminalReason,
+          finalArtifactId: finalArtifact.id
+        }
+      })
+    );
+    this.appEvents.emit({
+      type: 'run.terminal',
+      taskId: current.taskId,
+      iterationId: current.iterationId,
+      runId: current.id,
+      worktreeId: current.worktreeId,
+      payload: { status: 'interrupted', finalArtifactId: finalArtifact.id },
+      at: new Date().toISOString()
+    });
+  }
+
   private async finalizeTurn(
     run: RunRecord,
     turn: Turn,
@@ -1621,6 +1809,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
             'type' in item &&
             item.type === 'agentMessage'
         )?.text;
+    const reviewResult =
+      run.mode === 'REVIEW' ? parseCodexReviewResult(finalMessage) : undefined;
+    const codexReviewStatus = codexReviewStatusFromResult(reviewResult);
     const finalArtifact = await this.store.writeFinalArtifact(
       run.taskId,
       run.id,
@@ -1650,7 +1841,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
           terminalStatus: turn.status,
           error: turn.error?.message,
           finalArtifactId: finalArtifact.id,
-          terminalReason: turn.error?.message
+          terminalReason: turn.error?.message,
+          codexReviewStatus,
+          codexReviewResult: reviewResult
         }
       })
     );
@@ -1678,19 +1871,26 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         run.serverInstanceId === serverInstanceId && ACTIVE_RUN_STATES.includes(run.status)
     );
     for (const run of affected) {
-      await this.store.appendEvent(
-        createDomainEvent({
-          type: 'AGENT_RUNTIME_LOST',
-          taskId: run.taskId,
-          iterationId: run.iterationId,
-          runId: run.id,
-          worktreeId: run.worktreeId,
-          agentSessionId: run.sessionId,
-          serverInstanceId,
-          source: 'provider',
-          payload: { reason: 'Codex App Server exited unexpectedly.' }
-        })
-      );
+      if (run.status === 'INTERRUPTING') {
+        await this.recordLocalInterruption(
+          run,
+          'Codex App Server exited while processing an interruption.'
+        );
+      } else {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'AGENT_RUNTIME_LOST',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            serverInstanceId,
+            source: 'provider',
+            payload: { reason: 'Codex App Server exited unexpectedly.' }
+          })
+        );
+      }
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
     }
     for (const interaction of snapshot.interactionRequests.filter(
@@ -1741,6 +1941,10 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
             run.status
           )
         ) {
+          await this.recordLocalInterruption(
+            run,
+            `Turn ${providerTurnId} did not emit a terminal event after interruption; stopped the local runtime.`
+          );
           await this.supervisor.terminateUnresponsive(
             `Turn ${providerTurnId} did not emit a terminal event after interruption.`
           );
@@ -1979,7 +2183,18 @@ function mapMutationError(operation: string, error: unknown): Error {
   if (error instanceof CodexAmbiguousMutationError) {
     return new AgentMutationAmbiguousError(error.method || operation, error.message);
   }
-  return error instanceof Error ? error : new Error(String(error));
+  const mapped = error instanceof Error ? error : new Error(String(error));
+  if (/\bthread not found:/i.test(mapped.message)) {
+    return new AgentProviderSessionMissingError(operation, mapped.message);
+  }
+  return mapped;
+}
+
+function activeTurnIdFromInterruptMismatch(error: Error): string | undefined {
+  const match = error.message.match(
+    /expected active turn id\s+\S+\s+but found\s+([A-Za-z0-9_-]+)/i
+  );
+  return match?.[1];
 }
 
 function hashGoal(goal: string): string {

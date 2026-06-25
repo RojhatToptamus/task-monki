@@ -91,6 +91,16 @@ export class AgentMutationAmbiguousError extends Error {
   }
 }
 
+export class AgentProviderSessionMissingError extends Error {
+  constructor(
+    readonly operation: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'AgentProviderSessionMissingError';
+  }
+}
+
 export interface AgentProviderAdapter {
   initialize(): Promise<void>;
   preflight(): Promise<AgentPreflight>;

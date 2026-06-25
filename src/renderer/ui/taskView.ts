@@ -29,11 +29,44 @@ export interface TaskCardVM {
 /** Human label + tone for a task's most salient run/phase state. */
 export function describeTaskState(task: Task): { label: string; tone: Tone } {
   const attention = describeTaskAttention(task);
+  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+    return {
+      label: attention.label,
+      tone: attention.tone === 'error' ? 'error' : 'action'
+    };
+  }
+
+  const review = codexReviewGate(task);
+  if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
+    switch (review.status) {
+      case 'RUNNING':
+        return { label: 'AI reviewing', tone: 'info' };
+      case 'PASSED':
+        return { label: 'Review passed', tone: 'success' };
+      case 'NEEDS_CHANGES':
+        return { label: 'Needs changes', tone: 'error' };
+      case 'INCONCLUSIVE':
+        return { label: 'Review complete', tone: 'action' };
+      case 'FAILED':
+        return { label: 'Review failed', tone: 'error' };
+      case 'CANCELED':
+        return { label: 'Review stopped', tone: 'action' };
+      case 'STALE':
+        return { label: 'Needs re-review', tone: 'action' };
+      case 'NOT_RUN':
+        return { label: 'Needs review', tone: 'action' };
+    }
+  }
+
   if (attention) {
     return {
       label: attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
     };
+  }
+
+  if (isFixingReviewFeedback(task)) {
+    return { label: 'Fixing review feedback', tone: 'info' };
   }
 
   const run = task.projection.agentRun;
@@ -48,10 +81,6 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   }
 
   switch (task.workflowPhase) {
-    case 'REVIEW':
-      return { label: 'Review', tone: 'action' };
-    case 'IN_REVIEW':
-      return { label: 'In review', tone: 'info' };
     case 'DONE':
       return { label: 'Done', tone: 'success' };
     case 'CANCELED':
@@ -62,6 +91,46 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
     default:
       return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
   }
+}
+
+export function codexReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
+  return task.projection.codexReview ?? { status: 'NOT_RUN' };
+}
+
+export function canRequestCodexReviewChanges(
+  review: NonNullable<Task['projection']['codexReview']>,
+  effectiveStatus = review.status,
+  hasReviewOutput = Boolean(review.result)
+): boolean {
+  if (effectiveStatus === 'NEEDS_CHANGES' || effectiveStatus === 'INCONCLUSIVE') {
+    return true;
+  }
+  return (
+    effectiveStatus === 'FAILED' &&
+    hasReviewOutput
+  );
+}
+
+const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
+  'QUEUED',
+  'STARTING',
+  'RUNNING'
+]);
+
+function isFixingReviewFeedback(task: Task): boolean {
+  const review = codexReviewGate(task);
+  return (
+    task.workflowPhase === 'IN_PROGRESS' &&
+    REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
+    review.status === 'STALE' &&
+    Boolean(review.runId || review.result)
+  );
+}
+
+function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
+  return ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'RECOVERY_REQUIRED', 'LOST'].includes(
+    agentRun
+  );
 }
 
 function gitRollup(task: Task): Rollup {
@@ -163,7 +232,7 @@ export function computeNavCounts(tasks: Task[]): NavCounts {
   return {
     inbox: tasks.filter(isAttentionTask).length,
     active: tasks.filter(isInFlightTask).length,
-    review: tasks.filter((task) => REVIEW_PHASES.includes(task.workflowPhase)).length,
+    review: tasks.filter(isReviewQueueTask).length,
     done: tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)).length
   };
 }
@@ -174,9 +243,9 @@ export function tasksForView(tasks: Task[], view: NavView): Task[] {
     [...list].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   switch (view) {
     case 'active':
-      return sorted(tasks.filter(isInFlightTask));
+      return sorted(tasks.filter((task) => isInFlightTask(task) && !isReviewQueueTask(task)));
     case 'review':
-      return sorted(tasks.filter((task) => REVIEW_PHASES.includes(task.workflowPhase)));
+      return sorted(tasks.filter(isReviewQueueTask));
     case 'done':
       return sorted(tasks.filter((task) => DONE_PHASES.includes(task.workflowPhase)));
     default:
@@ -201,6 +270,16 @@ export const BOARD_COLUMNS: BoardColumnDef[] = [
 
 export function columnTasks(tasks: Task[], column: BoardColumnDef): Task[] {
   return [...tasks]
-    .filter((task) => column.phases.includes(task.workflowPhase))
+    .filter((task) =>
+      column.key === 'review'
+        ? isReviewQueueTask(task)
+        : column.key === 'progress'
+          ? column.phases.includes(task.workflowPhase) && !isReviewQueueTask(task)
+          : column.phases.includes(task.workflowPhase)
+    )
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function isReviewQueueTask(task: Task): boolean {
+  return REVIEW_PHASES.includes(task.workflowPhase) || codexReviewGate(task).status === 'RUNNING';
 }

@@ -24,7 +24,8 @@ import {
   selectTaskEvents,
   selectTaskRuns
 } from '../model/selectors';
-import { MainColumn } from './MainColumn';
+import { resolveModelExecutionSettings } from '../model/agentExecutionSettings';
+import { MainColumn, type AppSettings } from './MainColumn';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
 import { TaskDetail } from './TaskDetail';
@@ -57,6 +58,15 @@ const emptySnapshot: TaskSnapshot = {
 };
 
 type ThemePreference = 'light' | 'dark';
+type NotificationTone = 'info' | 'success' | 'error';
+interface AppNotification {
+  id: string;
+  tone: NotificationTone;
+  message: string;
+}
+
+const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
+const APP_SETTINGS_STORAGE_KEY = 'task-monki-app-settings';
 
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
@@ -70,11 +80,44 @@ export function App() {
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(() => getInitialTheme());
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => getInitialCollapsed());
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => getInitialAppSettings());
   const [providerState, setProviderState] = useState<AgentProviderState>();
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
   const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
   const toggleSidebar = useCallback(() => setIsSidebarCollapsed((current) => !current), []);
+  const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setNotifications((current) => [...current.slice(-2), { id, tone, message }]);
+    window.setTimeout(() => {
+      setNotifications((current) => current.filter((notification) => notification.id !== id));
+    }, 4200);
+  }, []);
+
+  const reportActionError = useCallback(
+    (caught: unknown, fallback: string) => {
+      const message = caught instanceof Error ? caught.message : fallback;
+      setError(message);
+      notify(message, 'error');
+      return message;
+    },
+    [notify]
+  );
+  const updateTheme = useCallback(
+    (nextTheme: ThemePreference) => {
+      setTheme(nextTheme);
+      notify('Theme updated.', 'success');
+    },
+    [notify]
+  );
+  const updateAppSettings = useCallback(
+    (nextSettings: AppSettings) => {
+      setAppSettings(nextSettings);
+      notify('Settings updated.', 'success');
+    },
+    [notify]
+  );
 
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
@@ -89,6 +132,10 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem('task-monki-sidebar-collapsed', isSidebarCollapsed ? '1' : '0');
   }, [isSidebarCollapsed]);
+
+  useEffect(() => {
+    window.localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
+  }, [appSettings]);
 
   useEffect(() => {
     let canceled = false;
@@ -217,26 +264,64 @@ export function App() {
   const selectedCiRollup = selectedTask ? selectLatestCiRollup(snapshot, selectedTask) : undefined;
   const selectedReviewRollup = selectedTask ? selectLatestReviewRollup(snapshot, selectedTask) : undefined;
   const selectedMergeSnapshot = selectedTask ? selectLatestMergeSnapshot(snapshot, selectedTask) : undefined;
+  const providerModels = providerState?.models ?? [];
+  const defaultTaskSettings = useMemo(
+    () =>
+      resolveModelExecutionSettings(
+        providerModels,
+        appSettings.defaultModel,
+        appSettings.defaultReasoningEffort
+      ),
+    [appSettings.defaultModel, appSettings.defaultReasoningEffort, providerModels]
+  );
+  const reviewExecutionSettings = useMemo(
+    () =>
+      resolveModelExecutionSettings(
+        providerModels,
+        appSettings.reviewModel ?? appSettings.defaultModel,
+        appSettings.reviewReasoningEffort
+      ),
+    [
+      appSettings.defaultModel,
+      appSettings.reviewModel,
+      appSettings.reviewReasoningEffort,
+      providerModels
+    ]
+  );
 
   const createTask = async (input: CreateTaskRequest) => {
-    const created = await taskManagerApi.createTask(input);
-    setSelectedTaskId(created.id);
-    setIsDetailOpen(true);
-    setIsNewTaskOpen(false);
-    await refresh();
+    try {
+      const created = await taskManagerApi.createTask(input);
+      setSelectedTaskId(created.id);
+      setIsDetailOpen(true);
+      setIsNewTaskOpen(false);
+      notify('Task created.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not create task.');
+      throw caught;
+    }
   };
 
   const refinePrompt = async (repositoryPath: string, input: string) => {
-    return taskManagerApi.refinePrompt({ repositoryPath, input });
+    try {
+      const refined = await taskManagerApi.refinePrompt({ repositoryPath, input });
+      notify('Prompt refined.', 'success');
+      return refined;
+    } catch (caught) {
+      reportActionError(caught, 'Could not refine prompt.');
+      throw caught;
+    }
   };
 
   const startRun = async (taskId: string) => {
     setError(undefined);
     try {
       await taskManagerApi.startRun({ taskId, mode: 'IMPLEMENTATION' });
+      notify('Agent run started.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to start run.');
+      reportActionError(caught, 'Failed to start run.');
     }
   };
 
@@ -244,9 +329,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.prepareWorktree({ taskId });
+      notify('Worktree prepared.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to prepare worktree.');
+      reportActionError(caught, 'Failed to prepare worktree.');
     }
   };
 
@@ -254,9 +340,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.refreshEvidence({ taskId });
+      notify('Evidence refreshed.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to refresh evidence.');
+      reportActionError(caught, 'Failed to refresh evidence.');
     }
   };
 
@@ -264,9 +351,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.runTests({ taskId });
+      notify('Test run started.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to run tests.');
+      reportActionError(caught, 'Failed to run tests.');
     }
   };
 
@@ -274,9 +362,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.createDeliveryCommit({ taskId });
+      notify('Delivery commit created.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to create delivery commit.');
+      reportActionError(caught, 'Failed to create delivery commit.');
     }
   };
 
@@ -284,9 +373,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.preflightGitHub({ taskId });
+      notify('GitHub capability checked.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to check GitHub capability.');
+      reportActionError(caught, 'Failed to check GitHub capability.');
     }
   };
 
@@ -294,9 +384,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.createPullRequest({ taskId });
+      notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to create pull request.');
+      reportActionError(caught, 'Failed to create pull request.');
     }
   };
 
@@ -304,9 +395,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.refreshGitHub({ taskId });
+      notify('GitHub state refreshed.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to refresh GitHub.');
+      reportActionError(caught, 'Failed to refresh GitHub.');
     }
   };
 
@@ -314,9 +406,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.transitionTask({ taskId, toPhase });
+      notify(`Task moved to ${toPhase.toLowerCase().replace(/_/g, ' ')}.`, 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Transition blocked.');
+      reportActionError(caught, 'Transition blocked.');
     }
   };
 
@@ -324,9 +417,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.cancelRun({ runId });
+      notify('Run cancellation requested.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to cancel run.');
+      reportActionError(caught, 'Failed to cancel run.');
     }
   };
 
@@ -338,9 +432,10 @@ export function App() {
         throw new Error('Run not found.');
       }
       await taskManagerApi.steerRun({ taskId: run.taskId, runId, instruction });
+      notify('Instruction sent.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to steer run.');
+      reportActionError(caught, 'Failed to steer run.');
       throw caught;
     }
   };
@@ -353,9 +448,10 @@ export function App() {
         throw new Error('Run not found.');
       }
       await taskManagerApi.continueRun({ taskId: run.taskId, runId, instruction });
+      notify('Follow-up run started.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to continue run.');
+      reportActionError(caught, 'Failed to continue run.');
       throw caught;
     }
   };
@@ -377,9 +473,10 @@ export function App() {
         strategy,
         instruction
       });
+      notify(strategy === 'FORK' ? 'Forked retry started.' : 'Retry started.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to retry run.');
+      reportActionError(caught, 'Failed to retry run.');
       throw caught;
     }
   };
@@ -391,14 +488,17 @@ export function App() {
       if (!run) {
         throw new Error('Run not found.');
       }
+      notify(REVIEW_STARTED_NOTICE, 'info');
       await taskManagerApi.startReview({
         taskId: run.taskId,
         runId,
-        target: { type: 'UNCOMMITTED_CHANGES' }
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: reviewExecutionSettings
       });
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to start review.');
+      reportActionError(caught, 'Failed to start review.');
+      throw caught;
     }
   };
 
@@ -406,9 +506,10 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.syncAgentGoal({ taskId, sessionId });
+      notify('Provider goal synced.', 'success');
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Failed to sync provider goal.');
+      reportActionError(caught, 'Failed to sync provider goal.');
       throw caught;
     }
   };
@@ -425,11 +526,10 @@ export function App() {
         interactionRequestId: interaction.id,
         decision
       });
+      notify('Provider request answered.', 'success');
       await refresh();
     } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : 'Failed to submit approval decision.'
-      );
+      reportActionError(caught, 'Failed to submit approval decision.');
       throw caught;
     }
   };
@@ -596,56 +696,58 @@ export function App() {
           <TaskDetail
             error={error}
             task={selectedTask}
-          run={selectedRun}
-          worktree={selectedWorktree}
-          gitSnapshot={selectedGitSnapshot}
-          testRun={selectedTestRun}
-          githubRepository={selectedGitHubRepository}
-          branchPublication={selectedBranchPublication}
-          pullRequest={selectedPullRequest}
-          ciRollup={selectedCiRollup}
-          reviewRollup={selectedReviewRollup}
-          mergeSnapshot={selectedMergeSnapshot}
-          events={selectedEvents}
-          runs={selectedRuns}
-          sessions={selectedSessions}
-          items={selectedItems}
-          goalSnapshots={selectedGoals}
-          planRevisions={selectedPlans}
-          usageSnapshots={selectedUsage}
-          settingsObservations={selectedSettings}
-          subagentObservations={selectedSubagentObservations}
-          providerState={providerState}
-          server={snapshot.agentServers.find(
-            (candidate) => candidate.id === selectedRun?.serverInstanceId
-          )}
-          artifacts={snapshot.artifacts}
-          interactions={selectedInteractions}
-          onPrepareWorktree={prepareWorktree}
-          onStart={startRun}
-          onCancel={cancelRun}
-          onSteer={steerRun}
-          onContinue={continueRun}
-          onRetry={retryRun}
-          onReview={startReview}
-          onSyncAgentGoal={syncAgentGoal}
-          onRespondToInteraction={respondToInteraction}
-          onRefreshEvidence={refreshEvidence}
-          onRunTests={runTests}
-          onCreateDeliveryCommit={createDeliveryCommit}
-          onPreflightGitHub={preflightGitHub}
-          onCreatePullRequest={createPullRequest}
-          onRefreshGitHub={refreshGitHub}
-          onTransition={transitionTask}
+            run={selectedRun}
+            worktree={selectedWorktree}
+            gitSnapshot={selectedGitSnapshot}
+            testRun={selectedTestRun}
+            githubRepository={selectedGitHubRepository}
+            branchPublication={selectedBranchPublication}
+            pullRequest={selectedPullRequest}
+            ciRollup={selectedCiRollup}
+            reviewRollup={selectedReviewRollup}
+            mergeSnapshot={selectedMergeSnapshot}
+            events={selectedEvents}
+            runs={selectedRuns}
+            sessions={selectedSessions}
+            items={selectedItems}
+            goalSnapshots={selectedGoals}
+            planRevisions={selectedPlans}
+            usageSnapshots={selectedUsage}
+            settingsObservations={selectedSettings}
+            subagentObservations={selectedSubagentObservations}
+            providerState={providerState}
+            server={snapshot.agentServers.find(
+              (candidate) => candidate.id === selectedRun?.serverInstanceId
+            )}
+            artifacts={snapshot.artifacts}
+            interactions={selectedInteractions}
+            onPrepareWorktree={prepareWorktree}
+            onStart={startRun}
+            onCancel={cancelRun}
+            onSteer={steerRun}
+            onContinue={continueRun}
+            onRetry={retryRun}
+            onReview={startReview}
+            onSyncAgentGoal={syncAgentGoal}
+            onRespondToInteraction={respondToInteraction}
+            onRefreshEvidence={refreshEvidence}
+            onRunTests={runTests}
+            onCreateDeliveryCommit={createDeliveryCommit}
+            onPreflightGitHub={preflightGitHub}
+            onCreatePullRequest={createPullRequest}
+            onRefreshGitHub={refreshGitHub}
+            onTransition={transitionTask}
           />
         ) : (
           <MainColumn
             view={view}
             tasks={snapshot.tasks}
             theme={theme}
-            onSetTheme={setTheme}
+            onSetTheme={updateTheme}
+            appSettings={appSettings}
+            onSetAppSettings={updateAppSettings}
             error={error}
-            models={providerState?.models ?? []}
+            models={providerModels}
             defaultRepositoryPath={defaultRepositoryPath}
             onSelect={selectTask}
           />
@@ -655,14 +757,33 @@ export function App() {
       {isNewTaskOpen ? (
         <NewTaskPanel
           defaultRepositoryPath={defaultRepositoryPath}
-          models={providerState?.models ?? []}
+          models={providerModels}
           preflight={providerState?.preflight}
+          defaultAgentSettings={defaultTaskSettings}
           disabled={isLoading || !defaultRepositoryPath}
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
           onClose={closeNewTask}
         />
       ) : null}
+
+      <GlobalNotifier notifications={notifications} />
+    </div>
+  );
+}
+
+function GlobalNotifier({ notifications }: { notifications: AppNotification[] }) {
+  return (
+    <div className="tm-notifier" aria-live="polite" aria-atomic="false">
+      {notifications.map((notification) => (
+        <div
+          className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
+          key={notification.id}
+        >
+          <span className="tm-notifier__dot" />
+          <strong>{notification.message}</strong>
+        </div>
+      ))}
     </div>
   );
 }
@@ -677,6 +798,30 @@ function getInitialTheme(): ThemePreference {
 
 function getInitialCollapsed(): boolean {
   return window.localStorage.getItem('task-monki-sidebar-collapsed') === '1';
+}
+
+function getInitialAppSettings(): AppSettings {
+  try {
+    const raw = window.localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      defaultModel: typeof parsed.defaultModel === 'string' ? parsed.defaultModel : undefined,
+      defaultReasoningEffort:
+        typeof parsed.defaultReasoningEffort === 'string'
+          ? parsed.defaultReasoningEffort
+          : undefined,
+      reviewModel: typeof parsed.reviewModel === 'string' ? parsed.reviewModel : undefined,
+      reviewReasoningEffort:
+        typeof parsed.reviewReasoningEffort === 'string'
+          ? parsed.reviewReasoningEffort
+          : undefined
+    };
+  } catch {
+    return {};
+  }
 }
 
 function repositoryDisplay(repositoryPath: string): string {
