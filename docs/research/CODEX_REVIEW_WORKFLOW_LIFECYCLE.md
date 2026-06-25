@@ -2,6 +2,9 @@
 
 Date: 2026-06-25
 
+Status: authoritative for review, follow-up, stale-review, and review
+interruption behavior.
+
 This document defines the Task Monki review workflow model and the operational
 rules for Codex review runs, follow-up implementation runs, cancellation,
 recovery, and board state. Use it when changing review/session code or

@@ -138,6 +138,14 @@ npm run build
 npm run check:codex-protocol
 ```
 
+## Development docs
+
+- [Agent guide](./AGENTS.md) is the first stop for AI agents working in this repo.
+- [Docs index](./docs/README.md) explains the curated public docs and what stays private.
+- [Product workflow](./docs/PRODUCT_WORKFLOW.md) captures board phases and action rules.
+- [App Server architecture](./docs/APP_SERVER_ARCHITECTURE.md) captures the Codex integration boundary.
+- [Review lifecycle](./docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md) is authoritative for Codex review, request-changes, stale-review, and follow-up behavior.
+
 ## Generated Codex protocol bindings
 
 The TypeScript bindings in
