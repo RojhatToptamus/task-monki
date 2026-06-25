@@ -84,12 +84,17 @@ Expected UI:
 6. Reducer keeps the task workflow phase in Review.
 7. `projection.codexReview.status` becomes `RUNNING`.
 
-The review fork must carry the configured review model, service tier, and
+The review fork must carry the configured review model, service tier, cwd, and
 reasoning effort. Codex exposes reasoning effort for `thread/fork` through the
 request `config.model_reasoning_effort` field rather than a top-level `effort`
 field. If that config is omitted, the fork can run at the provider default or an
 inherited effort such as `xhigh`, making reviews much slower than the user's
 selected review setting.
+
+After creating the review fork, Task Monki must call `review/start` with
+`delivery: "inline"` on that fork. Asking `review/start` for another detached
+thread can cause the provider to create a second review thread with a different
+cwd, so the AI reviews unrelated local changes instead of the task worktree.
 
 Expected UI:
 
@@ -244,11 +249,11 @@ Implementation/follow-up:
 - If the provider thread is missing, the orchestrator can recreate the provider
   session and retry starting the turn.
 
-Detached review:
+Codex review:
 
 - Uses a local review session with `role: "REVIEW"`.
 - Forks from the source run's provider thread.
-- Calls `review/start` on the forked provider thread.
+- Calls `review/start` inline on the forked provider thread.
 - Stores `reviewThreadId` on the review session.
 - The review run id is tracked through `projection.codexReview.runId`.
 

@@ -585,7 +585,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       response = await client.requestMutation('review/start', {
         threadId: reviewBase.thread.id,
         target: toReviewTarget(input.target),
-        delivery: 'detached'
+        delivery: 'inline'
       });
     } catch (error) {
       throw mapMutationError('review/start', error);

@@ -422,7 +422,7 @@ describe('CodexAppServerAdapter', () => {
     await orchestrator.shutdown();
   });
 
-  it('passes configured reasoning effort to detached review thread forks', async () => {
+  it('passes review config to the provider fork and starts review inline there', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-effort-')
     );
@@ -476,8 +476,10 @@ describe('CodexAppServerAdapter', () => {
 
     const server = snapshot.agentServers[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const reviewFork = readOutboundMessages(journal).find(
-      (message) => message.method === 'thread/fork'
+    const messages = readOutboundMessages(journal);
+    const reviewFork = messages.find((message) => message.method === 'thread/fork');
+    expect((reviewFork?.params as { cwd?: string } | undefined)?.cwd).toBe(
+      worktree.worktreePath
     );
     expect(
       (
@@ -486,6 +488,14 @@ describe('CodexAppServerAdapter', () => {
         }
       )?.config?.model_reasoning_effort
     ).toBe('low');
+    const reviewStart = messages.find((message) => message.method === 'review/start');
+    expect(
+      (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
+        ?.threadId
+    ).toBe('thread-review');
+    expect(
+      (reviewStart?.params as { delivery?: string } | undefined)?.delivery
+    ).toBe('inline');
 
     await orchestrator.interruptRun(reviewRun.id);
     await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');

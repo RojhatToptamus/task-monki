@@ -128,8 +128,11 @@ Codex protocol detail:
 - `turn/start` has a first-class `effort` field.
 - `thread/start`, `thread/resume`, and `thread/fork` do not; they must pass
   `model_reasoning_effort` through the request `config` object.
-- Detached reviews use `thread/fork` before `review/start`, so review latency
-  depends on this config being set correctly.
+- Reviews use `thread/fork` before `review/start`, so review latency depends on
+  this config being set correctly.
+- Task Monki starts `review/start` inline on that fork. Requesting a second
+  detached review thread can lose the fork cwd and review unrelated local
+  changes.
 
 ## Recovery rules
 
