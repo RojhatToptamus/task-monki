@@ -5,6 +5,7 @@ import type {
   AgentReviewTarget,
   AgentRetryStrategy,
   AgentRunMode,
+  AgentSessionRecord,
   InteractionRequestRecord,
   RespondToInteractionRequest,
   RunRecord,
@@ -17,6 +18,7 @@ import { createDomainEvent } from '../storage/domainEvent';
 import type { FileTaskStore } from '../storage/FileTaskStore';
 import {
   AgentMutationAmbiguousError,
+  AgentProviderSessionMissingError,
   type AgentProviderAdapter
 } from './AgentProviderAdapter';
 import { AgentInteractionService } from './AgentInteractionService';
@@ -160,19 +162,23 @@ export class AgentOrchestrator {
     });
 
     try {
-      await this.adapter.startTurn({
-        localRunId: run.id,
-        session: {
-          localSessionId: session.id,
-          providerSessionId: session.providerSessionId
-        },
-        mode: input.mode,
-        prompt: input.prompt,
-        authoritativeGoal: input.task.prompt,
-        settings
-      });
+      await this.startProviderTurn(run, session, input, settings);
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
+      if (error instanceof AgentProviderSessionMissingError) {
+        try {
+          const recovered = await this.recreateMissingProviderSession(
+            session,
+            settings,
+            error
+          );
+          await this.startProviderTurn(run, recovered, input, settings);
+          return (await this.store.getRun(run.id)) ?? run;
+        } catch (retryError) {
+          await this.recordStartFailure(run, retryError);
+          throw retryError;
+        }
+      }
       await this.recordStartFailure(run, error);
       throw error;
     }
@@ -208,14 +214,34 @@ export class AgentOrchestrator {
       forkedFromSessionId: sourceSession.id
     });
     try {
-      const materialized = await this.adapter.forkSession({
-        sourceSession: {
-          localSessionId: sourceSession.id,
-          providerSessionId: sourceSession.providerSessionId
-        },
-        localSessionId: fork.id,
-        settings
-      });
+      let materialized: AgentSessionRecord;
+      try {
+        materialized = await this.adapter.forkSession({
+          sourceSession: {
+            localSessionId: sourceSession.id,
+            providerSessionId: sourceSession.providerSessionId
+          },
+          localSessionId: fork.id,
+          settings
+        });
+      } catch (error) {
+        if (!(error instanceof AgentProviderSessionMissingError)) {
+          throw error;
+        }
+        const recovered = await this.recreateMissingProviderSession(
+          sourceSession,
+          settings,
+          error
+        );
+        materialized = await this.adapter.forkSession({
+          sourceSession: {
+            localSessionId: recovered.id,
+            providerSessionId: recovered.providerSessionId
+          },
+          localSessionId: fork.id,
+          settings
+        });
+      }
       return this.startTurnSerially({
         ...input,
         settings,
@@ -268,17 +294,23 @@ export class AgentOrchestrator {
       continuedFromRunId: input.sourceRun.id
     });
     try {
-      await this.adapter.startReview({
-        localRunId: run.id,
-        sourceSession: {
-          localSessionId: sourceSession.id,
-          providerSessionId: sourceSession.providerSessionId
-        },
-        reviewSessionId: reviewSession.id,
-        target: input.target
-      });
+      await this.startProviderReview(run, sourceSession, reviewSession, input.target);
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
+      if (error instanceof AgentProviderSessionMissingError) {
+        try {
+          const recovered = await this.recreateMissingProviderSession(
+            sourceSession,
+            settings,
+            error
+          );
+          await this.startProviderReview(run, recovered, reviewSession, input.target);
+          return (await this.store.getRun(run.id)) ?? run;
+        } catch (retryError) {
+          await this.recordStartFailure(run, retryError);
+          throw retryError;
+        }
+      }
       await this.recordStartFailure(run, error);
       throw error;
     }
@@ -384,6 +416,73 @@ export class AgentOrchestrator {
     return this.adapter.shutdown();
   }
 
+  private async startProviderTurn(
+    run: RunRecord,
+    session: AgentSessionRecord,
+    input: StartOrchestratedTurn,
+    settings: AgentExecutionSettings
+  ): Promise<void> {
+    await this.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: input.mode,
+      prompt: input.prompt,
+      authoritativeGoal: input.task.prompt,
+      settings
+    });
+  }
+
+  private async startProviderReview(
+    run: RunRecord,
+    sourceSession: AgentSessionRecord,
+    reviewSession: AgentSessionRecord,
+    target: AgentReviewTarget
+  ): Promise<void> {
+    if (!this.adapter.startReview) {
+      throw new Error('This provider does not support detached review.');
+    }
+    await this.adapter.startReview({
+      localRunId: run.id,
+      sourceSession: {
+        localSessionId: sourceSession.id,
+        providerSessionId: sourceSession.providerSessionId
+      },
+      reviewSessionId: reviewSession.id,
+      target
+    });
+  }
+
+  private async recreateMissingProviderSession(
+    session: AgentSessionRecord,
+    settings: AgentExecutionSettings,
+    error: AgentProviderSessionMissingError
+  ): Promise<AgentSessionRecord> {
+    const previousProviderSessionId = session.providerSessionId;
+    if (!previousProviderSessionId) {
+      throw error;
+    }
+    const reset = await this.store.updateAgentSession(session.id, {
+      providerSessionId: undefined,
+      providerSessionTreeId: undefined,
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      observedSettings: undefined,
+      lastAttachedAt: undefined,
+      relationshipDetail: `Codex provider thread ${previousProviderSessionId} was missing during ${error.operation}; Task Monki recreated the provider session.`
+    });
+    return this.adapter.createSession({
+      localSessionId: reset.id,
+      taskId: reset.taskId,
+      iterationId: reset.iterationId,
+      worktreeId: reset.worktreeId,
+      worktreePath: reset.worktreePath,
+      settings
+    });
+  }
+
   private async validateSettings(
     settings: AgentExecutionSettings
   ): Promise<AgentExecutionSettings> {
@@ -405,10 +504,14 @@ export class AgentOrchestrator {
         `Reasoning effort ${effort} is not supported by ${model.displayName}.`
       );
     }
+    const modelProvider =
+      settings.modelProvider && settings.modelProvider !== 'codex'
+        ? settings.modelProvider
+        : 'openai';
     return {
       ...settings,
       model: model.model,
-      modelProvider: settings.modelProvider ?? 'openai',
+      modelProvider,
       reasoningEffort: effort,
       serviceTier: settings.serviceTier ?? model.defaultServiceTier
     };

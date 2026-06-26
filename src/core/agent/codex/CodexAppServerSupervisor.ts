@@ -78,7 +78,13 @@ export class CodexAppServerSupervisor {
     }
 
     if (this.server) {
-      await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
+      const stored = await this.store.getAgentServer(this.server.id);
+      if (stored) {
+        this.server = stored;
+      }
+      if (!['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
+        await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
+      }
     }
     child.kill('SIGTERM');
     if (!(await waitForClose(child, 3_000))) {
@@ -196,7 +202,13 @@ export class CodexAppServerSupervisor {
   }
 
   private async failProtocol(error: Error): Promise<void> {
-    if (this.server && !['FAILED', 'EXITED', 'LOST'].includes(this.server.status)) {
+    if (this.server) {
+      const stored = await this.store.getAgentServer(this.server.id);
+      if (stored) {
+        this.server = stored;
+      }
+    }
+    if (this.server && !isTerminalServerStatus(this.server.status)) {
       this.server = await this.store.updateAgentServer(this.server.id, {
         status: 'FAILED',
         exitReason: `Protocol error: ${error.message}`
@@ -237,6 +249,10 @@ export class CodexAppServerSupervisor {
       this.events.emit('exit', server, unexpected);
     }
   }
+}
+
+function isTerminalServerStatus(status: AgentServerInstance['status']): boolean {
+  return status === 'FAILED' || status === 'EXITED' || status === 'LOST';
 }
 
 export async function probeCodexVersion(executable: string, cwd: string): Promise<string> {

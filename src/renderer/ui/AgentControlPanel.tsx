@@ -19,7 +19,6 @@ interface AgentControlPanelProps {
     strategy: AgentRetryStrategy,
     instruction?: string
   ): Promise<void>;
-  onReview(runId: string): Promise<void>;
 }
 
 const TERMINAL_OR_RECOVERY = new Set<RunRecord['status']>([
@@ -36,14 +35,13 @@ export function AgentControlPanel({
   onSteer,
   onInterrupt,
   onContinue,
-  onRetry,
-  onReview
+  onRetry
 }: AgentControlPanelProps) {
   const [mode, setMode] = useState<ComposerMode>();
   const [instruction, setInstruction] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  if (!run) {
+  if (!run || run.mode === 'REVIEW') {
     return null;
   }
 
@@ -166,16 +164,6 @@ export function AgentControlPanel({
                   }}
                 >
                   Fork alternative
-                </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  onClick={(event) => {
-                    closeParentDetails(event.currentTarget);
-                    void onReview(run.id);
-                  }}
-                >
-                  Review changes
                 </button>
               </div>
             </details>

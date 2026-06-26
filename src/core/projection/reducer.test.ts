@@ -100,6 +100,215 @@ describe('projection reducer', () => {
     expect(state.tasks[0].projection.tests).toBe('QUEUED');
   });
 
+  it('keeps Codex review runs in Review and records an inconclusive review result', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-1',
+      currentRunId: 'implementation-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'COMPLETED',
+        summary: 'Implementation completed.'
+      }
+    };
+    const reviewRun = createRun({ id: 'review-run', mode: 'REVIEW' });
+    const implementationRun = createRun({
+      id: 'implementation-run',
+      mode: 'IMPLEMENTATION',
+      status: 'COMPLETED'
+    });
+    const started = applyEventToState(
+      { ...createEmptyState(), tasks: [task], runs: [implementationRun, reviewRun] },
+      {
+        ...createEvent('TRANSITION_REQUESTED', {
+          fromPhase: 'REVIEW',
+          toPhase: 'IN_PROGRESS'
+        }),
+        runId: 'review-run'
+      }
+    );
+    const running = applyEventToState(
+      started,
+      {
+        ...createEvent('AGENT_RUN_STARTED', {
+          mode: 'REVIEW',
+          beforeGitSnapshotId: 'git-1',
+          reviewedHeadSha: 'abc',
+          reviewedDirtyFingerprint: 'fp-1'
+        }),
+        runId: 'review-run'
+      }
+    );
+    const completed = applyEventToState(
+      applyEventToState(running, {
+        ...createEvent('PROCESS_STARTED', { pid: 123 }),
+        runId: 'review-run'
+      }),
+      {
+        ...createEvent('AGENT_RUN_COMPLETED', {
+          terminalStatus: 'completed',
+          finalArtifactId: 'artifact-review'
+        }),
+        runId: 'review-run'
+      }
+    );
+
+    expect(started.tasks[0].workflowPhase).toBe('REVIEW');
+    expect(started.tasks[0].currentRunId).toBe('implementation-run');
+    expect(started.tasks[0].projection.agentRun).toBe('COMPLETED');
+    expect(running.tasks[0].workflowPhase).toBe('REVIEW');
+    expect(running.tasks[0].projection.codexReview?.status).toBe('RUNNING');
+    expect(running.tasks[0].projection.agentRun).toBe('COMPLETED');
+    expect(completed.tasks[0].workflowPhase).toBe('REVIEW');
+    expect(completed.tasks[0].projection.codexReview?.status).toBe('INCONCLUSIVE');
+    expect(completed.tasks[0].projection.codexReview?.finalArtifactId).toBe('artifact-review');
+    expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
+  });
+
+  it('stores structured Codex review findings and derives needs-changes status', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-1',
+      currentRunId: 'implementation-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'COMPLETED',
+        codexReview: { status: 'RUNNING', runId: 'review-run' }
+      }
+    };
+    const completed = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [task],
+        runs: [
+          createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
+          createRun({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' })
+        ]
+      },
+      {
+        ...createEvent('AGENT_RUN_COMPLETED', {
+          terminalStatus: 'completed',
+          codexReviewResult: {
+            schemaVersion: 'codex-review/v1',
+            verdict: 'PASSED',
+            summary: 'Found a blocker despite provider verdict.',
+            findings: [
+              {
+                id: 'leak',
+                severity: 'BLOCKER',
+                title: 'Listener is not cleaned up',
+                explanation: 'The handler is added repeatedly and never removed.',
+                path: 'src/renderer/ui/App.tsx',
+                line: 42
+              }
+            ]
+          }
+        }),
+        runId: 'review-run'
+      }
+    );
+
+    const review = completed.tasks[0].projection.codexReview;
+    expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
+    expect(review?.status).toBe('NEEDS_CHANGES');
+    expect(review?.summary).toBe('Found a blocker despite provider verdict.');
+    expect(review?.result?.findings[0]?.severity).toBe('BLOCKER');
+  });
+
+  it('marks review results stale when the diff changes or follow-up work starts', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      currentIterationId: 'iteration-1',
+      currentRunId: 'review-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        codexReview: {
+          status: 'INCONCLUSIVE',
+          runId: 'review-run',
+          reviewedHeadSha: 'abc',
+          reviewedDirtyFingerprint: 'fp-1'
+        }
+      }
+    };
+    const withNewDiff = applyEventToState(
+      { ...createEmptyState(), tasks: [task], runs: [createRun({ id: 'review-run', mode: 'REVIEW' })] },
+      {
+        ...createEvent('GIT_SNAPSHOT_CAPTURED', {
+          id: 'git-2',
+          headSha: 'abc',
+          dirtyFingerprint: 'fp-2',
+          status: 'DIRTY'
+        }),
+        runId: undefined
+      }
+    );
+    expect(withNewDiff.tasks[0].projection.codexReview?.status).toBe('STALE');
+
+    const followUpTask = {
+      ...task,
+      projection: {
+        ...task.projection,
+        codexReview: {
+          ...task.projection.codexReview!,
+          status: 'INCONCLUSIVE' as const
+        }
+      }
+    };
+    const followUpState = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [{ ...followUpTask, currentRunId: 'follow-up' }],
+        runs: [createRun({ id: 'follow-up', mode: 'FOLLOW_UP' })]
+      },
+      {
+        ...createEvent('AGENT_RUN_STARTED', { mode: 'FOLLOW_UP' }),
+        runId: 'follow-up'
+      }
+    );
+    expect(followUpState.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(followUpState.tasks[0].projection.codexReview?.status).toBe('STALE');
+
+    const completedFollowUpState = applyEventToState(
+      followUpState,
+      {
+        ...createEvent('AGENT_RUN_COMPLETED', { terminalStatus: 'completed' }),
+        runId: 'follow-up'
+      }
+    );
+    expect(completedFollowUpState.tasks[0].workflowPhase).toBe('REVIEW');
+    expect(completedFollowUpState.tasks[0].projection.codexReview?.status).toBe('STALE');
+  });
+
   it('keeps provider plans, usage, and goals separate from workflow and verified tests', () => {
     const task: Task = {
       id: 'task-1',
@@ -179,7 +388,7 @@ describe('run reducer', () => {
   });
 });
 
-function createRun(): RunRecord {
+function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
     taskId: 'task-1',
@@ -195,7 +404,8 @@ function createRun(): RunRecord {
     outputArtifactId: 'output',
     diagnosticArtifactId: 'diagnostic',
     startedAt: now,
-    eventCount: 0
+    eventCount: 0,
+    ...overrides
   };
 }
 

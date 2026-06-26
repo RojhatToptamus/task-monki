@@ -157,6 +157,49 @@ export type ReviewStatus =
   | 'STALE'
   | 'UNKNOWN';
 
+export type CodexReviewGateStatus =
+  | 'NOT_RUN'
+  | 'RUNNING'
+  | 'PASSED'
+  | 'NEEDS_CHANGES'
+  | 'INCONCLUSIVE'
+  | 'FAILED'
+  | 'CANCELED'
+  | 'STALE';
+
+export type CodexReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
+
+export interface CodexReviewFinding {
+  id: string;
+  severity: CodexReviewFindingSeverity;
+  title: string;
+  explanation: string;
+  path?: string;
+  line?: number;
+  endLine?: number;
+  recommendation?: string;
+}
+
+export interface CodexReviewResult {
+  schemaVersion: 'codex-review/v1';
+  verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
+  summary: string;
+  findings: CodexReviewFinding[];
+}
+
+export interface CodexReviewGateProjection {
+  status: CodexReviewGateStatus;
+  runId?: string;
+  sourceRunId?: string;
+  reviewedGitSnapshotId?: string;
+  reviewedHeadSha?: string;
+  reviewedDirtyFingerprint?: string;
+  finalArtifactId?: string;
+  summary?: string;
+  result?: CodexReviewResult;
+  updatedAt?: string;
+}
+
 export type MergeStatus =
   | 'NOT_APPLICABLE'
   | 'NOT_MERGED'
@@ -263,6 +306,11 @@ export interface StatusProjection {
   githubPullRequest: PullRequestStatus;
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
+  /**
+   * Local Codex diff-review gate. This is intentionally separate from
+   * GitHub PR review rollups above and is additive for older local stores.
+   */
+  codexReview?: CodexReviewGateProjection;
   merge: MergeStatus;
   artifact: ArtifactStatus;
   health: HealthStatus;
@@ -782,6 +830,7 @@ export function createInitialProjection(now: string): StatusProjection {
     githubPullRequest: 'UNLINKED',
     ciChecks: 'NOT_APPLICABLE',
     reviews: 'NOT_APPLICABLE',
+    codexReview: { status: 'NOT_RUN' },
     merge: 'NOT_APPLICABLE',
     artifact: 'NONE',
     health: 'INFO',

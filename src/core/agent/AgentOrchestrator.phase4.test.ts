@@ -14,6 +14,7 @@ import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import {
   AgentMutationAmbiguousError,
+  AgentProviderSessionMissingError,
   type AgentProviderAdapter,
   type AgentReconciliationResult,
   type AgentSessionRef,
@@ -29,6 +30,40 @@ import { AgentOrchestrator } from './AgentOrchestrator';
 import { codexCapabilities } from './codex/codexCapabilities';
 
 describe('AgentOrchestrator Phase 4', () => {
+  it('normalizes legacy codex adapter provider settings before starting a turn', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-provider-normalize-'));
+    const store = new FileTaskStore(dir);
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Normalize provider',
+      prompt: 'Start with legacy settings.',
+      repositoryPath: dir,
+      agentSettings: {
+        model: 'test-model',
+        modelProvider: 'codex',
+        reasoningEffort: 'high'
+      }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/provider-normalize',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+
+    await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+
+    expect(adapter.lastStart?.settings?.modelProvider).toBe('openai');
+  });
+
   it('preserves session lineage across steer, continue, forked retry, and detached review', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-'));
     const store = new FileTaskStore(dir);
@@ -107,6 +142,63 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(reviewed.mode).toBe('REVIEW');
   });
 
+  it('recreates a missing provider session and retries the same follow-up run', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-missing-session-'));
+    const store = new FileTaskStore(dir);
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Missing provider thread',
+      prompt: 'Continue even when provider session storage was evicted.',
+      repositoryPath: dir,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/missing-provider-thread',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const first = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(store, first, 'AGENT_RUN_COMPLETED');
+    const originalSession = (await store.getAgentSession(first.sessionId))!;
+    adapter.missingProviderSessionOnStart = originalSession.providerSessionId;
+
+    const continued = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      sessionId: first.sessionId,
+      mode: 'FOLLOW_UP',
+      prompt: 'Fix review feedback.',
+      settings: task.agentSettings,
+      continuedFromRunId: first.id
+    });
+
+    const recoveredSession = (await store.getAgentSession(first.sessionId))!;
+    const snapshot = await store.snapshot();
+    expect(continued.id).toBeTruthy();
+    expect(continued.sessionId).toBe(first.sessionId);
+    expect(continued.status).toBe('RUNNING');
+    expect(recoveredSession.providerSessionId).toBe('thread-2');
+    expect(recoveredSession.providerSessionId).not.toBe(originalSession.providerSessionId);
+    expect(recoveredSession.relationshipDetail).toContain('was missing during turn/start');
+    expect(
+      snapshot.events.some(
+        (event) =>
+          event.type === 'AGENT_RUN_FAILED' &&
+          event.runId === continued.id
+      )
+    ).toBe(false);
+  });
+
   it('records ambiguous turn submission as recovery-required without false failure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-ambiguous-'));
     const store = new FileTaskStore(dir);
@@ -148,6 +240,8 @@ describe('AgentOrchestrator Phase 4', () => {
 
 class Phase4Adapter implements AgentProviderAdapter {
   ambiguousStart = false;
+  missingProviderSessionOnStart?: string;
+  lastStart?: StartAgentTurn;
   lastSteer?: SteerAgentTurn;
   private turnCounter = 0;
   private threadCounter = 0;
@@ -212,6 +306,17 @@ class Phase4Adapter implements AgentProviderAdapter {
   }
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
+    this.lastStart = input;
+    if (
+      this.missingProviderSessionOnStart &&
+      input.session.providerSessionId === this.missingProviderSessionOnStart
+    ) {
+      this.missingProviderSessionOnStart = undefined;
+      throw new AgentProviderSessionMissingError(
+        'turn/start',
+        `thread not found: ${input.session.providerSessionId}`
+      );
+    }
     if (this.ambiguousStart) {
       throw new AgentMutationAmbiguousError(
         'turn/start',

@@ -11,6 +11,7 @@ interface NewTaskPanelProps {
   defaultRepositoryPath: string;
   models: AgentModel[];
   preflight?: AgentPreflight;
+  defaultAgentSettings?: AgentExecutionSettings;
   disabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
   onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
@@ -21,6 +22,7 @@ export function NewTaskPanel({
   defaultRepositoryPath,
   models,
   preflight,
+  defaultAgentSettings,
   disabled,
   onCreate,
   onRefinePrompt,
@@ -47,12 +49,17 @@ export function NewTaskPanel({
     if (model) {
       return;
     }
-    const defaultModel = models.find((candidate) => candidate.isDefault) ?? models[0];
+    const defaultModel =
+      models.find((candidate) => candidate.model === defaultAgentSettings?.model) ??
+      models.find((candidate) => candidate.isDefault) ??
+      models[0];
     if (defaultModel) {
       setModel(defaultModel.model);
-      setReasoningEffort(defaultModel.defaultReasoningEffort ?? '');
+      setReasoningEffort(
+        defaultAgentSettings?.reasoningEffort ?? defaultModel.defaultReasoningEffort ?? ''
+      );
     }
-  }, [model, models]);
+  }, [defaultAgentSettings?.model, defaultAgentSettings?.reasoningEffort, model, models]);
 
   const selectedModel = models.find((candidate) => candidate.model === model);
 
@@ -77,7 +84,7 @@ export function NewTaskPanel({
         testCommand,
         agentSettings: {
           model: model || undefined,
-          modelProvider: 'openai',
+          modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
           reasoningEffort: reasoningEffort || undefined,
           sandbox,
           networkAccess,

@@ -4,7 +4,30 @@ dist-renderer/
 .task-manager-dev-store/
 .playwright-mcp/
 .local/
-/docs/
+
+# Documentation policy:
+# Track curated operational docs. Keep private strategy, phase snapshots,
+# generated mockups, screenshots, and reports out of git.
+docs/private/
+docs/plans/
+docs/status/
+docs/ui-reports/
+docs/**/*PLAN*.md
+docs/**/*STATUS*.md
+docs/**/*REPORT*.md
+docs/research/*FEASIBILITY*.md
+docs/research/*OPPORTUNITIES*.md
+docs/**/*.html
+docs/**/*.dc.html
+docs/**/*.png
+docs/**/*.jpg
+docs/**/*.jpeg
+docs/**/*.gif
+docs/**/*.webp
+docs/**/*.js
+docs/**/*.css
+docs/**/.thumbnail
+docs/**/.DS_Store
 /ui-spec.md
 /Task Manager (standalone).html
 /*_REPORT.md
