@@ -24,13 +24,14 @@ interface MainColumnProps {
   onSetAppSettings(settings: AppSettings): void;
   error?: string;
   models: AgentModel[];
-  defaultRepositoryPath: string;
+  activeRepositoryPath: string;
   onSelect(taskId: string): void;
 }
 
 export interface AppSettings {
   defaultModel?: string;
   defaultReasoningEffort?: string;
+  promptRefinementModel?: string;
   reviewModel?: string;
   reviewReasoningEffort?: string;
 }
@@ -73,7 +74,7 @@ export function MainColumn({
   onSetAppSettings,
   error,
   models,
-  defaultRepositoryPath,
+  activeRepositoryPath,
   onSelect
 }: MainColumnProps) {
   const head = VIEW_TITLES[view];
@@ -102,7 +103,7 @@ export function MainColumn({
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
           models={models}
-          defaultRepositoryPath={defaultRepositoryPath}
+          activeRepositoryPath={activeRepositoryPath}
         />
       ) : null}
     </main>
@@ -236,20 +237,23 @@ function Settings({
   appSettings,
   onSetAppSettings,
   models,
-  defaultRepositoryPath
+  activeRepositoryPath
 }: {
   theme: 'light' | 'dark';
   onSetTheme(theme: 'light' | 'dark'): void;
   appSettings: AppSettings;
   onSetAppSettings(settings: AppSettings): void;
   models: AgentModel[];
-  defaultRepositoryPath: string;
+  activeRepositoryPath: string;
 }) {
   const defaultModel = models.find((model) => model.isDefault) ?? models[0];
   const selectedDefaultModel =
     models.find((model) => model.model === appSettings.defaultModel) ?? defaultModel;
   const selectedReviewModel =
     models.find((model) => model.model === appSettings.reviewModel) ?? selectedDefaultModel;
+  const selectedPromptRefinementModel =
+    models.find((model) => model.model === appSettings.promptRefinementModel) ??
+    selectedDefaultModel;
   const selectedDefaultEffort =
     resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
   const selectedReviewEffort =
@@ -257,8 +261,8 @@ function Settings({
   const rows: Array<{ k: string; hint: string; v: string }> = [
     {
       k: 'Repository',
-      hint: 'Default working repository',
-      v: defaultRepositoryPath ? repositoryName(defaultRepositoryPath) : 'Not set'
+      hint: 'Active task context',
+      v: activeRepositoryPath ? repositoryName(activeRepositoryPath) : 'Not set'
     },
     { k: 'Test command', hint: 'Run for verification', v: 'npm test' }
   ];
@@ -313,6 +317,18 @@ function Settings({
           }
         />
         <ModelSettingRow
+          label="Prompt refinement model"
+          hint="Used when improving task descriptions"
+          value={selectedPromptRefinementModel?.model ?? ''}
+          models={models}
+          onModelChange={(model) =>
+            onSetAppSettings({
+              ...appSettings,
+              promptRefinementModel: model || undefined
+            })
+          }
+        />
+        <ModelSettingRow
           label="Codex review model"
           hint="Used for AI quality-gate reviews"
           value={selectedReviewModel?.model ?? ''}
@@ -354,7 +370,7 @@ function ModelSettingRow({
   label,
   hint,
   value,
-  effortValue,
+  effortValue = '',
   models,
   onModelChange,
   onEffortChange
@@ -362,10 +378,10 @@ function ModelSettingRow({
   label: string;
   hint: string;
   value: string;
-  effortValue: string;
+  effortValue?: string;
   models: AgentModel[];
   onModelChange(value: string): void;
-  onEffortChange(value: string): void;
+  onEffortChange?(value: string): void;
 }) {
   const selected = models.find((model) => model.model === value);
   const efforts = [
@@ -383,7 +399,7 @@ function ModelSettingRow({
         <div className="tm-settings__k">{label}</div>
         <div className="tm-settings__hint">
           {hint}
-          {effortValue ? ` · ${effortValue}` : ''}
+          {onEffortChange && effortValue ? ` · ${effortValue}` : ''}
         </div>
       </div>
       <div className="tm-settings__controls">
@@ -402,19 +418,21 @@ function ModelSettingRow({
               </option>
             ))}
         </select>
-        <select
-          className="tm-settings__select tm-settings__select--effort"
-          value={effortValue}
-          onChange={(event) => onEffortChange(event.target.value)}
-          disabled={efforts.length === 0}
-          aria-label={`${label} reasoning effort`}
-        >
-          {efforts.map((effort) => (
-            <option key={effort} value={effort}>
-              {effort}
-            </option>
-          ))}
-        </select>
+        {onEffortChange ? (
+          <select
+            className="tm-settings__select tm-settings__select--effort"
+            value={effortValue}
+            onChange={(event) => onEffortChange(event.target.value)}
+            disabled={efforts.length === 0}
+            aria-label={`${label} reasoning effort`}
+          >
+            {efforts.map((effort) => (
+              <option key={effort} value={effort}>
+                {effort}
+              </option>
+            ))}
+          </select>
+        ) : null}
       </div>
     </div>
   );

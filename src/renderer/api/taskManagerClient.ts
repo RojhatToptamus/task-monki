@@ -60,6 +60,10 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
 
   return {
     getDefaultRepositoryPath: () => get<string>(baseUrl, '/api/defaultRepositoryPath'),
+    chooseRepositoryFolder: async () => {
+      const selectedPath = await post<string | null>(baseUrl, '/api/repository/chooseFolder', {});
+      return selectedPath ?? undefined;
+    },
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),

@@ -27,6 +27,7 @@ import type {
 
 const api: TaskManagerApi = {
   getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
+  chooseRepositoryFolder: () => ipcRenderer.invoke('repository:chooseFolder'),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),

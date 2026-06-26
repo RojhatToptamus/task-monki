@@ -119,7 +119,11 @@ export class TaskManagerService {
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
-    const refined = await this.promptRefiner.refine(input.repositoryPath, input.input);
+    const refined = await this.promptRefiner.refine(
+      input.repositoryPath,
+      input.input,
+      input.model
+    );
     this.events.emit({
       type: 'prompt.refined',
       taskId: 'prompt-preview',

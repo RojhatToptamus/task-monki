@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
   CiRollupRecord,
   DomainEvent,
+  Finding,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
   AgentInteractionDecision,
@@ -125,12 +126,17 @@ export function TaskDetail(props: TaskDetailProps) {
   const [requestInstruction, setRequestInstruction] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setReviewStartPending(false);
     setRequestDrawerOpen(false);
     setSelectedReviewFindingIds([]);
   }, [task?.id]);
+
+  useEffect(() => {
+    bodyRef.current?.scrollTo({ top: 0 });
+  }, [tab, task?.id]);
 
   if (!task) {
     return (
@@ -258,23 +264,21 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const primaryAction = getPrimaryAction({
     task,
-    worktreePresent: Boolean(worktree),
     onPrepareWorktree: props.onPrepareWorktree,
-    onStart: props.onStart,
-    onCreatePullRequest: props.onCreatePullRequest
+    onStart: props.onStart
   });
 
   const headActions: HeadAction[] = [];
-  headActions.push({
-    label: 'Move to review',
-    kind: 'soft',
-    disabled:
-      task.workflowPhase === 'REVIEW' ||
-      task.workflowPhase === 'IN_REVIEW' ||
-      task.workflowPhase === 'DONE' ||
-      task.projection.agentRun !== 'COMPLETED',
-    onClick: () => void props.onTransition(task.id, 'REVIEW')
-  });
+  if (
+    task.projection.agentRun === 'COMPLETED' &&
+    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)
+  ) {
+    headActions.push({
+      label: 'Move to review',
+      kind: 'soft',
+      onClick: () => void props.onTransition(task.id, 'REVIEW')
+    });
+  }
   if (primaryAction) {
     headActions.push({
       label: primaryAction.label,
@@ -290,11 +294,6 @@ export function TaskDetail(props: TaskDetailProps) {
       label: 'Refresh evidence',
       disabled: task.projection.worktree !== 'PRESENT',
       onClick: () => void props.onRefreshEvidence(task.id)
-    },
-    {
-      label: 'Commit',
-      disabled: reviewActionsPaused || !canCreateDeliveryCommit(task),
-      onClick: () => void props.onCreateDeliveryCommit(task.id)
     },
     pullRequest
       ? { label: 'Refresh GitHub', onClick: () => void props.onRefreshGitHub(task.id) }
@@ -362,7 +361,7 @@ export function TaskDetail(props: TaskDetailProps) {
         </div>
       </div>
 
-      <div className="tm-detail__body">
+      <div className="tm-detail__body" ref={bodyRef}>
         {error ? <div className="tm-error">{error}</div> : null}
 
         {tab === 'overview' ? (
@@ -380,8 +379,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   canStartReview={canStartCodexReview}
                   actionsPaused={reviewActionsPaused}
                   actionsPausedReason={reviewPauseReason}
-                  onOpenEvidence={() => setTab('evidence')}
-                  onOpenDebug={() => setTab('debug')}
                   onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
                   onStopReview={(reviewRunId) => void props.onCancel(reviewRunId)}
                   onOpenRequestChanges={openRequestChanges}
@@ -420,7 +417,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
               <div className="tm-panel">
                 <h3 className="tm-panel__title">Request</h3>
-                <details className="tm-raw" open>
+                <details className="tm-raw">
                   <summary>Prompt · {promptLineCount} lines</summary>
                   <pre>{task.prompt}</pre>
                 </details>
@@ -490,16 +487,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   ))}
                 </div>
               </div>
-
-              <div className="tm-teaser">
-                <div>
-                  <h3 className="tm-teaser__title">Provider telemetry</h3>
-                  <span className="tm-teaser__sub">Raw turns, tool calls, usage, subagents</span>
-                </div>
-                <button type="button" className="tm-headbtn" onClick={() => setTab('debug')}>
-                  Open debug →
-                </button>
-              </div>
             </div>
           </div>
         ) : null}
@@ -519,27 +506,15 @@ export function TaskDetail(props: TaskDetailProps) {
               mergeSnapshot={props.mergeSnapshot}
               artifacts={props.artifacts}
             />
-            {task.projection.findings.length > 0 ? (
-              <div className="tm-panel">
-                <h3 className="tm-panel__title">Findings</h3>
-                {task.projection.findings.map((finding) => (
-                  <div className="tm-fact" key={finding.id}>
-                    <span className="tm-fact__k">{finding.code}</span>
-                    <span className="tm-fact__v" style={{ fontFamily: 'var(--font-ui)' }}>
-                      {finding.message}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
           </div>
         ) : null}
 
         {tab === 'debug' ? (
           <div className="tm-debug">
+            <ActivityTimeline events={props.events} runs={props.runs} />
+            <TaskHealthFindings findings={task.projection.findings} />
             <div className="tm-debug__notice">
-              Debug surface — everything here is provider-reported and not authoritative. Verified
-              state lives under Evidence.
+              Provider diagnostics are for troubleshooting. Evidence remains the source of truth.
             </div>
             <SubagentHierarchyPanel
               sessions={sessions}
@@ -567,7 +542,6 @@ export function TaskDetail(props: TaskDetailProps) {
               onSyncGoal={props.onSyncAgentGoal}
             />
             <InteractionAuditPanel interactions={interactions} sessions={sessions} />
-            <ActivityTimeline events={props.events} />
           </div>
         ) : null}
       </div>
@@ -632,6 +606,62 @@ function ConfigRow({ k, v }: { k: string; v: string }) {
   );
 }
 
+function TaskHealthFindings({ findings }: { findings: Finding[] }) {
+  if (findings.length === 0) {
+    return null;
+  }
+
+  const sorted = [...findings].sort(
+    (a, b) => healthFindingRank(a.severity) - healthFindingRank(b.severity)
+  );
+
+  return (
+    <section className="card tm-healthfindings">
+      <div className="card__header">
+        <div>
+          <h3>Task health</h3>
+          <p className="tm-panel__lead">
+            Current projection and runtime findings.
+          </p>
+        </div>
+        <span className="tm-healthfindings__count">{findings.length}</span>
+      </div>
+      <div className="tm-reviewfindings__list tm-healthfindings__list">
+        {sorted.map((finding, index) => {
+          const tone = healthFindingTone(finding.severity);
+          return (
+            <details
+              key={finding.id}
+              className={`tm-finding tm-finding--${tone}`}
+              open={index === 0}
+            >
+              <summary>
+                <span className="tm-finding__severity">
+                  <span className="tm-finding__severity-dot" />
+                  <span>{humanizeEnum(finding.severity).toUpperCase()}</span>
+                </span>
+                <span className="tm-finding__main">
+                  <span className="tm-finding__title">{humanizeEnum(finding.code)}</span>
+                  <span className="tm-finding__ref">
+                    {finding.code} · {formatHealthFindingTime(finding.createdAt)}
+                  </span>
+                </span>
+                <span className="tm-finding__chevron" aria-hidden="true">
+                  ›
+                </span>
+              </summary>
+              <div className="tm-finding__detail">
+                <code>{finding.code}</code>
+                <p>{finding.message}</p>
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function PlanCard({ planRevisions }: { planRevisions: AgentPlanRevisionRecord[] }) {
   const latest = [...planRevisions].sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
   const steps = latest?.steps ?? [];
@@ -678,8 +708,6 @@ function CodexReviewPanel({
   canStartReview,
   actionsPaused,
   actionsPausedReason,
-  onOpenEvidence,
-  onOpenDebug,
   onRunReview,
   onStopReview,
   onOpenRequestChanges,
@@ -697,8 +725,6 @@ function CodexReviewPanel({
   canStartReview: boolean;
   actionsPaused: boolean;
   actionsPausedReason?: ReviewActionPauseReason;
-  onOpenEvidence(): void;
-  onOpenDebug(): void;
   onRunReview(sourceRunId: string): void;
   onStopReview(reviewRunId: string): void;
   onOpenRequestChanges(findingIds?: string[]): void;
@@ -737,7 +763,7 @@ function CodexReviewPanel({
             <h3 className="tm-panel__title" style={{ margin: 0 }}>
               Codex review
             </h3>
-            <p className="tm-reviewcard__subtitle">AI quality gate inside the Review phase</p>
+            <p className="tm-reviewcard__subtitle">AI review for the current diff</p>
           </div>
           <span className="tm-reviewcard__spacer" />
           <Chip tone={ui.tone} label={ui.label} />
@@ -749,17 +775,14 @@ function CodexReviewPanel({
               <div className="tm-reviewcard__running">
                 <span className="tm-reviewcard__spinner" />
                 <div>
-                  <h4>Reviewing the current diff...</h4>
+                  <h4>Reviewing the current diff</h4>
                   <p>{reviewedDiff}</p>
                 </div>
               </div>
               <div className="tm-reviewcard__progress" aria-hidden="true">
                 <span />
               </div>
-              <p>
-                Started a few seconds ago. You'll be able to act on the result here — nothing else
-                has changed about the task's state.
-              </p>
+              <p>Actions resume when the review finishes.</p>
             </div>
           ) : (
             <div className="tm-reviewcard__summary">
@@ -799,9 +822,6 @@ function CodexReviewPanel({
               <strong> Git {humanizeEnum(task.projection.git)}</strong>
               <span> · Tests {humanizeEnum(task.projection.tests)}</span>
             </span>
-            <button type="button" onClick={onOpenEvidence}>
-              View Evidence →
-            </button>
           </div>
         </div>
 
@@ -814,9 +834,6 @@ function CodexReviewPanel({
                 : nextReviewAction(effectiveStatus)}
             </p>
           </div>
-          <button type="button" className="tm-reviewcard__rawlink" onClick={onOpenDebug}>
-            Raw provider details →
-          </button>
           <div className="tm-reviewcard__buttons">
             {actionsPaused && !reviewIsRunning ? (
               <span className="tm-reviewcard__hint">
@@ -858,7 +875,7 @@ function CodexReviewPanel({
                   Stop review
                 </button>
                 <span className="tm-reviewcard__hint">
-                  Completion actions are paused while the review runs.
+                  Actions are paused while the review runs.
                 </span>
               </>
             ) : null}
@@ -872,6 +889,14 @@ function CodexReviewPanel({
                   onClick={() => onOpenAccept(false)}
                 >
                   Accept locally
+                </button>
+                <button
+                  type="button"
+                  className="outline-button"
+                  disabled={!canCreateDeliveryCommit(task) || actionBusy}
+                  onClick={onCreateDeliveryCommit}
+                >
+                  Commit
                 </button>
                 <button
                   type="button"
@@ -926,51 +951,6 @@ function CodexReviewPanel({
               </>
             ) : null}
           </div>
-
-        </div>
-      </section>
-
-      <section className="tm-panel tm-reviewfinish">
-        <div className="tm-reviewfinish__head">
-          <h3 className="tm-panel__title" style={{ margin: 0 }}>
-            Finish task
-          </h3>
-          <span>Completion actions for the Review phase</span>
-        </div>
-        <p className="tm-panel__lead">
-          {actionsPaused
-            ? reviewActionsBlockedByImplementation
-              ? 'Completion actions are paused while the follow-up run is active — the task will return for re-review when it finishes.'
-              : 'Completion actions are paused while Codex review is running — the result may change what you accept.'
-            : effectiveStatus === 'PASSED'
-              ? 'Codex review passed. Accept locally, commit, or open a draft PR.'
-              : 'No passing Codex review is recorded for this diff. You can still finish explicitly.'}
-        </p>
-        <div className="tm-reviewfinish__actions">
-          <button
-            type="button"
-            className="outline-button"
-            disabled={actionsPaused || actionBusy}
-            onClick={() => onOpenAccept(hasOpenIssues)}
-          >
-            Accept locally & mark done
-          </button>
-          <button
-            type="button"
-            className="outline-button"
-            disabled={actionsPaused || actionBusy || !canCreateDeliveryCommit(task)}
-            onClick={onCreateDeliveryCommit}
-          >
-            Commit
-          </button>
-          <button
-            type="button"
-            className="outline-button"
-            disabled={actionsPaused || actionBusy || !canCreatePullRequest(task)}
-            onClick={onCreatePullRequest}
-          >
-            Create draft PR
-          </button>
         </div>
       </section>
     </>
@@ -1100,10 +1080,7 @@ function ReviewRequestDrawer({
         <header className="tm-reviewdrawer__header">
           <div>
             <h3>Request changes</h3>
-            <p>
-              Sends the selected findings to the agent as a follow-up run and moves #
-              {formatShortId(task.id)} back to In Progress.
-            </p>
+            <p>Start a follow-up run with the selected findings for #{formatShortId(task.id)}.</p>
           </div>
           <button type="button" className="tm-reviewdrawer__close" onClick={onCancel}>
             <span aria-hidden="true">×</span>
@@ -1146,14 +1123,12 @@ function ReviewRequestDrawer({
               onChange={(event) => onInstructionChange(event.target.value)}
               rows={11}
             />
-            <small>
-              Prefilled from the review summary and selected findings. Editable before sending.
-            </small>
+            <small>Editable before sending.</small>
           </label>
         </div>
 
         <footer className="tm-reviewdrawer__footer">
-          <span>Task leaves Review while the agent works, then returns when follow-up completes.</span>
+          <span>Returns to Review when the follow-up finishes.</span>
           <div>
             <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
               Cancel
@@ -1269,8 +1244,7 @@ function AcceptLocalModal({
       <div className="tm-modal__panel">
         <h3 id="accept-local-title">{withIssues ? 'Accept with issues' : 'Accept locally'}</h3>
         <p>
-          Records this implementation as accepted on your machine and moves the task to Done.
-          No PR is created.
+          Records this implementation as accepted on your machine. No PR is created.
         </p>
         {withIssues ? (
           <div className="tm-modal__warning">
@@ -1292,7 +1266,7 @@ function AcceptLocalModal({
             Cancel
           </button>
           <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
-            {busy ? 'Accepting...' : withIssues ? 'Accept with issues & mark done' : 'Accept locally & mark done'}
+            {busy ? 'Accepting...' : withIssues ? 'Accept with issues' : 'Accept and mark done'}
           </button>
         </div>
       </div>
@@ -1374,6 +1348,42 @@ function ciTone(value: string): Tone {
   return 'neutral';
 }
 
+function healthFindingRank(severity: Finding['severity']): number {
+  switch (severity) {
+    case 'ERROR':
+    case 'BLOCKED':
+      return 0;
+    case 'WARNING':
+      return 1;
+    case 'INFO':
+      return 2;
+    case 'HEALTHY':
+      return 3;
+  }
+}
+
+function healthFindingTone(severity: Finding['severity']): Tone {
+  switch (severity) {
+    case 'ERROR':
+    case 'BLOCKED':
+      return 'error';
+    case 'WARNING':
+      return 'action';
+    case 'INFO':
+      return 'info';
+    case 'HEALTHY':
+      return 'neutral';
+  }
+}
+
+function formatHealthFindingTime(value: string): string {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) {
+    return 'unknown time';
+  }
+  return new Date(time).toLocaleString();
+}
+
 function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['status']): {
   label: string;
   tone: Tone;
@@ -1401,7 +1411,7 @@ function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['st
 function reviewTitle(status: NonNullable<Task['projection']['codexReview']>['status']): string {
   switch (status) {
     case 'NOT_RUN':
-      return "Codex hasn't reviewed this diff yet";
+      return 'No review yet';
     case 'PASSED':
       return 'Codex review passed';
     case 'NEEDS_CHANGES':
@@ -1431,19 +1441,19 @@ function reviewBody(
   }
   switch (reviewGate.status) {
     case 'NOT_RUN':
-      return 'Run an AI review to check the current diff before you accept or ship the work.';
+      return 'Run a review before accepting or shipping this diff.';
     case 'PASSED':
       return 'No blocking issues were reported for the reviewed diff.';
     case 'NEEDS_CHANGES':
-      return 'Send the findings back to the implementation agent, then re-review the follow-up.';
+      return 'Send the findings back to the agent, then re-review.';
     case 'INCONCLUSIVE':
-      return 'Read the review output, then either request follow-up changes or explicitly accept the work.';
+      return 'Review the output, then request changes or accept explicitly.';
     case 'FAILED':
-      return 'The review did not complete. Re-run it or inspect raw provider details.';
+      return 'The review did not complete. Re-run it or inspect Debug.';
     case 'CANCELED':
       return 'The partial review result was discarded.';
     case 'STALE':
-      return 'The diff changed after the last review. Re-run the review before accepting.';
+      return 'The diff changed after the last review.';
     case 'RUNNING':
       return 'Codex is reviewing the current diff.';
   }
@@ -1454,21 +1464,21 @@ function nextReviewAction(
 ): string {
   switch (status) {
     case 'NOT_RUN':
-      return 'Run a Codex review before you accept this work.';
+      return 'Run a review.';
     case 'RUNNING':
       return 'Wait for the review to finish, or stop it if it is no longer useful.';
     case 'PASSED':
-      return 'Accept locally, commit, or create a draft PR.';
+      return 'Accept, commit, or create a draft PR.';
     case 'NEEDS_CHANGES':
-      return 'Send the findings back to the agent, then re-review.';
+      return 'Request changes.';
     case 'INCONCLUSIVE':
-      return 'Read the review output and decide whether to request changes or accept.';
+      return 'Request changes or accept explicitly.';
     case 'FAILED':
-      return 'Run the review again or inspect raw provider details.';
+      return 'Run the review again or inspect Debug.';
     case 'CANCELED':
-      return 'Run the review again if you still want an AI quality gate.';
+      return 'Run the review again.';
     case 'STALE':
-      return 'Re-run the review to validate the current diff.';
+      return 'Re-run the review.';
   }
 }
 
@@ -1573,19 +1583,9 @@ function truncateMiddle(value: string, max: number): string {
 
 function getPrimaryAction(input: {
   task: Task;
-  worktreePresent: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
-  onCreatePullRequest(taskId: string): Promise<void>;
 }): { label: string; disabled?: boolean; onClick(): void } | undefined {
-  if (input.task.workflowPhase === 'REVIEW' && input.worktreePresent) {
-    return {
-      label: 'Create draft PR',
-      disabled: !canCreatePullRequest(input.task),
-      onClick: () => void input.onCreatePullRequest(input.task.id)
-    };
-  }
-
   if (['IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(input.task.workflowPhase)) {
     return undefined;
   }

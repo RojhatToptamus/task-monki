@@ -24,10 +24,20 @@ import {
   selectTaskEvents,
   selectTaskRuns
 } from '../model/selectors';
-import { resolveModelExecutionSettings } from '../model/agentExecutionSettings';
+import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
+import {
+  buildRepositoryOptions,
+  isSameRepositoryPath,
+  mergeRepositoryPath,
+  normalizeRepositoryPath,
+  repositoryDisplayPath,
+  resolveSelectedRepositoryPath,
+  tasksForRepository
+} from '../model/repositories';
 import { MainColumn, type AppSettings } from './MainColumn';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
+import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 
 const emptySnapshot: TaskSnapshot = {
@@ -67,11 +77,20 @@ interface AppNotification {
 
 const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
 const APP_SETTINGS_STORAGE_KEY = 'task-monki-app-settings';
+const REPOSITORIES_STORAGE_KEY = 'task-monki-repositories';
+const SELECTED_REPOSITORY_STORAGE_KEY = 'task-monki-selected-repository';
 
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
+  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState(() =>
+    getInitialSelectedRepositoryPath()
+  );
+  const [knownRepositoryPaths, setKnownRepositoryPaths] = useState<string[]>(() =>
+    getInitialRepositoryPaths()
+  );
+  const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [view, setView] = useState<NavView>('board');
@@ -122,7 +141,6 @@ export function App() {
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
     setSnapshot(next);
-    setSelectedTaskId((current) => current ?? next.tasks[0]?.id);
   }, []);
 
   useEffect(() => {
@@ -136,6 +154,16 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
   }, [appSettings]);
+
+  useEffect(() => {
+    window.localStorage.setItem(REPOSITORIES_STORAGE_KEY, JSON.stringify(knownRepositoryPaths));
+  }, [knownRepositoryPaths]);
+
+  useEffect(() => {
+    if (selectedRepositoryPath) {
+      window.localStorage.setItem(SELECTED_REPOSITORY_STORAGE_KEY, selectedRepositoryPath);
+    }
+  }, [selectedRepositoryPath]);
 
   useEffect(() => {
     let canceled = false;
@@ -177,7 +205,36 @@ export function App() {
     });
   }, [refresh]);
 
-  const selectedTask = snapshot.tasks.find((task) => task.id === selectedTaskId);
+  const repositoryOptions = useMemo(
+    () =>
+      buildRepositoryOptions({
+        defaultRepositoryPath,
+        storedRepositoryPaths: knownRepositoryPaths,
+        tasks: snapshot.tasks
+      }),
+    [defaultRepositoryPath, knownRepositoryPaths, snapshot.tasks]
+  );
+  const activeRepositoryPath = resolveSelectedRepositoryPath(
+    repositoryOptions,
+    selectedRepositoryPath
+  );
+  const visibleTasks = useMemo(
+    () => tasksForRepository(snapshot.tasks, activeRepositoryPath),
+    [activeRepositoryPath, snapshot.tasks]
+  );
+
+  useEffect(() => {
+    if (activeRepositoryPath && activeRepositoryPath !== selectedRepositoryPath) {
+      setSelectedRepositoryPath(activeRepositoryPath);
+    }
+  }, [activeRepositoryPath, selectedRepositoryPath]);
+
+  const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
+  const selectedTask =
+    selectedTaskCandidate &&
+    isSameRepositoryPath(selectedTaskCandidate.repositoryPath, activeRepositoryPath)
+      ? selectedTaskCandidate
+      : undefined;
   const selectedRuns = useMemo(
     () => (selectedTask ? selectTaskRuns(snapshot, selectedTask.id) : []),
     [selectedTask, snapshot]
@@ -305,7 +362,12 @@ export function App() {
 
   const refinePrompt = async (repositoryPath: string, input: string) => {
     try {
-      const refined = await taskManagerApi.refinePrompt({ repositoryPath, input });
+      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const refined = await taskManagerApi.refinePrompt({
+        repositoryPath,
+        input,
+        model: refinementModel?.model
+      });
       notify('Prompt refined.', 'success');
       return refined;
     } catch (caught) {
@@ -534,6 +596,56 @@ export function App() {
     }
   };
 
+  const selectRepository = useCallback(
+    (repositoryPath: string) => {
+      const normalized = normalizeRepositoryPath(repositoryPath);
+      if (!normalized || normalized === activeRepositoryPath) {
+        return;
+      }
+      setKnownRepositoryPaths((current) => mergeRepositoryPath(current, normalized));
+      setSelectedRepositoryPath(normalized);
+      setSelectedTaskId(undefined);
+      setLastTaskId(undefined);
+      setIsDetailOpen(false);
+      setIsNewTaskOpen(false);
+      setError(undefined);
+      notify(`Switched to ${repositoryDisplayPath(normalized)}.`, 'success');
+    },
+    [activeRepositoryPath, notify]
+  );
+
+  const addRepository = useCallback(async () => {
+    setError(undefined);
+    setIsAddingRepository(true);
+    try {
+      const selectedPath = await taskManagerApi.chooseRepositoryFolder();
+      const normalized = normalizeRepositoryPath(selectedPath ?? '');
+      if (!normalized) {
+        return false;
+      }
+
+      const preflight = await taskManagerApi.validateRepository(normalized);
+      if (preflight.status !== 'VALID') {
+        throw new Error(preflight.error ?? 'Selected folder is not a valid Git repository.');
+      }
+
+      const repositoryRoot = normalizeRepositoryPath(preflight.root ?? normalized);
+      setKnownRepositoryPaths((current) => mergeRepositoryPath(current, repositoryRoot));
+      setSelectedRepositoryPath(repositoryRoot);
+      setSelectedTaskId(undefined);
+      setLastTaskId(undefined);
+      setIsDetailOpen(false);
+      setIsNewTaskOpen(false);
+      notify(`Added ${repositoryDisplayPath(repositoryRoot)}.`, 'success');
+      return true;
+    } catch (caught) {
+      reportActionError(caught, 'Could not add repository.');
+      return false;
+    } finally {
+      setIsAddingRepository(false);
+    }
+  }, [notify, reportActionError]);
+
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
     setLastTaskId(taskId);
@@ -561,7 +673,7 @@ export function App() {
   const canGoBack = isDetailOpen;
   const canGoForward = !isDetailOpen && Boolean(lastTaskId);
 
-  const navCounts = computeNavCounts(snapshot.tasks);
+  const navCounts = computeNavCounts(visibleTasks);
 
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
@@ -604,7 +716,7 @@ export function App() {
           type="button"
           className="tm-newtask"
           onClick={openNewTask}
-          disabled={isLoading || !defaultRepositoryPath}
+          disabled={isLoading || !activeRepositoryPath}
         >
           + New task
         </button>
@@ -678,18 +790,14 @@ export function App() {
           />
           <div className="tm-nav__spacer" />
 
-          {defaultRepositoryPath ? (
-            <div
-              className="tm-nav__repo"
-              data-tip={isSidebarCollapsed ? repositoryDisplay(defaultRepositoryPath) : undefined}
-            >
-              <span className="tm-nav__repo-dot" />
-              <span className="tm-nav__repo-text">
-                <span className="tm-nav__repo-label">Repository</span>
-                <span className="tm-nav__repo-name">{repositoryDisplay(defaultRepositoryPath)}</span>
-              </span>
-            </div>
-          ) : null}
+          <RepositorySwitcher
+            activeRepositoryPath={activeRepositoryPath}
+            options={repositoryOptions}
+            collapsed={isSidebarCollapsed}
+            adding={isAddingRepository}
+            onSelect={selectRepository}
+            onAddRepository={addRepository}
+          />
         </aside>
 
         {showDetail ? (
@@ -741,14 +849,14 @@ export function App() {
         ) : (
           <MainColumn
             view={view}
-            tasks={snapshot.tasks}
+            tasks={visibleTasks}
             theme={theme}
             onSetTheme={updateTheme}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
             error={error}
             models={providerModels}
-            defaultRepositoryPath={defaultRepositoryPath}
+            activeRepositoryPath={activeRepositoryPath}
             onSelect={selectTask}
           />
         )}
@@ -756,11 +864,11 @@ export function App() {
 
       {isNewTaskOpen ? (
         <NewTaskPanel
-          defaultRepositoryPath={defaultRepositoryPath}
+          defaultRepositoryPath={activeRepositoryPath}
           models={providerModels}
           preflight={providerState?.preflight}
           defaultAgentSettings={defaultTaskSettings}
-          disabled={isLoading || !defaultRepositoryPath}
+          disabled={isLoading || !activeRepositoryPath}
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
           onClose={closeNewTask}
@@ -814,6 +922,10 @@ function getInitialAppSettings(): AppSettings {
           ? parsed.defaultReasoningEffort
           : undefined,
       reviewModel: typeof parsed.reviewModel === 'string' ? parsed.reviewModel : undefined,
+      promptRefinementModel:
+        typeof parsed.promptRefinementModel === 'string'
+          ? parsed.promptRefinementModel
+          : undefined,
       reviewReasoningEffort:
         typeof parsed.reviewReasoningEffort === 'string'
           ? parsed.reviewReasoningEffort
@@ -824,9 +936,28 @@ function getInitialAppSettings(): AppSettings {
   }
 }
 
-function repositoryDisplay(repositoryPath: string): string {
-  const parts = repositoryPath.split(/[\\/]/).filter(Boolean);
-  return parts.slice(-2).join('/') || repositoryPath;
+function getInitialRepositoryPaths(): string[] {
+  try {
+    const raw = window.localStorage.getItem(REPOSITORIES_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.reduce<string[]>((paths, value) => {
+      return typeof value === 'string' ? mergeRepositoryPath(paths, value) : paths;
+    }, []);
+  } catch {
+    return [];
+  }
+}
+
+function getInitialSelectedRepositoryPath(): string {
+  return normalizeRepositoryPath(
+    window.localStorage.getItem(SELECTED_REPOSITORY_STORAGE_KEY) ?? ''
+  );
 }
 
 function NavItem({

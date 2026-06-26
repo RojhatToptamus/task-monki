@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import type {
-  AgentExecutionSettings,
   AgentGoalSnapshotRecord,
   AgentProviderState,
   AgentServerInstance,
@@ -10,6 +9,9 @@ import type {
   RunRecord,
   Task
 } from '../../shared/contracts';
+import {
+  PROVIDER_SETTING_FIELDS
+} from '../model/providerSettings';
 import { RawProviderMessage } from './RawProviderMessage';
 import { humanizeEnum } from './display';
 
@@ -24,19 +26,6 @@ interface ProviderOverviewPanelProps {
   server?: AgentServerInstance;
   onSyncGoal(taskId: string, sessionId: string): Promise<void>;
 }
-
-const SETTING_FIELDS: Array<{
-  key: keyof AgentExecutionSettings;
-  label: string;
-}> = [
-  { key: 'model', label: 'Model' },
-  { key: 'modelProvider', label: 'Model provider' },
-  { key: 'reasoningEffort', label: 'Reasoning effort' },
-  { key: 'serviceTier', label: 'Service tier' },
-  { key: 'sandbox', label: 'Sandbox' },
-  { key: 'networkAccess', label: 'Network' },
-  { key: 'approvalPolicy', label: 'Approval policy' }
-];
 
 export function ProviderOverviewPanel({
   task,
@@ -166,32 +155,24 @@ export function ProviderOverviewPanel({
       </div>
 
       <div className="provider-section">
-        <h4>Requested versus observed settings</h4>
+        <h4>Current settings</h4>
         <div className="settings-table">
           <div className="settings-table__header">
             <span>Setting</span>
-            <span>Requested</span>
-            <span>Observed</span>
+            <span>Value</span>
           </div>
-          {SETTING_FIELDS.map(({ key, label }) => {
+          {PROVIDER_SETTING_FIELDS.map(({ key, label }) => {
             const observation = observations.find(
               (candidate) => candidate.settings[key] !== undefined
             );
+            const current =
+              observation?.settings[key] ??
+              run?.observedSettings?.[key] ??
+              run?.requestedSettings[key];
             return (
               <div className="settings-table__row" key={key}>
                 <strong>{label}</strong>
-                <span>
-                  {formatSetting(run?.requestedSettings[key])}
-                  <small>Requested by Task Monki</small>
-                </span>
-                <span>
-                  {formatSetting(observation?.settings[key])}
-                  <small>
-                    {observation
-                      ? `Observed · ${humanizeEnum(observation.source)}`
-                      : 'Not independently observed'}
-                  </small>
-                </span>
+                <span>{formatSetting(current)}</span>
               </div>
             );
           })}

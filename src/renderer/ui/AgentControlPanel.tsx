@@ -88,10 +88,10 @@ export function AgentControlPanel({
   };
 
   return (
-    <section className="card agent-controls" aria-label="Agent controls">
+    <section className="card agent-controls" aria-label="Agent">
       <div className="card__header">
         <div>
-          <h3>Agent controls</h3>
+          <h3>Agent</h3>
           <p className="agent-controls__subtitle">
             Turn {run.providerTurnId ?? 'not confirmed'} · {humanizeEnum(run.status)}
           </p>
@@ -133,7 +133,7 @@ export function AgentControlPanel({
               className="outline-button outline-button--danger"
               onClick={() => void onInterrupt(run.id)}
             >
-              Interrupt turn
+              Stop run
             </button>
           </>
         ) : null}
@@ -142,31 +142,20 @@ export function AgentControlPanel({
             <button type="button" className="primary-button" onClick={() => setMode('CONTINUE')}>
               Continue
             </button>
-            <details className="agent-controls__more">
-              <summary>More actions</summary>
-              <div className="agent-controls__more-menu">
-                <button
-                  type="button"
-                  className="outline-button"
-                  onClick={(event) => {
-                    closeParentDetails(event.currentTarget);
-                    setMode('RETRY_SAME');
-                  }}
-                >
-                  Retry in session
-                </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  onClick={(event) => {
-                    closeParentDetails(event.currentTarget);
-                    setMode('RETRY_FORK');
-                  }}
-                >
-                  Fork alternative
-                </button>
-              </div>
-            </details>
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() => setMode('RETRY_SAME')}
+            >
+              Retry in session
+            </button>
+            <button
+              type="button"
+              className="outline-button"
+              onClick={() => setMode('RETRY_FORK')}
+            >
+              Fork alternative
+            </button>
           </>
         ) : null}
       </div>
@@ -209,10 +198,6 @@ export function AgentControlPanel({
       ) : null}
     </section>
   );
-}
-
-function closeParentDetails(element: HTMLElement): void {
-  element.closest('details')?.removeAttribute('open');
 }
 
 function placeholderFor(mode: ComposerMode): string {

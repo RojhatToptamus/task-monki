@@ -7,14 +7,31 @@ is not just an AI chat UI.
 
 ## Product model
 
-1. User creates a task with a goal, repository, model, reasoning effort, and
-   validation command.
+1. User creates a task in the active repository with a goal, model, reasoning
+   effort, and validation command.
 2. Task Monki prepares an isolated Git worktree.
 3. An AI provider runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, test evidence,
    delivery evidence, and audit history.
 5. User reviews, requests changes, continues, retries, forks, commits, opens a
    draft PR, accepts locally, or marks done.
+
+## Repository context
+
+The sidebar repository selector defines the active task context. It filters the
+board, counts, settings summary, and new-task defaults to the selected
+repository. Adding a repository opens the local folder picker and validates the
+selected folder before it is saved as a selectable repository.
+
+New tasks inherit the active sidebar repository automatically. The creation
+flow should not ask for a repository path when a repository is already selected.
+
+Task records remain bound to the repository path they were created with. Runs,
+worktrees, Git evidence, tests, GitHub delivery, and provider sessions continue
+to resolve through the task and iteration records rather than the currently
+selected sidebar repository. Switching repositories must therefore close task
+detail views from the previous repository instead of mutating those task
+records.
 
 ## UI priority
 

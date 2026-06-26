@@ -11,9 +11,11 @@ describe('PromptRefinementService', () => {
   it('uses a repository-inspecting model response for the refined prompt', async () => {
     let capturedRepositoryPath = '';
     let capturedInstruction = '';
-    const service = new PromptRefinementService(async ({ repositoryPath, instruction }) => {
+    let capturedModel = '';
+    const service = new PromptRefinementService(async ({ repositoryPath, instruction, model }) => {
       capturedRepositoryPath = repositoryPath;
       capturedInstruction = instruction;
+      capturedModel = model ?? '';
       return JSON.stringify({
         titleSuggestion: 'Add GitHub sync badges',
         prompt: [
@@ -31,12 +33,17 @@ describe('PromptRefinementService', () => {
       });
     });
 
-    const refined = await service.refine('/tmp/example repo', 'add github sync badges');
+    const refined = await service.refine(
+      '/tmp/example repo',
+      'add github sync badges',
+      'gpt-5.3-codex-spark'
+    );
 
     expect(refined.source).toBe('model');
     expect(refined.titleSuggestion).toBe('Add GitHub sync badges');
     expect(refined.prompt).toContain('src/renderer/ui/StatusBadge.tsx');
     expect(capturedRepositoryPath).toBe('/tmp/example repo');
+    expect(capturedModel).toBe('gpt-5.3-codex-spark');
     expect(capturedInstruction).toContain('inspect the repository with read-only commands');
     expect(capturedInstruction).toContain('## Acceptance criteria');
   });
@@ -83,5 +90,12 @@ describe('PromptRefinementService', () => {
         '-'
       ]
     });
+  });
+
+  it('uses the selected refinement model when one is provided', () => {
+    const command = buildRefinementCommand('/tmp/example repo', 'gpt-5.3-codex-spark');
+
+    expect(command.argv).toContain('gpt-5.3-codex-spark');
+    expect(command.argv).not.toContain('gpt-5.4-mini');
   });
 });

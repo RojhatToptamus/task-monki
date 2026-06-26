@@ -730,6 +730,7 @@ export interface ProtocolMessageRecord {
 export interface RefinePromptRequest {
   repositoryPath: string;
   input: string;
+  model?: string;
 }
 
 export interface RefinePromptResponse {
@@ -785,6 +786,7 @@ export interface AppUpdateEvent {
 
 export interface TaskManagerApi {
   getDefaultRepositoryPath(): Promise<string>;
+  chooseRepositoryFolder(): Promise<string | undefined>;
   validateRepository(path: string): Promise<RepositoryPreflight>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;

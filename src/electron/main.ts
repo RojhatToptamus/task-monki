@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
@@ -56,6 +56,16 @@ function createWindow(): void {
 
 function installIpcHandlers(): void {
   ipcMain.handle('repository:defaultPath', () => service.getDefaultRepositoryPath());
+  ipcMain.handle('repository:chooseFolder', async () => {
+    const options: OpenDialogOptions = {
+      title: 'Add repository',
+      properties: ['openDirectory']
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? undefined : result.filePaths[0];
+  });
   ipcMain.handle('agent:providerState', () => service.getAgentProviderState());
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {

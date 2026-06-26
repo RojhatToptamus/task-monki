@@ -4,6 +4,7 @@ import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { AppUpdateEvent } from '../shared/contracts';
+import { chooseRepositoryFolder } from './folderPicker';
 
 const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
@@ -77,6 +78,11 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
     if (request.method === 'POST' && url.pathname === '/api/repository/validate') {
       const body = (await readJson(request)) as { path: string };
       sendJson(response, 200, await service.validateRepository(body.path));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/repository/chooseFolder') {
+      sendJson(response, 200, (await chooseRepositoryFolder()) ?? null);
       return;
     }
 

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { RefinePromptResponse } from '../../shared/contracts';
 import { ProcessSupervisor } from '../process/ProcessSupervisor';
 
-const REFINEMENT_MODEL = 'gpt-5.4-mini';
+const DEFAULT_REFINEMENT_MODEL = 'gpt-5.4-mini';
 const REFINEMENT_REASONING_EFFORT = 'low';
 const REFINEMENT_TIMEOUT_MS = 90_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -11,6 +11,7 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 export interface PromptRefinementRunRequest {
   repositoryPath: string;
   instruction: string;
+  model?: string;
 }
 
 export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Promise<string>;
@@ -18,7 +19,11 @@ export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Pr
 export class PromptRefinementService {
   constructor(private readonly runModel: PromptRefinementRunner = runCodexRefinement) {}
 
-  async refine(repositoryPath: string, input: string): Promise<RefinePromptResponse> {
+  async refine(
+    repositoryPath: string,
+    input: string,
+    model?: string
+  ): Promise<RefinePromptResponse> {
     const trimmed = input.trim();
     if (!trimmed) {
       throw new Error('Prompt text is required.');
@@ -27,7 +32,8 @@ export class PromptRefinementService {
     try {
       const modelOutput = await this.runModel({
         repositoryPath,
-        instruction: buildRefinementInstruction(trimmed)
+        instruction: buildRefinementInstruction(trimmed),
+        model
       });
       const refined = parseModelRefinement(modelOutput);
       return {
@@ -40,13 +46,17 @@ export class PromptRefinementService {
   }
 }
 
-export function buildRefinementCommand(repositoryPath: string): {
+export function buildRefinementCommand(
+  repositoryPath: string,
+  model = DEFAULT_REFINEMENT_MODEL
+): {
   executable: string;
   argv: string[];
 } {
   if (!repositoryPath.trim()) {
     throw new Error('Repository path is required.');
   }
+  const selectedModel = model.trim() || DEFAULT_REFINEMENT_MODEL;
 
   return {
     executable: 'codex',
@@ -61,7 +71,7 @@ export function buildRefinementCommand(repositoryPath: string): {
       '--cd',
       repositoryPath,
       '--model',
-      REFINEMENT_MODEL,
+      selectedModel,
       '-c',
       `model_reasoning_effort="${REFINEMENT_REASONING_EFFORT}"`,
       '-'
@@ -71,9 +81,10 @@ export function buildRefinementCommand(repositoryPath: string): {
 
 async function runCodexRefinement({
   repositoryPath,
-  instruction
+  instruction,
+  model
 }: PromptRefinementRunRequest): Promise<string> {
-  const command = buildRefinementCommand(repositoryPath);
+  const command = buildRefinementCommand(repositoryPath, model);
   const process = new ProcessSupervisor().start({
     executable: command.executable,
     argv: command.argv,
