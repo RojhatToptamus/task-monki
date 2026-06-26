@@ -1747,7 +1747,6 @@ textarea:focus-visible {
   border-radius: 9px;
 }
 
-.settings-table__header,
 .settings-table__row {
   display: grid;
   grid-template-columns: 110px minmax(0, 1fr);
@@ -1755,17 +1754,13 @@ textarea:focus-visible {
   padding: 8px 10px;
 }
 
-.settings-table__header {
-  background: var(--bg);
-  color: var(--muted);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
 .settings-table__row {
   border-top: 1px solid var(--border);
   font-size: 11.5px;
+}
+
+.settings-table__row:first-child {
+  border-top: 0;
 }
 
 .settings-table__row > span {
@@ -2435,7 +2430,6 @@ textarea:focus-visible {
     text-align: left;
   }
 
-  .settings-table__header,
   .settings-table__row {
     grid-template-columns: 90px minmax(0, 1fr);
   }
@@ -4973,7 +4967,7 @@ textarea:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 1px;
+  margin-top: 3px;
   min-width: 0;
 }
 
@@ -4988,6 +4982,7 @@ textarea:focus-visible {
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.08em;
+  line-height: 1.2;
   text-transform: uppercase;
 }
 
@@ -5046,7 +5041,7 @@ textarea:focus-visible {
 }
 
 .tm-finding__chevron {
-  margin-top: 1px;
+  margin-top: 0;
   color: var(--faint);
   font-size: 18px;
   line-height: 1;
@@ -5058,14 +5053,7 @@ textarea:focus-visible {
 }
 
 .tm-finding__detail {
-  padding: 2px 16px 14px 108px;
-}
-
-.tm-finding__detail code {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--faint);
-  font: 10.5px/1.45 var(--font-mono);
+  padding: 2px 16px 14px;
 }
 
 .tm-finding__detail p {

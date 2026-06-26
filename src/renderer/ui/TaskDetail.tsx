@@ -37,6 +37,7 @@ import {
   canStartRun,
   formatShortId
 } from '../model/selectors';
+import { describeHealthFinding } from '../model/debugDiagnostics';
 import { ActivityTimeline } from './ActivityTimeline';
 import { AgentControlPanel } from './AgentControlPanel';
 import { EvidencePanel } from './EvidencePanel';
@@ -629,6 +630,7 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
       <div className="tm-reviewfindings__list tm-healthfindings__list">
         {sorted.map((finding, index) => {
           const tone = healthFindingTone(finding.severity);
+          const view = describeHealthFinding(finding);
           return (
             <details
               key={finding.id}
@@ -641,18 +643,15 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
                   <span>{humanizeEnum(finding.severity).toUpperCase()}</span>
                 </span>
                 <span className="tm-finding__main">
-                  <span className="tm-finding__title">{humanizeEnum(finding.code)}</span>
-                  <span className="tm-finding__ref">
-                    {finding.code} · {formatHealthFindingTime(finding.createdAt)}
-                  </span>
+                  <span className="tm-finding__title">{view.title}</span>
+                  <span className="tm-finding__ref">{view.meta}</span>
                 </span>
                 <span className="tm-finding__chevron" aria-hidden="true">
                   ›
                 </span>
               </summary>
               <div className="tm-finding__detail">
-                <code>{finding.code}</code>
-                <p>{finding.message}</p>
+                <p>{view.detail}</p>
               </div>
             </details>
           );
@@ -1002,7 +1001,6 @@ function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
                 </span>
               </summary>
               <div className="tm-finding__detail">
-                <code>{fullFindingRef(finding)}</code>
                 <p>{finding.explanation}</p>
                 {finding.recommendation ? <p>{finding.recommendation}</p> : null}
               </div>
@@ -1170,20 +1168,6 @@ function shortFindingRef(finding: CodexReviewFinding): string {
   }
   const filename = finding.path.split('/').filter(Boolean).at(-1) ?? finding.path;
   return finding.line ? `${filename}:${finding.line}` : filename;
-}
-
-function fullFindingRef(finding: CodexReviewFinding): string {
-  if (!finding.path) {
-    return 'location not specified';
-  }
-  if (!finding.line) {
-    return finding.path;
-  }
-  const line =
-    finding.endLine && finding.endLine !== finding.line
-      ? `${finding.line}-${finding.endLine}`
-      : String(finding.line);
-  return `${finding.path} · line ${line}`;
 }
 
 function formatReviewTime(value: string | undefined): string {
@@ -1374,14 +1358,6 @@ function healthFindingTone(severity: Finding['severity']): Tone {
     case 'HEALTHY':
       return 'neutral';
   }
-}
-
-function formatHealthFindingTime(value: string): string {
-  const time = Date.parse(value);
-  if (Number.isNaN(time)) {
-    return 'unknown time';
-  }
-  return new Date(time).toLocaleString();
 }
 
 function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['status']): {

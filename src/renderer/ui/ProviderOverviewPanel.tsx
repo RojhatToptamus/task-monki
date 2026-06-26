@@ -12,6 +12,7 @@ import type {
 import {
   PROVIDER_SETTING_FIELDS
 } from '../model/providerSettings';
+import { shouldShowProviderGoalDiagnostics } from '../model/debugDiagnostics';
 import { RawProviderMessage } from './RawProviderMessage';
 import { humanizeEnum } from './display';
 
@@ -48,8 +49,9 @@ export function ProviderOverviewPanel({
         .sort((a, b) => b.observedAt.localeCompare(a.observedAt)),
     [session?.id, settingsObservations]
   );
+  const showGoalDiagnostics = shouldShowProviderGoalDiagnostics(goal, Boolean(session));
   const hasProviderSignal = Boolean(
-    run || session || goal || usage || observations.length > 0
+    run || session || usage || observations.length > 0 || showGoalDiagnostics
   );
 
   const sync = async () => {
@@ -115,52 +117,55 @@ export function ProviderOverviewPanel({
         </dl>
       </div>
 
-      <div className="provider-section">
-        <div className="provider-section__heading">
-          <h4>Goal mirror</h4>
-          {session && (!goal || goal.syncState !== 'IN_SYNC') ? (
-            <button
-              type="button"
-              className="outline-button provider-small-button"
-              disabled={syncing || !session.materialized}
-              onClick={() => void sync()}
-            >
-              {syncing ? 'Syncing…' : 'Resync provider goal'}
-            </button>
-          ) : null}
+      {showGoalDiagnostics ? (
+        <div className="provider-section">
+          <div className="provider-section__heading">
+            <h4>Provider goal</h4>
+            {session ? (
+              <button
+                type="button"
+                className="outline-button provider-small-button"
+                disabled={syncing || !session.materialized}
+                onClick={() => void sync()}
+              >
+                {syncing ? 'Syncing…' : 'Resync provider goal'}
+              </button>
+            ) : null}
+          </div>
+          <dl className="provider-kv">
+            <dt>Sync state</dt>
+            <dd>
+              <span>{goal ? humanizeEnum(goal.syncState) : 'Not observed'}</span>
+              <small>{goal?.source ? humanizeEnum(goal.source) : 'No provider observation'}</small>
+            </dd>
+            <dt>Expected goal</dt>
+            <dd>
+              <span>{task.prompt}</span>
+              <small>Authoritative task goal</small>
+            </dd>
+            <dt>Provider goal</dt>
+            <dd>
+              <span>{goal?.providerObjective ?? 'Not observed'}</span>
+              <small>
+                {goal?.providerObjective === task.prompt
+                  ? 'Matches the Task Monki goal'
+                  : 'Reported by Codex'}
+              </small>
+            </dd>
+            <dt>Provider status</dt>
+            <dd>
+              <span>{goal?.providerStatus ?? 'unknown'}</span>
+              <small>Reported by Codex</small>
+            </dd>
+          </dl>
+          {goal?.detail ? <p className="provider-warning">{goal.detail}</p> : null}
+          {goal ? <RawProviderMessage reference={goal.rawMessage} /> : null}
         </div>
-        <dl className="provider-kv">
-          <dt>Task Monki goal</dt>
-          <dd>
-            <span>{task.prompt}</span>
-            <small>Authoritative · Task Monki</small>
-          </dd>
-          <dt>Provider goal</dt>
-          <dd>
-            <span>{goal?.providerObjective ?? 'Not observed'}</span>
-            <small>
-              {goal
-                ? `${humanizeEnum(goal.syncState)} · ${goal.source}`
-                : 'No provider observation'}
-            </small>
-          </dd>
-          <dt>Provider status</dt>
-          <dd>
-            <span>{goal?.providerStatus ?? 'unknown'}</span>
-            <small>Reported by Codex; not a paused model turn</small>
-          </dd>
-        </dl>
-        {goal?.detail ? <p className="provider-warning">{goal.detail}</p> : null}
-        {goal ? <RawProviderMessage reference={goal.rawMessage} /> : null}
-      </div>
+      ) : null}
 
       <div className="provider-section">
         <h4>Current settings</h4>
         <div className="settings-table">
-          <div className="settings-table__header">
-            <span>Setting</span>
-            <span>Value</span>
-          </div>
           {PROVIDER_SETTING_FIELDS.map(({ key, label }) => {
             const observation = observations.find(
               (candidate) => candidate.settings[key] !== undefined

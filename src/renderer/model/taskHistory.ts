@@ -11,14 +11,25 @@ export interface TaskHistoryItem {
 
 export function buildTaskHistory(events: DomainEvent[], runs: RunRecord[] = []): TaskHistoryItem[] {
   const runById = new Map(runs.map((run) => [run.id, run]));
-  return events
-    .map((event) => historyItemFor(event, runById))
-    .filter((item): item is TaskHistoryItem => Boolean(item));
+  const state: HistoryBuildState = {};
+  const history: TaskHistoryItem[] = [];
+  for (const event of events) {
+    const item = historyItemFor(event, runById, state);
+    if (item) {
+      history.push(item);
+    }
+  }
+  return history;
+}
+
+interface HistoryBuildState {
+  lastGitSnapshotSignature?: string;
 }
 
 function historyItemFor(
   event: DomainEvent,
-  runById: Map<string, RunRecord>
+  runById: Map<string, RunRecord>,
+  state: HistoryBuildState
 ): TaskHistoryItem | undefined {
   const payload = objectPayload(event.payload);
   const run = event.runId ? runById.get(event.runId) : undefined;
@@ -36,14 +47,15 @@ function historyItemFor(
         'neutral'
       );
     case 'WORKTREE_CREATED':
-    case 'WORKTREE_VERIFIED':
       return item(
         event,
         'state',
-        event.type === 'WORKTREE_CREATED' ? 'Worktree ready' : 'Worktree checked',
+        'Worktree ready',
         stringField(payload, 'worktreePath') ?? stringField(payload, 'status') ?? '',
         'success'
       );
+    case 'WORKTREE_VERIFIED':
+      return worktreeVerificationItem(event, payload);
     case 'AGENT_RUN_STARTED':
       return item(event, runCategory(mode), runStartedTitle(mode), runStartedDetail(mode, payload), runTone(mode));
     case 'AGENT_RUN_COMPLETED':
@@ -58,14 +70,20 @@ function historyItemFor(
       return item(event, 'run', 'Agent needs input', humanizeEnum(stringField(payload, 'type') ?? 'REQUEST'), 'action');
     case 'AGENT_INTERACTION_RESOLVED':
       return item(event, 'run', 'Agent request answered', stringField(payload, 'status') ?? '', 'success');
-    case 'GIT_SNAPSHOT_CAPTURED':
+    case 'GIT_SNAPSHOT_CAPTURED': {
+      const signature = gitSnapshotSignature(payload);
+      if (signature === state.lastGitSnapshotSignature) {
+        return undefined;
+      }
+      state.lastGitSnapshotSignature = signature;
       return item(
         event,
         'evidence',
-        'Git evidence refreshed',
+        'Git evidence changed',
         `Status ${stringField(payload, 'status') ?? 'unknown'} · ${changedFileCount(payload)} changed files`,
         'success'
       );
+    }
     case 'TEST_RUN_STARTED':
       return item(event, 'test', 'Tests started', stringField(payload, 'command') ?? 'Local test command.', 'info');
     case 'TEST_RUN_COMPLETED':
@@ -101,7 +119,7 @@ function historyItemFor(
     case 'GITHUB_SYNC_FAILED':
       return item(event, 'delivery', 'GitHub sync failed', stringField(payload, 'error') ?? '', 'error');
     case 'AGENT_MUTATION_AMBIGUOUS':
-      return item(event, 'risk', 'Provider delivery ambiguous', stringField(payload, 'reason') ?? '', 'error');
+      return undefined;
     case 'AGENT_REVIEW_POLICY_VIOLATION':
       return item(event, 'risk', 'Review changed Git state', 'Review should be read-only.', 'error');
     case 'AGENT_RUNTIME_LOST':
@@ -111,6 +129,23 @@ function historyItemFor(
     default:
       return undefined;
   }
+}
+
+function worktreeVerificationItem(
+  event: DomainEvent,
+  payload: Record<string, unknown>
+): TaskHistoryItem | undefined {
+  const status = stringField(payload, 'status');
+  if (status === 'ERROR' || status === 'MISSING') {
+    return item(
+      event,
+      'risk',
+      'Worktree needs attention',
+      stringField(payload, 'error') ?? stringField(payload, 'worktreePath') ?? status,
+      'error'
+    );
+  }
+  return undefined;
 }
 
 function item(
@@ -204,6 +239,24 @@ function changedFileCount(payload: Record<string, unknown>): number {
     (numberField(payload, 'workingDiffFileCount') ?? 0) +
     (numberField(payload, 'committedDiffFileCount') ?? 0)
   );
+}
+
+function gitSnapshotSignature(payload: Record<string, unknown>): string {
+  const dirtyFingerprint = stringField(payload, 'dirtyFingerprint');
+  if (dirtyFingerprint) {
+    return dirtyFingerprint;
+  }
+
+  return [
+    stringField(payload, 'status') ?? 'unknown',
+    numberField(payload, 'workingDiffFileCount') ?? 0,
+    numberField(payload, 'committedDiffFileCount') ?? 0,
+    numberField(payload, 'stagedCount') ?? 0,
+    numberField(payload, 'unstagedCount') ?? 0,
+    numberField(payload, 'untrackedCount') ?? 0,
+    numberField(payload, 'conflictedCount') ?? 0,
+    stringField(payload, 'headSha') ?? ''
+  ].join(':');
 }
 
 function prDetail(payload: Record<string, unknown>): string {
