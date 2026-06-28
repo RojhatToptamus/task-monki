@@ -18,7 +18,7 @@ import type {
 
 export * from './agent';
 
-export const TASK_STORE_SCHEMA_VERSION = 7 as const;
+export const TASK_STORE_SCHEMA_VERSION = 8 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -213,6 +213,7 @@ export type MergeStatus =
 
 export type DomainEventType =
   | 'TASK_CREATED'
+  | 'TASK_ALTERNATIVE_CREATED'
   | 'TASK_ITERATION_CREATED'
   | 'TRANSITION_REQUESTED'
   | 'TRANSITION_COMPLETED'
@@ -333,6 +334,9 @@ export interface Task {
   currentIterationId?: string;
   currentWorktreeId?: string;
   currentTestRunId?: string;
+  forkedAlternativeTaskIds: string[];
+  forkedFromTaskId?: string;
+  forkedFromRunId?: string;
   agentSettings: AgentExecutionSettings;
   testCommand?: string;
   createdAt: string;

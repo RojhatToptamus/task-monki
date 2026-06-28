@@ -114,6 +114,7 @@ function taskFixture(repositoryPath: string): Task {
     phaseVersion: 1,
     currentIterationId: 'iteration-1',
     currentWorktreeId: 'worktree-1',
+    forkedAlternativeTaskIds: [],
     agentSettings: {},
     createdAt: now,
     updatedAt: now,

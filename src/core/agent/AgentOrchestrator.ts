@@ -3,7 +3,6 @@ import type {
   AgentExecutionSettings,
   AgentProviderState,
   AgentReviewTarget,
-  AgentRetryStrategy,
   AgentRunMode,
   AgentSessionRecord,
   InteractionRequestRecord,
@@ -45,12 +44,6 @@ export interface StartOrchestratedTurn {
   sessionId?: string;
   retryOfRunId?: string;
   continuedFromRunId?: string;
-}
-
-export interface ForkAndStartOrchestratedTurn
-  extends Omit<StartOrchestratedTurn, 'sessionId'> {
-  sourceRun: RunRecord;
-  retryStrategy: Extract<AgentRetryStrategy, 'FORK'>;
 }
 
 export interface StartOrchestratedReview {
@@ -180,76 +173,6 @@ export class AgentOrchestrator {
         }
       }
       await this.recordStartFailure(run, error);
-      throw error;
-    }
-  }
-
-  forkAndStartTurn(input: ForkAndStartOrchestratedTurn): Promise<RunRecord> {
-    const operation = this.startQueue.then(() => this.forkAndStartTurnSerially(input));
-    this.startQueue = operation.then(
-      () => undefined,
-      () => undefined
-    );
-    return operation;
-  }
-
-  private async forkAndStartTurnSerially(
-    input: ForkAndStartOrchestratedTurn
-  ): Promise<RunRecord> {
-    if (!this.adapter.forkSession) {
-      throw new Error('This provider does not support session forks.');
-    }
-    const settings = await this.validateSettings(input.settings);
-    await this.assertCapacity();
-    const sourceSession = await this.requireSession(input.sourceRun.sessionId);
-    await this.assertNoPendingInteractions(sourceSession.id);
-    const fork = await this.store.createAgentSession({
-      task: input.task,
-      iteration: input.iteration,
-      worktree: input.worktree,
-      provider: sourceSession.provider,
-      role: 'ALTERNATIVE',
-      requestedSettings: settings,
-      parentSessionId: sourceSession.id,
-      forkedFromSessionId: sourceSession.id
-    });
-    try {
-      let materialized: AgentSessionRecord;
-      try {
-        materialized = await this.adapter.forkSession({
-          sourceSession: {
-            localSessionId: sourceSession.id,
-            providerSessionId: sourceSession.providerSessionId
-          },
-          localSessionId: fork.id,
-          settings
-        });
-      } catch (error) {
-        if (!(error instanceof AgentProviderSessionMissingError)) {
-          throw error;
-        }
-        const recovered = await this.recreateMissingProviderSession(
-          sourceSession,
-          settings,
-          error
-        );
-        materialized = await this.adapter.forkSession({
-          sourceSession: {
-            localSessionId: recovered.id,
-            providerSessionId: recovered.providerSessionId
-          },
-          localSessionId: fork.id,
-          settings
-        });
-      }
-      return this.startTurnSerially({
-        ...input,
-        settings,
-        sessionId: materialized.id,
-        retryOfRunId: input.sourceRun.id
-      });
-    } catch (error) {
-      await this.store.updateAgentSession(fork.id, { status: 'UNKNOWN' });
       throw error;
     }
   }

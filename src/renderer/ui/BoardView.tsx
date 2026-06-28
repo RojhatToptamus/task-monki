@@ -39,7 +39,7 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
     case 'RECOVERY_REQUIRED':
       return {
         label: 'Recovery required',
-        detail: 'Runtime state is ambiguous and needs review.',
+        detail: 'Runtime state is ambiguous; inspect recovery details.',
         tone: 'error'
       };
     case 'LOST':
@@ -74,7 +74,7 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
 
   if (task.projection.tests === 'FAILED' || task.projection.tests === 'ERROR') {
     return {
-      label: 'Tests need review',
+      label: 'Tests need attention',
       detail: `Tests are ${humanizeEnum(task.projection.tests).toLowerCase()}.`,
       tone: 'warning'
     };

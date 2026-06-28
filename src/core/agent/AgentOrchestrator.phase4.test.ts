@@ -20,7 +20,6 @@ import {
   type AgentSessionRef,
   type AgentTurn,
   type CreateAgentSession,
-  type ForkAgentSession,
   type InterruptAgentTurn,
   type StartAgentReview,
   type StartAgentTurn,
@@ -64,7 +63,7 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(adapter.lastStart?.settings?.modelProvider).toBe('openai');
   });
 
-  it('preserves session lineage across steer, continue, forked retry, and detached review', async () => {
+  it('preserves session lineage across steer, continue, and detached review', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-'));
     const store = new FileTaskStore(dir);
     const adapter = new Phase4Adapter(store);
@@ -108,28 +107,12 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(continued.sessionId).toBe(first.sessionId);
     expect(continued.continuedFromRunId).toBe(first.id);
 
-    await terminal(store, continued, 'AGENT_RUN_FAILED');
-    const forked = await orchestrator.forkAndStartTurn({
-      task,
-      iteration,
-      worktree,
-      sourceRun: (await store.getRun(continued.id))!,
-      retryStrategy: 'FORK',
-      mode: 'RETRY',
-      prompt: 'Try an alternative approach.',
-      settings: task.agentSettings
-    });
-    const forkSession = await store.getAgentSession(forked.sessionId);
-    expect(forkSession?.role).toBe('ALTERNATIVE');
-    expect(forkSession?.forkedFromSessionId).toBe(first.sessionId);
-    expect(forked.retryOfRunId).toBe(continued.id);
-
-    await terminal(store, forked, 'AGENT_RUN_COMPLETED');
+    await terminal(store, continued, 'AGENT_RUN_COMPLETED');
     const reviewed = await orchestrator.startReview({
       task,
       iteration,
       worktree,
-      sourceRun: (await store.getRun(forked.id))!,
+      sourceRun: (await store.getRun(continued.id))!,
       target: { type: 'UNCOMMITTED_CHANGES' },
       settings: {
         ...task.agentSettings,
@@ -138,7 +121,7 @@ describe('AgentOrchestrator Phase 4', () => {
     });
     const reviewSession = await store.getAgentSession(reviewed.sessionId);
     expect(reviewSession?.role).toBe('REVIEW');
-    expect(reviewSession?.parentSessionId).toBe(forkSession?.id);
+    expect(reviewSession?.parentSessionId).toBe(first.sessionId);
     expect(reviewed.mode).toBe('REVIEW');
   });
 
@@ -339,16 +322,6 @@ class Phase4Adapter implements AgentProviderAdapter {
 
   interruptTurn(_input: InterruptAgentTurn): Promise<void> {
     return Promise.resolve();
-  }
-
-  async forkSession(input: ForkAgentSession): Promise<AgentSessionRecord> {
-    this.threadCounter += 1;
-    return this.store.updateAgentSession(input.localSessionId, {
-      providerSessionId: `thread-${this.threadCounter}`,
-      providerSessionTreeId: `thread-${this.threadCounter}`,
-      status: 'IDLE',
-      requestedSettings: input.settings
-    });
   }
 
   async startReview(input: StartAgentReview): Promise<AgentTurn> {

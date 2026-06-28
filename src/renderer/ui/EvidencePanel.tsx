@@ -352,7 +352,6 @@ export function EvidencePanel({
         <div className="tm-evidence-summary__head">
           <div>
             <h3>Verified evidence</h3>
-            <span>Observed locally by Task Monki</span>
           </div>
           {run ? <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span> : null}
         </div>

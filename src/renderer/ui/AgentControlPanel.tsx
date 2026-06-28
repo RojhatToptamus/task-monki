@@ -4,9 +4,12 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
+import {
+  getAgentComposerCopy,
+  getPostRunActionState,
+  type AgentComposerMode
+} from '../model/postRunActions';
 import { humanizeEnum } from './display';
-
-type ComposerMode = 'STEER' | 'CONTINUE' | 'RETRY_SAME' | 'RETRY_FORK';
 
 interface AgentControlPanelProps {
   run?: RunRecord;
@@ -21,14 +24,6 @@ interface AgentControlPanelProps {
   ): Promise<void>;
 }
 
-const TERMINAL_OR_RECOVERY = new Set<RunRecord['status']>([
-  'COMPLETED',
-  'FAILED',
-  'INTERRUPTED',
-  'RECOVERY_REQUIRED',
-  'LOST'
-]);
-
 export function AgentControlPanel({
   run,
   interactions,
@@ -37,7 +32,7 @@ export function AgentControlPanel({
   onContinue,
   onRetry
 }: AgentControlPanelProps) {
-  const [mode, setMode] = useState<ComposerMode>();
+  const [mode, setMode] = useState<AgentComposerMode>();
   const [instruction, setInstruction] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -46,7 +41,9 @@ export function AgentControlPanel({
   }
 
   const isRunning = run.status === 'RUNNING';
-  const canFollowUp = TERMINAL_OR_RECOVERY.has(run.status);
+  const { canFollowUp, canContinue, canRetry, continuationLabel, continuationKind } =
+    getPostRunActionState(run);
+  const composerCopy = mode ? getAgentComposerCopy(mode, continuationKind) : undefined;
   const staleInteractions = interactions.filter((interaction) =>
     ['STALE', 'ABORTED_SERVER_LOST'].includes(interaction.status)
   );
@@ -124,8 +121,13 @@ export function AgentControlPanel({
 
       <div className="agent-controls__actions">
         {isRunning ? (
-          <>
-            <button type="button" className="outline-button" onClick={() => setMode('STEER')}>
+          <div className="agent-controls__button-row">
+            <button
+              type="button"
+              className={actionButtonClass('outline-button', mode === 'STEER')}
+              aria-pressed={mode === 'STEER'}
+              onClick={() => setMode('STEER')}
+            >
               Add instruction
             </button>
             <button
@@ -135,43 +137,98 @@ export function AgentControlPanel({
             >
               Stop run
             </button>
-          </>
+          </div>
         ) : null}
-        {canFollowUp ? (
-          <>
-            <button type="button" className="primary-button" onClick={() => setMode('CONTINUE')}>
-              Continue
-            </button>
-            <button
-              type="button"
-              className="outline-button"
-              onClick={() => setMode('RETRY_SAME')}
-            >
-              Retry in session
-            </button>
-            <button
-              type="button"
-              className="outline-button"
-              onClick={() => setMode('RETRY_FORK')}
-            >
-              Fork alternative
-            </button>
-          </>
+
+        {canFollowUp || (canRetry && !canContinue) ? (
+          <div className="agent-controls__button-row">
+            {canFollowUp ? (
+              <button
+                type="button"
+                className={actionButtonClass('outline-button', mode === 'CONTINUE')}
+                aria-pressed={mode === 'CONTINUE'}
+                onClick={() => setMode('CONTINUE')}
+              >
+                {continuationLabel}
+              </button>
+            ) : null}
+            {canRetry ? (
+              <>
+                <button
+                  type="button"
+                  className={actionButtonClass('outline-button', mode === 'RETRY_SAME')}
+                  aria-pressed={mode === 'RETRY_SAME'}
+                  onClick={() => setMode('RETRY_SAME')}
+                >
+                  Retry in session
+                </button>
+                <button
+                  type="button"
+                  className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
+                  aria-pressed={mode === 'RETRY_FORK'}
+                  onClick={() => setMode('RETRY_FORK')}
+                >
+                  Fork alternative
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {canContinue ? (
+          <div className="agent-controls__group agent-controls__group--recovery">
+            <div className="agent-controls__group-copy">
+              <strong>Unfinished work</strong>
+              <span>Continues from the current worktree state.</span>
+            </div>
+            <div className="agent-controls__button-row">
+              <button
+                type="button"
+                className={actionButtonClass('outline-button', mode === 'CONTINUE')}
+                aria-pressed={mode === 'CONTINUE'}
+                onClick={() => setMode('CONTINUE')}
+              >
+                {continuationLabel}
+              </button>
+              {canRetry ? (
+                <>
+                  <button
+                    type="button"
+                    className={actionButtonClass('outline-button', mode === 'RETRY_SAME')}
+                    aria-pressed={mode === 'RETRY_SAME'}
+                    onClick={() => setMode('RETRY_SAME')}
+                  >
+                    Retry in session
+                  </button>
+                  <button
+                    type="button"
+                    className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
+                    aria-pressed={mode === 'RETRY_FORK'}
+                    onClick={() => setMode('RETRY_FORK')}
+                  >
+                    Fork alternative
+                  </button>
+                </>
+              ) : null}
+            </div>
+          </div>
         ) : null}
       </div>
 
-      {mode ? (
+      {mode && composerCopy ? (
         <div className="agent-controls__composer">
-          <label htmlFor={`agent-control-${run.id}`}>
-            {mode === 'STEER' ? 'Instruction for the active turn' : 'Optional follow-up instruction'}
-          </label>
+          <div className="agent-controls__composer-head">
+            <strong>{composerCopy.title}</strong>
+            {composerCopy.helperText ? <span>{composerCopy.helperText}</span> : null}
+          </div>
+          <label htmlFor={`agent-control-${run.id}`}>{composerCopy.fieldLabel}</label>
           <textarea
             id={`agent-control-${run.id}`}
             rows={4}
             value={instruction}
             autoFocus
             onChange={(event) => setInstruction(event.target.value)}
-            placeholder={placeholderFor(mode)}
+            placeholder={composerCopy.placeholder}
           />
           <div className="agent-controls__composer-actions">
             <button
@@ -191,7 +248,7 @@ export function AgentControlPanel({
               disabled={submitting || (mode === 'STEER' && !instruction.trim())}
               onClick={() => void submit()}
             >
-              {submitting ? 'Submitting…' : submitLabel(mode)}
+              {submitting ? 'Submitting...' : composerCopy.submitLabel}
             </button>
           </div>
         </div>
@@ -200,25 +257,6 @@ export function AgentControlPanel({
   );
 }
 
-function placeholderFor(mode: ComposerMode): string {
-  if (mode === 'STEER') {
-    return 'Example: Focus on the failing tests before changing more files.';
-  }
-  if (mode === 'RETRY_FORK') {
-    return 'Describe the alternative approach for the forked session.';
-  }
-  return 'Add context or constraints for the next turn.';
-}
-
-function submitLabel(mode: ComposerMode): string {
-  switch (mode) {
-    case 'STEER':
-      return 'Send instruction';
-    case 'CONTINUE':
-      return 'Start continuation';
-    case 'RETRY_SAME':
-      return 'Retry in session';
-    case 'RETRY_FORK':
-      return 'Fork and retry';
-  }
+function actionButtonClass(baseClass: string, active: boolean): string {
+  return active ? `${baseClass} agent-controls__action--active` : baseClass;
 }

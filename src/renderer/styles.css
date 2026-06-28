@@ -1571,20 +1571,65 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
-.agent-controls__actions,
+.agent-controls__actions {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-controls__button-row,
 .agent-controls__composer-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.agent-controls__actions .primary-button,
-.agent-controls__actions .outline-button,
+.agent-controls__button-row .primary-button,
+.agent-controls__button-row .outline-button,
 .agent-controls__composer-actions .primary-button,
 .agent-controls__composer-actions .outline-button {
   height: 32px;
   padding: 0 12px;
   font-size: 12px;
+}
+
+.agent-controls__action--active {
+  border-color: var(--accent);
+  background: var(--surface2);
+  color: var(--text);
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--accent) 12%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.outline-button.agent-controls__action--active:not(:disabled):hover {
+  border-color: var(--accent);
+  background: var(--surface2);
+}
+
+.agent-controls__group {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-controls__group--recovery {
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--action) 30%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--action) 8%, var(--surface));
+}
+
+.agent-controls__group-copy {
+  display: grid;
+  gap: 3px;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.agent-controls__group-copy strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .agent-controls__composer {
@@ -1593,6 +1638,23 @@ textarea:focus-visible {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid var(--border);
+}
+
+.agent-controls__composer-head {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-controls__composer-head strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.agent-controls__composer-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .agent-controls__composer label {
@@ -4585,6 +4647,44 @@ textarea:focus-visible {
   color: var(--text-soft);
 }
 
+.tm-finishpanel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+}
+
+.tm-finishpanel__head,
+.tm-finishpanel__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tm-finishpanel__head {
+  justify-content: flex-start;
+}
+
+.tm-finishpanel .tm-panel__title {
+  margin: 0;
+}
+
+.tm-finishpanel__actions {
+  justify-content: flex-end;
+  flex: 1 1 320px;
+  margin-left: auto;
+}
+
+.tm-finishpanel__actions .primary-button,
+.tm-finishpanel__actions .outline-button {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
 /* Codex review gate */
 .tm-reviewcard {
   border: 1px solid var(--border);
@@ -4742,23 +4842,6 @@ textarea:focus-visible {
 
 .tm-reviewcard__raw {
   margin-top: 0;
-}
-
-.tm-reviewcard__evidence {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.tm-reviewcard__evidence strong {
-  color: var(--text-soft);
-  font-weight: 600;
 }
 
 .tm-reviewcard__actions {

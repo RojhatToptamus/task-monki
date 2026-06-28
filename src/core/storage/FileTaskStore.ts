@@ -71,6 +71,11 @@ export interface CreateRunInput {
   beforeGitSnapshotId?: string;
 }
 
+export interface CreateForkedAlternativeTaskInput extends CreateTaskRequest {
+  sourceTaskId: string;
+  sourceRunId: string;
+}
+
 export interface CreateObservedSubagentRunInput {
   session: AgentSessionRecord;
   providerTurnId: string;
@@ -372,9 +377,36 @@ export class FileTaskStore {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
+    return this.createTaskRecord(input, 'ui');
+  }
+
+  async createForkedAlternativeTask(input: CreateForkedAlternativeTaskInput): Promise<Task> {
+    return this.createTaskRecord(input, 'ui', {
+      sourceTaskId: input.sourceTaskId,
+      sourceRunId: input.sourceRunId
+    });
+  }
+
+  private async createTaskRecord(
+    input: CreateTaskRequest,
+    source: DomainEvent['source'],
+    fork?: { sourceTaskId: string; sourceRunId: string }
+  ): Promise<Task> {
     await this.init();
 
     const now = new Date().toISOString();
+    const sourceTask = fork
+      ? this.state.tasks.find((candidate) => candidate.id === fork.sourceTaskId)
+      : undefined;
+    const sourceRun = fork
+      ? this.state.runs.find(
+          (candidate) =>
+            candidate.id === fork.sourceRunId && candidate.taskId === fork.sourceTaskId
+        )
+      : undefined;
+    if (fork && (!sourceTask || !sourceRun)) {
+      throw new Error('Fork source task or run was not found.');
+    }
     const task: Task = {
       id: randomUUID(),
       title: input.title.trim(),
@@ -385,6 +417,9 @@ export class FileTaskStore {
       completionPolicy: 'LOCAL_ACCEPTANCE',
       phaseVersion: 1,
       testCommand: input.testCommand?.trim() || 'npm test',
+      forkedAlternativeTaskIds: [],
+      forkedFromTaskId: fork?.sourceTaskId,
+      forkedFromRunId: fork?.sourceRunId,
       agentSettings: input.agentSettings ?? {},
       createdAt: now,
       updatedAt: now,
@@ -403,7 +438,21 @@ export class FileTaskStore {
 
     this.state = {
       ...this.state,
-      tasks: [task, ...this.state.tasks]
+      tasks: [
+        task,
+        ...this.state.tasks.map((existing) =>
+          fork && existing.id === fork.sourceTaskId
+            ? {
+                ...existing,
+                forkedAlternativeTaskIds: uniqueIds([
+                  ...(existing.forkedAlternativeTaskIds ?? []),
+                  task.id
+                ]),
+                updatedAt: now
+              }
+            : existing
+        )
+      ]
     };
 
     this.state = applyEventToState(
@@ -411,10 +460,32 @@ export class FileTaskStore {
       createDomainEvent({
         type: 'TASK_CREATED',
         taskId: task.id,
-        source: 'ui',
-        payload: { title: task.title, repositoryPath: task.repositoryPath, testCommand: task.testCommand }
+        source,
+        payload: {
+          title: task.title,
+          repositoryPath: task.repositoryPath,
+          testCommand: task.testCommand,
+          forkedFromTaskId: task.forkedFromTaskId,
+          forkedFromRunId: task.forkedFromRunId
+        }
       })
     );
+
+    if (fork) {
+      this.state = applyEventToState(
+        this.state,
+        createDomainEvent({
+          type: 'TASK_ALTERNATIVE_CREATED',
+          taskId: fork.sourceTaskId,
+          runId: fork.sourceRunId,
+          source,
+          payload: {
+            alternativeTaskId: task.id,
+            alternativeTitle: task.title
+          }
+        })
+      );
+    }
 
     await this.persistQueued();
     return clone(task);
@@ -2157,12 +2228,22 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     };
   });
   const tasks = state.tasks.map((task) => {
+    const taskWithDefaults =
+      Array.isArray(task.forkedAlternativeTaskIds)
+        ? task
+        : {
+            ...task,
+            forkedAlternativeTaskIds: []
+          };
+    if (taskWithDefaults !== task) {
+      changed = true;
+    }
     const taskCurrentRun = task.currentRunId
       ? runs.find((run) => run.id === task.currentRunId)
       : undefined;
-    const currentRun = findReviewRunForRepair(task, runs);
+    const currentRun = findReviewRunForRepair(taskWithDefaults, runs);
     if (!currentRun) {
-      return task;
+      return taskWithDefaults;
     }
 
     const isActiveReview = activeRunStatuses.includes(currentRun.status);
@@ -2172,14 +2253,25 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       activeRunStatuses.includes(taskCurrentRun.status);
     const shouldRepairPhase =
       !hasActiveNonReviewRun &&
-      task.workflowPhase !== 'REVIEW' &&
-      task.workflowPhase !== 'IN_REVIEW' &&
-      task.workflowPhase !== 'DONE' &&
-      task.workflowPhase !== 'CANCELED' &&
-      task.workflowPhase !== 'ARCHIVED';
-    const reviewResult = parseCodexReviewResult(currentRun.finalMessage);
+      taskWithDefaults.workflowPhase !== 'REVIEW' &&
+      taskWithDefaults.workflowPhase !== 'IN_REVIEW' &&
+      taskWithDefaults.workflowPhase !== 'DONE' &&
+      taskWithDefaults.workflowPhase !== 'CANCELED' &&
+      taskWithDefaults.workflowPhase !== 'ARCHIVED';
+    const currentReview = taskWithDefaults.projection.codexReview;
+    const sameProjectedReview = currentReview?.runId === currentRun.id;
+    const reviewResult =
+      parseCodexReviewResult(currentRun.finalMessage) ??
+      (sameProjectedReview ? currentReview?.result : undefined);
+    const projectedReviewStatus =
+      sameProjectedReview && currentReview?.status !== 'RUNNING'
+        ? currentReview?.status
+        : undefined;
     const reviewStatus: CodexReviewGateStatus =
-      codexReviewStatusFromResult(reviewResult) ??
+      (sameProjectedReview && currentReview?.status === 'STALE'
+        ? 'STALE'
+        : codexReviewStatusFromResult(reviewResult)) ??
+      projectedReviewStatus ??
       (currentRun.status === 'COMPLETED'
         ? 'INCONCLUSIVE'
         : currentRun.status === 'INTERRUPTED'
@@ -2187,7 +2279,6 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
           : ['FAILED', 'RECOVERY_REQUIRED', 'LOST'].includes(currentRun.status)
             ? 'FAILED'
             : 'RUNNING');
-    const currentReview = task.projection.codexReview;
     const repairedSourceRun =
       taskCurrentRun?.mode === 'REVIEW'
         ? findSourceRunForReviewRepair(currentRun, runs)
@@ -2200,7 +2291,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       (!currentReview.result && Boolean(reviewResult));
 
     if (!shouldRepairPhase && !shouldRepairReview && !shouldRepairCurrentRun) {
-      return task;
+      return taskWithDefaults;
     }
 
     changed = true;
@@ -2211,15 +2302,15 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       | StatusProjection['agentRun']
       | undefined;
     return {
-      ...task,
-      workflowPhase: shouldRepairPhase ? 'REVIEW' : task.workflowPhase,
-      currentRunId: repairedSourceRun?.id ?? task.currentRunId,
-      currentAgentSessionId: repairedSourceRun?.sessionId ?? task.currentAgentSessionId,
-      currentIterationId: repairedSourceRun?.iterationId ?? task.currentIterationId,
-      currentWorktreeId: repairedSourceRun?.worktreeId ?? task.currentWorktreeId,
+      ...taskWithDefaults,
+      workflowPhase: shouldRepairPhase ? 'REVIEW' : taskWithDefaults.workflowPhase,
+      currentRunId: repairedSourceRun?.id ?? taskWithDefaults.currentRunId,
+      currentAgentSessionId: repairedSourceRun?.sessionId ?? taskWithDefaults.currentAgentSessionId,
+      currentIterationId: repairedSourceRun?.iterationId ?? taskWithDefaults.currentIterationId,
+      currentWorktreeId: repairedSourceRun?.worktreeId ?? taskWithDefaults.currentWorktreeId,
       projection: {
-        ...task.projection,
-        agentRun: repairedAgentRun ?? task.projection.agentRun,
+        ...taskWithDefaults.projection,
+        agentRun: repairedAgentRun ?? taskWithDefaults.projection.agentRun,
         codexReview: {
           ...currentReview,
           status: reviewStatus,
@@ -2233,19 +2324,21 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
           finalArtifactId: currentRun.finalArtifactId ?? currentReview?.finalArtifactId,
           result: reviewResult ?? currentReview?.result,
           summary:
-            reviewResult?.summary ??
-            (reviewStatus === 'RUNNING'
-              ? 'Codex is reviewing the current diff.'
-              : reviewStatus === 'CANCELED'
-                ? 'Codex review was stopped before completion.'
-                : reviewStatus === 'FAILED'
-                  ? currentRun.terminalReason ??
-                    'Codex review needs attention before it can be accepted.'
-                : currentReview?.summary),
+            reviewStatus === 'STALE'
+              ? currentReview?.summary
+              : (reviewResult?.summary ??
+                (reviewStatus === 'RUNNING'
+                  ? 'Codex is reviewing the current diff.'
+                  : reviewStatus === 'CANCELED'
+                    ? 'Codex review was stopped before completion.'
+                    : reviewStatus === 'FAILED'
+                      ? currentRun.terminalReason ??
+                        'Codex review needs attention before it can be accepted.'
+                      : currentReview?.summary)),
           updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? currentReview?.updatedAt
         }
       },
-      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? task.updatedAt
+      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? taskWithDefaults.updatedAt
     };
   });
 
@@ -2343,6 +2436,10 @@ function clone<T>(value: T): T {
     return value;
   }
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function uniqueIds(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function validateAgentServerTransition(

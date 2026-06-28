@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-06-25
+Date: 2026-06-28
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -13,8 +13,9 @@ is not just an AI chat UI.
 3. An AI provider runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, test evidence,
    delivery evidence, and audit history.
-5. User reviews, requests changes, continues, retries, forks, commits, opens a
-   draft PR, accepts locally, or marks done.
+5. User reviews, requests changes, follows up, continues unfinished runs,
+   retries, forks alternatives, commits, opens a draft PR, accepts locally, or
+   marks done.
 
 ## Repository context
 
@@ -40,7 +41,8 @@ Screens should prioritize:
 1. user action required: approvals, input, permission requests;
 2. safety or recovery risk: runtime lost, ambiguous mutation, stale request;
 3. verified local evidence: Git, tests, PR, checks, reviews, merge;
-4. available user actions: start, continue, retry, fork, review, commit, PR;
+4. available user actions: start, follow up, continue, retry, fork alternative,
+   review, commit, PR;
 5. provider telemetry: plans, items, usage, raw protocol.
 
 Provider telemetry is useful, but it should not visually dominate pending user
@@ -125,6 +127,24 @@ Review:
   current findings.
 - Allow Accept locally, Commit, and Create draft PR when not paused by an active
   run or review.
+- Treat Accept anyway as an explicit owner override when review, test, or Git
+  evidence is missing, stale, failed, dirty, unavailable, canceled,
+  inconclusive, or unresolved.
+
+Post-run implementation controls:
+
+- Follow up
+  - Normal next implementation action after a completed run when the owner wants
+    another pass in the same task, worktree, branch, and provider session.
+- Continue
+  - Recovery action for failed, interrupted, lost, or recovery-required runs.
+    It resumes from the current local state in the same task/worktree.
+- Retry in session
+  - Secondary action that starts a retry in the same task, worktree, branch, and
+    provider session.
+- Fork alternative
+  - Creates a separate task with its own worktree, branch, iteration, run, and
+    fresh provider session.
 
 In Review:
 
@@ -141,6 +161,10 @@ Done:
 - Accept locally
   - Records local acceptance and can move the task to Done. It does not create a
     PR.
+- Accept anyway
+  - Records local acceptance despite missing or non-passing review, test, or Git
+    evidence. It should be styled and confirmed as an owner override, not a
+    review action.
 - Commit
   - Creates a local commit from task worktree changes.
 - Create draft PR
@@ -150,3 +174,20 @@ Done:
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.
+
+## Fork alternatives
+
+Fork alternative creates a separate task and isolated worktree/branch for a
+fresh alternative attempt. The source task records the alternative task id, and
+the alternative task records its source task and source run. Provider session
+history does not need to be reused.
+
+If alternative setup fails after the alternative task is created, the partial
+alternative remains visible as a blocked task with its worktree/setup error
+recorded. It must not be hidden behind only the source task's failed action.
+
+After creation, the source and alternative tasks are independent execution
+units. Follow-up, retry, review, accept, commit, and PR actions on one task must
+not mutate the other task. The source/alternative links are traceability
+metadata only; comparison UI can use them later, but there is no shared workflow
+state between the tasks.

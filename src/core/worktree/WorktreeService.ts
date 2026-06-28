@@ -28,12 +28,22 @@ export class WorktreeService {
       throw new Error(preflight.error ?? 'Repository preflight must pass before creating a worktree.');
     }
 
+    return this.buildSpecFromBase(task, {
+      baseRef: preflight.branch,
+      baseSha: preflight.headSha
+    });
+  }
+
+  buildSpecFromBase(
+    task: Task,
+    base: { baseRef?: string; baseSha: string }
+  ): WorktreeSpec {
     const branchName = `codex/task-${task.id.slice(0, 8)}-${slugify(task.title)}`;
     return {
       branchName,
       worktreePath: path.join(this.rootDir, task.id),
-      baseRef: preflight.branch,
-      baseSha: preflight.headSha
+      baseRef: base.baseRef,
+      baseSha: base.baseSha
     };
   }
 

@@ -19,6 +19,7 @@ import type {
   AgentProviderState,
   AgentServerInstance,
   CodexReviewFinding,
+  CodexReviewGateStatus,
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
@@ -51,6 +52,8 @@ import {
   canRequestCodexReviewChanges,
   codexReviewGate,
   describeTaskState,
+  getFinishEvidenceState,
+  type FinishEvidenceState,
   type Tone
 } from './taskView';
 import { humanizeEnum } from './display';
@@ -310,6 +313,11 @@ export function TaskDetail(props: TaskDetailProps) {
     'default';
 
   const evidenceChips = buildEvidenceChips(props);
+  const dirtyFileCount =
+    (gitSnapshot?.stagedCount ?? 0) +
+    (gitSnapshot?.unstagedCount ?? 0) +
+    (gitSnapshot?.untrackedCount ?? 0);
+  const finishEvidence = getFinishEvidenceState(task, reviewGate.status, dirtyFileCount);
   const evidenceRows: Array<{ k: string; v: string }> = [
     { k: 'Head', v: gitSnapshot?.headSha?.slice(0, 12) ?? '—' },
     { k: 'Dirty fp', v: gitSnapshot?.dirtyFingerprint?.slice(0, 12) ?? '—' },
@@ -331,10 +339,9 @@ export function TaskDetail(props: TaskDetailProps) {
               <Chip tone={state.tone} label={state.label} />
             </div>
             <h1 className="tm-detail__title">{task.title}</h1>
-            <div className="tm-detail__meta">
-              {repositoryName(task.repositoryPath)}
-              {worktree?.branchName ? ` · ${worktree.branchName}` : ''}
-            </div>
+            {worktree?.branchName ? (
+              <div className="tm-detail__meta">{worktree.branchName}</div>
+            ) : null}
           </div>
           <div className="tm-detail__actions">
             {headActions.map((action) => (
@@ -370,7 +377,6 @@ export function TaskDetail(props: TaskDetailProps) {
             <div className="tm-overview__col">
               {reviewPhaseVisible ? (
                 <CodexReviewPanel
-                  task={task}
                   reviewGate={reviewGate}
                   reviewRun={reviewRun}
                   sourceRun={reviewSourceRun}
@@ -383,9 +389,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
                   onStopReview={(reviewRunId) => void props.onCancel(reviewRunId)}
                   onOpenRequestChanges={openRequestChanges}
-                  onOpenAccept={(withIssues) => setAcceptModal(withIssues ? 'issues' : 'clean')}
-                  onCreateDeliveryCommit={() => void props.onCreateDeliveryCommit(task.id)}
-                  onCreatePullRequest={() => void props.onCreatePullRequest(task.id)}
                 />
               ) : null}
 
@@ -488,6 +491,20 @@ export function TaskDetail(props: TaskDetailProps) {
                   ))}
                 </div>
               </div>
+
+              {reviewPhaseVisible ? (
+                <FinishPanel
+                  task={task}
+                  reviewStatus={reviewPending ? 'RUNNING' : reviewGate.status}
+                  finishEvidence={finishEvidence}
+                  actionBusy={reviewActionBusy}
+                  actionsPaused={reviewActionsPaused}
+                  actionsPausedReason={reviewPauseReason}
+                  onOpenAccept={(withIssues) => setAcceptModal(withIssues ? 'issues' : 'clean')}
+                  onCreateDeliveryCommit={() => void props.onCreateDeliveryCommit(task.id)}
+                  onCreatePullRequest={() => void props.onCreatePullRequest(task.id)}
+                />
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -550,12 +567,7 @@ export function TaskDetail(props: TaskDetailProps) {
       {acceptModal ? (
         <AcceptLocalModal
           withIssues={acceptModal === 'issues'}
-          gitDirty={task.projection.git === 'DIRTY'}
-          fileCount={
-            (gitSnapshot?.stagedCount ?? 0) +
-            (gitSnapshot?.unstagedCount ?? 0) +
-            (gitSnapshot?.untrackedCount ?? 0)
-          }
+          warnings={acceptModal === 'issues' ? finishEvidence.warnings : []}
           busy={reviewActionBusy}
           onCancel={() => setAcceptModal(undefined)}
           onConfirm={() => void acceptLocally()}
@@ -697,7 +709,6 @@ function PlanCard({ planRevisions }: { planRevisions: AgentPlanRevisionRecord[] 
 }
 
 function CodexReviewPanel({
-  task,
   reviewGate,
   reviewRun,
   sourceRun,
@@ -709,12 +720,8 @@ function CodexReviewPanel({
   actionsPausedReason,
   onRunReview,
   onStopReview,
-  onOpenRequestChanges,
-  onOpenAccept,
-  onCreateDeliveryCommit,
-  onCreatePullRequest
+  onOpenRequestChanges
 }: {
-  task: Task;
   reviewGate: NonNullable<Task['projection']['codexReview']>;
   reviewRun?: RunRecord;
   sourceRun?: RunRecord;
@@ -727,9 +734,6 @@ function CodexReviewPanel({
   onRunReview(sourceRunId: string): void;
   onStopReview(reviewRunId: string): void;
   onOpenRequestChanges(findingIds?: string[]): void;
-  onOpenAccept(withIssues: boolean): void;
-  onCreateDeliveryCommit(): void;
-  onCreatePullRequest(): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
   const ui = reviewGateUi(effectiveStatus);
@@ -740,9 +744,6 @@ function CodexReviewPanel({
     !actionsPaused &&
     canRequestCodexReviewChanges(reviewGate, effectiveStatus, hasReviewOutput);
   const canRunAgain = Boolean(sourceRun) && !actionsPaused;
-  const hasOpenIssues = ['NEEDS_CHANGES', 'INCONCLUSIVE', 'FAILED', 'CANCELED', 'STALE'].includes(
-    effectiveStatus
-  );
   const sourceRunId = sourceRun?.id;
   const currentDiff = describeGitSnapshot(gitSnapshot);
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
@@ -762,7 +763,6 @@ function CodexReviewPanel({
             <h3 className="tm-panel__title" style={{ margin: 0 }}>
               Codex review
             </h3>
-            <p className="tm-reviewcard__subtitle">AI review for the current diff</p>
           </div>
           <span className="tm-reviewcard__spacer" />
           <Chip tone={ui.tone} label={ui.label} />
@@ -785,7 +785,6 @@ function CodexReviewPanel({
             </div>
           ) : (
             <div className="tm-reviewcard__summary">
-              <h4>{reviewTitle(effectiveStatus)}</h4>
               <p>{reviewBody(reviewGate, reviewRun)}</p>
               {effectiveStatus === 'NOT_RUN' ? (
                 <div className="tm-reviewcard__meta tm-reviewcard__meta--box">
@@ -815,13 +814,6 @@ function CodexReviewPanel({
             </div>
           )}
 
-          <div className="tm-reviewcard__evidence">
-            <span>
-              Based on local evidence:
-              <strong> Git {humanizeEnum(task.projection.git)}</strong>
-              <span> · Tests {humanizeEnum(task.projection.tests)}</span>
-            </span>
-          </div>
         </div>
 
         <div className="tm-reviewcard__actions">
@@ -852,14 +844,6 @@ function CodexReviewPanel({
                 >
                   Run Codex review
                 </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={actionBusy}
-                  onClick={() => onOpenAccept(true)}
-                >
-                  Accept without review...
-                </button>
               </>
             ) : null}
 
@@ -881,30 +865,6 @@ function CodexReviewPanel({
 
             {!actionsPaused && effectiveStatus === 'PASSED' ? (
               <>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={actionBusy}
-                  onClick={() => onOpenAccept(false)}
-                >
-                  Accept locally
-                </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={!canCreateDeliveryCommit(task) || actionBusy}
-                  onClick={onCreateDeliveryCommit}
-                >
-                  Commit
-                </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={!canCreatePullRequest(task) || actionBusy}
-                  onClick={onCreatePullRequest}
-                >
-                  Create draft PR
-                </button>
                 <button
                   type="button"
                   className="outline-button"
@@ -939,20 +899,103 @@ function CodexReviewPanel({
                 >
                   Run review again
                 </button>
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={actionBusy}
-                  onClick={() => onOpenAccept(hasOpenIssues)}
-                >
-                  Accept with issues...
-                </button>
               </>
             ) : null}
           </div>
         </div>
       </section>
     </>
+  );
+}
+
+function FinishPanel({
+  task,
+  reviewStatus,
+  finishEvidence,
+  actionBusy,
+  actionsPaused,
+  actionsPausedReason,
+  onOpenAccept,
+  onCreateDeliveryCommit,
+  onCreatePullRequest
+}: {
+  task: Task;
+  reviewStatus: CodexReviewGateStatus;
+  finishEvidence: FinishEvidenceState;
+  actionBusy: boolean;
+  actionsPaused: boolean;
+  actionsPausedReason?: ReviewActionPauseReason;
+  onOpenAccept(withIssues: boolean): void;
+  onCreateDeliveryCommit(): void;
+  onCreatePullRequest(): void;
+}) {
+  if (task.workflowPhase === 'DONE') {
+    return null;
+  }
+
+  const reviewPassed = reviewStatus === 'PASSED';
+  const reviewRunning = reviewStatus === 'RUNNING';
+  const cleanAccept = finishEvidence.mode === 'clean';
+  const pausedText =
+    actionsPausedReason === 'implementation-running'
+      ? 'Finish actions pause while the agent is running.'
+      : 'Finish actions pause while review runs.';
+
+  return (
+    <section className="tm-panel tm-finishpanel" aria-label="Finish task">
+      <div className="tm-finishpanel__head">
+        <h3 className="tm-panel__title">Finish</h3>
+        {reviewPassed ? <Chip tone="success" label="Review passed" /> : null}
+      </div>
+      <div className="tm-finishpanel__actions">
+        {actionsPaused ? <span className="tm-reviewcard__hint">{pausedText}</span> : null}
+
+        {cleanAccept ? (
+          <>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={actionBusy || actionsPaused}
+              onClick={() => onOpenAccept(false)}
+            >
+              Accept locally
+            </button>
+          </>
+        ) : null}
+
+        {!cleanAccept && !reviewRunning ? (
+          <button
+            type="button"
+            className="outline-button tm-finishpanel__accept-anyway"
+            disabled={actionBusy || actionsPaused}
+            onClick={() => onOpenAccept(true)}
+          >
+            Accept anyway
+          </button>
+        ) : null}
+
+        {reviewPassed ? (
+          <>
+            <button
+              type="button"
+              className="outline-button"
+              disabled={!canCreateDeliveryCommit(task) || actionBusy || actionsPaused}
+              onClick={onCreateDeliveryCommit}
+            >
+              Commit
+            </button>
+            <button
+              type="button"
+              className="outline-button"
+              disabled={!canCreatePullRequest(task) || actionBusy || actionsPaused}
+              onClick={onCreatePullRequest}
+            >
+              Create draft PR
+            </button>
+          </>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -1209,15 +1252,13 @@ function isActiveNonReviewRun(run: RunRecord): boolean {
 
 function AcceptLocalModal({
   withIssues,
-  gitDirty,
-  fileCount,
+  warnings,
   busy,
   onCancel,
   onConfirm
 }: {
   withIssues: boolean;
-  gitDirty: boolean;
-  fileCount: number;
+  warnings: FinishEvidenceState['warnings'];
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
@@ -1226,31 +1267,32 @@ function AcceptLocalModal({
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="accept-local-title">
       <div className="tm-modal__scrim" onClick={onCancel} />
       <div className="tm-modal__panel">
-        <h3 id="accept-local-title">{withIssues ? 'Accept with issues' : 'Accept locally'}</h3>
+        <h3 id="accept-local-title">{withIssues ? 'Accept anyway' : 'Accept locally'}</h3>
         <p>
-          Records this implementation as accepted on your machine. No PR is created.
+          {withIssues
+            ? 'Marks this task done despite unresolved evidence. No PR is created.'
+            : 'Records this implementation as accepted on your machine. No PR is created.'}
         </p>
-        {withIssues ? (
+        {withIssues && warnings.length === 0 ? (
           <div className="tm-modal__warning">
-            <strong>No passing Codex review is recorded.</strong>
+            <strong>Evidence is not fully passing.</strong>
             <span>You are explicitly accepting the current local result.</span>
           </div>
         ) : null}
-        {gitDirty ? (
-          <div className="tm-modal__warning">
-            <strong>Working tree is dirty.</strong>
-            <span>
-              {fileCount > 0 ? `${fileCount} uncommitted file${fileCount === 1 ? '' : 's'}. ` : ''}
-              Commit or open a PR to share the work.
-            </span>
-          </div>
-        ) : null}
+        {withIssues
+          ? warnings.map((warning) => (
+              <div className="tm-modal__warning" key={warning.title}>
+                <strong>{warning.title}</strong>
+                <span>{warning.detail}</span>
+              </div>
+            ))
+          : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
           <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
-            {busy ? 'Accepting...' : withIssues ? 'Accept with issues' : 'Accept and mark done'}
+            {busy ? 'Accepting...' : withIssues ? 'Mark done anyway' : 'Accept and mark done'}
           </button>
         </div>
       </div>
@@ -1381,27 +1423,6 @@ function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['st
       return { label: 'Needs re-review', tone: 'action' };
     case 'NOT_RUN':
       return { label: 'Not run', tone: 'neutral' };
-  }
-}
-
-function reviewTitle(status: NonNullable<Task['projection']['codexReview']>['status']): string {
-  switch (status) {
-    case 'NOT_RUN':
-      return 'No review yet';
-    case 'PASSED':
-      return 'Codex review passed';
-    case 'NEEDS_CHANGES':
-      return 'Codex requested changes';
-    case 'INCONCLUSIVE':
-      return 'Codex review completed';
-    case 'FAILED':
-      return 'Codex review failed';
-    case 'CANCELED':
-      return 'Codex review was stopped';
-    case 'STALE':
-      return 'Needs re-review';
-    case 'RUNNING':
-      return 'Reviewing the current diff';
   }
 }
 
@@ -1541,11 +1562,6 @@ function formatFindingLocation(finding: CodexReviewFinding): string {
     return finding.path;
   }
   return `${finding.path}:${finding.line}`;
-}
-
-function repositoryName(repositoryPath: string): string {
-  const parts = repositoryPath.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? repositoryPath;
 }
 
 function truncateMiddle(value: string, max: number): string {

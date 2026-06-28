@@ -11,6 +11,11 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
   switch (event.type) {
     case 'TASK_CREATED':
       return { label: 'Task created', detail: stringField(payload, 'title') ?? 'Task was added.' };
+    case 'TASK_ALTERNATIVE_CREATED':
+      return {
+        label: 'Alternative started',
+        detail: stringField(payload, 'alternativeTitle') ?? 'Alternative task was created.'
+      };
     case 'TASK_ITERATION_CREATED':
       return {
         label: 'Iteration created',

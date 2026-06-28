@@ -35,6 +35,7 @@ import {
   tasksForRepository
 } from '../model/repositories';
 import { MainColumn, type AppSettings } from './MainColumn';
+import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
 import { RepositorySwitcher } from './RepositorySwitcher';
@@ -67,8 +68,12 @@ const emptySnapshot: TaskSnapshot = {
   artifacts: []
 };
 
-type ThemePreference = 'light' | 'dark';
 type NotificationTone = 'info' | 'success' | 'error';
+
+function prefersDarkScheme(): boolean {
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+}
+
 interface AppNotification {
   id: string;
   tone: NotificationTone;
@@ -98,6 +103,7 @@ export function App() {
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(() => getInitialTheme());
+  const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => getInitialCollapsed());
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getInitialAppSettings());
   const [providerState, setProviderState] = useState<AgentProviderState>();
@@ -146,6 +152,16 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem('task-monki-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!media) {
+      return;
+    }
+    const onChange = (event: MediaQueryListEvent) => setPrefersDark(event.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem('task-monki-sidebar-collapsed', isSidebarCollapsed ? '1' : '0');
@@ -529,15 +545,26 @@ export function App() {
       if (!run) {
         throw new Error('Run not found.');
       }
-      await taskManagerApi.retryRun({
+      const retry = await taskManagerApi.retryRun({
         taskId: run.taskId,
         runId,
         strategy,
         instruction
       });
-      notify(strategy === 'FORK' ? 'Forked retry started.' : 'Retry started.', 'success');
+      if (strategy === 'FORK') {
+        setSelectedTaskId(retry.taskId);
+        setIsDetailOpen(true);
+      }
+      notify(strategy === 'FORK' ? 'Alternative task started.' : 'Retry started.', 'success');
       await refresh();
     } catch (caught) {
+      if (strategy === 'FORK') {
+        try {
+          await refresh();
+        } catch {
+          // Keep the original retry failure as the user-facing error.
+        }
+      }
       reportActionError(caught, 'Failed to retry run.');
       throw caught;
     }
@@ -677,8 +704,10 @@ export function App() {
 
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
+  const resolvedTheme = resolveTheme(theme, prefersDark);
+
   return (
-    <div className="tm-app app-shell" data-theme={theme}>
+    <div className="tm-app app-shell" data-theme={resolvedTheme}>
       <header className="tm-titlebar">
         <button
           type="button"
@@ -728,7 +757,7 @@ export function App() {
             <img
               className="tm-nav__brand-mark"
               src={
-                theme === 'dark'
+                resolvedTheme === 'dark'
                   ? '/assets/brand/monkey_icon_cream.svg'
                   : '/assets/brand/monkey_icon_charcoal.svg'
               }
@@ -898,10 +927,10 @@ function GlobalNotifier({ notifications }: { notifications: AppNotification[] })
 
 function getInitialTheme(): ThemePreference {
   const stored = window.localStorage.getItem('task-monki-theme');
-  if (stored === 'light' || stored === 'dark') {
+  if (stored === 'light' || stored === 'dark' || stored === 'device') {
     return stored;
   }
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'device';
 }
 
 function getInitialCollapsed(): boolean {

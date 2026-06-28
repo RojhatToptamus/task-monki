@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-06-25
+Date: 2026-06-28
 
 This document describes the current architecture, not an old migration plan.
 
@@ -59,8 +59,9 @@ Reasons:
   - User intent, workflow phase, current implementation-side run, worktree,
     projections, and evidence pointers.
 - `RunRecord`
-  - One implementation, follow-up, retry, fork, review, or provider-origin child
-    run.
+  - One implementation, follow-up, retry, review, or provider-origin child run.
+    Fork alternatives are represented as a new `Task` with its own
+    implementation run, not as a run inside the source task.
 - `AgentSessionRecord`
   - Provider thread/session metadata. Primary sessions are used for
     implementation-side work. Review sessions use `role: "REVIEW"`.
@@ -77,8 +78,9 @@ The adapter must:
 
 - launch and initialize the App Server;
 - discover account, models, supported reasoning efforts, and settings;
-- create, attach, fork, and read provider sessions;
-- start implementation, follow-up, retry, fork, and review turns;
+- create, attach, and read provider sessions;
+- fork provider sessions only for detached Codex review when supported;
+- start implementation, follow-up, retry, and review turns;
 - correlate provider thread IDs, turn IDs, item IDs, and request IDs;
 - materialize useful provider events into Task Monki records;
 - keep raw protocol traffic in the journal;
@@ -104,6 +106,15 @@ The adapter must not:
     `projection.codexReview`.
 - Provider-origin child runs
   - Observed child/subagent activity. These do not replace the task workflow.
+
+Fork alternatives are intentionally not a `RunRecord.mode`. They are created by
+Task Monki as a new task with a separate worktree, branch, iteration, fresh
+provider session, and implementation run. The source task stores the alternative
+task id, and the alternative stores its source task/run ids for traceability.
+After creation, workflow and delivery actions on either task are independent.
+If worktree or run startup fails after the alternative task is stored, Task
+Monki leaves the alternative visible and blocked rather than silently hiding the
+partial candidate.
 
 Read `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.

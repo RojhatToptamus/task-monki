@@ -1,6 +1,6 @@
 # Codex Review Workflow Lifecycle
 
-Date: 2026-06-25
+Date: 2026-06-28
 
 Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
@@ -134,7 +134,8 @@ Expected UI:
 - `NEEDS_CHANGES`
   - Show structured findings by severity.
   - Primary path: Request changes.
-  - Secondary path: run review again or accept with issues.
+  - Secondary path: run review again or use the finish-panel Accept anyway
+    owner override.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
   - Allow request changes only because the output is current to this reviewed
@@ -161,7 +162,7 @@ Expected UI while follow-up is active:
 - Review actions hidden or disabled:
   - no Request changes
   - no Run review again
-  - no Accept with issues
+  - no Accept anyway
   - no Accept locally
   - no Commit
   - no Create draft PR
@@ -248,6 +249,9 @@ Implementation/follow-up:
   `continuedFromRunId`.
 - If the provider thread is missing, the orchestrator can recreate the provider
   session and retry starting the turn.
+- Fork alternatives do not reuse or fork this provider session. They create a
+  separate task and start a fresh implementation session in that task's own
+  worktree.
 
 Codex review:
 

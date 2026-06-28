@@ -6,7 +6,8 @@ import {
   buildTaskCardVM,
   canRequestCodexReviewChanges,
   columnTasks,
-  computeNavCounts
+  computeNavCounts,
+  getFinishEvidenceState
 } from './taskView';
 
 const now = '2026-06-24T10:00:00.000Z';
@@ -24,7 +25,7 @@ describe('task card view model', () => {
       })
     );
 
-    expect(vm.stateLabel).toBe('Needs review');
+    expect(vm.stateLabel).toBe('Ready for review');
     expect(vm.stateTone).toBe('action');
   });
 
@@ -152,6 +153,78 @@ describe('task card view model', () => {
       canRequestCodexReviewChanges({ status: 'FAILED' })
     ).toBe(false);
   });
+
+  it('allows clean local acceptance only when review, tests, and Git evidence are healthy', () => {
+    const state = getFinishEvidenceState(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'CLEAN',
+          tests: 'PASSED',
+          codexReview: { status: 'PASSED' }
+        },
+        workflowPhase: 'REVIEW'
+      })
+    );
+
+    expect(state).toEqual({ mode: 'clean', warnings: [] });
+  });
+
+  it('uses Accept anyway when tests are missing or stale despite a passing review', () => {
+    const missingTests = getFinishEvidenceState(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'CLEAN',
+          tests: 'NOT_RUN',
+          codexReview: { status: 'PASSED' }
+        },
+        workflowPhase: 'REVIEW'
+      })
+    );
+    const staleTests = getFinishEvidenceState(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'CLEAN',
+          tests: 'STALE',
+          codexReview: { status: 'PASSED' }
+        },
+        workflowPhase: 'REVIEW'
+      })
+    );
+
+    expect(missingTests.mode).toBe('override');
+    expect(missingTests.warnings.map((warning) => warning.title)).toContain(
+      'No local test run is recorded.'
+    );
+    expect(staleTests.mode).toBe('override');
+    expect(staleTests.warnings.map((warning) => warning.title)).toContain(
+      'Local test evidence is stale.'
+    );
+  });
+
+  it('uses Accept anyway when Git is dirty even if review and tests passed', () => {
+    const state = getFinishEvidenceState(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'DIRTY',
+          tests: 'PASSED',
+          codexReview: { status: 'PASSED' }
+        },
+        workflowPhase: 'REVIEW'
+      }),
+      'PASSED',
+      2
+    );
+
+    expect(state.mode).toBe('override');
+    expect(state.warnings).toContainEqual({
+      title: 'Working tree is dirty.',
+      detail: '2 uncommitted files remain. Commit or open a PR to share the work.'
+    });
+  });
 });
 
 function createTask(overrides: Partial<Task> = {}): Task {
@@ -164,6 +237,7 @@ function createTask(overrides: Partial<Task> = {}): Task {
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
     phaseVersion: 1,
+    forkedAlternativeTaskIds: [],
     agentSettings: {},
     createdAt: now,
     updatedAt: now,

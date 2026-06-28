@@ -4,6 +4,7 @@ import type { AgentModel } from '../../shared/agent';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
+import type { ThemePreference } from './theme';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
@@ -18,8 +19,8 @@ import {
 interface MainColumnProps {
   view: NavView;
   tasks: Task[];
-  theme: 'light' | 'dark';
-  onSetTheme(theme: 'light' | 'dark'): void;
+  theme: ThemePreference;
+  onSetTheme(theme: ThemePreference): void;
   appSettings: AppSettings;
   onSetAppSettings(settings: AppSettings): void;
   error?: string;
@@ -86,7 +87,7 @@ export function MainColumn({
           <h1 className="tm-main__title">{head.title}</h1>
           <span className="tm-main__subtitle">{head.subtitle(tasks)}</span>
         </div>
-        <span className="tm-main__sync">Autonomous · last sync just now</span>
+        <span className="tm-main__sync">Autonomous</span>
       </div>
 
       {error ? <div className="tm-error">{error}</div> : null}
@@ -202,9 +203,6 @@ function Inbox({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void 
                 <div className="tm-decision__head">
                   <span className="tm-pulse" />
                   <span className="tm-decision__kind">{attention?.label}</span>
-                  <span className="tm-decision__wait">
-                    {humanizeEnum(task.projection.agentRun)}
-                  </span>
                 </div>
                 <strong className="tm-decision__title">{task.title}</strong>
                 <div className="tm-decision__task">
@@ -239,8 +237,8 @@ function Settings({
   models,
   activeRepositoryPath
 }: {
-  theme: 'light' | 'dark';
-  onSetTheme(theme: 'light' | 'dark'): void;
+  theme: ThemePreference;
+  onSetTheme(theme: ThemePreference): void;
   appSettings: AppSettings;
   onSetAppSettings(settings: AppSettings): void;
   models: AgentModel[];
@@ -289,6 +287,13 @@ function Settings({
               onClick={() => onSetTheme('dark')}
             >
               Dark
+            </button>
+            <button
+              type="button"
+              className={`tm-segtoggle__btn ${theme === 'device' ? 'tm-segtoggle__btn--active' : ''}`}
+              onClick={() => onSetTheme('device')}
+            >
+              Device
             </button>
           </div>
         </div>

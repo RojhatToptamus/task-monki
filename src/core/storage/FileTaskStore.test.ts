@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from './FileTaskStore';
+import { createDomainEvent } from './domainEvent';
 
 describe('FileTaskStore', () => {
   it('persists tasks, runs, events, and artifacts', async () => {
@@ -45,6 +46,169 @@ describe('FileTaskStore', () => {
     expect(snapshot.events.some((event) => event.type === 'TASK_CREATED')).toBe(true);
     expect(snapshot.artifacts.some((artifact) => artifact.id === final.id)).toBe(true);
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
+  });
+
+  it('links forked alternative tasks to their source task and run', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-fork-'));
+    const store = new FileTaskStore(dir);
+
+    const task = await store.createTask({
+      title: 'Compare approaches',
+      prompt: 'Implement the feature.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/source',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+
+    const alternative = await store.createForkedAlternativeTask({
+      title: 'Alternative: Compare approaches',
+      prompt: 'Try another implementation.',
+      repositoryPath: dir,
+      sourceTaskId: task.id,
+      sourceRunId: run.id
+    });
+    const snapshot = await store.snapshot();
+    const source = snapshot.tasks.find((candidate) => candidate.id === task.id);
+    const linkedAlternative = snapshot.tasks.find(
+      (candidate) => candidate.id === alternative.id
+    );
+
+    expect(source?.forkedAlternativeTaskIds).toEqual([alternative.id]);
+    expect(linkedAlternative?.forkedFromTaskId).toBe(task.id);
+    expect(linkedAlternative?.forkedFromRunId).toBe(run.id);
+    expect(
+      snapshot.events.some(
+        (event) =>
+          event.type === 'TASK_ALTERNATIVE_CREATED' &&
+          event.taskId === task.id &&
+          event.runId === run.id
+      )
+    ).toBe(true);
+  });
+
+  it('repairs schema-current task records missing alternative ids', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-repair-'));
+    const store = new FileTaskStore(dir);
+
+    const task = await store.createTask({
+      title: 'Repair task shape',
+      prompt: 'Keep current records loadable.',
+      repositoryPath: dir
+    });
+    const storePath = path.join(dir, 'store.json');
+    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    raw.tasks = raw.tasks.map((candidate: any) => {
+      if (candidate.id !== task.id) {
+        return candidate;
+      }
+      const withoutAlternatives = { ...candidate };
+      delete withoutAlternatives.forkedAlternativeTaskIds;
+      return withoutAlternatives;
+    });
+    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+
+    const repaired = await new FileTaskStore(dir).snapshot();
+    expect(repaired.tasks[0]?.forkedAlternativeTaskIds).toEqual([]);
+  });
+
+  it('preserves structured terminal review status when reloading', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-status-'));
+    const store = new FileTaskStore(dir);
+
+    const task = await store.createTask({
+      title: 'Keep review verdict',
+      prompt: 'Render passed review actions.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-verdict',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const implementationSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    const implementationRun = await store.createRun({
+      task,
+      session: implementationSession,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    await store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_COMPLETED',
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: implementationRun.id,
+        worktreeId: worktree.id,
+        agentSessionId: implementationSession.id,
+        source: 'provider',
+        payload: { terminalReason: 'completed' }
+      })
+    );
+
+    const reviewTask = (await store.getTask(task.id))!;
+    const reviewSession = await store.createAgentSession({
+      task: reviewTask,
+      iteration,
+      worktree,
+      provider: 'codex',
+      role: 'REVIEW',
+      parentSessionId: implementationSession.id,
+      forkedFromSessionId: implementationSession.id
+    });
+    const reviewRun = await store.createRun({
+      task: reviewTask,
+      session: reviewSession,
+      mode: 'REVIEW',
+      prompt: 'Review current changes.',
+      continuedFromRunId: implementationRun.id
+    });
+    await store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_COMPLETED',
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: reviewRun.id,
+        worktreeId: worktree.id,
+        agentSessionId: reviewSession.id,
+        source: 'provider',
+        payload: {
+          mode: 'REVIEW',
+          codexReviewResult: {
+            schemaVersion: 'codex-review/v1',
+            verdict: 'PASSED',
+            summary: 'No blocking issues found.',
+            findings: []
+          }
+        }
+      })
+    );
+
+    expect((await store.getTask(task.id))?.projection.codexReview?.status).toBe('PASSED');
+    const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
+    expect(reloadedTask.projection.codexReview?.status).toBe('PASSED');
+    expect(reloadedTask.projection.codexReview?.result?.verdict).toBe('PASSED');
   });
 
   it('keeps detached review runs inside the review workflow phase', async () => {

@@ -1,4 +1,4 @@
-import type { Task, WorkflowPhase } from '../../shared/contracts';
+import type { CodexReviewGateStatus, Task, TestStatus, WorkflowPhase } from '../../shared/contracts';
 import { formatShortId } from '../model/selectors';
 import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
 import { humanizeEnum } from './display';
@@ -24,6 +24,16 @@ export interface TaskCardVM {
   hasDecision: boolean;
   decisionLabel: string;
   rollups: Rollup[];
+}
+
+export interface FinishEvidenceWarning {
+  title: string;
+  detail: string;
+}
+
+export interface FinishEvidenceState {
+  mode: 'clean' | 'override';
+  warnings: FinishEvidenceWarning[];
 }
 
 /** Human label + tone for a task's most salient run/phase state. */
@@ -54,7 +64,7 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
       case 'STALE':
         return { label: 'Needs re-review', tone: 'action' };
       case 'NOT_RUN':
-        return { label: 'Needs review', tone: 'action' };
+        return { label: 'Ready for review', tone: 'action' };
     }
   }
 
@@ -111,6 +121,23 @@ export function canRequestCodexReviewChanges(
   );
 }
 
+export function getFinishEvidenceState(
+  task: Task,
+  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  dirtyFileCount?: number
+): FinishEvidenceState {
+  const warnings = [
+    reviewFinishWarning(reviewStatus),
+    testFinishWarning(task.projection.tests),
+    gitFinishWarning(task, dirtyFileCount)
+  ].filter((warning): warning is FinishEvidenceWarning => Boolean(warning));
+
+  return {
+    mode: warnings.length === 0 ? 'clean' : 'override',
+    warnings
+  };
+}
+
 const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
   'QUEUED',
   'STARTING',
@@ -125,6 +152,119 @@ function isFixingReviewFeedback(task: Task): boolean {
     review.status === 'STALE' &&
     Boolean(review.runId || review.result)
   );
+}
+
+function reviewFinishWarning(
+  status: CodexReviewGateStatus
+): FinishEvidenceWarning | undefined {
+  if (status === 'PASSED') {
+    return undefined;
+  }
+  if (status === 'STALE') {
+    return {
+      title: 'Codex review is stale.',
+      detail: 'Run review again before clean acceptance, or accept anyway.'
+    };
+  }
+  if (status === 'NEEDS_CHANGES') {
+    return {
+      title: 'Codex review requested changes.',
+      detail: 'Request changes or accept the current result as an owner override.'
+    };
+  }
+  if (status === 'RUNNING') {
+    return {
+      title: 'Codex review is running.',
+      detail: 'Wait for the review to finish before accepting cleanly.'
+    };
+  }
+  if (status === 'FAILED' || status === 'INCONCLUSIVE' || status === 'CANCELED') {
+    return {
+      title: `Codex review is ${humanizeEnum(status).toLowerCase()}.`,
+      detail: 'Run review again before clean acceptance, or accept anyway.'
+    };
+  }
+  return {
+    title: 'No passing Codex review is recorded.',
+    detail: 'Run Codex review before clean acceptance, or accept anyway.'
+  };
+}
+
+function testFinishWarning(status: TestStatus): FinishEvidenceWarning | undefined {
+  switch (status) {
+    case 'PASSED':
+      return undefined;
+    case 'FAILED':
+    case 'ERROR':
+      return {
+        title: `Local tests are ${humanizeEnum(status).toLowerCase()}.`,
+        detail: 'Fix or rerun tests before clean acceptance, or accept anyway.'
+      };
+    case 'STALE':
+      return {
+        title: 'Local test evidence is stale.',
+        detail: 'Rerun tests for the current Git state before clean acceptance.'
+      };
+    case 'NOT_RUN':
+      return {
+        title: 'No local test run is recorded.',
+        detail: 'Run tests before clean acceptance, or accept anyway.'
+      };
+    case 'NOT_CONFIGURED':
+      return {
+        title: 'No local test command is configured.',
+        detail: 'Configure or run verification before clean acceptance, or accept anyway.'
+      };
+    case 'QUEUED':
+    case 'RUNNING':
+      return {
+        title: 'Local tests are still running.',
+        detail: 'Wait for tests to finish before clean acceptance.'
+      };
+    case 'CANCELED':
+      return {
+        title: 'Local test run was canceled.',
+        detail: 'Rerun tests before clean acceptance, or accept anyway.'
+      };
+    case 'UNKNOWN':
+      return {
+        title: 'Local test state is unknown.',
+        detail: 'Refresh or rerun tests before clean acceptance, or accept anyway.'
+      };
+  }
+}
+
+function gitFinishWarning(
+  task: Task,
+  dirtyFileCount?: number
+): FinishEvidenceWarning | undefined {
+  switch (task.projection.git) {
+    case 'CLEAN':
+    case 'COMMITTED_UNPUSHED':
+    case 'PUSHED':
+      return undefined;
+    case 'DIRTY':
+      return {
+        title: 'Working tree is dirty.',
+        detail:
+          dirtyFileCount && dirtyFileCount > 0
+            ? `${dirtyFileCount} uncommitted file${dirtyFileCount === 1 ? '' : 's'} remain. Commit or open a PR to share the work.`
+            : 'Uncommitted changes remain. Commit or open a PR to share the work.'
+      };
+    case 'NOT_INSPECTED':
+      return {
+        title: 'Git evidence has not been inspected.',
+        detail: 'Refresh evidence before clean acceptance, or accept anyway.'
+      };
+    case 'CONFLICTED':
+    case 'DIVERGED':
+    case 'UNAVAILABLE':
+    case 'UNKNOWN':
+      return {
+        title: `Git state is ${humanizeEnum(task.projection.git).toLowerCase()}.`,
+        detail: 'Resolve or refresh Git evidence before clean acceptance, or accept anyway.'
+      };
+  }
 }
 
 function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {

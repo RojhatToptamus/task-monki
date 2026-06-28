@@ -28,7 +28,8 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   SyncAgentGoalRequest,
-  AgentExecutionSettings
+  AgentExecutionSettings,
+  AgentRunMode
 } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
@@ -143,6 +144,18 @@ export class TaskManagerService {
 
     const preflight = await this.validateAndRecordRepository(task);
     const spec = this.worktrees.buildSpec(task, preflight);
+    return this.createAndPrepareWorktree(task, spec);
+  }
+
+  private async createAndPrepareWorktree(
+    task: Task,
+    spec: {
+      branchName: string;
+      worktreePath: string;
+      baseRef?: string;
+      baseSha: string;
+    }
+  ): Promise<WorktreeRecord> {
     const { worktree } = await this.store.createIterationAndWorktree({
       task,
       branchName: spec.branchName,
@@ -179,9 +192,27 @@ export class TaskManagerService {
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     const task = await this.requireTask(input.taskId);
     const worktree = await this.prepareWorktree({ taskId: task.id });
+    return this.startPreparedRun({
+      task,
+      worktree,
+      mode: input.mode,
+      settings: input.settings
+    });
+  }
+
+  private async startPreparedRun(input: {
+    task: Task;
+    worktree: WorktreeRecord;
+    mode?: AgentRunMode;
+    settings?: AgentExecutionSettings;
+  }): Promise<RunRecord> {
+    const { task, worktree } = input;
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
       throw new Error('Task iteration was not created.');
+    }
+    if (iteration.id !== worktree.iterationId) {
+      throw new Error('Prepared worktree does not match the current task iteration.');
     }
     const snapshot = await this.refreshEvidence({ taskId: task.id });
     const mode = input.mode ?? 'IMPLEMENTATION';
@@ -190,19 +221,7 @@ export class TaskManagerService {
       readOnly: readOnlyMode,
       settings: [task.agentSettings, input.settings]
     });
-    const prompt = [
-      task.prompt,
-      '',
-      readOnlyMode
-        ? 'Analyze this task in an isolated Git worktree without modifying files.'
-        : 'You are implementing this task in an isolated Git worktree.',
-      `Repository root: ${worktree.worktreePath}`,
-      settings.sandbox === 'WORKSPACE_WRITE'
-        ? 'Only modify files inside this worktree.'
-        : 'Do not modify repository files.',
-      'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-      'When finished, summarize the files changed and verification you performed.'
-    ].join('\n');
+    const prompt = buildInitialRunPrompt({ task, worktree, settings, readOnlyMode });
 
     return this.agents.startTurn({
       task,
@@ -260,6 +279,15 @@ export class TaskManagerService {
       input.runId
     );
     assertRetryable(run);
+    if (input.strategy === 'FORK') {
+      return this.startForkedAlternative({
+        sourceTaskId: task.id,
+        sourceRun: run,
+        sourceWorktree: worktree,
+        instruction: input.instruction,
+        settings: input.settings
+      });
+    }
     const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
     const settings = followUpSettings(task, run, input.settings, false);
     const prompt = buildContinuationPrompt({
@@ -267,23 +295,8 @@ export class TaskManagerService {
       run,
       gitSnapshot,
       instruction: input.instruction,
-      kind: input.strategy === 'FORK' ? 'forked retry' : 'retry'
+      kind: 'retry'
     });
-    if (input.strategy === 'FORK') {
-      return this.agents.forkAndStartTurn({
-        task,
-        iteration,
-        worktree,
-        sourceRun: run,
-        retryStrategy: 'FORK',
-        mode: 'RETRY',
-        prompt,
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id,
-        retryOfRunId: run.id
-      });
-    }
     return this.agents.startTurn({
       task,
       iteration,
@@ -296,6 +309,59 @@ export class TaskManagerService {
       beforeGitSnapshotId: gitSnapshot.id,
       retryOfRunId: run.id
     });
+  }
+
+  private async startForkedAlternative(input: {
+    sourceTaskId: string;
+    sourceRun: RunRecord;
+    sourceWorktree: WorktreeRecord;
+    instruction?: string;
+    settings?: AgentExecutionSettings;
+  }): Promise<RunRecord> {
+    const sourceTask = await this.requireTask(input.sourceTaskId);
+    const alternativeNumber = (sourceTask.forkedAlternativeTaskIds?.length ?? 0) + 1;
+    const alternativeTask = await this.store.createForkedAlternativeTask({
+      title: `Alternative #${alternativeNumber}: ${sourceTask.title}`,
+      prompt: buildForkAlternativeTaskPrompt({
+        task: sourceTask,
+        run: input.sourceRun,
+        worktree: input.sourceWorktree,
+        instruction: input.instruction
+      }),
+      repositoryPath: sourceTask.repositoryPath,
+      testCommand: sourceTask.testCommand,
+      agentSettings: sourceTask.agentSettings,
+      sourceTaskId: sourceTask.id,
+      sourceRunId: input.sourceRun.id
+    });
+    try {
+      const spec = this.worktrees.buildSpecFromBase(alternativeTask, {
+        baseRef: input.sourceWorktree.baseRef,
+        baseSha: input.sourceWorktree.baseSha
+      });
+      const alternativeWorktree = await this.createAndPrepareWorktree(alternativeTask, spec);
+      return await this.startPreparedRun({
+        task: alternativeTask,
+        worktree: alternativeWorktree,
+        mode: 'IMPLEMENTATION',
+        settings: input.settings
+      });
+    } catch (error) {
+      await this.markForkedAlternativeSetupFailed(alternativeTask.id, error);
+      throw error;
+    }
+  }
+
+  private async markForkedAlternativeSetupFailed(
+    taskId: string,
+    error: unknown
+  ): Promise<void> {
+    const reason = `Fork alternative setup failed: ${error instanceof Error ? error.message : String(error)}`;
+    try {
+      await this.store.transitionTask(taskId, 'BLOCKED', reason);
+    } catch {
+      // Preserve the original setup failure for the caller.
+    }
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
@@ -734,7 +800,7 @@ function buildContinuationPrompt(input: {
   run: RunRecord;
   gitSnapshot: GitSnapshotRecord;
   instruction?: string;
-  kind: 'continuation' | 'retry' | 'forked retry';
+  kind: 'continuation' | 'retry';
 }): string {
   const instruction = input.instruction?.trim();
   return [
@@ -750,6 +816,50 @@ function buildContinuationPrompt(input: {
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     'Reinspect the current repository state instead of assuming the prior turn completed every step.',
     'When finished, summarize the files changed and verification you performed.'
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join('\n');
+}
+
+function buildInitialRunPrompt(input: {
+  task: Task;
+  worktree: WorktreeRecord;
+  settings: AgentExecutionSettings;
+  readOnlyMode: boolean;
+}): string {
+  return [
+    input.task.prompt,
+    '',
+    input.readOnlyMode
+      ? 'Analyze this task in an isolated Git worktree without modifying files.'
+      : 'You are implementing this task in an isolated Git worktree.',
+    `Repository root: ${input.worktree.worktreePath}`,
+    input.settings.sandbox === 'WORKSPACE_WRITE'
+      ? 'Only modify files inside this worktree.'
+      : 'Do not modify repository files.',
+    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
+    'When finished, summarize the files changed and verification you performed.'
+  ].join('\n');
+}
+
+function buildForkAlternativeTaskPrompt(input: {
+  task: Task;
+  run: RunRecord;
+  worktree: WorktreeRecord;
+  instruction?: string;
+}): string {
+  const instruction = input.instruction?.trim();
+  return [
+    'Alternative attempt for this Task Monki goal:',
+    input.task.prompt,
+    '',
+    `Source task: ${input.task.id}`,
+    `Source run: ${input.run.id} (${input.run.status})`,
+    `Source base: ${input.worktree.baseSha}`,
+    '',
+    'Start fresh from the source task base revision in this new isolated worktree.',
+    'Do not assume files changed by the source attempt are present.',
+    instruction ? `Alternative direction:\n${instruction}` : undefined
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');
