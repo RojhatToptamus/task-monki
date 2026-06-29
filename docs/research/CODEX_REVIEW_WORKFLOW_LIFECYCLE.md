@@ -129,12 +129,13 @@ When the review run emits a terminal event:
 Expected UI:
 
 - `PASSED`
-  - Primary path: Accept locally, commit, or create draft PR.
+  - Primary path: create draft PR.
+  - Secondary/local paths: commit or mark done.
   - Optional path: run review again.
 - `NEEDS_CHANGES`
   - Show structured findings by severity.
   - Primary path: Request changes.
-  - Secondary path: run review again or use the finish-panel Accept anyway
+  - Secondary path: run review again or use the finish-panel Mark done anyway
     owner override.
 - `INCONCLUSIVE`
   - Show raw output and any parsed findings.
@@ -162,8 +163,8 @@ Expected UI while follow-up is active:
 - Review actions hidden or disabled:
   - no Request changes
   - no Run review again
-  - no Accept anyway
-  - no Accept locally
+  - no Mark done anyway
+  - no Mark done
   - no Commit
   - no Create draft PR
 - Header and evidence-side delivery actions are also disabled while review
@@ -198,11 +199,12 @@ A Codex review becomes stale when:
 
 - a new non-review agent run starts after a terminal review result; or
 - a new Git snapshot has a different head SHA or dirty fingerprint than the
-  reviewed diff.
+  reviewed diff, except when a Task Monki delivery commit records the
+  still-current reviewed worktree into Git.
 
 Stale findings must not be treated as current findings. They are useful context
 for what was previously wrong, but the correct action is to re-run review on the
-current diff before accepting or sending more review-derived changes.
+current diff before marking done or sending more review-derived changes.
 
 ## Cancellation and interruption
 

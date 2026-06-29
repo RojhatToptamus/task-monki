@@ -31,8 +31,6 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import {
-  canCreateDeliveryCommit,
-  canCreatePullRequest,
   canPrepareWorktree,
   canRunTests,
   canStartRun,
@@ -53,7 +51,9 @@ import {
   canRequestCodexReviewChanges,
   codexReviewGate,
   describeTaskState,
+  finishActionsForTask,
   getFinishEvidenceState,
+  markDoneModalCopy,
   type FinishEvidenceState,
   type Tone
 } from './taskView';
@@ -129,7 +129,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [tab, setTab] = useState<DetailTab>('overview');
   const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
-  const [acceptModal, setAcceptModal] = useState<'clean' | 'issues'>();
+  const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [requestInstruction, setRequestInstruction] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
@@ -257,11 +257,11 @@ export function TaskDetail(props: TaskDetailProps) {
     setRequestInstruction(defaultReviewFollowUpInstruction(task, reviewGate, reviewRun, next));
   };
 
-  const acceptLocally = async () => {
+  const markDone = async () => {
     setReviewActionBusy(true);
     try {
       await props.onTransition(task.id, 'DONE');
-      setAcceptModal(undefined);
+      setMarkDoneModal(undefined);
     } catch {
       // The app shell reports the error. Keep the modal open so the user can retry.
     } finally {
@@ -513,7 +513,9 @@ export function TaskDetail(props: TaskDetailProps) {
                   actionBusy={reviewActionBusy}
                   actionsPaused={reviewActionsPaused}
                   actionsPausedReason={reviewPauseReason}
-                  onOpenAccept={(withIssues) => setAcceptModal(withIssues ? 'issues' : 'clean')}
+                  onOpenMarkDone={(withIssues) =>
+                    setMarkDoneModal(withIssues ? 'issues' : 'clean')
+                  }
                   onCreateDeliveryCommit={() => void props.onCreateDeliveryCommit(task.id)}
                   onCreatePullRequest={() => void props.onCreatePullRequest(task.id)}
                 />
@@ -577,13 +579,13 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
       </div>
 
-      {acceptModal ? (
-        <AcceptLocalModal
-          withIssues={acceptModal === 'issues'}
-          warnings={acceptModal === 'issues' ? finishEvidence.warnings : []}
+      {markDoneModal ? (
+        <MarkDoneModal
+          withIssues={markDoneModal === 'issues'}
+          warnings={markDoneModal === 'issues' ? finishEvidence.warnings : []}
           busy={reviewActionBusy}
-          onCancel={() => setAcceptModal(undefined)}
-          onConfirm={() => void acceptLocally()}
+          onCancel={() => setMarkDoneModal(undefined)}
+          onConfirm={() => void markDone()}
         />
       ) : null}
 
@@ -928,7 +930,7 @@ function FinishPanel({
   actionBusy,
   actionsPaused,
   actionsPausedReason,
-  onOpenAccept,
+  onOpenMarkDone,
   onCreateDeliveryCommit,
   onCreatePullRequest
 }: {
@@ -938,7 +940,7 @@ function FinishPanel({
   actionBusy: boolean;
   actionsPaused: boolean;
   actionsPausedReason?: ReviewActionPauseReason;
-  onOpenAccept(withIssues: boolean): void;
+  onOpenMarkDone(withIssues: boolean): void;
   onCreateDeliveryCommit(): void;
   onCreatePullRequest(): void;
 }) {
@@ -947,8 +949,13 @@ function FinishPanel({
   }
 
   const reviewPassed = reviewStatus === 'PASSED';
-  const reviewRunning = reviewStatus === 'RUNNING';
-  const cleanAccept = finishEvidence.mode === 'clean';
+  const actions = finishActionsForTask({
+    task,
+    reviewStatus,
+    finishEvidence,
+    actionBusy,
+    actionsPaused
+  });
   const pausedText =
     actionsPausedReason === 'implementation-running'
       ? 'Finish actions pause while the agent is running.'
@@ -962,51 +969,27 @@ function FinishPanel({
       </div>
       <div className="tm-finishpanel__actions">
         {actionsPaused ? <span className="tm-reviewcard__hint">{pausedText}</span> : null}
-
-        {cleanAccept ? (
-          <>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={actionBusy || actionsPaused}
-              onClick={() => onOpenAccept(false)}
-            >
-              Accept locally
-            </button>
-          </>
-        ) : null}
-
-        {!cleanAccept && !reviewRunning ? (
+        {actions.map((action) => (
           <button
+            key={action.id}
             type="button"
-            className="outline-button tm-finishpanel__accept-anyway"
-            disabled={actionBusy || actionsPaused}
-            onClick={() => onOpenAccept(true)}
+            className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
+              action.id === 'mark-done' && action.withIssues
+                ? 'tm-finishpanel__mark-done-anyway'
+                : ''
+            }`}
+            disabled={action.disabled}
+            onClick={
+              action.id === 'create-draft-pr'
+                ? onCreatePullRequest
+                : action.id === 'commit'
+                  ? onCreateDeliveryCommit
+                  : () => onOpenMarkDone(Boolean(action.withIssues))
+            }
           >
-            Accept anyway
+            {action.label}
           </button>
-        ) : null}
-
-        {reviewPassed ? (
-          <>
-            <button
-              type="button"
-              className="outline-button"
-              disabled={!canCreateDeliveryCommit(task) || actionBusy || actionsPaused}
-              onClick={onCreateDeliveryCommit}
-            >
-              Commit
-            </button>
-            <button
-              type="button"
-              className="outline-button"
-              disabled={!canCreatePullRequest(task) || actionBusy || actionsPaused}
-              onClick={onCreatePullRequest}
-            >
-              Create draft PR
-            </button>
-          </>
-        ) : null}
+        ))}
       </div>
     </section>
   );
@@ -1263,7 +1246,7 @@ function isActiveNonReviewRun(run: RunRecord): boolean {
   );
 }
 
-function AcceptLocalModal({
+function MarkDoneModal({
   withIssues,
   warnings,
   busy,
@@ -1276,20 +1259,17 @@ function AcceptLocalModal({
   onCancel(): void;
   onConfirm(): void;
 }) {
+  const copy = markDoneModalCopy(withIssues, busy);
   return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="accept-local-title">
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="mark-done-title">
       <div className="tm-modal__scrim" onClick={onCancel} />
       <div className="tm-modal__panel">
-        <h3 id="accept-local-title">{withIssues ? 'Accept anyway' : 'Accept locally'}</h3>
-        <p>
-          {withIssues
-            ? 'Marks this task done despite unresolved evidence. No PR is created.'
-            : 'Records this implementation as accepted on your machine. No PR is created.'}
-        </p>
+        <h3 id="mark-done-title">{copy.title}</h3>
+        <p>{copy.body}</p>
         {withIssues && warnings.length === 0 ? (
           <div className="tm-modal__warning">
-            <strong>Evidence is not fully passing.</strong>
-            <span>You are explicitly accepting the current local result.</span>
+            <strong>{copy.fallbackWarningTitle}</strong>
+            <span>{copy.fallbackWarningDetail}</span>
           </div>
         ) : null}
         {withIssues
@@ -1305,7 +1285,7 @@ function AcceptLocalModal({
             Cancel
           </button>
           <button type="button" className="primary-button" disabled={busy} onClick={onConfirm}>
-            {busy ? 'Accepting...' : withIssues ? 'Mark done anyway' : 'Accept and mark done'}
+            {copy.confirmLabel}
           </button>
         </div>
       </div>
@@ -1451,13 +1431,13 @@ function reviewBody(
   }
   switch (reviewGate.status) {
     case 'NOT_RUN':
-      return 'Run a review before accepting or shipping this diff.';
+      return 'Run a review before marking done or shipping this diff.';
     case 'PASSED':
       return 'No blocking issues were reported for the reviewed diff.';
     case 'NEEDS_CHANGES':
       return 'Send the findings back to the agent, then re-review.';
     case 'INCONCLUSIVE':
-      return 'Review the output, then request changes or accept explicitly.';
+      return 'Review the output, then request changes or mark done explicitly.';
     case 'FAILED':
       return 'The review did not complete. Re-run it or inspect Debug.';
     case 'CANCELED':
@@ -1478,11 +1458,11 @@ function nextReviewAction(
     case 'RUNNING':
       return 'Wait for the review to finish, or stop it if it is no longer useful.';
     case 'PASSED':
-      return 'Accept, commit, or create a draft PR.';
+      return 'Create a draft PR, commit locally, or mark done.';
     case 'NEEDS_CHANGES':
       return 'Request changes.';
     case 'INCONCLUSIVE':
-      return 'Request changes or accept explicitly.';
+      return 'Request changes or mark done explicitly.';
     case 'FAILED':
       return 'Run the review again or inspect Debug.';
     case 'CANCELED':

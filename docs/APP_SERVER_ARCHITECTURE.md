@@ -16,7 +16,7 @@ Task Monki owns:
 - Git snapshots, dirty fingerprints, and diff artifacts;
 - test execution and test artifacts;
 - GitHub branch, PR, check, review, and merge evidence;
-- local acceptance and Done transitions.
+- local completion and Done transitions.
 
 Codex owns:
 

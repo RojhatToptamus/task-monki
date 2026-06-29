@@ -314,6 +314,118 @@ describe('projection reducer', () => {
     expect(completedFollowUpState.tasks[0].projection.codexReview?.status).toBe('STALE');
   });
 
+  it('keeps a current review result fresh when a delivery commit records the reviewed diff', () => {
+    const task: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      forkedAlternativeTaskIds: [],
+      currentIterationId: 'iteration-1',
+      currentRunId: 'implementation-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'COMPLETED',
+        git: 'DIRTY',
+        tests: 'PASSED',
+        codexReview: {
+          status: 'PASSED',
+          runId: 'review-run',
+          reviewedHeadSha: 'abc',
+          reviewedDirtyFingerprint: 'fp-1'
+        }
+      }
+    };
+
+    const committed = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [task],
+        runs: [
+          createRun({ id: 'implementation-run', mode: 'IMPLEMENTATION', status: 'COMPLETED' }),
+          createRun({ id: 'review-run', mode: 'REVIEW', status: 'COMPLETED' })
+        ]
+      },
+      {
+        ...createEvent('DELIVERY_COMMIT_CREATED', {
+          headSha: 'commit-1',
+          branchName: 'task/task-1'
+        }),
+        runId: undefined
+      }
+    );
+
+    const refreshed = applyEventToState(committed, {
+      ...createEvent('GIT_SNAPSHOT_CAPTURED', {
+        id: 'git-committed',
+        headSha: 'commit-1',
+        dirtyFingerprint: 'clean-fp',
+        status: 'COMMITTED_UNPUSHED'
+      }),
+      runId: undefined
+    });
+
+    expect(committed.tasks[0].projection.codexReview).toMatchObject({
+      status: 'PASSED',
+      reviewedHeadSha: 'commit-1'
+    });
+    expect(committed.tasks[0].projection.codexReview?.reviewedDirtyFingerprint).toBeUndefined();
+    expect(refreshed.tasks[0].projection.codexReview?.status).toBe('PASSED');
+  });
+
+  it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {
+    const staleTask: Task = {
+      id: 'task-1',
+      title: 'Task',
+      prompt: 'Prompt',
+      repositoryPath: '/tmp/repo',
+      workflowPhase: 'REVIEW',
+      resolution: 'NONE',
+      completionPolicy: 'LOCAL_ACCEPTANCE',
+      phaseVersion: 2,
+      forkedAlternativeTaskIds: [],
+      currentIterationId: 'iteration-1',
+      currentRunId: 'implementation-run',
+      agentSettings: {},
+      createdAt: now,
+      updatedAt: now,
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'COMPLETED',
+        codexReview: {
+          status: 'STALE',
+          runId: 'review-run',
+          reviewedHeadSha: 'abc',
+          reviewedDirtyFingerprint: 'fp-1'
+        }
+      }
+    };
+
+    const committed = applyEventToState(
+      { ...createEmptyState(), tasks: [staleTask] },
+      {
+        ...createEvent('DELIVERY_COMMIT_CREATED', {
+          headSha: 'commit-1',
+          branchName: 'task/task-1'
+        }),
+        runId: undefined
+      }
+    );
+
+    expect(committed.tasks[0].projection.codexReview).toMatchObject({
+      status: 'STALE',
+      reviewedHeadSha: 'abc',
+      reviewedDirtyFingerprint: 'fp-1'
+    });
+  });
+
   it('keeps provider plans, usage, and goals separate from workflow and verified tests', () => {
     const task: Task = {
       id: 'task-1',

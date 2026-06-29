@@ -14,8 +14,7 @@ is not just an AI chat UI.
 4. Task Monki records provider activity, approvals, Git evidence, test evidence,
    delivery evidence, and audit history.
 5. User reviews, requests changes, follows up, continues unfinished runs,
-   retries, forks alternatives, commits, opens a draft PR, accepts locally, or
-   marks done.
+   retries, forks alternatives, commits, opens a draft PR, or marks done.
 
 ## Repository context
 
@@ -60,7 +59,7 @@ decisions or verified local evidence.
 - In Review
   - A PR or external review process exists.
 - Done
-  - Work is accepted locally, merged, or explicitly marked complete.
+  - Work is marked done locally, merged, or explicitly marked complete.
 
 Other phases such as Blocked, Canceled, or Archived are exceptional states and
 should explain what action is needed to recover.
@@ -125,9 +124,9 @@ Review:
 - Allow Run Codex review when no implementation-side run is active.
 - Allow Request changes only when the current review result has actionable
   current findings.
-- Allow Accept locally, Commit, and Create draft PR when not paused by an active
+- Allow Mark done, Commit, and Create draft PR when not paused by an active
   run or review.
-- Treat Accept anyway as an explicit owner override when review, test, or Git
+- Treat Mark done anyway as an explicit owner override when review, test, or Git
   evidence is missing, stale, failed, dirty, unavailable, canceled,
   inconclusive, or unresolved.
 
@@ -182,19 +181,25 @@ history, or provider remote thread data.
 
 ## Finish task actions
 
-- Accept locally
-  - Records local acceptance and can move the task to Done. It does not create a
-    PR.
-- Accept anyway
-  - Records local acceptance despite missing or non-passing review, test, or Git
-    evidence. It should be styled and confirmed as an owner override, not a
-    review action.
-- Commit
-  - Creates a local commit from task worktree changes.
-- Create draft PR
-  - Publishes the branch if needed and creates or opens a draft PR.
 - Mark done
-  - Only available when local policy says the task is complete enough.
+  - Moves the task to Done in Task Monki without creating a commit or PR. It is
+    only available as the clean local-completion path when local policy says the
+    task is complete enough.
+- Mark done anyway
+  - Moves the task to Done in Task Monki despite missing or non-passing review,
+    test, or Git evidence. It should be styled and confirmed as an owner
+    override, not a review action.
+- Create draft PR
+  - Main delivery path. It may create a delivery commit if needed, publish the
+    branch if needed, then create or open a draft PR.
+- Commit
+  - Secondary/manual delivery step for users who want local Git control before
+    publishing or opening a PR.
+
+A Task Monki delivery commit records the current task worktree into Git. It is
+delivery progress, not follow-up implementation work. If the reviewed diff was
+still current immediately before the delivery commit, the commit does not make
+the Codex review stale by itself.
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.

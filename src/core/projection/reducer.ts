@@ -475,6 +475,7 @@ export function reduceProjection(
         ...base,
         git: 'COMMITTED_UNPUSHED',
         tests: 'STALE',
+        codexReview: reduceCodexReview(base.codexReview, event, run),
         health: maxHealth(base.health, 'WARNING'),
         summary: 'Delivery commit created. Re-run tests before publishing.',
         findings,
@@ -1021,6 +1022,18 @@ function reduceCodexReview(
         summary: 'The current diff changed after this Codex review.',
         updatedAt: event.receivedAt
       };
+    case 'DELIVERY_COMMIT_CREATED': {
+      const headSha = getString(event.payload, 'headSha');
+      if (!isTerminalReviewGate(base) || !headSha) {
+        return base;
+      }
+      return {
+        ...base,
+        reviewedHeadSha: headSha,
+        reviewedDirtyFingerprint: undefined,
+        updatedAt: event.receivedAt
+      };
+    }
     default:
       return base;
   }

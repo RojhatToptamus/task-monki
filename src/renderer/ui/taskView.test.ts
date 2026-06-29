@@ -7,7 +7,9 @@ import {
   canRequestCodexReviewChanges,
   columnTasks,
   computeNavCounts,
-  getFinishEvidenceState
+  finishActionsForTask,
+  getFinishEvidenceState,
+  markDoneModalCopy
 } from './taskView';
 
 const now = '2026-06-24T10:00:00.000Z';
@@ -172,7 +174,7 @@ describe('task card view model', () => {
     ).toBe(false);
   });
 
-  it('allows clean local acceptance only when review, tests, and Git evidence are healthy', () => {
+  it('allows clean local completion only when review, tests, and Git evidence are healthy', () => {
     const state = getFinishEvidenceState(
       createTask({
         projection: {
@@ -188,7 +190,7 @@ describe('task card view model', () => {
     expect(state).toEqual({ mode: 'clean', warnings: [] });
   });
 
-  it('uses Accept anyway when tests are missing or stale despite a passing review', () => {
+  it('uses Mark done anyway when tests are missing or stale despite a passing review', () => {
     const missingTests = getFinishEvidenceState(
       createTask({
         projection: {
@@ -222,7 +224,7 @@ describe('task card view model', () => {
     );
   });
 
-  it('uses Accept anyway when Git is dirty even if review and tests passed', () => {
+  it('uses Mark done anyway when Git is dirty even if review and tests passed', () => {
     const state = getFinishEvidenceState(
       createTask({
         projection: {
@@ -242,6 +244,133 @@ describe('task card view model', () => {
       title: 'Working tree is dirty.',
       detail: '2 uncommitted files remain. Commit or open a PR to share the work.'
     });
+  });
+
+  it('labels finish actions with Create draft PR as the main delivery path', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'DIRTY',
+        tests: 'PASSED',
+        codexReview: { status: 'PASSED' }
+      },
+      workflowPhase: 'REVIEW'
+    });
+
+    expect(
+      finishActionsForTask({
+        task,
+        reviewStatus: 'PASSED',
+        finishEvidence: { mode: 'clean', warnings: [] }
+      }).map((action) => ({
+        id: action.id,
+        label: action.label,
+        kind: action.kind,
+        disabled: action.disabled,
+        withIssues: action.withIssues
+      }))
+    ).toEqual([
+      {
+        id: 'create-draft-pr',
+        label: 'Create draft PR',
+        kind: 'primary',
+        disabled: false,
+        withIssues: undefined
+      },
+      {
+        id: 'commit',
+        label: 'Commit',
+        kind: 'outline',
+        disabled: false,
+        withIssues: undefined
+      },
+      {
+        id: 'mark-done',
+        label: 'Mark done',
+        kind: 'outline',
+        disabled: false,
+        withIssues: false
+      }
+    ]);
+  });
+
+  it('keeps Create draft PR available when Mark done requires an override after a local commit', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'COMMITTED_UNPUSHED',
+        tests: 'STALE',
+        codexReview: { status: 'STALE', runId: 'review-run' }
+      },
+      workflowPhase: 'REVIEW'
+    });
+
+    const actions = finishActionsForTask({
+      task,
+      reviewStatus: 'STALE',
+      finishEvidence: {
+        mode: 'override',
+        warnings: [
+          {
+            title: 'Local test evidence is stale.',
+            detail: 'Rerun tests for the current Git state before marking done cleanly.'
+          }
+        ]
+      }
+    });
+
+    expect(actions.map((action) => action.label)).toEqual([
+      'Create draft PR',
+      'Commit',
+      'Mark done anyway'
+    ]);
+    expect(actions.find((action) => action.id === 'create-draft-pr')?.disabled).toBe(false);
+    expect(actions.find((action) => action.id === 'commit')?.disabled).toBe(true);
+  });
+
+  it('disables local completion while review is running', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'DIRTY',
+        tests: 'PASSED',
+        codexReview: { status: 'RUNNING', runId: 'review-run' }
+      },
+      workflowPhase: 'REVIEW'
+    });
+
+    expect(
+      finishActionsForTask({
+        task,
+        reviewStatus: 'RUNNING',
+        finishEvidence: { mode: 'override', warnings: [] }
+      })
+    ).toEqual([
+      {
+        id: 'mark-done',
+        label: 'Mark done anyway',
+        kind: 'outline',
+        disabled: true,
+        withIssues: true
+      }
+    ]);
+  });
+
+  it('uses Mark done language in the confirmation modal copy', () => {
+    expect(markDoneModalCopy(false, false)).toMatchObject({
+      title: 'Mark done',
+      body: 'Marks this task done in Task Monki without creating a commit or PR.',
+      confirmLabel: 'Mark done'
+    });
+    expect(markDoneModalCopy(true, false)).toMatchObject({
+      title: 'Mark done anyway',
+      body: 'Marks this task done in Task Monki despite unresolved evidence. No commit or PR is created.',
+      confirmLabel: 'Mark done anyway'
+    });
+    expect(markDoneModalCopy(true, true).confirmLabel).toBe('Marking done...');
   });
 });
 

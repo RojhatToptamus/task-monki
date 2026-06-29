@@ -1,5 +1,9 @@
 import type { CodexReviewGateStatus, Task, TestStatus, WorkflowPhase } from '../../shared/contracts';
-import { formatShortId } from '../model/selectors';
+import {
+  canCreateDeliveryCommit,
+  canCreatePullRequest,
+  formatShortId
+} from '../model/selectors';
 import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
 import { humanizeEnum } from './display';
 
@@ -35,6 +39,22 @@ export interface FinishEvidenceWarning {
 export interface FinishEvidenceState {
   mode: 'clean' | 'override';
   warnings: FinishEvidenceWarning[];
+}
+
+export interface FinishPanelAction {
+  id: 'create-draft-pr' | 'commit' | 'mark-done';
+  label: string;
+  kind: 'primary' | 'outline';
+  disabled: boolean;
+  withIssues?: boolean;
+}
+
+export interface MarkDoneModalCopy {
+  title: string;
+  body: string;
+  fallbackWarningTitle: string;
+  fallbackWarningDetail: string;
+  confirmLabel: string;
 }
 
 /** Human label + tone for a task's most salient run/phase state. */
@@ -141,6 +161,59 @@ export function getFinishEvidenceState(
   };
 }
 
+export function finishActionsForTask(input: {
+  task: Task;
+  reviewStatus: CodexReviewGateStatus;
+  finishEvidence: FinishEvidenceState;
+  actionBusy?: boolean;
+  actionsPaused?: boolean;
+}): FinishPanelAction[] {
+  if (input.task.workflowPhase === 'DONE') {
+    return [];
+  }
+
+  const reviewRunning = input.reviewStatus === 'RUNNING';
+  const busyOrPaused = Boolean(input.actionBusy || input.actionsPaused || reviewRunning);
+  const actions: FinishPanelAction[] = [];
+
+  if (!reviewRunning) {
+    actions.push({
+      id: 'create-draft-pr',
+      label: 'Create draft PR',
+      kind: 'primary',
+      disabled: !canCreatePullRequest(input.task) || busyOrPaused
+    });
+    actions.push({
+      id: 'commit',
+      label: 'Commit',
+      kind: 'outline',
+      disabled: !canCreateDeliveryCommit(input.task) || busyOrPaused
+    });
+  }
+
+  actions.push({
+    id: 'mark-done',
+    label: input.finishEvidence.mode === 'clean' ? 'Mark done' : 'Mark done anyway',
+    kind: reviewRunning || actions.length > 0 ? 'outline' : 'primary',
+    disabled: busyOrPaused,
+    withIssues: input.finishEvidence.mode !== 'clean'
+  });
+
+  return actions;
+}
+
+export function markDoneModalCopy(withIssues: boolean, busy: boolean): MarkDoneModalCopy {
+  return {
+    title: withIssues ? 'Mark done anyway' : 'Mark done',
+    body: withIssues
+      ? 'Marks this task done in Task Monki despite unresolved evidence. No commit or PR is created.'
+      : 'Marks this task done in Task Monki without creating a commit or PR.',
+    fallbackWarningTitle: 'Evidence is not fully passing.',
+    fallbackWarningDetail: 'You are explicitly marking the current local result done.',
+    confirmLabel: busy ? 'Marking done...' : withIssues ? 'Mark done anyway' : 'Mark done'
+  };
+}
+
 const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
   'QUEUED',
   'STARTING',
@@ -166,30 +239,30 @@ function reviewFinishWarning(
   if (status === 'STALE') {
     return {
       title: 'Codex review is stale.',
-      detail: 'Run review again before clean acceptance, or accept anyway.'
+      detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   if (status === 'NEEDS_CHANGES') {
     return {
       title: 'Codex review requested changes.',
-      detail: 'Request changes or accept the current result as an owner override.'
+      detail: 'Request changes or mark the current result done as an owner override.'
     };
   }
   if (status === 'RUNNING') {
     return {
       title: 'Codex review is running.',
-      detail: 'Wait for the review to finish before accepting cleanly.'
+      detail: 'Wait for the review to finish before marking done cleanly.'
     };
   }
   if (status === 'FAILED' || status === 'INCONCLUSIVE' || status === 'CANCELED') {
     return {
       title: `Codex review is ${humanizeEnum(status).toLowerCase()}.`,
-      detail: 'Run review again before clean acceptance, or accept anyway.'
+      detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   return {
     title: 'No passing Codex review is recorded.',
-    detail: 'Run Codex review before clean acceptance, or accept anyway.'
+    detail: 'Run Codex review before marking done cleanly, or mark done anyway.'
   };
 }
 
@@ -201,38 +274,38 @@ function testFinishWarning(status: TestStatus): FinishEvidenceWarning | undefine
     case 'ERROR':
       return {
         title: `Local tests are ${humanizeEnum(status).toLowerCase()}.`,
-        detail: 'Fix or rerun tests before clean acceptance, or accept anyway.'
+        detail: 'Fix or rerun tests before marking done cleanly, or mark done anyway.'
       };
     case 'STALE':
       return {
         title: 'Local test evidence is stale.',
-        detail: 'Rerun tests for the current Git state before clean acceptance.'
+        detail: 'Rerun tests for the current Git state before marking done cleanly.'
       };
     case 'NOT_RUN':
       return {
         title: 'No local test run is recorded.',
-        detail: 'Run tests before clean acceptance, or accept anyway.'
+        detail: 'Run tests before marking done cleanly, or mark done anyway.'
       };
     case 'NOT_CONFIGURED':
       return {
         title: 'No local test command is configured.',
-        detail: 'Configure or run verification before clean acceptance, or accept anyway.'
+        detail: 'Configure or run verification before marking done cleanly, or mark done anyway.'
       };
     case 'QUEUED':
     case 'RUNNING':
       return {
         title: 'Local tests are still running.',
-        detail: 'Wait for tests to finish before clean acceptance.'
+        detail: 'Wait for tests to finish before marking done cleanly.'
       };
     case 'CANCELED':
       return {
         title: 'Local test run was canceled.',
-        detail: 'Rerun tests before clean acceptance, or accept anyway.'
+        detail: 'Rerun tests before marking done cleanly, or mark done anyway.'
       };
     case 'UNKNOWN':
       return {
         title: 'Local test state is unknown.',
-        detail: 'Refresh or rerun tests before clean acceptance, or accept anyway.'
+        detail: 'Refresh or rerun tests before marking done cleanly, or mark done anyway.'
       };
   }
 }
@@ -257,7 +330,7 @@ function gitFinishWarning(
     case 'NOT_INSPECTED':
       return {
         title: 'Git evidence has not been inspected.',
-        detail: 'Refresh evidence before clean acceptance, or accept anyway.'
+        detail: 'Refresh evidence before marking done cleanly, or mark done anyway.'
       };
     case 'CONFLICTED':
     case 'DIVERGED':
@@ -265,7 +338,7 @@ function gitFinishWarning(
     case 'UNKNOWN':
       return {
         title: `Git state is ${humanizeEnum(task.projection.git).toLowerCase()}.`,
-        detail: 'Resolve or refresh Git evidence before clean acceptance, or accept anyway.'
+        detail: 'Resolve or refresh Git evidence before marking done cleanly, or mark done anyway.'
       };
   }
 }
