@@ -22,6 +22,104 @@ describe('projection reducer', () => {
     expect(next.summary).toContain('independent Git evidence');
   });
 
+  it('clears a started App Server turn process state on the authoritative terminal event', () => {
+    const run = createRun();
+    const started = reduceProjection(
+      createInitialProjection(now),
+      createEvent('AGENT_RUN_STARTED', { mode: 'IMPLEMENTATION' }),
+      run
+    );
+    const completed = reduceProjection(
+      started,
+      createEvent('AGENT_RUN_COMPLETED', {
+        terminalStatus: 'completed',
+        finalArtifactId: 'artifact-1'
+      }),
+      { ...run, status: 'COMPLETED' }
+    );
+
+    expect(started.osProcess).toBe('SPAWNING');
+    expect(completed.agentRun).toBe('COMPLETED');
+    expect(completed.osProcess).toBe('EXITED');
+  });
+
+  it('preserves a completed review summary across matching Git and provider goal updates', () => {
+    const projection = {
+      ...createInitialProjection(now),
+      codexReview: {
+        status: 'PASSED' as const,
+        reviewedHeadSha: 'abc',
+        reviewedDirtyFingerprint: 'fp-1',
+        summary: 'Review passed with no findings.'
+      },
+      summary: 'Review passed with no findings.'
+    };
+    const afterGit = reduceProjection(
+      projection,
+      createEvent('GIT_SNAPSHOT_CAPTURED', {
+        headSha: 'abc',
+        dirtyFingerprint: 'fp-1',
+        status: 'DIRTY'
+      })
+    );
+    const afterGoal = reduceProjection(
+      afterGit,
+      createEvent('AGENT_GOAL_UPDATED', { syncState: 'IN_SYNC' })
+    );
+
+    expect(afterGit.codexReview?.status).toBe('PASSED');
+    expect(afterGit.summary).toBe('Review passed with no findings.');
+    expect(afterGoal.summary).toBe('Review passed with no findings.');
+  });
+
+  it('promotes the completed review summary across the matching post-review Git snapshot', () => {
+    const projection = {
+      ...createInitialProjection(now),
+      codexReview: {
+        status: 'PASSED' as const,
+        reviewedHeadSha: 'abc',
+        reviewedDirtyFingerprint: 'fp-1',
+        summary: 'Review passed with no findings.'
+      },
+      summary: 'Agent turn completed. Review the provider result and independent Git evidence.'
+    };
+    const afterGit = reduceProjection(
+      projection,
+      createEvent('GIT_SNAPSHOT_CAPTURED', {
+        headSha: 'abc',
+        dirtyFingerprint: 'fp-1',
+        status: 'DIRTY'
+      })
+    );
+
+    expect(afterGit.codexReview?.status).toBe('PASSED');
+    expect(afterGit.summary).toBe('Review passed with no findings.');
+  });
+
+  it('surfaces review staleness when a Git snapshot differs from the reviewed diff', () => {
+    const projection = {
+      ...createInitialProjection(now),
+      codexReview: {
+        status: 'PASSED' as const,
+        reviewedHeadSha: 'abc',
+        reviewedDirtyFingerprint: 'fp-1',
+        summary: 'Review passed with no findings.'
+      },
+      summary: 'Review passed with no findings.'
+    };
+    const next = reduceProjection(
+      projection,
+      createEvent('GIT_SNAPSHOT_CAPTURED', {
+        headSha: 'abc',
+        dirtyFingerprint: 'fp-2',
+        status: 'DIRTY'
+      })
+    );
+
+    expect(next.codexReview?.status).toBe('STALE');
+    expect(next.summary).toBe('The current diff changed after this Codex review.');
+  });
+
   it('records non-zero process exits as errors', () => {
     const projection = createInitialProjection(now);
     const next = reduceProjection(projection, createEvent('PROCESS_EXITED', { exitCode: 2 }));

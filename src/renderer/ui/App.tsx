@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   TASK_STORE_SCHEMA_VERSION,
   type CreateTaskRequest,
   type AgentInteractionDecision,
   type AgentProviderState,
   type AgentRetryStrategy,
+  DEFAULT_PROMPT_REFINEMENT_MODEL,
+  DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  type CodexExternalToolSettings,
   type DeleteTaskResult,
   type GitSnapshotRecord,
   type InteractionRequestRecord,
   type Task,
+  type TaskManagerAppSettings,
   type TaskSnapshot,
   type WorkflowPhase,
   type WorktreeRecord
@@ -30,6 +34,7 @@ import {
   formatShortId
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
+import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
 import {
   buildRepositoryOptions,
   isSameRepositoryPath,
@@ -89,6 +94,8 @@ const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
 const APP_SETTINGS_STORAGE_KEY = 'task-monki-app-settings';
 const REPOSITORIES_STORAGE_KEY = 'task-monki-repositories';
 const SELECTED_REPOSITORY_STORAGE_KEY = 'task-monki-selected-repository';
+const APP_UPDATE_REFRESH_DELAY_MS = 100;
+const CODEX_EXTERNAL_TOOLS_SAVE_DELAY_MS = 350;
 
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
@@ -112,8 +119,16 @@ export function App() {
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => getInitialCollapsed());
   const [appSettings, setAppSettings] = useState<AppSettings>(() => getInitialAppSettings());
+  const [coreAppSettings, setCoreAppSettings] = useState<TaskManagerAppSettings>(
+    DEFAULT_TASK_MANAGER_APP_SETTINGS
+  );
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const snapshotRefreshRequestRef = useRef(0);
+  const providerStateRequestRef = useRef(0);
+  const coreAppSettingsRef = useRef<TaskManagerAppSettings>(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+  const codexExternalToolsSaveTimerRef = useRef<number | undefined>(undefined);
+  const codexExternalToolsSaveRequestRef = useRef(0);
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
   const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
@@ -151,9 +166,64 @@ export function App() {
   );
 
   const refresh = useCallback(async () => {
+    const requestId = ++snapshotRefreshRequestRef.current;
     const next = await taskManagerApi.listTasks();
-    setSnapshot(next);
+    if (requestId === snapshotRefreshRequestRef.current) {
+      setSnapshot(next);
+    }
   }, []);
+  const refreshProviderState = useCallback(async () => {
+    const requestId = ++providerStateRequestRef.current;
+    const next = await taskManagerApi.getAgentProviderState();
+    if (requestId === providerStateRequestRef.current) {
+      setProviderState(next);
+    }
+  }, []);
+  const updateCodexExternalTools = useCallback(
+    (patch: Partial<CodexExternalToolSettings>) => {
+      const nextSettings: TaskManagerAppSettings = {
+        ...coreAppSettingsRef.current,
+        codexExternalTools: {
+          ...coreAppSettingsRef.current.codexExternalTools,
+          ...patch
+        }
+      };
+      coreAppSettingsRef.current = nextSettings;
+      setCoreAppSettings(nextSettings);
+      if (codexExternalToolsSaveTimerRef.current !== undefined) {
+        window.clearTimeout(codexExternalToolsSaveTimerRef.current);
+      }
+      codexExternalToolsSaveTimerRef.current = window.setTimeout(() => {
+        const requestId = ++codexExternalToolsSaveRequestRef.current;
+        const codexExternalTools = coreAppSettingsRef.current.codexExternalTools;
+        void taskManagerApi
+          .updateAppSettings({ codexExternalTools })
+          .then((stored) => {
+            if (requestId !== codexExternalToolsSaveRequestRef.current) {
+              return;
+            }
+            coreAppSettingsRef.current = stored;
+            setCoreAppSettings(stored);
+            notify('Settings updated.', 'success');
+            void refreshProviderState();
+          })
+          .catch((caught: unknown) => {
+            reportActionError(caught, 'Could not update settings.');
+          });
+      }, CODEX_EXTERNAL_TOOLS_SAVE_DELAY_MS);
+    },
+    [notify, refreshProviderState, reportActionError]
+  );
+  const updateRefreshScheduler = useMemo(
+    () =>
+      createUpdateRefreshScheduler({
+        delayMs: APP_UPDATE_REFRESH_DELAY_MS,
+        refresh,
+        setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimer: (handle) => window.clearTimeout(handle as number)
+      }),
+    [refresh]
+  );
 
   useEffect(() => {
     window.localStorage.setItem('task-monki-theme', theme);
@@ -192,14 +262,17 @@ export function App() {
 
     async function load() {
       try {
-        const [repoPath, provider] = await Promise.all([
+        const [repoPath, provider, storedAppSettings] = await Promise.all([
           taskManagerApi.getDefaultRepositoryPath(),
           taskManagerApi.getAgentProviderState(),
+          taskManagerApi.getAppSettings(),
           refresh()
         ]);
         if (!canceled) {
           setDefaultRepositoryPath(repoPath);
           setProviderState(provider);
+          coreAppSettingsRef.current = storedAppSettings;
+          setCoreAppSettings(storedAppSettings);
         }
       } catch (caught) {
         if (!canceled) {
@@ -221,11 +294,22 @@ export function App() {
   useEffect(() => {
     return taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
-        void taskManagerApi.getAgentProviderState().then(setProviderState);
+        void refreshProviderState();
       }
-      void refresh();
+      updateRefreshScheduler.request();
     });
-  }, [refresh]);
+  }, [refreshProviderState, updateRefreshScheduler]);
+
+  useEffect(() => () => updateRefreshScheduler.dispose(), [updateRefreshScheduler]);
+
+  useEffect(
+    () => () => {
+      if (codexExternalToolsSaveTimerRef.current !== undefined) {
+        window.clearTimeout(codexExternalToolsSaveTimerRef.current);
+      }
+    },
+    []
+  );
 
   const repositoryOptions = useMemo(
     () =>
@@ -403,7 +487,10 @@ export function App() {
 
   const refinePrompt = async (repositoryPath: string, input: string) => {
     try {
-      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const refinementModel = selectModel(
+        providerModels,
+        appSettings.promptRefinementModel ?? DEFAULT_PROMPT_REFINEMENT_MODEL
+      );
       const refined = await taskManagerApi.refinePrompt({
         repositoryPath,
         input,
@@ -943,6 +1030,8 @@ export function App() {
             onSetTheme={updateTheme}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
+            codexExternalTools={coreAppSettings.codexExternalTools}
+            onSetCodexExternalTools={updateCodexExternalTools}
             error={error}
             models={providerModels}
             activeRepositoryPath={activeRepositoryPath}

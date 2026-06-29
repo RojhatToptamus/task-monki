@@ -2,10 +2,15 @@ import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { AgentServerInstance } from '../../../shared/agent';
+import type { AgentServerInstance, CodexExternalToolSettings } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
+import {
+  codexExternalToolConfigOverrides,
+  normalizeCodexExternalToolSettings,
+  resolveCodexExternalToolConfigOverrides
+} from './CodexToolConfig';
 import {
   CODEX_PROTOCOL_MAXIMUM_TESTED_RUNTIME_VERSION,
   CODEX_PROTOCOL_RUNTIME_VERSION,
@@ -13,6 +18,19 @@ import {
 } from './protocol/metadata';
 
 const execFileAsync = promisify(execFile);
+
+export const CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS = [
+  'command/exec/outputDelta',
+  'item/agentMessage/delta',
+  'item/commandExecution/outputDelta',
+  'item/fileChange/outputDelta',
+  'item/mcpToolCall/progress',
+  'item/plan/delta',
+  'item/reasoning/summaryTextDelta',
+  'item/reasoning/textDelta',
+  'process/outputDelta',
+  'turn/diff/updated'
+] as const;
 
 interface SupervisorEvents {
   ready: [server: AgentServerInstance];
@@ -27,6 +45,49 @@ export interface CodexAppServerSupervisorOptions {
   appVersion: string;
   requestTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
+  toolSettings?: CodexExternalToolSettings;
+}
+
+export interface CodexAppServerLaunchConfig {
+  toolSettings?: CodexExternalToolSettings;
+  mcpServerConfigOverrides?: readonly string[];
+}
+
+export function codexAppServerArgv(
+  input: CodexAppServerLaunchConfig | readonly string[] = {}
+): string[] {
+  const launchConfig: CodexAppServerLaunchConfig = Array.isArray(input)
+    ? { mcpServerConfigOverrides: input as readonly string[] }
+    : (input as CodexAppServerLaunchConfig);
+  const configOverrides = [
+    ...codexExternalToolConfigOverrides(launchConfig.toolSettings),
+    ...(launchConfig.mcpServerConfigOverrides ?? [])
+  ];
+  return codexAppServerArgvFromConfigOverrides(configOverrides);
+}
+
+function codexAppServerArgvFromConfigOverrides(configOverrides: readonly string[]): string[] {
+  return [
+    'app-server',
+    '--stdio',
+    ...configOverrides.flatMap((override) => ['-c', override])
+  ];
+}
+
+export async function resolveCodexAppServerArgv(input: {
+  executable: string;
+  cwd: string;
+  environment?: NodeJS.ProcessEnv;
+  toolSettings?: CodexExternalToolSettings;
+}): Promise<string[]> {
+  return codexAppServerArgvFromConfigOverrides(
+    await resolveCodexExternalToolConfigOverrides({
+      executable: input.executable,
+      cwd: input.cwd,
+      environment: input.environment,
+      settings: input.toolSettings
+    })
+  );
 }
 
 export class CodexAppServerSupervisor {
@@ -55,6 +116,10 @@ export class CodexAppServerSupervisor {
 
   get runtimeCompatibilityWarning(): string | undefined {
     return this.compatibilityWarning;
+  }
+
+  setToolSettings(settings: CodexExternalToolSettings): void {
+    this.options.toolSettings = normalizeCodexExternalToolSettings(settings);
   }
 
   start(): Promise<CodexRpcClient> {
@@ -118,12 +183,18 @@ export class CodexAppServerSupervisor {
     this.shuttingDown = false;
     this.diagnosticTail = '';
 
+    const argv = await resolveCodexAppServerArgv({
+      executable,
+      cwd: this.options.cwd,
+      environment: this.options.environment,
+      toolSettings: this.options.toolSettings
+    });
     const server = await this.store.createAgentServer({
       provider: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable,
-      argv: ['app-server', '--stdio'],
+      argv,
       runtimeVersion,
       schemaVersion: CODEX_PROTOCOL_RUNTIME_VERSION,
       schemaHash: CODEX_PROTOCOL_SCHEMA_HASH
@@ -131,7 +202,7 @@ export class CodexAppServerSupervisor {
     this.server = server;
 
     try {
-      const child = spawn(executable, ['app-server', '--stdio'], {
+      const child = spawn(executable, argv, {
         cwd: this.options.cwd,
         env: sanitizeEnvironment(this.options.environment ?? process.env),
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -176,7 +247,11 @@ export class CodexAppServerSupervisor {
           title: 'Task Monki',
           version: this.options.appVersion
         },
-        capabilities: null
+        capabilities: {
+          experimentalApi: false,
+          requestAttestation: false,
+          optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+        }
       });
       await client.notify('initialized', {});
 

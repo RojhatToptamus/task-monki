@@ -182,6 +182,40 @@ describe('CodexRpcClient', () => {
     ).rejects.toBeInstanceOf(CodexAmbiguousMutationError);
     client.close();
   });
+
+  it('ignores late responses for requests that already timed out', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-late-response-'));
+    const store = new FileTaskStore(dir);
+    const server = await store.createAgentServer({
+      provider: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = new CodexRpcClient(input, output, store, server.id, 10);
+    const protocolErrors: string[] = [];
+    client.events.on('protocolError', (error) => protocolErrors.push(error.message));
+
+    const outbound = readLine(input);
+    const responsePromise = client.request('model/list', {
+      includeHidden: false,
+      limit: 10
+    });
+    const rejection = expect(responsePromise).rejects.toThrow('timed out');
+    const request = JSON.parse(await outbound) as { id: number };
+
+    await rejection;
+    output.write(
+      `${JSON.stringify({ id: request.id, result: { data: [], nextCursor: null } })}\n`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(protocolErrors).toEqual([]);
+    client.close();
+  });
 });
 
 function readLine(stream: PassThrough): Promise<string> {

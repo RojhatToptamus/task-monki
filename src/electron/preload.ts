@@ -23,12 +23,16 @@ import type {
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   TaskManagerApi,
-  TransitionTaskRequest
+  TransitionTaskRequest,
+  UpdateAppSettingsRequest
 } from '../shared/contracts';
 
 const api: TaskManagerApi = {
   getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
   chooseRepositoryFolder: () => ipcRenderer.invoke('repository:chooseFolder'),
+  getAppSettings: () => ipcRenderer.invoke('settings:get'),
+  updateAppSettings: (input: UpdateAppSettingsRequest) =>
+    ipcRenderer.invoke('settings:update', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),

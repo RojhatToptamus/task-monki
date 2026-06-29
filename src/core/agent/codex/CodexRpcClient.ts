@@ -107,7 +107,9 @@ export class CodexRpcClient {
   readonly events = new EventEmitter<RpcEvents>();
 
   private readonly pending = new Map<RequestId, PendingRequest>();
+  private readonly expiredRequests = new Set<RequestId>();
   private readonly reader;
+  private inboundQueue: Promise<void> = Promise.resolve();
   private nextRequestId = 1;
   private closed = false;
 
@@ -120,7 +122,10 @@ export class CodexRpcClient {
   ) {
     this.reader = createInterface({ input: output, crlfDelay: Infinity });
     this.reader.on('line', (line) => {
-      void this.handleLine(line);
+      this.inboundQueue = this.inboundQueue.then(
+        () => this.handleLine(line),
+        () => this.handleLine(line)
+      );
     });
   }
 
@@ -154,6 +159,7 @@ export class CodexRpcClient {
     return new Promise<CodexMethodMap[M]['result']>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        this.trackExpiredRequest(id);
         reject(
           mutation
             ? new CodexAmbiguousMutationError(
@@ -287,6 +293,9 @@ export class CodexRpcClient {
   private handleResponse(response: CodexRpcResponse): void {
     const pending = this.pending.get(response.id);
     if (!pending) {
+      if (this.expiredRequests.delete(response.id)) {
+        return;
+      }
       throw new Error(`Codex App Server responded with an unknown request id: ${response.id}`);
     }
 
@@ -311,6 +320,17 @@ export class CodexRpcClient {
       return;
     }
     pending.resolve(response.result);
+  }
+
+  private trackExpiredRequest(id: RequestId): void {
+    this.expiredRequests.add(id);
+    if (this.expiredRequests.size <= 100) {
+      return;
+    }
+    const oldest = this.expiredRequests.values().next().value;
+    if (oldest !== undefined) {
+      this.expiredRequests.delete(oldest);
+    }
   }
 }
 

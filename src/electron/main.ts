@@ -23,7 +23,8 @@ import type {
   RetryRunRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
-  TransitionTaskRequest
+  TransitionTaskRequest,
+  UpdateAppSettingsRequest
 } from '../shared/contracts';
 
 let mainWindow: BrowserWindow | undefined;
@@ -68,6 +69,10 @@ function installIpcHandlers(): void {
     return result.canceled ? undefined : result.filePaths[0];
   });
   ipcMain.handle('agent:providerState', () => service.getAgentProviderState());
+  ipcMain.handle('settings:get', () => service.getAppSettings());
+  ipcMain.handle('settings:update', async (_, input: UpdateAppSettingsRequest) => {
+    return service.updateAppSettings(input);
+  });
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {
     return service.validateRepository(repositoryPath);

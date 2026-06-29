@@ -457,19 +457,22 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
-    case 'GIT_SNAPSHOT_CAPTURED':
+    case 'GIT_SNAPSHOT_CAPTURED': {
+      const gitStatus = getGitStatus(event.payload);
+      const codexReview = reduceCodexReview(base.codexReview, event, run);
       return {
         ...base,
-        git: getGitStatus(event.payload) ?? base.git,
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        git: gitStatus ?? base.git,
+        codexReview,
         health:
-          getGitStatus(event.payload) === 'CONFLICTED' || getGitStatus(event.payload) === 'UNAVAILABLE'
+          gitStatus === 'CONFLICTED' || gitStatus === 'UNAVAILABLE'
             ? 'ERROR'
             : base.health,
-        summary: `Git snapshot captured: ${getGitStatus(event.payload) ?? 'UNKNOWN'}.`,
+        summary: gitSnapshotSummary(base, codexReview, gitStatus),
         findings,
         updatedAt: event.receivedAt
       };
+    }
     case 'DELIVERY_COMMIT_CREATED':
       return {
         ...base,
@@ -680,7 +683,7 @@ export function reduceProjection(
         summary:
           getString(event.payload, 'syncState') === 'DIVERGED'
             ? 'The provider goal diverges from Task Monki’s authoritative goal.'
-            : 'Provider goal state updated.',
+            : base.summary,
         findings,
         updatedAt: event.receivedAt
       };
@@ -720,6 +723,7 @@ export function reduceProjection(
         ...base,
         requestedAction: 'SUCCEEDED',
         agentRun: 'COMPLETED',
+        osProcess: terminalOsProcess(base.osProcess),
         codexReview: reduceCodexReview(base.codexReview, event, run),
         artifact: 'FINAL_MESSAGE_PRESENT',
         health: findings.some((finding) => finding.severity === 'WARNING') ? 'WARNING' : 'HEALTHY',
@@ -732,6 +736,7 @@ export function reduceProjection(
         ...base,
         requestedAction: 'FAILED',
         agentRun: 'FAILED',
+        osProcess: terminalOsProcess(base.osProcess),
         codexReview: reduceCodexReview(base.codexReview, event, run),
         health: 'ERROR',
         summary: 'Agent turn failed. Review provider activity and diagnostics.',
@@ -743,6 +748,7 @@ export function reduceProjection(
         ...base,
         requestedAction: 'CANCELED',
         agentRun: 'INTERRUPTED',
+        osProcess: terminalOsProcess(base.osProcess),
         codexReview: reduceCodexReview(base.codexReview, event, run),
         health: 'WARNING',
         summary: 'Agent turn was interrupted; the session remains available for continuation.',
@@ -1037,6 +1043,34 @@ function reduceCodexReview(
     default:
       return base;
   }
+}
+
+function terminalOsProcess(osProcess: StatusProjection['osProcess']): StatusProjection['osProcess'] {
+  return osProcess === 'SPAWNING' || osProcess === 'RUNNING' || osProcess === 'CANCELING'
+    ? 'EXITED'
+    : osProcess;
+}
+
+function gitSnapshotSummary(
+  base: StatusProjection,
+  codexReview: StatusProjection['codexReview'] | undefined,
+  gitStatus: StatusProjection['git'] | undefined
+): string {
+  if (
+    codexReview?.status === 'STALE' &&
+    base.codexReview?.status !== 'STALE' &&
+    codexReview.summary
+  ) {
+    return codexReview.summary;
+  }
+  if (
+    codexReview &&
+    isTerminalReviewGate(codexReview) &&
+    codexReview.summary
+  ) {
+    return codexReview.summary;
+  }
+  return `Git snapshot captured: ${gitStatus ?? 'UNKNOWN'}.`;
 }
 
 function isTerminalReviewGate(

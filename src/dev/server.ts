@@ -70,6 +70,16 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/settings') {
+      sendJson(response, 200, await service.getAppSettings());
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/settings') {
+      sendJson(response, 200, await service.updateAppSettings((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/tasks') {
       sendJson(response, 200, await service.listTasks());
       return;

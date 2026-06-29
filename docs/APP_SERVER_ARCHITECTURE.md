@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-06-28
+Date: 2026-06-29
 
 This document describes the current architecture, not an old migration plan.
 
@@ -77,6 +77,17 @@ Reasons:
 The adapter must:
 
 - launch and initialize the App Server;
+- start the embedded App Server from Task Monki's core app settings. The default
+  is local-only: apps disabled, web search disabled, and discovered MCP servers
+  disabled through per-server runtime config overrides so local coding turns do
+  not inherit unrelated user/plugin tool processes;
+- allow explicit settings opt-in for cached or live Codex web search, all
+  configured Codex MCP servers, and Codex apps/connectors when a task needs
+  those external tools;
+- avoid copying MCP environment values into stored App Server argv records when
+  building those runtime config overrides;
+- opt out of high-volume provider delta notifications that Task Monki does not
+  use as verified evidence;
 - discover account, models, supported reasoning efforts, and settings;
 - create, attach, and read provider sessions;
 - fork provider sessions only for detached Codex review when supported;
@@ -133,6 +144,25 @@ Task and review execution settings include:
 Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
+
+Core app settings also include Codex external tool settings:
+
+- web search mode: disabled, cached, or live;
+- MCP servers: disabled or all configured servers;
+- apps/connectors: disabled or enabled.
+
+These settings are persisted outside the task store schema and apply before the
+embedded App Server starts. If they change while no agent turn is active, Task
+Monki restarts the App Server so the new launch config is effective immediately.
+If an agent turn is active, the setting is stored and applies after the App
+Server restarts.
+
+Prompt refinement uses a short-lived `codex exec --json --ephemeral` subprocess
+rather than the persistent App Server. Task Monki applies the same external tool
+settings to that subprocess and supplies compact local repository context itself.
+The refinement prompt must not ask the subprocess to inspect the repository with
+shell commands; prompt refinement is a fast rewrite step, not a detached agent
+investigation.
 
 Codex protocol detail:
 

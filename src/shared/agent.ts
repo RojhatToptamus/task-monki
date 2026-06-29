@@ -118,6 +118,32 @@ export interface AgentExecutionSettings {
   approvalPolicy?: string;
 }
 
+export type CodexWebSearchMode = 'disabled' | 'cached' | 'live';
+export type CodexMcpServersMode = 'disabled' | 'all';
+export type CodexAppsMode = 'disabled' | 'enabled';
+
+export interface CodexExternalToolSettings {
+  webSearchMode: CodexWebSearchMode;
+  mcpServers: CodexMcpServersMode;
+  apps: CodexAppsMode;
+}
+
+export interface TaskManagerAppSettings {
+  codexExternalTools: CodexExternalToolSettings;
+}
+
+export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
+  webSearchMode: 'disabled',
+  mcpServers: 'disabled',
+  apps: 'disabled'
+};
+
+export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
+
+export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
+  codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
+};
+
 export type AgentObservationSource =
   | 'THREAD_START_RESPONSE'
   | 'THREAD_RESUME_RESPONSE'

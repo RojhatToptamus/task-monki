@@ -12,6 +12,7 @@ import type {
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
+  CodexExternalToolSettings,
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
@@ -101,6 +102,8 @@ const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'INTERRUPTING',
   'RECOVERY_REQUIRED'
 ];
+const TOOL_SETTINGS_PENDING_RESTART_WARNING =
+  'Codex external tool settings will apply after the App Server restarts.';
 
 function canRetargetReviewTurn(
   run: RunRecord,
@@ -153,6 +156,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private readonly interruptCompletionTimeoutMs: number;
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
+  private toolSettingsRestartPending = false;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -802,6 +806,45 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     return this.supervisor.shutdown();
   }
 
+  async updateToolSettings(
+    settings: CodexExternalToolSettings,
+    restart: boolean
+  ): Promise<void> {
+    this.supervisor.setToolSettings(settings);
+    if (!this.initialized) {
+      return;
+    }
+    if (!restart) {
+      this.toolSettingsRestartPending = true;
+      this.preflightState = {
+        ...this.preflightState,
+        warnings: [
+          ...new Set([
+            ...this.preflightState.warnings,
+            TOOL_SETTINGS_PENDING_RESTART_WARNING
+          ])
+        ]
+      };
+      this.emitProviderUpdate();
+      return;
+    }
+
+    await this.shutdown();
+    this.toolSettingsRestartPending = false;
+    this.boundClient = undefined;
+    this.models = [];
+    this.initialized = false;
+    this.preflightState = {
+      provider: 'codex',
+      ready: false,
+      capabilities: codexCapabilities(),
+      problems: ['Codex App Server is restarting with updated settings.'],
+      warnings: []
+    };
+    this.emitProviderUpdate();
+    await this.initialize();
+  }
+
   getProviderState(): { preflight: AgentPreflight; models: AgentModel[]; refreshedAt: string } {
     return {
       preflight: structuredClone(this.preflightState),
@@ -861,6 +904,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     }
     if (this.supervisor.runtimeCompatibilityWarning) {
       warnings.push(this.supervisor.runtimeCompatibilityWarning);
+    }
+    if (this.toolSettingsRestartPending) {
+      warnings.push(TOOL_SETTINGS_PENDING_RESTART_WARNING);
     }
 
     this.preflightState = {

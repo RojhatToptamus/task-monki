@@ -1,5 +1,9 @@
 import type { CSSProperties } from 'react';
-import type { Task } from '../../shared/contracts';
+import {
+  DEFAULT_PROMPT_REFINEMENT_MODEL,
+  type CodexExternalToolSettings,
+  type Task
+} from '../../shared/contracts';
 import type { AgentModel } from '../../shared/agent';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
 import { describeTaskAttention } from './BoardView';
@@ -24,6 +28,8 @@ interface MainColumnProps {
   onSetTheme(theme: ThemePreference): void;
   appSettings: AppSettings;
   onSetAppSettings(settings: AppSettings): void;
+  codexExternalTools: CodexExternalToolSettings;
+  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
   error?: string;
   models: AgentModel[];
   activeRepositoryPath: string;
@@ -76,6 +82,8 @@ export function MainColumn({
   onSetTheme,
   appSettings,
   onSetAppSettings,
+  codexExternalTools,
+  onSetCodexExternalTools,
   error,
   models,
   activeRepositoryPath,
@@ -119,6 +127,8 @@ export function MainColumn({
           onSetTheme={onSetTheme}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
+          codexExternalTools={codexExternalTools}
+          onSetCodexExternalTools={onSetCodexExternalTools}
           models={models}
           activeRepositoryPath={activeRepositoryPath}
         />
@@ -308,6 +318,8 @@ function Settings({
   onSetTheme,
   appSettings,
   onSetAppSettings,
+  codexExternalTools,
+  onSetCodexExternalTools,
   models,
   activeRepositoryPath
 }: {
@@ -315,6 +327,8 @@ function Settings({
   onSetTheme(theme: ThemePreference): void;
   appSettings: AppSettings;
   onSetAppSettings(settings: AppSettings): void;
+  codexExternalTools: CodexExternalToolSettings;
+  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
   models: AgentModel[];
   activeRepositoryPath: string;
 }) {
@@ -325,6 +339,7 @@ function Settings({
     models.find((model) => model.model === appSettings.reviewModel) ?? selectedDefaultModel;
   const selectedPromptRefinementModel =
     models.find((model) => model.model === appSettings.promptRefinementModel) ??
+    models.find((model) => model.model === DEFAULT_PROMPT_REFINEMENT_MODEL) ??
     selectedDefaultModel;
   const selectedDefaultEffort =
     resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
@@ -430,6 +445,49 @@ function Settings({
             })
           }
         />
+        <ExternalToolSettingRow
+          label="Web search"
+          hint="Codex search tool"
+          value={codexExternalTools.webSearchMode}
+          options={[
+            { value: 'disabled', label: 'Disabled' },
+            { value: 'cached', label: 'Cached' },
+            { value: 'live', label: 'Live' }
+          ]}
+          onChange={(webSearchMode) =>
+            onSetCodexExternalTools({
+              webSearchMode
+            })
+          }
+        />
+        <ExternalToolSettingRow
+          label="MCP servers"
+          hint="Configured Codex servers"
+          value={codexExternalTools.mcpServers}
+          options={[
+            { value: 'disabled', label: 'Disabled' },
+            { value: 'all', label: 'All enabled' }
+          ]}
+          onChange={(mcpServers) =>
+            onSetCodexExternalTools({
+              mcpServers
+            })
+          }
+        />
+        <ExternalToolSettingRow
+          label="Apps"
+          hint="Codex apps and connectors"
+          value={codexExternalTools.apps}
+          options={[
+            { value: 'disabled', label: 'Disabled' },
+            { value: 'enabled', label: 'Enabled' }
+          ]}
+          onChange={(apps) =>
+            onSetCodexExternalTools({
+              apps
+            })
+          }
+        />
         {rows.map((row) => (
           <div className="tm-settings__row" key={row.k}>
             <div style={{ minWidth: 0 }}>
@@ -439,6 +497,43 @@ function Settings({
             <span className="tm-settings__v">{row.v}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ExternalToolSettingRow<Value extends string>({
+  label,
+  hint,
+  value,
+  options,
+  onChange
+}: {
+  label: string;
+  hint: string;
+  value: Value;
+  options: Array<{ value: Value; label: string }>;
+  onChange(value: Value): void;
+}) {
+  return (
+    <div className="tm-settings__row">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">{label}</div>
+        <div className="tm-settings__hint">{hint}</div>
+      </div>
+      <div className="tm-settings__controls">
+        <select
+          className="tm-settings__select tm-settings__select--effort"
+          value={value}
+          onChange={(event) => onChange(event.target.value as Value)}
+          aria-label={label}
+        >
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   );

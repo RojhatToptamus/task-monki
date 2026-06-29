@@ -132,7 +132,14 @@ export function EvidencePanel({
     return () => {
       canceled = true;
     };
-  }, [diffArtifact?.id, testStdoutArtifact?.id]);
+  }, [
+    diffArtifact?.id,
+    diffArtifact?.byteCount,
+    diffArtifact?.updatedAt,
+    testStdoutArtifact?.id,
+    testStdoutArtifact?.byteCount,
+    testStdoutArtifact?.updatedAt
+  ]);
 
   const diffFilesByScope = useMemo(
     () => ({

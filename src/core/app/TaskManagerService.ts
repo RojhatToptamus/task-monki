@@ -31,8 +31,11 @@ import type {
   SteerRunRequest,
   SyncAgentGoalRequest,
   AgentExecutionSettings,
-  AgentRunMode
+  AgentRunMode,
+  TaskManagerAppSettings,
+  UpdateAppSettingsRequest
 } from '../../shared/contracts';
+import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
 import { git, gitSucceeds } from '../git/gitCli';
@@ -52,10 +55,12 @@ import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
+  private readonly codexAdapter: CodexAppServerAdapter;
   private readonly testRunner: LocalTestRunner;
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
   private readonly promptRefiner = new PromptRefinementService();
+  private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -69,14 +74,16 @@ export class TaskManagerService {
     } = {}
   ) {
     this.events = events;
+    this.codexAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: defaultRepositoryPath,
+      executable: options.codexPath,
+      toolSettings: this.appSettings.codexExternalTools
+    });
     this.agents = new AgentOrchestrator(
       store,
       events,
       options.agentProviderAdapter ??
-        new CodexAppServerAdapter(store, events, {
-          cwd: defaultRepositoryPath,
-          executable: options.codexPath
-        })
+        this.codexAdapter
     );
     this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(
@@ -94,6 +101,8 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
+    this.appSettings = await this.store.getAppSettings();
+    await this.codexAdapter.updateToolSettings(this.appSettings.codexExternalTools, false);
     await this.agents.initialize();
     const snapshot = await this.store.snapshot();
     const recoveryTaskIds = new Set(
@@ -110,6 +119,27 @@ export class TaskManagerService {
 
   getDefaultRepositoryPath(): string {
     return this.defaultRepositoryPath;
+  }
+
+  async getAppSettings(): Promise<TaskManagerAppSettings> {
+    this.appSettings = await this.store.getAppSettings();
+    return structuredClone(this.appSettings);
+  }
+
+  async updateAppSettings(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
+    const next = await this.store.updateAppSettings(input);
+    this.appSettings = next;
+    await this.codexAdapter.updateToolSettings(
+      next.codexExternalTools,
+      !(await this.hasActiveAgentRun())
+    );
+    this.events.emit({
+      type: 'provider.updated',
+      taskId: 'settings',
+      payload: await this.getAgentProviderState(),
+      at: new Date().toISOString()
+    });
+    return structuredClone(next);
   }
 
   validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
@@ -132,7 +162,8 @@ export class TaskManagerService {
     const refined = await this.promptRefiner.refine(
       input.repositoryPath,
       input.input,
-      input.model
+      input.model,
+      this.appSettings.codexExternalTools
     );
     this.events.emit({
       type: 'prompt.refined',
@@ -373,6 +404,11 @@ export class TaskManagerService {
     }
   }
 
+  private async hasActiveAgentRun(): Promise<boolean> {
+    const snapshot = await this.store.snapshot();
+    return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
+  }
+
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
     const task = await this.requireTask(input.taskId);
     const snapshot = await this.store.snapshot();
@@ -381,11 +417,7 @@ export class TaskManagerService {
       throw new Error('Complete an agent turn before starting a detached review.');
     }
     const run = await this.requireRunForTask(runId, task.id);
-    if (
-      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
-        run.status
-      )
-    ) {
+    if (ACTIVE_AGENT_RUN_STATUSES.has(run.status)) {
       throw new Error('Wait for the active turn to finish before starting a review.');
     }
     const iteration = snapshot.iterations.find(
@@ -928,7 +960,8 @@ const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'RUNNING',
   'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT',
-  'INTERRUPTING'
+  'INTERRUPTING',
+  'RECOVERY_REQUIRED'
 ]);
 
 const ACTIVE_TEST_STATUSES = new Set(['QUEUED', 'RUNNING']);

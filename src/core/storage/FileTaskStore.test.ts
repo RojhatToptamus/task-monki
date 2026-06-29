@@ -6,6 +6,62 @@ import { FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
 describe('FileTaskStore', () => {
+  it('persists core app settings separately from task records', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-app-settings-'));
+    const store = new FileTaskStore(dir);
+
+    await expect(store.getAppSettings()).resolves.toEqual({
+      codexExternalTools: {
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      }
+    });
+
+    await store.updateAppSettings({
+      codexExternalTools: {
+        webSearchMode: 'cached',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
+    });
+
+    const reloaded = new FileTaskStore(dir);
+    await expect(reloaded.getAppSettings()).resolves.toEqual({
+      codexExternalTools: {
+        webSearchMode: 'cached',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
+    });
+    await expect(fs.readFile(path.join(dir, 'store.json'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
+  });
+
+  it('normalizes malformed app settings to the local-only default', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-app-settings-bad-'));
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'app-settings.json'),
+      JSON.stringify({
+        codexExternalTools: {
+          webSearchMode: 'recent',
+          mcpServers: true,
+          apps: 'sometimes'
+        }
+      })
+    );
+
+    await expect(new FileTaskStore(dir).getAppSettings()).resolves.toEqual({
+      codexExternalTools: {
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      }
+    });
+  });
+
   it('persists tasks, runs, events, and artifacts', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-'));
     const store = new FileTaskStore(dir);
@@ -46,6 +102,37 @@ describe('FileTaskStore', () => {
     expect(snapshot.events.some((event) => event.type === 'TASK_CREATED')).toBe(true);
     expect(snapshot.artifacts.some((artifact) => artifact.id === final.id)).toBe(true);
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
+  });
+
+  it('recovers queued persistence after a write failure', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-retry-'));
+    const store = new FileTaskStore(dir);
+
+    await store.createTask({
+      title: 'Initial task',
+      prompt: 'Seed the store.',
+      repositoryPath: dir
+    });
+
+    await fs.chmod(dir, 0o500);
+    await expect(
+      store.createTask({
+        title: 'Fails while store is read-only',
+        prompt: 'This persist should fail.',
+        repositoryPath: dir
+      })
+    ).rejects.toThrow();
+
+    await fs.chmod(dir, 0o700);
+    await store.createTask({
+      title: 'Persists after recovery',
+      prompt: 'This persist should succeed.',
+      repositoryPath: dir
+    });
+
+    const reloaded = new FileTaskStore(dir);
+    const snapshot = await reloaded.snapshot();
+    expect(snapshot.tasks.map((task) => task.title)).toContain('Persists after recovery');
   });
 
   it('links forked alternative tasks to their source task and run', async () => {

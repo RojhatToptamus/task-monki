@@ -690,6 +690,10 @@ export interface SyncAgentGoalRequest {
   sessionId: string;
 }
 
+export interface UpdateAppSettingsRequest {
+  codexExternalTools?: import('./agent').CodexExternalToolSettings;
+}
+
 export interface RespondToInteractionRequest {
   taskId: string;
   runId: string;
@@ -803,6 +807,10 @@ export interface TaskManagerApi {
   getDefaultRepositoryPath(): Promise<string>;
   chooseRepositoryFolder(): Promise<string | undefined>;
   validateRepository(path: string): Promise<RepositoryPreflight>;
+  getAppSettings(): Promise<import('./agent').TaskManagerAppSettings>;
+  updateAppSettings(
+    input: UpdateAppSettingsRequest
+  ): Promise<import('./agent').TaskManagerAppSettings>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;

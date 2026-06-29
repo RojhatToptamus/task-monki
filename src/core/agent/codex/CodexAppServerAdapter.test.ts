@@ -6,6 +6,7 @@ import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
+import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
 
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 10_000;
 
@@ -38,6 +39,16 @@ describe('CodexAppServerAdapter', () => {
     expect(readOutboundMethods(initializedJournal)).not.toContain(
       'modelProvider/capabilities/read'
     );
+    const initializeMessage = readOutboundMessages(initializedJournal).find(
+      (message) => message.method === 'initialize'
+    );
+    expect(initializeMessage?.params).toMatchObject({
+      capabilities: {
+        experimentalApi: false,
+        requestAttestation: false,
+        optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+      }
+    });
 
     const task = await store.createTask({
       title: 'App Server turn',
@@ -915,6 +926,10 @@ function fakeCodexScript(
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli 0.141.0\\n');
+  process.exit(0);
+}
+if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.includes('--json')) {
+  process.stdout.write('[]\\n');
   process.exit(0);
 }
 

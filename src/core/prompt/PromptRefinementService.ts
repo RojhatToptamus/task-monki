@@ -1,17 +1,31 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { RefinePromptResponse } from '../../shared/contracts';
+import {
+  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
+  DEFAULT_PROMPT_REFINEMENT_MODEL,
+  type CodexExternalToolSettings,
+  type RefinePromptResponse
+} from '../../shared/contracts';
 import { ProcessSupervisor } from '../process/ProcessSupervisor';
+import {
+  codexExternalToolConfigOverrides,
+  listDisabledCodexMcpServerConfigOverrides,
+  normalizeCodexExternalToolSettings,
+  resolveCodexExternalToolConfigOverrides
+} from '../agent/codex/CodexToolConfig';
 
-const DEFAULT_REFINEMENT_MODEL = 'gpt-5.4-mini';
 const REFINEMENT_REASONING_EFFORT = 'low';
 const REFINEMENT_TIMEOUT_MS = 90_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const REPOSITORY_CONTEXT_TEXT_LIMIT = 360;
+
+let disabledMcpServerConfigOverrides: Promise<string[]> | undefined;
 
 export interface PromptRefinementRunRequest {
   repositoryPath: string;
   instruction: string;
   model?: string;
+  toolSettings?: CodexExternalToolSettings;
 }
 
 export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Promise<string>;
@@ -22,18 +36,21 @@ export class PromptRefinementService {
   async refine(
     repositoryPath: string,
     input: string,
-    model?: string
+    model?: string,
+    toolSettings?: CodexExternalToolSettings
   ): Promise<RefinePromptResponse> {
     const trimmed = input.trim();
     if (!trimmed) {
       throw new Error('Prompt text is required.');
     }
 
+    const repositoryContext = await readRepositoryContext(repositoryPath);
     try {
       const modelOutput = await this.runModel({
         repositoryPath,
-        instruction: buildRefinementInstruction(trimmed),
-        model
+        instruction: buildRefinementInstruction(trimmed, repositoryContext),
+        model,
+        toolSettings
       });
       const refined = parseModelRefinement(modelOutput);
       return {
@@ -41,14 +58,17 @@ export class PromptRefinementService {
         source: 'model'
       };
     } catch {
-      return buildDeterministicFallback(repositoryPath, trimmed);
+      return buildDeterministicFallback(repositoryPath, trimmed, repositoryContext);
     }
   }
 }
 
 export function buildRefinementCommand(
   repositoryPath: string,
-  model = DEFAULT_REFINEMENT_MODEL
+  model = DEFAULT_PROMPT_REFINEMENT_MODEL,
+  configOverrides: readonly string[] = codexExternalToolConfigOverrides(
+    DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
+  )
 ): {
   executable: string;
   argv: string[];
@@ -56,7 +76,7 @@ export function buildRefinementCommand(
   if (!repositoryPath.trim()) {
     throw new Error('Repository path is required.');
   }
-  const selectedModel = model.trim() || DEFAULT_REFINEMENT_MODEL;
+  const selectedModel = model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL;
 
   return {
     executable: 'codex',
@@ -74,6 +94,7 @@ export function buildRefinementCommand(
       selectedModel,
       '-c',
       `model_reasoning_effort="${REFINEMENT_REASONING_EFFORT}"`,
+      ...configOverrides.flatMap((override) => ['-c', override]),
       '-'
     ]
   };
@@ -82,9 +103,14 @@ export function buildRefinementCommand(
 async function runCodexRefinement({
   repositoryPath,
   instruction,
-  model
+  model,
+  toolSettings
 }: PromptRefinementRunRequest): Promise<string> {
-  const command = buildRefinementCommand(repositoryPath, model);
+  const command = buildRefinementCommand(
+    repositoryPath,
+    model,
+    await resolvePromptRefinementConfigOverrides(repositoryPath, toolSettings)
+  );
   const process = new ProcessSupervisor().start({
     executable: command.executable,
     argv: command.argv,
@@ -147,11 +173,11 @@ async function runCodexRefinement({
   });
 }
 
-function buildRefinementInstruction(input: string): string {
+function buildRefinementInstruction(input: string, repositoryContext: string): string {
   return [
     'You are refining a software task prompt for the repository in your current working directory.',
     '',
-    'Before writing the prompt, inspect the repository with read-only commands. Review the file tree, package/build configuration, relevant implementation files, tests, and documentation. Do not modify any file.',
+    'Do not run commands, inspect files, use tools, or modify files. Use only the repository context provided below.',
     '',
     'Return JSON only, with exactly these string fields:',
     '{"titleSuggestion":"...","prompt":"..."}',
@@ -163,7 +189,10 @@ function buildRefinementInstruction(input: string): string {
     '## Acceptance criteria',
     '## Verification',
     '',
-    'Repository context must name concrete files, modules, symbols, scripts, or architectural boundaries you actually inspected. Do not invent repository facts. Keep the requested scope intact and make acceptance criteria objectively testable.',
+    'Repository context must stay within the facts provided below. Do not invent repository facts. Keep the requested scope intact and make acceptance criteria objectively testable.',
+    '',
+    'Repository context:',
+    repositoryContext,
     '',
     'User request:',
     input
@@ -236,9 +265,10 @@ function parseModelRefinement(output: string): Pick<
 
 async function buildDeterministicFallback(
   repositoryPath: string,
-  input: string
+  input: string,
+  repositoryContext?: string
 ): Promise<RefinePromptResponse> {
-  const context = await readRepositoryContext(repositoryPath);
+  const context = repositoryContext ?? (await readRepositoryContext(repositoryPath));
   const titleSuggestion = titleFromInput(input);
   const prompt = [
     `# Task: ${titleSuggestion}`,
@@ -282,15 +312,21 @@ function appendBounded(current: string, next: string): string {
 }
 
 async function readRepositoryContext(repositoryPath: string): Promise<string> {
-  const [packageJson, readme] = await Promise.all([
+  const [packageJson, readme, docsReadme, agentGuide, topLevelEntries] = await Promise.all([
     readJsonFile(path.join(repositoryPath, 'package.json')),
     readFirstExistingText([
       path.join(repositoryPath, 'README.md'),
       path.join(repositoryPath, 'readme.md')
-    ])
+    ]),
+    readFirstExistingText([path.join(repositoryPath, 'docs', 'README.md')]),
+    readFirstExistingText([path.join(repositoryPath, 'AGENTS.md')]),
+    readTopLevelEntries(repositoryPath)
   ]);
 
   const lines: string[] = [];
+  if (topLevelEntries.length > 0) {
+    lines.push(`- Top-level entries: ${topLevelEntries.join(', ')}`);
+  }
   if (packageJson && typeof packageJson === 'object') {
     const data = packageJson as Record<string, unknown>;
     if (typeof data.name === 'string') {
@@ -305,10 +341,59 @@ async function readRepositoryContext(repositoryPath: string): Promise<string> {
   }
 
   if (readme) {
-    lines.push(`- README summary: ${readme.replace(/\s+/g, ' ').slice(0, 280)}`);
+    lines.push(`- README summary: ${summarizeContextText(readme)}`);
+  }
+  if (docsReadme) {
+    lines.push(`- Docs map summary: ${summarizeContextText(docsReadme)}`);
+  }
+  if (agentGuide) {
+    lines.push(`- Agent guide summary: ${summarizeContextText(agentGuide)}`);
   }
 
   return lines.length > 0 ? lines.join('\n') : '- No package metadata or README summary found.';
+}
+
+async function resolvePromptRefinementConfigOverrides(
+  repositoryPath: string,
+  settings = DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
+): Promise<string[]> {
+  const normalized = normalizeCodexExternalToolSettings(settings);
+  return resolveCodexExternalToolConfigOverrides({
+    executable: 'codex',
+    cwd: repositoryPath,
+    settings: normalized,
+    mcpServerConfigOverrides:
+      normalized.mcpServers === 'disabled'
+        ? await cachedDisabledMcpServerConfigOverrides(repositoryPath)
+        : undefined
+  });
+}
+
+function cachedDisabledMcpServerConfigOverrides(repositoryPath: string): Promise<string[]> {
+  if (!disabledMcpServerConfigOverrides) {
+    disabledMcpServerConfigOverrides = listDisabledCodexMcpServerConfigOverrides(
+      'codex',
+      repositoryPath
+    ).catch(() => []);
+  }
+  return disabledMcpServerConfigOverrides;
+}
+
+async function readTopLevelEntries(repositoryPath: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(repositoryPath, { withFileTypes: true });
+    return entries
+      .filter((entry) => !entry.name.startsWith('.'))
+      .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : ''}`)
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, 18);
+  } catch {
+    return [];
+  }
+}
+
+function summarizeContextText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, REPOSITORY_CONTEXT_TEXT_LIMIT);
 }
 
 async function readJsonFile(filePath: string): Promise<unknown | undefined> {

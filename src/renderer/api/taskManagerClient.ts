@@ -34,20 +34,55 @@ import type {
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
   StartReviewRequest,
-  SteerRunRequest
+  SteerRunRequest,
+  UpdateAppSettingsRequest
 } from '../../shared/contracts';
 
 const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
+const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
 
 export const taskManagerApi: TaskManagerApi =
-  window.taskManager ?? createBrowserTaskManagerApi(apiBase);
+  (typeof window === 'undefined' ? undefined : window.taskManager) ??
+  createBrowserTaskManagerApi(apiBase);
 
-function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
+export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   let eventSource: EventSource | undefined;
+  let fallbackPollTimer: ReturnType<typeof setInterval> | undefined;
   const listeners = new Set<(event: AppUpdateEvent) => void>();
+
+  const emitSyntheticUpdate = () => {
+    const event: AppUpdateEvent = {
+      type: 'projection.updated',
+      taskId: '__browser_poll__',
+      payload: { source: 'fallback-poll' },
+      at: new Date().toISOString()
+    };
+    for (const listener of listeners) {
+      listener(event);
+    }
+  };
+
+  const ensureFallbackPolling = () => {
+    if (fallbackPollTimer) {
+      return;
+    }
+    fallbackPollTimer = setInterval(emitSyntheticUpdate, FALLBACK_UPDATE_POLL_INTERVAL_MS);
+  };
+
+  const stopFallbackPolling = () => {
+    if (!fallbackPollTimer) {
+      return;
+    }
+    clearInterval(fallbackPollTimer);
+    fallbackPollTimer = undefined;
+  };
 
   const ensureEventSource = () => {
     if (eventSource) {
+      return;
+    }
+    if (typeof EventSource === 'undefined') {
+      ensureFallbackPolling();
       return;
     }
 
@@ -58,6 +93,11 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         listener(event);
       }
     });
+    eventSource.addEventListener('error', () => {
+      eventSource?.close();
+      eventSource = undefined;
+      ensureFallbackPolling();
+    });
   };
 
   return {
@@ -66,6 +106,9 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       const selectedPath = await post<string | null>(baseUrl, '/api/repository/chooseFolder', {});
       return selectedPath ?? undefined;
     },
+    getAppSettings: () => get(baseUrl, '/api/settings'),
+    updateAppSettings: (input: UpdateAppSettingsRequest) =>
+      post(baseUrl, '/api/settings', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
@@ -116,6 +159,7 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         if (listeners.size === 0) {
           eventSource?.close();
           eventSource = undefined;
+          stopFallbackPolling();
         }
       };
     }
