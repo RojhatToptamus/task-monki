@@ -46,6 +46,7 @@ import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
+import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 
 export class TaskManagerService {
@@ -60,16 +61,22 @@ export class TaskManagerService {
     private readonly store: FileTaskStore,
     private readonly defaultRepositoryPath: string,
     events = new AppEventBus(),
-    options: { worktreeRoot?: string; ghPath?: string; codexPath?: string } = {}
+    options: {
+      worktreeRoot?: string;
+      ghPath?: string;
+      codexPath?: string;
+      agentProviderAdapter?: AgentProviderAdapter;
+    } = {}
   ) {
     this.events = events;
     this.agents = new AgentOrchestrator(
       store,
       events,
-      new CodexAppServerAdapter(store, events, {
-        cwd: defaultRepositoryPath,
-        executable: options.codexPath
-      })
+      options.agentProviderAdapter ??
+        new CodexAppServerAdapter(store, events, {
+          cwd: defaultRepositoryPath,
+          executable: options.codexPath
+        })
     );
     this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(

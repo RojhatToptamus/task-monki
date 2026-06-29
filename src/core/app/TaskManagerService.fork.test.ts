@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import type { RunRecord } from '../../shared/contracts';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { ScriptedAgentProviderAdapter } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -19,35 +19,11 @@ describe('TaskManagerService fork alternatives', () => {
     const baseSha = await initRepository(repositoryPath);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const agent = new ScriptedAgentProviderAdapter(store);
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      codexPath: 'codex-not-used'
+      agentProviderAdapter: agent
     });
-    const startInputs: unknown[] = [];
-    const fakeAgents = {
-      startTurn: async (input: any): Promise<RunRecord> => {
-        startInputs.push(input);
-        const session = await store.createAgentSession({
-          task: input.task,
-          iteration: input.iteration,
-          worktree: input.worktree,
-          provider: 'codex',
-          requestedSettings: input.settings
-        });
-        return store.createRun({
-          task: input.task,
-          session,
-          mode: input.mode,
-          prompt: input.prompt,
-          generationKey: input.generationKey,
-          requestedSettings: input.settings,
-          beforeGitSnapshotId: input.beforeGitSnapshotId,
-          retryOfRunId: input.retryOfRunId,
-          continuedFromRunId: input.continuedFromRunId
-        });
-      }
-    };
-    (service as unknown as { agents: typeof fakeAgents }).agents = fakeAgents;
 
     const sourceTask = await store.createTask({
       title: 'Build filter',
@@ -102,8 +78,8 @@ describe('TaskManagerService fork alternatives', () => {
     expect(alternativeWorktree?.baseSha).toBe(baseSha);
     expect(alternativeWorktree?.worktreePath).not.toBe(worktree.worktreePath);
     expect(alternativeWorktree?.branchName).toContain(`task-${forkedRun.taskId.slice(0, 8)}`);
-    expect(startInputs).toHaveLength(1);
-    expect((startInputs[0] as { sessionId?: string }).sessionId).toBeUndefined();
+    expect(agent.startedTurns).toHaveLength(1);
+    expect(agent.startedTurns[0]?.session.providerSessionId).toBeTruthy();
 
     const prompt = await store.readArtifact(forkedRun.promptArtifactId);
     expect(prompt).toContain('Alternative attempt for this Task Monki goal');
