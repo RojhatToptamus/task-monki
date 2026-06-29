@@ -103,6 +103,42 @@ export class WorktreeService {
       lastVerifiedAt: new Date().toISOString()
     };
   }
+
+  async remove(record: WorktreeRecord): Promise<WorktreeRecord> {
+    const repositoryPath = await canonicalPath(record.repositoryPath);
+    const worktreePath = await canonicalPath(record.worktreePath);
+    if (repositoryPath === worktreePath) {
+      throw new Error('Task Monki will not remove the original repository checkout.');
+    }
+
+    const verified = await this.verify(record);
+    if (verified.status === 'MISSING') {
+      return {
+        ...verified,
+        status: 'REMOVED',
+        error: undefined,
+        updatedAt: new Date().toISOString(),
+        lastVerifiedAt: new Date().toISOString()
+      };
+    }
+    if (verified.status === 'LOCKED') {
+      throw new Error('The local worktree is locked and cannot be removed by Task Monki.');
+    }
+    if (await hasUncommittedWork(record.worktreePath)) {
+      throw new Error(
+        'The local worktree has uncommitted or untracked files. Commit, stash, or clean it before removing the worktree.'
+      );
+    }
+
+    await git(record.repositoryPath, ['worktree', 'remove', record.worktreePath], 60_000);
+    return {
+      ...verified,
+      status: 'REMOVED',
+      error: undefined,
+      updatedAt: new Date().toISOString(),
+      lastVerifiedAt: new Date().toISOString()
+    };
+  }
 }
 
 export async function listGitWorktrees(repositoryPath: string): Promise<ParsedGitWorktree[]> {
@@ -191,6 +227,11 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function hasUncommittedWork(worktreePath: string): Promise<boolean> {
+  const status = await git(worktreePath, ['status', '--porcelain', '-z']);
+  return status.length > 0;
 }
 
 async function canonicalPath(filePath: string): Promise<string> {

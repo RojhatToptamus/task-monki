@@ -1102,6 +1102,20 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--error) 14%, var(--surface));
 }
 
+.tm-delete-modal .danger-button {
+  border-color: color-mix(in srgb, var(--error) 80%, black);
+  background: var(--error);
+  color: #fff;
+}
+
+.tm-delete-modal .danger-button:not(:disabled):hover {
+  background: color-mix(in srgb, var(--error) 88%, black);
+}
+
+.tm-delete-modal .danger-button:disabled {
+  opacity: 0.55;
+}
+
 /* Overflow menu */
 
 .overflow {
@@ -3999,12 +4013,12 @@ textarea:focus-visible {
 /* ---- Task card ---- */
 
 .tm-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 7px;
   width: 100%;
   text-align: left;
-  padding: 11px 12px;
+  padding: 0;
   border-radius: 11px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -4022,6 +4036,30 @@ textarea:focus-visible {
 
 .tm-card--decision {
   border-color: color-mix(in srgb, var(--action) 40%, var(--border));
+}
+
+.tm-card__body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  min-height: 100%;
+  padding: 11px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  pointer-events: none;
+  text-align: left;
+}
+
+.tm-card__hit:focus-visible,
+.tm-taskmenu__trigger:focus-visible,
+.tm-taskmenu__item:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--action) 65%, transparent);
+  outline-offset: 2px;
 }
 
 .tm-card__decisionbar {
@@ -4057,7 +4095,16 @@ textarea:focus-visible {
   color: var(--faint);
 }
 
+.tm-card__titlerow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+}
+
 .tm-card__title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.32;
@@ -4081,9 +4128,10 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   gap: 13px;
-  padding-top: 2px;
+  min-height: 26px;
+  padding-top: 8px;
+  margin-top: 3px;
   border-top: 1px solid var(--border);
-  margin-top: 1px;
 }
 
 .tm-rollup {
@@ -4098,6 +4146,106 @@ textarea:focus-visible {
   width: 5px;
   height: 5px;
   border-radius: 50%;
+}
+
+.tm-card__hit {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tm-card__body .tm-taskmenu {
+  pointer-events: auto;
+}
+
+.tm-card__actions {
+  flex: 0 0 auto;
+  margin-right: -4px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease, visibility 0.12s ease;
+}
+
+.tm-card:hover .tm-card__actions,
+.tm-card:focus-within .tm-card__actions,
+.tm-card__actions:has(.tm-taskmenu__menu) {
+  opacity: 1;
+  visibility: visible;
+}
+
+.tm-taskmenu {
+  position: relative;
+  display: inline-flex;
+}
+
+.tm-taskmenu__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--faint);
+  line-height: 0;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.tm-taskmenu__trigger:hover,
+.tm-taskmenu__trigger[aria-expanded='true'] {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.tm-taskmenu__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  min-width: 152px;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.tm-taskmenu__item {
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tm-taskmenu__item:not(:disabled):hover {
+  background: var(--surface2);
+}
+
+.tm-taskmenu__item:disabled {
+  color: var(--faint);
+}
+
+.tm-taskmenu__item--danger {
+  color: var(--error);
 }
 
 /* ---- Pill / chip helpers (match artifact chip()) ---- */
@@ -4540,13 +4688,26 @@ textarea:focus-visible {
   color: var(--faint);
 }
 
-.tm-detail__title {
+.tm-detail__titlerow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   margin: 0 0 4px;
+}
+
+.tm-detail__title {
+  margin: 0;
   font-size: 21px;
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.18;
   color: var(--text);
+}
+
+/* The kebab is always visible on the detail page; it reuses the shared
+   trigger style unchanged so it matches the board card exactly. */
+.tm-detail__taskmenu {
+  flex: 0 0 auto;
 }
 
 .tm-detail__meta {
@@ -5372,6 +5533,162 @@ textarea:focus-visible {
   justify-content: flex-end;
   gap: 10px;
   margin-top: 18px;
+}
+
+.tm-delete-modal .tm-modal__actions {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.tm-delete-modal {
+  width: min(660px, 100%);
+}
+
+.tm-delete-modal__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.tm-delete-modal__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--error) 12%, var(--surface));
+  color: var(--error);
+}
+
+.tm-delete-modal__head h3 {
+  margin: 0 0 5px;
+}
+
+.tm-delete-modal__head p {
+  margin: 0;
+}
+
+.tm-delete-modal__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tm-delete-modal__col {
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface2);
+}
+
+.tm-delete-modal__col h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tm-delete-modal__col ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.tm-delete-modal__col li {
+  position: relative;
+  padding-left: 16px;
+}
+
+.tm-delete-modal__col li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0.5em;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.tm-delete-modal__col--remove li::before {
+  background: color-mix(in srgb, var(--error) 60%, var(--faint));
+}
+
+.tm-delete-modal__col--keep li::before {
+  background: color-mix(in srgb, var(--success) 55%, var(--faint));
+}
+
+.tm-delete-modal__worktree {
+  display: flex;
+  gap: 11px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface2);
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.tm-delete-modal__worktree:has(input:not(:disabled)):hover {
+  border-color: var(--border-strong);
+}
+
+.tm-delete-modal__worktree--blocked {
+  border-color: color-mix(in srgb, var(--error) 30%, var(--border));
+  background: color-mix(in srgb, var(--error) 6%, var(--surface));
+}
+
+.tm-delete-modal__worktree--disabled {
+  cursor: not-allowed;
+}
+
+.tm-delete-modal__worktree--disabled strong {
+  color: var(--muted);
+}
+
+.tm-delete-modal__worktree input {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  accent-color: var(--error);
+  cursor: inherit;
+}
+
+.tm-delete-modal__worktree span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tm-delete-modal__worktree strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tm-delete-modal__worktree small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 /* decision card (overview) */
@@ -6661,6 +6978,10 @@ textarea:focus-visible {
 }
 
 @media (max-width: 720px) {
+  .tm-delete-modal__grid {
+    grid-template-columns: 1fr;
+  }
+
   .tm-detail__head {
     padding: 12px 14px 0;
   }
@@ -6677,7 +6998,7 @@ textarea:focus-visible {
   .tm-detail__actions {
     width: 100%;
     justify-content: flex-start;
-    overflow-x: auto;
+    overflow: visible;
     padding-bottom: 2px;
   }
 

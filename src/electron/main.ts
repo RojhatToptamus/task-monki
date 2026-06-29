@@ -8,6 +8,7 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
+  DeleteTaskRequest,
   GitHubPreflightRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
@@ -160,6 +161,10 @@ function installIpcHandlers(): void {
 
   ipcMain.handle('task:transition', async (_, input: TransitionTaskRequest) => {
     return service.transitionTask(input);
+  });
+
+  ipcMain.handle('task:delete', async (_, input: DeleteTaskRequest) => {
+    return service.deleteTask(input);
   });
 
   ipcMain.handle('artifact:read', async (_, { artifactId }: { artifactId: string }) => {

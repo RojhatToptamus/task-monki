@@ -102,6 +102,270 @@ describe('FileTaskStore', () => {
     ).toBe(true);
   });
 
+  it('deletes only the selected task records and repairs fork links', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delete-'));
+    const store = new FileTaskStore(dir);
+
+    const sourceTask = await store.createTask({
+      title: 'Compare deletion',
+      prompt: 'Build the source task.',
+      repositoryPath: dir
+    });
+    const { iteration: sourceIteration, worktree: sourceWorktree } =
+      await store.createIterationAndWorktree({
+        task: sourceTask,
+        branchName: 'codex/source-delete',
+        worktreePath: path.join(dir, 'source'),
+        baseSha: 'base'
+      });
+    const sourceSession = await store.createAgentSession({
+      task: sourceTask,
+      iteration: sourceIteration,
+      worktree: sourceWorktree,
+      provider: 'codex'
+    });
+    const sourceRun = await store.createRun({
+      task: sourceTask,
+      session: sourceSession,
+      mode: 'IMPLEMENTATION',
+      prompt: sourceTask.prompt
+    });
+
+    const alternativeTask = await store.createForkedAlternativeTask({
+      title: 'Alternative: Compare deletion',
+      prompt: 'Try another implementation.',
+      repositoryPath: dir,
+      sourceTaskId: sourceTask.id,
+      sourceRunId: sourceRun.id
+    });
+    const { iteration: alternativeIteration, worktree: alternativeWorktree } =
+      await store.createIterationAndWorktree({
+        task: alternativeTask,
+        branchName: 'codex/alternative-delete',
+        worktreePath: path.join(dir, 'alternative'),
+        baseSha: 'base'
+      });
+    const alternativeSession = await store.createAgentSession({
+      task: alternativeTask,
+      iteration: alternativeIteration,
+      worktree: alternativeWorktree,
+      provider: 'codex'
+    });
+    const alternativeRun = await store.createRun({
+      task: alternativeTask,
+      session: alternativeSession,
+      mode: 'IMPLEMENTATION',
+      prompt: alternativeTask.prompt
+    });
+    const finalArtifact = await store.writeFinalArtifact(
+      alternativeTask.id,
+      alternativeRun.id,
+      'done\n'
+    );
+    const gitSnapshot = await store.recordGitSnapshot(
+      {
+        taskId: alternativeTask.id,
+        iterationId: alternativeIteration.id,
+        worktreeId: alternativeWorktree.id,
+        worktreePath: alternativeWorktree.worktreePath,
+        repoRoot: dir,
+        gitCommonDir: path.join(dir, '.git'),
+        headSha: 'head',
+        branch: alternativeWorktree.branchName,
+        baseSha: alternativeWorktree.baseSha,
+        aheadCount: 0,
+        behindCount: 0,
+        stagedCount: 0,
+        unstagedCount: 0,
+        untrackedCount: 0,
+        conflictedCount: 0,
+        commitsAheadOfBase: 0,
+        committedDiffFileCount: 0,
+        workingDiffFileCount: 0,
+        diffStat: '',
+        dirtyFingerprint: 'clean',
+        status: 'CLEAN'
+      },
+      ''
+    );
+    const testRun = await store.createTestRun({
+      task: alternativeTask,
+      worktree: alternativeWorktree,
+      gitSnapshot,
+      commandLine: 'npm test',
+      executable: 'npm',
+      argv: ['test']
+    });
+    await store.recordGitHubPreflight({
+      taskId: alternativeTask.id,
+      iterationId: alternativeIteration.id,
+      worktreeId: alternativeWorktree.id,
+      remoteName: 'origin',
+      remoteUrl: 'https://github.com/example/repo.git',
+      host: 'github.com',
+      owner: 'example',
+      repo: 'repo',
+      status: 'READY'
+    });
+    await store.recordBranchPublication({
+      taskId: alternativeTask.id,
+      iterationId: alternativeIteration.id,
+      worktreeId: alternativeWorktree.id,
+      remoteName: 'origin',
+      branchName: alternativeWorktree.branchName,
+      remoteRef: `refs/heads/${alternativeWorktree.branchName}`,
+      headSha: 'head',
+      status: 'PUSHED'
+    });
+    await store.recordPullRequestSync({
+      pullRequest: {
+        taskId: alternativeTask.id,
+        iterationId: alternativeIteration.id,
+        worktreeId: alternativeWorktree.id,
+        number: 42,
+        url: 'https://github.com/example/repo/pull/42',
+        status: 'OPEN_DRAFT',
+        headRefName: alternativeWorktree.branchName,
+        headRefOid: 'head'
+      },
+      ci: {
+        taskId: alternativeTask.id,
+        iterationId: alternativeIteration.id,
+        worktreeId: alternativeWorktree.id,
+        pullRequestNumber: 42,
+        headSha: 'head',
+        status: 'PASSING',
+        requiredStatus: 'PASSING',
+        totalCount: 1,
+        pendingCount: 0,
+        passingCount: 1,
+        failingCount: 0,
+        skippedCount: 0
+      },
+      reviews: {
+        taskId: alternativeTask.id,
+        iterationId: alternativeIteration.id,
+        worktreeId: alternativeWorktree.id,
+        pullRequestNumber: 42,
+        headSha: 'head',
+        status: 'APPROVED'
+      },
+      merge: {
+        taskId: alternativeTask.id,
+        iterationId: alternativeIteration.id,
+        worktreeId: alternativeWorktree.id,
+        pullRequestNumber: 42,
+        headSha: 'head',
+        status: 'MERGEABLE'
+      }
+    });
+    const promptArtifactPath = await store.getArtifactPath(alternativeRun.promptArtifactId);
+    const finalArtifactPath = await store.getArtifactPath(finalArtifact.id);
+    const diffArtifactPath = await store.getArtifactPath(gitSnapshot.diffArtifactId!);
+    const stdoutArtifactPath = await store.getArtifactPath(testRun.stdoutArtifactId);
+    const stderrArtifactPath = await store.getArtifactPath(testRun.stderrArtifactId);
+
+    await store.deleteTask(alternativeTask.id);
+
+    const snapshot = await store.snapshot();
+    const sourceAfterDelete = snapshot.tasks.find((task) => task.id === sourceTask.id);
+
+    expect(snapshot.tasks.some((task) => task.id === alternativeTask.id)).toBe(false);
+    expect(sourceAfterDelete).toBeDefined();
+    expect(sourceAfterDelete?.forkedAlternativeTaskIds).not.toContain(alternativeTask.id);
+    expect(snapshot.runs.some((run) => run.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.iterations.some((iteration) => iteration.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.worktrees.some((worktree) => worktree.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.gitSnapshots.some((record) => record.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.testRuns.some((testRun) => testRun.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.githubRepositories.some((record) => record.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.branchPublications.some((record) => record.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.pullRequests.some((record) => record.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.ciRollups.some((record) => record.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.reviewRollups.some((record) => record.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.mergeSnapshots.some((record) => record.taskId === alternativeTask.id)).toBe(
+      false
+    );
+    expect(snapshot.agentSessions.some((session) => session.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.events.some((event) => event.taskId === alternativeTask.id)).toBe(false);
+    expect(snapshot.artifacts.some((artifact) => artifact.taskId === alternativeTask.id)).toBe(false);
+    expect(
+      snapshot.events.some(
+        (event) =>
+          event.taskId === sourceTask.id &&
+          typeof event.payload === 'object' &&
+          event.payload !== null &&
+          !Array.isArray(event.payload) &&
+          (event.payload as { alternativeTaskId?: string }).alternativeTaskId === alternativeTask.id
+      )
+    ).toBe(true);
+    await expect(fs.access(promptArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(finalArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(diffArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(stdoutArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(stderrArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not delete fork alternatives when deleting their source task', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delete-source-'));
+    const store = new FileTaskStore(dir);
+
+    const sourceTask = await store.createTask({
+      title: 'Source delete',
+      prompt: 'Build the original task.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task: sourceTask,
+      branchName: 'codex/delete-source',
+      worktreePath: path.join(dir, 'source'),
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task: sourceTask,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    const run = await store.createRun({
+      task: sourceTask,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: sourceTask.prompt
+    });
+    const alternativeTask = await store.createForkedAlternativeTask({
+      title: 'Alternative: Source delete',
+      prompt: 'Keep this alternative.',
+      repositoryPath: dir,
+      sourceTaskId: sourceTask.id,
+      sourceRunId: run.id
+    });
+
+    await store.deleteTask(sourceTask.id);
+
+    const snapshot = await store.snapshot();
+    const alternativeAfterDelete = snapshot.tasks.find(
+      (candidate) => candidate.id === alternativeTask.id
+    );
+
+    expect(snapshot.tasks.some((candidate) => candidate.id === sourceTask.id)).toBe(false);
+    expect(alternativeAfterDelete).toBeDefined();
+    expect(alternativeAfterDelete?.forkedFromTaskId).toBeUndefined();
+    expect(alternativeAfterDelete?.forkedFromRunId).toBeUndefined();
+  });
+
   it('repairs schema-current task records missing alternative ids', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-repair-'));
     const store = new FileTaskStore(dir);

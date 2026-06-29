@@ -117,6 +117,24 @@ describe('task card view model', () => {
     expect(vm.stateTone).toBe('action');
   });
 
+  it('shows Archived as the card state even when the last agent run completed', () => {
+    const vm = buildTaskCardVM(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          agentRun: 'COMPLETED',
+          git: 'DIRTY'
+        },
+        workflowPhase: 'ARCHIVED'
+      })
+    );
+
+    expect(vm.meta).toBe('repo');
+    expect(vm.stateLabel).toBe('Archived');
+    expect(vm.stateTone).toBe('neutral');
+    expect(vm.archived).toBe(true);
+  });
+
   it('allows requesting changes from actionable review results', () => {
     const finding = {
       id: 'finding-1',

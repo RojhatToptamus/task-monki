@@ -4,6 +4,7 @@ import type { AgentModel } from '../../shared/agent';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
+import { TaskActionsMenu } from './TaskActionsMenu';
 import type { ThemePreference } from './theme';
 import {
   BOARD_COLUMNS,
@@ -27,6 +28,8 @@ interface MainColumnProps {
   models: AgentModel[];
   activeRepositoryPath: string;
   onSelect(taskId: string): void;
+  onArchive(taskId: string): void;
+  onRequestDelete(taskId: string): void;
 }
 
 export interface AppSettings {
@@ -76,7 +79,9 @@ export function MainColumn({
   error,
   models,
   activeRepositoryPath,
-  onSelect
+  onSelect,
+  onArchive,
+  onRequestDelete
 }: MainColumnProps) {
   const head = VIEW_TITLES[view];
 
@@ -87,14 +92,25 @@ export function MainColumn({
           <h1 className="tm-main__title">{head.title}</h1>
           <span className="tm-main__subtitle">{head.subtitle(tasks)}</span>
         </div>
-        <span className="tm-main__sync">Autonomous</span>
       </div>
 
       {error ? <div className="tm-error">{error}</div> : null}
 
-      {view === 'board' ? <BoardKanban tasks={tasks} onSelect={onSelect} /> : null}
+      {view === 'board' ? (
+        <BoardKanban
+          tasks={tasks}
+          onSelect={onSelect}
+          onArchive={onArchive}
+          onRequestDelete={onRequestDelete}
+        />
+      ) : null}
       {view === 'active' || view === 'review' || view === 'done' ? (
-        <CardGrid tasks={tasksForView(tasks, view)} onSelect={onSelect} />
+        <CardGrid
+          tasks={tasksForView(tasks, view)}
+          onSelect={onSelect}
+          onArchive={onArchive}
+          onRequestDelete={onRequestDelete}
+        />
       ) : null}
       {view === 'inbox' ? <Inbox tasks={tasks} onSelect={onSelect} /> : null}
       {view === 'settings' ? (
@@ -111,7 +127,17 @@ export function MainColumn({
   );
 }
 
-function BoardKanban({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void }) {
+function BoardKanban({
+  tasks,
+  onSelect,
+  onArchive,
+  onRequestDelete
+}: {
+  tasks: Task[];
+  onSelect(id: string): void;
+  onArchive(id: string): void;
+  onRequestDelete(id: string): void;
+}) {
   return (
     <div className="tm-board">
       {BOARD_COLUMNS.map((column) => {
@@ -125,7 +151,13 @@ function BoardKanban({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string):
             </div>
             <div className="tm-col__cards">
               {cards.map((task) => (
-                <TaskCard key={task.id} vm={buildTaskCardVM(task)} onSelect={onSelect} />
+                <TaskCard
+                  key={task.id}
+                  vm={buildTaskCardVM(task)}
+                  onSelect={onSelect}
+                  onArchive={onArchive}
+                  onRequestDelete={onRequestDelete}
+                />
               ))}
             </div>
           </section>
@@ -135,7 +167,17 @@ function BoardKanban({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string):
   );
 }
 
-function CardGrid({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void }) {
+function CardGrid({
+  tasks,
+  onSelect,
+  onArchive,
+  onRequestDelete
+}: {
+  tasks: Task[];
+  onSelect(id: string): void;
+  onArchive(id: string): void;
+  onRequestDelete(id: string): void;
+}) {
   return (
     <div className="tm-grid">
       {tasks.length === 0 ? (
@@ -143,7 +185,13 @@ function CardGrid({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): vo
       ) : (
         <div className="tm-grid__inner">
           {tasks.map((task) => (
-            <TaskCard key={task.id} vm={buildTaskCardVM(task)} onSelect={onSelect} />
+            <TaskCard
+              key={task.id}
+              vm={buildTaskCardVM(task)}
+              onSelect={onSelect}
+              onArchive={onArchive}
+              onRequestDelete={onRequestDelete}
+            />
           ))}
         </div>
       )}
@@ -151,35 +199,61 @@ function CardGrid({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): vo
   );
 }
 
-export function TaskCard({ vm, onSelect }: { vm: TaskCardVM; onSelect(id: string): void }) {
+export function TaskCard({
+  vm,
+  onSelect,
+  onArchive,
+  onRequestDelete
+}: {
+  vm: TaskCardVM;
+  onSelect(id: string): void;
+  onArchive(id: string): void;
+  onRequestDelete(id: string): void;
+}) {
   return (
-    <button
-      type="button"
-      className={`tm-card ${vm.hasDecision ? 'tm-card--decision' : ''}`}
-      onClick={() => onSelect(vm.id)}
-    >
-      {vm.hasDecision ? (
-        <div className="tm-card__decisionbar">
-          <span className="tm-pulse" />
-          {vm.decisionLabel}
+    <article className={`tm-card ${vm.hasDecision ? 'tm-card--decision' : ''}`}>
+      {/* Full-card click target sits behind the content so the kebab can be a
+          real sibling next to the title (a button can't nest inside a button). */}
+      <button
+        type="button"
+        className="tm-card__hit"
+        aria-label={`Open ${vm.title}`}
+        onClick={() => onSelect(vm.id)}
+      />
+      <div className="tm-card__body">
+        {vm.hasDecision ? (
+          <div className="tm-card__decisionbar">
+            <span className="tm-pulse" />
+            {vm.decisionLabel}
+          </div>
+        ) : null}
+        <div className="tm-card__top">
+          <span className="tm-card__num">{vm.num}</span>
+          <span style={{ flex: 1 }} />
+          <Chip tone={vm.stateTone} label={vm.stateLabel} />
         </div>
-      ) : null}
-      <div className="tm-card__top">
-        <span className="tm-card__num">{vm.num}</span>
-        <span style={{ flex: 1 }} />
-        <Chip tone={vm.stateTone} label={vm.stateLabel} />
+        <div className="tm-card__titlerow">
+          <strong className="tm-card__title">{vm.title}</strong>
+          <TaskActionsMenu
+            taskId={vm.id}
+            title={vm.title}
+            archived={vm.archived}
+            onArchive={onArchive}
+            onRequestDelete={onRequestDelete}
+            className="tm-card__actions"
+          />
+        </div>
+        <div className="tm-card__meta">{vm.meta}</div>
+        <div className="tm-card__rollups">
+          {vm.rollups.map((rollup, index) => (
+            <span className="tm-rollup" key={index}>
+              <span className="tm-rollup__dot" style={dotStyle(rollup.tone)} />
+              {rollup.label}
+            </span>
+          ))}
+        </div>
       </div>
-      <strong className="tm-card__title">{vm.title}</strong>
-      <div className="tm-card__meta">{vm.meta}</div>
-      <div className="tm-card__rollups">
-        {vm.rollups.map((rollup, index) => (
-          <span className="tm-rollup" key={index}>
-            <span className="tm-rollup__dot" style={dotStyle(rollup.tone)} />
-            {rollup.label}
-          </span>
-        ))}
-      </div>
-    </button>
+    </article>
   );
 }
 
@@ -271,7 +345,6 @@ function Settings({
         <div className="tm-settings__row">
           <div style={{ minWidth: 0 }}>
             <div className="tm-settings__k">Theme</div>
-            <div className="tm-settings__hint">App appearance</div>
           </div>
           <div className="tm-segtoggle" role="group" aria-label="Theme">
             <button

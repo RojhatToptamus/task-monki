@@ -66,9 +66,7 @@ export function SubagentHierarchyPanel({
       <div className="card__header">
         <div>
           <h3>Subagent hierarchy</h3>
-          <p className="provider-subtitle">
-            Observed child threads only. Task Monki does not infer missing edges.
-          </p>
+          <p className="provider-subtitle">Observed child threads.</p>
         </div>
         <span className="count-pill">
           {subagents.length} {subagents.length === 1 ? 'child' : 'children'}
@@ -134,8 +132,8 @@ function SubagentNode({
           <span>
             <strong>{displayName}</strong>
             <small>
-              {node.session.providerRole ?? 'role unreported'} ·{' '}
-              {node.session.providerSessionId ?? 'thread ID unconfirmed'}
+              {node.session.providerRole ?? '—'} ·{' '}
+              {node.session.providerSessionId ?? '—'}
             </small>
           </span>
           <span className="subagent-node__badges">
@@ -151,20 +149,20 @@ function SubagentNode({
           ) : null}
           <dl className="provider-item-kv">
             <dt>Delegated prompt</dt>
-            <dd>{node.session.delegatedPrompt ?? 'Not supplied by the provider.'}</dd>
+            <dd>{node.session.delegatedPrompt ?? '—'}</dd>
             <dt>Requested model / effort</dt>
             <dd>
-              {node.session.requestedSettings.model ?? 'inherited or unknown'} /{' '}
-              {node.session.requestedSettings.reasoningEffort ?? 'inherited or unknown'}
+              {node.session.requestedSettings.model ?? '—'} /{' '}
+              {node.session.requestedSettings.reasoningEffort ?? '—'}
             </dd>
             <dt>Parent thread</dt>
             <dd>
               {node.session.providerParentSessionId ??
                 node.session.parentSessionId ??
-                'unresolved'}
+                '—'}
             </dd>
             <dt>Agent path</dt>
-            <dd>{node.session.agentPath ?? 'not reported'}</dd>
+            <dd>{node.session.agentPath ?? '—'}</dd>
           </dl>
           <div className="subagent-node__activity">
             {sessionRuns.length === 0 ? (

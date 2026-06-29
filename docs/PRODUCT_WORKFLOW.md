@@ -156,6 +156,30 @@ Done:
 - Show final evidence and completion route.
 - Avoid active agent controls unless the task is explicitly reopened.
 
+## Archive and delete
+
+Task menus expose both archive and delete.
+
+Archive is a non-destructive workflow transition to `ARCHIVED`. It removes the task
+from active workflow handling but keeps Task Monki records, evidence, worktree
+records, artifacts, provider session references, and source/alternative links.
+Archive is blocked while a task-owned run, test, or provider request is active.
+
+Delete is permanent and applies only to the selected task. It deletes the
+selected task record and Task Monki-owned records scoped to that task: task
+iterations, runs, domain events, artifacts, provider session/item/plan/usage
+records, interaction requests, Git snapshots, test runs, GitHub delivery
+snapshots, pull request/check/review/merge evidence, and worktree records. It
+also removes links in other tasks that point at the deleted task. Deleting a
+source task never deletes fork alternatives; deleting a fork alternative never
+deletes its source task or sibling alternatives.
+
+Local worktree removal is explicit and separate from task deletion. It is never
+enabled by default, and Task Monki blocks removal when the worktree has
+uncommitted, untracked, or conflicted files. Deleting a task never deletes the
+original repository, remote branch, pull request, commits, Git history, merge
+history, or provider remote thread data.
+
 ## Finish task actions
 
 - Accept locally

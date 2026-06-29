@@ -14,7 +14,6 @@ export function ActivityTimeline({ events, runs = [] }: ActivityTimelineProps) {
       <div className="card__header">
         <div>
           <h3>Task activity</h3>
-          <p className="provider-subtitle">Requests, runs, reviews, evidence, and delivery changes.</p>
         </div>
         <span className="count-pill">{history.length} key events</span>
       </div>

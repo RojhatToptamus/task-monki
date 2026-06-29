@@ -718,6 +718,16 @@ export interface TransitionTaskRequest {
   toPhase: WorkflowPhase;
 }
 
+export interface DeleteTaskRequest {
+  taskId: string;
+  removeWorktree?: boolean;
+}
+
+export interface DeleteTaskResult {
+  taskId: string;
+  removedWorktree: boolean;
+}
+
 export interface ReadArtifactRequest {
   artifactId: string;
 }
@@ -778,7 +788,8 @@ export interface AppUpdateEvent {
     | 'prompt.refined'
     | 'provider.updated'
     | 'projection.updated'
-    | 'finding.updated';
+    | 'finding.updated'
+    | 'task.deleted';
   taskId: string;
   iterationId?: string;
   runId?: string;
@@ -815,6 +826,7 @@ export interface TaskManagerApi {
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
+  deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;
   readProtocolMessage(
     input: ReadProtocolMessageRequest

@@ -6,6 +6,7 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
+  DeleteTaskRequest,
   GitHubPreflightRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
@@ -56,6 +57,7 @@ const api: TaskManagerApi = {
     ipcRenderer.invoke('github:createPullRequest', input),
   refreshGitHub: (input: RefreshGitHubRequest) => ipcRenderer.invoke('github:refresh', input),
   transitionTask: (input: TransitionTaskRequest) => ipcRenderer.invoke('task:transition', input),
+  deleteTask: (input: DeleteTaskRequest) => ipcRenderer.invoke('task:delete', input),
   readArtifact: (input: ReadArtifactRequest) => ipcRenderer.invoke('artifact:read', input),
   readProtocolMessage: (input: ReadProtocolMessageRequest) =>
     ipcRenderer.invoke('agent:readProtocolMessage', input),

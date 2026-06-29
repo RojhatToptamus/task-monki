@@ -187,6 +187,11 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/tasks/delete') {
+      sendJson(response, 200, await service.deleteTask((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/artifact/read') {
       const text = await service.readArtifact((await readJson(request)) as never);
       sendJson(response, 200, text);

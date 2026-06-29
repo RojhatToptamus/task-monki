@@ -387,6 +387,115 @@ export class FileTaskStore {
     });
   }
 
+  async deleteTask(taskId: string): Promise<void> {
+    await this.init();
+
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+
+    const runIds = new Set(
+      this.state.runs.filter((run) => run.taskId === taskId).map((run) => run.id)
+    );
+    const sessionIds = new Set(
+      this.state.agentSessions
+        .filter((session) => session.taskId === taskId)
+        .map((session) => session.id)
+    );
+    const worktreeIds = new Set(
+      this.state.worktrees
+        .filter((worktree) => worktree.taskId === taskId)
+        .map((worktree) => worktree.id)
+    );
+    const testRunIds = new Set(
+      this.state.testRuns
+        .filter((testRun) => testRun.taskId === taskId)
+        .map((testRun) => testRun.id)
+    );
+    const artifactsToDelete = this.state.artifacts.filter(
+      (artifact) =>
+        artifact.taskId === taskId ||
+        (artifact.runId ? runIds.has(artifact.runId) : false) ||
+        (artifact.testRunId ? testRunIds.has(artifact.testRunId) : false)
+    );
+    const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
+    const now = new Date().toISOString();
+
+    this.state = {
+      ...this.state,
+      tasks: this.state.tasks
+        .filter((candidate) => candidate.id !== taskId)
+        .map((candidate) => removeTaskLink(candidate, taskId, now)),
+      iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
+      worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
+      gitSnapshots: this.state.gitSnapshots.filter((snapshot) => snapshot.taskId !== taskId),
+      testRuns: this.state.testRuns.filter((testRun) => testRun.taskId !== taskId),
+      githubRepositories: this.state.githubRepositories.filter(
+        (record) => record.taskId !== taskId
+      ),
+      branchPublications: this.state.branchPublications.filter(
+        (record) => record.taskId !== taskId
+      ),
+      pullRequests: this.state.pullRequests.filter((record) => record.taskId !== taskId),
+      ciRollups: this.state.ciRollups.filter((record) => record.taskId !== taskId),
+      reviewRollups: this.state.reviewRollups.filter((record) => record.taskId !== taskId),
+      mergeSnapshots: this.state.mergeSnapshots.filter((record) => record.taskId !== taskId),
+      runs: this.state.runs.filter((run) => run.taskId !== taskId),
+      agentSessions: this.state.agentSessions.filter((session) => session.taskId !== taskId),
+      agentItems: this.state.agentItems.filter(
+        (item) =>
+          item.taskId !== taskId &&
+          !runIds.has(item.runId) &&
+          !sessionIds.has(item.sessionId)
+      ),
+      agentGoalSnapshots: this.state.agentGoalSnapshots.filter(
+        (goal) => goal.taskId !== taskId && !sessionIds.has(goal.sessionId)
+      ),
+      agentPlanRevisions: this.state.agentPlanRevisions.filter(
+        (plan) =>
+          plan.taskId !== taskId &&
+          !runIds.has(plan.runId) &&
+          !sessionIds.has(plan.sessionId)
+      ),
+      agentUsageSnapshots: this.state.agentUsageSnapshots.filter(
+        (usage) =>
+          usage.taskId !== taskId &&
+          (usage.runId ? !runIds.has(usage.runId) : true) &&
+          !sessionIds.has(usage.sessionId)
+      ),
+      agentSettingsObservations: this.state.agentSettingsObservations.filter(
+        (observation) =>
+          observation.taskId !== taskId && !sessionIds.has(observation.sessionId)
+      ),
+      agentSubagentObservations: this.state.agentSubagentObservations.filter(
+        (observation) =>
+          observation.taskId !== taskId &&
+          !sessionIds.has(observation.sessionId) &&
+          !sessionIds.has(observation.parentSessionId)
+      ),
+      interactionRequests: this.state.interactionRequests.filter(
+        (request) =>
+          request.taskId !== taskId &&
+          !runIds.has(request.runId) &&
+          !sessionIds.has(request.sessionId)
+      ),
+      events: this.state.events.filter(
+        (event) =>
+          !eventBelongsToDeletedTask(event, taskId, {
+            runIds,
+            sessionIds,
+            worktreeIds,
+            testRunIds
+          })
+      ),
+      artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
+    };
+
+    await this.persistQueued();
+    await Promise.all(artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path)));
+  }
+
   private async createTaskRecord(
     input: CreateTaskRequest,
     source: DomainEvent['source'],
@@ -2343,6 +2452,65 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
   });
 
   return changed ? { state: { ...state, runs, tasks }, changed } : { state, changed };
+}
+
+function removeTaskLink(task: Task, deletedTaskId: string, now: string): Task {
+  const forkedAlternativeTaskIds = (task.forkedAlternativeTaskIds ?? []).filter(
+    (alternativeTaskId) => alternativeTaskId !== deletedTaskId
+  );
+  const removedAlternative =
+    forkedAlternativeTaskIds.length !== (task.forkedAlternativeTaskIds ?? []).length;
+  const removedSource = task.forkedFromTaskId === deletedTaskId;
+
+  if (!removedAlternative && !removedSource) {
+    return task;
+  }
+
+  return {
+    ...task,
+    forkedAlternativeTaskIds,
+    forkedFromTaskId: removedSource ? undefined : task.forkedFromTaskId,
+    forkedFromRunId: removedSource ? undefined : task.forkedFromRunId,
+    updatedAt: now
+  };
+}
+
+function eventBelongsToDeletedTask(
+  event: DomainEvent,
+  taskId: string,
+  ids: {
+    runIds: Set<string>;
+    sessionIds: Set<string>;
+    worktreeIds: Set<string>;
+    testRunIds: Set<string>;
+  }
+): boolean {
+  if (event.taskId === taskId) {
+    return true;
+  }
+  if (event.runId && ids.runIds.has(event.runId)) {
+    return true;
+  }
+  if (event.agentSessionId && ids.sessionIds.has(event.agentSessionId)) {
+    return true;
+  }
+  if (event.worktreeId && ids.worktreeIds.has(event.worktreeId)) {
+    return true;
+  }
+  if (event.testRunId && ids.testRunIds.has(event.testRunId)) {
+    return true;
+  }
+  return false;
+}
+
+async function unlinkIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
 }
 
 function isStaleIdleReviewRun(

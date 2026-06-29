@@ -67,7 +67,7 @@ export function ProviderActivityPanel({
         <summary className="provider-activity__summary">
           <span>
             <strong>Provider activity</strong>
-            <small>Structured provider telemetry. Open only when debugging a turn.</small>
+            <small>Reported by Codex</small>
           </span>
           <span className="count-pill">{runs.length} turns</span>
         </summary>
@@ -138,7 +138,7 @@ function ProviderRunView({
             </strong>
             <small>
               {new Date(run.startedAt).toLocaleString()} ·{' '}
-              {run.providerTurnId ?? 'turn ID unconfirmed'}
+              {run.providerTurnId ?? '—'}
             </small>
           </span>
           <span className={`provider-status provider-status--${run.status.toLowerCase()}`}>
@@ -222,7 +222,7 @@ function ProviderLifecycleEvent({ event }: { event: DomainEvent }) {
       ) : eventType === 'turn/diff/updated' ? (
         <p>
           Provider aggregate diff updated ({Number(payload.byteCount ?? 0).toLocaleString()}{' '}
-          bytes). Independent Git evidence remains authoritative.
+          bytes).
         </p>
       ) : eventType === 'thread/compacted' ? (
         <p>Codex reported automatic context compaction.</p>
@@ -230,7 +230,6 @@ function ProviderLifecycleEvent({ event }: { event: DomainEvent }) {
         <p>{stringValue(payload.message) ?? eventType}</p>
       )}
       <footer>
-        <span className="provenance-badge">Reported by Codex · {eventType}</span>
         <RawProviderMessage reference={provenance} />
       </footer>
     </article>
@@ -288,7 +287,6 @@ function ProviderItem({ item }: { item: AgentItemRecord }) {
       </header>
       <ItemBody type={item.type} payload={payload} />
       <footer>
-        <span className="provenance-badge">Reported by Codex · item lifecycle</span>
         <RawProviderMessage reference={item.rawMessage} />
       </footer>
     </article>

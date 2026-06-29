@@ -47,6 +47,7 @@ import { InteractionAuditPanel } from './InteractionAuditPanel';
 import { ProviderActivityPanel } from './ProviderActivityPanel';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
+import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip, dotStyle } from './MainColumn';
 import {
   canRequestCodexReviewChanges,
@@ -103,6 +104,8 @@ interface TaskDetailProps {
   onCreatePullRequest(taskId: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
+  onArchive(taskId: string): void;
+  onRequestDelete(taskId: string): void;
 }
 
 interface HeadAction {
@@ -338,7 +341,17 @@ export function TaskDetail(props: TaskDetailProps) {
               <span className="tm-detail__num">#{formatShortId(task.id)}</span>
               <Chip tone={state.tone} label={state.label} />
             </div>
-            <h1 className="tm-detail__title">{task.title}</h1>
+            <div className="tm-detail__titlerow">
+              <h1 className="tm-detail__title">{task.title}</h1>
+              <TaskActionsMenu
+                taskId={task.id}
+                title={task.title}
+                archived={task.workflowPhase === 'ARCHIVED'}
+                onArchive={props.onArchive}
+                onRequestDelete={props.onRequestDelete}
+                className="tm-detail__taskmenu"
+              />
+            </div>
             {worktree?.branchName ? (
               <div className="tm-detail__meta">{worktree.branchName}</div>
             ) : null}
@@ -532,7 +545,7 @@ export function TaskDetail(props: TaskDetailProps) {
             <ActivityTimeline events={props.events} runs={props.runs} />
             <TaskHealthFindings findings={task.projection.findings} />
             <div className="tm-debug__notice">
-              Provider diagnostics are for troubleshooting. Evidence remains the source of truth.
+              Provider diagnostics are for troubleshooting. Verified evidence remains the source of truth.
             </div>
             <SubagentHierarchyPanel
               sessions={sessions}

@@ -1,0 +1,124 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { describe, expect, it } from 'vitest';
+import { FileTaskStore } from '../storage/FileTaskStore';
+import { TaskManagerService } from './TaskManagerService';
+
+const exec = promisify(execFile);
+
+describe('TaskManagerService task deletion', () => {
+  it('blocks deletion while an agent run is active', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-active-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: 'codex-not-used'
+    });
+
+    const task = await store.createTask({
+      title: 'Active delete guard',
+      prompt: 'Keep the run alive.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/delete-active',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+
+    await expect(service.deleteTask({ taskId: task.id })).rejects.toThrow(
+      'active agent run'
+    );
+    expect(await store.getTask(task.id)).toBeDefined();
+  });
+
+  it('blocks local worktree removal when the worktree is dirty', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-dirty-'));
+    const repositoryPath = path.join(dir, 'repo');
+    const worktreeRoot = path.join(dir, 'worktrees');
+    await fs.mkdir(repositoryPath, { recursive: true });
+    await initRepository(repositoryPath);
+
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, repositoryPath, undefined, {
+      worktreeRoot,
+      codexPath: 'codex-not-used'
+    });
+    const task = await service.createTask({
+      title: 'Dirty delete guard',
+      prompt: 'Create a dirty worktree.',
+      repositoryPath
+    });
+    const worktree = await service.prepareWorktree({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'dirty.txt'), 'dirty\n');
+
+    await expect(
+      service.deleteTask({ taskId: task.id, removeWorktree: true })
+    ).rejects.toThrow('uncommitted or untracked files');
+    expect(await store.getTask(task.id)).toBeDefined();
+    await expect(fs.access(worktree.worktreePath)).resolves.toBeUndefined();
+  });
+
+  it('removes a clean task worktree when explicitly requested', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-clean-'));
+    const repositoryPath = path.join(dir, 'repo');
+    const worktreeRoot = path.join(dir, 'worktrees');
+    await fs.mkdir(repositoryPath, { recursive: true });
+    await initRepository(repositoryPath);
+
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, repositoryPath, undefined, {
+      worktreeRoot,
+      codexPath: 'codex-not-used'
+    });
+    const task = await service.createTask({
+      title: 'Clean delete removal',
+      prompt: 'Remove the clean worktree.',
+      repositoryPath
+    });
+    const worktree = await service.prepareWorktree({ taskId: task.id });
+
+    const result = await service.deleteTask({ taskId: task.id, removeWorktree: true });
+
+    expect(result).toEqual({ taskId: task.id, removedWorktree: true });
+    await expect(store.getTask(task.id)).resolves.toBeUndefined();
+    await expect(fs.access(worktree.worktreePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(path.join(repositoryPath, 'README.md'))).resolves.toBeUndefined();
+  });
+});
+
+async function initRepository(repositoryPath: string): Promise<string> {
+  await exec('git', ['init'], { cwd: repositoryPath });
+  await fs.writeFile(path.join(repositoryPath, 'README.md'), 'base\n');
+  await exec('git', ['add', 'README.md'], { cwd: repositoryPath });
+  await exec(
+    'git',
+    [
+      '-c',
+      'user.name=Task Monki',
+      '-c',
+      'user.email=task-monki@example.invalid',
+      'commit',
+      '-m',
+      'base'
+    ],
+    { cwd: repositoryPath }
+  );
+  const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: repositoryPath });
+  return stdout.trim();
+}

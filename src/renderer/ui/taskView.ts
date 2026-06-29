@@ -21,6 +21,7 @@ export interface TaskCardVM {
   meta: string;
   stateLabel: string;
   stateTone: Tone;
+  archived: boolean;
   hasDecision: boolean;
   decisionLabel: string;
   rollups: Rollup[];
@@ -38,6 +39,13 @@ export interface FinishEvidenceState {
 
 /** Human label + tone for a task's most salient run/phase state. */
 export function describeTaskState(task: Task): { label: string; tone: Tone } {
+  if (task.workflowPhase === 'DONE') {
+    return { label: 'Done', tone: 'success' };
+  }
+  if (task.workflowPhase === 'CANCELED' || task.workflowPhase === 'ARCHIVED') {
+    return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
+  }
+
   const attention = describeTaskAttention(task);
   if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
     return {
@@ -91,11 +99,6 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   }
 
   switch (task.workflowPhase) {
-    case 'DONE':
-      return { label: 'Done', tone: 'success' };
-    case 'CANCELED':
-    case 'ARCHIVED':
-      return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
     case 'IN_PROGRESS':
       return { label: 'In progress', tone: 'info' };
     default:
@@ -328,7 +331,7 @@ export function rollupsForTask(task: Task): Rollup[] {
 }
 
 export function taskMeta(task: Task): string {
-  return `${repositoryName(task.repositoryPath)} · ${humanizeEnum(task.workflowPhase)}`;
+  return repositoryName(task.repositoryPath);
 }
 
 export function buildTaskCardVM(task: Task): TaskCardVM {
@@ -343,6 +346,7 @@ export function buildTaskCardVM(task: Task): TaskCardVM {
     meta: taskMeta(task),
     stateLabel: state.label,
     stateTone: state.tone,
+    archived: task.workflowPhase === 'ARCHIVED',
     hasDecision,
     decisionLabel: hasDecision
       ? `${humanizeEnum(task.projection.agentRun)} · needs you`

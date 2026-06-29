@@ -6,6 +6,8 @@ import type {
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
+  DeleteTaskRequest,
+  DeleteTaskResult,
   GitSnapshotRecord,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
@@ -101,6 +103,8 @@ function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
+    deleteTask: (input: DeleteTaskRequest) =>
+      post<DeleteTaskResult>(baseUrl, '/api/tasks/delete', input),
     readArtifact: (input: ReadArtifactRequest) => post<string>(baseUrl, '/api/artifact/read', input),
     readProtocolMessage: (input: ReadProtocolMessageRequest) =>
       post(baseUrl, '/api/agent/protocol/read', input),

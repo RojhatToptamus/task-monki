@@ -3,6 +3,8 @@ import type {
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  DeleteTaskRequest,
+  DeleteTaskResult,
   GitSnapshotRecord,
   GitHubPreflightRequest,
   PrepareWorktreeRequest,
@@ -626,6 +628,34 @@ export class TaskManagerService {
     return this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
   }
 
+  async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
+    const task = await this.requireTask(input.taskId);
+    const snapshot = await this.store.snapshot();
+    const blockedReason = taskDeletionBlocker(task, snapshot);
+    if (blockedReason) {
+      throw new Error(blockedReason);
+    }
+
+    let removedWorktree = false;
+    if (input.removeWorktree) {
+      const worktrees = snapshot.worktrees.filter((worktree) => worktree.taskId === task.id);
+      for (const worktree of worktrees) {
+        await this.worktrees.remove(worktree);
+        removedWorktree = true;
+      }
+    }
+
+    await this.store.deleteTask(task.id);
+    const result = { taskId: task.id, removedWorktree };
+    this.events.emit({
+      type: 'task.deleted',
+      taskId: task.id,
+      payload: result,
+      at: new Date().toISOString()
+    });
+    return result;
+  }
+
   readArtifact(input: ReadArtifactRequest): Promise<string> {
     return this.store.readArtifact(input.artifactId);
   }
@@ -885,6 +915,60 @@ function assertRetryable(run: RunRecord): void {
   }
 }
 
+const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'AWAITING_APPROVAL',
+  'AWAITING_USER_INPUT',
+  'INTERRUPTING'
+]);
+
+const ACTIVE_TEST_STATUSES = new Set(['QUEUED', 'RUNNING']);
+
+function activeTaskOperationBlocker(
+  task: Task,
+  evidence?: { testStatus?: string }
+): string | undefined {
+  if (ACTIVE_AGENT_RUN_STATUSES.has(task.projection.agentRun as RunRecord['status'])) {
+    return 'Stop or let the active agent run finish before changing this task.';
+  }
+  if (ACTIVE_TEST_STATUSES.has(evidence?.testStatus ?? task.projection.tests)) {
+    return 'Wait for the active test run to finish before changing this task.';
+  }
+  if (['REQUESTED', 'STARTING', 'RUNNING', 'CANCEL_REQUESTED'].includes(task.projection.requestedAction)) {
+    return 'Resolve the pending provider request before changing this task.';
+  }
+  return undefined;
+}
+
+export function taskDeletionBlocker(task: Task, snapshot: TaskSnapshot): string | undefined {
+  const activeRun = snapshot.runs.find(
+    (run) => run.taskId === task.id && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+  );
+  if (activeRun) {
+    return 'Stop or let the active agent run finish before deleting this task.';
+  }
+
+  const activeTest = snapshot.testRuns.find(
+    (testRun) =>
+      testRun.taskId === task.id &&
+      (ACTIVE_TEST_STATUSES.has(testRun.status) || testRun.processStatus === 'RUNNING')
+  );
+  if (activeTest) {
+    return 'Wait for the active test run to finish before deleting this task.';
+  }
+
+  const activeInteraction = snapshot.interactionRequests.find(
+    (request) => request.taskId === task.id && ['PENDING', 'RESPONDING'].includes(request.status)
+  );
+  if (activeInteraction) {
+    return 'Resolve the pending provider request before deleting this task.';
+  }
+
+  return undefined;
+}
+
 export function transitionBlocker(
   task: Task,
   toPhase: Task['workflowPhase'],
@@ -929,6 +1013,9 @@ export function transitionBlocker(
       return 'GitHub must report the pull request merged before DONE.';
     }
     return undefined;
+  }
+  if (toPhase === 'ARCHIVED') {
+    return activeTaskOperationBlocker(task, { testStatus: evidence.testStatus });
   }
   return undefined;
 }

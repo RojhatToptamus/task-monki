@@ -26,9 +26,7 @@ export function InteractionAuditPanel({
       <div className="card__header">
         <div>
           <h3>Interaction audit</h3>
-          <p className="provider-subtitle">
-            Resolved, declined, stale, and runtime-aborted provider requests.
-          </p>
+          <p className="provider-subtitle">Past provider requests.</p>
         </div>
         <span className="count-pill">{historical.length}</span>
       </div>
@@ -52,7 +50,7 @@ export function InteractionAuditPanel({
                 <dt>Run / turn</dt>
                 <dd>
                   {interaction.runId.slice(0, 8)} /{' '}
-                  {interaction.providerTurnId ?? 'unknown'}
+                  {interaction.providerTurnId ?? '—'}
                 </dd>
                 <dt>Source thread</dt>
                 <dd>

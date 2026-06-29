@@ -5,9 +5,13 @@ import {
   type AgentInteractionDecision,
   type AgentProviderState,
   type AgentRetryStrategy,
+  type DeleteTaskResult,
+  type GitSnapshotRecord,
   type InteractionRequestRecord,
+  type Task,
   type TaskSnapshot,
-  type WorkflowPhase
+  type WorkflowPhase,
+  type WorktreeRecord
 } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
 import {
@@ -22,7 +26,8 @@ import {
   selectLatestMergeSnapshot,
   selectLatestTestRun,
   selectTaskEvents,
-  selectTaskRuns
+  selectTaskRuns,
+  formatShortId
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import {
@@ -102,6 +107,7 @@ export function App() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
+  const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
   const [theme, setTheme] = useState<ThemePreference>(() => getInitialTheme());
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => getInitialCollapsed());
@@ -251,6 +257,19 @@ export function App() {
     isSameRepositoryPath(selectedTaskCandidate.repositoryPath, activeRepositoryPath)
       ? selectedTaskCandidate
       : undefined;
+  const deleteCandidate = snapshot.tasks.find((task) => task.id === deleteCandidateId);
+
+  useEffect(() => {
+    if (!selectedTaskId || isLoading) {
+      return;
+    }
+    if (snapshot.tasks.some((task) => task.id === selectedTaskId)) {
+      return;
+    }
+    setSelectedTaskId(undefined);
+    setLastTaskId((current) => (current === selectedTaskId ? undefined : current));
+    setIsDetailOpen(false);
+  }, [isLoading, selectedTaskId, snapshot.tasks]);
   const selectedRuns = useMemo(
     () => (selectedTask ? selectTaskRuns(snapshot, selectedTask.id) : []),
     [selectedTask, snapshot]
@@ -337,6 +356,12 @@ export function App() {
   const selectedCiRollup = selectedTask ? selectLatestCiRollup(snapshot, selectedTask) : undefined;
   const selectedReviewRollup = selectedTask ? selectLatestReviewRollup(snapshot, selectedTask) : undefined;
   const selectedMergeSnapshot = selectedTask ? selectLatestMergeSnapshot(snapshot, selectedTask) : undefined;
+  const deleteCandidateWorktree = deleteCandidate
+    ? selectCurrentWorktree(snapshot, deleteCandidate)
+    : undefined;
+  const deleteCandidateGitSnapshot = deleteCandidate
+    ? selectLatestGitSnapshot(snapshot, deleteCandidate)
+    : undefined;
   const providerModels = providerState?.models ?? [];
   const defaultTaskSettings = useMemo(
     () =>
@@ -488,6 +513,39 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Transition blocked.');
+    }
+  };
+
+  const archiveTask = (taskId: string) => {
+    void transitionTask(taskId, 'ARCHIVED');
+  };
+
+  const requestDeleteTask = (taskId: string) => {
+    setDeleteCandidateId(taskId);
+  };
+
+  const deleteTask = async (
+    taskId: string,
+    removeWorktree: boolean
+  ): Promise<DeleteTaskResult> => {
+    setError(undefined);
+    try {
+      const deleted = await taskManagerApi.deleteTask({ taskId, removeWorktree });
+      setDeleteCandidateId(undefined);
+      if (selectedTaskId === taskId) {
+        setSelectedTaskId(undefined);
+        setIsDetailOpen(false);
+      }
+      setLastTaskId((current) => (current === taskId ? undefined : current));
+      notify(
+        deleted.removedWorktree ? 'Task and local worktree deleted.' : 'Task deleted.',
+        'success'
+      );
+      await refresh();
+      return deleted;
+    } catch (caught) {
+      reportActionError(caught, 'Could not delete task.');
+      throw caught;
     }
   };
 
@@ -874,6 +932,8 @@ export function App() {
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
             onTransition={transitionTask}
+            onArchive={archiveTask}
+            onRequestDelete={requestDeleteTask}
           />
         ) : (
           <MainColumn
@@ -887,6 +947,8 @@ export function App() {
             models={providerModels}
             activeRepositoryPath={activeRepositoryPath}
             onSelect={selectTask}
+            onArchive={archiveTask}
+            onRequestDelete={requestDeleteTask}
           />
         )}
       </div>
@@ -901,6 +963,16 @@ export function App() {
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
           onClose={closeNewTask}
+        />
+      ) : null}
+
+      {deleteCandidate ? (
+        <DeleteTaskModal
+          task={deleteCandidate}
+          worktree={deleteCandidateWorktree}
+          gitSnapshot={deleteCandidateGitSnapshot}
+          onCancel={() => setDeleteCandidateId(undefined)}
+          onConfirm={(removeWorktree) => deleteTask(deleteCandidate.id, removeWorktree)}
         />
       ) : null}
 
@@ -923,6 +995,170 @@ function GlobalNotifier({ notifications }: { notifications: AppNotification[] })
       ))}
     </div>
   );
+}
+
+function DeleteTaskModal({
+  task,
+  worktree,
+  gitSnapshot,
+  onCancel,
+  onConfirm
+}: {
+  task: Task;
+  worktree?: WorktreeRecord;
+  gitSnapshot?: GitSnapshotRecord;
+  onCancel(): void;
+  onConfirm(removeWorktree: boolean): Promise<DeleteTaskResult>;
+}) {
+  const [removeWorktree, setRemoveWorktree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const worktreeRemoval = describeWorktreeRemoval(worktree, gitSnapshot);
+  const canRemoveWorktree = worktreeRemoval.status === 'available';
+
+  useEffect(() => {
+    setRemoveWorktree(false);
+    setBusy(false);
+  }, [task.id]);
+
+  useEffect(() => {
+    if (!canRemoveWorktree) {
+      setRemoveWorktree(false);
+    }
+  }, [canRemoveWorktree]);
+
+  const submit = () => {
+    setBusy(true);
+    void onConfirm(removeWorktree).catch(() => {
+      setBusy(false);
+    });
+  };
+
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <div className="tm-modal__panel tm-delete-modal">
+        <div className="tm-delete-modal__head">
+          <span className="tm-delete-modal__mark" aria-hidden="true">
+            <TrashIcon />
+          </span>
+          <div>
+            <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
+            <p>
+              This permanently removes only the selected task. Fork alternatives and source
+              tasks stay in place.
+            </p>
+          </div>
+        </div>
+
+        <div className="tm-delete-modal__grid">
+          <section className="tm-delete-modal__col tm-delete-modal__col--remove">
+            <h4>
+              Will be deleted
+            </h4>
+            <ul>
+              <li>Task record and workflow state</li>
+              <li>Runs, events, artifacts, and provider session records</li>
+              <li>Stored Git, test, GitHub, PR, review, and merge evidence</li>
+              <li>Source and alternative links that point at this task</li>
+            </ul>
+          </section>
+          <section className="tm-delete-modal__col tm-delete-modal__col--keep">
+            <h4>
+              Stays untouched
+            </h4>
+            <ul>
+              <li>Fork alternatives or source tasks</li>
+              <li>Original repository or Git history</li>
+              <li>Remote branch, pull request, commits, or merge history</li>
+              <li>Provider remote thread data</li>
+            </ul>
+          </section>
+        </div>
+
+        <label
+          className={`tm-delete-modal__worktree ${
+            canRemoveWorktree ? '' : 'tm-delete-modal__worktree--disabled'
+          } ${worktreeRemoval.status === 'dirty' ? 'tm-delete-modal__worktree--blocked' : ''}`}
+        >
+          <input
+            type="checkbox"
+            checked={removeWorktree}
+            disabled={!canRemoveWorktree || busy}
+            onChange={(event) => setRemoveWorktree(event.target.checked)}
+          />
+          <span>
+            <strong>Also remove local worktree</strong>
+            <small>{worktreeRemoval.detail}</small>
+          </span>
+        </label>
+
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="danger-button" disabled={busy} onClick={submit}>
+            {busy ? 'Deleting…' : 'Delete task'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function describeWorktreeRemoval(
+  worktree: WorktreeRecord | undefined,
+  gitSnapshot: GitSnapshotRecord | undefined
+): { status: 'available' | 'none' | 'unverified' | 'dirty' | 'unavailable'; detail: string } {
+  if (!worktree) {
+    return {
+      status: 'none',
+      detail: 'No local worktree is recorded for this task.'
+    };
+  }
+  if (isSameRepositoryPath(worktree.repositoryPath, worktree.worktreePath)) {
+    return {
+      status: 'unavailable',
+      detail: 'Task Monki never removes the original repository checkout.'
+    };
+  }
+  if (worktree.status === 'MISSING' || worktree.status === 'REMOVED') {
+    return {
+      status: 'none',
+      detail: 'No removable local worktree exists for this task.'
+    };
+  }
+  if (worktree.status !== 'PRESENT') {
+    return {
+      status: 'unavailable',
+      detail:
+        `The local worktree is ${worktree.status.toLowerCase().replace(/_/g, ' ')}. ` +
+        'Repair or refresh it before removal.'
+    };
+  }
+  if (!gitSnapshot) {
+    return {
+      status: 'unverified',
+      detail: 'Refresh Git evidence before removing the local worktree.'
+    };
+  }
+
+  const dirtyCount =
+    gitSnapshot.stagedCount +
+    gitSnapshot.unstagedCount +
+    gitSnapshot.untrackedCount +
+    gitSnapshot.conflictedCount;
+  if (dirtyCount > 0 || gitSnapshot.status === 'DIRTY' || gitSnapshot.status === 'CONFLICTED') {
+    return {
+      status: 'dirty',
+      detail:
+        'The worktree has uncommitted, untracked, or conflicted files. Commit, stash, or clean it before removal.'
+    };
+  }
+
+  return {
+    status: 'available',
+    detail: `${worktree.worktreePath} will be removed from disk.`
+  };
 }
 
 function getInitialTheme(): ThemePreference {
@@ -1039,6 +1275,17 @@ function PanelIcon() {
     <svg {...ICON_PROPS} width={17} height={17}>
       <rect x="3" y="3" width="18" height="18" rx="2" />
       <path d="M9 3v18" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg {...ICON_PROPS} width={18} height={18}>
+      <path d="M4 7h16" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13" />
+      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
     </svg>
   );
 }

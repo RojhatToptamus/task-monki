@@ -79,7 +79,6 @@ export function ProviderOverviewPanel({
             Provider-derived state; it does not replace local evidence.
           </p>
         </div>
-        <span className="provenance-badge">Provider: Codex</span>
       </div>
 
       <div className="provider-section">
@@ -92,27 +91,22 @@ export function ProviderOverviewPanel({
                 server?.status ?? (providerState?.preflight.ready ? 'READY' : 'NOT_READY')
               )}
             </span>
-            <small>Observed by Task Monki process supervision</small>
           </dd>
           <dt>Account</dt>
           <dd>
-            <span>{providerState?.preflight.accountLabel ?? 'Not observed'}</span>
-            <small>Reported by Codex account/read</small>
+            <span>{providerState?.preflight.accountLabel ?? '—'}</span>
           </dd>
           <dt>Runtime</dt>
           <dd>
-            <span>{providerState?.preflight.runtimeVersion ?? 'unknown'}</span>
-            <small>Reported by installed Codex CLI</small>
+            <span>{providerState?.preflight.runtimeVersion ?? '—'}</span>
           </dd>
           <dt>Thread</dt>
           <dd>
-            <span>{session?.providerSessionId ?? 'Not materialized'}</span>
-            <small>Opaque provider identifier</small>
+            <span>{session?.providerSessionId ?? '—'}</span>
           </dd>
           <dt>Raw journal</dt>
           <dd>
-            <span>{server?.protocolJournalPath ?? 'Not created'}</span>
-            <small>Task Monki append-only local audit journal</small>
+            <span>{server?.protocolJournalPath ?? '—'}</span>
           </dd>
         </dl>
       </div>
@@ -135,8 +129,8 @@ export function ProviderOverviewPanel({
           <dl className="provider-kv">
             <dt>Sync state</dt>
             <dd>
-              <span>{goal ? humanizeEnum(goal.syncState) : 'Not observed'}</span>
-              <small>{goal?.source ? humanizeEnum(goal.source) : 'No provider observation'}</small>
+              <span>{goal ? humanizeEnum(goal.syncState) : '—'}</span>
+              <small>{goal?.source ? humanizeEnum(goal.source) : '—'}</small>
             </dd>
             <dt>Expected goal</dt>
             <dd>
@@ -145,17 +139,16 @@ export function ProviderOverviewPanel({
             </dd>
             <dt>Provider goal</dt>
             <dd>
-              <span>{goal?.providerObjective ?? 'Not observed'}</span>
+              <span>{goal?.providerObjective ?? '—'}</span>
               <small>
                 {goal?.providerObjective === task.prompt
                   ? 'Matches the Task Monki goal'
-                  : 'Reported by Codex'}
+                  : 'Differs from the Task Monki goal'}
               </small>
             </dd>
             <dt>Provider status</dt>
             <dd>
-              <span>{goal?.providerStatus ?? 'unknown'}</span>
-              <small>Reported by Codex</small>
+              <span>{goal?.providerStatus ?? '—'}</span>
             </dd>
           </dl>
           {goal?.detail ? <p className="provider-warning">{goal.detail}</p> : null}
