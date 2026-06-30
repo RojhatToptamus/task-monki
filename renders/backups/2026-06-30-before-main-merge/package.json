@@ -22,7 +22,6 @@
     "video:still": "mkdir -p renders && remotion still src/remotion/index.tsx TaskMonkiShowcase renders/task-monki-showcase-still.png --frame=1100",
     "video:render": "mkdir -p renders && remotion render src/remotion/index.tsx TaskMonkiShowcase renders/task-monki-showcase.mp4 --codec=h264 --crf=18",
     "video:demo": "npm run video:capture && npm run video:render",
-    "screenshots:capture": "node scripts/capture-app-screenshots.mjs",
     "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check"
   },

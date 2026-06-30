@@ -1,0 +1,59 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.tmv-root {
+  background: #05070a;
+  overflow: hidden;
+}
+
+.tmv-shot {
+  position: absolute;
+  inset: -1px;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.tmv-shot__image {
+  position: absolute;
+  inset: 0;
+  width: 1920px;
+  height: 1080px;
+  object-fit: cover;
+}
+
+.tmv-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  width: 31px;
+  height: 35px;
+  pointer-events: none;
+  filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.45));
+  will-change: transform;
+}
+
+.tmv-cursor svg {
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: 31px;
+  height: 35px;
+}
+
+.tmv-cursor__click {
+  position: absolute;
+  left: -11px;
+  top: -11px;
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  border: 2px solid rgba(244, 245, 246, 0.72);
+  border-radius: 999px;
+  transform-origin: center;
+}
