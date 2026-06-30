@@ -47,6 +47,7 @@ import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip, dotStyle } from './MainColumn';
+import { StatusChip } from './StatusBadge';
 import {
   canRequestCodexReviewChanges,
   codexReviewGate,
@@ -476,10 +477,12 @@ export function TaskDetail(props: TaskDetailProps) {
                 </p>
                 <div className="tm-evidence__chips">
                   {evidenceChips.map((chip) => (
-                    <span className="tm-evchip" key={chip.label}>
-                      <span className="tm-evchip__dot" style={dotStyle(chip.tone)} />
-                      {chip.label} <strong>{chip.value}</strong>
-                    </span>
+                    <StatusChip
+                      key={chip.label}
+                      label={chip.label}
+                      value={chip.value}
+                      tone={chip.tone}
+                    />
                   ))}
                 </div>
                 <div className="tm-evidence__rows">

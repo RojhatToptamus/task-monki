@@ -34,14 +34,6 @@
   --info-ink: #2a5fb8;
   --success-ink: color-mix(in srgb, var(--success) 72%, var(--text));
   --error-ink: color-mix(in srgb, var(--error) 72%, var(--text));
-  --action-soft: color-mix(in srgb, var(--action) 10%, var(--surface));
-  --action-line: color-mix(in srgb, var(--action) 38%, var(--border));
-  --error-soft: color-mix(in srgb, var(--error) 9%, var(--surface));
-  --error-line: color-mix(in srgb, var(--error) 34%, var(--border));
-  --info-soft: color-mix(in srgb, var(--info) 10%, var(--surface));
-  --info-line: color-mix(in srgb, var(--info) 28%, var(--border));
-  --success-soft: color-mix(in srgb, var(--success) 10%, var(--surface));
-  --success-line: color-mix(in srgb, var(--success) 30%, var(--border));
   --scrim: rgba(16, 19, 24, 0.32);
   --shadow-menu: 0 10px 30px rgba(16, 19, 24, 0.14);
 
@@ -85,6 +77,11 @@
   --info-ink: #86abdc;
   --success-ink: #5fc79f;
   --error-ink: #ef8f86;
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-menu: 0 14px 38px rgba(0, 0, 0, 0.38);
+}
+
+.app-shell {
   --action-soft: color-mix(in srgb, var(--action) 10%, var(--surface));
   --action-line: color-mix(in srgb, var(--action) 38%, var(--border));
   --error-soft: color-mix(in srgb, var(--error) 9%, var(--surface));
@@ -93,8 +90,6 @@
   --info-line: color-mix(in srgb, var(--info) 28%, var(--border));
   --success-soft: color-mix(in srgb, var(--success) 10%, var(--surface));
   --success-line: color-mix(in srgb, var(--success) 30%, var(--border));
-  --scrim: rgba(0, 0, 0, 0.5);
-  --shadow-menu: 0 14px 38px rgba(0, 0, 0, 0.38);
 }
 
 * {
@@ -779,6 +774,7 @@ textarea:focus-visible {
   border: 0;
   border-radius: 999px;
   background: var(--surface2);
+  box-shadow: inset 0 0 0 1px transparent;
   color: var(--muted);
   font-size: 11.5px;
   font-weight: 600;
@@ -807,6 +803,10 @@ textarea:focus-visible {
   font-family: var(--font-mono);
   font-size: 11.5px;
   font-weight: 600;
+}
+
+.status-pill--neutral {
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .status-pill--success {
@@ -5741,29 +5741,6 @@ textarea:focus-visible {
   flex-wrap: wrap;
   gap: 7px;
   margin-bottom: 15px;
-}
-
-.tm-evchip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 9px;
-  border-radius: 8px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.tm-evchip__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-
-.tm-evchip strong {
-  font-weight: 600;
-  color: var(--text);
 }
 
 .tm-evidence__rows {
