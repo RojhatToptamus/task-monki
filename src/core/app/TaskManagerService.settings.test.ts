@@ -112,6 +112,10 @@ if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.incl
   process.stdout.write('[{"name":"docs","enabled":true,"transport":{"type":"stdio","command":"docs-mcp"}}]\\n');
   process.exit(0);
 }
+if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
+  process.stdout.write('Usage: codex app-server [OPTIONS]\\n  --stdio\\n  --listen <URL>\\n');
+  process.exit(0);
+}
 
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
@@ -161,8 +165,20 @@ rl.on('line', (line) => {
         nextCursor: null
       } });
       break;
+    case 'thread/start':
+    case 'thread/resume':
+    case 'thread/fork':
+    case 'thread/read':
+    case 'thread/goal/get':
+    case 'thread/goal/set':
+    case 'turn/start':
+    case 'turn/steer':
+    case 'turn/interrupt':
+    case 'review/start':
+      send({ id: message.id, error: { code: -32602, message: 'probe-only fake method' } });
+      break;
     default:
-      send({ id: message.id, error: { message: 'unsupported ' + message.method } });
+      send({ id: message.id, error: { code: -32601, message: 'unsupported ' + message.method } });
   }
 });
 `;

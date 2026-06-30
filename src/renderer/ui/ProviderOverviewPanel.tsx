@@ -49,9 +49,12 @@ export function ProviderOverviewPanel({
         .sort((a, b) => b.observedAt.localeCompare(a.observedAt)),
     [session?.id, settingsObservations]
   );
+  const runtimeResolution = server?.runtimeResolution;
+  const rejectedRuntimeProbes =
+    runtimeResolution?.probes.filter((probe) => !probe.compatible) ?? [];
   const showGoalDiagnostics = shouldShowProviderGoalDiagnostics(goal, Boolean(session));
   const hasProviderSignal = Boolean(
-    run || session || usage || observations.length > 0 || showGoalDiagnostics
+    server || run || session || usage || observations.length > 0 || showGoalDiagnostics
   );
 
   const sync = async () => {
@@ -100,6 +103,19 @@ export function ProviderOverviewPanel({
           <dd>
             <span>{providerState?.preflight.runtimeVersion ?? '—'}</span>
           </dd>
+          <dt>Executable</dt>
+          <dd>
+            <span>{server?.executable ?? '—'}</span>
+          </dd>
+          <dt>Argv</dt>
+          <dd>
+            <span>{server?.argv.join(' ') ?? '—'}</span>
+          </dd>
+          <dt>Schema</dt>
+          <dd>
+            <span>{server?.schemaVersion ?? '—'}</span>
+            <small>{server?.schemaHash ?? '—'}</small>
+          </dd>
           <dt>Thread</dt>
           <dd>
             <span>{session?.providerSessionId ?? '—'}</span>
@@ -108,7 +124,60 @@ export function ProviderOverviewPanel({
           <dd>
             <span>{server?.protocolJournalPath ?? '—'}</span>
           </dd>
+          {runtimeResolution ? (
+            <>
+              <dt>Runtime probes</dt>
+              <dd>
+                <span>{runtimeResolution.probes.length}</span>
+                <small>{rejectedRuntimeProbes.length} rejected</small>
+              </dd>
+            </>
+          ) : null}
         </dl>
+        {runtimeResolution ? (
+          <details className="raw-provider-event">
+            <summary>Show runtime resolution probes</summary>
+            <dl className="provider-item-kv">
+              <dt>Selected</dt>
+              <dd>
+                {runtimeResolution.selectedExecutable}
+                <small>{runtimeResolution.selectedVersion ?? 'version unknown'}</small>
+              </dd>
+              <dt>Source</dt>
+              <dd>{humanizeEnum(runtimeResolution.selectedSource)}</dd>
+              <dt>Launch</dt>
+              <dd>{formatArgv(runtimeResolution.selectedLaunchArgv)}</dd>
+              <dt>Required capabilities</dt>
+              <dd>{runtimeResolution.requiredCapabilities.join(', ')}</dd>
+            </dl>
+            {runtimeResolution.probes.map((probe, index) => (
+              <dl
+                className="provider-item-kv"
+                key={`${probe.source}:${probe.executable}:${index}`}
+              >
+                <dt>Candidate</dt>
+                <dd>
+                  {probe.executable}
+                  <small>{probe.version ?? 'version unknown'}</small>
+                </dd>
+                <dt>Status</dt>
+                <dd>
+                  {probe.compatible ? 'Compatible' : 'Rejected'}
+                  <small>{humanizeEnum(probe.source)}</small>
+                </dd>
+                <dt>Launch</dt>
+                <dd>
+                  {formatArgv(probe.launchArgv)}
+                  <small>{probe.launchForm ? humanizeEnum(probe.launchForm) : '—'}</small>
+                </dd>
+                <dt>Missing</dt>
+                <dd>{formatList(probe.missingCapabilities)}</dd>
+                <dt>Detail</dt>
+                <dd>{probe.detail}</dd>
+              </dl>
+            ))}
+          </details>
+        ) : null}
       </div>
 
       {showGoalDiagnostics ? (
@@ -221,6 +290,14 @@ function latestForSession<T extends { sessionId: string; observedAt: string }>(
   return records
     .filter((record) => record.sessionId === sessionId)
     .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+}
+
+function formatArgv(argv?: string[]): string {
+  return argv && argv.length > 0 ? argv.join(' ') : '—';
+}
+
+function formatList(values?: string[]): string {
+  return values && values.length > 0 ? values.join(', ') : '—';
 }
 
 function formatSetting(value: unknown): string {

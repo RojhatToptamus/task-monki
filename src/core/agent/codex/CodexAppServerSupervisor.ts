@@ -1,23 +1,25 @@
-import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { promisify } from 'node:util';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import type { AgentServerInstance, CodexExternalToolSettings } from '../../../shared/agent';
+import type {
+  AgentRuntimeResolutionDiagnostics,
+  AgentServerInstance,
+  CodexExternalToolSettings
+} from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
+import {
+  resolveCodexRuntime,
+  type CodexAppServerLaunch,
+  type CodexRuntimeProbeResult,
+  type ResolvedCodexRuntime
+} from './CodexRuntimeResolver';
 import {
   codexExternalToolConfigOverrides,
   normalizeCodexExternalToolSettings,
   resolveCodexExternalToolConfigOverrides
 } from './CodexToolConfig';
-import {
-  CODEX_PROTOCOL_MAXIMUM_TESTED_RUNTIME_VERSION,
-  CODEX_PROTOCOL_RUNTIME_VERSION,
-  CODEX_PROTOCOL_SCHEMA_HASH
-} from './protocol/metadata';
-
-const execFileAsync = promisify(execFile);
+import { CODEX_PROTOCOL_RUNTIME_VERSION, CODEX_PROTOCOL_SCHEMA_HASH } from './protocol/metadata';
 
 export const CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS = [
   'command/exec/outputDelta',
@@ -51,6 +53,7 @@ export interface CodexAppServerSupervisorOptions {
 export interface CodexAppServerLaunchConfig {
   toolSettings?: CodexExternalToolSettings;
   mcpServerConfigOverrides?: readonly string[];
+  appServerArgv?: readonly string[];
 }
 
 export function codexAppServerArgv(
@@ -63,13 +66,18 @@ export function codexAppServerArgv(
     ...codexExternalToolConfigOverrides(launchConfig.toolSettings),
     ...(launchConfig.mcpServerConfigOverrides ?? [])
   ];
-  return codexAppServerArgvFromConfigOverrides(configOverrides);
+  return codexAppServerArgvWithLaunch(
+    launchConfig.appServerArgv ?? ['app-server', '--stdio'],
+    configOverrides
+  );
 }
 
-function codexAppServerArgvFromConfigOverrides(configOverrides: readonly string[]): string[] {
+function codexAppServerArgvWithLaunch(
+  launchArgv: readonly string[],
+  configOverrides: readonly string[]
+): string[] {
   return [
-    'app-server',
-    '--stdio',
+    ...launchArgv,
     ...configOverrides.flatMap((override) => ['-c', override])
   ];
 }
@@ -79,14 +87,17 @@ export async function resolveCodexAppServerArgv(input: {
   cwd: string;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
+  launch?: CodexAppServerLaunch;
 }): Promise<string[]> {
-  return codexAppServerArgvFromConfigOverrides(
-    await resolveCodexExternalToolConfigOverrides({
-      executable: input.executable,
-      cwd: input.cwd,
-      environment: input.environment,
-      settings: input.toolSettings
-    })
+  const configOverrides = await resolveCodexExternalToolConfigOverrides({
+    executable: input.executable,
+    cwd: input.cwd,
+    environment: input.environment,
+    settings: input.toolSettings
+  });
+  return codexAppServerArgvWithLaunch(
+    input.launch?.argv ?? ['app-server', '--stdio'],
+    configOverrides
   );
 }
 
@@ -99,7 +110,7 @@ export class CodexAppServerSupervisor {
   private startPromise?: Promise<CodexRpcClient>;
   private shuttingDown = false;
   private diagnosticTail = '';
-  private compatibilityWarning?: string;
+  private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
 
   constructor(
     private readonly store: FileTaskStore,
@@ -114,8 +125,8 @@ export class CodexAppServerSupervisor {
     return this.client;
   }
 
-  get runtimeCompatibilityWarning(): string | undefined {
-    return this.compatibilityWarning;
+  get lastRuntimeDiagnostics(): readonly CodexRuntimeProbeResult[] {
+    return this.runtimeDiagnostics;
   }
 
   setToolSettings(settings: CodexExternalToolSettings): void {
@@ -177,9 +188,15 @@ export class CodexAppServerSupervisor {
   }
 
   private async startInternal(): Promise<CodexRpcClient> {
-    const executable = this.options.executable ?? 'codex';
-    const runtimeVersion = await probeCodexVersion(executable, this.options.cwd);
-    this.compatibilityWarning = validateRuntimeVersion(runtimeVersion);
+    const runtime = await resolveCodexRuntime({
+      executable: this.options.executable,
+      cwd: this.options.cwd,
+      environment: this.options.environment,
+      requestTimeoutMs: this.options.requestTimeoutMs
+    });
+    const executable = runtime.executable;
+    const runtimeVersion = runtime.version;
+    this.runtimeDiagnostics = runtime.diagnostics;
     this.shuttingDown = false;
     this.diagnosticTail = '';
 
@@ -187,7 +204,8 @@ export class CodexAppServerSupervisor {
       executable,
       cwd: this.options.cwd,
       environment: this.options.environment,
-      toolSettings: this.options.toolSettings
+      toolSettings: this.options.toolSettings,
+      launch: runtime.compatibility.launch
     });
     const server = await this.store.createAgentServer({
       provider: 'codex',
@@ -197,7 +215,8 @@ export class CodexAppServerSupervisor {
       argv,
       runtimeVersion,
       schemaVersion: CODEX_PROTOCOL_RUNTIME_VERSION,
-      schemaHash: CODEX_PROTOCOL_SCHEMA_HASH
+      schemaHash: CODEX_PROTOCOL_SCHEMA_HASH,
+      runtimeResolution: codexRuntimeResolutionDiagnostics(runtime)
     });
     this.server = server;
 
@@ -330,133 +349,27 @@ function isTerminalServerStatus(status: AgentServerInstance['status']): boolean 
   return status === 'FAILED' || status === 'EXITED' || status === 'LOST';
 }
 
-export async function probeCodexVersion(executable: string, cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync(executable, ['--version'], {
-    cwd,
-    timeout: 10_000,
-    maxBuffer: 1024 * 1024
-  });
-  const match = CODEX_VERSION_OUTPUT_PATTERN.exec(stdout);
-  if (!match) {
-    throw new Error(`Could not parse Codex runtime version from: ${stdout.trim()}`);
-  }
-  return match[1];
-}
-
-export function validateRuntimeVersion(runtimeVersion: string): string | undefined {
-  const comparison = compareVersions(runtimeVersion, CODEX_PROTOCOL_RUNTIME_VERSION);
-  if (comparison < 0) {
-    throw new Error(
-      `Codex ${runtimeVersion} is unsupported. Install ${CODEX_PROTOCOL_RUNTIME_VERSION} or newer.`
-    );
-  }
-  const testedComparison = compareVersions(
-    runtimeVersion,
-    CODEX_PROTOCOL_MAXIMUM_TESTED_RUNTIME_VERSION
-  );
-  if (testedComparison > 0) {
-    return (
-      `Codex ${runtimeVersion} is newer than Task Monki's maximum tested runtime ` +
-      `${CODEX_PROTOCOL_MAXIMUM_TESTED_RUNTIME_VERSION}; Task Monki will use ` +
-      `stable compatibility mode with generated protocol ${CODEX_PROTOCOL_RUNTIME_VERSION}.`
-    );
-  }
-  return undefined;
-}
-
-interface ParsedSemver {
-  major: number;
-  minor: number;
-  patch: number;
-  prerelease: string[];
-}
-
-const SEMVER_VERSION_SOURCE =
-  '(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)' +
-  '(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?' +
-  '(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?';
-
-const CODEX_VERSION_OUTPUT_PATTERN = new RegExp(
-  `codex(?:-cli)?\\s+(${SEMVER_VERSION_SOURCE})(?:\\s|$)`
-);
-
-const SEMVER_PATTERN =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-
-function compareVersions(left: string, right: string): number {
-  const a = parseSemver(left);
-  const b = parseSemver(right);
-  for (const key of ['major', 'minor', 'patch'] as const) {
-    const difference = a[key] - b[key];
-    if (difference !== 0) {
-      return Math.sign(difference);
-    }
-  }
-  return comparePrerelease(a.prerelease, b.prerelease);
-}
-
-function parseSemver(version: string): ParsedSemver {
-  const match = SEMVER_PATTERN.exec(version);
-  if (!match) {
-    throw new Error(
-      `Invalid Codex runtime version "${version}". Expected semantic version ` +
-        'major.minor.patch with optional prerelease/build metadata.'
-    );
-  }
-  const prerelease = match[4]?.split('.') ?? [];
-  for (const identifier of prerelease) {
-    if (/^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith('0')) {
-      throw new Error(
-        `Invalid Codex runtime version "${version}". Prerelease numeric ` +
-          'identifiers must not contain leading zeroes.'
-      );
-    }
-  }
+function codexRuntimeResolutionDiagnostics(
+  runtime: ResolvedCodexRuntime
+): AgentRuntimeResolutionDiagnostics {
   return {
-    major: Number.parseInt(match[1], 10),
-    minor: Number.parseInt(match[2], 10),
-    patch: Number.parseInt(match[3], 10),
-    prerelease
+    selectedExecutable: runtime.executable,
+    selectedSource: runtime.source,
+    selectedVersion: runtime.version,
+    selectedLaunchArgv: [...runtime.compatibility.launch.argv],
+    requiredCapabilities: [...runtime.compatibility.requiredMethods],
+    probes: runtime.diagnostics.map((probe) => ({
+      executable: probe.candidate.executable,
+      source: probe.candidate.source,
+      explicit: probe.candidate.explicit,
+      compatible: probe.compatible,
+      version: probe.version,
+      launchArgv: probe.launch ? [...probe.launch.argv] : undefined,
+      launchForm: probe.launch?.form,
+      missingCapabilities: probe.missingMethods ? [...probe.missingMethods] : undefined,
+      detail: probe.detail
+    }))
   };
-}
-
-function comparePrerelease(left: string[], right: string[]): number {
-  if (left.length === 0 && right.length === 0) {
-    return 0;
-  }
-  if (left.length === 0) {
-    return 1;
-  }
-  if (right.length === 0) {
-    return -1;
-  }
-
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (a === undefined) {
-      return -1;
-    }
-    if (b === undefined) {
-      return 1;
-    }
-    if (a === b) {
-      continue;
-    }
-    const aNumeric = /^\d+$/.test(a);
-    const bNumeric = /^\d+$/.test(b);
-    if (aNumeric && bNumeric) {
-      return Math.sign(Number.parseInt(a, 10) - Number.parseInt(b, 10));
-    }
-    if (aNumeric) {
-      return -1;
-    }
-    if (bNumeric) {
-      return 1;
-    }
-    return a < b ? -1 : 1;
-  }
-  return 0;
 }
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

@@ -902,9 +902,6 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     } catch (error) {
       problems.push(error instanceof Error ? error.message : String(error));
     }
-    if (this.supervisor.runtimeCompatibilityWarning) {
-      warnings.push(this.supervisor.runtimeCompatibilityWarning);
-    }
     if (this.toolSettingsRestartPending) {
       warnings.push(TOOL_SETTINGS_PENDING_RESTART_WARNING);
     }

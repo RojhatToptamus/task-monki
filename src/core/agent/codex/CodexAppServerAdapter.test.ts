@@ -32,6 +32,24 @@ describe('CodexAppServerAdapter', () => {
     expect(provider.models[0]?.model).toBe('fake-model');
     expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
     const initializedServer = (await store.snapshot()).agentServers[0];
+    expect(initializedServer.runtimeResolution).toMatchObject({
+      selectedExecutable: executable,
+      selectedSource: 'config',
+      selectedVersion: '0.141.0',
+      selectedLaunchArgv: ['app-server', '--stdio'],
+      requiredCapabilities: expect.arrayContaining(['thread/start', 'turn/start', 'review/start'])
+    });
+    expect(initializedServer.runtimeResolution?.probes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          executable,
+          source: 'config',
+          compatible: true,
+          version: '0.141.0',
+          launchForm: 'stdio-flag'
+        })
+      ])
+    );
     const initializedJournal = await fs.readFile(
       initializedServer.protocolJournalPath,
       'utf8'
@@ -932,6 +950,10 @@ if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.incl
   process.stdout.write('[]\\n');
   process.exit(0);
 }
+if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
+  process.stdout.write('Usage: codex app-server [OPTIONS]\\n  --stdio\\n  --listen <URL>\\n');
+  process.exit(0);
+}
 
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
@@ -1204,6 +1226,12 @@ rl.on('line', (line) => {
       } });
       break;
     }
+    case 'thread/goal/get':
+      send({ id: message.id, result: { goal: null } });
+      break;
+    case 'turn/steer':
+      send({ id: message.id, result: { turnId: 'turn-1' } });
+      break;
     case 'review/start':
       send({ id: message.id, result: {
         turn: { ...turn('inProgress'), id: reviewResponseTurnId },

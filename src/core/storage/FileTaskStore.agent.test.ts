@@ -33,7 +33,34 @@ describe('FileTaskStore agent persistence', () => {
       executable: 'codex',
       argv: ['app-server', '--stdio'],
       runtimeVersion: '0.141.0',
-      schemaHash: 'schema-hash'
+      schemaHash: 'schema-hash',
+      runtimeResolution: {
+        selectedExecutable: '/Applications/Codex.app/Contents/Resources/codex',
+        selectedSource: 'codex-app-bundle',
+        selectedVersion: '0.142.4',
+        selectedLaunchArgv: ['app-server', '--stdio'],
+        requiredCapabilities: ['thread/start', 'turn/start'],
+        probes: [
+          {
+            executable: '/opt/homebrew/bin/codex',
+            source: 'path',
+            explicit: false,
+            compatible: false,
+            version: '0.22.0',
+            detail: 'Codex App Server command or stdio transport was not detected.'
+          },
+          {
+            executable: '/Applications/Codex.app/Contents/Resources/codex',
+            source: 'codex-app-bundle',
+            explicit: false,
+            compatible: true,
+            version: '0.142.4',
+            launchArgv: ['app-server', '--stdio'],
+            launchForm: 'stdio-flag',
+            detail: 'Compatible Codex App Server via stdio-flag.'
+          }
+        ]
+      }
     });
     const run = await store.createRun({
       task,
@@ -111,6 +138,22 @@ describe('FileTaskStore agent persistence', () => {
 
     const reloaded = await new FileTaskStore(dir).snapshot();
     expect(reloaded.agentServers).toHaveLength(1);
+    expect(reloaded.agentServers[0]?.runtimeResolution).toMatchObject({
+      selectedExecutable: '/Applications/Codex.app/Contents/Resources/codex',
+      selectedVersion: '0.142.4',
+      probes: [
+        {
+          executable: '/opt/homebrew/bin/codex',
+          compatible: false,
+          version: '0.22.0'
+        },
+        {
+          executable: '/Applications/Codex.app/Contents/Resources/codex',
+          compatible: true,
+          launchForm: 'stdio-flag'
+        }
+      ]
+    });
     expect(reloaded.agentSessions).toHaveLength(1);
     expect(reloaded.agentItems).toHaveLength(1);
     expect(reloaded.interactionRequests[0]?.status).toBe('RESOLVED');

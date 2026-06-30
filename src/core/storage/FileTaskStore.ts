@@ -120,6 +120,7 @@ export interface CreateAgentServerInput {
   runtimeVersion?: string;
   schemaVersion?: string;
   schemaHash?: string;
+  runtimeResolution?: AgentServerInstance['runtimeResolution'];
 }
 
 interface CreateTestRunInput {
@@ -664,6 +665,7 @@ export class FileTaskStore {
       runtimeVersion: input.runtimeVersion,
       schemaVersion: input.schemaVersion,
       schemaHash: input.schemaHash,
+      runtimeResolution: clone(input.runtimeResolution),
       protocolJournalPath: this.protocolJournal.pathFor(id),
       startedAt: now
     };

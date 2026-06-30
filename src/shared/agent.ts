@@ -266,6 +266,27 @@ export type AgentJsonValue =
   | AgentJsonValue[]
   | { [key: string]: AgentJsonValue };
 
+export interface AgentRuntimeProbeDiagnostic {
+  executable: string;
+  source: string;
+  explicit: boolean;
+  compatible: boolean;
+  version?: string;
+  launchArgv?: string[];
+  launchForm?: string;
+  missingCapabilities?: string[];
+  detail: string;
+}
+
+export interface AgentRuntimeResolutionDiagnostics {
+  selectedExecutable: string;
+  selectedSource: string;
+  selectedVersion?: string;
+  selectedLaunchArgv?: string[];
+  requiredCapabilities: string[];
+  probes: AgentRuntimeProbeDiagnostic[];
+}
+
 export interface AgentServerInstance {
   id: string;
   provider: AgentProviderId;
@@ -278,6 +299,7 @@ export interface AgentServerInstance {
   runtimeVersion?: string;
   schemaVersion?: string;
   schemaHash?: string;
+  runtimeResolution?: AgentRuntimeResolutionDiagnostics;
   protocolJournalPath: string;
   startedAt: string;
   initializedAt?: string;

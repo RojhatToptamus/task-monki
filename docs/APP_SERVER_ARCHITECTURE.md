@@ -37,7 +37,7 @@ flowchart LR
   Orchestrator --> Adapter["AgentProviderAdapter"]
   Adapter --> Codex["CodexAppServerAdapter"]
   Codex --> RPC["CodexRpcClient"]
-  RPC --> Server["codex app-server --stdio"]
+  RPC --> Server["resolved codex app-server stdio transport"]
   RPC --> Journal["Protocol journal"]
   Journal --> Store["FileTaskStore"]
   Service --> Git["GitSnapshotService"]
@@ -76,7 +76,9 @@ Reasons:
 
 The adapter must:
 
-- launch and initialize the App Server;
+- resolve, launch, and initialize a compatible App Server runtime;
+- probe Codex App Server support by capability rather than rejecting runtimes
+  solely because their version is newer than the generated protocol baseline;
 - start the embedded App Server from Task Monki's core app settings. The default
   is local-only: apps disabled, web search disabled, and discovered MCP servers
   disabled through per-server runtime config overrides so local coding turns do
@@ -163,6 +165,28 @@ settings to that subprocess and supplies compact local repository context itself
 The refinement prompt must not ask the subprocess to inspect the repository with
 shell commands; prompt refinement is a fast rewrite step, not a detached agent
 investigation.
+
+## Runtime resolution
+
+Task Monki resolves a Codex executable before launching the long-lived App
+Server. Resolution checks explicit configuration first, then the
+`TASK_MONKI_CODEX_BIN` environment override, then every `codex` found on `PATH`,
+then known bundled runtimes such as Codex Desktop and the OpenAI Codex VS Code
+extension.
+
+Automatic discovery does not fail on the first stale binary. Each candidate is
+probed with `--version`, `codex app-server --help`, an isolated temporary
+`CODEX_HOME`, `initialize`, and the JSON-RPC methods Task Monki needs. The
+newest compatible automatically discovered runtime is selected. An explicit
+configured runtime is treated as intentional and must itself be compatible.
+The selected runtime, all candidate versions, rejected candidates, missing
+capabilities, and probe failures are persisted on the App Server instance and
+shown only in provider diagnostics/debug surfaces.
+
+The default transport is the documented local stdio App Server transport. Task
+Monki prefers `codex app-server --stdio`, uses `--listen stdio://` when that is
+the supported stdio form, and can fall back to `codex app-server` only when the
+runtime documents default stdio but not a stdio flag.
 
 Codex protocol detail:
 
