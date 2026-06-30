@@ -3,30 +3,35 @@ import { formatStatusValue } from './display';
 interface StatusBadgeProps {
   label: string;
   value: string;
-  tone?: 'neutral' | 'info' | 'success' | 'warning' | 'error';
+  tone?: 'neutral' | 'info' | 'action' | 'success' | 'warning' | 'error';
   muted?: boolean;
 }
 
-export function StatusBadge({ label, value, tone = 'neutral', muted = false }: StatusBadgeProps) {
-  const resolvedTone = tone === 'neutral' ? toneForValue(value) : tone;
-  return (
-    <span
-      className={`status-badge status-badge--${resolvedTone} ${muted ? 'status-badge--muted' : ''}`}
-    >
-      <span className="status-badge__dot" aria-hidden="true" />
-      <span>{label}</span>
-      <strong>{formatStatusValue(value)}</strong>
-    </span>
-  );
-}
+const RUNNING_VALUES = new Set([
+  'RUNNING',
+  'STARTING',
+  'QUEUED',
+  'CREATING',
+  'IN_PROGRESS',
+  'PUSHING',
+  'COMPUTING',
+  'INTERRUPTING'
+]);
 
 export function StatusChip({ label, value, tone = 'neutral', muted = false }: StatusBadgeProps) {
   const resolvedTone = tone === 'neutral' ? toneForValue(value) : tone;
+  const classes = [
+    'status-pill',
+    'status-pill--with-value',
+    `status-pill--${resolvedTone}`,
+    isRunningValue(value) ? 'status-pill--running' : '',
+    muted ? 'status-pill--muted' : ''
+  ].filter(Boolean);
   return (
-    <span className={`status-chip status-chip--${resolvedTone} ${muted ? 'status-chip--muted' : ''}`}>
-      <span className="status-chip__dot" aria-hidden="true" />
-      <span className="status-chip__label">{label}</span>
-      <strong className="status-chip__value">{formatStatusValue(value)}</strong>
+    <span className={classes.join(' ')}>
+      <span className="status-pill__dot" aria-hidden="true" />
+      <span className="status-pill__label">{label}</span>
+      <strong className="status-pill__value">{formatStatusValue(value)}</strong>
     </span>
   );
 }
@@ -79,19 +84,12 @@ function toneForValue(value: string): StatusBadgeProps['tone'] {
   ) {
     return 'warning';
   }
-  if (
-    [
-      'RUNNING',
-      'STARTING',
-      'QUEUED',
-      'CREATING',
-      'IN_PROGRESS',
-      'PUSHING',
-      'COMPUTING',
-      'INTERRUPTING'
-    ].includes(value)
-  ) {
+  if (isRunningValue(value)) {
     return 'info';
   }
   return 'neutral';
+}
+
+function isRunningValue(value: string): boolean {
+  return RUNNING_VALUES.has(value);
 }
