@@ -1052,37 +1052,25 @@ function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
 }
 
 function SeverityDistribution({ findings }: { findings: CodexReviewFinding[] }) {
-  const total = Math.max(findings.length, 1);
+  const counts = FINDING_LEVELS.map((level) => ({
+    ...level,
+    count: findings.filter((finding) => finding.severity === level.severity).length
+  }));
   return (
     <div className="tm-reviewfindings__distribution">
-      <div className="tm-reviewfindings__bar" aria-hidden="true">
-        {FINDING_LEVELS.map((level) => {
-          const count = findings.filter((finding) => finding.severity === level.severity).length;
-          return count > 0 ? (
-            <span
-              key={level.severity}
-              className={`tm-reviewfindings__segment tm-reviewfindings__segment--${level.tone}`}
-              style={{ width: `${(count / total) * 100}%` }}
-            />
-          ) : null;
-        })}
-      </div>
-      <div className="tm-reviewfindings__legend">
-        {FINDING_LEVELS.map((level) => {
-          const count = findings.filter((finding) => finding.severity === level.severity).length;
-          return (
-            <span
-              key={level.severity}
-              className={`tm-reviewfindings__legenditem tm-reviewfindings__legenditem--${level.tone}${
-                count > 0 ? '' : ' tm-reviewfindings__legenditem--empty'
-              }`}
-            >
-              <span />
-              <strong>{count}</strong>
-              {level.label}
-            </span>
-          );
-        })}
+      <div className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
+        {counts.map((level) => (
+          <span
+            key={level.severity}
+            className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}${
+              level.count > 0 ? '' : ' tm-reviewfindings__count--empty'
+            }`}
+          >
+            <span className="tm-reviewfindings__count-dot" />
+            <strong>{level.count}</strong>
+            {level.label}
+          </span>
+        ))}
       </div>
     </div>
   );

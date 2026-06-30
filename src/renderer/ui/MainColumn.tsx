@@ -613,8 +613,8 @@ function ModelSettingRow({
 
 export function Chip({ tone, label }: { tone: Tone; label: string }) {
   return (
-    <span className={`tm-chip tm-chip--${tone}`}>
-      <span className="tm-chip__dot" />
+    <span className={`status-pill status-pill--${tone}`}>
+      <span className="status-pill__dot" />
       {label}
     </span>
   );

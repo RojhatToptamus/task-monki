@@ -8,8 +8,8 @@ import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardV
 import { humanizeEnum } from './display';
 
 /**
- * Tone palette shared with the artifact's `chip(tone)` helper. Each maps to a
- * `--<tone>` CSS variable and the `.tm-chip--<tone>` class.
+ * Tone palette shared by the standard status pill. Each maps to a semantic
+ * `--<tone>` CSS variable and the `.status-pill--<tone>` class.
  */
 export type Tone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
