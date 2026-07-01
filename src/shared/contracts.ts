@@ -690,10 +690,6 @@ export interface SyncAgentGoalRequest {
   sessionId: string;
 }
 
-export interface UpdateAppSettingsRequest {
-  codexExternalTools?: import('./agent').CodexExternalToolSettings;
-}
-
 export interface RespondToInteractionRequest {
   taskId: string;
   runId: string;
@@ -757,6 +753,46 @@ export interface RefinePromptResponse {
   source: 'model' | 'deterministic-fallback';
 }
 
+export interface UpdateAppSettingsRequest {
+  theme?: import('./agent').TaskManagerThemePreference;
+  sidebarCollapsed?: boolean;
+  defaultModel?: string | null;
+  defaultReasoningEffort?: string | null;
+  promptRefinementModel?: string | null;
+  reviewModel?: string | null;
+  reviewReasoningEffort?: string | null;
+  codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
+  externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
+  repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+}
+
+export type ExternalToolId = 'git' | 'codex' | 'gh';
+export type ExternalToolResolutionSource = 'env' | 'override' | 'settings' | 'auto';
+export type ExternalToolProbeStatus = 'ok' | 'error';
+
+export interface ExternalToolProbeResult {
+  tool: ExternalToolId;
+  label: string;
+  required: boolean;
+  source: ExternalToolResolutionSource;
+  configuredPath: string | null;
+  executable: string;
+  resolvedPath: string | null;
+  status: ExternalToolProbeStatus;
+  version: string | null;
+  error: string | null;
+}
+
+export interface ExternalToolStatusReport {
+  tools: Record<ExternalToolId, ExternalToolProbeResult>;
+  refreshedAt: string;
+}
+
+export interface TestExternalToolRequest {
+  tool: ExternalToolId;
+  executablePath?: string | null;
+}
+
 export interface GitHubPreflightRequest {
   taskId: string;
 }
@@ -811,6 +847,8 @@ export interface TaskManagerApi {
   updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<import('./agent').TaskManagerAppSettings>;
+  getExternalToolStatus(): Promise<ExternalToolStatusReport>;
+  testExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;

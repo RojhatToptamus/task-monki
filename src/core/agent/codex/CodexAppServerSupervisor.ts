@@ -60,7 +60,7 @@ export function codexAppServerArgv(
   input: CodexAppServerLaunchConfig | readonly string[] = {}
 ): string[] {
   const launchConfig: CodexAppServerLaunchConfig = Array.isArray(input)
-    ? { mcpServerConfigOverrides: input as readonly string[] }
+    ? { mcpServerConfigOverrides: input }
     : (input as CodexAppServerLaunchConfig);
   const configOverrides = [
     ...codexExternalToolConfigOverrides(launchConfig.toolSettings),
@@ -127,6 +127,10 @@ export class CodexAppServerSupervisor {
 
   get lastRuntimeDiagnostics(): readonly CodexRuntimeProbeResult[] {
     return this.runtimeDiagnostics;
+  }
+
+  setExecutable(executable: string | undefined): void {
+    this.options.executable = executable;
   }
 
   setToolSettings(settings: CodexExternalToolSettings): void {
@@ -199,7 +203,6 @@ export class CodexAppServerSupervisor {
     this.runtimeDiagnostics = runtime.diagnostics;
     this.shuttingDown = false;
     this.diagnosticTail = '';
-
     const argv = await resolveCodexAppServerArgv({
       executable,
       cwd: this.options.cwd,
@@ -207,6 +210,7 @@ export class CodexAppServerSupervisor {
       toolSettings: this.options.toolSettings,
       launch: runtime.compatibility.launch
     });
+
     const server = await this.store.createAgentServer({
       provider: 'codex',
       runtimeKind: 'APP_SERVER',
@@ -266,11 +270,7 @@ export class CodexAppServerSupervisor {
           title: 'Task Monki',
           version: this.options.appVersion
         },
-        capabilities: {
-          experimentalApi: false,
-          requestAttestation: false,
-          optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
-        }
+        capabilities: null
       });
       await client.notify('initialized', {});
 

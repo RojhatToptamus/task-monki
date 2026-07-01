@@ -33,12 +33,15 @@ import type {
   AgentExecutionSettings,
   AgentRunMode,
   TaskManagerAppSettings,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ExternalToolStatusReport,
+  TestExternalToolRequest,
+  ExternalToolProbeResult
 } from '../../shared/contracts';
 import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
-import { git, gitSucceeds } from '../git/gitCli';
+import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
 import { PromptRefinementService } from '../prompt/PromptRefinementService';
@@ -51,6 +54,11 @@ import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
+import {
+  MemoryAppSettingsStore,
+  type AppSettingsStorage
+} from '../settings/AppSettingsStore';
+import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -60,7 +68,10 @@ export class TaskManagerService {
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
   private readonly promptRefiner = new PromptRefinementService();
+  private readonly appSettingsStore: AppSettingsStorage;
+  private readonly externalToolResolver: ExternalToolResolver;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
+  private codexExecutable: string | undefined;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -68,22 +79,34 @@ export class TaskManagerService {
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
+      gitPath?: string;
       ghPath?: string;
       codexPath?: string;
+      agentCwd?: string;
+      appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
     } = {}
   ) {
+    const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
     this.events = events;
+    this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
+    this.externalToolResolver = new ExternalToolResolver({
+      cwd: agentCwd,
+      overrides: {
+        git: options.gitPath,
+        codex: options.codexPath,
+        gh: options.ghPath
+      }
+    });
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
-      cwd: defaultRepositoryPath,
+      cwd: agentCwd,
       executable: options.codexPath,
       toolSettings: this.appSettings.codexExternalTools
     });
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ??
-        this.codexAdapter
+      options.agentProviderAdapter ?? this.codexAdapter
     );
     this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(
@@ -101,8 +124,8 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
-    this.appSettings = await this.store.getAppSettings();
-    await this.codexAdapter.updateToolSettings(this.appSettings.codexExternalTools, false);
+    this.appSettings = await this.appSettingsStore.get();
+    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
     await this.agents.initialize();
     const snapshot = await this.store.snapshot();
     const recoveryTaskIds = new Set(
@@ -122,24 +145,49 @@ export class TaskManagerService {
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.store.getAppSettings();
+    this.appSettings = await this.appSettingsStore.get();
     return structuredClone(this.appSettings);
   }
 
-  async updateAppSettings(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
-    const next = await this.store.updateAppSettings(input);
-    this.appSettings = next;
-    await this.codexAdapter.updateToolSettings(
-      next.codexExternalTools,
-      !(await this.hasActiveAgentRun())
+  async updateAppSettings(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    this.appSettings = await this.appSettingsStore.update(input);
+    const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
+    if (affectsExternalTools) {
+      const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
+      try {
+        await this.applyRuntimeSettings({
+          restartCodex: affectsCodexRuntime && !(await this.hasActiveAgentRun()),
+          updateCodex: affectsCodexRuntime
+        });
+      } catch {
+        // The setting is still saved; provider/tool status reports the runtime failure.
+      }
+      if (affectsCodexRuntime) {
+        this.events.emit({
+          type: 'provider.updated',
+          taskId: 'settings',
+          payload: await this.getAgentProviderState(),
+          at: new Date().toISOString()
+        });
+      }
+    }
+    return structuredClone(this.appSettings);
+  }
+
+  async getExternalToolStatus(): Promise<ExternalToolStatusReport> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.externalToolResolver.getStatus(this.appSettings.externalExecutables);
+  }
+
+  async testExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.externalToolResolver.probe(
+      input.tool,
+      this.appSettings.externalExecutables,
+      input
     );
-    this.events.emit({
-      type: 'provider.updated',
-      taskId: 'settings',
-      payload: await this.getAgentProviderState(),
-      at: new Date().toISOString()
-    });
-    return structuredClone(next);
   }
 
   validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
@@ -163,6 +211,7 @@ export class TaskManagerService {
       input.repositoryPath,
       input.input,
       input.model,
+      this.codexExecutable,
       this.appSettings.codexExternalTools
     );
     this.events.emit({
@@ -404,6 +453,26 @@ export class TaskManagerService {
     }
   }
 
+  private async applyRuntimeSettings(input: {
+    restartCodex: boolean;
+    updateCodex: boolean;
+  }): Promise<ExternalToolStatusReport> {
+    const status = await this.externalToolResolver.getStatus(
+      this.appSettings.externalExecutables
+    );
+    configureGitExecutablePath(executableForRuntime(status.tools.git));
+    this.github.setExecutable(executableForRuntime(status.tools.gh));
+    if (input.updateCodex) {
+      this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
+      await this.codexAdapter.updateRuntimeConfig({
+        executable: this.codexExecutable,
+        toolSettings: this.appSettings.codexExternalTools,
+        restart: input.restartCodex
+      });
+    }
+    return status;
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
@@ -417,7 +486,11 @@ export class TaskManagerService {
       throw new Error('Complete an agent turn before starting a detached review.');
     }
     const run = await this.requireRunForTask(runId, task.id);
-    if (ACTIVE_AGENT_RUN_STATUSES.has(run.status)) {
+    if (
+      ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
+        run.status
+      )
+    ) {
       throw new Error('Wait for the active turn to finish before starting a review.');
     }
     const iteration = snapshot.iterations.find(
@@ -952,6 +1025,26 @@ function assertRetryable(run: RunRecord): void {
   ) {
     throw new Error(`Run ${run.id} cannot be retried while it is ${run.status}.`);
   }
+}
+
+function executableForRuntime(result: ExternalToolProbeResult): string {
+  return result.resolvedPath ?? result.executable;
+}
+
+function explicitExecutableForCodexRuntime(
+  result: ExternalToolProbeResult
+): string | undefined {
+  if (result.source === 'auto') {
+    return undefined;
+  }
+  return result.configuredPath ?? result.executable;
+}
+
+function affectsCodexRuntimeSettings(input: UpdateAppSettingsRequest): boolean {
+  return Boolean(
+    input.codexExternalTools ||
+      (input.externalExecutables && 'codexExecutablePath' in input.externalExecutables)
+  );
 }
 
 const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([

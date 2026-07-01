@@ -1,11 +1,20 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
+import type { Task } from '../../shared/contracts';
 import {
   DEFAULT_PROMPT_REFINEMENT_MODEL,
-  type CodexExternalToolSettings,
-  type Task
+  type AgentModel,
+  type ExternalToolId,
+  type ExternalToolProbeResult,
+  type ExternalToolStatusReport,
+  type TaskManagerAppSettings,
+  type TestExternalToolRequest,
+  type UpdateAppSettingsRequest
 } from '../../shared/contracts';
-import type { AgentModel } from '../../shared/agent';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
+import {
+  buildExecutableTestRequest,
+  selectExecutableDisplayStatus
+} from '../model/executableSettings';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
 import { TaskActionsMenu } from './TaskActionsMenu';
@@ -26,24 +35,17 @@ interface MainColumnProps {
   tasks: Task[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
-  appSettings: AppSettings;
-  onSetAppSettings(settings: AppSettings): void;
-  codexExternalTools: CodexExternalToolSettings;
-  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
+  appSettings: TaskManagerAppSettings;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  externalToolStatus?: ExternalToolStatusReport;
+  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
   activeRepositoryPath: string;
   onSelect(taskId: string): void;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
-}
-
-export interface AppSettings {
-  defaultModel?: string;
-  defaultReasoningEffort?: string;
-  promptRefinementModel?: string;
-  reviewModel?: string;
-  reviewReasoningEffort?: string;
 }
 
 const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
@@ -82,8 +84,9 @@ export function MainColumn({
   onSetTheme,
   appSettings,
   onSetAppSettings,
-  codexExternalTools,
-  onSetCodexExternalTools,
+  externalToolStatus,
+  onRefreshExternalTools,
+  onTestExternalTool,
   error,
   models,
   activeRepositoryPath,
@@ -127,8 +130,9 @@ export function MainColumn({
           onSetTheme={onSetTheme}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
-          codexExternalTools={codexExternalTools}
-          onSetCodexExternalTools={onSetCodexExternalTools}
+          externalToolStatus={externalToolStatus}
+          onRefreshExternalTools={onRefreshExternalTools}
+          onTestExternalTool={onTestExternalTool}
           models={models}
           activeRepositoryPath={activeRepositoryPath}
         />
@@ -256,10 +260,7 @@ export function TaskCard({
         <div className="tm-card__meta">{vm.meta}</div>
         <div className="tm-card__rollups">
           {vm.rollups.map((rollup, index) => (
-            <span className="tm-rollup" key={index}>
-              <span className="tm-rollup__dot" style={dotStyle(rollup.tone)} />
-              {rollup.label}
-            </span>
+            <Chip key={index} tone={rollup.tone} label={rollup.label} compact />
           ))}
         </div>
       </div>
@@ -318,17 +319,19 @@ function Settings({
   onSetTheme,
   appSettings,
   onSetAppSettings,
-  codexExternalTools,
-  onSetCodexExternalTools,
+  externalToolStatus,
+  onRefreshExternalTools,
+  onTestExternalTool,
   models,
   activeRepositoryPath
 }: {
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
-  appSettings: AppSettings;
-  onSetAppSettings(settings: AppSettings): void;
-  codexExternalTools: CodexExternalToolSettings;
-  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
+  appSettings: TaskManagerAppSettings;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  externalToolStatus?: ExternalToolStatusReport;
+  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   models: AgentModel[];
   activeRepositoryPath: string;
 }) {
@@ -394,18 +397,16 @@ function Settings({
           onModelChange={(model) => {
             const nextModel = models.find((candidate) => candidate.model === model);
             onSetAppSettings({
-              ...appSettings,
-              defaultModel: model || undefined,
+              defaultModel: model || null,
               defaultReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.defaultReasoningEffort
-              )
+              ) ?? null
             });
           }}
           onEffortChange={(reasoningEffort) =>
             onSetAppSettings({
-              ...appSettings,
-              defaultReasoningEffort: reasoningEffort || undefined
+              defaultReasoningEffort: reasoningEffort || null
             })
           }
         />
@@ -416,8 +417,7 @@ function Settings({
           models={models}
           onModelChange={(model) =>
             onSetAppSettings({
-              ...appSettings,
-              promptRefinementModel: model || undefined
+              promptRefinementModel: model || null
             })
           }
         />
@@ -430,64 +430,118 @@ function Settings({
           onModelChange={(model) => {
             const nextModel = models.find((candidate) => candidate.model === model);
             onSetAppSettings({
-              ...appSettings,
-              reviewModel: model || undefined,
+              reviewModel: model || null,
               reviewReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.reviewReasoningEffort
-              )
+              ) ?? null
             });
           }}
           onEffortChange={(reasoningEffort) =>
             onSetAppSettings({
-              ...appSettings,
-              reviewReasoningEffort: reasoningEffort || undefined
+              reviewReasoningEffort: reasoningEffort || null
             })
           }
         />
         <ExternalToolSettingRow
           label="Web search"
           hint="Codex search tool"
-          value={codexExternalTools.webSearchMode}
+          value={appSettings.codexExternalTools.webSearchMode}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'cached', label: 'Cached' },
             { value: 'live', label: 'Live' }
           ]}
           onChange={(webSearchMode) =>
-            onSetCodexExternalTools({
-              webSearchMode
+            onSetAppSettings({
+              codexExternalTools: { webSearchMode }
             })
           }
         />
         <ExternalToolSettingRow
           label="MCP servers"
           hint="Configured Codex servers"
-          value={codexExternalTools.mcpServers}
+          value={appSettings.codexExternalTools.mcpServers}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'all', label: 'All enabled' }
           ]}
           onChange={(mcpServers) =>
-            onSetCodexExternalTools({
-              mcpServers
+            onSetAppSettings({
+              codexExternalTools: { mcpServers }
             })
           }
         />
         <ExternalToolSettingRow
           label="Apps"
           hint="Codex apps and connectors"
-          value={codexExternalTools.apps}
+          value={appSettings.codexExternalTools.apps}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'enabled', label: 'Enabled' }
           ]}
           onChange={(apps) =>
-            onSetCodexExternalTools({
-              apps
+            onSetAppSettings({
+              codexExternalTools: { apps }
             })
           }
         />
+        <ExecutableSettingRow
+          tool="git"
+          label="Git executable"
+          hint="Required for repository evidence"
+          value={appSettings.externalExecutables.gitExecutablePath}
+          status={externalToolStatus?.tools.git}
+          onSetPath={(gitExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { gitExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <ExecutableSettingRow
+          tool="codex"
+          label="Codex executable"
+          hint="Required for agent runs"
+          value={appSettings.externalExecutables.codexExecutablePath}
+          status={externalToolStatus?.tools.codex}
+          onSetPath={(codexExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { codexExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <ExecutableSettingRow
+          tool="gh"
+          label="GitHub CLI"
+          hint="Optional for PR delivery"
+          value={appSettings.externalExecutables.ghExecutablePath}
+          status={externalToolStatus?.tools.gh}
+          onSetPath={(ghExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { ghExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <div className="tm-settings__row">
+          <div style={{ minWidth: 0 }}>
+            <div className="tm-settings__k">Tool status</div>
+            <div className="tm-settings__hint">
+              {externalToolStatus
+                ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}`
+                : 'Not checked'}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="tm-settings__button"
+            onClick={() => void onRefreshExternalTools()}
+          >
+            Refresh
+          </button>
+        </div>
         {rows.map((row) => (
           <div className="tm-settings__row" key={row.k}>
             <div style={{ minWidth: 0 }}>
@@ -537,6 +591,157 @@ function ExternalToolSettingRow<Value extends string>({
       </div>
     </div>
   );
+}
+
+function ExecutableSettingRow({
+  tool,
+  label,
+  hint,
+  value,
+  status,
+  onSetPath,
+  onTest
+}: {
+  tool: ExternalToolId;
+  label: string;
+  hint: string;
+  value: string | null;
+  status?: ExternalToolProbeResult;
+  onSetPath(path: string | null): void;
+  onTest(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+}) {
+  const savedPath = value ?? '';
+  const [mode, setMode] = useState<'auto' | 'custom'>(savedPath ? 'custom' : 'auto');
+  const [draftPath, setDraftPath] = useState(savedPath);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ExternalToolProbeResult>();
+
+  useEffect(() => {
+    setMode(savedPath ? 'custom' : 'auto');
+    setDraftPath(savedPath);
+    setTestResult(undefined);
+  }, [savedPath]);
+
+  const isCustom = mode === 'custom';
+  const normalizedDraft = draftPath.trim();
+  const hasPendingCustomPath = isCustom && normalizedDraft !== savedPath;
+  const displayStatus = selectExecutableDisplayStatus(status, testResult);
+
+  return (
+    <div className="tm-settings__row tm-settings__row--tools">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">{label}</div>
+        <div className="tm-settings__hint">{hint} · {formatToolStatus(displayStatus)}</div>
+      </div>
+      <div className="tm-settings__controls tm-settings__controls--tools">
+        <select
+          className="tm-settings__select tm-settings__select--mode"
+          value={mode}
+          onChange={(event) => {
+            const nextMode = event.target.value === 'custom' ? 'custom' : 'auto';
+            setMode(nextMode);
+            setTestResult(undefined);
+            if (nextMode === 'auto') {
+              setDraftPath('');
+              onSetPath(null);
+            }
+          }}
+          aria-label={`${label} mode`}
+        >
+          <option value="auto">Auto</option>
+          <option value="custom">Custom</option>
+        </select>
+        <input
+          className="tm-settings__input"
+          value={draftPath}
+          onChange={(event) => {
+            setDraftPath(event.target.value);
+            setTestResult(undefined);
+          }}
+          disabled={!isCustom}
+          placeholder={displayStatus?.resolvedPath ?? displayStatus?.executable ?? 'Auto-detect'}
+          aria-label={`${label} path`}
+        />
+        {hasPendingCustomPath ? (
+          <button
+            type="button"
+            className="tm-settings__button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              setTestResult(undefined);
+              onSetPath(normalizedDraft || null);
+            }}
+          >
+            Save
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="tm-settings__button"
+          disabled={isTesting}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={async () => {
+            setIsTesting(true);
+            setTestResult(undefined);
+            try {
+              setTestResult(await onTest(buildExecutableTestRequest(tool, mode, draftPath)));
+            } finally {
+              setIsTesting(false);
+            }
+          }}
+        >
+          {isTesting ? 'Testing' : 'Test'}
+        </button>
+        <button
+          type="button"
+          className="tm-settings__button"
+          disabled={!savedPath && !draftPath}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setMode('auto');
+            setDraftPath('');
+            setTestResult(undefined);
+            onSetPath(null);
+          }}
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatToolStatus(status: ExternalToolProbeResult | undefined): string {
+  if (!status) {
+    return 'Not checked';
+  }
+  const source = humanizeEnum(status.source);
+  if (status.status === 'ok') {
+    const version = status.version ? ` · ${status.version}` : '';
+    const path = compactSettingsText(status.resolvedPath ?? status.executable);
+    return `${source} · ${path}${version}`;
+  }
+  const error = status.error ? compactSettingsText(status.error) : '';
+  return `${source} · ${status.required ? 'Unavailable' : 'Optional unavailable'}${
+    error ? ` · ${error}` : ''
+  }`;
+}
+
+function compactSettingsText(value: string, maxLength = 72): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  const headLength = 24;
+  const tailLength = Math.max(12, maxLength - headLength - 3);
+  return `${value.slice(0, headLength)}...${value.slice(-tailLength)}`;
+}
+
+function formatSettingsTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'recently';
+  }
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function ModelSettingRow({
@@ -611,11 +816,25 @@ function ModelSettingRow({
   );
 }
 
-export function Chip({ tone, label }: { tone: Tone; label: string }) {
+export function Chip({
+  tone,
+  label,
+  compact = false
+}: {
+  tone: Tone;
+  label: string;
+  compact?: boolean;
+}) {
+  const classes = [
+    'status-pill',
+    `status-pill--${tone}`,
+    compact ? 'status-pill--compact' : ''
+  ].filter(Boolean);
+
   return (
-    <span className={`status-pill status-pill--${tone}`}>
-      <span className="status-pill__dot" />
-      {label}
+    <span className={classes.join(' ')}>
+      <span className="status-pill__dot" aria-hidden="true" />
+      <span className="status-pill__label">{label}</span>
     </span>
   );
 }

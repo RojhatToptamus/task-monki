@@ -22,6 +22,7 @@ import type {
   RetryRunRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
+  TestExternalToolRequest,
   TaskManagerApi,
   TransitionTaskRequest,
   UpdateAppSettingsRequest
@@ -33,6 +34,9 @@ const api: TaskManagerApi = {
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
     ipcRenderer.invoke('settings:update', input),
+  getExternalToolStatus: () => ipcRenderer.invoke('settings:tools:status'),
+  testExternalTool: (input: TestExternalToolRequest) =>
+    ipcRenderer.invoke('settings:tools:test', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),

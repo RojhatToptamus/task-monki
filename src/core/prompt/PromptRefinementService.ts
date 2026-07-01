@@ -9,22 +9,18 @@ import {
 import { ProcessSupervisor } from '../process/ProcessSupervisor';
 import {
   codexExternalToolConfigOverrides,
-  listDisabledCodexMcpServerConfigOverrides,
-  normalizeCodexExternalToolSettings,
   resolveCodexExternalToolConfigOverrides
 } from '../agent/codex/CodexToolConfig';
 
 const REFINEMENT_REASONING_EFFORT = 'low';
 const REFINEMENT_TIMEOUT_MS = 90_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
-const REPOSITORY_CONTEXT_TEXT_LIMIT = 360;
-
-let disabledMcpServerConfigOverrides: Promise<string[]> | undefined;
 
 export interface PromptRefinementRunRequest {
   repositoryPath: string;
   instruction: string;
   model?: string;
+  codexExecutable?: string;
   toolSettings?: CodexExternalToolSettings;
 }
 
@@ -37,6 +33,7 @@ export class PromptRefinementService {
     repositoryPath: string,
     input: string,
     model?: string,
+    codexExecutable?: string,
     toolSettings?: CodexExternalToolSettings
   ): Promise<RefinePromptResponse> {
     const trimmed = input.trim();
@@ -44,12 +41,12 @@ export class PromptRefinementService {
       throw new Error('Prompt text is required.');
     }
 
-    const repositoryContext = await readRepositoryContext(repositoryPath);
     try {
       const modelOutput = await this.runModel({
         repositoryPath,
-        instruction: buildRefinementInstruction(trimmed, repositoryContext),
+        instruction: buildRefinementInstruction(trimmed),
         model,
+        codexExecutable,
         toolSettings
       });
       const refined = parseModelRefinement(modelOutput);
@@ -58,7 +55,7 @@ export class PromptRefinementService {
         source: 'model'
       };
     } catch {
-      return buildDeterministicFallback(repositoryPath, trimmed, repositoryContext);
+      return buildDeterministicFallback(repositoryPath, trimmed);
     }
   }
 }
@@ -68,7 +65,8 @@ export function buildRefinementCommand(
   model = DEFAULT_PROMPT_REFINEMENT_MODEL,
   configOverrides: readonly string[] = codexExternalToolConfigOverrides(
     DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
-  )
+  ),
+  executable = 'codex'
 ): {
   executable: string;
   argv: string[];
@@ -79,7 +77,7 @@ export function buildRefinementCommand(
   const selectedModel = model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL;
 
   return {
-    executable: 'codex',
+    executable,
     argv: [
       '--ask-for-approval',
       'never',
@@ -104,12 +102,19 @@ async function runCodexRefinement({
   repositoryPath,
   instruction,
   model,
+  codexExecutable,
   toolSettings
 }: PromptRefinementRunRequest): Promise<string> {
+  const executable = codexExecutable ?? 'codex';
   const command = buildRefinementCommand(
     repositoryPath,
     model,
-    await resolvePromptRefinementConfigOverrides(repositoryPath, toolSettings)
+    await resolveCodexExternalToolConfigOverrides({
+      executable,
+      cwd: repositoryPath,
+      settings: toolSettings
+    }),
+    executable
   );
   const process = new ProcessSupervisor().start({
     executable: command.executable,
@@ -173,11 +178,11 @@ async function runCodexRefinement({
   });
 }
 
-function buildRefinementInstruction(input: string, repositoryContext: string): string {
+function buildRefinementInstruction(input: string): string {
   return [
     'You are refining a software task prompt for the repository in your current working directory.',
     '',
-    'Do not run commands, inspect files, use tools, or modify files. Use only the repository context provided below.',
+    'Before writing the prompt, inspect the repository with read-only commands. Review the file tree, package/build configuration, relevant implementation files, tests, and documentation. Do not modify any file.',
     '',
     'Return JSON only, with exactly these string fields:',
     '{"titleSuggestion":"...","prompt":"..."}',
@@ -189,10 +194,7 @@ function buildRefinementInstruction(input: string, repositoryContext: string): s
     '## Acceptance criteria',
     '## Verification',
     '',
-    'Repository context must stay within the facts provided below. Do not invent repository facts. Keep the requested scope intact and make acceptance criteria objectively testable.',
-    '',
-    'Repository context:',
-    repositoryContext,
+    'Repository context must name concrete files, modules, symbols, scripts, or architectural boundaries you actually inspected. Do not invent repository facts. Keep the requested scope intact and make acceptance criteria objectively testable.',
     '',
     'User request:',
     input
@@ -265,10 +267,9 @@ function parseModelRefinement(output: string): Pick<
 
 async function buildDeterministicFallback(
   repositoryPath: string,
-  input: string,
-  repositoryContext?: string
+  input: string
 ): Promise<RefinePromptResponse> {
-  const context = repositoryContext ?? (await readRepositoryContext(repositoryPath));
+  const context = await readRepositoryContext(repositoryPath);
   const titleSuggestion = titleFromInput(input);
   const prompt = [
     `# Task: ${titleSuggestion}`,
@@ -312,21 +313,15 @@ function appendBounded(current: string, next: string): string {
 }
 
 async function readRepositoryContext(repositoryPath: string): Promise<string> {
-  const [packageJson, readme, docsReadme, agentGuide, topLevelEntries] = await Promise.all([
+  const [packageJson, readme] = await Promise.all([
     readJsonFile(path.join(repositoryPath, 'package.json')),
     readFirstExistingText([
       path.join(repositoryPath, 'README.md'),
       path.join(repositoryPath, 'readme.md')
-    ]),
-    readFirstExistingText([path.join(repositoryPath, 'docs', 'README.md')]),
-    readFirstExistingText([path.join(repositoryPath, 'AGENTS.md')]),
-    readTopLevelEntries(repositoryPath)
+    ])
   ]);
 
   const lines: string[] = [];
-  if (topLevelEntries.length > 0) {
-    lines.push(`- Top-level entries: ${topLevelEntries.join(', ')}`);
-  }
   if (packageJson && typeof packageJson === 'object') {
     const data = packageJson as Record<string, unknown>;
     if (typeof data.name === 'string') {
@@ -341,59 +336,10 @@ async function readRepositoryContext(repositoryPath: string): Promise<string> {
   }
 
   if (readme) {
-    lines.push(`- README summary: ${summarizeContextText(readme)}`);
-  }
-  if (docsReadme) {
-    lines.push(`- Docs map summary: ${summarizeContextText(docsReadme)}`);
-  }
-  if (agentGuide) {
-    lines.push(`- Agent guide summary: ${summarizeContextText(agentGuide)}`);
+    lines.push(`- README summary: ${readme.replace(/\s+/g, ' ').slice(0, 280)}`);
   }
 
   return lines.length > 0 ? lines.join('\n') : '- No package metadata or README summary found.';
-}
-
-async function resolvePromptRefinementConfigOverrides(
-  repositoryPath: string,
-  settings = DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
-): Promise<string[]> {
-  const normalized = normalizeCodexExternalToolSettings(settings);
-  return resolveCodexExternalToolConfigOverrides({
-    executable: 'codex',
-    cwd: repositoryPath,
-    settings: normalized,
-    mcpServerConfigOverrides:
-      normalized.mcpServers === 'disabled'
-        ? await cachedDisabledMcpServerConfigOverrides(repositoryPath)
-        : undefined
-  });
-}
-
-function cachedDisabledMcpServerConfigOverrides(repositoryPath: string): Promise<string[]> {
-  if (!disabledMcpServerConfigOverrides) {
-    disabledMcpServerConfigOverrides = listDisabledCodexMcpServerConfigOverrides(
-      'codex',
-      repositoryPath
-    ).catch(() => []);
-  }
-  return disabledMcpServerConfigOverrides;
-}
-
-async function readTopLevelEntries(repositoryPath: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(repositoryPath, { withFileTypes: true });
-    return entries
-      .filter((entry) => !entry.name.startsWith('.'))
-      .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : ''}`)
-      .sort((a, b) => a.localeCompare(b))
-      .slice(0, 18);
-  } catch {
-    return [];
-  }
-}
-
-function summarizeContextText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim().slice(0, REPOSITORY_CONTEXT_TEXT_LIMIT);
 }
 
 async function readJsonFile(filePath: string): Promise<unknown | undefined> {

@@ -128,8 +128,31 @@ export interface CodexExternalToolSettings {
   apps: CodexAppsMode;
 }
 
+export interface ExternalExecutablePathSettings {
+  gitExecutablePath: string | null;
+  codexExecutablePath: string | null;
+  ghExecutablePath: string | null;
+}
+
+export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
+
+export interface TaskManagerRepositorySettings {
+  knownPaths: string[];
+  selectedPath: string | null;
+}
+
 export interface TaskManagerAppSettings {
+  schemaVersion: 1;
+  theme: TaskManagerThemePreference;
+  sidebarCollapsed: boolean;
+  defaultModel?: string;
+  defaultReasoningEffort?: string;
+  promptRefinementModel?: string;
+  reviewModel?: string;
+  reviewReasoningEffort?: string;
   codexExternalTools: CodexExternalToolSettings;
+  externalExecutables: ExternalExecutablePathSettings;
+  repositories: TaskManagerRepositorySettings;
 }
 
 export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
@@ -138,10 +161,24 @@ export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
   apps: 'disabled'
 };
 
+export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSettings = {
+  gitExecutablePath: null,
+  codexExecutablePath: null,
+  ghExecutablePath: null
+};
+
 export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
-  codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
+  schemaVersion: 1,
+  theme: 'device',
+  sidebarCollapsed: false,
+  codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
+  externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
+  repositories: {
+    knownPaths: [],
+    selectedPath: null
+  }
 };
 
 export type AgentObservationSource =

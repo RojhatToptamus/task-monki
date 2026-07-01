@@ -70,6 +70,25 @@ describe('GitHub PR rollups', () => {
 });
 
 describe('GitHubService branch publication', () => {
+  it('uses the configured executable instead of rereading raw env overrides', () => {
+    const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
+    process.env.TASK_MANAGER_GH_PATH = '   ';
+    try {
+      const service = new GitHubService('/initial/gh');
+      service.setExecutable('/resolved/gh');
+
+      expect((service as unknown as { ghExecutable: string }).ghExecutable).toBe(
+        '/resolved/gh'
+      );
+    } finally {
+      if (originalGhPath === undefined) {
+        delete process.env.TASK_MANAGER_GH_PATH;
+      } else {
+        process.env.TASK_MANAGER_GH_PATH = originalGhPath;
+      }
+    }
+  });
+
   it('pushes a committed task branch to a local bare remote', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-publish-'));
     const remote = path.join(dir, 'remote.git');

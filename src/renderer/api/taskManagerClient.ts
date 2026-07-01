@@ -35,6 +35,7 @@ import type {
   ReadProtocolMessageRequest,
   StartReviewRequest,
   SteerRunRequest,
+  TestExternalToolRequest,
   UpdateAppSettingsRequest
 } from '../../shared/contracts';
 
@@ -109,6 +110,9 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),
+    getExternalToolStatus: () => get(baseUrl, '/api/settings/tools'),
+    testExternalTool: (input: TestExternalToolRequest) =>
+      post(baseUrl, '/api/settings/tools/test', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),

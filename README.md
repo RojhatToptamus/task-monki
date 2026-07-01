@@ -41,7 +41,7 @@ What you can do today:
 
 ## Local-first, by design
 
-Task Monki runs entirely on your machine. The development API binds to `127.0.0.1`, task state lives in local storage, and every task gets its own Git branch and worktree.
+Task Monki runs entirely on your machine. The development API binds to `127.0.0.1`, task and evidence records stay in the local task store, app preferences stay in a separate app settings file, and every task gets its own Git branch and worktree.
 
 The actual implementation is delegated to your installed, authenticated Codex CLI through a single application-scoped App Server process. Task Monki discovers the available models and reasoning efforts, opens persistent threads in task worktrees, captures the structured protocol activity, and records Git and process evidence on its own. Connectivity and data handling still follow your Codex CLI configuration and account.
 
@@ -49,7 +49,7 @@ A guiding principle runs through the whole task page: it keeps **Reported by Cod
 
 When Codex spawns subagents, they show up as an explicit parent/child tree: delegated prompts, requested model and effort, provider status, nested turns, and source-thread labels on approvals. Hierarchy edges are only drawn from provider-supplied thread IDs, and missing or contradictory relationships stay visible rather than being papered over.
 
-GitHub is optional. When you enable it, Task Monki uses local Git and the authenticated `gh` CLI to publish a branch, open a draft pull request, and read delivery status.
+GitHub is optional. When you enable it, Task Monki uses local Git and the authenticated `gh` CLI to publish a branch, open a draft pull request, and read delivery status. Git, Codex, and `gh` executable paths can be checked and customized from Settings.
 
 ## The workflow
 
@@ -64,10 +64,23 @@ GitHub is optional. When you enable it, Task Monki uses local Git and the authen
 
 Task data and artifacts are stored locally. The browser dev server uses a temporary store by default; the Electron app uses its application data directory.
 
+## Install Task Monki
+
+Download the latest desktop build from
+[GitHub Releases](https://github.com/RojhatToptamus/task-monki/releases/latest).
+
+Current builds are unsigned. macOS and Windows may show security warnings until
+signing and notarization are added.
+
+After installing, launch Task Monki and select a local Git repository from the
+repository menu.
+
+Task Monki does not bundle Git, Codex CLI, or GitHub CLI. See
+[install instructions](./docs/INSTALL.md) for platform downloads, CLI
+prerequisites, and manual update steps.
+
 ## Requirements
 
-- Node.js 20 or newer
-- npm
 - Git
 - [Codex CLI](https://github.com/openai/codex) 0.141.0 or newer, installed and authenticated
 - Optional: [GitHub CLI](https://cli.github.com/), installed and authenticated, for branch and pull-request features
@@ -78,7 +91,12 @@ The repository you manage must already be a valid local Git repo. GitHub deliver
 gh auth login
 ```
 
-## Run it locally
+## Run From Source
+
+Most users should install a release. Use the source workflow when developing
+Task Monki or testing local changes.
+
+Source development also requires Node.js 20 or newer and npm.
 
 Install dependencies:
 
@@ -144,6 +162,8 @@ npm run check:codex-protocol
 - [Docs index](./docs/README.md) explains the curated public docs and what stays private.
 - [Product workflow](./docs/PRODUCT_WORKFLOW.md) captures board phases and action rules.
 - [App Server architecture](./docs/APP_SERVER_ARCHITECTURE.md) captures the Codex integration boundary.
+- [Install guide](./docs/INSTALL.md) explains release artifacts and manual updates.
+- [Release guide](./docs/RELEASING.md) explains the unsigned GitHub Releases workflow.
 - [Review lifecycle](./docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md) is authoritative for Codex review, request-changes, stale-review, and follow-up behavior.
 
 ## Generated Codex protocol bindings

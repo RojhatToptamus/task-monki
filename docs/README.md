@@ -16,10 +16,15 @@ behavior and architecture, not private roadmap sequencing.
 2. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-3. `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
+3. `docs/INSTALL.md`
+   - User-facing install, prerequisite, unsigned-build, and manual update
+     instructions.
+4. `docs/RELEASING.md`
+   - Maintainer workflow for unsigned GitHub Releases.
+5. `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
    - Authoritative review workflow lifecycle. Read before touching review,
      follow-up, stale-review, or interrupt behavior.
-4. `docs/research/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+6. `docs/research/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
 
 For agent-specific working instructions, start at root `AGENTS.md`.

@@ -1,6 +1,8 @@
 node_modules/
 dist-electron/
 dist-renderer/
+release/
+build/icon.iconset/
 .task-manager-dev-store/
 .playwright-mcp/
 .local/

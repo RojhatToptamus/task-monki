@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'ele
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
   AppUpdateEvent,
   ContinueRunRequest,
@@ -23,6 +24,7 @@ import type {
   RetryRunRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
+  TestExternalToolRequest,
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
@@ -33,6 +35,8 @@ let serviceCreated = false;
 let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
 
+const appId = 'dev.taskmonki.desktop';
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -41,6 +45,8 @@ function createWindow(): void {
     minHeight: 720,
     title: 'Task Monki',
     backgroundColor: '#101217',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 17 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -72,6 +78,10 @@ function installIpcHandlers(): void {
   ipcMain.handle('settings:get', () => service.getAppSettings());
   ipcMain.handle('settings:update', async (_, input: UpdateAppSettingsRequest) => {
     return service.updateAppSettings(input);
+  });
+  ipcMain.handle('settings:tools:status', () => service.getExternalToolStatus());
+  ipcMain.handle('settings:tools:test', async (_, input: TestExternalToolRequest) => {
+    return service.testExternalTool(input);
   });
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {
@@ -188,10 +198,51 @@ function broadcast(event: AppUpdateEvent): void {
   mainWindow?.webContents.send('app:update', event);
 }
 
+function configureDesktopCliPath(): void {
+  const existingPath = process.env.PATH ?? '';
+  const existingEntries = existingPath.split(path.delimiter).filter(Boolean);
+  const windowsLocalGitPath = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd')
+    : undefined;
+  const commonEntries =
+    process.platform === 'darwin'
+      ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+      : process.platform === 'linux'
+        ? ['/usr/local/bin', '/usr/bin', '/bin']
+        : [
+            'C:\\Program Files\\Git\\cmd',
+            'C:\\Program Files\\GitHub CLI',
+            windowsLocalGitPath
+          ];
+
+  const entries = [
+    ...commonEntries.filter((entry): entry is string => Boolean(entry)),
+    ...existingEntries
+  ];
+  process.env.PATH = [...new Set(entries)].join(path.delimiter);
+}
+
+function resolveDefaultRepositoryPath(): string {
+  if (process.env.TASK_MANAGER_REPO_PATH !== undefined) {
+    return process.env.TASK_MANAGER_REPO_PATH;
+  }
+  return app.isPackaged ? '' : process.cwd();
+}
+
 app.whenReady().then(async () => {
+  app.setAppUserModelId(appId);
+  configureDesktopCliPath();
+  const defaultRepositoryPath = resolveDefaultRepositoryPath();
   service = new TaskManagerService(
     new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
-    process.cwd()
+    defaultRepositoryPath,
+    undefined,
+    {
+      agentCwd: defaultRepositoryPath || app.getPath('home'),
+      appSettingsStore: new AppSettingsStore(
+        path.join(app.getPath('userData'), 'app-settings.json')
+      )
+    }
   );
   serviceCreated = true;
   await service.init();

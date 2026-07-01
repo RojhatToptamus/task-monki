@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "description": "Experimental local task board for running Codex in isolated Git worktrees.",
+  "author": "Task Monki contributors",
+  "homepage": "https://github.com/RojhatToptamus/task-monki#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RojhatToptamus/task-monki.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RojhatToptamus/task-monki/issues"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -12,6 +21,10 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
+    "dist:dir": "npm run build && electron-builder --dir",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
     "dev:api": "npm run build:main && node dist-electron/dev/server.js",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
@@ -30,6 +43,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",
     "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
     "typescript": "^5.9.3",
     "vite": "^5.4.21",
     "vitest": "^2.1.9"

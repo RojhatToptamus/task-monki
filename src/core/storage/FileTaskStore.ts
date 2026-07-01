@@ -33,19 +33,14 @@ import type {
   RunRecord,
   StatusProjection,
   Task,
-  TaskManagerAppSettings,
   TaskIteration,
   TaskSnapshot,
   TestRunRecord,
-  UpdateAppSettingsRequest,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
-  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-  DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
-  createInitialProjection,
-  type CodexExternalToolSettings
+  createInitialProjection
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
@@ -143,19 +138,14 @@ interface PersistedState extends StoreState {}
 
 export class FileTaskStore {
   private readonly storePath: string;
-  private readonly appSettingsPath: string;
   private readonly artifactsDir: string;
   private readonly protocolJournal: AgentProtocolJournal;
   private state: StoreState = createEmptyState();
-  private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private loaded = false;
-  private appSettingsLoaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
-  private appSettingsWriteQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly baseDir: string) {
     this.storePath = path.join(baseDir, 'store.json');
-    this.appSettingsPath = path.join(baseDir, 'app-settings.json');
     this.artifactsDir = path.join(baseDir, 'artifacts');
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
   }
@@ -187,44 +177,9 @@ export class FileTaskStore {
     this.loaded = true;
   }
 
-  private async initAppSettings(): Promise<void> {
-    if (this.appSettingsLoaded) {
-      return;
-    }
-
-    try {
-      const raw = await fs.readFile(this.appSettingsPath, 'utf8');
-      this.appSettings = normalizeLoadedAppSettings(JSON.parse(raw) as unknown);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      this.appSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
-    }
-
-    this.appSettingsLoaded = true;
-  }
-
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return clone(this.state);
-  }
-
-  async getAppSettings(): Promise<TaskManagerAppSettings> {
-    await this.initAppSettings();
-    return clone(this.appSettings);
-  }
-
-  async updateAppSettings(
-    input: UpdateAppSettingsRequest
-  ): Promise<TaskManagerAppSettings> {
-    await this.initAppSettings();
-    this.appSettings = normalizeLoadedAppSettings({
-      ...this.appSettings,
-      ...input
-    });
-    await this.persistAppSettingsQueued();
-    return clone(this.appSettings);
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
@@ -2299,14 +2254,6 @@ export class FileTaskStore {
     await operation;
   }
 
-  private async persistAppSettingsQueued(): Promise<void> {
-    const operation = this.appSettingsWriteQueue
-      .catch(() => undefined)
-      .then(() => this.persistAppSettings());
-    this.appSettingsWriteQueue = operation.catch(() => undefined);
-    await operation;
-  }
-
   private async persist(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true });
     const tmpPath = `${this.storePath}.tmp`;
@@ -2316,17 +2263,6 @@ export class FileTaskStore {
     });
     await fs.chmod(tmpPath, 0o600);
     await fs.rename(tmpPath, this.storePath);
-  }
-
-  private async persistAppSettings(): Promise<void> {
-    await fs.mkdir(this.baseDir, { recursive: true });
-    const tmpPath = `${this.appSettingsPath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.appSettings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.chmod(tmpPath, 0o600);
-    await fs.rename(tmpPath, this.appSettingsPath);
   }
 }
 
@@ -2667,52 +2603,6 @@ function findSourceRunForReviewRepair(
         run.mode !== 'REVIEW'
     )
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
-}
-
-function normalizeLoadedAppSettings(value: unknown): TaskManagerAppSettings {
-  const record = objectRecord(value);
-  return {
-    codexExternalTools: normalizeCodexExternalToolSettings(
-      record?.codexExternalTools
-    )
-  };
-}
-
-function normalizeCodexExternalToolSettings(value: unknown): CodexExternalToolSettings {
-  const record = objectRecord(value);
-  return {
-    webSearchMode: isCodexWebSearchMode(record?.webSearchMode)
-      ? record.webSearchMode
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.webSearchMode,
-    mcpServers: isCodexMcpServersMode(record?.mcpServers)
-      ? record.mcpServers
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.mcpServers,
-    apps: isCodexAppsMode(record?.apps)
-      ? record.apps
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.apps
-  };
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function isCodexWebSearchMode(
-  value: unknown
-): value is CodexExternalToolSettings['webSearchMode'] {
-  return value === 'disabled' || value === 'cached' || value === 'live';
-}
-
-function isCodexMcpServersMode(
-  value: unknown
-): value is CodexExternalToolSettings['mcpServers'] {
-  return value === 'disabled' || value === 'all';
-}
-
-function isCodexAppsMode(value: unknown): value is CodexExternalToolSettings['apps'] {
-  return value === 'disabled' || value === 'enabled';
 }
 
 function clone<T>(value: T): T {

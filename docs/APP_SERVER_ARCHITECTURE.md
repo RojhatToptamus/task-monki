@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-06-29
+Date: 2026-07-01
 
 This document describes the current architecture, not an old migration plan.
 
@@ -16,7 +16,7 @@ Task Monki owns:
 - Git snapshots, dirty fingerprints, and diff artifacts;
 - test execution and test artifacts;
 - GitHub branch, PR, check, review, and merge evidence;
-- local completion and Done transitions.
+- local acceptance and Done transitions.
 
 Codex owns:
 
@@ -134,7 +134,7 @@ mode or follow-up behavior.
 
 ## Settings
 
-Task and review execution settings include:
+Task and review execution settings stored on task/run records include:
 
 - model;
 - reasoning effort;
@@ -147,24 +147,29 @@ Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
 
-Core app settings also include Codex external tool settings:
+App-level user preferences are separate from `FileTaskStore`. The Electron app
+stores them in `app-settings.json` directly under `app.getPath('userData')`.
+The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
+`app-settings.json` file beside the dev store. These settings include:
 
-- web search mode: disabled, cached, or live;
-- MCP servers: disabled or all configured servers;
-- apps/connectors: disabled or enabled.
+- theme and sidebar preference;
+- default implementation, review, and prompt-refinement models;
+- selected and known repositories;
+- Codex external tool modes for web search, MCP servers, and apps;
+- external executable path preferences for Git, Codex CLI, and GitHub CLI.
 
-These settings are persisted outside the task store schema and apply before the
-embedded App Server starts. If they change while no agent turn is active, Task
-Monki restarts the App Server so the new launch config is effective immediately.
-If an agent turn is active, the setting is stored and applies after the App
-Server restarts.
+Empty executable paths mean Auto-detect. The main process resolves and probes
+executables live; resolved paths and detected versions are not persisted. Git
+and Codex CLI are required, while GitHub CLI is optional. Environment variables
+`TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
+act as debug overrides ahead of saved settings.
 
-Prompt refinement uses a short-lived `codex exec --json --ephemeral` subprocess
-rather than the persistent App Server. Task Monki applies the same external tool
-settings to that subprocess and supplies compact local repository context itself.
-The refinement prompt must not ask the subprocess to inspect the repository with
-shell commands; prompt refinement is a fast rewrite step, not a detached agent
-investigation.
+Codex Auto-detect status may display the resolved `codex` path, but that
+auto-discovered path is not passed as an explicit App Server runtime. In Auto
+mode, App Server startup leaves the executable unset so capability-based
+runtime resolution can scan all candidates and choose a compatible runtime.
+Saved custom paths, constructor overrides, and `TASK_MONKI_CODEX_BIN` are
+intentional and are passed explicitly.
 
 ## Runtime resolution
 

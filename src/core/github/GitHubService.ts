@@ -37,7 +37,11 @@ interface ExecResult {
 }
 
 export class GitHubService {
-  constructor(private readonly ghExecutable = process.env.TASK_MANAGER_GH_PATH ?? 'gh') {}
+  constructor(private ghExecutable = 'gh') {}
+
+  setExecutable(executable: string | undefined): void {
+    this.ghExecutable = executable ?? 'gh';
+  }
 
   async preflight(task: Task, worktree: WorktreeRecord): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
     const remote = await detectGitHubRemote(worktree.worktreePath);
