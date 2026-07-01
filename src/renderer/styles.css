@@ -3323,6 +3323,13 @@ textarea:focus-visible {
   color: var(--text);
 }
 
+.tm-nav__item:focus-visible,
+.tm-nav__repo:focus-visible,
+.tm-segtoggle__btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--action) 65%, transparent);
+  outline-offset: 2px;
+}
+
 .tm-nav__item--active {
   background: var(--surface2);
   color: var(--text);
@@ -4059,15 +4066,69 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.tm-card__rollups {
+.tm-card__evidence {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  min-height: 26px;
+  gap: 4px 12px;
   padding-top: 8px;
   margin-top: 3px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--hair);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.tm-card__evidence-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.tm-card__evidence-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.tm-card__evidence-item--info {
+  color: var(--info-ink);
+  font-weight: 600;
+}
+
+.tm-card__evidence-item--info .tm-card__evidence-dot {
+  background: var(--info);
+}
+
+.tm-card__evidence-item--action {
+  color: var(--action-ink);
+  font-weight: 600;
+}
+
+.tm-card__evidence-item--action .tm-card__evidence-dot {
+  background: var(--action);
+}
+
+.tm-card__evidence-item--error {
+  color: var(--error-ink);
+  font-weight: 600;
+}
+
+.tm-card__evidence-item--error .tm-card__evidence-dot {
+  background: var(--error);
+}
+
+.tm-card__evidence-item--success {
+  color: var(--muted);
+}
+
+.tm-card__evidence-item--success .tm-card__evidence-dot {
+  background: var(--success);
 }
 
 .tm-card__hit {
@@ -4865,6 +4926,12 @@ textarea:focus-visible {
   align-items: center;
 }
 
+.tm-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--action) 65%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 .tm-tab--active {
   border-bottom-color: var(--accent);
   color: var(--text);
@@ -4929,24 +4996,21 @@ textarea:focus-visible {
 }
 
 .tm-finishpanel {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
   gap: 12px;
-  flex-wrap: wrap;
-  padding: 14px 16px;
+  padding: 16px;
 }
 
 .tm-finishpanel__head,
 .tm-finishpanel__actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .tm-finishpanel__head {
-  justify-content: flex-start;
+  justify-content: space-between;
 }
 
 .tm-finishpanel .tm-panel__title {
@@ -4959,11 +5023,77 @@ textarea:focus-visible {
   margin-left: auto;
 }
 
+.tm-finishpanel__requirements {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tm-finishpanel__requirement {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+
+.tm-finishpanel__requirement-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.tm-finishpanel__requirement--info {
+  color: var(--info-ink);
+}
+
+.tm-finishpanel__requirement--info .tm-finishpanel__requirement-dot {
+  background: var(--info);
+}
+
+.tm-finishpanel__requirement--action {
+  color: var(--action-ink);
+}
+
+.tm-finishpanel__requirement--action .tm-finishpanel__requirement-dot {
+  background: var(--action);
+}
+
+.tm-finishpanel__requirement--success {
+  color: var(--muted);
+}
+
+.tm-finishpanel__requirement--success .tm-finishpanel__requirement-dot {
+  background: var(--success);
+}
+
+.tm-finishpanel__requirement--error {
+  color: var(--error-ink);
+}
+
+.tm-finishpanel__requirement--error .tm-finishpanel__requirement-dot {
+  background: var(--error);
+}
+
 .tm-finishpanel__actions .primary-button,
 .tm-finishpanel__actions .outline-button {
   height: 32px;
   padding: 0 12px;
   font-size: 12px;
+}
+
+.tm-finishpanel__mark-done-anyway {
+  border-color: var(--action-line);
+  color: var(--action-ink);
+}
+
+.tm-finishpanel__mark-done-anyway:not(:disabled):hover {
+  border-color: var(--action);
 }
 
 /* Codex review gate */
@@ -5482,21 +5612,24 @@ textarea:focus-visible {
 
 .tm-reviewdrawer__findings {
   display: grid;
-  gap: 9px;
+  gap: 0;
 }
 
 .tm-reviewdrawer__finding {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--code-bg);
+  padding: 10px 0;
+  border-top: 1px solid var(--hair);
+  background: transparent;
+  cursor: pointer;
 }
 
 .tm-reviewdrawer__finding input {
-  margin-top: 4px;
+  margin-top: 2px;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
 }
 
 .tm-reviewdrawer__finding > span,
@@ -5616,6 +5749,63 @@ textarea:focus-visible {
 
 .tm-modal__warning strong {
   color: var(--text);
+}
+
+.tm-modal__requirements {
+  margin-top: 4px;
+  padding: 4px 14px 8px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--bg);
+}
+
+.tm-modal__requirements-title {
+  padding: 11px 0 3px;
+  color: var(--muted);
+  font: 700 10px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tm-modal__requirement {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 0;
+  border-top: 1px solid var(--hair);
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.tm-modal__requirement strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tm-modal__requirement-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--faint);
+}
+
+.tm-modal__requirement--info .tm-modal__requirement-dot {
+  background: var(--info);
+}
+
+.tm-modal__requirement--action .tm-modal__requirement-dot {
+  background: var(--action);
+}
+
+.tm-modal__requirement--success .tm-modal__requirement-dot {
+  background: var(--success);
+}
+
+.tm-modal__requirement--error .tm-modal__requirement-dot {
+  background: var(--error);
 }
 
 .tm-modal__actions {

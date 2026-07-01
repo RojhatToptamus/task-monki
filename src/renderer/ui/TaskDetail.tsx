@@ -51,11 +51,13 @@ import { StatusChip } from './StatusBadge';
 import {
   canRequestCodexReviewChanges,
   codexReviewGate,
-  describeTaskState,
+  describeTaskHeaderState,
+  finishRequirementsForTask,
   finishActionsForTask,
   getFinishEvidenceState,
   markDoneModalCopy,
   type FinishEvidenceState,
+  type FinishRequirement,
   type Tone
 } from './taskView';
 import { humanizeEnum } from './display';
@@ -167,7 +169,7 @@ export function TaskDetail(props: TaskDetailProps) {
     planRevisions
   } = props;
 
-  const state = describeTaskState(task);
+  const headerState = describeTaskHeaderState(task);
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
   const promptLineCount = task.prompt.split(/\r?\n/).length;
   const reviewGate = codexReviewGate(task);
@@ -222,7 +224,12 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const openRequestChanges = (findingIds?: string[]) => {
-    if (!reviewSourceRun || reviewActionsPaused) {
+    const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
+    if (
+      !reviewSourceRun ||
+      reviewActionsPaused ||
+      !canRequestCodexReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
+    ) {
       return;
     }
     const selectedIds = findingIds?.length
@@ -322,6 +329,11 @@ export function TaskDetail(props: TaskDetailProps) {
     (gitSnapshot?.unstagedCount ?? 0) +
     (gitSnapshot?.untrackedCount ?? 0);
   const finishEvidence = getFinishEvidenceState(task, reviewGate.status, dirtyFileCount);
+  const finishRequirements = finishRequirementsForTask(
+    task,
+    reviewPending ? 'RUNNING' : reviewGate.status,
+    dirtyFileCount
+  );
   const evidenceRows: Array<{ k: string; v: string }> = [
     { k: 'Head', v: gitSnapshot?.headSha?.slice(0, 12) ?? '—' },
     { k: 'Dirty fp', v: gitSnapshot?.dirtyFingerprint?.slice(0, 12) ?? '—' },
@@ -340,7 +352,7 @@ export function TaskDetail(props: TaskDetailProps) {
           <div className="tm-detail__heading">
             <div className="tm-detail__ids">
               <span className="tm-detail__num">#{formatShortId(task.id)}</span>
-              <Chip tone={state.tone} label={state.label} />
+              <Chip tone={headerState.tone} label={headerState.label} />
             </div>
             <div className="tm-detail__titlerow">
               <h1 className="tm-detail__title">{task.title}</h1>
@@ -513,6 +525,7 @@ export function TaskDetail(props: TaskDetailProps) {
                   task={task}
                   reviewStatus={reviewPending ? 'RUNNING' : reviewGate.status}
                   finishEvidence={finishEvidence}
+                  requirements={finishRequirements}
                   actionBusy={reviewActionBusy}
                   actionsPaused={reviewActionsPaused}
                   actionsPausedReason={reviewPauseReason}
@@ -586,6 +599,11 @@ export function TaskDetail(props: TaskDetailProps) {
         <MarkDoneModal
           withIssues={markDoneModal === 'issues'}
           warnings={markDoneModal === 'issues' ? finishEvidence.warnings : []}
+          requirements={
+            markDoneModal === 'issues'
+              ? finishRequirements.filter((requirement) => requirement.unresolved)
+              : []
+          }
           busy={reviewActionBusy}
           onCancel={() => setMarkDoneModal(undefined)}
           onConfirm={() => void markDone()}
@@ -894,10 +912,7 @@ function CodexReviewPanel({
               </>
             ) : null}
 
-            {!actionsPaused &&
-            ['NEEDS_CHANGES', 'INCONCLUSIVE', 'FAILED', 'CANCELED', 'STALE'].includes(
-              effectiveStatus
-            ) ? (
+            {!actionsPaused && ['NEEDS_CHANGES', 'INCONCLUSIVE'].includes(effectiveStatus) ? (
               <>
                 {canRequestChanges ? (
                   <button
@@ -919,6 +934,29 @@ function CodexReviewPanel({
                 </button>
               </>
             ) : null}
+
+            {!actionsPaused && ['FAILED', 'CANCELED', 'STALE'].includes(effectiveStatus) ? (
+              <>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={!canRunAgain || actionBusy || !sourceRunId}
+                  onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                >
+                  Run review again
+                </button>
+                {canRequestChanges ? (
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={actionBusy}
+                    onClick={() => onOpenRequestChanges()}
+                  >
+                    Request changes
+                  </button>
+                ) : null}
+              </>
+            ) : null}
           </div>
         </div>
       </section>
@@ -930,6 +968,7 @@ function FinishPanel({
   task,
   reviewStatus,
   finishEvidence,
+  requirements,
   actionBusy,
   actionsPaused,
   actionsPausedReason,
@@ -940,6 +979,7 @@ function FinishPanel({
   task: Task;
   reviewStatus: CodexReviewGateStatus;
   finishEvidence: FinishEvidenceState;
+  requirements: FinishRequirement[];
   actionBusy: boolean;
   actionsPaused: boolean;
   actionsPausedReason?: ReviewActionPauseReason;
@@ -951,7 +991,6 @@ function FinishPanel({
     return null;
   }
 
-  const reviewPassed = reviewStatus === 'PASSED';
   const actions = finishActionsForTask({
     task,
     reviewStatus,
@@ -968,30 +1007,40 @@ function FinishPanel({
     <section className="tm-panel tm-finishpanel" aria-label="Finish task">
       <div className="tm-finishpanel__head">
         <h3 className="tm-panel__title">Finish</h3>
-        {reviewPassed ? <Chip tone="success" label="Review passed" /> : null}
+        <div className="tm-finishpanel__actions">
+          {actionsPaused ? <span className="tm-reviewcard__hint">{pausedText}</span> : null}
+          {actions.map((action) => (
+            <button
+              key={action.id}
+              type="button"
+              className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
+                action.id === 'mark-done' && action.withIssues
+                  ? 'tm-finishpanel__mark-done-anyway'
+                  : ''
+              }`}
+              disabled={action.disabled}
+              onClick={
+                action.id === 'create-draft-pr'
+                  ? onCreatePullRequest
+                  : action.id === 'commit'
+                    ? onCreateDeliveryCommit
+                    : () => onOpenMarkDone(Boolean(action.withIssues))
+              }
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="tm-finishpanel__actions">
-        {actionsPaused ? <span className="tm-reviewcard__hint">{pausedText}</span> : null}
-        {actions.map((action) => (
-          <button
-            key={action.id}
-            type="button"
-            className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
-              action.id === 'mark-done' && action.withIssues
-                ? 'tm-finishpanel__mark-done-anyway'
-                : ''
-            }`}
-            disabled={action.disabled}
-            onClick={
-              action.id === 'create-draft-pr'
-                ? onCreatePullRequest
-                : action.id === 'commit'
-                  ? onCreateDeliveryCommit
-                  : () => onOpenMarkDone(Boolean(action.withIssues))
-            }
+      <div className="tm-finishpanel__requirements" aria-label="Finish requirements">
+        {requirements.map((requirement) => (
+          <span
+            key={requirement.label}
+            className={`tm-finishpanel__requirement tm-finishpanel__requirement--${requirement.tone}`}
           >
-            {action.label}
-          </button>
+            <span className="tm-finishpanel__requirement-dot" aria-hidden="true" />
+            {requirement.label} {requirement.detail}
+          </span>
         ))}
       </div>
     </section>
@@ -1240,12 +1289,14 @@ function isActiveNonReviewRun(run: RunRecord): boolean {
 function MarkDoneModal({
   withIssues,
   warnings,
+  requirements,
   busy,
   onCancel,
   onConfirm
 }: {
   withIssues: boolean;
   warnings: FinishEvidenceState['warnings'];
+  requirements: FinishRequirement[];
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
@@ -1257,20 +1308,28 @@ function MarkDoneModal({
       <div className="tm-modal__panel">
         <h3 id="mark-done-title">{copy.title}</h3>
         <p>{copy.body}</p>
-        {withIssues && warnings.length === 0 ? (
-          <div className="tm-modal__warning">
-            <strong>{copy.fallbackWarningTitle}</strong>
-            <span>{copy.fallbackWarningDetail}</span>
+        {withIssues && requirements.length > 0 ? (
+          <div className="tm-modal__requirements">
+            <div className="tm-modal__requirements-title">Unresolved</div>
+            {requirements.map((requirement) => (
+              <div
+                className={`tm-modal__requirement tm-modal__requirement--${requirement.tone}`}
+                key={requirement.label}
+              >
+                <span className="tm-modal__requirement-dot" aria-hidden="true" />
+                <span>
+                  <strong>{requirement.label}</strong> — {requirement.detail}
+                </span>
+              </div>
+            ))}
           </div>
         ) : null}
-        {withIssues
-          ? warnings.map((warning) => (
-              <div className="tm-modal__warning" key={warning.title}>
-                <strong>{warning.title}</strong>
-                <span>{warning.detail}</span>
-              </div>
-            ))
-          : null}
+        {withIssues && requirements.length === 0 ? (
+          <div className="tm-modal__warning">
+            <strong>{copy.fallbackWarningTitle}</strong>
+            <span>{warnings[0]?.detail ?? copy.fallbackWarningDetail}</span>
+          </div>
+        ) : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
             Cancel
@@ -1398,13 +1457,13 @@ function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['st
     case 'NEEDS_CHANGES':
       return { label: 'Needs changes', tone: 'error' };
     case 'INCONCLUSIVE':
-      return { label: 'Review complete', tone: 'action' };
+      return { label: 'Inconclusive', tone: 'action' };
     case 'FAILED':
       return { label: 'Failed', tone: 'error' };
     case 'CANCELED':
       return { label: 'Stopped', tone: 'action' };
     case 'STALE':
-      return { label: 'Needs re-review', tone: 'action' };
+      return { label: 'Stale', tone: 'action' };
     case 'NOT_RUN':
       return { label: 'Not run', tone: 'neutral' };
   }
@@ -1428,7 +1487,7 @@ function reviewBody(
     case 'NEEDS_CHANGES':
       return 'Send the findings back to the agent, then re-review.';
     case 'INCONCLUSIVE':
-      return 'Review the output, then request changes or mark done explicitly.';
+      return 'The review finished without a clear pass or fail verdict. Read the output, then request changes or mark done explicitly.';
     case 'FAILED':
       return 'The review did not complete. Re-run it or inspect Debug.';
     case 'CANCELED':
@@ -1459,7 +1518,7 @@ function nextReviewAction(
     case 'CANCELED':
       return 'Run the review again.';
     case 'STALE':
-      return 'Re-run the review.';
+      return 'Run review again on the current diff.';
   }
 }
 

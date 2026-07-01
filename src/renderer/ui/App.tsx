@@ -1072,33 +1072,27 @@ function DeleteTaskModal({
           <div>
             <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
             <p>
-              This permanently removes only the selected task. Fork alternatives and source
-              tasks stay in place.
+              Permanently removes this task and its stored evidence. Fork alternatives and the
+              repository stay in place.
             </p>
           </div>
         </div>
 
         <div className="tm-delete-modal__grid">
           <section className="tm-delete-modal__col tm-delete-modal__col--remove">
-            <h4>
-              Will be deleted
-            </h4>
+            <h4>Deleted</h4>
             <ul>
               <li>Task record and workflow state</li>
-              <li>Runs, events, artifacts, and provider session records</li>
-              <li>Stored Git, test, GitHub, PR, review, and merge evidence</li>
-              <li>Source and alternative links that point at this task</li>
+              <li>Runs, events, and provider sessions</li>
+              <li>Stored Git, test, and GitHub evidence</li>
             </ul>
           </section>
           <section className="tm-delete-modal__col tm-delete-modal__col--keep">
-            <h4>
-              Stays untouched
-            </h4>
+            <h4>Kept</h4>
             <ul>
-              <li>Fork alternatives or source tasks</li>
-              <li>Original repository or Git history</li>
-              <li>Remote branch, pull request, commits, or merge history</li>
-              <li>Provider remote thread data</li>
+              <li>Repository and Git history</li>
+              <li>Remote branch, PR, and commits</li>
+              <li>Fork alternatives and source tasks</li>
             </ul>
           </section>
         </div>

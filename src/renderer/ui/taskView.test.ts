@@ -7,7 +7,10 @@ import {
   canRequestCodexReviewChanges,
   columnTasks,
   computeNavCounts,
+  describeTaskHeaderState,
+  evidenceLineForTask,
   finishActionsForTask,
+  finishRequirementsForTask,
   getFinishEvidenceState,
   markDoneModalCopy
 } from './taskView';
@@ -46,6 +49,7 @@ describe('task card view model', () => {
     expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
     expect(vm.hasDecision).toBe(true);
+    expect(vm.decisionLabel).toBe('Needs you');
   });
 
   it('keeps a running review gate in the review lane even if the phase is stale', () => {
@@ -61,10 +65,76 @@ describe('task card view model', () => {
     const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
     const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
 
-    expect(vm.stateLabel).toBe('AI reviewing');
+    expect(vm.stateLabel).toBe('Reviewing...');
     expect(computeNavCounts([task]).review).toBe(1);
     expect(columnTasks([task], reviewColumn)).toHaveLength(1);
     expect(columnTasks([task], progressColumn)).toHaveLength(0);
+  });
+
+  it('labels inconclusive review output directly', () => {
+    const vm = buildTaskCardVM(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          agentRun: 'COMPLETED',
+          codexReview: { status: 'INCONCLUSIVE' }
+        },
+        workflowPhase: 'REVIEW'
+      })
+    );
+
+    expect(vm.stateLabel).toBe('Inconclusive');
+    expect(vm.stateTone).toBe('action');
+  });
+
+  it('keeps review verdicts out of the task detail header state', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'COMPLETED',
+        codexReview: { status: 'NEEDS_CHANGES' }
+      },
+      workflowPhase: 'REVIEW'
+    });
+
+    expect(buildTaskCardVM(task).stateLabel).toBe('Needs changes');
+    expect(describeTaskHeaderState(task)).toEqual({ label: 'In review', tone: 'info' });
+  });
+
+  it('builds a quiet evidence line while keeping bad evidence noticeable', () => {
+    const clean = evidenceLineForTask(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'CLEAN',
+          tests: 'PASSED',
+          githubPullRequest: 'NOT_CREATED'
+        }
+      })
+    );
+    const dirty = evidenceLineForTask(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'DIRTY',
+          tests: 'FAILED',
+          githubPullRequest: 'OPEN_DRAFT',
+          ciChecks: 'BLOCKED'
+        }
+      })
+    );
+
+    expect(clean).toEqual([
+      { label: 'git clean' },
+      { label: 'tests pass' },
+      { label: 'no PR' }
+    ]);
+    expect(dirty).toEqual([
+      { label: 'git dirty', tone: 'action' },
+      { label: 'tests fail', tone: 'error' },
+      { label: 'PR draft' },
+      { label: 'CI blocked', tone: 'error' }
+    ]);
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {
@@ -246,6 +316,28 @@ describe('task card view model', () => {
     });
   });
 
+  it('summarizes finish requirements without duplicate verdict chips', () => {
+    const requirements = finishRequirementsForTask(
+      createTask({
+        projection: {
+          ...createInitialProjection(now),
+          git: 'DIRTY',
+          tests: 'STALE',
+          codexReview: { status: 'NEEDS_CHANGES' }
+        },
+        workflowPhase: 'REVIEW'
+      }),
+      'NEEDS_CHANGES',
+      2
+    );
+
+    expect(requirements).toEqual([
+      { label: 'Review', detail: 'needs changes', tone: 'error', unresolved: true },
+      { label: 'Tests', detail: 'stale', tone: 'action', unresolved: true },
+      { label: 'Tree', detail: '2 dirty', tone: 'action', unresolved: true }
+    ]);
+  });
+
   it('labels finish actions with Create draft PR as the main delivery path', () => {
     const task = createTask({
       projection: {
@@ -362,12 +454,12 @@ describe('task card view model', () => {
   it('uses Mark done language in the confirmation modal copy', () => {
     expect(markDoneModalCopy(false, false)).toMatchObject({
       title: 'Mark done',
-      body: 'Marks this task done in Task Monki without creating a commit or PR.',
+      body: 'Records the current local result as done without creating a commit or PR.',
       confirmLabel: 'Mark done'
     });
     expect(markDoneModalCopy(true, false)).toMatchObject({
       title: 'Mark done anyway',
-      body: 'Marks this task done in Task Monki despite unresolved evidence. No commit or PR is created.',
+      body: 'Records the current local result as done. No commit or PR is created, and these checks stay unresolved:',
       confirmLabel: 'Mark done anyway'
     });
     expect(markDoneModalCopy(true, true).confirmLabel).toBe('Marking done...');
