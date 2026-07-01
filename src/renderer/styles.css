@@ -4418,11 +4418,6 @@ textarea:focus-visible {
   flex: 0 1 390px;
 }
 
-.tm-settings__controls--tools {
-  flex: 1 1 520px;
-  flex-wrap: wrap;
-}
-
 .tm-settings__select {
   min-width: 0;
   max-width: 100%;
@@ -4482,6 +4477,201 @@ textarea:focus-visible {
   text-transform: capitalize;
 }
 
+.tm-settings__button--primary {
+  border-color: var(--border-hover);
+  background: var(--accent);
+  color: var(--surface);
+}
+
+.tm-settings__button--primary:hover {
+  background: var(--accent-hover);
+}
+
+/* Executable settings (Git / Codex / GitHub CLI) */
+.tm-exec {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.tm-exec__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tm-exec__title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tm-exec__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  font: 600 11px/1 var(--font-ui);
+  color: var(--muted);
+}
+
+.tm-exec__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tm-exec__badge--ok {
+  color: var(--success);
+  border-color: var(--success-line);
+}
+
+.tm-exec__badge--error {
+  color: var(--error);
+  border-color: var(--error-line);
+}
+
+.tm-exec__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.tm-exec__source {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tm-exec__path {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tm-exec__version {
+  font-family: var(--font-mono);
+}
+
+.tm-exec__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-exec__controls .tm-settings__select--mode {
+  flex: 0 0 92px;
+}
+
+.tm-exec__controls .tm-settings__input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tm-exec__actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Test result feedback strip */
+.tm-exec__test {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.tm-exec__test--running {
+  color: var(--muted);
+}
+
+.tm-exec__test--passed {
+  border-color: var(--success-line);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface2));
+}
+
+.tm-exec__test--failed {
+  border-color: var(--error-line);
+  background: color-mix(in srgb, var(--error) 10%, var(--surface2));
+}
+
+.tm-exec__test-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+}
+
+.tm-exec__test--passed .tm-exec__test-icon {
+  background: var(--success);
+}
+
+.tm-exec__test--failed .tm-exec__test-icon {
+  background: var(--error);
+}
+
+.tm-exec__test-text {
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.tm-exec__test-path,
+.tm-exec__test-message {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.tm-exec__test--failed .tm-exec__test-message {
+  color: var(--error);
+}
+
+.tm-exec__spinner {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-top: 1px;
+  border: 2px solid color-mix(in srgb, var(--muted) 40%, transparent);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+  animation: tm-exec-spin 0.7s linear infinite;
+}
+
+@keyframes tm-exec-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 720px) {
   .tm-settings__row {
     align-items: stretch;
@@ -4493,16 +4683,26 @@ textarea:focus-visible {
     flex: 1 1 auto;
   }
 
-  .tm-settings__controls--tools {
-    justify-content: stretch;
-  }
-
   .tm-settings__select--model {
     min-width: 0;
   }
 
   .tm-settings__input {
     min-width: 0;
+  }
+
+  .tm-exec__controls {
+    flex-wrap: wrap;
+  }
+
+  .tm-exec__controls .tm-settings__input {
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .tm-exec__actions {
+    flex: 1 1 auto;
+    justify-content: flex-end;
   }
 }
 

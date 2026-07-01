@@ -615,32 +615,88 @@ function ExecutableSettingRow({
   const [draftPath, setDraftPath] = useState(savedPath);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<ExternalToolProbeResult>();
+  // Feedback shown below the controls after the user clicks Test. Kept separate
+  // from `testResult` (which feeds the passive badge) so the outcome message is
+  // only tied to an explicit test action.
+  const [testFeedback, setTestFeedback] = useState<ExecutableTestFeedback>();
+
+  const resetTestFeedback = () => {
+    setTestResult(undefined);
+    setTestFeedback(undefined);
+  };
 
   useEffect(() => {
     setMode(savedPath ? 'custom' : 'auto');
     setDraftPath(savedPath);
-    setTestResult(undefined);
+    resetTestFeedback();
   }, [savedPath]);
 
   const isCustom = mode === 'custom';
   const normalizedDraft = draftPath.trim();
   const hasPendingCustomPath = isCustom && normalizedDraft !== savedPath;
   const displayStatus = selectExecutableDisplayStatus(status, testResult);
+  const badge = describeToolStatus(displayStatus);
+  const resolvedMeta = displayStatus
+    ? compactSettingsText(displayStatus.resolvedPath ?? displayStatus.executable)
+    : null;
+  const versionMeta =
+    displayStatus?.status === 'ok' && displayStatus.version ? displayStatus.version : null;
+
+  const runTest = async () => {
+    setIsTesting(true);
+    setTestResult(undefined);
+    setTestFeedback({ state: 'running' });
+    try {
+      const result = await onTest(buildExecutableTestRequest(tool, mode, draftPath));
+      setTestResult(result);
+      setTestFeedback(
+        result.status === 'ok'
+          ? {
+              state: 'passed',
+              path: result.resolvedPath ?? result.executable,
+              version: result.version
+            }
+          : { state: 'failed', message: result.error ?? 'The tool could not be verified.' }
+      );
+    } catch (caught) {
+      setTestFeedback({
+        state: 'failed',
+        message: caught instanceof Error ? caught.message : 'The test could not be run.'
+      });
+    } finally {
+      setIsTesting(false);
+    }
+  };
 
   return (
-    <div className="tm-settings__row tm-settings__row--tools">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">{hint} · {formatToolStatus(displayStatus)}</div>
+    <div className="tm-exec">
+      <div className="tm-exec__head">
+        <div className="tm-exec__title" style={{ minWidth: 0 }}>
+          <div className="tm-settings__k">{label}</div>
+          <div className="tm-settings__hint">{hint}</div>
+        </div>
+        <span className={`tm-exec__badge tm-exec__badge--${badge.tone}`}>
+          <span className="tm-exec__dot" aria-hidden="true" />
+          {badge.label}
+        </span>
       </div>
-      <div className="tm-settings__controls tm-settings__controls--tools">
+
+      {resolvedMeta ? (
+        <div className="tm-exec__meta">
+          <span className="tm-exec__source">{humanizeEnum(displayStatus!.source)}</span>
+          <span className="tm-exec__path">{resolvedMeta}</span>
+          {versionMeta ? <span className="tm-exec__version">{versionMeta}</span> : null}
+        </div>
+      ) : null}
+
+      <div className="tm-exec__controls">
         <select
           className="tm-settings__select tm-settings__select--mode"
           value={mode}
           onChange={(event) => {
             const nextMode = event.target.value === 'custom' ? 'custom' : 'auto';
             setMode(nextMode);
-            setTestResult(undefined);
+            resetTestFeedback();
             if (nextMode === 'auto') {
               setDraftPath('');
               onSetPath(null);
@@ -656,75 +712,114 @@ function ExecutableSettingRow({
           value={draftPath}
           onChange={(event) => {
             setDraftPath(event.target.value);
-            setTestResult(undefined);
+            resetTestFeedback();
           }}
           disabled={!isCustom}
           placeholder={displayStatus?.resolvedPath ?? displayStatus?.executable ?? 'Auto-detect'}
           aria-label={`${label} path`}
         />
-        {hasPendingCustomPath ? (
+        <div className="tm-exec__actions">
+          {hasPendingCustomPath ? (
+            <button
+              type="button"
+              className="tm-settings__button tm-settings__button--primary"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                resetTestFeedback();
+                onSetPath(normalizedDraft || null);
+              }}
+            >
+              Save
+            </button>
+          ) : null}
           <button
             type="button"
             className="tm-settings__button"
+            disabled={isTesting}
+            aria-busy={isTesting}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void runTest()}
+          >
+            {isTesting ? 'Testing…' : 'Test'}
+          </button>
+          <button
+            type="button"
+            className="tm-settings__button"
+            disabled={!savedPath && !draftPath}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => {
-              setTestResult(undefined);
-              onSetPath(normalizedDraft || null);
+              setMode('auto');
+              setDraftPath('');
+              resetTestFeedback();
+              onSetPath(null);
             }}
           >
-            Save
+            Reset
           </button>
-        ) : null}
-        <button
-          type="button"
-          className="tm-settings__button"
-          disabled={isTesting}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={async () => {
-            setIsTesting(true);
-            setTestResult(undefined);
-            try {
-              setTestResult(await onTest(buildExecutableTestRequest(tool, mode, draftPath)));
-            } finally {
-              setIsTesting(false);
-            }
-          }}
-        >
-          {isTesting ? 'Testing' : 'Test'}
-        </button>
-        <button
-          type="button"
-          className="tm-settings__button"
-          disabled={!savedPath && !draftPath}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => {
-            setMode('auto');
-            setDraftPath('');
-            setTestResult(undefined);
-            onSetPath(null);
-          }}
-        >
-          Reset
-        </button>
+        </div>
       </div>
+
+      {testFeedback ? <ExecutableTestFeedbackStrip feedback={testFeedback} /> : null}
     </div>
   );
 }
 
-function formatToolStatus(status: ExternalToolProbeResult | undefined): string {
+type ExecutableTestFeedback =
+  | { state: 'running' }
+  | { state: 'passed'; path: string; version: string | null }
+  | { state: 'failed'; message: string };
+
+function ExecutableTestFeedbackStrip({ feedback }: { feedback: ExecutableTestFeedback }) {
+  if (feedback.state === 'running') {
+    return (
+      <div className="tm-exec__test tm-exec__test--running" role="status" aria-live="polite">
+        <span className="tm-exec__spinner" aria-hidden="true" />
+        <span>Testing…</span>
+      </div>
+    );
+  }
+
+  if (feedback.state === 'passed') {
+    return (
+      <div className="tm-exec__test tm-exec__test--passed" role="status" aria-live="polite">
+        <span className="tm-exec__test-icon" aria-hidden="true">
+          ✓
+        </span>
+        <span className="tm-exec__test-text">
+          <strong>Test passed</strong>
+          {feedback.version ? ` · ${feedback.version}` : ''}
+          <span className="tm-exec__test-path">{compactSettingsText(feedback.path)}</span>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tm-exec__test tm-exec__test--failed" role="alert" aria-live="assertive">
+      <span className="tm-exec__test-icon" aria-hidden="true">
+        ✕
+      </span>
+      <span className="tm-exec__test-text">
+        <strong>Test failed</strong>
+        <span className="tm-exec__test-message">{feedback.message}</span>
+      </span>
+    </div>
+  );
+}
+
+function describeToolStatus(
+  status: ExternalToolProbeResult | undefined
+): { tone: 'ok' | 'error' | 'muted'; label: string } {
   if (!status) {
-    return 'Not checked';
+    return { tone: 'muted', label: 'Not checked' };
   }
-  const source = humanizeEnum(status.source);
   if (status.status === 'ok') {
-    const version = status.version ? ` · ${status.version}` : '';
-    const path = compactSettingsText(status.resolvedPath ?? status.executable);
-    return `${source} · ${path}${version}`;
+    return { tone: 'ok', label: 'Available' };
   }
-  const error = status.error ? compactSettingsText(status.error) : '';
-  return `${source} · ${status.required ? 'Unavailable' : 'Optional unavailable'}${
-    error ? ` · ${error}` : ''
-  }`;
+  return {
+    tone: status.required ? 'error' : 'muted',
+    label: status.required ? 'Unavailable' : 'Optional'
+  };
 }
 
 function compactSettingsText(value: string, maxLength = 72): string {
