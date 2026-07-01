@@ -258,9 +258,17 @@ export function TaskCard({
           />
         </div>
         <div className="tm-card__meta">{vm.meta}</div>
-        <div className="tm-card__rollups">
-          {vm.rollups.map((rollup, index) => (
-            <Chip key={index} tone={rollup.tone} label={rollup.label} compact />
+        <div className="tm-card__evidence" aria-label="Task evidence">
+          {vm.evidence.map((item, index) => (
+            <span
+              key={`${item.label}-${index}`}
+              className={`tm-card__evidence-item ${
+                item.tone ? `tm-card__evidence-item--${item.tone}` : ''
+              }`}
+            >
+              <span className="tm-card__evidence-dot" aria-hidden="true" />
+              {item.label}
+            </span>
           ))}
         </div>
       </div>
