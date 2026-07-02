@@ -18,10 +18,13 @@ local acceptance.
 - `docs/APP_SERVER_ARCHITECTURE.md`
   - App Server process model, records, adapter responsibilities, and recovery
     rules.
-- `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
+- `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
   - Required reading before changing review, request-changes, stale-review,
     follow-up, or interrupt behavior.
-- `docs/research/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+- `docs/workflows/PR_STATUS_CARD_FLOW.md`
+  - Required reading before changing PR Status, GitHub delivery evidence, or
+    merge/check completion rules.
+- `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
   - Required reading before changing Codex protocol handling or generated
     bindings.
 

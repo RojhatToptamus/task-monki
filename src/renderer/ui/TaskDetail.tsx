@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -26,13 +26,11 @@ import type {
   ReviewRollupRecord,
   RunRecord,
   Task,
-  TestRunRecord,
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
   canPrepareWorktree,
-  canRunTests,
   canStartRun,
   formatShortId
 } from '../model/selectors';
@@ -47,7 +45,6 @@ import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip, dotStyle } from './MainColumn';
-import { StatusChip } from './StatusBadge';
 import {
   canRequestCodexReviewChanges,
   codexReviewGate,
@@ -57,10 +54,18 @@ import {
   getFinishEvidenceState,
   markDoneModalCopy,
   type FinishEvidenceState,
+  type FinishPanelAction,
   type FinishRequirement,
   type Tone
 } from './taskView';
 import { humanizeEnum } from './display';
+import {
+  buildFailingChecksInvestigationPrompt,
+  buildPrStatusActionState,
+  buildPrStatusViewModel,
+  type PrCheckGroup,
+  type PrStatusViewModel
+} from '../model/prStatus';
 
 interface TaskDetailProps {
   error?: string;
@@ -68,7 +73,6 @@ interface TaskDetailProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
-  testRun?: TestRunRecord;
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -100,10 +104,7 @@ interface TaskDetailProps {
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
   ): Promise<void>;
-  onRefreshEvidence(taskId: string): Promise<void>;
-  onRunTests(taskId: string): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
-  onPreflightGitHub(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
@@ -118,14 +119,12 @@ interface HeadAction {
   onClick(): void;
 }
 
-interface UtilAction {
-  label: string;
-  disabled?: boolean;
-  onClick(): void;
-}
-
 type DetailTab = 'overview' | 'evidence' | 'debug';
-type ReviewActionPauseReason = 'review-starting' | 'review-running' | 'implementation-running';
+type ReviewActionPauseReason =
+  | 'review-starting'
+  | 'review-running'
+  | 'implementation-running'
+  | 'delivery-running';
 
 export function TaskDetail(props: TaskDetailProps) {
   const { task, error } = props;
@@ -135,7 +134,10 @@ export function TaskDetail(props: TaskDetailProps) {
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [requestInstruction, setRequestInstruction] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
+  const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
+  const reviewActionInFlightRef = useRef(false);
+  const deliveryActionInFlightRef = useRef(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -162,7 +164,6 @@ export function TaskDetail(props: TaskDetailProps) {
     run,
     worktree,
     gitSnapshot,
-    testRun,
     pullRequest,
     interactions,
     sessions,
@@ -206,21 +207,81 @@ export function TaskDetail(props: TaskDetailProps) {
       : activeImplementationRun
         ? 'implementation-running'
         : undefined;
-  const reviewActionsPaused = Boolean(reviewPauseReason);
+  const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
+    deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
+  const reviewActionsPaused = Boolean(reviewActionsPausedReason);
   const canStartCodexReview =
     Boolean(reviewSourceRun) && !reviewActionsPaused && reviewPhaseVisible;
+  const deliverySourceRun =
+    (task.currentRunId
+      ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
+      : undefined) ??
+    props.runs.find(
+      (candidate) =>
+        candidate.mode !== 'REVIEW' &&
+        candidate.iterationId === task.currentIterationId &&
+        ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+          candidate.status
+        )
+    );
+  const prStatus = buildPrStatusViewModel({
+    task,
+    gitSnapshot,
+    branchPublication: props.branchPublication,
+    pullRequest,
+    ciRollup: props.ciRollup,
+    reviewRollup: props.reviewRollup,
+    mergeSnapshot: props.mergeSnapshot
+  });
+  const prActionState = buildPrStatusActionState({
+    view: prStatus,
+    deliveryBusy: deliveryActionBusy,
+    pauseReason: reviewPauseReason,
+    hasInvestigationSource: Boolean(deliverySourceRun)
+  });
 
-  const runCodexReview = async (sourceRunId: string) => {
-    setReviewStartPending(true);
+  const runReviewAction = async (action: () => Promise<void>) => {
+    if (reviewActionInFlightRef.current) {
+      return;
+    }
+    reviewActionInFlightRef.current = true;
     setReviewActionBusy(true);
     try {
-      await props.onReview(sourceRunId);
-    } catch {
-      setReviewStartPending(false);
+      await action();
     } finally {
+      reviewActionInFlightRef.current = false;
       setReviewActionBusy(false);
-      setReviewStartPending(false);
     }
+  };
+
+  const runDeliveryAction = async (action: () => Promise<void>) => {
+    if (deliveryActionInFlightRef.current) {
+      return;
+    }
+    deliveryActionInFlightRef.current = true;
+    setDeliveryActionBusy(true);
+    try {
+      await action();
+    } finally {
+      deliveryActionInFlightRef.current = false;
+      setDeliveryActionBusy(false);
+    }
+  };
+
+  const runCodexReview = async (sourceRunId: string) => {
+    if (reviewActionInFlightRef.current) {
+      return;
+    }
+    setReviewStartPending(true);
+    await runReviewAction(async () => {
+      try {
+        await props.onReview(sourceRunId);
+      } catch {
+        setReviewStartPending(false);
+      } finally {
+        setReviewStartPending(false);
+      }
+    });
   };
 
   const openRequestChanges = (findingIds?: string[]) => {
@@ -243,18 +304,17 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const submitRequestChanges = async () => {
-    if (!reviewSourceRun || !requestInstruction.trim()) {
+    if (!reviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
       return;
     }
-    setReviewActionBusy(true);
-    try {
-      await props.onContinue(reviewSourceRun.id, requestInstruction.trim());
-      setRequestDrawerOpen(false);
-    } catch {
-      // The app shell reports the error. Keep the drawer open so the user can retry.
-    } finally {
-      setReviewActionBusy(false);
-    }
+    await runReviewAction(async () => {
+      try {
+        await props.onContinue(reviewSourceRun.id, requestInstruction.trim());
+        setRequestDrawerOpen(false);
+      } catch {
+        // The app shell reports the error. Keep the drawer open so the user can retry.
+      }
+    });
   };
 
   const toggleSelectedReviewFinding = (findingId: string) => {
@@ -266,15 +326,35 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const markDone = async () => {
-    setReviewActionBusy(true);
-    try {
-      await props.onTransition(task.id, 'DONE');
-      setMarkDoneModal(undefined);
-    } catch {
-      // The app shell reports the error. Keep the modal open so the user can retry.
-    } finally {
-      setReviewActionBusy(false);
+    if (reviewActionsPaused) {
+      return;
     }
+    await runReviewAction(async () => {
+      try {
+        await props.onTransition(task.id, 'DONE');
+        setMarkDoneModal(undefined);
+      } catch {
+        // The app shell reports the error. Keep the modal open so the user can retry.
+      }
+    });
+  };
+
+  const investigateFailingChecks = async () => {
+    if (!deliverySourceRun || !prStatus.canInvestigateFailure || prActionState.investigateDisabled) {
+      return;
+    }
+    await runDeliveryAction(async () => {
+      await props.onContinue(
+        deliverySourceRun.id,
+        buildFailingChecksInvestigationPrompt(prStatus)
+      );
+    });
+  };
+
+  const stopReview = async (reviewRunId: string) => {
+    await runReviewAction(async () => {
+      await props.onCancel(reviewRunId);
+    });
   };
 
   const primaryAction = getPrimaryAction({
@@ -303,18 +383,6 @@ export function TaskDetail(props: TaskDetailProps) {
     });
   }
 
-  const utilityActions: UtilAction[] = [
-    { label: 'Run tests', disabled: !canRunTests(task), onClick: () => void props.onRunTests(task.id) },
-    {
-      label: 'Refresh evidence',
-      disabled: task.projection.worktree !== 'PRESENT',
-      onClick: () => void props.onRefreshEvidence(task.id)
-    },
-    pullRequest
-      ? { label: 'Refresh GitHub', onClick: () => void props.onRefreshGitHub(task.id) }
-      : { label: 'Check GitHub', disabled: !worktree, onClick: () => void props.onPreflightGitHub(task.id) }
-  ];
-
   const model =
     run?.observedSettings?.model ?? run?.requestedSettings.model ?? task.agentSettings.model ?? 'unknown';
   const effort =
@@ -323,26 +391,41 @@ export function TaskDetail(props: TaskDetailProps) {
     task.agentSettings.reasoningEffort ??
     'default';
 
-  const evidenceChips = buildEvidenceChips(props);
   const dirtyFileCount =
     (gitSnapshot?.stagedCount ?? 0) +
     (gitSnapshot?.unstagedCount ?? 0) +
     (gitSnapshot?.untrackedCount ?? 0);
-  const finishEvidence = getFinishEvidenceState(task, reviewGate.status, dirtyFileCount);
+  const finishMergeStatus = props.mergeSnapshot?.status ?? task.projection.merge;
+  const finishCiStatus = props.ciRollup?.status ?? task.projection.ciChecks;
+  const finishVerifiedChecksEvidence = {
+    ciStatus: finishCiStatus,
+    ciHeadSha: props.ciRollup?.headSha,
+    ciPullRequestNumber: props.ciRollup?.pullRequestNumber,
+    mergeHeadSha: props.mergeSnapshot?.headSha,
+    mergePullRequestNumber: props.mergeSnapshot?.pullRequestNumber
+  };
+  const hasPullRequest = Boolean(
+    props.pullRequest?.number ||
+      props.pullRequest?.url ||
+      task.projection.githubPullRequestNumber ||
+      task.projection.githubPullRequestUrl
+  );
+  const finishEvidence = getFinishEvidenceState(
+    task,
+    reviewGate.status,
+    dirtyFileCount,
+    finishMergeStatus,
+    finishCiStatus,
+    finishVerifiedChecksEvidence
+  );
   const finishRequirements = finishRequirementsForTask(
     task,
     reviewPending ? 'RUNNING' : reviewGate.status,
-    dirtyFileCount
+    dirtyFileCount,
+    finishMergeStatus,
+    finishCiStatus,
+    finishVerifiedChecksEvidence
   );
-  const evidenceRows: Array<{ k: string; v: string }> = [
-    { k: 'Head', v: gitSnapshot?.headSha?.slice(0, 12) ?? '—' },
-    { k: 'Dirty fp', v: gitSnapshot?.dirtyFingerprint?.slice(0, 12) ?? '—' },
-    { k: 'Worktree', v: worktree?.worktreePath ? truncateMiddle(worktree.worktreePath, 38) : 'Not created' }
-  ];
-  if (pullRequest?.url) {
-    evidenceRows.push({ k: 'Pull request', v: pullRequest.url });
-  }
-
   const isFailed = ['FAILED', 'LOST', 'RECOVERY_REQUIRED'].includes(task.projection.agentRun);
 
   return (
@@ -411,9 +494,9 @@ export function TaskDetail(props: TaskDetailProps) {
                   reviewPending={reviewPending}
                   canStartReview={canStartCodexReview}
                   actionsPaused={reviewActionsPaused}
-                  actionsPausedReason={reviewPauseReason}
+                  actionsPausedReason={reviewActionsPausedReason}
                   onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
-                  onStopReview={(reviewRunId) => void props.onCancel(reviewRunId)}
+                  onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   onOpenRequestChanges={openRequestChanges}
                 />
               ) : null}
@@ -461,7 +544,6 @@ export function TaskDetail(props: TaskDetailProps) {
                       'on-request'
                     }
                   />
-                  <ConfigRow k="Test command" v={task.testCommand ?? 'npm test'} />
                   <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
                 </div>
               </div>
@@ -477,48 +559,21 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
 
             <div className="tm-overview__col">
-              <div className="tm-panel">
-                <div className="tm-evidence__head">
-                  <span className="tm-evidence__dot" />
-                  <h3 className="tm-panel__title" style={{ margin: 0 }}>
-                    Verified evidence
-                  </h3>
-                </div>
-                <p className="tm-evidence__note">
-                  Checked locally by Task Monki — independent of the provider.
-                </p>
-                <div className="tm-evidence__chips">
-                  {evidenceChips.map((chip) => (
-                    <StatusChip
-                      key={chip.label}
-                      label={chip.label}
-                      value={chip.value}
-                      tone={chip.tone}
-                    />
-                  ))}
-                </div>
-                <div className="tm-evidence__rows">
-                  {evidenceRows.map((row) => (
-                    <div key={row.k} style={{ display: 'contents' }}>
-                      <span className="k">{row.k}</span>
-                      <span className="v">{row.v}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="tm-evidence__util">
-                  {utilityActions.map((action) => (
-                    <button
-                      key={action.label}
-                      type="button"
-                      className="tm-utilbtn"
-                      disabled={action.disabled}
-                      onClick={action.onClick}
-                    >
-                      {action.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <PrStatusCard
+                view={prStatus}
+                actionState={prActionState}
+                onCreateOrPush={() =>
+                  void runDeliveryAction(async () => {
+                    await props.onCreatePullRequest(task.id);
+                  })
+                }
+                onRefresh={() =>
+                  void runDeliveryAction(async () => {
+                    await props.onRefreshGitHub(task.id);
+                  })
+                }
+                onInvestigate={() => void investigateFailingChecks()}
+              />
 
               {reviewPhaseVisible ? (
                 <FinishPanel
@@ -528,12 +583,15 @@ export function TaskDetail(props: TaskDetailProps) {
                   requirements={finishRequirements}
                   actionBusy={reviewActionBusy}
                   actionsPaused={reviewActionsPaused}
-                  actionsPausedReason={reviewPauseReason}
+                  actionsPausedReason={reviewActionsPausedReason}
                   onOpenMarkDone={(withIssues) =>
                     setMarkDoneModal(withIssues ? 'issues' : 'clean')
                   }
-                  onCreateDeliveryCommit={() => void props.onCreateDeliveryCommit(task.id)}
-                  onCreatePullRequest={() => void props.onCreatePullRequest(task.id)}
+                  onCreateDeliveryCommit={() =>
+                    void runDeliveryAction(async () => {
+                      await props.onCreateDeliveryCommit(task.id);
+                    })
+                  }
                 />
               ) : null}
             </div>
@@ -546,7 +604,6 @@ export function TaskDetail(props: TaskDetailProps) {
               run={run}
               worktree={worktree}
               gitSnapshot={gitSnapshot}
-              testRun={testRun}
               githubRepository={props.githubRepository}
               branchPublication={props.branchPublication}
               pullRequest={pullRequest}
@@ -599,6 +656,7 @@ export function TaskDetail(props: TaskDetailProps) {
         <MarkDoneModal
           withIssues={markDoneModal === 'issues'}
           warnings={markDoneModal === 'issues' ? finishEvidence.warnings : []}
+          hasPullRequest={hasPullRequest}
           requirements={
             markDoneModal === 'issues'
               ? finishRequirements.filter((requirement) => requirement.unresolved)
@@ -785,10 +843,57 @@ function CodexReviewPanel({
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
   const reviewActionsBlockedByImplementation = actionsPausedReason === 'implementation-running';
+  const reviewActionsBlockedByDelivery = actionsPausedReason === 'delivery-running';
   const staleContextNote =
     effectiveStatus === 'STALE' && hasReviewOutput
       ? 'Previous review output is shown for context only. Re-run the review before acting on the current diff.'
       : undefined;
+  const reviewActionPauseTitle = (): string | undefined => {
+    switch (actionsPausedReason) {
+      case 'delivery-running':
+        return 'Review actions pause during GitHub actions.';
+      case 'implementation-running':
+        return 'Review actions pause while the agent is running.';
+      case 'review-starting':
+        return 'Review is starting.';
+      case 'review-running':
+        return 'Review is already running.';
+      default:
+        return undefined;
+    }
+  };
+  const runReviewDisabledTitle = (canRun: boolean): string | undefined => {
+    if (actionsPaused) {
+      return reviewActionPauseTitle();
+    }
+    if (actionBusy) {
+      return 'Review action is in progress.';
+    }
+    if (!sourceRunId) {
+      return 'No completed implementation run is available to review.';
+    }
+    if (!canRun) {
+      return 'Review cannot start from the current task state.';
+    }
+    return undefined;
+  };
+  const stopReviewDisabledTitle = (): string | undefined => {
+    if (actionBusy) {
+      return 'Review action is in progress.';
+    }
+    if (reviewPending) {
+      return 'Review is starting.';
+    }
+    if (!reviewRun) {
+      return 'No running review is available.';
+    }
+    if (!canStopReview) {
+      return 'The current review cannot be stopped.';
+    }
+    return undefined;
+  };
+  const requestChangesDisabledTitle = (): string | undefined =>
+    actionBusy ? 'Review action is in progress.' : undefined;
 
   return (
     <>
@@ -858,102 +963,128 @@ function CodexReviewPanel({
             <p>
               {reviewActionsBlockedByImplementation
                 ? 'Follow-up work is running. Review actions are paused until the agent finishes, then this task returns for re-review.'
+                : reviewActionsBlockedByDelivery
+                  ? 'GitHub action is in progress. Review actions resume when it finishes.'
                 : nextReviewAction(effectiveStatus)}
             </p>
           </div>
           <div className="tm-reviewcard__buttons">
-            {actionsPaused && !reviewIsRunning ? (
-              <span className="tm-reviewcard__hint">
-                {reviewActionsBlockedByImplementation
-                  ? 'The active agent run is fixing review feedback.'
-                  : 'Review actions are paused while the review starts.'}
-              </span>
-            ) : null}
-
-            {!actionsPaused && effectiveStatus === 'NOT_RUN' ? (
+            {effectiveStatus === 'NOT_RUN' ? (
               <>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={!canStartReview || actionBusy || !sourceRunId}
-                  onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                <ActionButtonTitle
+                  disabled={!canStartReview || actionBusy || !sourceRunId || actionsPaused}
+                  title={runReviewDisabledTitle(canStartReview)}
                 >
-                  Run Codex review
-                </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={!canStartReview || actionBusy || !sourceRunId || actionsPaused}
+                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                  >
+                    Run Codex review
+                  </button>
+                </ActionButtonTitle>
               </>
             ) : null}
 
             {reviewIsRunning ? (
               <>
-                <button
-                  type="button"
-                  className="outline-button"
+                <ActionButtonTitle
                   disabled={!canStopReview || actionBusy || !reviewRun}
-                  onClick={() => reviewRun && onStopReview(reviewRun.id)}
+                  title={stopReviewDisabledTitle()}
                 >
-                  Stop review
-                </button>
-                <span className="tm-reviewcard__hint">
-                  Actions are paused while the review runs.
-                </span>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={!canStopReview || actionBusy || !reviewRun}
+                    onClick={() => reviewRun && onStopReview(reviewRun.id)}
+                  >
+                    Stop review
+                  </button>
+                </ActionButtonTitle>
               </>
             ) : null}
 
             {!actionsPaused && effectiveStatus === 'PASSED' ? (
               <>
-                <button
-                  type="button"
-                  className="outline-button"
+                <ActionButtonTitle
                   disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                  title={runReviewDisabledTitle(canRunAgain)}
                 >
-                  Run review again
-                </button>
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={!canRunAgain || actionBusy || !sourceRunId}
+                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                  >
+                    Run review again
+                  </button>
+                </ActionButtonTitle>
               </>
             ) : null}
 
             {!actionsPaused && ['NEEDS_CHANGES', 'INCONCLUSIVE'].includes(effectiveStatus) ? (
               <>
                 {canRequestChanges ? (
+                  <ActionButtonTitle
+                    disabled={actionBusy}
+                    title={requestChangesDisabledTitle()}
+                  >
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={actionBusy}
+                      onClick={() => onOpenRequestChanges()}
+                    >
+                      Request changes
+                    </button>
+                  </ActionButtonTitle>
+                ) : null}
+                <ActionButtonTitle
+                  disabled={!canRunAgain || actionBusy || !sourceRunId}
+                  title={runReviewDisabledTitle(canRunAgain)}
+                >
                   <button
                     type="button"
-                    className="primary-button"
-                    disabled={actionBusy}
-                    onClick={() => onOpenRequestChanges()}
+                    className="outline-button"
+                    disabled={!canRunAgain || actionBusy || !sourceRunId}
+                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
                   >
-                    Request changes
+                    Run review again
                   </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  onClick={() => sourceRunId && onRunReview(sourceRunId)}
-                >
-                  Run review again
-                </button>
+                </ActionButtonTitle>
               </>
             ) : null}
 
             {!actionsPaused && ['FAILED', 'CANCELED', 'STALE'].includes(effectiveStatus) ? (
               <>
-                <button
-                  type="button"
-                  className="primary-button"
+                <ActionButtonTitle
                   disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  onClick={() => sourceRunId && onRunReview(sourceRunId)}
+                  title={runReviewDisabledTitle(canRunAgain)}
                 >
-                  Run review again
-                </button>
-                {canRequestChanges ? (
                   <button
                     type="button"
-                    className="outline-button"
-                    disabled={actionBusy}
-                    onClick={() => onOpenRequestChanges()}
+                    className="primary-button"
+                    disabled={!canRunAgain || actionBusy || !sourceRunId}
+                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
                   >
-                    Request changes
+                    Run review again
                   </button>
+                </ActionButtonTitle>
+                {canRequestChanges ? (
+                  <ActionButtonTitle
+                    disabled={actionBusy}
+                    title={requestChangesDisabledTitle()}
+                  >
+                    <button
+                      type="button"
+                      className="outline-button"
+                      disabled={actionBusy}
+                      onClick={() => onOpenRequestChanges()}
+                    >
+                      Request changes
+                    </button>
+                  </ActionButtonTitle>
                 ) : null}
               </>
             ) : null}
@@ -961,6 +1092,295 @@ function CodexReviewPanel({
         </div>
       </section>
     </>
+  );
+}
+
+function PrStatusCard({
+  view,
+  actionState,
+  onCreateOrPush,
+  onRefresh,
+  onInvestigate
+}: {
+  view: PrStatusViewModel;
+  actionState: ReturnType<typeof buildPrStatusActionState>;
+  onCreateOrPush(): void;
+  onRefresh(): void;
+  onInvestigate(): void;
+}) {
+  return (
+    <section className={`tm-panel tm-prstatus tm-prstatus--${view.tone}`} aria-label="PR Status">
+      <div className="tm-prstatus__head">
+        <span className="tm-prstatus__titleline">
+          <h3 className="tm-panel__title">PR Status</h3>
+          {view.canRefresh ? (
+            <ActionButtonTitle
+              disabled={actionState.refreshDisabled}
+              title={actionState.refreshReason ?? 'Refresh PR status'}
+            >
+              <button
+                type="button"
+                className="tm-prstatus__refresh"
+                disabled={actionState.refreshDisabled}
+                onClick={onRefresh}
+                aria-label="Refresh"
+              >
+                <RefreshIcon />
+              </button>
+            </ActionButtonTitle>
+          ) : null}
+        </span>
+        {view.refreshedLine ? <span className="tm-prstatus__refreshed">{view.refreshedLine}</span> : null}
+      </div>
+
+      <div className="tm-prstatus__headline-row">
+        <span
+          className={`tm-prstatus__dot tm-prstatus__dot--${view.tone} ${
+            view.kind === 'CHECKS_PENDING' ? 'tm-prstatus__dot--pulse' : ''
+          }`}
+          aria-hidden="true"
+        />
+        <p className="tm-prstatus__headline">{view.headline}</p>
+      </div>
+
+      {view.leadLine ? <p className="tm-prstatus__lead">{view.leadLine}</p> : null}
+
+      {view.hasPullRequest ||
+      view.freshnessLine ||
+      view.guidanceLine ||
+      view.checkSummaryLine ||
+      view.reviewLine ||
+      view.mergeLine ? (
+        <div className="tm-prstatus__meta">
+          {view.hasPullRequest ? (
+            <div className="tm-prstatus__identity">
+              {view.prNumber && view.prUrl ? (
+                <a href={view.prUrl} target="_blank" rel="noreferrer">
+                  #{view.prNumber}
+                </a>
+              ) : (
+                <span>{view.prNumber ? `#${view.prNumber}` : 'PR'}</span>
+              )}
+              <span>{prIdentitySuffix(view)}</span>
+            </div>
+          ) : null}
+
+          {view.freshnessLine ? <p className="tm-prstatus__reason">{view.freshnessLine}</p> : null}
+          {view.guidanceLine ? <p className="tm-prstatus__reason">{view.guidanceLine}</p> : null}
+
+          {view.checkSummaryLine || view.reviewLine || view.mergeLine ? (
+            <div className="tm-prstatus__evidence">
+              {[view.checkSummaryLine, view.reviewLine, view.mergeLine].filter(Boolean).join(' · ')}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure ? (
+        <div className="tm-prstatus__actions">
+          {view.canCreateDraftPr ? (
+            <ActionButtonTitle
+              disabled={actionState.createOrPushDisabled}
+              title={actionState.createOrPushReason}
+            >
+              <button
+                type="button"
+                className="primary-button"
+                disabled={actionState.createOrPushDisabled}
+                onClick={onCreateOrPush}
+              >
+                Create draft PR
+              </button>
+            </ActionButtonTitle>
+          ) : null}
+          {view.canPushUpdate ? (
+            <ActionButtonTitle
+              disabled={actionState.createOrPushDisabled}
+              title={actionState.createOrPushReason}
+            >
+              <button
+                type="button"
+                className="primary-button"
+                disabled={actionState.createOrPushDisabled}
+                onClick={onCreateOrPush}
+              >
+                Push update
+              </button>
+            </ActionButtonTitle>
+          ) : null}
+          {view.canInvestigateFailure ? (
+            <ActionButtonTitle
+              disabled={actionState.investigateDisabled}
+              title={actionState.investigateReason}
+            >
+              <button
+                type="button"
+                className="outline-button tm-prstatus__investigate"
+                disabled={actionState.investigateDisabled}
+                onClick={onInvestigate}
+              >
+                Investigate failure
+              </button>
+            </ActionButtonTitle>
+          ) : null}
+        </div>
+      ) : null}
+
+      {view.checkGroups.length > 0 ? <PrCheckDetails groups={view.checkGroups} /> : null}
+    </section>
+  );
+}
+
+function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
+  const checks = groups.flatMap((group) => group.checks);
+  return (
+    <div className="tm-prchecks" aria-label="GitHub check details">
+      <div className="tm-prchecks__head">
+        <span>Checks</span>
+        <span>{checks.length}</span>
+      </div>
+      <div className="tm-prchecks__rows">
+        {checks.map((check) => (
+          <details
+            key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`}
+            className={`tm-prcheck tm-prcheck--${check.status}`}
+          >
+            <summary>
+              <span className="tm-prcheck__name">
+                <span className="tm-prcheck__chevron" aria-hidden="true">
+                  <ChevronRightIcon />
+                </span>
+                <span className={`tm-prcheck__dot tm-prcheck__dot--${check.status}`} aria-hidden="true" />
+                <span>{check.name}</span>
+              </span>
+              <span className="tm-prcheck__status">
+                <span className={`tm-prcheck__label tm-prcheck__label--${check.status}`}>
+                  {checkStatusLabel(check.status)}
+                </span>
+                <span>{checkMetaLine(check)}</span>
+              </span>
+            </summary>
+            <pre>{checkEvidenceText(check)}</pre>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function prIdentitySuffix(view: PrStatusViewModel): string {
+  const state =
+    view.kind === 'MERGED'
+      ? 'merged'
+      : view.kind === 'CLOSED_UNMERGED'
+        ? 'closed'
+        : view.kind === 'DRAFT' || view.headline === 'Draft PR'
+          ? 'draft'
+          : 'open';
+  return `${state} · ${view.headRefName ?? 'head'} → ${view.baseRefName ?? 'base'}`;
+}
+
+function checkStatusLabel(status: PrCheckGroup['status']): string {
+  switch (status) {
+    case 'passed':
+      return 'Passed';
+    case 'failed':
+      return 'Failed';
+    case 'canceled':
+      return 'Canceled';
+    case 'pending':
+      return 'Pending';
+    case 'skipped':
+      return 'Skipped';
+  }
+}
+
+function checkMetaLine(check: PrCheckGroup['checks'][number]): string {
+  const duration = formatCheckDuration(check.startedAt, check.completedAt);
+  if (duration) {
+    return duration;
+  }
+  if (check.status === 'pending') {
+    return 'running';
+  }
+  if (check.status === 'skipped') {
+    return 'optional';
+  }
+  return check.event ?? '';
+}
+
+function checkEvidenceText(check: PrCheckGroup['checks'][number]): string {
+  const lines = [
+    check.workflow ? `Workflow: ${check.workflow}` : undefined,
+    `Status: ${check.state ?? checkStatusLabel(check.status)}`,
+    check.event ? `Event: ${check.event}` : undefined,
+    check.description ? `Description: ${check.description}` : undefined,
+    check.startedAt ? `Started: ${check.startedAt}` : undefined,
+    check.completedAt ? `Completed: ${check.completedAt}` : undefined,
+    check.link ? `URL: ${check.link}` : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.length > 0 ? lines.join('\n') : 'No additional check detail was reported.';
+}
+
+function formatCheckDuration(startedAt?: string, completedAt?: string): string | undefined {
+  if (!startedAt || !completedAt) {
+    return undefined;
+  }
+  const started = Date.parse(startedAt);
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) {
+    return undefined;
+  }
+  const seconds = Math.round((completed - started) / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
+function ActionButtonTitle({
+  title,
+  disabled,
+  children
+}: {
+  title?: string;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      className={`tm-actiontitle${disabled ? ' tm-actiontitle--disabled' : ''}`}
+      title={title}
+    >
+      {children}
+    </span>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M9 6l6 6-6 6"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
@@ -973,8 +1393,7 @@ function FinishPanel({
   actionsPaused,
   actionsPausedReason,
   onOpenMarkDone,
-  onCreateDeliveryCommit,
-  onCreatePullRequest
+  onCreateDeliveryCommit
 }: {
   task: Task;
   reviewStatus: CodexReviewGateStatus;
@@ -985,7 +1404,6 @@ function FinishPanel({
   actionsPausedReason?: ReviewActionPauseReason;
   onOpenMarkDone(withIssues: boolean): void;
   onCreateDeliveryCommit(): void;
-  onCreatePullRequest(): void;
 }) {
   if (task.workflowPhase === 'DONE') {
     return null;
@@ -1001,34 +1419,56 @@ function FinishPanel({
   const pausedText =
     actionsPausedReason === 'implementation-running'
       ? 'Finish actions pause while the agent is running.'
+      : actionsPausedReason === 'delivery-running'
+        ? 'Finish actions pause during GitHub actions.'
       : 'Finish actions pause while review runs.';
+  const disabledTitle = (action: FinishPanelAction): string | undefined => {
+    if (!action.disabled) {
+      return undefined;
+    }
+    if (actionsPaused) {
+      return pausedText;
+    }
+    if (actionBusy || reviewStatus === 'RUNNING') {
+      return 'Finish action is in progress.';
+    }
+    if (action.id === 'commit') {
+      return 'No uncommitted task changes are available to commit.';
+    }
+    if (finishEvidence.mode === 'blocked') {
+      return finishEvidence.warnings.map((warning) => warning.detail).join(' ');
+    }
+    return undefined;
+  };
 
   return (
     <section className="tm-panel tm-finishpanel" aria-label="Finish task">
       <div className="tm-finishpanel__head">
         <h3 className="tm-panel__title">Finish</h3>
         <div className="tm-finishpanel__actions">
-          {actionsPaused ? <span className="tm-reviewcard__hint">{pausedText}</span> : null}
           {actions.map((action) => (
-            <button
+            <ActionButtonTitle
               key={action.id}
-              type="button"
-              className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
-                action.id === 'mark-done' && action.withIssues
-                  ? 'tm-finishpanel__mark-done-anyway'
-                  : ''
-              }`}
               disabled={action.disabled}
-              onClick={
-                action.id === 'create-draft-pr'
-                  ? onCreatePullRequest
-                  : action.id === 'commit'
-                    ? onCreateDeliveryCommit
-                    : () => onOpenMarkDone(Boolean(action.withIssues))
-              }
+              title={disabledTitle(action)}
             >
-              {action.label}
-            </button>
+              <button
+                type="button"
+                className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
+                  action.id === 'mark-done' && action.withIssues
+                    ? 'tm-finishpanel__mark-done-anyway'
+                    : ''
+                }`}
+                disabled={action.disabled}
+                onClick={
+                  action.id === 'commit'
+                      ? onCreateDeliveryCommit
+                      : () => onOpenMarkDone(Boolean(action.withIssues))
+                }
+              >
+                {action.label}
+              </button>
+            </ActionButtonTitle>
           ))}
         </div>
       </div>
@@ -1289,6 +1729,7 @@ function isActiveNonReviewRun(run: RunRecord): boolean {
 function MarkDoneModal({
   withIssues,
   warnings,
+  hasPullRequest,
   requirements,
   busy,
   onCancel,
@@ -1296,12 +1737,13 @@ function MarkDoneModal({
 }: {
   withIssues: boolean;
   warnings: FinishEvidenceState['warnings'];
+  hasPullRequest: boolean;
   requirements: FinishRequirement[];
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
 }) {
-  const copy = markDoneModalCopy(withIssues, busy);
+  const copy = markDoneModalCopy(withIssues, busy, { hasPullRequest });
   return (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="mark-done-title">
       <div className="tm-modal__scrim" onClick={onCancel} />
@@ -1350,70 +1792,6 @@ function planStepTone(status: string): Tone {
   if (status === 'IN_PROGRESS') {
     return 'info';
   }
-  return 'neutral';
-}
-
-interface EvidenceChip {
-  label: string;
-  value: string;
-  tone: Tone;
-}
-
-function buildEvidenceChips(props: TaskDetailProps): EvidenceChip[] {
-  const task = props.task!;
-  const chips: EvidenceChip[] = [
-    { label: 'Git', value: humanizeEnum(task.projection.git), tone: gitTone(task.projection.git) },
-    {
-      label: 'Tests',
-      value: humanizeEnum(task.projection.tests),
-      tone: testsTone(task.projection.tests)
-    }
-  ];
-  if (task.projection.githubPullRequest !== 'UNLINKED' && task.projection.githubPullRequest !== 'NOT_CREATED') {
-    chips.push({
-      label: 'PR',
-      value: humanizeEnum(task.projection.githubPullRequest),
-      tone: prTone(task.projection.githubPullRequest)
-    });
-  }
-  if (task.projection.ciChecks !== 'NOT_APPLICABLE') {
-    chips.push({
-      label: 'CI',
-      value: humanizeEnum(task.projection.ciChecks),
-      tone: ciTone(task.projection.ciChecks)
-    });
-  }
-  return chips;
-}
-
-function gitTone(value: string): Tone {
-  if (value === 'PUSHED') return 'success';
-  if (value === 'DIRTY') return 'action';
-  if (value === 'CONFLICTED' || value === 'DIVERGED') return 'error';
-  if (value === 'COMMITTED_UNPUSHED') return 'info';
-  return 'neutral';
-}
-
-function testsTone(value: string): Tone {
-  if (value === 'PASSED') return 'success';
-  if (value === 'FAILED' || value === 'ERROR') return 'error';
-  if (value === 'RUNNING' || value === 'QUEUED') return 'info';
-  if (value === 'STALE') return 'action';
-  return 'neutral';
-}
-
-function prTone(value: string): Tone {
-  if (value === 'MERGED') return 'success';
-  if (value === 'CLOSED_UNMERGED') return 'error';
-  if (value === 'OPEN_DRAFT' || value === 'OPEN_READY') return 'info';
-  return 'neutral';
-}
-
-function ciTone(value: string): Tone {
-  if (value === 'PASSING') return 'success';
-  if (value === 'FAILING' || value === 'BLOCKED') return 'error';
-  if (value === 'PENDING') return 'action';
-  if (value === 'STALE') return 'action';
   return 'neutral';
 }
 
@@ -1508,7 +1886,7 @@ function nextReviewAction(
     case 'RUNNING':
       return 'Wait for the review to finish, or stop it if it is no longer useful.';
     case 'PASSED':
-      return 'Create a draft PR, commit locally, or mark done.';
+      return 'Use PR Status for GitHub delivery, commit locally, or mark done.';
     case 'NEEDS_CHANGES':
       return 'Request changes.';
     case 'INCONCLUSIVE':

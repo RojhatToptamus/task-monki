@@ -1,17 +1,17 @@
 # Product Workflow
 
-Date: 2026-06-28
+Date: 2026-07-02
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
 
 ## Product model
 
-1. User creates a task in the active repository with a goal, model, reasoning
-   effort, and validation command.
+1. User creates a task in the active repository with a goal, model, and
+   reasoning effort.
 2. Task Monki prepares an isolated Git worktree.
 3. An AI provider runs in that worktree.
-4. Task Monki records provider activity, approvals, Git evidence, test evidence,
+4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
 5. User reviews, requests changes, follows up, continues unfinished runs,
    retries, forks alternatives, commits, opens a draft PR, or marks done.
@@ -27,7 +27,7 @@ New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
 
 Task records remain bound to the repository path they were created with. Runs,
-worktrees, Git evidence, tests, GitHub delivery, and provider sessions continue
+worktrees, Git evidence, GitHub delivery, and provider sessions continue
 to resolve through the task and iteration records rather than the currently
 selected sidebar repository. Switching repositories must therefore close task
 detail views from the previous repository instead of mutating those task
@@ -39,7 +39,7 @@ Screens should prioritize:
 
 1. user action required: approvals, input, permission requests;
 2. safety or recovery risk: runtime lost, ambiguous mutation, stale request;
-3. verified local evidence: Git, tests, PR, checks, reviews, merge;
+3. verified delivery evidence: Git, PR, checks, reviews, merge;
 4. available user actions: start, follow up, continue, retry, fork alternative,
    review, commit, PR;
 5. provider telemetry: plans, items, usage, raw protocol.
@@ -103,7 +103,7 @@ Rules:
 - After follow-up completes, the task returns to Review and needs a fresh review.
 
 The detailed source of truth is
-`docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`.
+`docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`.
 
 ## Action rules
 
@@ -120,13 +120,14 @@ In Progress:
 
 Review:
 
-- Show verified evidence prominently.
+- Show verified evidence prominently, with PR Status as the primary delivery
+  surface.
 - Allow Run Codex review when no implementation-side run is active.
 - Allow Request changes only when the current review result has actionable
   current findings.
-- Allow Mark done, Commit, and Create draft PR when not paused by an active
-  run or review.
-- Treat Mark done anyway as an explicit owner override when review, test, or Git
+- Allow Mark done and Commit when not paused by an active run or review.
+- Keep Create draft PR and Push update in PR Status, not duplicated in Finish.
+- Treat Mark done anyway as an explicit owner override when review or Git
   evidence is missing, stale, failed, dirty, unavailable, canceled,
   inconclusive, or unresolved.
 
@@ -147,8 +148,13 @@ Post-run implementation controls:
 
 In Review:
 
-- Prioritize PR, check, review, and merge evidence.
+- Prioritize PR Status: one linked PR identity, one headline, check summary,
+  review line when delivery-affecting, merge line when known, and freshness.
+- Show a concise failing-check reason and next action first. Keep raw check
+  metadata collapsed as supporting evidence unless opened.
 - Allow GitHub refresh actions.
+- Offer failing-CI investigation only when GitHub checks are failing; that
+  action starts implementation-side work, not a GitHub state update.
 
 Done:
 
@@ -162,12 +168,12 @@ Task menus expose both archive and delete.
 Archive is a non-destructive workflow transition to `ARCHIVED`. It removes the task
 from active workflow handling but keeps Task Monki records, evidence, worktree
 records, artifacts, provider session references, and source/alternative links.
-Archive is blocked while a task-owned run, test, or provider request is active.
+Archive is blocked while a task-owned run or provider request is active.
 
 Delete is permanent and applies only to the selected task. It deletes the
 selected task record and Task Monki-owned records scoped to that task: task
 iterations, runs, domain events, artifacts, provider session/item/plan/usage
-records, interaction requests, Git snapshots, test runs, GitHub delivery
+records, interaction requests, Git snapshots, GitHub delivery
 snapshots, pull request/check/review/merge evidence, and worktree records. It
 also removes links in other tasks that point at the deleted task. Deleting a
 source task never deletes fork alternatives; deleting a fork alternative never
@@ -182,16 +188,31 @@ history, or provider remote thread data.
 ## Finish task actions
 
 - Mark done
-  - Moves the task to Done in Task Monki without creating a commit or PR. It is
-    only available as the clean local-completion path when local policy says the
-    task is complete enough.
+  - Moves the task to Done in Task Monki without creating another commit or PR.
+    It is only available as the clean local-completion path when the task
+    completion policy says the task is complete enough.
+  - New tasks start as `LOCAL_ACCEPTANCE`. When Task Monki records a linked PR
+    for the task, that task moves to the `MERGED` completion policy. This is a
+    task-scoped policy transition, not a provider verdict.
+  - PR evidence must not downgrade stricter or explicit policies such as
+    `MERGED_AND_VERIFIED` or `MANUAL`.
+  - `LOCAL_ACCEPTANCE` remains the local-only path. If legacy or manually
+    repaired state has PR evidence while still using `LOCAL_ACCEPTANCE`, Mark
+    done records local acceptance and leaves that PR unchanged.
+  - For `MERGED` tasks, GitHub merge evidence is a hard requirement. The Finish
+    panel should show a Merge requirement and keep Mark done disabled until
+    merge evidence is `MERGED`.
+  - For `MERGED_AND_VERIFIED` tasks, GitHub merge evidence and passing GitHub
+    checks for the same merged PR head are hard requirements before Done.
+  - Merged PR evidence may move eligible merge-policy tasks to Done
+    automatically. It must not auto-complete `MANUAL` tasks or
+    `MERGED_AND_VERIFIED` tasks whose GitHub checks are missing, not passing,
+    or passing for a different PR head than the merge evidence.
 - Mark done anyway
   - Moves the task to Done in Task Monki despite missing or non-passing review,
-    test, or Git evidence. It should be styled and confirmed as an owner
-    override, not a review action.
-- Create draft PR
-  - Main delivery path. It may create a delivery commit if needed, publish the
-    branch if needed, then create or open a draft PR.
+    or Git evidence. It should be styled and confirmed as an owner
+    override, not a review action. It must not override a `MERGED` completion
+    policy that is still waiting on GitHub merge evidence.
 - Commit
   - Secondary/manual delivery step for users who want local Git control before
     publishing or opening a PR.
@@ -203,6 +224,53 @@ the Codex review stale by itself.
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.
+
+## PR Status
+
+PR Status is the primary GitHub delivery surface. Task Monki creates or reuses
+one draft PR for the Task Monki-owned branch, then records PR identity, check
+details, GitHub review rollup, merge state, and whether the PR head is fresh
+against the local worktree.
+
+Create draft PR and Push update are shown only here. The action must be disabled
+with a clear reason when local Git evidence cannot satisfy the service publish
+guard, such as no task changes, missing worktree, unresolved conflicts, branch
+divergence, or a rejected remote push caused by newer remote commits.
+Recoverable publication failures, such as GitHub authentication or transient
+network errors, should be shown as the last failure while leaving the action
+retryable.
+
+The UI should render one headline from those facts instead of separate
+competing badges. Headline priority is:
+
+1. Merged.
+2. Closed without merge.
+3. Branch diverged or stale.
+4. Local changes not pushed.
+5. PR has newer commits.
+6. Checks failed.
+7. Checks pending, canceled, or no required checks ran.
+8. GitHub changes requested.
+9. GitHub review waiting.
+10. Ready to merge.
+11. Draft PR.
+12. Open PR.
+13. Unknown.
+
+Closed without merge is a terminal status for that PR snapshot, but it may
+still offer Create draft PR when the task branch remains publishable. Merged PRs
+do not offer Create draft PR or Push update.
+
+GitHub checks are normalized into passed, failed, pending, skipped, and
+canceled buckets from `gh pr checks`. Canceled checks are distinct from
+failures, but they still block ready-to-merge status until GitHub reports merge
+readiness. Ready to merge requires explicit current PR, check, review, and
+merge evidence for the same PR head; absent check or review evidence must not
+be treated as success. The PR number is the link to GitHub; do not add a
+separate Open PR button when the number can be rendered as a link.
+
+The detailed PR Status source of truth is
+`docs/workflows/PR_STATUS_CARD_FLOW.md`.
 
 ## Fork alternatives
 

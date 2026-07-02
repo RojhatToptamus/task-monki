@@ -177,11 +177,6 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
-    if (request.method === 'POST' && url.pathname === '/api/tests/run') {
-      sendJson(response, 200, await service.runTests((await readJson(request)) as never));
-      return;
-    }
-
     if (request.method === 'POST' && url.pathname === '/api/evidence/refresh') {
       sendJson(response, 200, await service.refreshEvidence((await readJson(request)) as never));
       return;

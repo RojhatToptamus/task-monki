@@ -1,5 +1,4 @@
 import type { Task } from '../../shared/contracts';
-import { humanizeEnum } from './display';
 
 type AttentionTone = 'warning' | 'error' | 'info';
 
@@ -69,14 +68,6 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
       label: 'Error',
       detail: task.projection.summary,
       tone: 'error'
-    };
-  }
-
-  if (task.projection.tests === 'FAILED' || task.projection.tests === 'ERROR') {
-    return {
-      label: 'Tests need attention',
-      detail: `Tests are ${humanizeEnum(task.projection.tests).toLowerCase()}.`,
-      tone: 'warning'
     };
   }
 

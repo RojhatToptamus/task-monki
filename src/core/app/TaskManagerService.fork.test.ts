@@ -28,8 +28,7 @@ describe('TaskManagerService fork alternatives', () => {
     const sourceTask = await store.createTask({
       title: 'Build filter',
       prompt: 'Add a better filter.',
-      repositoryPath,
-      testCommand: 'npm test'
+      repositoryPath
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: sourceTask,
@@ -118,8 +117,7 @@ describe('TaskManagerService fork alternatives', () => {
     const sourceTask = await store.createTask({
       title: 'Build filter',
       prompt: 'Add a better filter.',
-      repositoryPath,
-      testCommand: 'npm test'
+      repositoryPath
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: sourceTask,

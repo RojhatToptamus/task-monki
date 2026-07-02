@@ -17,8 +17,9 @@ docs/ui-reports/
 docs/**/*PLAN*.md
 docs/**/*STATUS*.md
 docs/**/*REPORT*.md
-docs/research/*FEASIBILITY*.md
-docs/research/*OPPORTUNITIES*.md
+!docs/workflows/PR_STATUS_CARD_FLOW.md
+docs/**/*FEASIBILITY*.md
+docs/**/*OPPORTUNITIES*.md
 docs/**/*.html
 docs/**/*.dc.html
 docs/**/*.png

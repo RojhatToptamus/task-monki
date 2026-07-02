@@ -93,4 +93,4 @@ Add signing in a separate change from the unsigned MVP:
 
 Automatic updates should also be a separate change. Use a prompted update flow,
 not forced restarts, because Task Monki can have active Codex App Server runs,
-Git operations, test commands, and local worktrees.
+Git operations, GitHub delivery operations, and local worktrees.

@@ -20,19 +20,19 @@ describe('describeTaskAttention', () => {
     });
   });
 
-  it('labels failed tests as attention instead of review', () => {
+  it('labels failing GitHub checks as delivery attention', () => {
     const attention = describeTaskAttention(
       taskFixture({
         projection: {
           ...createInitialProjection('2026-01-01T00:00:00.000Z'),
-          tests: 'FAILED'
+          ciChecks: 'FAILING'
         }
       })
     );
 
     expect(attention).toMatchObject({
-      label: 'Tests need attention',
-      detail: 'Tests are failed.'
+      label: 'Delivery blocked',
+      detail: 'Remote checks are failing.'
     });
   });
 });
@@ -48,7 +48,6 @@ function taskFixture(overrides: Partial<Task> = {}): Task {
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
     phaseVersion: 1,
-    testCommand: 'npm test',
     forkedAlternativeTaskIds: [],
     agentSettings: {},
     createdAt: now,

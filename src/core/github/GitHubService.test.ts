@@ -48,11 +48,50 @@ describe('GitHub PR rollups', () => {
           { name: 'lint', status: 'IN_PROGRESS' }
         ]
       },
-      worktree
+      worktree,
+      [
+        {
+          name: 'test',
+          bucket: 'pass',
+          state: 'SUCCESS',
+          workflow: 'CI',
+          link: 'https://github.com/openai/task-manager/actions/runs/1'
+        },
+        {
+          name: 'lint',
+          bucket: 'pending',
+          state: 'IN_PROGRESS',
+          workflow: 'CI'
+        }
+      ]
     );
 
     expect(parsed.pullRequest.status).toBe('OPEN_DRAFT');
     expect(parsed.ci.status).toBe('PENDING');
+    expect(parsed.ci.checkDetails).toEqual([
+      {
+        name: 'test',
+        status: 'passed',
+        state: 'SUCCESS',
+        workflow: 'CI',
+        link: 'https://github.com/openai/task-manager/actions/runs/1',
+        description: undefined,
+        event: undefined,
+        startedAt: undefined,
+        completedAt: undefined
+      },
+      {
+        name: 'lint',
+        status: 'pending',
+        state: 'IN_PROGRESS',
+        workflow: 'CI',
+        link: undefined,
+        description: undefined,
+        event: undefined,
+        startedAt: undefined,
+        completedAt: undefined
+      }
+    ]);
     expect(parsed.reviews.status).toBe('REQUESTED');
     expect(parsed.merge.status).toBe('NOT_MERGED');
   });
@@ -66,6 +105,22 @@ describe('GitHub PR rollups', () => {
     );
     expect(rollup.status).toBe('FAILING');
     expect(rollup.failingCount).toBe(1);
+    expect(rollup.canceledCount).toBe(0);
+    expect(rollup.checkDetails).toEqual([]);
+  });
+
+  it('normalizes canceled gh check buckets separately from failures', () => {
+    const rollup = parseCiRollup(
+      [],
+      worktreeFixture('/tmp/repo'),
+      1,
+      'abc',
+      [{ name: 'deploy', bucket: 'cancel', state: 'CANCELLED' }]
+    );
+
+    expect(rollup.status).toBe('CANCELED');
+    expect(rollup.canceledCount).toBe(1);
+    expect(rollup.failingCount).toBe(0);
   });
 });
 
@@ -119,6 +174,52 @@ describe('GitHubService branch publication', () => {
       'refs/heads/codex/task-test'
     );
   });
+
+  it('normalizes non-fast-forward push rejections', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-publish-reject-'));
+    const remote = path.join(dir, 'remote.git');
+    const repo = path.join(dir, 'repo');
+    const peer = path.join(dir, 'peer');
+    await git(dir, ['init', '--bare', remote]);
+    await fs.mkdir(repo);
+    await git(repo, ['init']);
+    await git(repo, ['config', 'user.email', 'test@example.com']);
+    await git(repo, ['config', 'user.name', 'Test User']);
+    await git(repo, ['remote', 'add', 'origin', remote]);
+    await fs.writeFile(path.join(repo, 'README.md'), '# Repo\n', 'utf8');
+    await git(repo, ['add', 'README.md']);
+    await git(repo, ['commit', '-m', 'init']);
+    await git(repo, ['checkout', '-b', 'codex/task-test']);
+    await fs.writeFile(path.join(repo, 'first.txt'), 'first\n', 'utf8');
+    await git(repo, ['add', 'first.txt']);
+    await git(repo, ['commit', '-m', 'first']);
+    await git(repo, ['push', '--set-upstream', 'origin', 'HEAD']);
+
+    await git(dir, ['clone', remote, peer]);
+    await git(peer, ['config', 'user.email', 'peer@example.com']);
+    await git(peer, ['config', 'user.name', 'Peer User']);
+    await git(peer, ['checkout', 'codex/task-test']);
+    await fs.writeFile(path.join(peer, 'remote.txt'), 'remote\n', 'utf8');
+    await git(peer, ['add', 'remote.txt']);
+    await git(peer, ['commit', '-m', 'remote update']);
+    await git(peer, ['push', 'origin', 'HEAD']);
+
+    await fs.writeFile(path.join(repo, 'local.txt'), 'local\n', 'utf8');
+    await git(repo, ['add', 'local.txt']);
+    await git(repo, ['commit', '-m', 'local update']);
+
+    const service = new GitHubService();
+    const result = await service.publishBranch({
+      task: taskFixture(repo),
+      worktree: worktreeFixture(repo),
+      remoteName: 'origin'
+    });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.error).toBe(
+      'Remote branch has newer commits. Sync the branch before pushing again.'
+    );
+  });
 });
 
 function taskFixture(repositoryPath: string): Task {
@@ -144,7 +245,6 @@ function taskFixture(repositoryPath: string): Task {
       repositoryPreflight: 'VALID',
       worktree: 'PRESENT',
       git: 'COMMITTED_UNPUSHED',
-      tests: 'PASSED',
       githubRepository: 'READY',
       branchPublication: 'NOT_PUSHED',
       githubPullRequest: 'UNLINKED',

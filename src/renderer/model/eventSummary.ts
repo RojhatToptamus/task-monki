@@ -32,15 +32,6 @@ export function summarizeEvent(event: DomainEvent): EventSummary {
         label: 'Git evidence refreshed',
         detail: `Status ${stringField(payload, 'status') ?? 'unknown'}, changed files ${numberField(payload, 'workingDiffFileCount') ?? 0}.`
       };
-    case 'TEST_RUN_STARTED':
-      return { label: 'Tests queued', detail: stringField(payload, 'command') ?? 'Local test command queued.' };
-    case 'TEST_RUN_COMPLETED':
-      return {
-        label: 'Tests finished',
-        detail: `Exit ${nullableNumberField(payload, 'exitCode') ?? 'unknown'}.`
-      };
-    case 'TEST_RESULT_STALE':
-      return { label: 'Tests stale', detail: stringField(payload, 'reason') ?? 'Git generation changed.' };
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         label: 'Agent update',

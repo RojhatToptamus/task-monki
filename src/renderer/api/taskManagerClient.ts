@@ -16,13 +16,11 @@ import type {
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
   RepositoryPreflight,
-  RunTestsRequest,
   RunRecord,
   StartRunRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
-  TestRunRecord,
   TransitionTaskRequest,
   WorktreeRecord,
   RefreshEvidenceRequest,
@@ -135,7 +133,6 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),
     respondToInteraction: (input: RespondToInteractionRequest) =>
       post(baseUrl, '/api/interactions/respond', input),
-    runTests: (input: RunTestsRequest) => post<TestRunRecord>(baseUrl, '/api/tests/run', input),
     refreshEvidence: (input: RefreshEvidenceRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
     createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>

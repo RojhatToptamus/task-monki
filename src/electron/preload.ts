@@ -15,7 +15,6 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
-  RunTestsRequest,
   StartRunRequest,
   StartReviewRequest,
   SteerRunRequest,
@@ -55,7 +54,6 @@ const api: TaskManagerApi = {
   cancelRun: (input: CancelRunRequest) => ipcRenderer.invoke('codex:cancelRun', input),
   respondToInteraction: (input: RespondToInteractionRequest) =>
     ipcRenderer.invoke('agent:respondToInteraction', input),
-  runTests: (input: RunTestsRequest) => ipcRenderer.invoke('test:run', input),
   refreshEvidence: (input: RefreshEvidenceRequest) => ipcRenderer.invoke('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
     ipcRenderer.invoke('git:deliveryCommit', input),

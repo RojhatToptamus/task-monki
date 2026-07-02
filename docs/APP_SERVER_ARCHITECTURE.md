@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-01
+Date: 2026-07-02
 
 This document describes the current architecture, not an old migration plan.
 
@@ -14,7 +14,6 @@ Task Monki owns:
 - task records and workflow phases;
 - isolated task worktrees and branches;
 - Git snapshots, dirty fingerprints, and diff artifacts;
-- test execution and test artifacts;
 - GitHub branch, PR, check, review, and merge evidence;
 - local acceptance and Done transitions.
 
@@ -41,7 +40,6 @@ flowchart LR
   RPC --> Journal["Protocol journal"]
   Journal --> Store["FileTaskStore"]
   Service --> Git["GitSnapshotService"]
-  Service --> Tests["LocalTestRunner"]
   Service --> GitHub["GitHubService"]
 ```
 
@@ -129,7 +127,7 @@ If worktree or run startup fails after the alternative task is stored, Task
 Monki leaves the alternative visible and blocked rather than silently hiding the
 partial candidate.
 
-Read `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
+Read `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.
 
 ## Settings
@@ -140,8 +138,7 @@ Task and review execution settings stored on task/run records include:
 - reasoning effort;
 - sandbox;
 - approval policy;
-- network access;
-- test command.
+- network access.
 
 Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults

@@ -34,12 +34,12 @@ import { TaskManagerService } from '../core/app/TaskManagerService';
 
 interface ScenarioOptions {
   name?: string;
+  ghPath?: string;
 }
 
 interface CreateScenarioTaskInput {
   title?: string;
   prompt?: string;
-  testCommand?: string;
   agentSettings?: Task['agentSettings'];
 }
 
@@ -80,6 +80,7 @@ export async function createTaskMonkiScenario(
   const agent = new ScriptedAgentProviderAdapter(store);
   const service = new TaskManagerService(store, repositoryPath, events, {
     worktreeRoot,
+    ghPath: options.ghPath,
     agentProviderAdapter: agent
   });
   await service.init();
@@ -97,7 +98,6 @@ export async function createTaskMonkiScenario(
         title: input.title ?? 'Scenario task',
         prompt: input.prompt ?? 'Exercise the task workflow.',
         repositoryPath,
-        testCommand: input.testCommand,
         agentSettings: input.agentSettings ?? {
           model: 'scenario-model',
           reasoningEffort: 'low'

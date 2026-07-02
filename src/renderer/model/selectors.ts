@@ -10,7 +10,6 @@ import type {
   RunRecord,
   Task,
   TaskSnapshot,
-  TestRunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
 
@@ -41,12 +40,6 @@ export function selectLatestGitSnapshot(
   return snapshot.gitSnapshots
     .filter((gitSnapshot) => gitSnapshot.taskId === task.id && gitSnapshot.iterationId === task.currentIterationId)
     .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
-}
-
-export function selectLatestTestRun(snapshot: TaskSnapshot, task: Task): TestRunRecord | undefined {
-  return snapshot.testRuns
-    .filter((testRun) => testRun.taskId === task.id && testRun.iterationId === task.currentIterationId)
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
 }
 
 export function selectLatestGitHubRepository(
@@ -118,16 +111,8 @@ export function canPrepareWorktree(task: Task): boolean {
   return !['CREATING', 'PRESENT'].includes(task.projection.worktree);
 }
 
-export function canRunTests(task: Task): boolean {
-  return task.projection.worktree === 'PRESENT' && task.projection.tests !== 'RUNNING';
-}
-
 export function canCreateDeliveryCommit(task: Task): boolean {
   return task.projection.worktree === 'PRESENT' && task.projection.git === 'DIRTY';
-}
-
-export function canCreatePullRequest(task: Task): boolean {
-  return task.projection.worktree === 'PRESENT' && task.projection.branchPublication !== 'PUSHING';
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {

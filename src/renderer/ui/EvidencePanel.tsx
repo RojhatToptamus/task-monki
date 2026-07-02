@@ -9,7 +9,6 @@ import type {
   PullRequestSnapshotRecord,
   ReviewRollupRecord,
   RunRecord,
-  TestRunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
@@ -29,7 +28,6 @@ interface EvidencePanelProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
-  testRun?: TestRunRecord;
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -41,7 +39,6 @@ interface EvidencePanelProps {
 
 interface LoadedArtifacts {
   diff: string;
-  test: string;
 }
 
 const DIFF_STATUS_FILTERS: Array<{ value: DiffFileStatusFilter; label: string }> = [
@@ -62,7 +59,6 @@ export function EvidencePanel({
   run,
   worktree,
   gitSnapshot,
-  testRun,
   githubRepository,
   branchPublication,
   pullRequest,
@@ -71,7 +67,7 @@ export function EvidencePanel({
   mergeSnapshot,
   artifacts
 }: EvidencePanelProps) {
-  const [artifactText, setArtifactText] = useState<LoadedArtifacts>({ diff: '', test: '' });
+  const [artifactText, setArtifactText] = useState<LoadedArtifacts>({ diff: '' });
   const [artifactError, setArtifactError] = useState<string | undefined>();
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [selectedFileId, setSelectedFileId] = useState<string | undefined>();
@@ -83,43 +79,28 @@ export function EvidencePanel({
   const diffArtifact = gitSnapshot?.diffArtifactId
     ? artifacts.find((artifact) => artifact.id === gitSnapshot.diffArtifactId)
     : undefined;
-  const testStdoutArtifact = testRun
-    ? artifacts.find((artifact) => artifact.id === testRun.stdoutArtifactId)
-    : undefined;
 
   useEffect(() => {
     let canceled = false;
 
     async function loadArtifacts() {
       setArtifactError(undefined);
-      setArtifactText({ diff: '', test: '' });
-      setLoadingArtifacts(Boolean(diffArtifact || testStdoutArtifact));
+      setArtifactText({ diff: '' });
 
-      const next: LoadedArtifacts = { diff: '', test: '' };
+      setLoadingArtifacts(Boolean(diffArtifact));
+      const next: LoadedArtifacts = { diff: '' };
       const errors: string[] = [];
 
-      await Promise.all([
-        diffArtifact
-          ? taskManagerApi
-              .readArtifact({ artifactId: diffArtifact.id })
-              .then((text) => {
-                next.diff = text;
-              })
-              .catch((error: unknown) => {
-                errors.push(error instanceof Error ? error.message : 'Could not read diff.');
-              })
-          : Promise.resolve(),
-        testStdoutArtifact
-          ? taskManagerApi
-              .readArtifact({ artifactId: testStdoutArtifact.id })
-              .then((text) => {
-                next.test = text;
-              })
-              .catch((error: unknown) => {
-                errors.push(error instanceof Error ? error.message : 'Could not read test output.');
-              })
-          : Promise.resolve()
-      ]);
+      if (diffArtifact) {
+        await taskManagerApi
+          .readArtifact({ artifactId: diffArtifact.id })
+          .then((text) => {
+            next.diff = text;
+          })
+          .catch((error: unknown) => {
+            errors.push(error instanceof Error ? error.message : 'Could not read diff.');
+          });
+      }
 
       if (!canceled) {
         setArtifactText(next);
@@ -136,9 +117,6 @@ export function EvidencePanel({
     diffArtifact?.id,
     diffArtifact?.byteCount,
     diffArtifact?.updatedAt,
-    testStdoutArtifact?.id,
-    testStdoutArtifact?.byteCount,
-    testStdoutArtifact?.updatedAt
   ]);
 
   const diffFilesByScope = useMemo(
@@ -363,12 +341,11 @@ export function EvidencePanel({
           {run ? <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span> : null}
         </div>
 
-        {run || worktree || gitSnapshot || testRun || pullRequest ? (
+        {run || worktree || gitSnapshot || pullRequest ? (
           <div className="tm-evidence-summary__body">
             <div className="evidence-grid">
               {worktree ? <StatusChip label="Worktree" value={worktree.status} /> : null}
               {gitSnapshot ? <StatusChip label="Git" value={gitSnapshot.status} /> : null}
-              {testRun ? <StatusChip label="Tests" value={testRun.status} /> : null}
               {githubRepository ? <StatusChip label="GitHub" value={githubRepository.status} /> : null}
               {branchPublication ? <StatusChip label="Publish" value={branchPublication.status} /> : null}
               {pullRequest ? <StatusChip label="PR" value={pullRequest.status} /> : null}
@@ -392,16 +369,6 @@ export function EvidencePanel({
                 }
               />
               <EvidenceFact
-                label="Tests"
-                value={
-                  testRun
-                    ? `${humanizeEnum(testRun.status)} · exit ${
-                        testRun.exitCode === undefined ? 'unknown' : String(testRun.exitCode)
-                      }`
-                    : 'not run'
-                }
-              />
-              <EvidenceFact
                 label="Remote"
                 value={
                   githubRepository?.owner && githubRepository.repo
@@ -418,19 +385,9 @@ export function EvidencePanel({
             </div>
           </div>
         ) : (
-          <p className="muted">Prepare a worktree to capture Git, diff, and test evidence.</p>
+          <p className="muted">Prepare a worktree to capture Git and diff evidence.</p>
         )}
       </section>
-
-      {testStdoutArtifact ? (
-        <details className="tm-evidence-test">
-          <summary>
-            <span>Test output</span>
-            <small>{testStdoutArtifact.byteCount.toLocaleString()} bytes</small>
-          </summary>
-          <pre>{artifactText.test || (loadingArtifacts ? 'Loading test output...' : 'No test output.')}</pre>
-        </details>
-      ) : null}
     </>
   );
 }

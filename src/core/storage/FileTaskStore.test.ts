@@ -2,6 +2,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import type {
+  CiChecksStatus,
+  MergeStatus,
+  TaskIteration,
+  WorktreeRecord
+} from '../../shared/contracts';
 import { FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
@@ -133,6 +139,249 @@ describe('FileTaskStore', () => {
     ).toBe(true);
   });
 
+  it('moves only the linked task to merged completion policy when PR evidence is recorded', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-policy-'));
+    const store = new FileTaskStore(dir);
+
+    const linkedTask = await store.createTask({
+      title: 'Linked PR task',
+      prompt: 'Open a PR for this task.',
+      repositoryPath: dir
+    });
+    const untouchedTask = await store.createTask({
+      title: 'Untouched local task',
+      prompt: 'Keep this task local.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task: linkedTask,
+      branchName: 'codex/linked-pr',
+      worktreePath: path.join(dir, 'linked'),
+      baseSha: 'base'
+    });
+
+    await recordOpenPullRequest(store, linkedTask.id, iteration, worktree);
+
+    const snapshot = await store.snapshot();
+    const linked = snapshot.tasks.find((task) => task.id === linkedTask.id);
+    const untouched = snapshot.tasks.find((task) => task.id === untouchedTask.id);
+    expect(linked?.completionPolicy).toBe('MERGED');
+    expect(linked?.phaseVersion).toBe(linkedTask.phaseVersion + 1);
+    expect(untouched?.completionPolicy).toBe('LOCAL_ACCEPTANCE');
+  });
+
+  it('does not downgrade stricter or manual completion policies when PR evidence refreshes', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-policy-preserve-'));
+    const store = new FileTaskStore(dir);
+
+    const verifiedTask = await store.createTask({
+      title: 'Verified merge task',
+      prompt: 'Keep verification after merge.',
+      repositoryPath: dir
+    });
+    const manualTask = await store.createTask({
+      title: 'Manual completion task',
+      prompt: 'Keep manual completion.',
+      repositoryPath: dir
+    });
+    const verifiedRecords = await store.createIterationAndWorktree({
+      task: verifiedTask,
+      branchName: 'codex/verified-policy',
+      worktreePath: path.join(dir, 'verified'),
+      baseSha: 'base'
+    });
+    const manualRecords = await store.createIterationAndWorktree({
+      task: manualTask,
+      branchName: 'codex/manual-policy',
+      worktreePath: path.join(dir, 'manual'),
+      baseSha: 'base'
+    });
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      tasks: Array<{ id: string; completionPolicy: string }>;
+    };
+    persisted.tasks = persisted.tasks.map((task) =>
+      task.id === verifiedTask.id
+        ? { ...task, completionPolicy: 'MERGED_AND_VERIFIED' }
+        : task.id === manualTask.id
+          ? { ...task, completionPolicy: 'MANUAL' }
+          : task
+    );
+    await fs.writeFile(storePath, JSON.stringify(persisted, null, 2));
+
+    const reloaded = new FileTaskStore(dir);
+    await recordOpenPullRequest(
+      reloaded,
+      verifiedTask.id,
+      verifiedRecords.iteration,
+      verifiedRecords.worktree
+    );
+    await recordOpenPullRequest(
+      reloaded,
+      manualTask.id,
+      manualRecords.iteration,
+      manualRecords.worktree,
+      83
+    );
+
+    const snapshot = await reloaded.snapshot();
+    expect(snapshot.tasks.find((task) => task.id === verifiedTask.id)?.completionPolicy).toBe(
+      'MERGED_AND_VERIFIED'
+    );
+    expect(snapshot.tasks.find((task) => task.id === manualTask.id)?.completionPolicy).toBe(
+      'MANUAL'
+    );
+  });
+
+  it('auto-completes only when merged PR evidence satisfies the task completion policy', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-auto-done-'));
+    const store = new FileTaskStore(dir);
+
+    const mergedTask = await store.createTask({
+      title: 'Merged task',
+      prompt: 'Complete when merged.',
+      repositoryPath: dir
+    });
+    const verifiedTask = await store.createTask({
+      title: 'Verified task',
+      prompt: 'Require checks after merge.',
+      repositoryPath: dir
+    });
+    const verifiedStaleTask = await store.createTask({
+      title: 'Verified stale task',
+      prompt: 'Reject old passing checks after merge.',
+      repositoryPath: dir
+    });
+    const verifiedPassingTask = await store.createTask({
+      title: 'Verified passing task',
+      prompt: 'Complete when merged checks match.',
+      repositoryPath: dir
+    });
+    const manualTask = await store.createTask({
+      title: 'Manual task',
+      prompt: 'Require explicit completion.',
+      repositoryPath: dir
+    });
+    const mergedRecords = await store.createIterationAndWorktree({
+      task: mergedTask,
+      branchName: 'codex/merged-task',
+      worktreePath: path.join(dir, 'merged'),
+      baseSha: 'base'
+    });
+    const verifiedRecords = await store.createIterationAndWorktree({
+      task: verifiedTask,
+      branchName: 'codex/verified-task',
+      worktreePath: path.join(dir, 'verified'),
+      baseSha: 'base'
+    });
+    const verifiedStaleRecords = await store.createIterationAndWorktree({
+      task: verifiedStaleTask,
+      branchName: 'codex/verified-stale-task',
+      worktreePath: path.join(dir, 'verified-stale'),
+      baseSha: 'base'
+    });
+    const verifiedPassingRecords = await store.createIterationAndWorktree({
+      task: verifiedPassingTask,
+      branchName: 'codex/verified-passing-task',
+      worktreePath: path.join(dir, 'verified-passing'),
+      baseSha: 'base'
+    });
+    const manualRecords = await store.createIterationAndWorktree({
+      task: manualTask,
+      branchName: 'codex/manual-task',
+      worktreePath: path.join(dir, 'manual'),
+      baseSha: 'base'
+    });
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      tasks: Array<{ id: string; completionPolicy: string }>;
+    };
+    persisted.tasks = persisted.tasks.map((task) =>
+      task.id === verifiedTask.id ||
+      task.id === verifiedStaleTask.id ||
+      task.id === verifiedPassingTask.id
+        ? { ...task, completionPolicy: 'MERGED_AND_VERIFIED' }
+        : task.id === manualTask.id
+          ? { ...task, completionPolicy: 'MANUAL' }
+          : task
+    );
+    await fs.writeFile(storePath, JSON.stringify(persisted, null, 2));
+
+    const reloaded = new FileTaskStore(dir);
+    await recordOpenPullRequest(reloaded, mergedTask.id, mergedRecords.iteration, mergedRecords.worktree, {
+      mergeStatus: 'MERGED'
+    });
+    await recordOpenPullRequest(
+      reloaded,
+      verifiedTask.id,
+      verifiedRecords.iteration,
+      verifiedRecords.worktree,
+      { ciStatus: 'FAILING', mergeStatus: 'MERGED', pullRequestNumber: 83 }
+    );
+    await recordOpenPullRequest(
+      reloaded,
+      verifiedStaleTask.id,
+      verifiedStaleRecords.iteration,
+      verifiedStaleRecords.worktree,
+      {
+        ciStatus: 'PASSING',
+        ciHeadSha: 'old-head',
+        mergeHeadSha: 'merged-head',
+        mergeStatus: 'MERGED',
+        pullRequestNumber: 84
+      }
+    );
+    await recordOpenPullRequest(
+      reloaded,
+      verifiedPassingTask.id,
+      verifiedPassingRecords.iteration,
+      verifiedPassingRecords.worktree,
+      {
+        ciStatus: 'PASSING',
+        ciHeadSha: 'merged-head',
+        mergeHeadSha: 'merged-head',
+        mergeStatus: 'MERGED',
+        pullRequestNumber: 85
+      }
+    );
+    await recordOpenPullRequest(
+      reloaded,
+      manualTask.id,
+      manualRecords.iteration,
+      manualRecords.worktree,
+      { mergeStatus: 'MERGED', pullRequestNumber: 86 }
+    );
+
+    const snapshot = await reloaded.snapshot();
+    expect(snapshot.tasks.find((task) => task.id === mergedTask.id)).toMatchObject({
+      completionPolicy: 'MERGED',
+      workflowPhase: 'DONE',
+      resolution: 'COMPLETED'
+    });
+    expect(snapshot.tasks.find((task) => task.id === verifiedTask.id)).toMatchObject({
+      completionPolicy: 'MERGED_AND_VERIFIED',
+      workflowPhase: 'READY',
+      resolution: 'NONE'
+    });
+    expect(snapshot.tasks.find((task) => task.id === verifiedStaleTask.id)).toMatchObject({
+      completionPolicy: 'MERGED_AND_VERIFIED',
+      workflowPhase: 'READY',
+      resolution: 'NONE'
+    });
+    expect(snapshot.tasks.find((task) => task.id === verifiedPassingTask.id)).toMatchObject({
+      completionPolicy: 'MERGED_AND_VERIFIED',
+      workflowPhase: 'DONE',
+      resolution: 'COMPLETED'
+    });
+    expect(snapshot.tasks.find((task) => task.id === manualTask.id)).toMatchObject({
+      completionPolicy: 'MANUAL',
+      workflowPhase: 'READY',
+      resolution: 'NONE'
+    });
+  });
+
   it('deletes only the selected task records and repairs fork links', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-delete-'));
     const store = new FileTaskStore(dir);
@@ -219,14 +468,6 @@ describe('FileTaskStore', () => {
       },
       ''
     );
-    const testRun = await store.createTestRun({
-      task: alternativeTask,
-      worktree: alternativeWorktree,
-      gitSnapshot,
-      commandLine: 'npm test',
-      executable: 'npm',
-      argv: ['test']
-    });
     await store.recordGitHubPreflight({
       taskId: alternativeTask.id,
       iterationId: alternativeIteration.id,
@@ -271,7 +512,9 @@ describe('FileTaskStore', () => {
         pendingCount: 0,
         passingCount: 1,
         failingCount: 0,
-        skippedCount: 0
+        skippedCount: 0,
+        canceledCount: 0,
+        checkDetails: []
       },
       reviews: {
         taskId: alternativeTask.id,
@@ -293,8 +536,6 @@ describe('FileTaskStore', () => {
     const promptArtifactPath = await store.getArtifactPath(alternativeRun.promptArtifactId);
     const finalArtifactPath = await store.getArtifactPath(finalArtifact.id);
     const diffArtifactPath = await store.getArtifactPath(gitSnapshot.diffArtifactId!);
-    const stdoutArtifactPath = await store.getArtifactPath(testRun.stdoutArtifactId);
-    const stderrArtifactPath = await store.getArtifactPath(testRun.stderrArtifactId);
 
     await store.deleteTask(alternativeTask.id);
 
@@ -314,7 +555,6 @@ describe('FileTaskStore', () => {
     expect(snapshot.gitSnapshots.some((record) => record.taskId === alternativeTask.id)).toBe(
       false
     );
-    expect(snapshot.testRuns.some((testRun) => testRun.taskId === alternativeTask.id)).toBe(false);
     expect(snapshot.githubRepositories.some((record) => record.taskId === alternativeTask.id)).toBe(
       false
     );
@@ -345,8 +585,6 @@ describe('FileTaskStore', () => {
     await expect(fs.access(promptArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(finalArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(diffArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(stdoutArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(stderrArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('does not delete fork alternatives when deleting their source task', async () => {
@@ -1090,3 +1328,74 @@ Full review comments:
     });
   });
 });
+
+async function recordOpenPullRequest(
+  store: FileTaskStore,
+  taskId: string,
+  iteration: TaskIteration,
+  worktree: WorktreeRecord,
+  options: number | {
+    ciStatus?: CiChecksStatus;
+    ciHeadSha?: string;
+    mergeStatus?: MergeStatus;
+    mergeHeadSha?: string;
+    pullRequestHeadSha?: string;
+    pullRequestNumber?: number;
+  } = 82
+): Promise<void> {
+  const pullRequestNumber =
+    typeof options === 'number' ? options : options.pullRequestNumber ?? 82;
+  const ciStatus = typeof options === 'number' ? 'PASSING' : options.ciStatus ?? 'PASSING';
+  const ciHeadSha = typeof options === 'number' ? 'head' : options.ciHeadSha ?? 'head';
+  const mergeStatus = typeof options === 'number' ? 'MERGEABLE' : options.mergeStatus ?? 'MERGEABLE';
+  const mergeHeadSha = typeof options === 'number' ? 'head' : options.mergeHeadSha ?? 'head';
+  const pullRequestHeadSha =
+    typeof options === 'number' ? 'head' : options.pullRequestHeadSha ?? mergeHeadSha;
+  await store.recordPullRequestSync({
+    pullRequest: {
+      taskId,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      number: pullRequestNumber,
+      url: `https://github.com/example/repo/pull/${pullRequestNumber}`,
+      status: 'OPEN_READY',
+      state: 'OPEN',
+      isDraft: false,
+      headRefName: worktree.branchName,
+      headRefOid: pullRequestHeadSha,
+      baseRefName: 'main'
+    },
+    ci: {
+      taskId,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      pullRequestNumber,
+      headSha: ciHeadSha,
+      status: ciStatus,
+      requiredStatus: 'PASSING',
+      totalCount: 1,
+      pendingCount: 0,
+      passingCount: ciStatus === 'PASSING' ? 1 : 0,
+      failingCount: ciStatus === 'FAILING' || ciStatus === 'BLOCKED' ? 1 : 0,
+      skippedCount: 0,
+      canceledCount: 0,
+      checkDetails: []
+    },
+    reviews: {
+      taskId,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      pullRequestNumber,
+      headSha: 'head',
+      status: 'NOT_REQUESTED'
+    },
+    merge: {
+      taskId,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      pullRequestNumber,
+      headSha: mergeHeadSha,
+      status: mergeStatus
+    }
+  });
+}

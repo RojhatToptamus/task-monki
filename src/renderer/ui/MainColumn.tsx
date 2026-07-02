@@ -361,8 +361,7 @@ function Settings({
       k: 'Repository',
       hint: 'Active task context',
       v: activeRepositoryPath ? repositoryName(activeRepositoryPath) : 'Not set'
-    },
-    { k: 'Test command', hint: 'Run for verification', v: 'npm test' }
+    }
   ];
 
   return (
