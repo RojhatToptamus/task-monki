@@ -16,6 +16,14 @@ interface ParsedStatus {
   conflictedCount: number;
 }
 
+const GIT_STATUS_ARGS = [
+  'status',
+  '--porcelain=v2',
+  '--branch',
+  '--untracked-files=all',
+  '-z'
+] as const;
+
 export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>> {
   const [
     repoRoot,
@@ -32,7 +40,7 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
   ] = await Promise.all([
     git(worktree.worktreePath, ['rev-parse', '--show-toplevel']),
     git(worktree.worktreePath, ['rev-parse', '--git-common-dir']),
-    git(worktree.worktreePath, ['status', '--porcelain=v2', '--branch', '-z']),
+    git(worktree.worktreePath, [...GIT_STATUS_ARGS]),
     git(worktree.worktreePath, ['rev-parse', 'HEAD']).catch(() => ''),
     git(worktree.worktreePath, ['branch', '--show-current']).catch(() => ''),
     git(worktree.worktreePath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
@@ -88,7 +96,7 @@ export async function inspectGitSnapshot(worktree: WorktreeRecord): Promise<Omit
 }
 
 export async function buildDiffEvidence(worktree: WorktreeRecord): Promise<string> {
-  const [committed, staged, unstaged, stat] = await Promise.all([
+  const [committed, staged, unstaged, untracked, stat] = await Promise.all([
     git(worktree.worktreePath, ['diff', `${worktree.baseSha}..HEAD`]).catch((error) =>
       formatGitError('Committed diff', error)
     ),
@@ -96,8 +104,10 @@ export async function buildDiffEvidence(worktree: WorktreeRecord): Promise<strin
       formatGitError('Staged diff', error)
     ),
     git(worktree.worktreePath, ['diff']).catch((error) => formatGitError('Unstaged diff', error)),
+    buildUntrackedDiff(worktree.worktreePath),
     buildDiffStat(worktree)
   ]);
+  const unstagedAndUntracked = [unstaged.trim(), untracked.trim()].filter(Boolean).join('\n');
 
   return [
     '# Git diff evidence',
@@ -120,7 +130,7 @@ export async function buildDiffEvidence(worktree: WorktreeRecord): Promise<strin
     '',
     '## Unstaged diff',
     '',
-    unstaged || 'No unstaged diff.',
+    unstagedAndUntracked || 'No unstaged diff.',
     ''
   ].join('\n');
 }
@@ -184,16 +194,94 @@ export function parseGitStatusPorcelain(output: string): ParsedStatus {
 }
 
 async function buildDiffStat(worktree: WorktreeRecord): Promise<string> {
-  const [committed, working] = await Promise.all([
+  const [committed, working, untracked] = await Promise.all([
     git(worktree.worktreePath, ['diff', '--stat', `${worktree.baseSha}..HEAD`]).catch(() => ''),
-    git(worktree.worktreePath, ['diff', '--stat']).catch(() => '')
+    git(worktree.worktreePath, ['diff', '--stat']).catch(() => ''),
+    buildUntrackedDiffStat(worktree.worktreePath)
   ]);
-  return [committed.trim(), working.trim()].filter(Boolean).join('\n');
+  return [committed.trim(), working.trim(), untracked.trim()].filter(Boolean).join('\n');
+}
+
+async function buildUntrackedDiff(worktreePath: string): Promise<string> {
+  const paths = await getUntrackedPaths(worktreePath);
+  const chunks: string[] = [];
+
+  for (const relativePath of paths) {
+    try {
+      const diff = await gitDiffAllowingChanges(worktreePath, [
+        'diff',
+        '--no-index',
+        '--',
+        '/dev/null',
+        relativePath
+      ]);
+      const normalizedDiff = hasDiffFileHeader(diff)
+        ? diff.trimEnd()
+        : syntheticAddedFileDiff(relativePath);
+      chunks.push(normalizedDiff);
+    } catch (error) {
+      chunks.push(formatGitError(`Untracked diff for ${relativePath}`, error));
+    }
+  }
+
+  return chunks.join('\n');
+}
+
+function hasDiffFileHeader(diff: string): boolean {
+  return /^diff --git /m.test(diff);
+}
+
+function syntheticAddedFileDiff(relativePath: string): string {
+  return [
+    `diff --git a/${relativePath} b/${relativePath}`,
+    'new file mode 100644',
+    'index 0000000..0000000',
+    '--- /dev/null',
+    `+++ b/${relativePath}`
+  ].join('\n');
+}
+
+async function buildUntrackedDiffStat(worktreePath: string): Promise<string> {
+  const paths = await getUntrackedPaths(worktreePath);
+  const chunks: string[] = [];
+
+  for (const relativePath of paths) {
+    const stat = await gitDiffAllowingChanges(worktreePath, [
+      'diff',
+      '--no-index',
+      '--stat',
+      '--',
+      '/dev/null',
+      relativePath
+    ]).catch(() => '');
+    if (stat.trim()) {
+      chunks.push(stat.trimEnd());
+    }
+  }
+
+  return chunks.join('\n');
+}
+
+async function getUntrackedPaths(worktreePath: string): Promise<string[]> {
+  const statusOutput = await git(worktreePath, [...GIT_STATUS_ARGS]).catch(() => '');
+  return parseGitStatusPorcelain(statusOutput).untrackedPaths.sort();
+}
+
+async function gitDiffAllowingChanges(cwd: string, argv: string[]): Promise<string> {
+  try {
+    return await git(cwd, argv);
+  } catch (error) {
+    const gitError = error as { code?: unknown; stdout?: unknown };
+    if (gitError.code === 1 && typeof gitError.stdout === 'string') {
+      return gitError.stdout;
+    }
+    throw error;
+  }
 }
 
 async function computeDirtyFingerprint(worktreePath: string): Promise<string> {
   const [statusOutput, unstaged, staged] = await Promise.all([
-    git(worktreePath, ['status', '--porcelain=v2', '--branch', '-z']).catch(() => ''),
+    git(worktreePath, [...GIT_STATUS_ARGS]).catch(() => ''),
     git(worktreePath, ['diff', '--binary']).catch(() => ''),
     git(worktreePath, ['diff', '--cached', '--binary']).catch(() => '')
   ]);
