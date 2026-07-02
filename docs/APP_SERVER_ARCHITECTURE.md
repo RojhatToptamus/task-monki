@@ -14,7 +14,6 @@ Task Monki owns:
 - task records and workflow phases;
 - isolated task worktrees and branches;
 - Git snapshots, dirty fingerprints, and diff artifacts;
-- test execution and test artifacts;
 - GitHub branch, PR, check, review, and merge evidence;
 - local acceptance and Done transitions.
 
@@ -41,7 +40,6 @@ flowchart LR
   RPC --> Journal["Protocol journal"]
   Journal --> Store["FileTaskStore"]
   Service --> Git["GitSnapshotService"]
-  Service --> Tests["LocalTestRunner"]
   Service --> GitHub["GitHubService"]
 ```
 
@@ -140,8 +138,7 @@ Task and review execution settings stored on task/run records include:
 - reasoning effort;
 - sandbox;
 - approval policy;
-- network access;
-- test command.
+- network access.
 
 Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults

@@ -63,7 +63,7 @@ describe('createBrowserTaskManagerApi updates', () => {
 
     const unsubscribe = api.onUpdate((event) => events.push(event));
     const event: AppUpdateEvent = {
-      type: 'test.output',
+      type: 'run.output',
       taskId: 'task-1',
       payload: { stream: 'stdout' },
       at: '2026-06-29T00:00:00.000Z'

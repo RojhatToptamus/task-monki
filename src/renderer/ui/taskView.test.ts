@@ -107,7 +107,6 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'CLEAN',
-          tests: 'PASSED',
           githubPullRequest: 'NOT_CREATED'
         }
       })
@@ -117,24 +116,15 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'DIRTY',
-          tests: 'FAILED',
           githubPullRequest: 'OPEN_DRAFT',
+          githubPullRequestNumber: 82,
           ciChecks: 'BLOCKED'
         }
       })
     );
 
-    expect(clean).toEqual([
-      { label: 'git clean' },
-      { label: 'tests pass' },
-      { label: 'no PR' }
-    ]);
-    expect(dirty).toEqual([
-      { label: 'git dirty', tone: 'action' },
-      { label: 'tests fail', tone: 'error' },
-      { label: 'PR draft' },
-      { label: 'CI blocked', tone: 'error' }
-    ]);
+    expect(clean).toEqual([{ label: 'No PR', tone: 'neutral' }]);
+    expect(dirty).toEqual([{ label: 'PR #82 | checks failing', tone: 'error' }]);
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {
@@ -244,13 +234,12 @@ describe('task card view model', () => {
     ).toBe(false);
   });
 
-  it('allows clean local completion only when review, tests, and Git evidence are healthy', () => {
+  it('allows clean local completion only when review and Git evidence are healthy', () => {
     const state = getFinishEvidenceState(
       createTask({
         projection: {
           ...createInitialProjection(now),
           git: 'CLEAN',
-          tests: 'PASSED',
           codexReview: { status: 'PASSED' }
         },
         workflowPhase: 'REVIEW'
@@ -260,47 +249,12 @@ describe('task card view model', () => {
     expect(state).toEqual({ mode: 'clean', warnings: [] });
   });
 
-  it('uses Mark done anyway when tests are missing or stale despite a passing review', () => {
-    const missingTests = getFinishEvidenceState(
-      createTask({
-        projection: {
-          ...createInitialProjection(now),
-          git: 'CLEAN',
-          tests: 'NOT_RUN',
-          codexReview: { status: 'PASSED' }
-        },
-        workflowPhase: 'REVIEW'
-      })
-    );
-    const staleTests = getFinishEvidenceState(
-      createTask({
-        projection: {
-          ...createInitialProjection(now),
-          git: 'CLEAN',
-          tests: 'STALE',
-          codexReview: { status: 'PASSED' }
-        },
-        workflowPhase: 'REVIEW'
-      })
-    );
-
-    expect(missingTests.mode).toBe('override');
-    expect(missingTests.warnings.map((warning) => warning.title)).toContain(
-      'No local test run is recorded.'
-    );
-    expect(staleTests.mode).toBe('override');
-    expect(staleTests.warnings.map((warning) => warning.title)).toContain(
-      'Local test evidence is stale.'
-    );
-  });
-
-  it('uses Mark done anyway when Git is dirty even if review and tests passed', () => {
+  it('uses Mark done anyway when Git is dirty even if review passed', () => {
     const state = getFinishEvidenceState(
       createTask({
         projection: {
           ...createInitialProjection(now),
           git: 'DIRTY',
-          tests: 'PASSED',
           codexReview: { status: 'PASSED' }
         },
         workflowPhase: 'REVIEW'
@@ -322,7 +276,6 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'DIRTY',
-          tests: 'STALE',
           codexReview: { status: 'NEEDS_CHANGES' }
         },
         workflowPhase: 'REVIEW'
@@ -333,7 +286,6 @@ describe('task card view model', () => {
 
     expect(requirements).toEqual([
       { label: 'Review', detail: 'needs changes', tone: 'error', unresolved: true },
-      { label: 'Tests', detail: 'stale', tone: 'action', unresolved: true },
       { label: 'Tree', detail: '2 dirty', tone: 'action', unresolved: true }
     ]);
   });
@@ -344,7 +296,6 @@ describe('task card view model', () => {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'DIRTY',
-        tests: 'PASSED',
         codexReview: { status: 'PASSED' }
       },
       workflowPhase: 'REVIEW'
@@ -393,7 +344,6 @@ describe('task card view model', () => {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'COMMITTED_UNPUSHED',
-        tests: 'STALE',
         codexReview: { status: 'STALE', runId: 'review-run' }
       },
       workflowPhase: 'REVIEW'
@@ -406,8 +356,8 @@ describe('task card view model', () => {
         mode: 'override',
         warnings: [
           {
-            title: 'Local test evidence is stale.',
-            detail: 'Rerun tests for the current Git state before marking done cleanly.'
+            title: 'Codex review is stale.',
+            detail: 'Run review again before marking done cleanly, or mark done anyway.'
           }
         ]
       }
@@ -422,13 +372,35 @@ describe('task card view model', () => {
     expect(actions.find((action) => action.id === 'commit')?.disabled).toBe(true);
   });
 
+  it('does not offer Create draft PR after an open PR exists', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'PUSHED',
+        githubPullRequest: 'OPEN_READY',
+        githubPullRequestNumber: 82,
+        codexReview: { status: 'PASSED' }
+      },
+      workflowPhase: 'IN_REVIEW'
+    });
+
+    const actions = finishActionsForTask({
+      task,
+      reviewStatus: 'PASSED',
+      finishEvidence: { mode: 'clean', warnings: [] }
+    });
+
+    expect(actions.map((action) => action.id)).toEqual(['commit', 'mark-done']);
+    expect(actions.find((action) => action.id === 'commit')?.disabled).toBe(true);
+  });
+
   it('disables local completion while review is running', () => {
     const task = createTask({
       projection: {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'DIRTY',
-        tests: 'PASSED',
         codexReview: { status: 'RUNNING', runId: 'review-run' }
       },
       workflowPhase: 'REVIEW'

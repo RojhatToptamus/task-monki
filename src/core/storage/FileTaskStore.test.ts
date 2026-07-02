@@ -219,14 +219,6 @@ describe('FileTaskStore', () => {
       },
       ''
     );
-    const testRun = await store.createTestRun({
-      task: alternativeTask,
-      worktree: alternativeWorktree,
-      gitSnapshot,
-      commandLine: 'npm test',
-      executable: 'npm',
-      argv: ['test']
-    });
     await store.recordGitHubPreflight({
       taskId: alternativeTask.id,
       iterationId: alternativeIteration.id,
@@ -271,7 +263,9 @@ describe('FileTaskStore', () => {
         pendingCount: 0,
         passingCount: 1,
         failingCount: 0,
-        skippedCount: 0
+        skippedCount: 0,
+        canceledCount: 0,
+        checkDetails: []
       },
       reviews: {
         taskId: alternativeTask.id,
@@ -293,8 +287,6 @@ describe('FileTaskStore', () => {
     const promptArtifactPath = await store.getArtifactPath(alternativeRun.promptArtifactId);
     const finalArtifactPath = await store.getArtifactPath(finalArtifact.id);
     const diffArtifactPath = await store.getArtifactPath(gitSnapshot.diffArtifactId!);
-    const stdoutArtifactPath = await store.getArtifactPath(testRun.stdoutArtifactId);
-    const stderrArtifactPath = await store.getArtifactPath(testRun.stderrArtifactId);
 
     await store.deleteTask(alternativeTask.id);
 
@@ -314,7 +306,6 @@ describe('FileTaskStore', () => {
     expect(snapshot.gitSnapshots.some((record) => record.taskId === alternativeTask.id)).toBe(
       false
     );
-    expect(snapshot.testRuns.some((testRun) => testRun.taskId === alternativeTask.id)).toBe(false);
     expect(snapshot.githubRepositories.some((record) => record.taskId === alternativeTask.id)).toBe(
       false
     );
@@ -345,8 +336,6 @@ describe('FileTaskStore', () => {
     await expect(fs.access(promptArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(finalArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(diffArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(stdoutArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(stderrArtifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('does not delete fork alternatives when deleting their source task', async () => {

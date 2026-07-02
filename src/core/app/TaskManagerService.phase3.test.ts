@@ -7,7 +7,7 @@ import {
 } from './TaskManagerService';
 
 describe('Phase 3 delivery guards', () => {
-  it('allows draft PR publication readiness without local test evidence', () => {
+  it('allows draft PR publication readiness from committed Git evidence', () => {
     expect(() => assertPublishReady(gitSnapshot('head-1', 'fingerprint-1'))).not.toThrow();
   });
 

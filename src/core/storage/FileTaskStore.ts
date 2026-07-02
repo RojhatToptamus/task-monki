@@ -35,7 +35,6 @@ import type {
   Task,
   TaskIteration,
   TaskSnapshot,
-  TestRunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
@@ -116,15 +115,6 @@ export interface CreateAgentServerInput {
   schemaVersion?: string;
   schemaHash?: string;
   runtimeResolution?: AgentServerInstance['runtimeResolution'];
-}
-
-interface CreateTestRunInput {
-  task: Task;
-  worktree: WorktreeRecord;
-  gitSnapshot: GitSnapshotRecord;
-  commandLine: string;
-  executable: string;
-  argv: string[];
 }
 
 interface PrSyncInput {
@@ -412,16 +402,10 @@ export class FileTaskStore {
         .filter((worktree) => worktree.taskId === taskId)
         .map((worktree) => worktree.id)
     );
-    const testRunIds = new Set(
-      this.state.testRuns
-        .filter((testRun) => testRun.taskId === taskId)
-        .map((testRun) => testRun.id)
-    );
     const artifactsToDelete = this.state.artifacts.filter(
       (artifact) =>
         artifact.taskId === taskId ||
-        (artifact.runId ? runIds.has(artifact.runId) : false) ||
-        (artifact.testRunId ? testRunIds.has(artifact.testRunId) : false)
+        (artifact.runId ? runIds.has(artifact.runId) : false)
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
@@ -434,7 +418,6 @@ export class FileTaskStore {
       iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
       worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
       gitSnapshots: this.state.gitSnapshots.filter((snapshot) => snapshot.taskId !== taskId),
-      testRuns: this.state.testRuns.filter((testRun) => testRun.taskId !== taskId),
       githubRepositories: this.state.githubRepositories.filter(
         (record) => record.taskId !== taskId
       ),
@@ -489,8 +472,7 @@ export class FileTaskStore {
           !eventBelongsToDeletedTask(event, taskId, {
             runIds,
             sessionIds,
-            worktreeIds,
-            testRunIds
+            worktreeIds
           })
       ),
       artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
@@ -529,7 +511,6 @@ export class FileTaskStore {
       resolution: 'NONE',
       completionPolicy: 'LOCAL_ACCEPTANCE',
       phaseVersion: 1,
-      testCommand: input.testCommand?.trim() || 'npm test',
       forkedAlternativeTaskIds: [],
       forkedFromTaskId: fork?.sourceTaskId,
       forkedFromRunId: fork?.sourceRunId,
@@ -577,7 +558,6 @@ export class FileTaskStore {
         payload: {
           title: task.title,
           repositoryPath: task.repositoryPath,
-          testCommand: task.testCommand,
           forkedFromTaskId: task.forkedFromTaskId,
           forkedFromRunId: task.forkedFromRunId
         }
@@ -1723,81 +1703,8 @@ export class FileTaskStore {
       false
     );
 
-    await this.markStaleTestsForSnapshot(stored, false);
     await this.persistQueued();
     return clone(stored);
-  }
-
-  async createTestRun(input: CreateTestRunInput): Promise<TestRunRecord> {
-    await this.init();
-
-    const now = new Date().toISOString();
-    const testRunId = randomUUID();
-    const stdoutArtifact = await this.createArtifactRecord(input.task.id, 'test-stdout', {
-      testRunId
-    });
-    const stderrArtifact = await this.createArtifactRecord(input.task.id, 'test-stderr', {
-      testRunId
-    });
-    await Promise.all([
-      fs.writeFile(stdoutArtifact.path, '', 'utf8'),
-      fs.writeFile(stderrArtifact.path, '', 'utf8')
-    ]);
-
-    const testRun: TestRunRecord = {
-      id: testRunId,
-      taskId: input.task.id,
-      iterationId: input.worktree.iterationId,
-      worktreeId: input.worktree.id,
-      generationKey: input.gitSnapshot.dirtyFingerprint,
-      command: input.commandLine,
-      executable: input.executable,
-      argv: input.argv,
-      cwd: input.worktree.worktreePath,
-      status: 'QUEUED',
-      processStatus: 'CREATED',
-      stdoutArtifactId: stdoutArtifact.id,
-      stderrArtifactId: stderrArtifact.id,
-      startedAt: now,
-      testedHeadSha: input.gitSnapshot.headSha,
-      testedDirtyFingerprint: input.gitSnapshot.dirtyFingerprint
-    };
-
-    this.state = {
-      ...this.state,
-      tasks: this.state.tasks.map((existing) =>
-        existing.id === input.task.id
-          ? {
-              ...existing,
-              currentTestRunId: testRun.id,
-              updatedAt: now
-            }
-          : existing
-      ),
-      testRuns: [testRun, ...this.state.testRuns],
-      artifacts: [stdoutArtifact, stderrArtifact, ...this.state.artifacts]
-    };
-
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'TEST_RUN_STARTED',
-        taskId: input.task.id,
-        iterationId: input.worktree.iterationId,
-        worktreeId: input.worktree.id,
-        testRunId: testRun.id,
-        source: 'test',
-        payload: {
-          command: input.commandLine,
-          cwd: input.worktree.worktreePath,
-          testedHeadSha: input.gitSnapshot.headSha,
-          testedDirtyFingerprint: input.gitSnapshot.dirtyFingerprint
-        }
-      }),
-      false
-    );
-
-    await this.persistQueued();
-    return clone(testRun);
   }
 
   async transitionTask(taskId: string, toPhase: Task['workflowPhase'], reason: string): Promise<Task> {
@@ -2176,76 +2083,22 @@ export class FileTaskStore {
   private async createArtifactRecord(
     taskId: string,
     kind: ArtifactKind,
-    ids: { runId?: string; testRunId?: string } = {}
+    ids: { runId?: string } = {}
   ): Promise<ArtifactRecord> {
     const now = new Date().toISOString();
     const id = randomUUID();
-    const ownerId = ids.runId ?? ids.testRunId ?? 'task';
+    const ownerId = ids.runId ?? 'task';
     const fileName = `${taskId}-${ownerId}-${kind}-${id}.log`;
     return {
       id,
       taskId,
       runId: ids.runId,
-      testRunId: ids.testRunId,
       kind,
       path: path.join(this.artifactsDir, fileName),
       byteCount: 0,
       createdAt: now,
       updatedAt: now
     };
-  }
-
-  private async markStaleTestsForSnapshot(
-    snapshot: GitSnapshotRecord,
-    persist: boolean
-  ): Promise<void> {
-    const staleRuns = this.state.testRuns.filter(
-      (testRun) =>
-        testRun.taskId === snapshot.taskId &&
-        testRun.iterationId === snapshot.iterationId &&
-        ['PASSED', 'FAILED'].includes(testRun.status) &&
-        (testRun.testedHeadSha !== snapshot.headSha ||
-          testRun.testedDirtyFingerprint !== snapshot.dirtyFingerprint)
-    );
-
-    for (const testRun of staleRuns) {
-      const reason = 'Git generation changed after this test run completed.';
-      this.state = {
-        ...this.state,
-        testRuns: this.state.testRuns.map((candidate) =>
-          candidate.id === testRun.id
-            ? {
-                ...candidate,
-                status: 'STALE',
-                staleReason: reason
-              }
-            : candidate
-        )
-      };
-
-      await this.appendEvent(
-        createDomainEvent({
-          type: 'TEST_RESULT_STALE',
-          taskId: testRun.taskId,
-          iterationId: testRun.iterationId,
-          worktreeId: testRun.worktreeId,
-          testRunId: testRun.id,
-          source: 'test',
-          payload: {
-            reason,
-            testedHeadSha: testRun.testedHeadSha,
-            currentHeadSha: snapshot.headSha,
-            testedDirtyFingerprint: testRun.testedDirtyFingerprint,
-            currentDirtyFingerprint: snapshot.dirtyFingerprint
-          }
-        }),
-        false
-      );
-    }
-
-    if (persist && staleRuns.length > 0) {
-      await this.persistQueued();
-    }
   }
 
   private async persistQueued(): Promise<void> {
@@ -2278,7 +2131,6 @@ function requireCurrentState(state: PersistedState): StoreState {
     'iterations',
     'worktrees',
     'gitSnapshots',
-    'testRuns',
     'githubRepositories',
     'branchPublications',
     'pullRequests',
@@ -2488,7 +2340,6 @@ function eventBelongsToDeletedTask(
     runIds: Set<string>;
     sessionIds: Set<string>;
     worktreeIds: Set<string>;
-    testRunIds: Set<string>;
   }
 ): boolean {
   if (event.taskId === taskId) {
@@ -2501,9 +2352,6 @@ function eventBelongsToDeletedTask(
     return true;
   }
   if (event.worktreeId && ids.worktreeIds.has(event.worktreeId)) {
-    return true;
-  }
-  if (event.testRunId && ids.testRunIds.has(event.testRunId)) {
     return true;
   }
   return false;

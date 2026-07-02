@@ -293,7 +293,7 @@ async function buildDeterministicFallback(
     '- Update relevant phase/status docs when the change affects the delivery plan.',
     '',
     '## Verification',
-    '- Run the configured task test command when practical.',
+    '- Run relevant verification commands when practical.',
     '- Report what changed, what was verified, and any remaining limitations.',
     ''
   ].join('\n');

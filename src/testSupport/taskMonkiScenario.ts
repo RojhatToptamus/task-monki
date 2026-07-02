@@ -39,7 +39,6 @@ interface ScenarioOptions {
 interface CreateScenarioTaskInput {
   title?: string;
   prompt?: string;
-  testCommand?: string;
   agentSettings?: Task['agentSettings'];
 }
 
@@ -97,7 +96,6 @@ export async function createTaskMonkiScenario(
         title: input.title ?? 'Scenario task',
         prompt: input.prompt ?? 'Exercise the task workflow.',
         repositoryPath,
-        testCommand: input.testCommand,
         agentSettings: input.agentSettings ?? {
           model: 'scenario-model',
           reasoningEffort: 'low'

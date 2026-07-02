@@ -181,8 +181,6 @@ describe('CodexAppServerAdapter', () => {
     expect(resolved?.status).toBe('RESOLVED');
     expect(resolved?.responseRawMessage?.direction).toBe('OUTBOUND');
     expect((await store.getRun(run.id))?.status).toBe('COMPLETED');
-    expect((await store.getTask(task.id))?.projection.tests).toBe('NOT_RUN');
-    expect((await store.snapshot()).testRuns).toHaveLength(0);
     await expect(
       orchestrator.respondToInteraction({
         taskId: task.id,

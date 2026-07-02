@@ -30,7 +30,6 @@ export function NewTaskPanel({
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [testCommand, setTestCommand] = useState('npm test');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [sandbox, setSandbox] =
@@ -90,7 +89,6 @@ export function NewTaskPanel({
         title,
         prompt,
         repositoryPath,
-        testCommand,
         agentSettings: {
           model: model || undefined,
           modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
@@ -277,19 +275,6 @@ export function NewTaskPanel({
                 </select>
               </label>
             </div>
-
-            <label className="field">
-              <span className="field__label">
-                Test command
-              </span>
-              <input
-                className="field__mono"
-                value={testCommand}
-                onChange={(event) => setTestCommand(event.target.value)}
-                placeholder="npm test"
-                disabled={disabled}
-              />
-            </label>
 
             <div className="network-toggle">
               <div className="network-toggle__copy">

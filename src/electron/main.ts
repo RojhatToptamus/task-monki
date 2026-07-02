@@ -17,7 +17,6 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
-  RunTestsRequest,
   StartRunRequest,
   StartReviewRequest,
   SteerRunRequest,
@@ -145,10 +144,6 @@ function installIpcHandlers(): void {
       return service.respondToInteraction(input);
     }
   );
-
-  ipcMain.handle('test:run', async (_, input: RunTestsRequest) => {
-    return service.runTests(input);
-  });
 
   ipcMain.handle('evidence:refresh', async (_, input: RefreshEvidenceRequest) => {
     return service.refreshEvidence(input);

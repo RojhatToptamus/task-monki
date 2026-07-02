@@ -48,11 +48,50 @@ describe('GitHub PR rollups', () => {
           { name: 'lint', status: 'IN_PROGRESS' }
         ]
       },
-      worktree
+      worktree,
+      [
+        {
+          name: 'test',
+          bucket: 'pass',
+          state: 'SUCCESS',
+          workflow: 'CI',
+          link: 'https://github.com/openai/task-manager/actions/runs/1'
+        },
+        {
+          name: 'lint',
+          bucket: 'pending',
+          state: 'IN_PROGRESS',
+          workflow: 'CI'
+        }
+      ]
     );
 
     expect(parsed.pullRequest.status).toBe('OPEN_DRAFT');
     expect(parsed.ci.status).toBe('PENDING');
+    expect(parsed.ci.checkDetails).toEqual([
+      {
+        name: 'test',
+        status: 'passed',
+        state: 'SUCCESS',
+        workflow: 'CI',
+        link: 'https://github.com/openai/task-manager/actions/runs/1',
+        description: undefined,
+        event: undefined,
+        startedAt: undefined,
+        completedAt: undefined
+      },
+      {
+        name: 'lint',
+        status: 'pending',
+        state: 'IN_PROGRESS',
+        workflow: 'CI',
+        link: undefined,
+        description: undefined,
+        event: undefined,
+        startedAt: undefined,
+        completedAt: undefined
+      }
+    ]);
     expect(parsed.reviews.status).toBe('REQUESTED');
     expect(parsed.merge.status).toBe('NOT_MERGED');
   });
@@ -66,6 +105,22 @@ describe('GitHub PR rollups', () => {
     );
     expect(rollup.status).toBe('FAILING');
     expect(rollup.failingCount).toBe(1);
+    expect(rollup.canceledCount).toBe(0);
+    expect(rollup.checkDetails).toEqual([]);
+  });
+
+  it('normalizes canceled gh check buckets separately from failures', () => {
+    const rollup = parseCiRollup(
+      [],
+      worktreeFixture('/tmp/repo'),
+      1,
+      'abc',
+      [{ name: 'deploy', bucket: 'cancel', state: 'CANCELLED' }]
+    );
+
+    expect(rollup.status).toBe('CANCELED');
+    expect(rollup.canceledCount).toBe(1);
+    expect(rollup.failingCount).toBe(0);
   });
 });
 
@@ -144,7 +199,6 @@ function taskFixture(repositoryPath: string): Task {
       repositoryPreflight: 'VALID',
       worktree: 'PRESENT',
       git: 'COMMITTED_UNPUSHED',
-      tests: 'PASSED',
       githubRepository: 'READY',
       branchPublication: 'NOT_PUSHED',
       githubPullRequest: 'UNLINKED',

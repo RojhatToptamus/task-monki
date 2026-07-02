@@ -26,13 +26,11 @@ import type {
   ReviewRollupRecord,
   RunRecord,
   Task,
-  TestRunRecord,
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
   canPrepareWorktree,
-  canRunTests,
   canStartRun,
   formatShortId
 } from '../model/selectors';
@@ -47,7 +45,6 @@ import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip, dotStyle } from './MainColumn';
-import { StatusChip } from './StatusBadge';
 import {
   canRequestCodexReviewChanges,
   codexReviewGate,
@@ -61,6 +58,12 @@ import {
   type Tone
 } from './taskView';
 import { humanizeEnum } from './display';
+import {
+  buildFailingChecksInvestigationPrompt,
+  buildPrStatusViewModel,
+  type PrCheckGroup,
+  type PrStatusViewModel
+} from '../model/prStatus';
 
 interface TaskDetailProps {
   error?: string;
@@ -68,7 +71,6 @@ interface TaskDetailProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
-  testRun?: TestRunRecord;
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -100,10 +102,7 @@ interface TaskDetailProps {
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
   ): Promise<void>;
-  onRefreshEvidence(taskId: string): Promise<void>;
-  onRunTests(taskId: string): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
-  onPreflightGitHub(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
@@ -114,12 +113,6 @@ interface TaskDetailProps {
 interface HeadAction {
   label: string;
   kind: 'primary' | 'soft';
-  disabled?: boolean;
-  onClick(): void;
-}
-
-interface UtilAction {
-  label: string;
   disabled?: boolean;
   onClick(): void;
 }
@@ -135,6 +128,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
   const [requestInstruction, setRequestInstruction] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
+  const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -162,7 +156,6 @@ export function TaskDetail(props: TaskDetailProps) {
     run,
     worktree,
     gitSnapshot,
-    testRun,
     pullRequest,
     interactions,
     sessions,
@@ -209,6 +202,27 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPaused = Boolean(reviewPauseReason);
   const canStartCodexReview =
     Boolean(reviewSourceRun) && !reviewActionsPaused && reviewPhaseVisible;
+  const deliverySourceRun =
+    (task.currentRunId
+      ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
+      : undefined) ??
+    props.runs.find(
+      (candidate) =>
+        candidate.mode !== 'REVIEW' &&
+        candidate.iterationId === task.currentIterationId &&
+        ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+          candidate.status
+        )
+    );
+  const prStatus = buildPrStatusViewModel({
+    task,
+    gitSnapshot,
+    branchPublication: props.branchPublication,
+    pullRequest,
+    ciRollup: props.ciRollup,
+    reviewRollup: props.reviewRollup,
+    mergeSnapshot: props.mergeSnapshot
+  });
 
   const runCodexReview = async (sourceRunId: string) => {
     setReviewStartPending(true);
@@ -277,6 +291,21 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
+  const investigateFailingChecks = async () => {
+    if (!deliverySourceRun || !prStatus.canInvestigateFailure) {
+      return;
+    }
+    setDeliveryActionBusy(true);
+    try {
+      await props.onContinue(
+        deliverySourceRun.id,
+        buildFailingChecksInvestigationPrompt(prStatus)
+      );
+    } finally {
+      setDeliveryActionBusy(false);
+    }
+  };
+
   const primaryAction = getPrimaryAction({
     task,
     onPrepareWorktree: props.onPrepareWorktree,
@@ -303,18 +332,6 @@ export function TaskDetail(props: TaskDetailProps) {
     });
   }
 
-  const utilityActions: UtilAction[] = [
-    { label: 'Run tests', disabled: !canRunTests(task), onClick: () => void props.onRunTests(task.id) },
-    {
-      label: 'Refresh evidence',
-      disabled: task.projection.worktree !== 'PRESENT',
-      onClick: () => void props.onRefreshEvidence(task.id)
-    },
-    pullRequest
-      ? { label: 'Refresh GitHub', onClick: () => void props.onRefreshGitHub(task.id) }
-      : { label: 'Check GitHub', disabled: !worktree, onClick: () => void props.onPreflightGitHub(task.id) }
-  ];
-
   const model =
     run?.observedSettings?.model ?? run?.requestedSettings.model ?? task.agentSettings.model ?? 'unknown';
   const effort =
@@ -323,7 +340,6 @@ export function TaskDetail(props: TaskDetailProps) {
     task.agentSettings.reasoningEffort ??
     'default';
 
-  const evidenceChips = buildEvidenceChips(props);
   const dirtyFileCount =
     (gitSnapshot?.stagedCount ?? 0) +
     (gitSnapshot?.unstagedCount ?? 0) +
@@ -334,15 +350,6 @@ export function TaskDetail(props: TaskDetailProps) {
     reviewPending ? 'RUNNING' : reviewGate.status,
     dirtyFileCount
   );
-  const evidenceRows: Array<{ k: string; v: string }> = [
-    { k: 'Head', v: gitSnapshot?.headSha?.slice(0, 12) ?? '—' },
-    { k: 'Dirty fp', v: gitSnapshot?.dirtyFingerprint?.slice(0, 12) ?? '—' },
-    { k: 'Worktree', v: worktree?.worktreePath ? truncateMiddle(worktree.worktreePath, 38) : 'Not created' }
-  ];
-  if (pullRequest?.url) {
-    evidenceRows.push({ k: 'Pull request', v: pullRequest.url });
-  }
-
   const isFailed = ['FAILED', 'LOST', 'RECOVERY_REQUIRED'].includes(task.projection.agentRun);
 
   return (
@@ -461,7 +468,6 @@ export function TaskDetail(props: TaskDetailProps) {
                       'on-request'
                     }
                   />
-                  <ConfigRow k="Test command" v={task.testCommand ?? 'npm test'} />
                   <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
                 </div>
               </div>
@@ -477,48 +483,14 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
 
             <div className="tm-overview__col">
-              <div className="tm-panel">
-                <div className="tm-evidence__head">
-                  <span className="tm-evidence__dot" />
-                  <h3 className="tm-panel__title" style={{ margin: 0 }}>
-                    Verified evidence
-                  </h3>
-                </div>
-                <p className="tm-evidence__note">
-                  Checked locally by Task Monki — independent of the provider.
-                </p>
-                <div className="tm-evidence__chips">
-                  {evidenceChips.map((chip) => (
-                    <StatusChip
-                      key={chip.label}
-                      label={chip.label}
-                      value={chip.value}
-                      tone={chip.tone}
-                    />
-                  ))}
-                </div>
-                <div className="tm-evidence__rows">
-                  {evidenceRows.map((row) => (
-                    <div key={row.k} style={{ display: 'contents' }}>
-                      <span className="k">{row.k}</span>
-                      <span className="v">{row.v}</span>
-                    </div>
-                  ))}
-                </div>
-                <div className="tm-evidence__util">
-                  {utilityActions.map((action) => (
-                    <button
-                      key={action.label}
-                      type="button"
-                      className="tm-utilbtn"
-                      disabled={action.disabled}
-                      onClick={action.onClick}
-                    >
-                      {action.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <PrStatusCard
+                view={prStatus}
+                busy={deliveryActionBusy}
+                investigateDisabled={!deliverySourceRun || reviewActionsPaused}
+                onCreateOrPush={() => void props.onCreatePullRequest(task.id)}
+                onRefresh={() => void props.onRefreshGitHub(task.id)}
+                onInvestigate={() => void investigateFailingChecks()}
+              />
 
               {reviewPhaseVisible ? (
                 <FinishPanel
@@ -546,7 +518,6 @@ export function TaskDetail(props: TaskDetailProps) {
               run={run}
               worktree={worktree}
               gitSnapshot={gitSnapshot}
-              testRun={testRun}
               githubRepository={props.githubRepository}
               branchPublication={props.branchPublication}
               pullRequest={pullRequest}
@@ -964,6 +935,248 @@ function CodexReviewPanel({
   );
 }
 
+function PrStatusCard({
+  view,
+  busy,
+  investigateDisabled,
+  onCreateOrPush,
+  onRefresh,
+  onInvestigate
+}: {
+  view: PrStatusViewModel;
+  busy: boolean;
+  investigateDisabled: boolean;
+  onCreateOrPush(): void;
+  onRefresh(): void;
+  onInvestigate(): void;
+}) {
+  return (
+    <section className={`tm-panel tm-prstatus tm-prstatus--${view.tone}`} aria-label="PR Status">
+      <div className="tm-prstatus__head">
+        <span className="tm-prstatus__titleline">
+          <h3 className="tm-panel__title">PR Status</h3>
+          {view.canRefresh ? (
+            <button
+              type="button"
+              className="tm-prstatus__refresh"
+              disabled={busy}
+              onClick={onRefresh}
+              title="Refresh PR status"
+              aria-label="Refresh"
+            >
+              <RefreshIcon />
+            </button>
+          ) : null}
+        </span>
+        {view.refreshedLine ? <span className="tm-prstatus__refreshed">{view.refreshedLine}</span> : null}
+      </div>
+
+      <div className="tm-prstatus__headline-row">
+        <span
+          className={`tm-prstatus__dot tm-prstatus__dot--${view.tone} ${
+            view.kind === 'CHECKS_PENDING' ? 'tm-prstatus__dot--pulse' : ''
+          }`}
+          aria-hidden="true"
+        />
+        <p className="tm-prstatus__headline">{view.headline}</p>
+      </div>
+
+      {view.leadLine ? <p className="tm-prstatus__lead">{view.leadLine}</p> : null}
+
+      {view.hasPullRequest ||
+      view.freshnessLine ||
+      view.checkSummaryLine ||
+      view.reviewLine ||
+      view.mergeLine ? (
+        <div className="tm-prstatus__meta">
+          {view.hasPullRequest ? (
+            <div className="tm-prstatus__identity">
+              {view.prNumber && view.prUrl ? (
+                <a href={view.prUrl} target="_blank" rel="noreferrer">
+                  #{view.prNumber}
+                </a>
+              ) : (
+                <span>{view.prNumber ? `#${view.prNumber}` : 'PR'}</span>
+              )}
+              <span>{prIdentitySuffix(view)}</span>
+            </div>
+          ) : null}
+
+          {view.freshnessLine ? <p className="tm-prstatus__reason">{view.freshnessLine}</p> : null}
+
+          {view.checkSummaryLine || view.reviewLine || view.mergeLine ? (
+            <div className="tm-prstatus__evidence">
+              {[view.checkSummaryLine, view.reviewLine, view.mergeLine].filter(Boolean).join(' · ')}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {view.canCreateDraftPr || view.canPushUpdate || view.canInvestigateFailure ? (
+        <div className="tm-prstatus__actions">
+          {view.canCreateDraftPr ? (
+            <button type="button" className="primary-button" disabled={busy} onClick={onCreateOrPush}>
+              Create draft PR
+            </button>
+          ) : null}
+          {view.canPushUpdate ? (
+            <button type="button" className="primary-button" disabled={busy} onClick={onCreateOrPush}>
+              Push update
+            </button>
+          ) : null}
+          {view.canInvestigateFailure ? (
+            <button
+              type="button"
+              className="outline-button tm-prstatus__investigate"
+              disabled={busy || investigateDisabled}
+              onClick={onInvestigate}
+            >
+              Investigate failure
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {view.checkGroups.length > 0 ? <PrCheckDetails groups={view.checkGroups} /> : null}
+    </section>
+  );
+}
+
+function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
+  const checks = groups.flatMap((group) => group.checks);
+  return (
+    <div className="tm-prchecks" aria-label="GitHub check details">
+      <div className="tm-prchecks__head">
+        <span>Checks</span>
+        <span>{checks.length}</span>
+      </div>
+      <div className="tm-prchecks__rows">
+        {checks.map((check) => (
+          <details
+            key={`${check.name}-${check.workflow ?? ''}-${check.link ?? ''}`}
+            className={`tm-prcheck tm-prcheck--${check.status}`}
+            open={check.status === 'failed' || check.status === 'canceled'}
+          >
+            <summary>
+              <span className="tm-prcheck__name">
+                <span className="tm-prcheck__chevron" aria-hidden="true">
+                  <ChevronRightIcon />
+                </span>
+                <span className={`tm-prcheck__dot tm-prcheck__dot--${check.status}`} aria-hidden="true" />
+                <span>{check.name}</span>
+              </span>
+              <span className="tm-prcheck__status">
+                <span className={`tm-prcheck__label tm-prcheck__label--${check.status}`}>
+                  {checkStatusLabel(check.status)}
+                </span>
+                <span>{checkMetaLine(check)}</span>
+              </span>
+            </summary>
+            <pre>{checkEvidenceText(check)}</pre>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function prIdentitySuffix(view: PrStatusViewModel): string {
+  const state =
+    view.kind === 'MERGED'
+      ? 'merged'
+      : view.kind === 'CLOSED_UNMERGED'
+        ? 'closed'
+        : view.kind === 'DRAFT' || view.headline === 'Draft PR'
+          ? 'draft'
+          : 'open';
+  return `${state} · ${view.headRefName ?? 'head'} → ${view.baseRefName ?? 'base'}`;
+}
+
+function checkStatusLabel(status: PrCheckGroup['status']): string {
+  switch (status) {
+    case 'passed':
+      return 'Passed';
+    case 'failed':
+      return 'Failed';
+    case 'canceled':
+      return 'Canceled';
+    case 'pending':
+      return 'Pending';
+    case 'skipped':
+      return 'Skipped';
+  }
+}
+
+function checkMetaLine(check: PrCheckGroup['checks'][number]): string {
+  const duration = formatCheckDuration(check.startedAt, check.completedAt);
+  if (duration) {
+    return duration;
+  }
+  if (check.status === 'pending') {
+    return 'running';
+  }
+  if (check.status === 'skipped') {
+    return 'optional';
+  }
+  return check.event ?? '';
+}
+
+function checkEvidenceText(check: PrCheckGroup['checks'][number]): string {
+  const lines = [
+    check.workflow ? `Workflow: ${check.workflow}` : undefined,
+    `Status: ${check.state ?? checkStatusLabel(check.status)}`,
+    check.event ? `Event: ${check.event}` : undefined,
+    check.description ? `Description: ${check.description}` : undefined,
+    check.startedAt ? `Started: ${check.startedAt}` : undefined,
+    check.completedAt ? `Completed: ${check.completedAt}` : undefined,
+    check.link ? `URL: ${check.link}` : undefined
+  ].filter((line): line is string => Boolean(line));
+  return lines.length > 0 ? lines.join('\n') : 'No additional check detail was reported.';
+}
+
+function formatCheckDuration(startedAt?: string, completedAt?: string): string | undefined {
+  if (!startedAt || !completedAt) {
+    return undefined;
+  }
+  const started = Date.parse(startedAt);
+  const completed = Date.parse(completedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) {
+    return undefined;
+  }
+  const seconds = Math.round((completed - started) / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M9 6l6 6-6 6"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function FinishPanel({
   task,
   reviewStatus,
@@ -1350,70 +1563,6 @@ function planStepTone(status: string): Tone {
   if (status === 'IN_PROGRESS') {
     return 'info';
   }
-  return 'neutral';
-}
-
-interface EvidenceChip {
-  label: string;
-  value: string;
-  tone: Tone;
-}
-
-function buildEvidenceChips(props: TaskDetailProps): EvidenceChip[] {
-  const task = props.task!;
-  const chips: EvidenceChip[] = [
-    { label: 'Git', value: humanizeEnum(task.projection.git), tone: gitTone(task.projection.git) },
-    {
-      label: 'Tests',
-      value: humanizeEnum(task.projection.tests),
-      tone: testsTone(task.projection.tests)
-    }
-  ];
-  if (task.projection.githubPullRequest !== 'UNLINKED' && task.projection.githubPullRequest !== 'NOT_CREATED') {
-    chips.push({
-      label: 'PR',
-      value: humanizeEnum(task.projection.githubPullRequest),
-      tone: prTone(task.projection.githubPullRequest)
-    });
-  }
-  if (task.projection.ciChecks !== 'NOT_APPLICABLE') {
-    chips.push({
-      label: 'CI',
-      value: humanizeEnum(task.projection.ciChecks),
-      tone: ciTone(task.projection.ciChecks)
-    });
-  }
-  return chips;
-}
-
-function gitTone(value: string): Tone {
-  if (value === 'PUSHED') return 'success';
-  if (value === 'DIRTY') return 'action';
-  if (value === 'CONFLICTED' || value === 'DIVERGED') return 'error';
-  if (value === 'COMMITTED_UNPUSHED') return 'info';
-  return 'neutral';
-}
-
-function testsTone(value: string): Tone {
-  if (value === 'PASSED') return 'success';
-  if (value === 'FAILED' || value === 'ERROR') return 'error';
-  if (value === 'RUNNING' || value === 'QUEUED') return 'info';
-  if (value === 'STALE') return 'action';
-  return 'neutral';
-}
-
-function prTone(value: string): Tone {
-  if (value === 'MERGED') return 'success';
-  if (value === 'CLOSED_UNMERGED') return 'error';
-  if (value === 'OPEN_DRAFT' || value === 'OPEN_READY') return 'info';
-  return 'neutral';
-}
-
-function ciTone(value: string): Tone {
-  if (value === 'PASSING') return 'success';
-  if (value === 'FAILING' || value === 'BLOCKED') return 'error';
-  if (value === 'PENDING') return 'action';
-  if (value === 'STALE') return 'action';
   return 'neutral';
 }
 

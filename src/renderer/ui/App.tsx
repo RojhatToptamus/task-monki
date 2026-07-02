@@ -28,7 +28,6 @@ import {
   selectLatestCiRollup,
   selectLatestReviewRollup,
   selectLatestMergeSnapshot,
-  selectLatestTestRun,
   selectTaskEvents,
   selectTaskRuns,
   formatShortId
@@ -56,7 +55,6 @@ const emptySnapshot: TaskSnapshot = {
   iterations: [],
   worktrees: [],
   gitSnapshots: [],
-  testRuns: [],
   githubRepositories: [],
   branchPublications: [],
   pullRequests: [],
@@ -355,7 +353,6 @@ export function App() {
   const selectedGitSnapshot = selectedTask
     ? selectLatestGitSnapshot(snapshot, selectedTask)
     : undefined;
-  const selectedTestRun = selectedTask ? selectLatestTestRun(snapshot, selectedTask) : undefined;
   const selectedGitHubRepository = selectedTask
     ? selectLatestGitHubRepository(snapshot, selectedTask)
     : undefined;
@@ -449,28 +446,6 @@ export function App() {
     }
   };
 
-  const refreshEvidence = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.refreshEvidence({ taskId });
-      notify('Evidence refreshed.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to refresh evidence.');
-    }
-  };
-
-  const runTests = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.runTests({ taskId });
-      notify('Test run started.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to run tests.');
-    }
-  };
-
   const createDeliveryCommit = async (taskId: string) => {
     setError(undefined);
     try {
@@ -479,17 +454,6 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to create delivery commit.');
-    }
-  };
-
-  const preflightGitHub = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.preflightGitHub({ taskId });
-      notify('GitHub capability checked.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to check GitHub capability.');
     }
   };
 
@@ -919,7 +883,6 @@ export function App() {
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
-            testRun={selectedTestRun}
             githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
@@ -950,10 +913,7 @@ export function App() {
             onReview={startReview}
             onSyncAgentGoal={syncAgentGoal}
             onRespondToInteraction={respondToInteraction}
-            onRefreshEvidence={refreshEvidence}
-            onRunTests={runTests}
             onCreateDeliveryCommit={createDeliveryCommit}
-            onPreflightGitHub={preflightGitHub}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
             onTransition={transitionTask}

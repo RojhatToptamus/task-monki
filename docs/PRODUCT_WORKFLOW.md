@@ -1,17 +1,17 @@
 # Product Workflow
 
-Date: 2026-06-28
+Date: 2026-07-01
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
 
 ## Product model
 
-1. User creates a task in the active repository with a goal, model, reasoning
-   effort, and validation command.
+1. User creates a task in the active repository with a goal, model, and
+   reasoning effort.
 2. Task Monki prepares an isolated Git worktree.
 3. An AI provider runs in that worktree.
-4. Task Monki records provider activity, approvals, Git evidence, test evidence,
+4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
 5. User reviews, requests changes, follows up, continues unfinished runs,
    retries, forks alternatives, commits, opens a draft PR, or marks done.
@@ -27,7 +27,7 @@ New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
 
 Task records remain bound to the repository path they were created with. Runs,
-worktrees, Git evidence, tests, GitHub delivery, and provider sessions continue
+worktrees, Git evidence, GitHub delivery, and provider sessions continue
 to resolve through the task and iteration records rather than the currently
 selected sidebar repository. Switching repositories must therefore close task
 detail views from the previous repository instead of mutating those task
@@ -39,7 +39,7 @@ Screens should prioritize:
 
 1. user action required: approvals, input, permission requests;
 2. safety or recovery risk: runtime lost, ambiguous mutation, stale request;
-3. verified local evidence: Git, tests, PR, checks, reviews, merge;
+3. verified delivery evidence: Git, PR, checks, reviews, merge;
 4. available user actions: start, follow up, continue, retry, fork alternative,
    review, commit, PR;
 5. provider telemetry: plans, items, usage, raw protocol.
@@ -120,13 +120,14 @@ In Progress:
 
 Review:
 
-- Show verified evidence prominently.
+- Show verified evidence prominently, with PR Status as the primary delivery
+  surface.
 - Allow Run Codex review when no implementation-side run is active.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done, Commit, and Create draft PR when not paused by an active
   run or review.
-- Treat Mark done anyway as an explicit owner override when review, test, or Git
+- Treat Mark done anyway as an explicit owner override when review or Git
   evidence is missing, stale, failed, dirty, unavailable, canceled,
   inconclusive, or unresolved.
 
@@ -147,8 +148,13 @@ Post-run implementation controls:
 
 In Review:
 
-- Prioritize PR, check, review, and merge evidence.
+- Prioritize PR Status: one linked PR identity, one headline, check summary,
+  review line when delivery-affecting, merge line when known, and freshness.
+- Expand failing check details by default and keep successful/skipped checks
+  collapsed unless opened.
 - Allow GitHub refresh actions.
+- Offer failing-CI investigation only when GitHub checks are failing; that
+  action starts implementation-side work, not a GitHub state update.
 
 Done:
 
@@ -162,12 +168,12 @@ Task menus expose both archive and delete.
 Archive is a non-destructive workflow transition to `ARCHIVED`. It removes the task
 from active workflow handling but keeps Task Monki records, evidence, worktree
 records, artifacts, provider session references, and source/alternative links.
-Archive is blocked while a task-owned run, test, or provider request is active.
+Archive is blocked while a task-owned run or provider request is active.
 
 Delete is permanent and applies only to the selected task. It deletes the
 selected task record and Task Monki-owned records scoped to that task: task
 iterations, runs, domain events, artifacts, provider session/item/plan/usage
-records, interaction requests, Git snapshots, test runs, GitHub delivery
+records, interaction requests, Git snapshots, GitHub delivery
 snapshots, pull request/check/review/merge evidence, and worktree records. It
 also removes links in other tasks that point at the deleted task. Deleting a
 source task never deletes fork alternatives; deleting a fork alternative never
@@ -187,7 +193,7 @@ history, or provider remote thread data.
     task is complete enough.
 - Mark done anyway
   - Moves the task to Done in Task Monki despite missing or non-passing review,
-    test, or Git evidence. It should be styled and confirmed as an owner
+    or Git evidence. It should be styled and confirmed as an owner
     override, not a review action.
 - Create draft PR
   - Main delivery path. It may create a delivery commit if needed, publish the
@@ -203,6 +209,35 @@ the Codex review stale by itself.
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.
+
+## PR Status
+
+PR Status is the primary GitHub delivery surface. Task Monki creates or reuses
+one draft PR for the Task Monki-owned branch, then records PR identity, check
+details, GitHub review rollup, merge state, and whether the PR head is fresh
+against the local worktree.
+
+The UI should render one headline from those facts instead of separate
+competing badges. Headline priority is:
+
+1. Merged.
+2. Closed without merge.
+3. Branch diverged or stale.
+4. Local changes not pushed.
+5. PR has newer commits.
+6. Checks failed.
+7. Checks pending or canceled.
+8. GitHub changes requested.
+9. GitHub review waiting.
+10. Ready to merge.
+11. Draft PR.
+12. Unknown.
+
+GitHub checks are normalized into passed, failed, pending, skipped, and
+canceled buckets from `gh pr checks`. Canceled checks are distinct from
+failures, but they still block ready-to-merge status until GitHub reports merge
+readiness. The PR number is the link to GitHub; do not add a separate Open PR
+button when the number can be rendered as a link.
 
 ## Fork alternatives
 

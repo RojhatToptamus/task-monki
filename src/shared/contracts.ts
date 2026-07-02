@@ -18,7 +18,7 @@ import type {
 
 export * from './agent';
 
-export const TASK_STORE_SCHEMA_VERSION = 8 as const;
+export const TASK_STORE_SCHEMA_VERSION = 9 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -95,18 +95,6 @@ export type GitStatus =
   | 'UNAVAILABLE'
   | 'UNKNOWN';
 
-export type TestStatus =
-  | 'NOT_CONFIGURED'
-  | 'NOT_RUN'
-  | 'QUEUED'
-  | 'RUNNING'
-  | 'PASSED'
-  | 'FAILED'
-  | 'ERROR'
-  | 'CANCELED'
-  | 'STALE'
-  | 'UNKNOWN';
-
 export type GitHubRepositoryStatus =
   | 'NOT_CHECKED'
   | 'READY'
@@ -145,6 +133,20 @@ export type CiChecksStatus =
   | 'BLOCKED'
   | 'STALE'
   | 'UNKNOWN';
+
+export type GitHubCheckStatus = 'passed' | 'failed' | 'pending' | 'skipped' | 'canceled';
+
+export interface GitHubCheckDetailRecord {
+  name: string;
+  status: GitHubCheckStatus;
+  state?: string;
+  workflow?: string;
+  link?: string;
+  description?: string;
+  event?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
 
 export type ReviewStatus =
   | 'NOT_APPLICABLE'
@@ -225,12 +227,6 @@ export type DomainEventType =
   | 'GIT_SNAPSHOT_CAPTURED'
   | 'DELIVERY_COMMIT_CREATED'
   | 'DIFF_ARTIFACT_CREATED'
-  | 'TEST_RUN_STARTED'
-  | 'TEST_PROCESS_STARTED'
-  | 'TEST_STDOUT_CHUNK'
-  | 'TEST_STDERR_CHUNK'
-  | 'TEST_RUN_COMPLETED'
-  | 'TEST_RESULT_STALE'
   | 'PROMPT_REFINED'
   | 'GITHUB_PREFLIGHT_COMPLETED'
   | 'BRANCH_PUBLISH_REQUESTED'
@@ -281,8 +277,6 @@ export type ArtifactKind =
   | 'agent-final'
   | 'diff'
   | 'git-snapshot'
-  | 'test-stdout'
-  | 'test-stderr'
   | 'pr-body';
 
 export interface Finding {
@@ -301,10 +295,11 @@ export interface StatusProjection {
   repositoryPreflight: RepositoryPreflightStatus;
   worktree: WorktreeStatus;
   git: GitStatus;
-  tests: TestStatus;
   githubRepository: GitHubRepositoryStatus;
   branchPublication: BranchPublicationStatus;
   githubPullRequest: PullRequestStatus;
+  githubPullRequestNumber?: number;
+  githubPullRequestUrl?: string;
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
   /**
@@ -333,12 +328,10 @@ export interface Task {
   currentAgentSessionId?: string;
   currentIterationId?: string;
   currentWorktreeId?: string;
-  currentTestRunId?: string;
   forkedAlternativeTaskIds: string[];
   forkedFromTaskId?: string;
   forkedFromRunId?: string;
   agentSettings: AgentExecutionSettings;
-  testCommand?: string;
   createdAt: string;
   updatedAt: string;
   projection: StatusProjection;
@@ -441,29 +434,6 @@ export interface RunRecord {
   finalMessage?: string;
 }
 
-export interface TestRunRecord {
-  id: string;
-  taskId: string;
-  iterationId: string;
-  worktreeId: string;
-  generationKey: string;
-  command: string;
-  executable: string;
-  argv: string[];
-  cwd: string;
-  status: TestStatus;
-  processStatus: ProcessStatus;
-  stdoutArtifactId: string;
-  stderrArtifactId: string;
-  startedAt: string;
-  endedAt?: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-  testedHeadSha?: string;
-  testedDirtyFingerprint?: string;
-  staleReason?: string;
-}
-
 export interface GitHubRepositoryRecord {
   id: string;
   taskId: string;
@@ -530,6 +500,8 @@ export interface CiRollupRecord {
   passingCount: number;
   failingCount: number;
   skippedCount: number;
+  canceledCount: number;
+  checkDetails: GitHubCheckDetailRecord[];
   observedAt: string;
   raw?: unknown;
 }
@@ -564,7 +536,6 @@ export interface ArtifactRecord {
   id: string;
   taskId: string;
   runId?: string;
-  testRunId?: string;
   kind: ArtifactKind;
   path: string;
   byteCount: number;
@@ -582,7 +553,6 @@ export interface DomainEvent {
   serverInstanceId?: string;
   agentItemId?: string;
   interactionRequestId?: string;
-  testRunId?: string;
   worktreeId?: string;
   source:
     | 'ui'
@@ -592,7 +562,6 @@ export interface DomainEvent {
     | 'repository'
     | 'projection'
     | 'git'
-    | 'test'
     | 'github'
     | 'prompt';
   sourceEventId: string;
@@ -618,7 +587,6 @@ export interface TaskSnapshot {
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
   gitSnapshots: GitSnapshotRecord[];
-  testRuns: TestRunRecord[];
   githubRepositories: GitHubRepositoryRecord[];
   branchPublications: BranchPublicationRecord[];
   pullRequests: PullRequestSnapshotRecord[];
@@ -643,7 +611,6 @@ export interface CreateTaskRequest {
   title: string;
   prompt: string;
   repositoryPath: string;
-  testCommand?: string;
   agentSettings?: AgentExecutionSettings;
 }
 
@@ -698,10 +665,6 @@ export interface RespondToInteractionRequest {
 }
 
 export interface PrepareWorktreeRequest {
-  taskId: string;
-}
-
-export interface RunTestsRequest {
   taskId: string;
 }
 
@@ -821,9 +784,6 @@ export interface AppUpdateEvent {
     | 'interaction.updated'
     | 'worktree.updated'
     | 'git.updated'
-    | 'test.started'
-    | 'test.output'
-    | 'test.terminal'
     | 'github.updated'
     | 'prompt.refined'
     | 'provider.updated'
@@ -833,7 +793,6 @@ export interface AppUpdateEvent {
   taskId: string;
   iterationId?: string;
   runId?: string;
-  testRunId?: string;
   worktreeId?: string;
   payload: unknown;
   at: string;
@@ -864,7 +823,6 @@ export interface TaskManagerApi {
   respondToInteraction(
     input: RespondToInteractionRequest
   ): Promise<InteractionRequestRecord>;
-  runTests(input: RunTestsRequest): Promise<TestRunRecord>;
   refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord>;
   createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord>;
   preflightGitHub(input: GitHubPreflightRequest): Promise<GitHubRepositoryRecord>;
@@ -888,7 +846,6 @@ export function createInitialProjection(now: string): StatusProjection {
     repositoryPreflight: 'UNKNOWN',
     worktree: 'NOT_CREATED',
     git: 'NOT_INSPECTED',
-    tests: 'NOT_RUN',
     githubRepository: 'NOT_CHECKED',
     branchPublication: 'NOT_PUSHED',
     githubPullRequest: 'UNLINKED',

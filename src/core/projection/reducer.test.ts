@@ -170,36 +170,6 @@ describe('projection reducer', () => {
     expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
   });
 
-  it('keeps test execution as evidence without moving workflow phase', () => {
-    const task: Task = {
-      id: 'task-1',
-      title: 'Task',
-      prompt: 'Prompt',
-      repositoryPath: '/tmp/repo',
-      workflowPhase: 'REVIEW',
-      resolution: 'NONE',
-      completionPolicy: 'LOCAL_ACCEPTANCE',
-      phaseVersion: 2,
-      forkedAlternativeTaskIds: [],
-      currentIterationId: 'iteration-1',
-      agentSettings: {},
-      createdAt: now,
-      updatedAt: now,
-      projection: createInitialProjection(now)
-    };
-
-    const state = applyEventToState(
-      { ...createEmptyState(), tasks: [task] },
-      {
-        ...createEvent('TEST_RUN_STARTED', { command: 'npm test' }),
-        iterationId: 'iteration-1'
-      }
-    );
-
-    expect(state.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(state.tasks[0].projection.tests).toBe('QUEUED');
-  });
-
   it('keeps Codex review runs in Review and records an inconclusive review result', () => {
     const task: Task = {
       id: 'task-1',
@@ -432,7 +402,6 @@ describe('projection reducer', () => {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
         git: 'DIRTY',
-        tests: 'PASSED',
         codexReview: {
           status: 'PASSED',
           runId: 'review-run',
@@ -524,7 +493,7 @@ describe('projection reducer', () => {
     });
   });
 
-  it('keeps provider plans, usage, and goals separate from workflow and verified tests', () => {
+  it('keeps provider plans, usage, and goals separate from workflow evidence', () => {
     const task: Task = {
       id: 'task-1',
       title: 'Task',
@@ -561,7 +530,6 @@ describe('projection reducer', () => {
     });
 
     expect(withDivergence.tasks[0].workflowPhase).toBe('IN_PROGRESS');
-    expect(withDivergence.tasks[0].projection.tests).toBe('NOT_RUN');
     expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
   });
 });

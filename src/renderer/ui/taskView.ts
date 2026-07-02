@@ -1,9 +1,10 @@
-import type { CodexReviewGateStatus, Task, TestStatus, WorkflowPhase } from '../../shared/contracts';
+import type { CodexReviewGateStatus, Task, WorkflowPhase } from '../../shared/contracts';
 import {
   canCreateDeliveryCommit,
   canCreatePullRequest,
   formatShortId
 } from '../model/selectors';
+import { buildBoardDeliveryLine } from '../model/prStatus';
 import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
 import { humanizeEnum } from './display';
 
@@ -196,7 +197,6 @@ export function getFinishEvidenceState(
 ): FinishEvidenceState {
   const warnings = [
     reviewFinishWarning(reviewStatus),
-    testFinishWarning(task.projection.tests),
     gitFinishWarning(task, dirtyFileCount)
   ].filter((warning): warning is FinishEvidenceWarning => Boolean(warning));
 
@@ -213,7 +213,6 @@ export function finishRequirementsForTask(
 ): FinishRequirement[] {
   return [
     reviewRequirement(reviewStatus),
-    testsRequirement(task.projection.tests),
     treeRequirement(task.projection.git, dirtyFileCount)
   ];
 }
@@ -231,15 +230,23 @@ export function finishActionsForTask(input: {
 
   const reviewRunning = input.reviewStatus === 'RUNNING';
   const busyOrPaused = Boolean(input.actionBusy || input.actionsPaused || reviewRunning);
+  const shouldShowCreatePullRequestAction = [
+    'UNLINKED',
+    'NOT_CREATED',
+    'CLOSED_UNMERGED'
+  ].includes(input.task.projection.githubPullRequest);
   const actions: FinishPanelAction[] = [];
 
-  if (!reviewRunning) {
+  if (!reviewRunning && shouldShowCreatePullRequestAction) {
     actions.push({
       id: 'create-draft-pr',
       label: 'Create draft PR',
       kind: 'primary',
       disabled: !canCreatePullRequest(input.task) || busyOrPaused
     });
+  }
+
+  if (!reviewRunning) {
     actions.push({
       id: 'commit',
       label: 'Commit',
@@ -323,50 +330,6 @@ function reviewFinishWarning(
   };
 }
 
-function testFinishWarning(status: TestStatus): FinishEvidenceWarning | undefined {
-  switch (status) {
-    case 'PASSED':
-      return undefined;
-    case 'FAILED':
-    case 'ERROR':
-      return {
-        title: `Local tests are ${humanizeEnum(status).toLowerCase()}.`,
-        detail: 'Fix or rerun tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'STALE':
-      return {
-        title: 'Local test evidence is stale.',
-        detail: 'Rerun tests for the current Git state before marking done cleanly.'
-      };
-    case 'NOT_RUN':
-      return {
-        title: 'No local test run is recorded.',
-        detail: 'Run tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'NOT_CONFIGURED':
-      return {
-        title: 'No local test command is configured.',
-        detail: 'Configure or run verification before marking done cleanly, or mark done anyway.'
-      };
-    case 'QUEUED':
-    case 'RUNNING':
-      return {
-        title: 'Local tests are still running.',
-        detail: 'Wait for tests to finish before marking done cleanly.'
-      };
-    case 'CANCELED':
-      return {
-        title: 'Local test run was canceled.',
-        detail: 'Rerun tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'UNKNOWN':
-      return {
-        title: 'Local test state is unknown.',
-        detail: 'Refresh or rerun tests before marking done cleanly, or mark done anyway.'
-      };
-  }
-}
-
 function gitFinishWarning(
   task: Task,
   dirtyFileCount?: number
@@ -406,92 +369,36 @@ function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boo
   );
 }
 
-function gitEvidence(task: Task): CardEvidenceItem {
-  switch (task.projection.git) {
-    case 'CLEAN':
-      return { label: 'git clean' };
-    case 'DIRTY':
-      return { label: 'git dirty', tone: 'action' };
-    case 'COMMITTED_UNPUSHED':
-      return { label: 'committed', tone: 'info' };
-    case 'PUSHED':
-      return { label: 'pushed' };
-    case 'CONFLICTED':
-    case 'DIVERGED':
-    case 'UNAVAILABLE':
-      return { label: humanizeEnum(task.projection.git).toLowerCase(), tone: 'error' };
-    case 'NOT_INSPECTED':
-    case 'UNKNOWN':
-      return { label: humanizeEnum(task.projection.git).toLowerCase(), tone: 'action' };
-    default:
-      return { label: humanizeEnum(task.projection.git).toLowerCase() };
-  }
-}
-
-function testsEvidence(task: Task): CardEvidenceItem {
-  switch (task.projection.tests) {
-    case 'PASSED':
-      return { label: 'tests pass' };
-    case 'FAILED':
-    case 'ERROR':
-      return { label: 'tests fail', tone: 'error' };
-    case 'RUNNING':
-    case 'QUEUED':
-      return { label: 'tests running', tone: 'info' };
-    case 'STALE':
-      return { label: 'tests stale', tone: 'action' };
-    case 'NOT_RUN':
-    case 'NOT_CONFIGURED':
-    case 'CANCELED':
-    case 'UNKNOWN':
-      return { label: humanizeEnum(task.projection.tests).toLowerCase(), tone: 'action' };
-    default:
-      return { label: humanizeEnum(task.projection.tests).toLowerCase() };
-  }
-}
-
-function prEvidence(task: Task): CardEvidenceItem | undefined {
-  switch (task.projection.githubPullRequest) {
-    case 'OPEN_DRAFT':
-      return { label: 'PR draft' };
-    case 'OPEN_READY':
-      return { label: 'PR open' };
-    case 'MERGED':
-      return { label: 'merged' };
-    case 'CLOSED_UNMERGED':
-      return { label: 'PR closed', tone: 'error' };
-    case 'NOT_CREATED':
-    case 'UNLINKED':
-      return { label: 'no PR' };
-    default:
-      return { label: humanizeEnum(task.projection.githubPullRequest).toLowerCase(), tone: 'action' };
-  }
-}
-
-function ciEvidence(task: Task): CardEvidenceItem | undefined {
-  switch (task.projection.ciChecks) {
-    case 'NOT_APPLICABLE':
-      return undefined;
-    case 'PASSING':
-      return { label: 'CI passing' };
-    case 'FAILING':
-    case 'BLOCKED':
-      return { label: `CI ${task.projection.ciChecks.toLowerCase()}`, tone: 'error' };
-    case 'PENDING':
-    case 'STALE':
-      return { label: `CI ${task.projection.ciChecks.toLowerCase()}`, tone: 'action' };
-    default:
-      return { label: `CI ${humanizeEnum(task.projection.ciChecks).toLowerCase()}` };
-  }
-}
-
 export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
-  return [
-    gitEvidence(task),
-    testsEvidence(task),
-    prEvidence(task),
-    ciEvidence(task)
-  ].filter((item): item is CardEvidenceItem => Boolean(item));
+  return [{ label: buildBoardDeliveryLine(task), tone: deliveryLineTone(task) }];
+}
+
+function deliveryLineTone(task: Task): Tone {
+  if (
+    task.projection.githubPullRequest === 'CLOSED_UNMERGED' ||
+    task.projection.ciChecks === 'FAILING' ||
+    task.projection.ciChecks === 'BLOCKED' ||
+    task.projection.reviews === 'CHANGES_REQUESTED'
+  ) {
+    return 'error';
+  }
+  if (
+    task.projection.ciChecks === 'PENDING' ||
+    task.projection.ciChecks === 'CANCELED' ||
+    task.projection.ciChecks === 'STALE' ||
+    task.projection.reviews === 'REQUESTED' ||
+    task.projection.reviews === 'PENDING'
+  ) {
+    return 'action';
+  }
+  if (
+    task.projection.githubPullRequest === 'MERGED' ||
+    task.projection.merge === 'MERGED' ||
+    (task.projection.ciChecks === 'PASSING' && task.projection.merge === 'MERGEABLE')
+  ) {
+    return 'success';
+  }
+  return 'neutral';
 }
 
 export function taskMeta(task: Task): string {
@@ -535,29 +442,6 @@ function reviewRequirement(status: CodexReviewGateStatus): FinishRequirement {
       return { label: 'Review', detail: 'stopped', tone: 'action', unresolved: true };
     case 'NOT_RUN':
       return { label: 'Review', detail: 'not run', tone: 'action', unresolved: true };
-  }
-}
-
-function testsRequirement(status: TestStatus): FinishRequirement {
-  switch (status) {
-    case 'PASSED':
-      return { label: 'Tests', detail: 'pass', tone: 'success', unresolved: false };
-    case 'FAILED':
-    case 'ERROR':
-      return { label: 'Tests', detail: status.toLowerCase(), tone: 'error', unresolved: true };
-    case 'RUNNING':
-    case 'QUEUED':
-      return { label: 'Tests', detail: status.toLowerCase(), tone: 'info', unresolved: true };
-    case 'STALE':
-      return { label: 'Tests', detail: 'stale', tone: 'action', unresolved: true };
-    case 'NOT_RUN':
-      return { label: 'Tests', detail: 'not run', tone: 'action', unresolved: true };
-    case 'NOT_CONFIGURED':
-      return { label: 'Tests', detail: 'not configured', tone: 'action', unresolved: true };
-    case 'CANCELED':
-      return { label: 'Tests', detail: 'canceled', tone: 'action', unresolved: true };
-    case 'UNKNOWN':
-      return { label: 'Tests', detail: 'unknown', tone: 'action', unresolved: true };
   }
 }
 

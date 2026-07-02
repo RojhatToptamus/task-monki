@@ -52,11 +52,11 @@ of:
 ## Core invariants
 
 - Task Monki is authoritative for tasks, workflow phase, worktrees, Git state,
-  tests, GitHub delivery, and acceptance.
+  GitHub delivery, and acceptance.
 - Codex is authoritative only for its own server, thread, turn, item, approval,
   plan, model, settings, and usage events.
 - Provider reports are useful context, not verified evidence.
-- Git, test, and GitHub evidence must be observed independently by Task Monki.
+- Git and GitHub evidence must be observed independently by Task Monki.
 - A Codex review is a check inside the Review phase; requested changes are
   implementation work and belong in In Progress while they run.
 

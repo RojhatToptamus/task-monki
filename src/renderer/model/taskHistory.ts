@@ -6,7 +6,7 @@ export interface TaskHistoryItem {
   title: string;
   detail: string;
   tone: 'success' | 'error' | 'info' | 'action' | 'neutral';
-  category: 'request' | 'run' | 'review' | 'evidence' | 'test' | 'delivery' | 'state' | 'risk';
+  category: 'request' | 'run' | 'review' | 'evidence' | 'delivery' | 'state' | 'risk';
 }
 
 export function buildTaskHistory(events: DomainEvent[], runs: RunRecord[] = []): TaskHistoryItem[] {
@@ -84,18 +84,6 @@ function historyItemFor(
         'success'
       );
     }
-    case 'TEST_RUN_STARTED':
-      return item(event, 'test', 'Tests started', stringField(payload, 'command') ?? 'Local test command.', 'info');
-    case 'TEST_RUN_COMPLETED':
-      return item(
-        event,
-        'test',
-        'Tests finished',
-        `Exit ${nullableNumberField(payload, 'exitCode') ?? 'unknown'}`,
-        nullableNumberField(payload, 'exitCode') === 0 ? 'success' : 'error'
-      );
-    case 'TEST_RESULT_STALE':
-      return item(event, 'test', 'Tests stale', stringField(payload, 'reason') ?? 'Diff changed.', 'action');
     case 'TRANSITION_COMPLETED':
       return item(event, 'state', 'Workflow moved', `Moved to ${humanizeEnum(stringField(payload, 'toPhase') ?? 'next phase')}.`, 'info');
     case 'TRANSITION_BLOCKED':
@@ -290,11 +278,6 @@ function stringField(payload: Record<string, unknown>, key: string): string | un
 function numberField(payload: Record<string, unknown>, key: string): number | undefined {
   const value = payload[key];
   return typeof value === 'number' ? value : undefined;
-}
-
-function nullableNumberField(payload: Record<string, unknown>, key: string): number | null | undefined {
-  const value = payload[key];
-  return typeof value === 'number' || value === null ? value : undefined;
 }
 
 function humanizeEnum(value: string): string {

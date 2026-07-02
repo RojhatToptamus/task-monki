@@ -16,7 +16,6 @@ import type {
   RefinePromptResponse,
   RepositoryPreflight,
   RunRecord,
-  RunTestsRequest,
   StartRunRequest,
   Task,
   TaskSnapshot,
@@ -45,7 +44,6 @@ import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
 import { PromptRefinementService } from '../prompt/PromptRefinementService';
-import { LocalTestRunner } from '../test/LocalTestRunner';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -64,7 +62,6 @@ export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
   private readonly codexAdapter: CodexAppServerAdapter;
-  private readonly testRunner: LocalTestRunner;
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
   private readonly promptRefiner = new PromptRefinementService();
@@ -108,7 +105,6 @@ export class TaskManagerService {
       events,
       options.agentProviderAdapter ?? this.codexAdapter
     );
-    this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
@@ -418,7 +414,6 @@ export class TaskManagerService {
         instruction: input.instruction
       }),
       repositoryPath: sourceTask.repositoryPath,
-      testCommand: sourceTask.testCommand,
       agentSettings: sourceTask.agentSettings,
       sourceTaskId: sourceTask.id,
       sourceRunId: input.sourceRun.id
@@ -529,13 +524,6 @@ export class TaskManagerService {
     return this.agents.shutdown();
   }
 
-  async runTests(input: RunTestsRequest) {
-    const task = await this.requireTask(input.taskId);
-    const worktree = await this.requireWorktree(task);
-    const snapshot = await this.refreshEvidence({ taskId: task.id });
-    return this.testRunner.start(task, worktree, snapshot);
-  }
-
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
@@ -629,28 +617,26 @@ export class TaskManagerService {
   async createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
+    let latestGit: GitSnapshotRecord | undefined =
+      await this.ensureCommittedPublishableGit(task);
     let snapshot = await this.store.snapshot();
-    let latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
-    let latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
     let latestPublication = latestForIteration(
       snapshot.branchPublications,
       task.currentIterationId,
       'updatedAt'
     );
 
-    if (latestPublication?.status !== 'PUSHED') {
+    if (latestPublication?.status !== 'PUSHED' || latestPublication.headSha !== latestGit.headSha) {
       latestPublication = await this.publishBranch({ taskId: task.id });
       snapshot = await this.store.snapshot();
       latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
-      latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
     }
     assertPublishReady(latestGit);
 
     const prBodyContent = await this.github.writePullRequestBody({
       filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
       task,
-      gitDiffStat: latestGit?.diffStat,
-      testStatus: latestTest?.status,
+      gitDiffStat: latestGit.diffStat,
       agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
@@ -660,7 +646,6 @@ export class TaskManagerService {
     const sync = await this.github.createOrFindDraftPullRequest({
       task,
       worktree,
-      headSha: latestGit?.headSha,
       baseRef: worktree.baseRef,
       bodyFilePath: bodyPath
     });
@@ -708,9 +693,6 @@ export class TaskManagerService {
     const latestGit = snapshot.gitSnapshots
       .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
       .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
-    const latestTest = snapshot.testRuns
-      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
     const latestPr = snapshot.pullRequests
       .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
       .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
@@ -721,12 +703,8 @@ export class TaskManagerService {
     const blockedReason = transitionBlocker(task, input.toPhase, {
       hasWorktree: Boolean(task.currentWorktreeId),
       hasGitSnapshot: Boolean(latestGit),
-      hasTestRun: Boolean(latestTest),
       gitStatus: latestGit?.status ?? task.projection.git,
-      testStatus: latestTest?.status ?? task.projection.tests,
       gitHeadSha: latestGit?.headSha,
-      testHeadSha: latestTest?.testedHeadSha,
-      testDirtyFingerprint: latestTest?.testedDirtyFingerprint,
       gitDirtyFingerprint: latestGit?.dirtyFingerprint,
       pullRequestStatus: latestPr?.status,
       pullRequestHeadSha: latestPr?.headRefOid,
@@ -1057,17 +1035,9 @@ const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'RECOVERY_REQUIRED'
 ]);
 
-const ACTIVE_TEST_STATUSES = new Set(['QUEUED', 'RUNNING']);
-
-function activeTaskOperationBlocker(
-  task: Task,
-  evidence?: { testStatus?: string }
-): string | undefined {
+function activeTaskOperationBlocker(task: Task): string | undefined {
   if (ACTIVE_AGENT_RUN_STATUSES.has(task.projection.agentRun as RunRecord['status'])) {
     return 'Stop or let the active agent run finish before changing this task.';
-  }
-  if (ACTIVE_TEST_STATUSES.has(evidence?.testStatus ?? task.projection.tests)) {
-    return 'Wait for the active test run to finish before changing this task.';
   }
   if (['REQUESTED', 'STARTING', 'RUNNING', 'CANCEL_REQUESTED'].includes(task.projection.requestedAction)) {
     return 'Resolve the pending provider request before changing this task.';
@@ -1081,15 +1051,6 @@ export function taskDeletionBlocker(task: Task, snapshot: TaskSnapshot): string 
   );
   if (activeRun) {
     return 'Stop or let the active agent run finish before deleting this task.';
-  }
-
-  const activeTest = snapshot.testRuns.find(
-    (testRun) =>
-      testRun.taskId === task.id &&
-      (ACTIVE_TEST_STATUSES.has(testRun.status) || testRun.processStatus === 'RUNNING')
-  );
-  if (activeTest) {
-    return 'Wait for the active test run to finish before deleting this task.';
   }
 
   const activeInteraction = snapshot.interactionRequests.find(
@@ -1108,12 +1069,8 @@ export function transitionBlocker(
   evidence: {
     hasWorktree: boolean;
     hasGitSnapshot?: boolean;
-    hasTestRun?: boolean;
     gitStatus?: string;
-    testStatus?: string;
     gitHeadSha?: string;
-    testHeadSha?: string;
-    testDirtyFingerprint?: string;
     gitDirtyFingerprint?: string;
     pullRequestStatus?: string;
     pullRequestHeadSha?: string;
@@ -1148,7 +1105,7 @@ export function transitionBlocker(
     return undefined;
   }
   if (toPhase === 'ARCHIVED') {
-    return activeTaskOperationBlocker(task, { testStatus: evidence.testStatus });
+    return activeTaskOperationBlocker(task);
   }
   return undefined;
 }
@@ -1165,7 +1122,7 @@ function latestForIteration<T extends { iterationId: string }>(
 
 export function assertPublishReady(
   latestGit: GitSnapshotRecord | undefined
-): void {
+): asserts latestGit is GitSnapshotRecord {
   if (!latestGit) {
     throw new Error('Refresh Git evidence before opening a draft PR.');
   }

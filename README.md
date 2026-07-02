@@ -15,21 +15,21 @@
 
 ## What it is
 
-You write a task prompt, Task Monki gives it an isolated branch and Git worktree, and Codex implements inside it. You watch the work happen, inspect the diff, run your tests, and open a draft pull request when it's ready — all from one board on your machine.
+You write a task prompt, Task Monki gives it an isolated branch and Git worktree, and Codex implements inside it. You watch the work happen, inspect the diff, review local Git evidence, and open a draft pull request when it's ready — all from one board on your machine.
 
-It runs entirely locally. Codex work is delegated to your own installed, authenticated [Codex CLI](https://github.com/openai/codex); Task Monki tracks the Git, test, and GitHub evidence itself. It never merges a pull request for you.
+It runs entirely locally. Codex work is delegated to your own installed, authenticated [Codex CLI](https://github.com/openai/codex); Task Monki tracks the Git and GitHub delivery evidence itself. It never merges a pull request for you.
 
-A key principle: Task Monki keeps what **Codex reports** separate from what it has **verified locally**. Provider plans, usage, and completion claims are always marked as such — only Task Monki's own Git inspection, test runs, and GitHub sync count as verified.
+A key principle: Task Monki keeps what **Codex reports** separate from what it has **verified locally**. Provider plans, usage, and completion claims are always marked as such — only Task Monki's own Git inspection and GitHub sync count as verified delivery evidence.
 
 ## How it works
 
-1. **Create a task** — pick a repository, write a prompt, set a test command.
+1. **Create a task** — pick a repository, write a prompt, and choose Codex settings.
 2. **Prepare the worktree** — creates an isolated `codex/task-*` branch.
 3. **Start implementation** — Codex runs with write access scoped to that worktree.
-4. **Review** — inspect the diff, commands, file changes, and approvals.
-5. **Test** — run your test command and check the results.
-6. **Commit** — create a delivery commit, then re-test against it.
-7. **Ship** — open a draft pull request once the branch and evidence are ready.
+4. **Inspect** — review the diff, commands, file changes, and approvals.
+5. **Review** — run Codex review or request follow-up changes when needed.
+6. **Commit** — create a delivery commit when the local diff is ready.
+7. **Ship** — open a draft pull request once the branch and GitHub evidence are ready.
 
 You can steer or interrupt a run mid-turn, follow up in the same session, retry, or fork an alternative attempt.
 
@@ -78,4 +78,4 @@ npm run typecheck && npm test && npm run build && npm run check:codex-protocol
 
 ## Status
 
-Task Monki is experimental and focused on one thing: a reliable local review loop with isolated implementation, inspectable evidence, explicit tests, and human-controlled GitHub delivery. It runs real local processes and Git operations, so use it only with repositories you can recover — never with untrusted prompts, repos, or test commands. Interfaces and stored data formats may still change.
+Task Monki is experimental and focused on one thing: a reliable local review loop with isolated implementation, inspectable evidence, and human-controlled GitHub delivery. It runs real local processes and Git operations, so use it only with repositories you can recover — never with untrusted prompts or repositories. Interfaces and stored data formats may still change.

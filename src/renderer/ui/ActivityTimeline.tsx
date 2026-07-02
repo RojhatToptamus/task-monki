@@ -77,7 +77,6 @@ function toneForEvent(type: string): 'success' | 'error' | 'info' | 'action' | '
     type === 'WORKTREE_CREATED' ||
     type === 'GIT_SNAPSHOT_CAPTURED' ||
     type === 'AGENT_RUN_COMPLETED' ||
-    type === 'TEST_RUN_COMPLETED' ||
     type === 'BRANCH_PUBLISHED' ||
     type === 'TRANSITION_COMPLETED'
   ) {
@@ -86,12 +85,11 @@ function toneForEvent(type: string): 'success' | 'error' | 'info' | 'action' | '
   if (
     type === 'TASK_ITERATION_CREATED' ||
     type === 'PROCESS_STARTED' ||
-    type === 'TEST_RUN_STARTED' ||
     type === 'AGENT_ACTIVITY_RECEIVED'
   ) {
     return 'info';
   }
-  if (type === 'CANCEL_REQUESTED' || type === 'TEST_RESULT_STALE') {
+  if (type === 'CANCEL_REQUESTED') {
     return 'action';
   }
   return 'neutral';
