@@ -124,6 +124,69 @@ describe('GitHub PR rollups', () => {
   });
 });
 
+describe('GitHubService pull request creation', () => {
+  it('uses the requested title when creating a new draft PR', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-pr-title-'));
+    const logPath = path.join(dir, 'gh.log');
+    const ghPath = await writeFakePullRequestGh(logPath, {
+      listRows: [],
+      viewTitle: 'Custom PR title'
+    });
+    const service = new GitHubService(ghPath);
+
+    const sync = await service.createOrFindDraftPullRequest({
+      task: taskFixture(dir),
+      worktree: worktreeFixture(dir),
+      baseRef: 'main',
+      bodyFilePath: path.join(dir, 'body.md'),
+      title: 'Custom PR title'
+    });
+
+    expect(sync.pullRequest.title).toBe('Custom PR title');
+    const createInvocation = (await readGhInvocations(logPath)).find(
+      (args) => args[0] === 'pr' && args[1] === 'create'
+    );
+    expect(createInvocation).toEqual(
+      expect.arrayContaining(['--title', 'Custom PR title'])
+    );
+  });
+
+  it('reuses an existing open PR without creating or retitling it', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-pr-existing-'));
+    const logPath = path.join(dir, 'gh.log');
+    const ghPath = await writeFakePullRequestGh(logPath, {
+      listRows: [
+        {
+          number: 14,
+          url: 'https://github.com/example/repo/pull/14',
+          state: 'OPEN',
+          isDraft: true,
+          headRefName: 'codex/task-test',
+          headRefOid: 'abc',
+          baseRefName: 'main',
+          title: 'Existing PR title',
+          reviewDecision: 'REVIEW_REQUIRED',
+          statusCheckRollup: []
+        }
+      ],
+      viewTitle: 'Existing PR title'
+    });
+    const service = new GitHubService(ghPath);
+
+    const sync = await service.createOrFindDraftPullRequest({
+      task: taskFixture(dir),
+      worktree: worktreeFixture(dir),
+      baseRef: 'main',
+      bodyFilePath: path.join(dir, 'body.md'),
+      title: 'Edited title'
+    });
+
+    expect(sync.pullRequest.title).toBe('Existing PR title');
+    const invocations = await readGhInvocations(logPath);
+    expect(invocations.some((args) => args[0] === 'pr' && args[1] === 'create')).toBe(false);
+  });
+});
+
 describe('GitHubService branch publication', () => {
   it('uses the configured executable instead of rereading raw env overrides', () => {
     const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
@@ -221,6 +284,62 @@ describe('GitHubService branch publication', () => {
     );
   });
 });
+
+async function writeFakePullRequestGh(
+  logPath: string,
+  options: { listRows: unknown[]; viewTitle: string }
+): Promise<string> {
+  const ghPath = path.join(path.dirname(logPath), 'gh');
+  await fs.writeFile(
+    ghPath,
+    `#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'pr' && args[1] === 'list') {
+  console.log(JSON.stringify(${JSON.stringify(options.listRows)}));
+  process.exit(0);
+}
+if (args[0] === 'pr' && args[1] === 'create') {
+  console.log('https://github.com/example/repo/pull/14');
+  process.exit(0);
+}
+if (args[0] === 'pr' && args[1] === 'view') {
+  console.log(JSON.stringify({
+    number: 14,
+    url: 'https://github.com/example/repo/pull/14',
+    state: 'OPEN',
+    isDraft: true,
+    headRefName: 'codex/task-test',
+    headRefOid: 'abc',
+    baseRefName: 'main',
+    title: ${JSON.stringify(options.viewTitle)},
+    reviewDecision: 'REVIEW_REQUIRED',
+    statusCheckRollup: []
+  }));
+  process.exit(0);
+}
+if (args[0] === 'pr' && args[1] === 'checks') {
+  console.log('[]');
+  process.exit(0);
+}
+console.error('Unexpected gh invocation: ' + args.join(' '));
+process.exit(1);
+`,
+    'utf8'
+  );
+  await fs.chmod(ghPath, 0o755);
+  return ghPath;
+}
+
+async function readGhInvocations(logPath: string): Promise<string[][]> {
+  const content = await fs.readFile(logPath, 'utf8');
+  return content
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]);
+}
 
 function taskFixture(repositoryPath: string): Task {
   return {

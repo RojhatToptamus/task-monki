@@ -457,10 +457,10 @@ export function App() {
     }
   };
 
-  const createPullRequest = async (taskId: string) => {
+  const createPullRequest = async (taskId: string, title?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.createPullRequest({ taskId });
+      await taskManagerApi.createPullRequest({ taskId, title });
       notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {

@@ -41,6 +41,7 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
+  normalizePullRequestTitle,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import os from 'node:os';
@@ -686,6 +687,7 @@ export class TaskManagerService {
       latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
     }
     assertPublishReady(latestGit);
+    const title = normalizePullRequestTitle(input.title, task.title);
 
     const prBodyContent = await this.github.writePullRequestBody({
       filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
@@ -701,7 +703,8 @@ export class TaskManagerService {
       task,
       worktree,
       baseRef: worktree.baseRef,
-      bodyFilePath: bodyPath
+      bodyFilePath: bodyPath,
+      title
     });
     sync.pullRequest.bodyArtifactId = bodyArtifact.id;
     const pullRequest = await this.store.recordPullRequestSync(sync);

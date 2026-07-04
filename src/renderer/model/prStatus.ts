@@ -42,10 +42,13 @@ export interface PrStatusViewModel {
   hasPullRequest: boolean;
   prNumber?: number;
   prUrl?: string;
+  prTitle?: string;
+  prIdentityLine?: string;
   prHeadSha?: string;
   headRefName?: string;
   baseRefName?: string;
   checkSummaryLine?: string;
+  evidenceLine?: string;
   reviewLine?: string;
   mergeLine?: string;
   freshnessLine?: string;
@@ -171,8 +174,6 @@ export function buildPrStatusViewModel(input: {
     reviewRollup,
     mergeSnapshot
   });
-  const checkGroups = groupChecks(ciRollup?.checkDetails ?? []);
-  const checkSummaryLine = formatCheckSummary(ciRollup);
   const reviewLine = formatReviewLine(reviewRollup);
   const mergeLine = formatMergeLine(mergeSnapshot);
   const terminal = terminalPrStatus(pullRequest, mergeSnapshot);
@@ -181,7 +182,7 @@ export function buildPrStatusViewModel(input: {
     if (terminal.kind === 'CLOSED_UNMERGED') {
       const createDraftPr = createDraftPrAvailability(task, gitSnapshot, branchPublication);
       return {
-        ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+        ...baseStatus(pullRequest),
         ...terminal,
         guidanceLine: createDraftPr.line,
         canCreateDraftPr: createDraftPr.showAction,
@@ -189,7 +190,7 @@ export function buildPrStatusViewModel(input: {
       };
     }
     return {
-      ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+      ...baseStatus(pullRequest),
       ...terminal
     };
   }
@@ -197,7 +198,7 @@ export function buildPrStatusViewModel(input: {
   const freshnessStatus = freshnessToStatus(freshness);
   if (freshnessStatus) {
     return {
-      ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+      ...baseStatus(pullRequest),
       ...freshnessStatus,
       freshnessLine: freshness.line,
       canPushUpdate: freshness.kind === 'LOCAL_NOT_PUSHED',
@@ -206,21 +207,19 @@ export function buildPrStatusViewModel(input: {
   }
 
   const checksStatus = checksToStatus(ciRollup);
-  if (checksStatus) {
+  if (checksStatus && ciRollup) {
     return {
-      ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+      ...baseStatus(pullRequest),
+      ...checkEvidence(ciRollup),
       ...checksStatus,
-      guidanceLine:
-        checksStatus.kind === 'CHECKS_FAILED'
-          ? formatFailingChecksGuidance(ciRollup)
-          : undefined
+      canInvestigateFailure: checksStatus.kind === 'CHECKS_FAILED'
     };
   }
 
   const reviewStatus = reviewToStatus(reviewRollup);
   if (reviewStatus) {
     return {
-      ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+      ...baseStatus(pullRequest),
       ...reviewStatus
     };
   }
@@ -228,27 +227,24 @@ export function buildPrStatusViewModel(input: {
   const ready = isReadyToMerge(pullRequest, ciRollup, reviewRollup, mergeSnapshot);
   if (ready) {
     return {
-      ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+      ...baseStatus(pullRequest),
       kind: 'READY_TO_MERGE',
       headline: 'Ready to merge',
       tone: 'success',
       reviewLine,
-      mergeLine
+      mergeLine,
+      evidenceLine: formatEvidenceLine(reviewLine, mergeLine)
     };
   }
 
   return {
-    ...baseStatus(pullRequest, checkGroups, checkSummaryLine),
+    ...baseStatus(pullRequest),
     kind: pullRequest.isDraft ? 'DRAFT' : 'OPEN',
     headline: pullRequest.isDraft ? 'Draft PR' : 'Open PR',
     tone: pullRequest.isDraft ? 'info' : 'neutral'
   };
 
-  function baseStatus(
-    pr: PullRequestSnapshotRecord,
-    groups: PrCheckGroup[],
-    summaryLine?: string
-  ): PrStatusViewModel {
+  function baseStatus(pr: PullRequestSnapshotRecord): PrStatusViewModel {
     return {
       kind: 'UNKNOWN',
       headline: 'Unknown',
@@ -256,18 +252,57 @@ export function buildPrStatusViewModel(input: {
       hasPullRequest: true,
       prNumber: pr.number,
       prUrl: pr.url,
+      prTitle: cleanPrTitle(pr.title),
+      prIdentityLine: formatPrIdentityLine(pr),
       prHeadSha: pr.headRefOid,
       headRefName: pr.headRefName,
       baseRefName: pr.baseRefName,
-      checkSummaryLine: summaryLine,
       refreshedLine: formatRefreshLine(pr.observedAt),
-      checkGroups: groups,
+      checkGroups: [],
       canCreateDraftPr: false,
       canRefresh: true,
-      canInvestigateFailure: ciRollup?.status === 'FAILING' || ciRollup?.status === 'BLOCKED',
+      canInvestigateFailure: false,
       canPushUpdate: false
     };
   }
+}
+
+function checkEvidence(
+  ciRollup: CiRollupRecord
+): Pick<PrStatusViewModel, 'checkGroups' | 'checkSummaryLine' | 'evidenceLine'> {
+  const checkGroups = groupChecks(ciRollup.checkDetails ?? []);
+  const checkSummaryLine = formatCheckSummary(ciRollup);
+  return {
+    checkGroups,
+    checkSummaryLine,
+    evidenceLine: checkGroups.length === 0 && hasCheckCounts(ciRollup) ? checkSummaryLine : undefined
+  };
+}
+
+function cleanPrTitle(title: string | undefined): string | undefined {
+  const value = title?.trim();
+  return value ? value : undefined;
+}
+
+function formatPrIdentityLine(pr: PullRequestSnapshotRecord): string {
+  const number = pr.number ? `#${pr.number}` : 'PR';
+  const title = cleanPrTitle(pr.title);
+  return title ? `${number} ${title}` : number;
+}
+
+function formatEvidenceLine(...parts: Array<string | undefined>): string | undefined {
+  const line = parts.filter(Boolean).join(' · ');
+  return line || undefined;
+}
+
+function hasCheckCounts(ciRollup: CiRollupRecord): boolean {
+  return [
+    ciRollup.failingCount,
+    ciRollup.canceledCount,
+    ciRollup.pendingCount,
+    ciRollup.skippedCount,
+    ciRollup.passingCount
+  ].some((count) => Boolean(count && count > 0));
 }
 
 function createDraftPrAvailability(
@@ -537,31 +572,8 @@ function freshnessToStatus(
   }
 }
 
-function formatFailingChecksGuidance(ciRollup?: CiRollupRecord): string | undefined {
-  const failingChecks = (ciRollup?.checkDetails ?? []).filter((check) => check.status === 'failed');
-  const failingCount = ciRollup?.failingCount ?? failingChecks.length;
-  if (ciRollup?.status === 'BLOCKED' && failingCount === 0 && failingChecks.length === 0) {
-    return 'GitHub checks are blocked. Investigate the failure, fix the branch, then push an update.';
-  }
-  const first = failingChecks[0];
-  const firstLabel = first
-    ? `${first.name}${first.workflow ? ` in ${first.workflow}` : ''}`
-    : undefined;
-  const subject =
-    failingCount > 1
-      ? `${failingCount} checks failed${firstLabel ? `; start with ${firstLabel}` : ''}`
-      : `${firstLabel ?? 'A GitHub check'} failed`;
-  const description = first?.description?.trim();
-  const detail = description ? `: ${sentenceCase(description)}` : '.';
-  return `${subject}${detail} Investigate the failure, fix the branch, then push an update.`;
-}
-
 function isRemoteNewerPublicationError(error: string | undefined): boolean {
   return Boolean(error?.toLowerCase().includes('newer commits'));
-}
-
-function sentenceCase(value: string): string {
-  return /[.!?]$/.test(value) ? value : `${value}.`;
 }
 
 function checksToStatus(

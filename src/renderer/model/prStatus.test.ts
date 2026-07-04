@@ -100,10 +100,11 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.headline).toBe('Checks failed');
+    expect(view.prTitle).toBe('Odd Minute Check');
+    expect(view.prIdentityLine).toBe('#82 Odd Minute Check');
     expect(view.checkSummaryLine).toBe('2 failed · 1 skipped · 3 passed');
-    expect(view.guidanceLine).toBe(
-      '2 checks failed; start with lint-and-test in CI. Investigate the failure, fix the branch, then push an update.'
-    );
+    expect(view.evidenceLine).toBeUndefined();
+    expect(view.guidanceLine).toBeUndefined();
     expect(view.canInvestigateFailure).toBe(true);
     expect(view.checkGroups[0]).toMatchObject({ status: 'failed', defaultOpen: false });
   });
@@ -120,9 +121,8 @@ describe('buildPrStatusViewModel', () => {
     });
 
     expect(view.headline).toBe('Checks failed');
-    expect(view.guidanceLine).toBe(
-      'GitHub checks are blocked. Investigate the failure, fix the branch, then push an update.'
-    );
+    expect(view.guidanceLine).toBeUndefined();
+    expect(view.evidenceLine).toBeUndefined();
     expect(view.canInvestigateFailure).toBe(true);
   });
 
@@ -131,6 +131,7 @@ describe('buildPrStatusViewModel', () => {
       task: taskFixture(),
       pullRequest: prFixture(),
       ciRollup: ciFixture({
+        status: 'FAILING',
         checkDetails: [
           { name: 'passed-check', status: 'passed' },
           { name: 'skipped-check', status: 'skipped' },
@@ -148,6 +149,24 @@ describe('buildPrStatusViewModel', () => {
       'skipped',
       'passed'
     ]);
+    expect(view.evidenceLine).toBeUndefined();
+  });
+
+  it('uses aggregate check evidence only when exact check rows are unavailable', () => {
+    const view = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      ciRollup: ciFixture({
+        status: 'PENDING',
+        pendingCount: 2,
+        passingCount: 1
+      })
+    });
+
+    expect(view.headline).toBe('Checks pending');
+    expect(view.checkGroups).toEqual([]);
+    expect(view.checkSummaryLine).toBe('2 pending · 1 passed');
+    expect(view.evidenceLine).toBe('2 pending · 1 passed');
   });
 
   it('uses the spec copy for refreshed time and ready evidence', () => {
@@ -164,6 +183,7 @@ describe('buildPrStatusViewModel', () => {
     expect(view.checkSummaryLine).toBeUndefined();
     expect(view.reviewLine).toBe('Approved');
     expect(view.mergeLine).toBe('Mergeable');
+    expect(view.evidenceLine).toBe('Approved · Mergeable');
   });
 
   it('does not call a PR ready to merge when CI or review evidence is missing', () => {
@@ -381,7 +401,12 @@ describe('buildPrStatusViewModel', () => {
           pullRequest: prFixture({ headRefOid: 'new-head' }),
           ciRollup: ciFixture({ headSha: 'old-head', status: 'PASSING', passingCount: 2 })
         },
-        expected: { kind: 'STALE', headline: 'Stale', tone: 'action' }
+        expected: {
+          kind: 'STALE',
+          headline: 'Stale',
+          tone: 'action',
+          canInvestigateFailure: false
+        }
       },
       {
         name: 'local changes not pushed',
@@ -394,6 +419,7 @@ describe('buildPrStatusViewModel', () => {
           kind: 'LOCAL_NOT_PUSHED',
           headline: 'Local changes not pushed',
           tone: 'action',
+          canInvestigateFailure: false,
           canPushUpdate: true
         }
       },
@@ -437,6 +463,34 @@ describe('buildPrStatusViewModel', () => {
     expect(view.freshnessLine).toBe('Refresh PR status for the current head.');
   });
 
+  it('does not offer failing-check investigation when check evidence is stale', () => {
+    const view = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ headRefOid: 'new-head' }),
+      ciRollup: ciFixture({
+        headSha: 'old-head',
+        status: 'FAILING',
+        failingCount: 1,
+        checkDetails: [
+          {
+            name: 'lint-and-test',
+            status: 'failed',
+            workflow: 'CI',
+            link: 'https://github.com/example/repo/actions/runs/1'
+          }
+        ]
+      })
+    });
+
+    expect(view.kind).toBe('STALE');
+    expect(view.freshnessLine).toBe('Refresh PR status for the current head.');
+    expect(view.canInvestigateFailure).toBe(false);
+    expect(view.guidanceLine).toBeUndefined();
+    expect(view.checkSummaryLine).toBeUndefined();
+    expect(view.evidenceLine).toBeUndefined();
+    expect(view.checkGroups).toEqual([]);
+  });
+
   it('marks local commits as not pushed when local head differs from PR head', () => {
     const view = buildPrStatusViewModel({
       task: taskFixture(),
@@ -459,6 +513,35 @@ describe('buildPrStatusViewModel', () => {
 
     expect(view.headline).toBe('Local changes not pushed');
     expect(view.canPushUpdate).toBe(true);
+  });
+
+  it('does not inherit failing-check actions while local changes need to be pushed', () => {
+    const view = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture(),
+      gitSnapshot: gitFixture({ unstagedCount: 1, workingDiffFileCount: 1, status: 'DIRTY' }),
+      ciRollup: ciFixture({
+        status: 'FAILING',
+        failingCount: 1,
+        checkDetails: [
+          {
+            name: 'lint-and-test',
+            status: 'failed',
+            workflow: 'CI',
+            link: 'https://github.com/example/repo/actions/runs/1'
+          }
+        ]
+      })
+    });
+
+    expect(view.kind).toBe('LOCAL_NOT_PUSHED');
+    expect(view.freshnessLine).toBe('Local worktree has uncommitted changes.');
+    expect(view.canPushUpdate).toBe(true);
+    expect(view.canInvestigateFailure).toBe(false);
+    expect(view.guidanceLine).toBeUndefined();
+    expect(view.checkSummaryLine).toBeUndefined();
+    expect(view.evidenceLine).toBeUndefined();
+    expect(view.checkGroups).toEqual([]);
   });
 
   it('turns a rejected push into an actionable branch state', () => {
@@ -670,6 +753,7 @@ function prFixture(overrides: Partial<PullRequestSnapshotRecord> = {}): PullRequ
     headRefName: 'task/auth-refresh',
     headRefOid: 'abc123',
     baseRefName: 'main',
+    title: 'Odd Minute Check',
     observedAt: now,
     ...overrides
   };

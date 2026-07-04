@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import {
+  PULL_REQUEST_TITLE_MAX_LENGTH,
+  normalizePullRequestTitle
+} from '../../shared/contracts';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -35,7 +39,6 @@ import {
   formatShortId
 } from '../model/selectors';
 import { describeHealthFinding } from '../model/debugDiagnostics';
-import { ActivityTimeline } from './ActivityTimeline';
 import { AgentControlPanel } from './AgentControlPanel';
 import { EvidencePanel } from './EvidencePanel';
 import { InteractionPanel } from './InteractionPanel';
@@ -66,6 +69,12 @@ import {
   type PrCheckGroup,
   type PrStatusViewModel
 } from '../model/prStatus';
+import {
+  buildTaskActivityLedger,
+  projectDebugTaskActivity,
+  projectOverviewTaskActivity
+} from '../model/taskActivity';
+import { TaskActivityPanel } from './TaskActivityPanel';
 
 interface TaskDetailProps {
   error?: string;
@@ -105,7 +114,7 @@ interface TaskDetailProps {
     decision: AgentInteractionDecision
   ): Promise<void>;
   onCreateDeliveryCommit(taskId: string): Promise<void>;
-  onCreatePullRequest(taskId: string): Promise<void>;
+  onCreatePullRequest(taskId: string, title?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
@@ -132,6 +141,8 @@ export function TaskDetail(props: TaskDetailProps) {
   const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
   const [markDoneModal, setMarkDoneModal] = useState<'clean' | 'issues'>();
+  const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
+  const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestInstruction, setRequestInstruction] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
@@ -144,7 +155,9 @@ export function TaskDetail(props: TaskDetailProps) {
     setReviewStartPending(false);
     setRequestDrawerOpen(false);
     setSelectedReviewFindingIds([]);
-  }, [task?.id]);
+    setDraftPrModalOpen(false);
+    setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
+  }, [task?.id, task?.title]);
 
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: 0 });
@@ -239,6 +252,23 @@ export function TaskDetail(props: TaskDetailProps) {
     pauseReason: reviewPauseReason,
     hasInvestigationSource: Boolean(deliverySourceRun)
   });
+  const taskActivityLedger = useMemo(
+    () =>
+      buildTaskActivityLedger({
+        task,
+        events: props.events,
+        runs: props.runs
+      }),
+    [task, props.events, props.runs]
+  );
+  const overviewActivity = useMemo(
+    () => projectOverviewTaskActivity(taskActivityLedger),
+    [taskActivityLedger]
+  );
+  const debugActivity = useMemo(
+    () => projectDebugTaskActivity(taskActivityLedger),
+    [taskActivityLedger]
+  );
 
   const runReviewAction = async (action: () => Promise<void>) => {
     if (reviewActionInFlightRef.current) {
@@ -348,6 +378,22 @@ export function TaskDetail(props: TaskDetailProps) {
         deliverySourceRun.id,
         buildFailingChecksInvestigationPrompt(prStatus)
       );
+    });
+  };
+
+  const openDraftPrModal = () => {
+    setDraftPrTitle(normalizePullRequestTitle(undefined, task.title));
+    setDraftPrModalOpen(true);
+  };
+
+  const submitDraftPr = async () => {
+    const title = draftPrTitle.replace(/\s+/g, ' ').trim();
+    if (!title || prActionState.createOrPushDisabled) {
+      return;
+    }
+    await runDeliveryAction(async () => {
+      await props.onCreatePullRequest(task.id, normalizePullRequestTitle(title, task.title));
+      setDraftPrModalOpen(false);
     });
   };
 
@@ -562,7 +608,8 @@ export function TaskDetail(props: TaskDetailProps) {
               <PrStatusCard
                 view={prStatus}
                 actionState={prActionState}
-                onCreateOrPush={() =>
+                onCreateDraftPr={() => openDraftPrModal()}
+                onPushUpdate={() =>
                   void runDeliveryAction(async () => {
                     await props.onCreatePullRequest(task.id);
                   })
@@ -574,6 +621,8 @@ export function TaskDetail(props: TaskDetailProps) {
                 }
                 onInvestigate={() => void investigateFailingChecks()}
               />
+
+              <TaskActivityPanel view={overviewActivity} variant="overview" />
 
               {reviewPhaseVisible ? (
                 <FinishPanel
@@ -617,7 +666,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
         {tab === 'debug' ? (
           <div className="tm-debug">
-            <ActivityTimeline events={props.events} runs={props.runs} />
+            <TaskActivityPanel view={debugActivity} variant="debug" rawEvents={props.events} />
             <TaskHealthFindings findings={task.projection.findings} />
             <div className="tm-debug__notice">
               Provider diagnostics are for troubleshooting. Verified evidence remains the source of truth.
@@ -668,6 +717,19 @@ export function TaskDetail(props: TaskDetailProps) {
         />
       ) : null}
 
+      {draftPrModalOpen ? (
+        <CreateDraftPrModal
+          title={draftPrTitle}
+          worktree={worktree}
+          busy={deliveryActionBusy}
+          disabled={prActionState.createOrPushDisabled}
+          disabledReason={prActionState.createOrPushReason}
+          onTitleChange={setDraftPrTitle}
+          onCancel={() => setDraftPrModalOpen(false)}
+          onSubmit={() => void submitDraftPr()}
+        />
+      ) : null}
+
       {requestDrawerOpen ? (
         <ReviewRequestDrawer
           task={task}
@@ -682,6 +744,82 @@ export function TaskDetail(props: TaskDetailProps) {
         />
       ) : null}
     </main>
+  );
+}
+
+function CreateDraftPrModal({
+  title,
+  worktree,
+  busy,
+  disabled,
+  disabledReason,
+  onTitleChange,
+  onCancel,
+  onSubmit
+}: {
+  title: string;
+  worktree?: WorktreeRecord;
+  busy: boolean;
+  disabled: boolean;
+  disabledReason?: string;
+  onTitleChange(value: string): void;
+  onCancel(): void;
+  onSubmit(): void;
+}) {
+  const cleanTitle = title.replace(/\s+/g, ' ').trim();
+  const confirmDisabled = busy || disabled || !cleanTitle;
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!confirmDisabled) {
+      onSubmit();
+    }
+  };
+
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="draft-pr-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <form className="tm-modal__panel tm-draftpr-modal" onSubmit={submit}>
+        <h3 id="draft-pr-title">Create draft PR</h3>
+        <p>Review the title before Task Monki opens the draft pull request.</p>
+
+        <label className="field tm-draftpr-modal__field">
+          <span className="field__label">PR title</span>
+          <input
+            type="text"
+            value={title}
+            maxLength={PULL_REQUEST_TITLE_MAX_LENGTH}
+            autoFocus
+            disabled={busy}
+            onChange={(event) => onTitleChange(event.target.value)}
+          />
+          <small>{cleanTitle.length} / {PULL_REQUEST_TITLE_MAX_LENGTH}</small>
+        </label>
+
+        {worktree ? (
+          <div className="tm-draftpr-modal__context">
+            <div>
+              <span>Head</span>
+              <strong>{worktree.branchName}</strong>
+            </div>
+            <div>
+              <span>Base</span>
+              <strong>{worktree.baseRef ?? 'main'}</strong>
+            </div>
+          </div>
+        ) : null}
+
+        {disabled && disabledReason ? <p className="form-warning">{disabledReason}</p> : null}
+
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={confirmDisabled}>
+            {busy ? 'Creating...' : 'Create draft PR'}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -1098,13 +1236,15 @@ function CodexReviewPanel({
 function PrStatusCard({
   view,
   actionState,
-  onCreateOrPush,
+  onCreateDraftPr,
+  onPushUpdate,
   onRefresh,
   onInvestigate
 }: {
   view: PrStatusViewModel;
   actionState: ReturnType<typeof buildPrStatusActionState>;
-  onCreateOrPush(): void;
+  onCreateDraftPr(): void;
+  onPushUpdate(): void;
   onRefresh(): void;
   onInvestigate(): void;
 }) {
@@ -1148,31 +1288,24 @@ function PrStatusCard({
       {view.hasPullRequest ||
       view.freshnessLine ||
       view.guidanceLine ||
-      view.checkSummaryLine ||
-      view.reviewLine ||
-      view.mergeLine ? (
+      view.evidenceLine ? (
         <div className="tm-prstatus__meta">
           {view.hasPullRequest ? (
             <div className="tm-prstatus__identity">
-              {view.prNumber && view.prUrl ? (
+              {view.prUrl ? (
                 <a href={view.prUrl} target="_blank" rel="noreferrer">
-                  #{view.prNumber}
+                  {view.prIdentityLine ?? 'PR'}
                 </a>
               ) : (
-                <span>{view.prNumber ? `#${view.prNumber}` : 'PR'}</span>
+                <span>{view.prIdentityLine ?? 'PR'}</span>
               )}
-              <span>{prIdentitySuffix(view)}</span>
             </div>
           ) : null}
 
           {view.freshnessLine ? <p className="tm-prstatus__reason">{view.freshnessLine}</p> : null}
           {view.guidanceLine ? <p className="tm-prstatus__reason">{view.guidanceLine}</p> : null}
 
-          {view.checkSummaryLine || view.reviewLine || view.mergeLine ? (
-            <div className="tm-prstatus__evidence">
-              {[view.checkSummaryLine, view.reviewLine, view.mergeLine].filter(Boolean).join(' · ')}
-            </div>
-          ) : null}
+          {view.evidenceLine ? <div className="tm-prstatus__evidence">{view.evidenceLine}</div> : null}
         </div>
       ) : null}
 
@@ -1187,7 +1320,7 @@ function PrStatusCard({
                 type="button"
                 className="primary-button"
                 disabled={actionState.createOrPushDisabled}
-                onClick={onCreateOrPush}
+                onClick={onCreateDraftPr}
               >
                 Create draft PR
               </button>
@@ -1202,7 +1335,7 @@ function PrStatusCard({
                 type="button"
                 className="primary-button"
                 disabled={actionState.createOrPushDisabled}
-                onClick={onCreateOrPush}
+                onClick={onPushUpdate}
               >
                 Push update
               </button>
@@ -1266,18 +1399,6 @@ function PrCheckDetails({ groups }: { groups: PrCheckGroup[] }) {
       </div>
     </div>
   );
-}
-
-function prIdentitySuffix(view: PrStatusViewModel): string {
-  const state =
-    view.kind === 'MERGED'
-      ? 'merged'
-      : view.kind === 'CLOSED_UNMERGED'
-        ? 'closed'
-        : view.kind === 'DRAFT' || view.headline === 'Draft PR'
-          ? 'draft'
-          : 'open';
-  return `${state} · ${view.headRefName ?? 'head'} → ${view.baseRefName ?? 'base'}`;
 }
 
 function checkStatusLabel(status: PrCheckGroup['status']): string {

@@ -23,6 +23,13 @@ It answers:
 Finish remains local acceptance. It owns `Commit`, `Mark done`, and
 `Mark done anyway`. It does not render `Create draft PR` or `Push update`.
 
+Activity Timeline may render below PR Status as supporting task context. It may
+summarize meaningful delivery changes such as first PR availability, branch
+publication failure, check verdict changes, GitHub review decisions, and merge
+outcomes. It must not log `Refresh GitHub` clicks or unchanged PR/check/review
+captures. PR Status remains the place to inspect current delivery state and run
+GitHub delivery actions.
+
 ## Source Of Truth
 
 Task Monki owns workflow and evidence. GitHub and Codex provider output are not
@@ -64,7 +71,7 @@ The card uses the existing panel language:
 +--------------------------------------------------+
 | PR Status                              Jul 2... |
 | o <headline>                                    |
-| #82 open · task/auth-refresh → main             |
+| #82 <PR title>                                  |
 | <reason / guidance / evidence>                  |
 | [primary action] [secondary action]             |
 | Checks 3                                        |
@@ -173,14 +180,17 @@ exit code and still parses JSON.
 
 ## Delivery Creation Flow
 
-`Create draft PR` and `Push update` both call
-`TaskManagerService.createPullRequest(...)`. The service path means "make
+`Create draft PR` opens a small confirmation dialog before calling
+`TaskManagerService.createPullRequest(...)`. The dialog defaults the PR title
+to the task title and lets the user edit it for the new PR. `Push update`
+continues to call the same service path directly. The service path means "make
 GitHub delivery current for this task branch."
 
 ```text
-TaskDetail.onCreateOrPush
+TaskDetail.onCreateDraftPr
+  -> CreateDraftPrModal
   -> runDeliveryAction(...)
-  -> taskManagerApi.createPullRequest({ taskId })
+  -> taskManagerApi.createPullRequest({ taskId, title })
   -> TaskManagerService.createPullRequest(...)
   -> createPullRequestUnlocked(...)
 ```
@@ -195,15 +205,20 @@ Backend flow:
 6. Check the latest branch publication.
 7. If no pushed publication exists for current `HEAD`, publish the branch.
 8. Assert publish readiness with `assertPublishReady`.
-9. Write the PR body artifact.
-10. Record `PR_CREATE_REQUESTED`.
-11. `gh pr list` finds an existing open PR for the branch, or `gh pr create`
-    opens a new draft PR.
-12. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
+9. Normalize the requested PR title, falling back to the task title.
+10. Write the PR body artifact.
+11. Record `PR_CREATE_REQUESTED`.
+12. `gh pr list` finds an existing open PR for the branch, or `gh pr create`
+    opens a new draft PR with the normalized title.
+13. `gh pr view` and `gh pr checks` normalize PR, CI, review, and merge
     evidence.
-13. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
-14. If GitHub reports an open PR, Task Monki transitions the task to
+14. `FileTaskStore.recordPullRequestSync(...)` stores all evidence records.
+15. If GitHub reports an open PR, Task Monki transitions the task to
     `IN_REVIEW`.
+
+The edited title applies only when `gh pr create` creates a new PR. If `gh pr
+list` finds an existing open PR for the task branch, Task Monki reuses the
+observed PR and does not rename it.
 
 `assertPublishReady` requires:
 
@@ -236,12 +251,15 @@ surfaces the error through the app shell.
 
 ## Failing Check Investigation Flow
 
-`Investigate failure` appears only when the view model says the check state is
-failure-like:
+`Investigate failure` appears only when the selected PR Status state is
+`CHECKS_FAILED`. This is stricter than reading the latest CI rollup alone:
+terminal and freshness states win first, so stale, diverged, or locally
+unpublished work never inherits a failure investigation action from non-current
+check evidence.
 
 ```text
-ciRollup.status === FAILING
-ciRollup.status === BLOCKED
+selectedStatus === CHECKS_FAILED
+ciRollup.status === FAILING or BLOCKED
 ```
 
 Clicking it does not call GitHub. It starts implementation-side follow-up work:
@@ -481,10 +499,14 @@ Run implementation or make a task change before opening a PR.
 PR Status
 o No PR
 [Create draft PR]
+
+Create draft PR dialog
+PR title: <task title>
+[Cancel] [Create draft PR]
 ```
 
 Backend creates a delivery commit, publishes the branch, and creates or finds
-the draft PR.
+the draft PR. The dialog title is used only if a new PR is created.
 
 ### NO_PR, committed task diff
 
@@ -492,9 +514,14 @@ the draft PR.
 PR Status
 o No PR
 [Create draft PR]
+
+Create draft PR dialog
+PR title: <task title>
+[Cancel] [Create draft PR]
 ```
 
-Backend publishes the branch and creates or finds the draft PR.
+Backend publishes the branch and creates or finds the draft PR. The dialog
+title is used only if a new PR is created.
 
 ### NO_PR, conflicted
 
@@ -555,7 +582,7 @@ Remote branch has newer commits. Sync the branch before pushing again.
 ```text
 PR Status                         Jul 2, 10:56
 o Draft PR
-#82 draft · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 
@@ -566,7 +593,7 @@ Tone: `info`.
 ```text
 PR Status                         Jul 2, 10:56
 o Open PR
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 
@@ -577,7 +604,7 @@ Tone: `neutral`.
 ```text
 PR Status                         Jul 2, 10:56
 o Local changes not pushed
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Local worktree has uncommitted changes.
 [Push update]
 ```
@@ -587,7 +614,7 @@ Local worktree has uncommitted changes.
 ```text
 PR Status                         Jul 2, 10:56
 o Local changes not pushed
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Local branch has newer commits.
 [Push update]
 ```
@@ -597,7 +624,7 @@ Local branch has newer commits.
 ```text
 PR Status                         Jul 2, 10:56
 o Local changes not pushed
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Last push failed: <stored publication error>
 [Push update]
 ```
@@ -607,7 +634,7 @@ Last push failed: <stored publication error>
 ```text
 PR Status                         Jul 2, 10:56
 o Branch diverged
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Local branch and PR branch both changed.
 [refresh]
 ```
@@ -619,7 +646,7 @@ No push action is shown.
 ```text
 PR Status                         Jul 2, 10:56
 o Branch diverged
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Remote branch has newer commits. Sync the branch before pushing again.
 [refresh]
 ```
@@ -631,7 +658,7 @@ No push action is shown.
 ```text
 PR Status                         Jul 2, 10:56
 o PR has newer commits
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 This worktree is behind the PR.
 [refresh]
 ```
@@ -641,22 +668,21 @@ This worktree is behind the PR.
 ```text
 PR Status                         Jul 2, 10:56
 o Stale
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Refresh PR status for the current head.
 [refresh]
 ```
 
 Stale means at least one recorded CI, review, or merge head SHA does not match
-the current PR head SHA.
+the current PR head SHA. The card does not render check details or failure
+investigation actions from stale check evidence.
 
 ### CHECKS_FAILED
 
 ```text
 PR Status                         Jul 2, 10:56
 o Checks failed
-#82 open · task/auth-refresh → main
-2 checks failed; start with lint-and-test in CI. Investigate the failure, fix the branch, then push an update.
-2 failed · 1 skipped · 3 passed
+#82 Refresh auth token
 [refresh] [Investigate failure]
 Checks 6
   > lint-and-test  Failed   3m
@@ -665,19 +691,15 @@ Checks 6
   > typecheck      Passed
 ```
 
-Tone: `error`. `BLOCKED` CI also renders as `Checks failed`:
-
-```text
-GitHub checks are blocked. Investigate the failure, fix the branch, then push an update.
-```
+Tone: `error`. `BLOCKED` CI also renders as `Checks failed` and keeps the same
+investigation action when it is the selected PR Status state.
 
 ### CHECKS_PENDING
 
 ```text
 PR Status                         Jul 2, 10:56
 o Checks pending
-#82 open · task/auth-refresh → main
-2 pending · 1 passed
+#82 Refresh auth token
 [refresh]
 Checks 3
   > build  Pending
@@ -692,8 +714,7 @@ Tone: `action`. The headline dot pulses.
 ```text
 PR Status                         Jul 2, 10:56
 o Checks canceled
-#82 open · task/auth-refresh → main
-1 canceled
+#82 Refresh auth token
 [refresh]
 Checks 1
   > deploy-preview  Canceled
@@ -707,22 +728,22 @@ ready-to-merge status.
 ```text
 PR Status                         Jul 2, 10:56
 o No required checks ran
-#82 open · task/auth-refresh → main
-2 skipped
+#82 Refresh auth token
 [refresh]
 Checks 2
   > docs-only  Skipped
 ```
 
 This renders only when `ciRollup.status == NO_CHECKS` and the total check count
-is greater than zero.
+is greater than zero. Aggregate check summaries render only when GitHub did not
+return individual check rows; otherwise the expandable rows are the evidence.
 
 ### GITHUB_CHANGES_REQUESTED
 
 ```text
 PR Status                         Jul 2, 10:56
 o GitHub changes requested
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 
@@ -733,7 +754,7 @@ Tone: `error`. This is GitHub review evidence, not Codex review evidence.
 ```text
 PR Status                         Jul 2, 10:56
 o GitHub review waiting
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 
@@ -744,7 +765,7 @@ Tone: `action`.
 ```text
 PR Status                         Jul 2, 10:56
 o Ready to merge
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 Approved · Mergeable
 [refresh]
 ```
@@ -766,7 +787,7 @@ Tone: `success`.
 ```text
 PR Status                         Jul 2, 10:56
 o Merged
-#82 merged · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 
@@ -777,7 +798,7 @@ Tone: `success`. No create or push action is shown.
 ```text
 PR Status                         Jul 2, 10:56
 o Closed without merge
-#82 closed · task/auth-refresh → main
+#82 Refresh auth token
 [refresh] [Create draft PR]
 ```
 
@@ -789,7 +810,7 @@ Tone: `error`. The old PR snapshot is terminal, but Task Monki may still offer
 ```text
 PR Status                         Jul 2, 10:56
 o Unknown
-#82 open · task/auth-refresh → main
+#82 Refresh auth token
 [refresh]
 ```
 

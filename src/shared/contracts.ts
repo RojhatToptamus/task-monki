@@ -75,6 +75,23 @@ export function verifiedChecksMatchMergeHead(evidence: VerifiedChecksEvidence): 
   );
 }
 
+export const PULL_REQUEST_TITLE_MAX_LENGTH = 256;
+
+export function normalizePullRequestTitle(
+  title: string | null | undefined,
+  fallback: string
+): string {
+  return (
+    compactPullRequestTitle(title) ||
+    compactPullRequestTitle(fallback) ||
+    'Task Monki PR'
+  );
+}
+
+function compactPullRequestTitle(title: string | null | undefined): string {
+  return (title ?? '').replace(/\s+/g, ' ').trim().slice(0, PULL_REQUEST_TITLE_MAX_LENGTH).trim();
+}
+
 export type RequestedActionStatus =
   | 'NONE'
   | 'REQUESTED'
@@ -795,6 +812,7 @@ export interface PublishBranchRequest {
 
 export interface CreatePullRequestRequest {
   taskId: string;
+  title?: string;
 }
 
 export interface RefreshGitHubRequest {

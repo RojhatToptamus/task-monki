@@ -47,6 +47,51 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Activity Timeline
+
+The Overview may show `Activity Timeline` below PR Status. It is a curated task
+history, not a log viewer.
+
+Activity Timeline should answer what changed, who or what caused it, whether
+anything is blocked or stale, and what the next useful action is likely to be.
+It is derived from stored Task Monki domain events, task projections, run
+records, Git evidence, and GitHub delivery rollups. It must not treat raw
+provider text or raw GitHub responses as workflow truth.
+
+The timeline shows the latest bounded window of useful activity in chronological
+order with stable absolute timestamps. It must not render relative labels such
+as "now" for stored events, because reopening a task should not imply the event
+just happened.
+
+Tone is expressed by the row's single status dot. Timeline text stays neutral;
+do not add colored chips, tinted row backgrounds, colored borders, or repeated
+status labels. Supporting details should be collapsed behind an in-row
+disclosure only when they name concrete evidence and the decision it affects,
+such as the exact failed GitHub check that blocks PR readiness.
+
+Main-history items should be consequence-bearing: terminal implementation or
+review outcomes, current active runs, Git state changes, delivery commits,
+branch publication results, first PR availability, check verdict changes,
+GitHub review decisions, merge outcomes, blocked transitions, stale Codex
+review state, and recovery risks.
+
+No-op refreshes, repeated unchanged evidence captures, provider protocol
+details, raw item traffic, goal/plan/usage telemetry, PR body artifact creation,
+and healthy verification pings belong in Debug or supporting evidence surfaces,
+not in Activity Timeline.
+
+PR Status remains the current GitHub delivery surface. Activity Timeline can
+summarize meaningful delivery verdict changes, but it must not duplicate PR
+actions or become a second source of delivery truth.
+
+The renderer should derive both Overview `Activity Timeline` and Debug `Task
+activity` from the same task activity model. Overview is a compact projection
+of the canonical activity ledger; Debug may show the fuller curated ledger plus
+the raw domain-event audit. Do not maintain a second event-to-label switch for
+Debug, because delivery/review facts such as exact failed checks, stale
+evidence, blocked transitions, and merge state must be interpreted consistently
+across surfaces.
+
 ## Board phases
 
 - Backlog / Ready
@@ -148,13 +193,16 @@ Post-run implementation controls:
 
 In Review:
 
-- Prioritize PR Status: one linked PR identity, one headline, check summary,
-  review line when delivery-affecting, merge line when known, and freshness.
-- Show a concise failing-check reason and next action first. Keep raw check
-  metadata collapsed as supporting evidence unless opened.
+- Prioritize PR Status: one linked PR identity, one headline, exact check rows
+  when available, review line when delivery-affecting, merge line when known,
+  and freshness.
+- For failed checks, show the `Investigate failure` action and expandable check
+  rows instead of repeating a prose explanation of the failure.
 - Allow GitHub refresh actions.
-- Offer failing-CI investigation only when GitHub checks are failing; that
-  action starts implementation-side work, not a GitHub state update.
+- Offer failing-CI investigation only when the selected PR Status state is
+  `Checks failed`; stale, diverged, or locally unpublished work should surface
+  its own next action instead. Investigation starts implementation-side work,
+  not a GitHub state update.
 
 Done:
 
@@ -232,13 +280,16 @@ one draft PR for the Task Monki-owned branch, then records PR identity, check
 details, GitHub review rollup, merge state, and whether the PR head is fresh
 against the local worktree.
 
-Create draft PR and Push update are shown only here. The action must be disabled
-with a clear reason when local Git evidence cannot satisfy the service publish
-guard, such as no task changes, missing worktree, unresolved conflicts, branch
-divergence, or a rejected remote push caused by newer remote commits.
-Recoverable publication failures, such as GitHub authentication or transient
-network errors, should be shown as the last failure while leaving the action
-retryable.
+Create draft PR and Push update are shown only here. Create draft PR opens a
+small confirmation dialog where the user can edit the default PR title before
+creation. The title is request metadata for a new PR only; if Task Monki finds
+an existing open PR for the task branch, it reuses the observed PR instead of
+renaming it. The action must be disabled with a clear reason when local Git
+evidence cannot satisfy the service publish guard, such as no task changes,
+missing worktree, unresolved conflicts, branch divergence, or a rejected remote
+push caused by newer remote commits. Recoverable publication failures, such as
+GitHub authentication or transient network errors, should be shown as the last
+failure while leaving the action retryable.
 
 The UI should render one headline from those facts instead of separate
 competing badges. Headline priority is:

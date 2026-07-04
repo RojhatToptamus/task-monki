@@ -143,6 +143,7 @@ export class GitHubService {
     worktree: WorktreeRecord;
     baseRef?: string;
     bodyFilePath: string;
+    title: string;
   }): Promise<GitHubPrSync> {
     const existing = await this.findOpenPullRequest(input.worktree);
     if (existing) {
@@ -155,7 +156,7 @@ export class GitHubService {
         'create',
         '--draft',
         '--title',
-        input.task.title,
+        input.title,
         '--body-file',
         input.bodyFilePath,
         '--base',
