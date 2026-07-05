@@ -7,7 +7,10 @@ import type {
   TaskManagerRepositorySettings,
   TaskManagerThemePreference
 } from '../../shared/agent';
-import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/agent';
+import {
+  DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+} from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
 
 export interface AppSettingsStorage {
@@ -98,10 +101,7 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
   private settings: TaskManagerAppSettings;
 
   constructor(initialSettings: Partial<TaskManagerAppSettings> = {}) {
-    this.settings = normalizeAppSettings({
-      ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
-      ...initialSettings
-    });
+    this.settings = normalizeAppSettings(initialSettings);
   }
 
   get(): Promise<TaskManagerAppSettings> {
@@ -116,13 +116,18 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
 
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
   const record = isRecord(value) ? value : {};
+  const repositories = normalizeRepositories(record.repositories);
   return {
-    schemaVersion: 1,
+    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: normalizeTheme(record.theme),
     sidebarCollapsed:
       typeof record.sidebarCollapsed === 'boolean'
         ? record.sidebarCollapsed
         : DEFAULT_TASK_MANAGER_APP_SETTINGS.sidebarCollapsed,
+    firstLaunchSetupCompleted: normalizeFirstLaunchSetupCompleted(
+      record.firstLaunchSetupCompleted,
+      repositories
+    ),
     defaultModel: normalizeOptionalString(record.defaultModel),
     defaultReasoningEffort: normalizeOptionalString(record.defaultReasoningEffort),
     promptRefinementModel: normalizeOptionalString(record.promptRefinementModel),
@@ -130,7 +135,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    repositories: normalizeRepositories(record.repositories)
+    repositories
   };
 }
 
@@ -144,6 +149,9 @@ export function mergeAppSettings(
   }
   if (input.sidebarCollapsed !== undefined) {
     patch.sidebarCollapsed = input.sidebarCollapsed === true;
+  }
+  if (input.firstLaunchSetupCompleted !== undefined) {
+    patch.firstLaunchSetupCompleted = input.firstLaunchSetupCompleted === true;
   }
   if ('defaultModel' in input) {
     patch.defaultModel = normalizeOptionalString(input.defaultModel);
@@ -219,6 +227,16 @@ function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
     knownPaths,
     selectedPath
   };
+}
+
+function normalizeFirstLaunchSetupCompleted(
+  value: unknown,
+  repositories: TaskManagerRepositorySettings
+): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return Boolean(repositories.selectedPath || repositories.knownPaths.length > 0);
 }
 
 function normalizeExecutablePath(value: unknown): string | null {

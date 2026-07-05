@@ -23,6 +23,14 @@ board, counts, settings summary, and new-task defaults to the selected
 repository. Adding a repository opens the local folder picker and validates the
 selected folder before it is saved as a selectable repository.
 
+On first launch, when no repository has been configured, the main workflow area
+shows setup instead of an empty board. Adding a repository completes only the
+repository step. The setup surface remains open so the user can review required
+tool status and defaults, then explicitly finish setup before entering the
+board and creating tasks. Finishing setup re-checks required Git and Codex
+tool availability before the completion flag is saved; GitHub CLI remains
+optional because it only affects PR delivery.
+
 New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
 

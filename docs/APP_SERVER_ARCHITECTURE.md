@@ -150,6 +150,7 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 `app-settings.json` file beside the dev store. These settings include:
 
 - theme and sidebar preference;
+- first-launch setup completion;
 - default implementation, review, and prompt-refinement models;
 - selected and known repositories;
 - Codex external tool modes for web search, MCP servers, and apps;

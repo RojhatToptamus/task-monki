@@ -765,6 +765,7 @@ export interface RefinePromptResponse {
 export interface UpdateAppSettingsRequest {
   theme?: import('./agent').TaskManagerThemePreference;
   sidebarCollapsed?: boolean;
+  firstLaunchSetupCompleted?: boolean;
   defaultModel?: string | null;
   defaultReasoningEffort?: string | null;
   promptRefinementModel?: string | null;

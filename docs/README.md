@@ -38,6 +38,12 @@ behavior and architecture, not private roadmap sequencing.
 2. `docs/RELEASING.md`
    - Maintainer workflow for unsigned GitHub Releases.
 
+### Interface Design
+
+1. `docs/DESIGN_SPEC.md`
+   - Current interface principles, CSS token usage, component rules, status
+     semantics, screen patterns, and content guidelines.
+
 For agent-specific working instructions, start at root `AGENTS.md`.
 
 ## Private Or Ignored Docs

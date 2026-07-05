@@ -33,12 +33,14 @@ import {
   formatShortId
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
+import { areRequiredExternalToolsReady } from '../model/executableSettings';
 import {
   buildRepositoryOptions,
   isSameRepositoryPath,
   mergeRepositoryPath,
   normalizeRepositoryPath,
   repositoryDisplayPath,
+  resolveRepositorySetupState,
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from '../model/repositories';
@@ -139,8 +141,10 @@ export function App() {
         if (successMessage) {
           notify(successMessage, 'success');
         }
+        return nextSettings;
       } catch (caught) {
         reportActionError(caught, 'Failed to update settings.');
+        return undefined;
       }
     },
     [notify, reportActionError]
@@ -245,6 +249,14 @@ export function App() {
     repositoryOptions,
     selectedRepositoryPath
   );
+  const repositorySetupState = resolveRepositorySetupState({
+    loading: isLoading,
+    options: repositoryOptions,
+    activeRepositoryPath,
+    firstLaunchSetupCompleted: appSettings.firstLaunchSetupCompleted
+  });
+  const canCreateTask =
+    !isLoading && Boolean(activeRepositoryPath) && repositorySetupState === 'complete';
   const visibleTasks = useMemo(
     () => tasksForRepository(snapshot.tasks, activeRepositoryPath),
     [activeRepositoryPath, snapshot.tasks]
@@ -660,7 +672,7 @@ export function App() {
       if (!normalized || normalized === activeRepositoryPath) {
         return;
       }
-      await updateAppSettings(
+      const nextSettings = await updateAppSettings(
         {
           repositories: {
             knownPaths: mergeRepositoryPath(knownRepositoryPaths, normalized),
@@ -669,6 +681,9 @@ export function App() {
         },
         ''
       );
+      if (!nextSettings) {
+        return;
+      }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
@@ -695,7 +710,7 @@ export function App() {
       }
 
       const repositoryRoot = normalizeRepositoryPath(preflight.root ?? normalized);
-      await updateAppSettings(
+      const nextSettings = await updateAppSettings(
         {
           repositories: {
             knownPaths: mergeRepositoryPath(knownRepositoryPaths, repositoryRoot),
@@ -704,6 +719,9 @@ export function App() {
         },
         ''
       );
+      if (!nextSettings) {
+        return false;
+      }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
@@ -717,6 +735,35 @@ export function App() {
       setIsAddingRepository(false);
     }
   }, [knownRepositoryPaths, notify, reportActionError, updateAppSettings]);
+
+  const finishFirstLaunchSetup = useCallback(async () => {
+    if (!activeRepositoryPath) {
+      const message = 'Add a repository before finishing setup.';
+      reportActionError(new Error(message), message);
+      throw new Error(message);
+    }
+    try {
+      const latestToolStatus = await taskManagerApi.getExternalToolStatus();
+      setExternalToolStatus(latestToolStatus);
+      if (!areRequiredExternalToolsReady(latestToolStatus)) {
+        throw new Error('Git and Codex must be available before setup can finish.');
+      }
+      const nextSettings = await taskManagerApi.updateAppSettings({
+        firstLaunchSetupCompleted: true
+      });
+      setAppSettings(nextSettings);
+      setView('board');
+      setSelectedTaskId(undefined);
+      setLastTaskId(undefined);
+      setIsDetailOpen(false);
+      setIsNewTaskOpen(false);
+      setError(undefined);
+      notify('Setup complete.', 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Could not finish setup.');
+      throw caught;
+    }
+  }, [activeRepositoryPath, notify, reportActionError]);
 
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
@@ -791,7 +838,8 @@ export function App() {
           type="button"
           className="tm-newtask"
           onClick={openNewTask}
-          disabled={isLoading || !activeRepositoryPath}
+          disabled={!canCreateTask}
+          title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
         >
           + New task
         </button>
@@ -933,6 +981,10 @@ export function App() {
             error={error}
             models={providerModels}
             activeRepositoryPath={activeRepositoryPath}
+            repositorySetupState={repositorySetupState}
+            addingRepository={isAddingRepository}
+            onAddRepository={addRepository}
+            onFinishSetup={finishFirstLaunchSetup}
             onSelect={selectTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
@@ -946,7 +998,7 @@ export function App() {
           models={providerModels}
           preflight={providerState?.preflight}
           defaultAgentSettings={defaultTaskSettings}
-          disabled={isLoading || !activeRepositoryPath}
+          disabled={!canCreateTask}
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
           onClose={closeNewTask}

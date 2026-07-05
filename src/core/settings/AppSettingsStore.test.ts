@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION } from '../../shared/agent';
 import {
   AppSettingsStore,
   MemoryAppSettingsStore,
@@ -17,9 +18,10 @@ describe('AppSettingsStore', () => {
     const settings = await store.get();
 
     expect(settings).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       theme: 'device',
       sidebarCollapsed: false,
+      firstLaunchSetupCompleted: false,
       externalExecutables: {
         gitExecutablePath: null,
         codexExecutablePath: null,
@@ -60,6 +62,59 @@ describe('AppSettingsStore', () => {
     });
   });
 
+  it('keeps first-launch setup incomplete when a fresh config adds a repository', async () => {
+    const store = new MemoryAppSettingsStore();
+
+    const settings = await store.update({
+      repositories: {
+        knownPaths: ['/repos/current'],
+        selectedPath: '/repos/current'
+      }
+    });
+
+    expect(settings.firstLaunchSetupCompleted).toBe(false);
+    expect(settings.repositories).toEqual({
+      knownPaths: ['/repos/current'],
+      selectedPath: '/repos/current'
+    });
+  });
+
+  it('infers first-launch setup as completed for legacy configs that already have repositories', () => {
+    expect(
+      normalizeAppSettings({
+        repositories: {
+          knownPaths: ['/repos/current'],
+          selectedPath: '/repos/current'
+        }
+      }).firstLaunchSetupCompleted
+    ).toBe(true);
+  });
+
+  it('infers first-launch setup for memory stores initialized with legacy repositories', async () => {
+    const store = new MemoryAppSettingsStore({
+      repositories: {
+        knownPaths: ['/repos/current'],
+        selectedPath: '/repos/current'
+      }
+    });
+
+    await expect(store.get()).resolves.toMatchObject({
+      firstLaunchSetupCompleted: true
+    });
+  });
+
+  it('preserves an explicit incomplete first-launch flag with repositories', () => {
+    expect(
+      normalizeAppSettings({
+        firstLaunchSetupCompleted: false,
+        repositories: {
+          knownPaths: ['/repos/current'],
+          selectedPath: '/repos/current'
+        }
+      }).firstLaunchSetupCompleted
+    ).toBe(false);
+  });
+
   it('normalizes empty executable paths as auto-detect', () => {
     expect(
       normalizeAppSettings({
@@ -83,14 +138,16 @@ describe('AppSettingsStore', () => {
     const store = new AppSettingsStore(settingsPath);
 
     await expect(store.get()).resolves.toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       externalExecutables: {
         gitExecutablePath: null,
         codexExecutablePath: null,
         ghExecutablePath: null
       }
     });
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain('"schemaVersion": 1');
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
+      `"schemaVersion": ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}`
+    );
     const files = await fs.readdir(dir);
     expect(files.some((file) => file.startsWith('app-settings.json.invalid-'))).toBe(true);
   });

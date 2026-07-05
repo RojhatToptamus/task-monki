@@ -4,6 +4,7 @@ import {
   buildRepositoryOptions,
   mergeRepositoryPath,
   normalizeRepositoryPath,
+  resolveRepositorySetupState,
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from './repositories';
@@ -76,6 +77,67 @@ describe('repository selection model', () => {
       '/repos/current',
       '/repos/other'
     ]);
+  });
+
+  it('keeps setup in loading while repositories are still loading', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: true,
+        options: [],
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('loading');
+  });
+
+  it('requires setup when no repository source is available', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsRepository');
+  });
+
+  it('keeps setup open when a repository exists but first-launch setup is incomplete', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '/repos/current',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsReview');
+  });
+
+  it('treats an active repository as complete after first-launch setup is finished', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '/repos/current',
+        firstLaunchSetupCompleted: true
+      })
+    ).toBe('complete');
+  });
+
+  it('keeps saved repository options in setup until first-launch setup is finished', () => {
+    const options = buildRepositoryOptions({
+      defaultRepositoryPath: '',
+      storedRepositoryPaths: ['/repos/current'],
+      tasks: []
+    });
+
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options,
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsReview');
   });
 });
 

@@ -141,10 +141,13 @@ export interface TaskManagerRepositorySettings {
   selectedPath: string | null;
 }
 
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 2 as const;
+
 export interface TaskManagerAppSettings {
-  schemaVersion: 1;
+  schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
   theme: TaskManagerThemePreference;
   sidebarCollapsed: boolean;
+  firstLaunchSetupCompleted: boolean;
   defaultModel?: string;
   defaultReasoningEffort?: string;
   promptRefinementModel?: string;
@@ -170,9 +173,10 @@ export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSe
 export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
-  schemaVersion: 1,
+  schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   theme: 'device',
   sidebarCollapsed: false,
+  firstLaunchSetupCompleted: false,
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
   repositories: {
