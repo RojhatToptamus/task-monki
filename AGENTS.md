@@ -58,6 +58,21 @@ git diff --check
 Run targeted tests while iterating, then run the full relevant set before
 finishing changes that touch storage, workflow, protocol, or renderer behavior.
 
+## Seeded UI And Workflow Testing
+
+- Before testing UI or workflow states, run `npm run dev:seed` and use the
+  generated `.local/task-monki-dev-seed/manifest.json`.
+- Start local development from the generated environment:
+  `source .local/task-monki-dev-seed/dev-api.env`, then `npm run dev:api` and
+  `npm run dev:renderer`.
+- Use stable scenario slugs such as `[seed:delivery-checks-failed]` instead of
+  guessing app state or manually clicking through setup.
+- If an important state is missing, extend `src/dev/seedData.ts` and
+  `src/dev/seedData.test.ts`; do not rely on stale static fixtures or
+  hand-edited store JSON.
+- `scripts/serve-readme-screenshot-data.mjs` is screenshot-only legacy data and
+  is not authoritative for workflow testing.
+
 ## Development Rules
 
 - Keep edits scoped to the requested behavior.

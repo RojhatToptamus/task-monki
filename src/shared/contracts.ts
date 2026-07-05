@@ -657,6 +657,7 @@ export interface CreateTaskRequest {
   title: string;
   prompt: string;
   repositoryPath: string;
+  completionPolicy?: CompletionPolicy;
   agentSettings?: AgentExecutionSettings;
 }
 

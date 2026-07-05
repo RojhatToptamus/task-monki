@@ -85,6 +85,28 @@ describe('FileTaskStore', () => {
     expect(snapshot.tasks.map((task) => task.title)).toContain('Persists after recovery');
   });
 
+  it('validates optional task completion policy input', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-policy-input-'));
+    const store = new FileTaskStore(dir);
+
+    const manual = await store.createTask({
+      title: 'Manual policy task',
+      prompt: 'Keep manual completion.',
+      repositoryPath: dir,
+      completionPolicy: 'MANUAL'
+    });
+
+    expect(manual.completionPolicy).toBe('MANUAL');
+    await expect(
+      store.createTask({
+        title: 'Invalid policy task',
+        prompt: 'Reject bad input.',
+        repositoryPath: dir,
+        completionPolicy: 'NOT_A_POLICY' as never
+      })
+    ).rejects.toThrow('Invalid completion policy');
+  });
+
   it('links forked alternative tasks to their source task and run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-fork-'));
     const store = new FileTaskStore(dir);
@@ -168,6 +190,42 @@ describe('FileTaskStore', () => {
     expect(linked?.completionPolicy).toBe('MERGED');
     expect(linked?.phaseVersion).toBe(linkedTask.phaseVersion + 1);
     expect(untouched?.completionPolicy).toBe('LOCAL_ACCEPTANCE');
+  });
+
+  it('records in-progress branch publication as a request, not a failure', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-branch-pushing-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Publish branch',
+      prompt: 'Push the branch.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/publish-branch',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+
+    await store.recordBranchPublication({
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      remoteName: 'origin',
+      branchName: worktree.branchName,
+      remoteRef: `origin/${worktree.branchName}`,
+      status: 'PUSHING'
+    });
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.branchPublications[0]).toMatchObject({ status: 'PUSHING' });
+    expect(snapshot.tasks.find((candidate) => candidate.id === task.id)?.projection).toMatchObject({
+      branchPublication: 'PUSHING'
+    });
+    expect(
+      snapshot.events.some((event) => event.type === 'BRANCH_PUBLISH_REQUESTED')
+    ).toBe(true);
+    expect(snapshot.events.some((event) => event.type === 'BRANCH_PUBLISH_FAILED')).toBe(false);
   });
 
   it('does not downgrade stricter or manual completion policies when PR evidence refreshes', async () => {

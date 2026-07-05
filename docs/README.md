@@ -21,6 +21,8 @@ behavior and architecture, not private roadmap sequencing.
 3. `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
    - Authoritative review workflow lifecycle. Read before touching review,
      follow-up, stale-review, or interrupt behavior.
+4. `docs/DEV_SEEDING.md`
+   - Deterministic local seed data for UI and workflow testing.
 
 ### Architecture
 
@@ -87,6 +89,9 @@ npm run build
 npm run check:codex-protocol
 git diff --check
 ```
+
+For deterministic UI and workflow testing, start from `npm run dev:seed` and the
+generated `.local/task-monki-dev-seed/manifest.json`.
 
 Run targeted tests when iterating, but use the full set above before merging
 workflow, storage, protocol, or renderer changes.

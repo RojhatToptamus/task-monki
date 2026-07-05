@@ -171,6 +171,26 @@ function shouldCompleteFromPullRequestSync(
   );
 }
 
+const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
+  'ARTIFACT_ACCEPTANCE',
+  'LOCAL_ACCEPTANCE',
+  'MERGED',
+  'MERGED_AND_VERIFIED',
+  'MANUAL'
+];
+
+function normalizeCreateTaskCompletionPolicy(
+  value: CreateTaskRequest['completionPolicy']
+): Task['completionPolicy'] {
+  if (value === undefined) {
+    return 'LOCAL_ACCEPTANCE';
+  }
+  if (CREATE_TASK_COMPLETION_POLICIES.includes(value)) {
+    return value;
+  }
+  throw new Error(`Invalid completion policy: ${String(value)}`);
+}
+
 interface PersistedState extends StoreState {}
 
 export class FileTaskStore {
@@ -556,7 +576,7 @@ export class FileTaskStore {
       repositoryPath: input.repositoryPath.trim(),
       workflowPhase: 'READY',
       resolution: 'NONE',
-      completionPolicy: 'LOCAL_ACCEPTANCE',
+      completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
       forkedAlternativeTaskIds: [],
       forkedFromTaskId: fork?.sourceTaskId,
@@ -1867,9 +1887,10 @@ export class FileTaskStore {
       ...this.state,
       branchPublications: [stored, ...this.state.branchPublications]
     };
+    const eventType = branchPublicationEventType(stored.status);
     await this.appendEvent(
       createDomainEvent({
-        type: stored.status === 'PUSHED' ? 'BRANCH_PUBLISHED' : 'BRANCH_PUBLISH_FAILED',
+        type: eventType,
         taskId: stored.taskId,
         iterationId: stored.iterationId,
         worktreeId: stored.worktreeId,
@@ -2537,6 +2558,21 @@ function validateAgentServerTransition(
   if (!allowed[current].includes(next)) {
     throw new Error(`Invalid agent server transition: ${current} -> ${next}`);
   }
+}
+
+function branchPublicationEventType(
+  status: BranchPublicationRecord['status']
+): Extract<
+  DomainEvent['type'],
+  'BRANCH_PUBLISH_REQUESTED' | 'BRANCH_PUBLISHED' | 'BRANCH_PUBLISH_FAILED'
+> {
+  if (status === 'PUSHED') {
+    return 'BRANCH_PUBLISHED';
+  }
+  if (status === 'PUSHING') {
+    return 'BRANCH_PUBLISH_REQUESTED';
+  }
+  return 'BRANCH_PUBLISH_FAILED';
 }
 
 function validateInteractionTransition(
