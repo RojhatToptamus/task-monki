@@ -78,9 +78,6 @@ export function ProviderOverviewPanel({
       <div className="card__header">
         <div>
           <h3>Reported by Codex</h3>
-          <p className="provider-subtitle">
-            Provider-derived state; it does not replace local evidence.
-          </p>
         </div>
       </div>
 

@@ -153,6 +153,24 @@ describe('task activity model', () => {
     );
   });
 
+  it('collapses adjacent duplicate overview rows without hiding debug activity', () => {
+    const ledger = buildTaskActivityLedger({
+      task: taskFixture(),
+      events: [
+        event('AGENT_RUN_COMPLETED', {}),
+        event('AGENT_RUN_COMPLETED', {})
+      ]
+    });
+    const overview = projectOverviewTaskActivity(ledger, { limit: 10 });
+    const debug = projectDebugTaskActivity(ledger);
+
+    expect(debug.items.map((item) => item.title)).toEqual([
+      'Implementation completed',
+      'Implementation completed'
+    ]);
+    expect(overview.items.map((item) => item.title)).toEqual(['Implementation completed']);
+  });
+
   it('shows exact failed check evidence and the decision it blocks', () => {
     const view = buildOverviewTaskActivityViewModel({
       task: taskFixture(),

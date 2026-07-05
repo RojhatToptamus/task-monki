@@ -49,7 +49,6 @@ describe('task card view model', () => {
     expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
     expect(vm.hasDecision).toBe(true);
-    expect(vm.decisionLabel).toBe('Needs you');
   });
 
   it('keeps a running review gate in the review lane even if the phase is stale', () => {

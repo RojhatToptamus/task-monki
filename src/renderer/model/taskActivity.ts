@@ -138,7 +138,7 @@ export function projectOverviewTaskActivity(
   ledger: TaskActivityItem[],
   options: { limit?: number } = {}
 ): TaskActivityViewModel {
-  const items = ledger.filter(isOverviewActivityItem);
+  const items = collapseAdjacentOverviewDuplicates(ledger.filter(isOverviewActivityItem));
   if (items.length === 0) {
     return emptyView();
   }
@@ -150,6 +150,31 @@ export function projectOverviewTaskActivity(
     hiddenCount: Math.max(0, items.length - visible.length),
     totalCount: items.length
   };
+}
+
+function collapseAdjacentOverviewDuplicates(items: TaskActivityItem[]): TaskActivityItem[] {
+  const collapsed: TaskActivityItem[] = [];
+  for (const item of items) {
+    const previous = collapsed.at(-1);
+    if (previous && isDuplicateOverviewActivity(previous, item)) {
+      collapsed[collapsed.length - 1] = item;
+    } else {
+      collapsed.push(item);
+    }
+  }
+  return collapsed;
+}
+
+function isDuplicateOverviewActivity(a: TaskActivityItem, b: TaskActivityItem): boolean {
+  return (
+    ['run', 'review'].includes(a.category) &&
+    a.actor === b.actor &&
+    a.title === b.title &&
+    a.category === b.category &&
+    a.tone === b.tone &&
+    !a.evidence &&
+    !b.evidence
+  );
 }
 
 export function projectDebugTaskActivity(ledger: TaskActivityItem[]): TaskActivityViewModel {

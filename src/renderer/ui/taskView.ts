@@ -38,7 +38,6 @@ export interface TaskCardVM {
   stateTone: Tone;
   archived: boolean;
   hasDecision: boolean;
-  decisionLabel: string;
   evidence: CardEvidenceItem[];
 }
 
@@ -501,7 +500,6 @@ export function buildTaskCardVM(task: Task): TaskCardVM {
     stateTone: state.tone,
     archived: task.workflowPhase === 'ARCHIVED',
     hasDecision,
-    decisionLabel: hasDecision ? 'Needs you' : '',
     evidence: evidenceLineForTask(task)
   };
 }

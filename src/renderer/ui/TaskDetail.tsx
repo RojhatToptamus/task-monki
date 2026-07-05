@@ -65,6 +65,7 @@ import { humanizeEnum } from './display';
 import {
   buildFailingChecksInvestigationPrompt,
   buildPrStatusActionState,
+  buildPrStatusCreateOrPushTitle,
   buildPrStatusViewModel,
   type PrCheckGroup,
   type PrStatusViewModel
@@ -982,6 +983,11 @@ function CodexReviewPanel({
   const reviewIsRunning = effectiveStatus === 'RUNNING';
   const reviewActionsBlockedByImplementation = actionsPausedReason === 'implementation-running';
   const reviewActionsBlockedByDelivery = actionsPausedReason === 'delivery-running';
+  const suggestedReviewAction = reviewActionsBlockedByImplementation
+    ? 'Follow-up work is running. Review actions are paused until the agent finishes, then this task returns for re-review.'
+    : reviewActionsBlockedByDelivery
+      ? 'GitHub action is in progress. Review actions resume when it finishes.'
+      : undefined;
   const staleContextNote =
     effectiveStatus === 'STALE' && hasReviewOutput
       ? 'Previous review output is shown for context only. Re-run the review before acting on the current diff.'
@@ -1096,16 +1102,12 @@ function CodexReviewPanel({
         </div>
 
         <div className="tm-reviewcard__actions">
-          <div>
-            <span className="tm-reviewcard__eyebrow">Suggested next action</span>
-            <p>
-              {reviewActionsBlockedByImplementation
-                ? 'Follow-up work is running. Review actions are paused until the agent finishes, then this task returns for re-review.'
-                : reviewActionsBlockedByDelivery
-                  ? 'GitHub action is in progress. Review actions resume when it finishes.'
-                : nextReviewAction(effectiveStatus)}
-            </p>
-          </div>
+          {suggestedReviewAction ? (
+            <div>
+              <span className="tm-reviewcard__eyebrow">Suggested next action</span>
+              <p>{suggestedReviewAction}</p>
+            </div>
+          ) : null}
           <div className="tm-reviewcard__buttons">
             {effectiveStatus === 'NOT_RUN' ? (
               <>
@@ -1248,6 +1250,11 @@ function PrStatusCard({
   onRefresh(): void;
   onInvestigate(): void;
 }) {
+  const createOrPushTitle = buildPrStatusCreateOrPushTitle(
+    view,
+    actionState.createOrPushReason
+  );
+
   return (
     <section className={`tm-panel tm-prstatus tm-prstatus--${view.tone}`} aria-label="PR Status">
       <div className="tm-prstatus__head">
@@ -1314,7 +1321,7 @@ function PrStatusCard({
           {view.canCreateDraftPr ? (
             <ActionButtonTitle
               disabled={actionState.createOrPushDisabled}
-              title={actionState.createOrPushReason}
+              title={createOrPushTitle}
             >
               <button
                 type="button"
@@ -1329,7 +1336,7 @@ function PrStatusCard({
           {view.canPushUpdate ? (
             <ActionButtonTitle
               disabled={actionState.createOrPushDisabled}
-              title={actionState.createOrPushReason}
+              title={createOrPushTitle}
             >
               <button
                 type="button"
@@ -1995,29 +2002,6 @@ function reviewBody(
       return 'The diff changed after the last review.';
     case 'RUNNING':
       return 'Codex is reviewing the current diff.';
-  }
-}
-
-function nextReviewAction(
-  status: NonNullable<Task['projection']['codexReview']>['status']
-): string {
-  switch (status) {
-    case 'NOT_RUN':
-      return 'Run a review.';
-    case 'RUNNING':
-      return 'Wait for the review to finish, or stop it if it is no longer useful.';
-    case 'PASSED':
-      return 'Use PR Status for GitHub delivery, commit locally, or mark done.';
-    case 'NEEDS_CHANGES':
-      return 'Request changes.';
-    case 'INCONCLUSIVE':
-      return 'Request changes or mark done explicitly.';
-    case 'FAILED':
-      return 'Run the review again or inspect Debug.';
-    case 'CANCELED':
-      return 'Run the review again.';
-    case 'STALE':
-      return 'Run review again on the current diff.';
   }
 }
 

@@ -235,12 +235,6 @@ export function TaskCard({
         onClick={() => onSelect(vm.id)}
       />
       <div className="tm-card__body">
-        {vm.hasDecision ? (
-          <div className="tm-card__decisionbar">
-            <span className="tm-pulse" />
-            {vm.decisionLabel}
-          </div>
-        ) : null}
         <div className="tm-card__top">
           <span className="tm-card__num">{vm.num}</span>
           <span style={{ flex: 1 }} />
@@ -794,8 +788,6 @@ function ExecutableTestFeedbackStrip({ feedback }: { feedback: ExecutableTestFee
         </span>
         <span className="tm-exec__test-text">
           <strong>Test passed</strong>
-          {feedback.version ? ` · ${feedback.version}` : ''}
-          <span className="tm-exec__test-path">{compactSettingsText(feedback.path)}</span>
         </span>
       </div>
     );

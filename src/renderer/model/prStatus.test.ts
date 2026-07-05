@@ -13,6 +13,7 @@ import {
   buildBoardDeliveryLine,
   buildFailingChecksInvestigationPrompt,
   buildPrStatusActionState,
+  buildPrStatusCreateOrPushTitle,
   buildPrStatusViewModel
 } from './prStatus';
 
@@ -697,6 +698,26 @@ describe('buildPrStatusActionState', () => {
     expect(actions.investigateDisabled).toBe(true);
     expect(actions.investigateReason).toBe('No completed run is available.');
     expect(actions.hint).toBe('No completed run is available.');
+  });
+});
+
+describe('buildPrStatusCreateOrPushTitle', () => {
+  it('omits a disabled action title when the same reason is already visible', () => {
+    expect(
+      buildPrStatusCreateOrPushTitle(
+        { leadLine: 'Run implementation or make a task change before opening a PR.' },
+        'Run implementation or make a task change before opening a PR.'
+      )
+    ).toBeUndefined();
+  });
+
+  it('keeps paused action titles when they are not visible in the card', () => {
+    expect(
+      buildPrStatusCreateOrPushTitle(
+        { leadLine: 'Run implementation or make a task change before opening a PR.' },
+        'Delivery actions pause while the agent runs.'
+      )
+    ).toBe('Delivery actions pause while the agent runs.');
   });
 });
 

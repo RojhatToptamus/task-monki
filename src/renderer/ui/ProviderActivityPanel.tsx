@@ -67,7 +67,6 @@ export function ProviderActivityPanel({
         <summary className="provider-activity__summary">
           <span>
             <strong>Provider activity</strong>
-            <small>Reported by Codex</small>
           </span>
           <span className="count-pill">{runs.length} turns</span>
         </summary>

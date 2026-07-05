@@ -116,6 +116,14 @@ export function buildPrStatusActionState(input: {
   };
 }
 
+export function buildPrStatusCreateOrPushTitle(
+  view: Pick<PrStatusViewModel, 'leadLine' | 'freshnessLine' | 'guidanceLine'>,
+  createOrPushReason?: string
+): string | undefined {
+  const visibleReason = view.leadLine ?? view.freshnessLine ?? view.guidanceLine;
+  return createOrPushReason === visibleReason ? undefined : createOrPushReason;
+}
+
 function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): string | undefined {
   switch (reason) {
     case 'review-starting':

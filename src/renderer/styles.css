@@ -3997,18 +3997,6 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
-.tm-card__decisionbar {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  background: var(--action-soft);
-  color: var(--action-ink);
-  font-size: 10.5px;
-  font-weight: 600;
-}
-
 .tm-pulse {
   width: 6px;
   height: 6px;
@@ -4695,7 +4683,6 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
-.tm-exec__test-path,
 .tm-exec__test-message {
   display: block;
   margin-top: 2px;

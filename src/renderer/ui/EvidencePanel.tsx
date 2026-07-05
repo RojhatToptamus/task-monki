@@ -156,6 +156,7 @@ export function EvidencePanel({
     '--tm-diffbrowser-height': `${diffBrowserHeight}px`
   } as CSSProperties;
   const filePanelToggleLabel = filePanelCollapsed ? 'Expand file panel' : 'Collapse file panel';
+  const showDiffViewerEmpty = filePanelCollapsed;
 
   function toggleDirectory(directoryId: string) {
     setCollapsedDirectoryIds((current) => {
@@ -362,14 +363,16 @@ export function EvidencePanel({
                   onToggle={() => setFilePanelCollapsed((collapsed) => !collapsed)}
                 />
               </div>
-              <div className="tm-diffviewer__empty">
-                <strong>{filterActive ? 'No matching files' : 'No files in this scope'}</strong>
-                <span>
-                  {filterActive
-                    ? 'Adjust the file filter to inspect the captured diff.'
-                    : diffEmptyMessage(diffScope, false)}
-                </span>
-              </div>
+              {showDiffViewerEmpty ? (
+                <div className="tm-diffviewer__empty">
+                  <strong>{filterActive ? 'No matching files' : 'No files in this scope'}</strong>
+                  <span>
+                    {filterActive
+                      ? 'Adjust the file filter to inspect the captured diff.'
+                      : diffEmptyMessage(diffScope, false)}
+                  </span>
+                </div>
+              ) : null}
             </>
           )}
         </div>
