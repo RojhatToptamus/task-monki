@@ -635,6 +635,7 @@ export function TaskCard({
             taskId={vm.id}
             title={vm.title}
             archived={vm.archived}
+            openTarget={{ type: 'repository', repositoryPath: vm.repositoryPath }}
             onArchive={onArchive}
             onRequestDelete={onRequestDelete}
             className="tm-card__actions"

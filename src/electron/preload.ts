@@ -7,7 +7,9 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
+  InspectOpenTargetRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
@@ -36,6 +38,10 @@ const api: TaskManagerApi = {
   getExternalToolStatus: () => ipcRenderer.invoke('settings:tools:status'),
   testExternalTool: (input: TestExternalToolRequest) =>
     ipcRenderer.invoke('settings:tools:test', input),
+  inspectOpenTarget: (input: InspectOpenTargetRequest) =>
+    ipcRenderer.invoke('openTarget:inspect', input),
+  executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
+    ipcRenderer.invoke('openTarget:execute', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),

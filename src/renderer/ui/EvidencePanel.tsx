@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -23,8 +23,11 @@ import {
   type DiffTreeNode
 } from '../model/diffEvidence';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { openTargetMenuPosition } from '../model/openTargetMenu';
 import { StatusChip } from './StatusBadge';
 import { humanizeEnum } from './display';
+import { OpenTargetContextMenu } from './OpenTargetMenu';
+import type { OpenTargetRef } from '../../shared/contracts';
 
 interface EvidencePanelProps {
   run?: RunRecord;
@@ -81,6 +84,10 @@ export function EvidencePanel({
   const [fileFilter, setFileFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<DiffFileStatusFilter>('all');
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [pathMenu, setPathMenu] = useState<{
+    target: OpenTargetRef;
+    position: { x: number; y: number };
+  }>();
   const [collapsedDirectoryIds, setCollapsedDirectoryIds] = useState<Set<string>>(() => new Set());
   const [filePanelCollapsed, setFilePanelCollapsed] = useState(false);
   const [diffBrowserHeight, setDiffBrowserHeight] = useState(DEFAULT_DIFF_BROWSER_HEIGHT);
@@ -174,6 +181,28 @@ export function EvidencePanel({
     setDiffBrowserHeight(
       clamp(nextHeight, MIN_DIFF_BROWSER_HEIGHT, MAX_DIFF_BROWSER_HEIGHT)
     );
+  }
+
+  function openPathMenu(
+    relativePath: string,
+    event: MouseEvent,
+    line?: number
+  ) {
+    if (!worktree) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setPathMenu({
+      target: {
+        type: 'worktreeFile',
+        taskId: worktree.taskId,
+        worktreeId: worktree.id,
+        relativePath,
+        line
+      },
+      position: openTargetMenuPosition(event.clientX, event.clientY)
+    });
   }
 
   return (
@@ -328,6 +357,7 @@ export function EvidencePanel({
                         collapsedDirectoryIds={collapsedDirectoryIds}
                         onToggleDirectory={toggleDirectory}
                         onSelectFile={setSelectedFileId}
+                        onOpenPathMenu={openPathMenu}
                       />
                     ))}
                   </div>
@@ -353,6 +383,7 @@ export function EvidencePanel({
               filePanelCollapsed={filePanelCollapsed}
               filePanelToggleLabel={filePanelToggleLabel}
               onToggleFilePanel={() => setFilePanelCollapsed((collapsed) => !collapsed)}
+              onOpenPathMenu={openPathMenu}
             />
           ) : (
             <>
@@ -487,6 +518,13 @@ export function EvidencePanel({
           <p className="muted">Prepare a worktree to capture Git and diff evidence.</p>
         )}
       </section>
+      {pathMenu ? (
+        <OpenTargetContextMenu
+          target={pathMenu.target}
+          position={pathMenu.position}
+          onClose={() => setPathMenu(undefined)}
+        />
+      ) : null}
     </>
   );
 }
@@ -506,7 +544,8 @@ function DiffTreeRow({
   selectedFileId,
   collapsedDirectoryIds,
   onToggleDirectory,
-  onSelectFile
+  onSelectFile,
+  onOpenPathMenu
 }: {
   node: DiffTreeNode;
   depth: number;
@@ -514,6 +553,7 @@ function DiffTreeRow({
   collapsedDirectoryIds: Set<string>;
   onToggleDirectory(directoryId: string): void;
   onSelectFile(fileId: string): void;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent): void;
 }) {
   const rowStyle = {
     '--tm-difftree-indent': `${depth * 14}px`
@@ -531,6 +571,7 @@ function DiffTreeRow({
           aria-expanded={!collapsed}
           style={rowStyle}
           onClick={() => onToggleDirectory(node.id)}
+          onContextMenu={(event) => onOpenPathMenu?.(node.path, event)}
           onKeyDown={(event) => {
             if (event.key === 'ArrowRight' && collapsed) {
               event.preventDefault();
@@ -558,6 +599,7 @@ function DiffTreeRow({
                 collapsedDirectoryIds={collapsedDirectoryIds}
                 onToggleDirectory={onToggleDirectory}
                 onSelectFile={onSelectFile}
+                onOpenPathMenu={onOpenPathMenu}
               />
             ))}
           </div>
@@ -579,6 +621,7 @@ function DiffTreeRow({
       style={rowStyle}
       title={node.path}
       onClick={() => onSelectFile(node.file.id)}
+      onContextMenu={(event) => onOpenPathMenu?.(node.file.path, event)}
     >
       <span className="tm-difftree__spacer" aria-hidden="true" />
       <StatusIcon status={node.file.status} />
@@ -594,13 +637,15 @@ function DiffFileView({
   context,
   filePanelCollapsed,
   filePanelToggleLabel,
-  onToggleFilePanel
+  onToggleFilePanel,
+  onOpenPathMenu
 }: {
   file: DiffFile;
   context: DiffScopeContext;
   filePanelCollapsed: boolean;
   filePanelToggleLabel: string;
   onToggleFilePanel(): void;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent, line?: number): void;
 }) {
   return (
     <>
@@ -612,7 +657,10 @@ function DiffFileView({
         />
         <div className="tm-diffviewer__identity">
           <StatusIcon status={file.status} />
-          <span className="tm-diffviewer__titletext">
+          <span
+            className="tm-diffviewer__titletext"
+            onContextMenu={(event) => onOpenPathMenu?.(file.path, event)}
+          >
             <strong>{file.path}</strong>
             <small>
               {context.label} · {context.comparison}
@@ -639,7 +687,12 @@ function DiffFileView({
                   line.kind === 'hunk' ? (
                     <DiffHunkRow key={`${block.id}:${index}`} line={line} />
                   ) : (
-                    <DiffLineRow key={`${block.id}:${index}`} line={line} />
+                    <DiffLineRow
+                      key={`${block.id}:${index}`}
+                      line={line}
+                      file={file}
+                      onOpenPathMenu={onOpenPathMenu}
+                    />
                   )
                 )}
             </div>
@@ -735,10 +788,22 @@ function DiffHunkRow({ line }: { line: DiffLine }) {
   );
 }
 
-function DiffLineRow({ line }: { line: DiffLine }) {
+function DiffLineRow({
+  line,
+  file,
+  onOpenPathMenu
+}: {
+  line: DiffLine;
+  file: DiffFile;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent, line?: number): void;
+}) {
   const code = diffLineCode(line);
+  const targetLine = line.newLine ?? line.oldLine;
   return (
-    <div className={`tm-diffline tm-diffline--${line.kind}`}>
+    <div
+      className={`tm-diffline tm-diffline--${line.kind}`}
+      onContextMenu={(event) => onOpenPathMenu?.(file.path, event, targetLine)}
+    >
       <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
       <span className="tm-diffline__num">{line.newLine ?? ''}</span>
       <code>{code || ' '}</code>

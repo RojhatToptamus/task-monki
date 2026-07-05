@@ -490,6 +490,11 @@ export function TaskDetail(props: TaskDetailProps) {
                 taskId={task.id}
                 title={task.title}
                 archived={task.workflowPhase === 'ARCHIVED'}
+                openTarget={
+                  worktree
+                    ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
+                    : { type: 'repository', repositoryPath: task.repositoryPath }
+                }
                 onArchive={props.onArchive}
                 onRequestDelete={props.onRequestDelete}
                 className="tm-detail__taskmenu"

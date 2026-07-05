@@ -35,7 +35,11 @@ import type {
   UpdateAppSettingsRequest,
   ExternalToolStatusReport,
   TestExternalToolRequest,
-  ExternalToolProbeResult
+  ExternalToolProbeResult,
+  InspectOpenTargetRequest,
+  OpenTargetInspection,
+  ExecuteOpenTargetActionRequest,
+  OpenTargetActionResult
 } from '../../shared/contracts';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -63,6 +67,7 @@ import {
   type AppSettingsStorage
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
+import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -73,6 +78,7 @@ export class TaskManagerService {
   private readonly promptRefiner = new PromptRefinementService();
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
+  private readonly openTargets: OpenTargetService;
   private readonly taskActionLocks = new Map<string, string>();
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private codexExecutable: string | undefined;
@@ -89,6 +95,7 @@ export class TaskManagerService {
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
+      openTargetHost?: OpenTargetHost;
     } = {}
   ) {
     const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
@@ -102,6 +109,7 @@ export class TaskManagerService {
         gh: options.ghPath
       }
     });
+    this.openTargets = new OpenTargetService(options.openTargetHost);
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
@@ -191,6 +199,26 @@ export class TaskManagerService {
       this.appSettings.externalExecutables,
       input
     );
+  }
+
+  async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.openTargets.inspect(input, {
+      snapshot: await this.store.snapshot(),
+      defaultRepositoryPath: this.defaultRepositoryPath,
+      appSettings: this.appSettings
+    });
+  }
+
+  async executeOpenTargetAction(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.openTargets.execute(input, {
+      snapshot: await this.store.snapshot(),
+      defaultRepositoryPath: this.defaultRepositoryPath,
+      appSettings: this.appSettings
+    });
   }
 
   validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {

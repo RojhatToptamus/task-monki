@@ -3976,6 +3976,10 @@ textarea:focus-visible {
   border-color: var(--border-strong);
 }
 
+.tm-card:has(.tm-taskmenu__menu) {
+  z-index: 45;
+}
+
 .tm-card--decision {
   border-color: var(--border);
 }
@@ -4194,6 +4198,10 @@ textarea:focus-visible {
   box-shadow: var(--shadow-menu);
 }
 
+.tm-taskmenu__menu:has(.tm-pathmenu__item) {
+  min-width: 214px;
+}
+
 .tm-taskmenu__item {
   width: 100%;
   padding: 7px 10px;
@@ -4216,6 +4224,101 @@ textarea:focus-visible {
 }
 
 .tm-taskmenu__item--danger {
+  color: var(--error);
+}
+
+.tm-pathmenu--floating {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  min-width: 214px;
+  max-width: min(280px, calc(100vw - 18px));
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.tm-pathmenu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-pathmenu__item span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-pathmenu__appicon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.tm-pathmenu__separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--hair);
+}
+
+.tm-pathmenu__submenu {
+  display: grid;
+  gap: 1px;
+}
+
+.tm-pathmenu__submenu > summary {
+  display: flex;
+  align-items: center;
+  min-height: 31px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tm-pathmenu__submenu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tm-pathmenu__submenu > summary::after {
+  content: '›';
+  margin-left: auto;
+  color: var(--faint);
+}
+
+.tm-pathmenu__submenu[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.tm-pathmenu__submenu > summary:hover,
+.tm-pathmenu__submenu[open] > summary {
+  background: var(--surface2);
+}
+
+.tm-pathmenu__submenu-body {
+  display: grid;
+  gap: 1px;
+  padding-left: 10px;
+}
+
+.tm-pathmenu__message {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.tm-pathmenu__message--error {
   color: var(--error);
 }
 

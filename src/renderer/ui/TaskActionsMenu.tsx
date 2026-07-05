@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
+import type { OpenTargetRef } from '../../shared/contracts';
+import { OpenTargetMenuItems } from './OpenTargetMenu';
 
 interface TaskActionsMenuProps {
   taskId: string;
   title: string;
   archived: boolean;
+  openTarget?: OpenTargetRef;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
   className?: string;
@@ -13,6 +16,7 @@ export function TaskActionsMenu({
   taskId,
   title,
   archived,
+  openTarget,
   onArchive,
   onRequestDelete,
   className
@@ -62,6 +66,12 @@ export function TaskActionsMenu({
       </button>
       {open ? (
         <div className="tm-taskmenu__menu" role="menu">
+          {openTarget ? (
+            <>
+              <OpenTargetMenuItems target={openTarget} onActionComplete={() => setOpen(false)} />
+              <div className="tm-pathmenu__separator" />
+            </>
+          ) : null}
           <button
             type="button"
             role="menuitem"

@@ -803,6 +803,82 @@ export interface TestExternalToolRequest {
   executablePath?: string | null;
 }
 
+export type OpenTargetAppId =
+  | 'vscode'
+  | 'vscode-insiders'
+  | 'cursor'
+  | 'windsurf'
+  | 'sublime'
+  | 'intellij-idea'
+  | 'xcode'
+  | 'default';
+
+export type OpenTargetAppIcon = { kind: 'image'; dataUrl: string };
+
+export interface OpenTargetDetectedApp {
+  id: OpenTargetAppId;
+  label: string;
+  icon?: OpenTargetAppIcon;
+}
+
+export type OpenTargetRef =
+  | {
+      type: 'repository';
+      repositoryPath: string;
+    }
+  | {
+      type: 'worktree';
+      worktreeId: string;
+      taskId?: string;
+    }
+  | {
+      type: 'worktreeFile';
+      worktreeId: string;
+      relativePath: string;
+      taskId?: string;
+      line?: number;
+      column?: number;
+    };
+
+export interface InspectOpenTargetRequest {
+  target: OpenTargetRef;
+}
+
+export interface OpenTargetInspection {
+  target: {
+    type: OpenTargetRef['type'];
+    kind: 'file' | 'directory' | 'other' | 'missing';
+  };
+  apps: OpenTargetDetectedApp[];
+  preferredAppId: OpenTargetAppId;
+  revealLabel: string;
+  canOpen: boolean;
+  canReveal: boolean;
+  canOpenTerminal: boolean;
+  canCopyFileContents: boolean;
+  copyFileContentsDisabledReason?: string;
+  disabledReason?: string;
+}
+
+export type OpenTargetAction =
+  | 'open'
+  | 'reveal'
+  | 'openTerminal'
+  | 'copyPath'
+  | 'copyFileContents';
+
+export interface ExecuteOpenTargetActionRequest {
+  target: OpenTargetRef;
+  action: OpenTargetAction;
+  appId?: OpenTargetAppId;
+}
+
+export interface OpenTargetActionResult {
+  ok: boolean;
+  message?: string;
+  clipboardText?: string;
+}
+
 export interface GitHubPreflightRequest {
   taskId: string;
 }
@@ -856,6 +932,10 @@ export interface TaskManagerApi {
   ): Promise<import('./agent').TaskManagerAppSettings>;
   getExternalToolStatus(): Promise<ExternalToolStatusReport>;
   testExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+  inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection>;
+  executeOpenTargetAction(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;

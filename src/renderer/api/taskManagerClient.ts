@@ -8,9 +8,13 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
+  InspectOpenTargetRequest,
+  OpenTargetActionResult,
+  OpenTargetInspection,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
@@ -111,6 +115,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     getExternalToolStatus: () => get(baseUrl, '/api/settings/tools'),
     testExternalTool: (input: TestExternalToolRequest) =>
       post(baseUrl, '/api/settings/tools/test', input),
+    inspectOpenTarget: (input: InspectOpenTargetRequest) =>
+      post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
+    executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
+      post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),

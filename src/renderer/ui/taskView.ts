@@ -34,6 +34,7 @@ export interface TaskCardVM {
   num: string;
   title: string;
   meta: string;
+  repositoryPath: string;
   stateLabel: string;
   stateTone: Tone;
   archived: boolean;
@@ -496,6 +497,7 @@ export function buildTaskCardVM(task: Task): TaskCardVM {
     num: `#${formatShortId(task.id)}`,
     title: task.title,
     meta: taskMeta(task),
+    repositoryPath: task.repositoryPath,
     stateLabel: state.label,
     stateTone: state.tone,
     archived: task.workflowPhase === 'ARCHIVED',

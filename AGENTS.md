@@ -18,6 +18,8 @@ local acceptance.
 - `docs/APP_SERVER_ARCHITECTURE.md`
   - App Server process model, records, adapter responsibilities, and recovery
     rules.
+- `DESIGN.md`
+  - Frontend and design guidance for coherent Task Monki UI changes.
 - `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
   - Required reading before changing review, request-changes, stale-review,
     follow-up, or interrupt behavior.

@@ -11,6 +11,8 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   GitHubPreflightRequest,
+  InspectOpenTargetRequest,
+  ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   RefreshEvidenceRequest,
@@ -27,6 +29,7 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import { createElectronOpenTargetHost } from './openTargetHost';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
@@ -81,6 +84,12 @@ function installIpcHandlers(): void {
   ipcMain.handle('settings:tools:status', () => service.getExternalToolStatus());
   ipcMain.handle('settings:tools:test', async (_, input: TestExternalToolRequest) => {
     return service.testExternalTool(input);
+  });
+  ipcMain.handle('openTarget:inspect', async (_, input: InspectOpenTargetRequest) => {
+    return service.inspectOpenTarget(input);
+  });
+  ipcMain.handle('openTarget:execute', async (_, input: ExecuteOpenTargetActionRequest) => {
+    return service.executeOpenTargetAction(input);
   });
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {
@@ -236,7 +245,8 @@ app.whenReady().then(async () => {
       agentCwd: defaultRepositoryPath || app.getPath('home'),
       appSettingsStore: new AppSettingsStore(
         path.join(app.getPath('userData'), 'app-settings.json')
-      )
+      ),
+      openTargetHost: createElectronOpenTargetHost()
     }
   );
   serviceCreated = true;

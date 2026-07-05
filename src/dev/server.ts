@@ -100,6 +100,16 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       return;
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/open-target/inspect') {
+      sendJson(response, 200, await service.inspectOpenTarget((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/open-target/execute') {
+      sendJson(response, 200, await service.executeOpenTargetAction((await readJson(request)) as never));
+      return;
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/tasks') {
       sendJson(response, 200, await service.listTasks());
       return;
