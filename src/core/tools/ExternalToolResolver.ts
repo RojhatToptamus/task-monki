@@ -11,7 +11,11 @@ import type {
   ExternalToolStatusReport,
   TestExternalToolRequest
 } from '../../shared/contracts';
-import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
+import {
+  discoverBundledCodexRuntimeCandidates,
+  TASK_MONKI_CODEX_BIN_ENV,
+  type CodexBundledRuntimeDiscoveryOptions
+} from '../agent/codex/CodexRuntimeResolver';
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +60,7 @@ export interface ExternalToolResolverOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   overrides?: Partial<Record<ExternalToolId, string | null | undefined>>;
+  codexBundledDiscovery?: CodexBundledRuntimeDiscoveryOptions;
 }
 
 export class ExternalToolResolver {
@@ -73,7 +78,7 @@ export class ExternalToolResolver {
     };
   }
 
-  probe(
+  async probe(
     tool: ExternalToolId,
     settings: ExternalExecutablePathSettings,
     request: TestExternalToolRequest = { tool }
@@ -86,7 +91,7 @@ export class ExternalToolResolver {
       env: this.options.env ?? process.env,
       overrides: this.options.overrides
     });
-    return probeExecutable({
+    const result = await probeExecutable({
       tool,
       label: definition.label,
       required: definition.required,
@@ -97,6 +102,30 @@ export class ExternalToolResolver {
       cwd: this.options.cwd ?? process.cwd(),
       env: this.options.env ?? process.env
     });
+    if (tool !== 'codex' || configured.source !== 'auto' || result.status === 'ok') {
+      return result;
+    }
+
+    const bundledCandidates = await discoverBundledCodexRuntimeCandidates(
+      this.options.codexBundledDiscovery
+    );
+    for (const candidate of bundledCandidates) {
+      const bundledResult = await probeExecutable({
+        tool,
+        label: definition.label,
+        required: definition.required,
+        executable: candidate.executable,
+        configuredPath: null,
+        source: 'auto',
+        versionArgs: definition.versionArgs,
+        cwd: this.options.cwd ?? process.cwd(),
+        env: this.options.env ?? process.env
+      });
+      if (bundledResult.status === 'ok') {
+        return bundledResult;
+      }
+    }
+    return result;
   }
 }
 

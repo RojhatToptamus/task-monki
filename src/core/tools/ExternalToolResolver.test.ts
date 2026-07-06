@@ -56,6 +56,59 @@ describe('ExternalToolResolver', () => {
     });
   });
 
+  it('auto-detects Codex from bundled candidates when PATH probing fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-tools-codex-bundle-'));
+    const codex = await writeExecutable(
+      dir,
+      'Codex.app/Contents/Resources/codex',
+      'codex-cli 2.3.4'
+    );
+    const resolver = new ExternalToolResolver({
+      cwd: dir,
+      env: { PATH: '' },
+      codexBundledDiscovery: {
+        appBundleCandidates: [codex],
+        extensionRoots: []
+      }
+    });
+
+    const result = await resolver.probe('codex', autoSettings);
+
+    expect(result).toMatchObject({
+      tool: 'codex',
+      source: 'auto',
+      configuredPath: null,
+      executable: codex,
+      resolvedPath: codex,
+      status: 'ok',
+      version: 'codex-cli 2.3.4'
+    });
+  });
+
+  it('reports Codex unavailable when PATH and bundled candidates fail', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-tools-codex-missing-'));
+    const resolver = new ExternalToolResolver({
+      cwd: dir,
+      env: { PATH: '' },
+      codexBundledDiscovery: {
+        appBundleCandidates: [path.join(dir, 'missing-codex')],
+        extensionRoots: []
+      }
+    });
+
+    const result = await resolver.probe('codex', autoSettings);
+
+    expect(result).toMatchObject({
+      tool: 'codex',
+      source: 'auto',
+      executable: 'codex',
+      resolvedPath: null,
+      status: 'error',
+      version: null
+    });
+    expect(result.error).toMatch(/ENOENT|no such file/i);
+  });
+
   it('prefers environment overrides over saved settings', () => {
     expect(
       resolveConfiguredExecutable({
@@ -148,6 +201,7 @@ describe('ExternalToolResolver', () => {
 
 async function writeExecutable(dir: string, name: string, output: string): Promise<string> {
   const filePath = path.join(dir, name);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `#!/bin/sh\necho ${JSON.stringify(output)}\n`, 'utf8');
   await fs.chmod(filePath, 0o755);
   return filePath;

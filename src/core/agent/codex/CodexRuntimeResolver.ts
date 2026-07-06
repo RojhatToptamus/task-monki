@@ -84,6 +84,11 @@ export interface CodexRuntimeResolverOptions {
   extensionRoots?: string[];
 }
 
+export interface CodexBundledRuntimeDiscoveryOptions {
+  appBundleCandidates?: string[];
+  extensionRoots?: string[];
+}
+
 interface JsonRpcResponse {
   id: number;
   result?: unknown;
@@ -173,14 +178,35 @@ export async function discoverCodexRuntimeCandidates(
     await add(candidate, 'path', false);
   }
 
-  for (const candidate of options.appBundleCandidates ?? defaultCodexAppBundleCandidates()) {
-    await add(candidate, 'codex-app-bundle', false);
+  for (const candidate of await discoverBundledCodexRuntimeCandidates(options)) {
+    await add(candidate.executable, candidate.source, false);
   }
 
-  for (const candidate of await extensionCodexCandidates(
+  return candidates;
+}
+
+export async function discoverBundledCodexRuntimeCandidates(
+  options: CodexBundledRuntimeDiscoveryOptions = {}
+): Promise<Array<Pick<CodexRuntimeCandidate, 'executable' | 'source'>>> {
+  const candidates: Array<Pick<CodexRuntimeCandidate, 'executable' | 'source'>> = [];
+  const seen = new Set<string>();
+  const add = async (executable: string, source: CodexRuntimeCandidateSource) => {
+    const key = await candidateKey(executable);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push({ executable, source });
+  };
+
+  for (const executable of options.appBundleCandidates ?? defaultCodexAppBundleCandidates()) {
+    await add(executable, 'codex-app-bundle');
+  }
+
+  for (const executable of await extensionCodexCandidates(
     options.extensionRoots ?? defaultExtensionRoots()
   )) {
-    await add(candidate, 'vscode-extension-bundle', false);
+    await add(executable, 'vscode-extension-bundle');
   }
 
   return candidates;
