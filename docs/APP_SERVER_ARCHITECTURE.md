@@ -162,6 +162,11 @@ and Codex CLI are required, while GitHub CLI is optional. Environment variables
 `TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
 act as debug overrides ahead of saved settings.
 
+First-launch setup uses lightweight external tool probes. In Codex Auto-detect
+mode, setup checks `codex --version` from `PATH` first, then known bundled
+Codex executable locations such as Codex Desktop and extension bundles. It does
+not run App Server compatibility checks from the setup screen.
+
 Codex Auto-detect status may display the resolved `codex` path, but that
 auto-discovered path is not passed as an explicit App Server runtime. In Auto
 mode, App Server startup leaves the executable unset so capability-based
