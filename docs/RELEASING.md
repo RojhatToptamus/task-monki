@@ -20,6 +20,12 @@ The stable app identity is `dev.taskmonki.desktop`. Do not change it without a
 data-migration plan, because app identity affects where desktop platforms store
 application data and how manual upgrades relate to previous installs.
 
+macOS packaging uses `build/icon.icns` for the bundle icon and also copies
+`build/icon.png` to `Contents/Resources/icon.png`. The main process sets the
+Dock tile from that PNG at runtime so macOS shows the original full-canvas logo
+instead of a cached or inset fallback. Do not regenerate or pad these icon
+assets casually; keep the original logo geometry intact.
+
 ## Local Verification Before Tagging
 
 Run the full repository checks:

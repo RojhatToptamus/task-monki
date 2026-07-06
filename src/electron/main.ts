@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
@@ -30,10 +31,14 @@ import type {
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import { createElectronOpenTargetHost } from './openTargetHost';
+import { getMacDockIconPath } from './dockIcon';
+import { getMainWindowChromeOptions } from './windowChrome';
+import { shouldCreateWindowOnActivate } from './windowLifecycle';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
 let serviceCreated = false;
+let ipcHandlersInstalled = false;
 let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
 
@@ -47,8 +52,7 @@ function createWindow(): void {
     minHeight: 720,
     title: 'Task Monki',
     backgroundColor: '#101217',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 17 },
+    ...getMainWindowChromeOptions(process.platform),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -61,6 +65,21 @@ function createWindow(): void {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     void mainWindow.loadFile(path.join(__dirname, '../../dist-renderer/index.html'));
+  }
+}
+
+function configureMacDockIcon(): void {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  const iconPath = getMacDockIconPath({
+    appPath: app.getAppPath(),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath
+  });
+  if (fs.existsSync(iconPath)) {
+    app.dock.setIcon(iconPath);
   }
 }
 
@@ -196,6 +215,7 @@ function installIpcHandlers(): void {
       return service.readProtocolMessage(input);
     }
   );
+  ipcHandlersInstalled = true;
 }
 
 function broadcast(event: AppUpdateEvent): void {
@@ -236,6 +256,7 @@ function resolveDefaultRepositoryPath(): string {
 app.whenReady().then(async () => {
   app.setAppUserModelId(appId);
   configureDesktopCliPath();
+  configureMacDockIcon();
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
   service = new TaskManagerService(
     new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
@@ -281,7 +302,12 @@ app.on('before-quit', (event) => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (
+    shouldCreateWindowOnActivate({
+      ipcHandlersInstalled,
+      openWindowCount: BrowserWindow.getAllWindows().length
+    })
+  ) {
     createWindow();
   }
 });

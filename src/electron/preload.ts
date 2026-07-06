@@ -28,6 +28,20 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import type { WindowChromePlatform } from '../shared/shell';
+
+function getWindowChromePlatform(): WindowChromePlatform {
+  if (process.platform === 'darwin') {
+    return 'macos';
+  }
+  if (process.platform === 'win32') {
+    return 'windows';
+  }
+  if (process.platform === 'linux') {
+    return 'linux';
+  }
+  return 'other';
+}
 
 const api: TaskManagerApi = {
   getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
@@ -81,3 +95,6 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
+contextBridge.exposeInMainWorld('taskManagerShell', {
+  windowChromePlatform: getWindowChromePlatform()
+});

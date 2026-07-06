@@ -8,6 +8,7 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
+import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
@@ -105,6 +106,46 @@ describe('FileTaskStore', () => {
         completionPolicy: 'NOT_A_POLICY' as never
       })
     ).rejects.toThrow('Invalid completion policy');
+  });
+
+  it('migrates schema 8 stores by dropping the legacy testRuns collection', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema8-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({
+      title: 'Existing schema 8 task',
+      prompt: 'Keep this task after migration.',
+      repositoryPath: dir
+    });
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    await fs.writeFile(
+      storePath,
+      `${JSON.stringify(
+        {
+          ...persisted,
+          schemaVersion: 8,
+          testRuns: [{ id: 'legacy-test-run' }]
+        },
+        null,
+        2
+      )}\n`,
+      'utf8'
+    );
+
+    const migrated = await new FileTaskStore(dir).snapshot();
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(migrated.tasks[0]?.title).toBe('Existing schema 8 task');
+
+    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(rewritten.testRuns).toBeUndefined();
   });
 
   it('links forked alternative tasks to their source task and run', async () => {

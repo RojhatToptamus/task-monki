@@ -191,7 +191,10 @@ function normalizeCreateTaskCompletionPolicy(
   throw new Error(`Invalid completion policy: ${String(value)}`);
 }
 
-interface PersistedState extends StoreState {}
+type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
+  schemaVersion?: unknown;
+  testRuns?: unknown;
+};
 
 export class FileTaskStore {
   private readonly storePath: string;
@@ -216,11 +219,10 @@ export class FileTaskStore {
 
     try {
       const raw = await fs.readFile(this.storePath, 'utf8');
-      const normalized = normalizeLoadedState(
-        requireCurrentState(JSON.parse(raw) as PersistedState)
-      );
+      const migrated = migratePersistedState(JSON.parse(raw) as PersistedState);
+      const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
       this.state = normalized.state;
-      if (normalized.changed) {
+      if (migrated.changed || normalized.changed) {
         await this.persist();
       }
     } catch (error) {
@@ -2229,7 +2231,26 @@ function requireCurrentState(state: PersistedState): StoreState {
       throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
     }
   }
-  return state;
+  return state as StoreState;
+}
+
+function migratePersistedState(state: PersistedState): {
+  state: PersistedState;
+  changed: boolean;
+} {
+  if (state.schemaVersion !== 8) {
+    return { state, changed: false };
+  }
+
+  // Schema 8 differs from schema 9 only by this retired collection.
+  const { testRuns: _legacyTestRuns, ...currentState } = state;
+  return {
+    state: {
+      ...currentState,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    },
+    changed: true
+  };
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {

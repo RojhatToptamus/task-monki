@@ -45,6 +45,8 @@ behavior and architecture, not private roadmap sequencing.
 1. `docs/DESIGN_SPEC.md`
    - Current interface principles, CSS token usage, component rules, status
      semantics, screen patterns, and content guidelines.
+2. `docs/WINDOW_CHROME.md`
+   - Native Electron window chrome expectations for macOS, Windows, and Linux.
 
 For agent-specific working instructions, start at root `AGENTS.md`.
 

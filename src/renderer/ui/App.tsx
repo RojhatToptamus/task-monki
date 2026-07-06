@@ -91,6 +91,10 @@ interface AppNotification {
 
 const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
 
+function resolveWindowChromePlatform() {
+  return window.taskManagerShell?.windowChromePlatform ?? 'other';
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
@@ -797,11 +801,18 @@ export function App() {
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
+  const windowChromePlatform = resolveWindowChromePlatform();
 
   return (
-    <div className="tm-app app-shell" data-theme={resolvedTheme}>
-      <header className="tm-titlebar">
-        <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
+    <div
+      className="tm-app app-shell"
+      data-theme={resolvedTheme}
+      data-window-platform={windowChromePlatform}
+    >
+      <header className="tm-titlebar" data-window-platform={windowChromePlatform}>
+        {windowChromePlatform === 'macos' ? (
+          <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
+        ) : null}
         <button
           type="button"
           className="tm-iconbtn"

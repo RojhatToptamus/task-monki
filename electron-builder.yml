@@ -28,6 +28,9 @@ mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
   identity: null
+  extraResources:
+    - from: build/icon.png
+      to: icon.png
   extendInfo:
     NSBluetoothAlwaysUsageDescription: Task Monki does not use Bluetooth access.
     NSBluetoothPeripheralUsageDescription: Task Monki does not use Bluetooth access.

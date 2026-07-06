@@ -3185,10 +3185,15 @@ textarea:focus-visible {
   gap: 10px;
   height: 52px;
   padding: 0 16px;
+  padding-right: max(
+    16px,
+    calc(16px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+  );
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
   -webkit-app-region: drag;
+  user-select: none;
 }
 
 .tm-titlebar__traffic-spacer {
@@ -3208,6 +3213,15 @@ textarea:focus-visible {
   background: transparent;
   color: var(--muted);
   flex: 0 0 auto;
+  -webkit-app-region: no-drag;
+}
+
+.tm-titlebar button,
+.tm-titlebar input,
+.tm-titlebar select,
+.tm-titlebar textarea,
+.tm-titlebar a,
+.tm-titlebar [role='button'] {
   -webkit-app-region: no-drag;
 }
 
@@ -3738,6 +3752,10 @@ textarea:focus-visible {
   .tm-titlebar {
     gap: 8px;
     padding: 0 10px;
+    padding-right: max(
+      10px,
+      calc(10px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+    );
   }
 
   .tm-newtask {
