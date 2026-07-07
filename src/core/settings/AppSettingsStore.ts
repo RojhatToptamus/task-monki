@@ -124,6 +124,10 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
       typeof record.sidebarCollapsed === 'boolean'
         ? record.sidebarCollapsed
         : DEFAULT_TASK_MANAGER_APP_SETTINGS.sidebarCollapsed,
+    showMascot:
+      typeof record.showMascot === 'boolean'
+        ? record.showMascot
+        : DEFAULT_TASK_MANAGER_APP_SETTINGS.showMascot,
     firstLaunchSetupCompleted: normalizeFirstLaunchSetupCompleted(
       record.firstLaunchSetupCompleted,
       repositories
@@ -149,6 +153,9 @@ export function mergeAppSettings(
   }
   if (input.sidebarCollapsed !== undefined) {
     patch.sidebarCollapsed = input.sidebarCollapsed === true;
+  }
+  if (input.showMascot !== undefined) {
+    patch.showMascot = input.showMascot === true;
   }
   if (input.firstLaunchSetupCompleted !== undefined) {
     patch.firstLaunchSetupCompleted = input.firstLaunchSetupCompleted === true;

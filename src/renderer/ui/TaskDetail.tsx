@@ -71,6 +71,11 @@ import {
   type PrStatusViewModel
 } from '../model/prStatus';
 import {
+  MASCOT_VIDEO_SOURCES,
+  getMascotStateForTask,
+  type MascotState
+} from '../model/mascotState';
+import {
   buildTaskActivityLedger,
   projectDebugTaskActivity,
   projectOverviewTaskActivity
@@ -102,6 +107,7 @@ interface TaskDetailProps {
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
   interactions: InteractionRequestRecord[];
+  showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
@@ -136,8 +142,25 @@ type ReviewActionPauseReason =
   | 'implementation-running'
   | 'delivery-running';
 
+const REVIEW_START_PENDING_TIMEOUT_MS = 5000;
+const REVIEW_MASCOT_MIN_ACTIVE_MS = 1600;
+
 export function TaskDetail(props: TaskDetailProps) {
-  const { task, error } = props;
+  const {
+    task,
+    error,
+    run,
+    worktree,
+    gitSnapshot,
+    pullRequest,
+    interactions,
+    sessions,
+    planRevisions,
+    branchPublication,
+    ciRollup,
+    reviewRollup,
+    mergeSnapshot
+  } = props;
   const [tab, setTab] = useState<DetailTab>('overview');
   const [requestDrawerOpen, setRequestDrawerOpen] = useState(false);
   const [selectedReviewFindingIds, setSelectedReviewFindingIds] = useState<string[]>([]);
@@ -148,12 +171,42 @@ export function TaskDetail(props: TaskDetailProps) {
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
+  const [reviewMascotHoldGeneration, setReviewMascotHoldGeneration] = useState(0);
   const reviewActionInFlightRef = useRef(false);
   const deliveryActionInFlightRef = useRef(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const reviewGate = task ? codexReviewGate(task) : undefined;
+  const reviewIsRunning = reviewGate?.status === 'RUNNING';
+  const reviewPending = reviewStartPending && !reviewIsRunning;
+  const reviewMascotHoldActive = reviewMascotHoldGeneration > 0;
+  const reviewActiveForMascot = reviewMascotHoldActive || reviewIsRunning;
+  const headerState = task ? describeTaskHeaderState(task) : undefined;
+  const prStatus = task
+    ? buildPrStatusViewModel({
+        task,
+        gitSnapshot,
+        branchPublication,
+        pullRequest,
+        ciRollup,
+        reviewRollup,
+        mergeSnapshot
+      })
+    : undefined;
+  const mascotState = task && headerState
+    ? getMascotStateForTask({
+        workflowPhase: task.workflowPhase,
+        agentRun: task.projection.agentRun,
+        reviewStatus: reviewGate?.status ?? 'NOT_RUN',
+        prStatusKind: prStatus?.kind,
+        reviewActive: reviewActiveForMascot
+      })
+    : 'idle';
+  const mascotVideoSource = MASCOT_VIDEO_SOURCES[mascotState];
 
   useEffect(() => {
     setReviewStartPending(false);
+    setReviewMascotHoldGeneration(0);
     setRequestDrawerOpen(false);
     setSelectedReviewFindingIds([]);
     setDraftPrModalOpen(false);
@@ -164,7 +217,38 @@ export function TaskDetail(props: TaskDetailProps) {
     bodyRef.current?.scrollTo({ top: 0 });
   }, [tab, task?.id]);
 
-  if (!task) {
+  useEffect(() => {
+    if (reviewIsRunning) {
+      setReviewStartPending(false);
+    }
+  }, [reviewIsRunning]);
+
+  useEffect(() => {
+    if (!reviewStartPending) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setReviewStartPending(false);
+    }, REVIEW_START_PENDING_TIMEOUT_MS);
+
+    return () => window.clearTimeout(timeout);
+  }, [reviewStartPending, task?.id]);
+
+  useEffect(() => {
+    if (reviewMascotHoldGeneration === 0) {
+      return;
+    }
+
+    const generation = reviewMascotHoldGeneration;
+    const timeout = window.setTimeout(() => {
+      setReviewMascotHoldGeneration((current) => (current === generation ? 0 : current));
+    }, REVIEW_MASCOT_MIN_ACTIVE_MS);
+
+    return () => window.clearTimeout(timeout);
+  }, [reviewMascotHoldGeneration, task?.id]);
+
+  if (!task || !reviewGate || !headerState || !prStatus) {
     return (
       <main className="tm-detail">
         <div className="tm-detail__body">
@@ -174,20 +258,8 @@ export function TaskDetail(props: TaskDetailProps) {
     );
   }
 
-  const {
-    run,
-    worktree,
-    gitSnapshot,
-    pullRequest,
-    interactions,
-    sessions,
-    planRevisions
-  } = props;
-
-  const headerState = describeTaskHeaderState(task);
   const session = sessions.find((candidate) => candidate.id === run?.sessionId);
   const promptLineCount = task.prompt.split(/\r?\n/).length;
-  const reviewGate = codexReviewGate(task);
   const reviewFindings = reviewGate.result?.findings ?? [];
   const reviewRun =
     props.runs.find((candidate) => candidate.id === reviewGate.runId) ??
@@ -210,8 +282,6 @@ export function TaskDetail(props: TaskDetailProps) {
           candidate.status
         )
     );
-  const reviewIsRunning = reviewGate.status === 'RUNNING';
-  const reviewPending = reviewStartPending && !reviewIsRunning;
   const reviewPhaseVisible = isReviewPhase(task.workflowPhase) || reviewRun?.mode === 'REVIEW';
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
@@ -238,15 +308,6 @@ export function TaskDetail(props: TaskDetailProps) {
           candidate.status
         )
     );
-  const prStatus = buildPrStatusViewModel({
-    task,
-    gitSnapshot,
-    branchPublication: props.branchPublication,
-    pullRequest,
-    ciRollup: props.ciRollup,
-    reviewRollup: props.reviewRollup,
-    mergeSnapshot: props.mergeSnapshot
-  });
   const prActionState = buildPrStatusActionState({
     view: prStatus,
     deliveryBusy: deliveryActionBusy,
@@ -304,13 +365,13 @@ export function TaskDetail(props: TaskDetailProps) {
       return;
     }
     setReviewStartPending(true);
+    setReviewMascotHoldGeneration((generation) => generation + 1);
     await runReviewAction(async () => {
       try {
         await props.onReview(sourceRunId);
       } catch {
         setReviewStartPending(false);
-      } finally {
-        setReviewStartPending(false);
+        setReviewMascotHoldGeneration(0);
       }
     });
   };
@@ -474,10 +535,13 @@ export function TaskDetail(props: TaskDetailProps) {
     finishVerifiedChecksEvidence
   );
   const isFailed = ['FAILED', 'LOST', 'RECOVERY_REQUIRED'].includes(task.projection.agentRun);
+  const detailHeadClassName = props.showMascot
+    ? 'tm-detail__head tm-detail__head--with-mascot'
+    : 'tm-detail__head';
 
   return (
     <main className="tm-detail">
-      <div className="tm-detail__head">
+      <div className={detailHeadClassName}>
         <div className="tm-detail__row">
           <div className="tm-detail__heading">
             <div className="tm-detail__ids">
@@ -486,6 +550,21 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
             <div className="tm-detail__titlerow">
               <h1 className="tm-detail__title">{task.title}</h1>
+              {headActions.length > 0 ? (
+                <div className="tm-detail__titleactions">
+                  {headActions.map((action) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      className={`tm-headbtn ${action.kind === 'primary' ? 'tm-headbtn--primary' : ''}`}
+                      disabled={action.disabled}
+                      onClick={action.onClick}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <TaskActionsMenu
                 taskId={task.id}
                 title={task.title}
@@ -504,20 +583,14 @@ export function TaskDetail(props: TaskDetailProps) {
               <div className="tm-detail__meta">{worktree.branchName}</div>
             ) : null}
           </div>
-          <div className="tm-detail__actions">
-            {headActions.map((action) => (
-              <button
-                key={action.label}
-                type="button"
-                className={`tm-headbtn ${action.kind === 'primary' ? 'tm-headbtn--primary' : ''}`}
-                disabled={action.disabled}
-                onClick={action.onClick}
-              >
-                {action.label}
-              </button>
-            ))}
-          </div>
         </div>
+        {props.showMascot ? (
+          <TaskMascotVideo
+            source={mascotVideoSource}
+            state={mascotState}
+            prefersReducedMotion={prefersReducedMotion}
+          />
+        ) : null}
         <div className="tm-tabs">
           <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
           <TabButton label="Evidence" active={tab === 'evidence'} onClick={() => setTab('evidence')} />
@@ -2102,6 +2175,168 @@ function truncateMiddle(value: string, max: number): string {
   const head = Math.ceil((max - 1) / 2);
   const tail = Math.floor((max - 1) / 2);
   return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+}
+
+type MascotVideoLayerPhase = 'entering' | 'active' | 'exiting';
+
+const MASCOT_EXIT_FALLBACK_MS = 620;
+const MASCOT_PLAYBACK_RATE = 0.85;
+
+interface MascotVideoLayer {
+  id: number;
+  source: string;
+  state: MascotState;
+  phase: MascotVideoLayerPhase;
+}
+
+function TaskMascotVideo({
+  source,
+  state,
+  prefersReducedMotion
+}: {
+  source: string;
+  state: MascotState;
+  prefersReducedMotion: boolean;
+}) {
+  const nextLayerIdRef = useRef(1);
+  const videoRefs = useRef(new Map<number, HTMLVideoElement>());
+  const [layers, setLayers] = useState<MascotVideoLayer[]>([
+    { id: 0, source, state, phase: 'active' }
+  ]);
+
+  useEffect(() => {
+    setLayers((current) => {
+      const active =
+        current.find((layer) => layer.phase === 'active') ?? current[current.length - 1];
+      if (prefersReducedMotion) {
+        if (active?.source === source) {
+          return [{ ...active, state, phase: 'active' }];
+        }
+
+        const nextLayer: MascotVideoLayer = {
+          id: nextLayerIdRef.current,
+          source,
+          state,
+          phase: 'active'
+        };
+        nextLayerIdRef.current += 1;
+        return [nextLayer];
+      }
+
+      if (active?.source === source) {
+        return current.map((layer) =>
+          layer.source === source
+            ? { ...layer, state, phase: 'active' }
+            : { ...layer, phase: 'exiting' }
+        );
+      }
+
+      const nextLayer: MascotVideoLayer = {
+        id: nextLayerIdRef.current,
+        source,
+        state,
+        phase: 'entering'
+      };
+      nextLayerIdRef.current += 1;
+
+      return [
+        ...current.map((layer) => ({ ...layer, phase: 'exiting' as const })).slice(-1),
+        nextLayer
+      ];
+    });
+  }, [source, state, prefersReducedMotion]);
+
+  useEffect(() => {
+    if (prefersReducedMotion || !layers.some((layer) => layer.phase === 'entering')) {
+      return;
+    }
+
+    const animationFrame = window.requestAnimationFrame(() => {
+      setLayers((current) =>
+        current.map((layer) =>
+          layer.phase === 'entering' ? { ...layer, phase: 'active' } : layer
+        )
+      );
+    });
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [layers, prefersReducedMotion]);
+
+  useEffect(() => {
+    if (prefersReducedMotion || !layers.some((layer) => layer.phase === 'exiting')) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setLayers((current) => current.filter((layer) => layer.phase !== 'exiting'));
+    }, MASCOT_EXIT_FALLBACK_MS);
+
+    return () => window.clearTimeout(timeout);
+  }, [layers, prefersReducedMotion]);
+
+  useEffect(() => {
+    for (const video of videoRefs.current.values()) {
+      video.playbackRate = MASCOT_PLAYBACK_RATE;
+      if (prefersReducedMotion) {
+        video.pause();
+        if (video.currentTime > 0.05) {
+          video.currentTime = 0;
+        }
+      } else {
+        void video.play().catch(() => undefined);
+      }
+    }
+  }, [layers, prefersReducedMotion]);
+
+  return (
+    <div className="tm-detail__mascot" data-mascot-state={state} aria-hidden="true">
+      {layers.map((layer) => (
+        <video
+          key={layer.id}
+          ref={(video) => {
+            if (video) {
+              videoRefs.current.set(layer.id, video);
+            } else {
+              videoRefs.current.delete(layer.id);
+            }
+          }}
+          className={`tm-detail__mascot-video tm-detail__mascot-video--${layer.phase}`}
+          src={layer.source}
+          data-mascot-state={layer.state}
+          autoPlay={!prefersReducedMotion}
+          loop={!prefersReducedMotion}
+          muted
+          playsInline
+          preload="auto"
+          disablePictureInPicture
+          onTransitionEnd={(event) => {
+            if (layer.phase !== 'exiting' || event.propertyName !== 'opacity') {
+              return;
+            }
+            setLayers((current) => current.filter((candidate) => candidate.id !== layer.id));
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function usePrefersReducedMotion(): boolean {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(
+    () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+  );
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!media) {
+      return;
+    }
+    const onChange = (event: MediaQueryListEvent) => setPrefersReducedMotion(event.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+
+  return prefersReducedMotion;
 }
 
 function getPrimaryAction(input: {

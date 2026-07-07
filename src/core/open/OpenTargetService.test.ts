@@ -2,6 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createInitialProjection,
+  TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   TASK_STORE_SCHEMA_VERSION,
   type TaskManagerAppSettings,
   type TaskSnapshot,
@@ -14,9 +15,10 @@ import {
 } from './OpenTargetService';
 
 const defaultSettings: TaskManagerAppSettings = {
-  schemaVersion: 2,
+  schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   theme: 'device',
   sidebarCollapsed: false,
+  showMascot: true,
   firstLaunchSetupCompleted: true,
   codexExternalTools: {
     webSearchMode: 'disabled',

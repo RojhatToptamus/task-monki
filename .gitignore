@@ -7,6 +7,11 @@ build/icon.iconset/
 .playwright-mcp/
 .local/
 
+# Local mascot source/export artifacts. The app ships the optimized WebM files.
+/outputs/
+/public/assets/brand/task-monki-mascot.webm
+/public/assets/brand/videos/*.mp4
+
 # Documentation policy:
 # Track curated operational docs. Keep private strategy, phase snapshots,
 # generated mockups, screenshots, and reports out of git.

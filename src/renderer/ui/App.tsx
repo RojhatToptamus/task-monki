@@ -962,6 +962,7 @@ export function App() {
             )}
             artifacts={snapshot.artifacts}
             interactions={selectedInteractions}
+            showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
             onCancel={cancelRun}

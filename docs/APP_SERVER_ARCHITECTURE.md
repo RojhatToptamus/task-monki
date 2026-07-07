@@ -149,7 +149,7 @@ stores them in `app-settings.json` directly under `app.getPath('userData')`.
 The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 `app-settings.json` file beside the dev store. These settings include:
 
-- theme and sidebar preference;
+- theme, sidebar, and mascot preferences;
 - first-launch setup completion;
 - default implementation, review, and prompt-refinement models;
 - selected and known repositories;

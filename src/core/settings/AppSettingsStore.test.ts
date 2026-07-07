@@ -21,6 +21,7 @@ describe('AppSettingsStore', () => {
       schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
       theme: 'device',
       sidebarCollapsed: false,
+      showMascot: true,
       firstLaunchSetupCompleted: false,
       externalExecutables: {
         gitExecutablePath: null,
@@ -59,6 +60,17 @@ describe('AppSettingsStore', () => {
       gitExecutablePath: '/usr/bin/git',
       codexExecutablePath: '/opt/bin/codex',
       ghExecutablePath: '/usr/bin/gh'
+    });
+  });
+
+  it('preserves explicit mascot visibility and defaults legacy settings to enabled', async () => {
+    expect(normalizeAppSettings({}).showMascot).toBe(true);
+    expect(normalizeAppSettings({ showMascot: false }).showMascot).toBe(false);
+
+    const store = new MemoryAppSettingsStore({ showMascot: true });
+
+    await expect(store.update({ showMascot: false })).resolves.toMatchObject({
+      showMascot: false
     });
   });
 

@@ -3258,6 +3258,11 @@ textarea:focus-visible {
   font-size: 12.5px;
   font-weight: 600;
   -webkit-app-region: no-drag;
+  transition: background 120ms ease;
+}
+
+.tm-newtask:not(:disabled):hover {
+  background: var(--accent-hover);
 }
 
 .tm-newtask:disabled {
@@ -4384,6 +4389,11 @@ textarea:focus-visible {
   color: var(--text);
   font-size: 12.5px;
   font-weight: 600;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.tm-headbtn:not(:disabled):hover {
+  background: var(--surface2);
 }
 
 .tm-headbtn--primary {
@@ -4391,6 +4401,10 @@ textarea:focus-visible {
   background: var(--accent);
   border: 0;
   color: var(--on-accent);
+}
+
+.tm-headbtn--primary:not(:disabled):hover {
+  background: var(--accent-hover);
 }
 
 /* ---- Inbox ---- */
@@ -5173,6 +5187,7 @@ textarea:focus-visible {
 }
 
 .tm-detail__head {
+  position: relative;
   flex: 0 0 auto;
   padding: 14px 24px 0;
   background: var(--surface);
@@ -5199,7 +5214,12 @@ textarea:focus-visible {
   gap: 16px;
 }
 
+.tm-detail__head--with-mascot .tm-detail__row {
+  padding-right: 120px;
+}
+
 .tm-detail__heading {
+  position: relative;
   min-width: 0;
   flex: 1;
 }
@@ -5220,17 +5240,20 @@ textarea:focus-visible {
 .tm-detail__titlerow {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+  flex-wrap: wrap;
   margin: 0 0 4px;
 }
 
 .tm-detail__title {
+  min-width: 0;
   margin: 0;
   font-size: 21px;
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.18;
   color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 /* The kebab is always visible on the detail page; it reuses the shared
@@ -5239,19 +5262,53 @@ textarea:focus-visible {
   flex: 0 0 auto;
 }
 
+.tm-detail__mascot {
+  position: absolute;
+  top: 14px;
+  right: 24px;
+  width: 104px;
+  height: 69px;
+  pointer-events: none;
+}
+
+.tm-detail__mascot-video {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 520ms ease-in-out;
+}
+
+.tm-detail__mascot-video--entering,
+.tm-detail__mascot-video--exiting {
+  opacity: 0;
+}
+
+.tm-detail__mascot-video--active {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tm-detail__mascot-video {
+    transition: none;
+  }
+}
+
 .tm-detail__meta {
   color: var(--muted);
   font-size: 12px;
   font-family: var(--font-mono);
 }
 
-.tm-detail__actions {
+.tm-detail__titleactions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
   flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .tm-tabs {
@@ -8127,12 +8184,19 @@ textarea:focus-visible {
     gap: 10px;
   }
 
+  .tm-detail__head--with-mascot .tm-detail__row {
+    padding-right: 0;
+  }
+
   .tm-detail__title {
     font-size: 18px;
   }
 
-  .tm-detail__actions {
-    width: 100%;
+  .tm-detail__mascot {
+    display: none;
+  }
+
+  .tm-detail__titleactions {
     justify-content: flex-start;
     overflow: visible;
     padding-bottom: 2px;

@@ -802,6 +802,12 @@ function Settings({
             </button>
           </div>
         </div>
+        <SettingsSwitchRow
+          label="Mascot animation"
+          hint="Show the task detail mascot"
+          checked={appSettings.showMascot}
+          onChange={(showMascot) => onSetAppSettings({ showMascot })}
+        />
         <ModelSettingRow
           label="Default task model"
           hint="Used for new implementation tasks"
@@ -966,6 +972,37 @@ function Settings({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SettingsSwitchRow({
+  label,
+  hint,
+  checked,
+  onChange
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange(checked: boolean): void;
+}) {
+  return (
+    <div className="tm-settings__row">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">{label}</div>
+        <div className="tm-settings__hint">{hint}</div>
+      </div>
+      <button
+        type="button"
+        className={`network-toggle__switch ${checked ? 'network-toggle__switch--on' : ''}`}
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={() => onChange(!checked)}
+      >
+        <span />
+      </button>
     </div>
   );
 }
