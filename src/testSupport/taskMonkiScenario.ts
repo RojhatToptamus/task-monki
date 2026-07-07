@@ -146,6 +146,7 @@ export function commandLine(...argv: string[]): string {
 export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
   readonly startedTurns: StartAgentTurn[] = [];
   readonly startedReviews: StartAgentReview[] = [];
+  readonly steeredTurns: SteerAgentTurn[] = [];
   ambiguousStart = false;
   ambiguousInterrupt = false;
   private threadCounter = 0;
@@ -233,7 +234,8 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
     return this.startRun(input.localRunId, input.session.localSessionId, 'scenario-turn');
   }
 
-  steerTurn(_input: SteerAgentTurn): Promise<void> {
+  steerTurn(input: SteerAgentTurn): Promise<void> {
+    this.steeredTurns.push(input);
     return Promise.resolve();
   }
 

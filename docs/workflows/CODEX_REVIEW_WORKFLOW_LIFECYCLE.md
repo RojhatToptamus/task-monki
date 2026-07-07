@@ -100,7 +100,7 @@ Expected UI:
 
 - Board column: Review.
 - Card chip: AI reviewing.
-- Review panel: running indicator and Stop review.
+- Review panel: running indicator, concise current review activity, and Stop review.
 - Finish actions: paused.
 - Review actions: paused except Stop review.
 - Agent implementation controls should not be shown for the review run as if it

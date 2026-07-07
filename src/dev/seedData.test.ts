@@ -15,6 +15,8 @@ import {
   selectLatestReviewRollup
 } from '../renderer/model/selectors';
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
+import { buildRunProgressViewModel } from '../renderer/model/runProgress';
+import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
 import {
   DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
@@ -81,6 +83,92 @@ describe('Task Monki development seed data', () => {
         (event) => event.taskId === approvalTask.id && event.type === 'AGENT_INTERACTION_REQUESTED'
       )
     ).toBe(true);
+    const approvalRun = snapshot.runs.find((run) => run.id === approvalTask.currentRunId);
+    const approvalProgress = buildRunProgressViewModel({
+      preferredRun: approvalRun,
+      runs: snapshot.runs.filter((run) => run.taskId === approvalTask.id),
+      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === approvalTask.id),
+      items: snapshot.agentItems.filter((item) => item.taskId === approvalTask.id)
+    });
+    expect(approvalProgress).toMatchObject({
+      state: 'RUNNING',
+      headerLabel: 'Current run',
+      workingNow: {
+        label: 'Waiting for the interaction response before continuing implementation.',
+        tone: 'neutral'
+      }
+    });
+    expect(approvalProgress?.steps.map((step) => step.step)).toEqual([
+      'Prepare interaction request',
+      'Wait for user response',
+      'Continue implementation'
+    ]);
+    expect(approvalProgress?.activityDetails).toEqual([]);
+
+    const runningReviewTask = taskForScenario(manifest, snapshot, 'review-running');
+    const runningReviewRun = snapshot.runs.find(
+      (run) => run.taskId === runningReviewTask.id && run.mode === 'REVIEW'
+    );
+    const runningReviewActivity = buildReviewActivityViewModel({
+      reviewRun: runningReviewRun,
+      reviewRunning: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      useRunActivity: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      items: snapshot.agentItems
+    });
+    expect(runningReviewActivity).toEqual({
+      label: 'Inspecting changed files for regressions.'
+    });
+
+    const runningTask = taskForScenario(manifest, snapshot, 'agent-running');
+    const runningRun = snapshot.runs.find((run) => run.id === runningTask.currentRunId);
+    expect(runningRun).toMatchObject({ status: 'RUNNING' });
+    const runningProgress = buildRunProgressViewModel({
+      preferredRun: runningRun,
+      runs: snapshot.runs.filter((run) => run.taskId === runningTask.id),
+      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === runningTask.id),
+      items: snapshot.agentItems.filter((item) => item.taskId === runningTask.id)
+    });
+    expect(runningProgress).toMatchObject({
+      state: 'RUNNING',
+      headerLabel: 'Current run',
+      workingNow: {
+        label: 'Updated the overview panel and will verify the seeded UI next.',
+        tone: 'neutral'
+      }
+    });
+    expect(runningProgress?.steps.map((step) => step.step)).toEqual([
+      'Read task context',
+      'Update overview progress panel',
+      'Verify seeded UI state'
+    ]);
+    expect(runningProgress?.activityDetails).toEqual([]);
+
+    const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
+    const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
+    const completedCi = selectLatestCiRollup(snapshot, completedTask);
+    const completedProgress = buildRunProgressViewModel({
+      preferredRun: completedRun,
+      runs: snapshot.runs.filter((run) => run.taskId === completedTask.id),
+      planRevisions: snapshot.agentPlanRevisions.filter((plan) => plan.taskId === completedTask.id),
+      items: snapshot.agentItems.filter((item) => item.taskId === completedTask.id),
+      gitSnapshot: selectLatestGitSnapshot(snapshot, completedTask),
+      ciStatus: completedCi?.status ?? completedTask.projection.ciChecks
+    });
+    expect(completedProgress).toMatchObject({
+      state: 'COMPLETED',
+      headerLabel: 'Final plan',
+      activityDetails: [],
+      footer: {
+        title: 'Completed',
+        detail: '1 file changed · verification not run',
+        tone: 'success'
+      }
+    });
+    expect(completedProgress?.steps.map((step) => step.step)).toEqual([
+      'Read task context',
+      'Implement seeded change',
+      'Verify local state'
+    ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
     expect(reviewTask.projection.codexReview).toMatchObject({ status: 'NEEDS_CHANGES' });

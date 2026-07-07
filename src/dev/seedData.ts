@@ -492,6 +492,11 @@ export async function seedTaskMonkiDevelopmentData(
       relatedTaskIds: result.relatedTaskIds
     });
   }
+  await store.updateAgentServer(server.id, {
+    status: 'EXITED',
+    exitedAt: new Date().toISOString(),
+    exitReason: 'Seeded App Server record; no live provider process is attached.'
+  });
 
   const snapshot = await store.snapshot();
   const manifest: DevSeedManifest = {
@@ -787,6 +792,15 @@ async function createImplementedTask(
 ): Promise<SeededTaskState> {
   const state = await createWorktreeState(ctx, definition, 'committed', completionPolicy);
   const started = await createRun(ctx, state, 'IMPLEMENTATION', `Implement ${definition.slug}.`);
+  await seedActiveRunProgress(ctx, started, {
+    steps: [
+      { step: 'Read task context', status: 'COMPLETED' },
+      { step: 'Implement seeded change', status: 'COMPLETED' },
+      { step: 'Verify local state', status: 'COMPLETED' }
+    ],
+    message: 'Progress: Summarizing completed seed implementation.',
+    explanation: 'Implementation completed.'
+  });
   await completeRun(ctx, started, 'Seed implementation completed.', state.gitSnapshot?.id);
   return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, started.id) };
 }
@@ -806,10 +820,21 @@ async function createAgentScenario(
   const state = await createWorktreeState(ctx, definition, 'dirty');
   const run = await createRun(ctx, state, 'IMPLEMENTATION', `Exercise ${definition.slug}.`);
   if (variant === 'running') {
-    return { ...state, task: await requireTask(ctx, state.task.id), run };
+    await seedActiveRunProgress(ctx, run);
+    return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, run.id) };
   }
   if (variant === 'approval' || variant === 'user-input' || variant === 'interaction-stale') {
     const request = await createInteraction(ctx, run, variant === 'user-input' ? 'USER_INPUT' : 'COMMAND_APPROVAL');
+    if (variant === 'approval' || variant === 'user-input') {
+      await seedActiveRunProgress(ctx, await requireRun(ctx, run.id), {
+        steps: [
+          { step: 'Prepare interaction request', status: 'COMPLETED' },
+          { step: 'Wait for user response', status: 'IN_PROGRESS' },
+          { step: 'Continue implementation', status: 'PENDING' }
+        ],
+        message: 'Progress: Waiting for the interaction response before continuing implementation.'
+      });
+    }
     if (variant === 'interaction-stale') {
       await ctx.store.transitionInteractionRequest(request.id, 'PENDING', {
         status: 'STALE',
@@ -831,6 +856,66 @@ async function createAgentScenario(
   return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, run.id) };
 }
 
+async function seedActiveRunProgress(
+  ctx: SeedContext,
+  run: RunRecord,
+  input: {
+    steps?: Array<{ step: string; status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' }>;
+    message?: string;
+    explanation?: string;
+  } = {}
+): Promise<void> {
+  const steps = input.steps ?? [
+    { step: 'Read task context', status: 'COMPLETED' },
+    { step: 'Update overview progress panel', status: 'IN_PROGRESS' },
+    { step: 'Verify seeded UI state', status: 'PENDING' }
+  ];
+  const message =
+    input.message ??
+    'Progress: Updated the overview panel and will verify the seeded UI next.';
+  await ctx.store.recordAgentPlanRevision({
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    sessionId: run.sessionId,
+    provider: 'codex',
+    explanation: input.explanation ?? 'Implementation is in progress.',
+    steps,
+    rawMessage: await rawMessage(ctx, 'INBOUND', {
+      type: 'turn/plan/updated',
+      runId: run.id
+    })
+  });
+  await seedAgentMessage(ctx, run, message);
+}
+
+async function seedAgentMessage(
+  ctx: SeedContext,
+  run: RunRecord,
+  message: string,
+  suffix = 'progress'
+): Promise<void> {
+  await ctx.store.upsertAgentItem({
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    sessionId: run.sessionId,
+    providerItemId: `seed-${suffix}-${run.id}`,
+    type: 'AGENT_MESSAGE',
+    status: 'COMPLETED',
+    payload: {
+      type: 'agentMessage',
+      id: `seed-${suffix}-${run.id}`,
+      text: message
+    },
+    rawMessage: await rawMessage(ctx, 'INBOUND', {
+      type: 'item/agentMessage',
+      runId: run.id
+    }),
+    providerCompletedAt: new Date().toISOString()
+  });
+}
+
 async function createReviewScenario(
   ctx: SeedContext,
   definition: DevSeedScenarioDefinition
@@ -846,6 +931,12 @@ async function createReviewScenario(
     beforeGitSnapshotId: state.gitSnapshot?.id
   });
   if (definition.slug === 'review-running') {
+    await seedAgentMessage(
+      ctx,
+      review,
+      'Progress: Inspecting changed files for regressions.',
+      'review-progress'
+    );
     return { ...state, task: await requireTask(ctx, state.task.id), run: review };
   }
 

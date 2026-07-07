@@ -46,6 +46,7 @@ describe('PromptRefinementService', () => {
     expect(capturedModel).toBe('gpt-5.3-codex-spark');
     expect(capturedInstruction).toContain('inspect the repository with read-only commands');
     expect(capturedInstruction).toContain('## Acceptance criteria');
+    expect(capturedInstruction).toContain('Verification must name concrete commands');
   });
 
   it('falls back to repository metadata when model refinement fails', async () => {
@@ -65,7 +66,9 @@ describe('PromptRefinementService', () => {
     expect(refined.titleSuggestion).toBe('add github sync badges');
     expect(refined.prompt).toContain('## Goal');
     expect(refined.prompt).toContain('task-manager-test');
+    expect(refined.prompt).toContain('test: vitest run');
     expect(refined.prompt).toContain('## Acceptance criteria');
+    expect(refined.prompt).toContain('Run relevant repository scripts named above');
   });
 
   it('configures the default refinement model with low reasoning and read-only repository access', () => {

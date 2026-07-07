@@ -6140,6 +6140,39 @@ textarea:focus-visible {
   animation: tm-shimmer 1.1s linear infinite;
 }
 
+.tm-reviewcard__activity {
+  display: grid;
+  gap: 5px;
+}
+
+.tm-reviewcard__activity-k {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.tm-reviewcard__activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.tm-reviewcard__activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--action);
+  flex: 0 0 auto;
+}
+
+.tm-reviewcard__activity-text {
+  overflow-wrap: anywhere;
+}
+
 .tm-reviewcard__meta {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -7048,16 +7081,28 @@ textarea:focus-visible {
 }
 
 /* plan card */
+.tm-run-progress__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.tm-run-progress__head .tm-panel__title {
+  margin: 0;
+}
+
 .tm-plan__steps {
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 8px;
 }
 
 .tm-plan__step {
   display: flex;
-  align-items: center;
-  gap: 11px;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .tm-plan__dot {
@@ -7065,11 +7110,13 @@ textarea:focus-visible {
   height: 9px;
   border-radius: 50%;
   flex: 0 0 auto;
+  margin-top: 4px;
 }
 
 .tm-plan__label {
   flex: 1;
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 1.35;
   color: var(--text-soft);
 }
 
@@ -7082,6 +7129,107 @@ textarea:focus-visible {
   font-size: 11px;
   color: var(--muted);
   font-family: var(--font-mono);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tm-run-progress__working,
+.tm-run-progress__details,
+.tm-run-progress__footer {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.tm-run-progress__subhead,
+.tm-run-progress__details summary {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.tm-run-progress__details summary {
+  display: inline-flex;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tm-run-progress__details summary::-webkit-details-marker {
+  display: none;
+}
+
+.tm-run-progress__details summary::after {
+  content: '›';
+  margin-left: 6px;
+  transform: rotate(90deg);
+  transition: transform 140ms ease;
+}
+
+.tm-run-progress__details[open] summary::after {
+  transform: rotate(270deg);
+}
+
+.tm-run-progress__activity-list {
+  display: grid;
+  gap: 5px;
+  max-height: 112px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.tm-run-progress__activity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tm-run-progress__activity-mark {
+  width: 10px;
+  height: 1px;
+  margin-top: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  background: var(--hair);
+}
+
+.tm-run-progress__activity-label {
+  min-width: 0;
+  flex: 1;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.tm-run-progress__working .tm-run-progress__activity-label {
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.tm-run-progress__footer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tm-run-progress__footer-copy {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.tm-run-progress__footer-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tm-run-progress__footer-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 /* config grid */

@@ -9,42 +9,6 @@ const SEVERITIES: CodexReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', '
 
 export const CODEX_REVIEW_RESULT_SCHEMA_VERSION = 'codex-review/v1' as const;
 
-export const CODEX_REVIEW_DEVELOPER_INSTRUCTIONS = `You are performing a Task Monki Codex review.
-
-Review only the current diff. Do not modify files.
-
-Return a concise human-readable review followed by exactly one fenced JSON block whose language is json.
-The JSON block must match this schema:
-
-{
-  "schemaVersion": "codex-review/v1",
-  "verdict": "PASSED" | "NEEDS_CHANGES" | "INCONCLUSIVE",
-  "summary": "One short sentence explaining the review result.",
-  "findings": [
-    {
-      "id": "stable-kebab-case-id",
-      "severity": "BLOCKER" | "MAJOR" | "MINOR" | "NIT",
-      "title": "Short finding title",
-      "explanation": "Why this matters and how it can fail.",
-      "path": "relative/path/to/file.ts",
-      "line": 123,
-      "endLine": 125,
-      "recommendation": "Specific fix direction."
-    }
-  ]
-}
-
-Severity definitions:
-- BLOCKER: likely correctness, data-loss, security, or crash issue that should block acceptance.
-- MAJOR: meaningful behavioral regression, broken workflow, or high-risk maintainability issue.
-- MINOR: limited issue that should be fixed but does not normally block local acceptance.
-- NIT: small style, wording, or cleanup note.
-
-Use verdict NEEDS_CHANGES when any BLOCKER or MAJOR finding exists.
-Use verdict PASSED when there are no blocker or major findings.
-Use verdict INCONCLUSIVE only when the diff cannot be reviewed confidently.
-If there are no findings, return an empty findings array.`;
-
 export function parseCodexReviewResult(text: string | undefined): CodexReviewResult | undefined {
   if (!text?.trim()) {
     return undefined;

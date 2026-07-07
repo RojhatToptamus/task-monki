@@ -54,6 +54,12 @@ import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
 import { PromptRefinementService } from '../prompt/PromptRefinementService';
+import {
+  buildContinuationPrompt,
+  buildForkAlternativeTaskPrompt,
+  buildInitialRunPrompt,
+  buildSteerInstruction
+} from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -365,7 +371,15 @@ export class TaskManagerService {
 
   async steerRun(input: SteerRunRequest): Promise<void> {
     const run = await this.requireRunForTask(input.runId, input.taskId);
-    return this.agents.steerRun(run.id, input.instruction);
+    const snapshot = await this.store.snapshot();
+    const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
+    return this.agents.steerRun(
+      run.id,
+      buildSteerInstruction({
+        instruction: input.instruction,
+        worktreePath: worktree?.worktreePath
+      })
+    );
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
@@ -375,8 +389,10 @@ export class TaskManagerService {
         input.runId
       );
       const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work');
       assertContinuable(run);
+      this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
+        exceptRunId: run.id
+      });
       const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
       const settings = followUpSettings(task, run, input.settings, false);
       const prompt = buildContinuationPrompt({
@@ -408,8 +424,10 @@ export class TaskManagerService {
         input.runId
       );
       const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work');
       assertRetryable(run);
+      this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
+        exceptRunId: run.id
+      });
       if (input.strategy === 'FORK') {
         return this.startForkedAlternative({
           sourceTaskId: task.id,
@@ -994,9 +1012,17 @@ export class TaskManagerService {
     }
   }
 
-  private assertNoActiveTaskRun(snapshot: TaskSnapshot, taskId: string, action: string): void {
+  private assertNoActiveTaskRun(
+    snapshot: TaskSnapshot,
+    taskId: string,
+    action: string,
+    options: { exceptRunId?: string } = {}
+  ): void {
     const activeRun = snapshot.runs.find(
-      (run) => run.taskId === taskId && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+      (run) =>
+        run.taskId === taskId &&
+        run.id !== options.exceptRunId &&
+        ACTIVE_AGENT_RUN_STATUSES.has(run.status)
     );
     if (!activeRun) {
       return;
@@ -1043,76 +1069,6 @@ export function mergeRunSettings(input: {
     networkAccess: requestedSettings.networkAccess ?? false,
     approvalPolicy: requestedSettings.approvalPolicy ?? 'on-request'
   };
-}
-
-function buildContinuationPrompt(input: {
-  task: Task;
-  run: RunRecord;
-  gitSnapshot: GitSnapshotRecord;
-  instruction?: string;
-  kind: 'continuation' | 'retry';
-}): string {
-  const instruction = input.instruction?.trim();
-  return [
-    `Authoritative Task Monki goal:\n${input.task.prompt}`,
-    '',
-    `This is a ${input.kind} after run ${input.run.id} ended with ${input.run.status}.`,
-    `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
-    instruction ? `Additional user instruction:\n${instruction}` : undefined,
-    '',
-    `Repository root: ${input.gitSnapshot.worktreePath}`,
-    'Continue in the existing isolated task worktree.',
-    'Only modify files inside this worktree.',
-    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-    'Reinspect the current repository state instead of assuming the prior turn completed every step.',
-    'When finished, summarize the files changed and verification you performed.'
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
-}
-
-function buildInitialRunPrompt(input: {
-  task: Task;
-  worktree: WorktreeRecord;
-  settings: AgentExecutionSettings;
-  readOnlyMode: boolean;
-}): string {
-  return [
-    input.task.prompt,
-    '',
-    input.readOnlyMode
-      ? 'Analyze this task in an isolated Git worktree without modifying files.'
-      : 'You are implementing this task in an isolated Git worktree.',
-    `Repository root: ${input.worktree.worktreePath}`,
-    input.settings.sandbox === 'WORKSPACE_WRITE'
-      ? 'Only modify files inside this worktree.'
-      : 'Do not modify repository files.',
-    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-    'When finished, summarize the files changed and verification you performed.'
-  ].join('\n');
-}
-
-function buildForkAlternativeTaskPrompt(input: {
-  task: Task;
-  run: RunRecord;
-  worktree: WorktreeRecord;
-  instruction?: string;
-}): string {
-  const instruction = input.instruction?.trim();
-  return [
-    'Alternative attempt for this Task Monki goal:',
-    input.task.prompt,
-    '',
-    `Source task: ${input.task.id}`,
-    `Source run: ${input.run.id} (${input.run.status})`,
-    `Source base: ${input.worktree.baseSha}`,
-    '',
-    'Start fresh from the source task base revision in this new isolated worktree.',
-    'Do not assume files changed by the source attempt are present.',
-    instruction ? `Alternative direction:\n${instruction}` : undefined
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
 }
 
 function assertContinuable(run: RunRecord): void {

@@ -270,7 +270,11 @@ export class CodexAppServerSupervisor {
           title: 'Task Monki',
           version: this.options.appVersion
         },
-        capabilities: null
+        capabilities: {
+          experimentalApi: false,
+          requestAttestation: false,
+          optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+        }
       });
       await client.notify('initialized', {});
 

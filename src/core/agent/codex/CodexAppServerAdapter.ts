@@ -89,8 +89,8 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
+import { CODEX_REVIEW_DEVELOPER_INSTRUCTIONS } from '../../../shared/promptTemplates';
 import {
-  CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
   codexReviewStatusFromResult,
   parseCodexReviewResult
 } from '../../review/CodexReviewContract';

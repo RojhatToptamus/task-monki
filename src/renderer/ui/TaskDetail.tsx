@@ -80,6 +80,14 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
+import {
+  buildRunProgressViewModel,
+  type RunProgressViewModel
+} from '../model/runProgress';
+import {
+  buildReviewActivityViewModel,
+  type ReviewActivityViewModel
+} from '../model/reviewActivity';
 import { TaskActivityPanel } from './TaskActivityPanel';
 
 interface TaskDetailProps {
@@ -267,6 +275,12 @@ export function TaskDetail(props: TaskDetailProps) {
       (candidate) =>
         candidate.mode === 'REVIEW' && candidate.iterationId === task.currentIterationId
     );
+  const reviewActivity = buildReviewActivityViewModel({
+    reviewRun,
+    reviewRunning: reviewPending || reviewGate.status === 'RUNNING',
+    useRunActivity: reviewGate.status === 'RUNNING',
+    items: props.items
+  });
   const reviewSourceRun =
     (reviewGate.sourceRunId
       ? props.runs.find((candidate) => candidate.id === reviewGate.sourceRunId)
@@ -330,6 +344,18 @@ export function TaskDetail(props: TaskDetailProps) {
   const debugActivity = useMemo(
     () => projectDebugTaskActivity(taskActivityLedger),
     [taskActivityLedger]
+  );
+  const runProgress = useMemo(
+    () =>
+      buildRunProgressViewModel({
+        preferredRun: run,
+        runs: props.runs,
+        planRevisions,
+        items: props.items,
+        gitSnapshot,
+        ciStatus: ciRollup?.status ?? task.projection.ciChecks
+      }),
+    [run, props.runs, planRevisions, props.items, gitSnapshot, ciRollup?.status, task.projection.ciChecks]
   );
 
   const runReviewAction = async (action: () => Promise<void>) => {
@@ -615,6 +641,7 @@ export function TaskDetail(props: TaskDetailProps) {
                   reviewRun={reviewRun}
                   sourceRun={reviewSourceRun}
                   gitSnapshot={gitSnapshot}
+                  reviewActivity={reviewActivity}
                   actionBusy={reviewActionBusy}
                   reviewPending={reviewPending}
                   canStartReview={canStartCodexReview}
@@ -649,10 +676,6 @@ export function TaskDetail(props: TaskDetailProps) {
                 </div>
               ) : null}
 
-              {planRevisions.length > 0 ? (
-                <PlanCard planRevisions={planRevisions} />
-              ) : null}
-
               <div className="tm-panel">
                 <h3 className="tm-panel__title">Request</h3>
                 <details className="tm-raw">
@@ -672,6 +695,8 @@ export function TaskDetail(props: TaskDetailProps) {
                   <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
                 </div>
               </div>
+
+              {runProgress ? <RunProgressCard progress={runProgress} /> : null}
 
               <AgentControlPanel
                 run={run}
@@ -984,37 +1009,65 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
   );
 }
 
-function PlanCard({ planRevisions }: { planRevisions: AgentPlanRevisionRecord[] }) {
-  const latest = [...planRevisions].sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
-  const steps = latest?.steps ?? [];
-  if (steps.length === 0) {
-    return null;
-  }
+function RunProgressCard({ progress }: { progress: RunProgressViewModel }) {
+  const steps = progress.steps;
+  const showActivityDetails = progress.state === 'RUNNING' && progress.activityDetails.length > 0;
   return (
     <div className="tm-panel">
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14 }}>
-        <h3 className="tm-panel__title" style={{ margin: 0 }}>
-          Plan
-        </h3>
-        {latest?.explanation ? (
-          <span className="tm-plan__status">{truncateMiddle(latest.explanation, 48)}</span>
-        ) : null}
+      <div className="tm-run-progress__head">
+        <h3 className="tm-panel__title">Agent progress</h3>
+        <span className="tm-plan__status">{progress.headerLabel}</span>
       </div>
       <div className="tm-plan__steps">
         {steps.map((step, index) => {
           const tone = planStepTone(step.status);
           const active = step.status === 'IN_PROGRESS';
           return (
-            <div className="tm-plan__step" key={index}>
+            <div className="tm-plan__step" key={`${step.status}:${step.step}:${index}`}>
               <span className="tm-plan__dot" style={dotStyle(tone)} />
               <span className={`tm-plan__label ${active ? 'tm-plan__label--active' : ''}`}>
                 {step.step}
               </span>
-              <span className="tm-plan__status">{humanizeEnum(step.status)}</span>
             </div>
           );
         })}
       </div>
+      {progress.workingNow ? (
+        <div className="tm-run-progress__working">
+          <div className="tm-run-progress__subhead">Working now</div>
+          <div className="tm-run-progress__activity-row">
+            <span className="tm-run-progress__activity-mark" />
+            <span className="tm-run-progress__activity-label">{progress.workingNow.label}</span>
+          </div>
+        </div>
+      ) : null}
+      {showActivityDetails ? (
+        <details className="tm-run-progress__details">
+          <summary>Show activity</summary>
+          <div className="tm-run-progress__activity-list">
+            {progress.activityDetails.map((activity, index) => (
+              <div
+                className="tm-run-progress__activity-row"
+                key={`${activity.at}:${activity.label}:${index}`}
+              >
+                <span className="tm-run-progress__activity-mark" />
+                <span className="tm-run-progress__activity-label">{activity.label}</span>
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      {progress.footer ? (
+        <div className="tm-run-progress__footer">
+          <span className="tm-plan__dot" style={dotStyle(progress.footer.tone)} />
+          <span className="tm-run-progress__footer-copy">
+            <span className="tm-run-progress__footer-title">{progress.footer.title}</span>
+            {progress.footer.detail ? (
+              <span className="tm-run-progress__footer-detail">{progress.footer.detail}</span>
+            ) : null}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1024,6 +1077,7 @@ function CodexReviewPanel({
   reviewRun,
   sourceRun,
   gitSnapshot,
+  reviewActivity,
   actionBusy,
   reviewPending,
   canStartReview,
@@ -1037,6 +1091,7 @@ function CodexReviewPanel({
   reviewRun?: RunRecord;
   sourceRun?: RunRecord;
   gitSnapshot?: GitSnapshotRecord;
+  reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
   canStartReview: boolean;
@@ -1144,7 +1199,15 @@ function CodexReviewPanel({
               <div className="tm-reviewcard__progress" aria-hidden="true">
                 <span />
               </div>
-              <p>Actions resume when the review finishes.</p>
+              <div className="tm-reviewcard__activity" aria-live="polite">
+                <span className="tm-reviewcard__activity-k">Current activity</span>
+                <div className="tm-reviewcard__activity-row">
+                  <span className="tm-reviewcard__activity-dot" />
+                  <span className="tm-reviewcard__activity-text">
+                    {reviewActivity?.label ?? 'Preparing review context.'}
+                  </span>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="tm-reviewcard__summary">
@@ -1996,7 +2059,7 @@ function planStepTone(status: string): Tone {
     return 'success';
   }
   if (status === 'IN_PROGRESS') {
-    return 'info';
+    return 'action';
   }
   return 'neutral';
 }
@@ -2146,7 +2209,10 @@ function defaultReviewFollowUpInstruction(
   }
   lines.push(
     '',
-    'Make the necessary code changes, preserve the existing task intent, and stop when the follow-up is ready for review again.'
+    [
+      'Fix only the selected findings or review output above unless the root cause requires a scoped adjacent change.',
+      'Preserve the existing task intent and stop when the follow-up is ready for review again.'
+    ].join(' ')
   );
   return lines.join('\n');
 }
@@ -2166,15 +2232,6 @@ function formatFindingLocation(finding: CodexReviewFinding): string {
     return finding.path;
   }
   return `${finding.path}:${finding.line}`;
-}
-
-function truncateMiddle(value: string, max: number): string {
-  if (value.length <= max) {
-    return value;
-  }
-  const head = Math.ceil((max - 1) / 2);
-  const tail = Math.floor((max - 1) / 2);
-  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
 
 type MascotVideoLayerPhase = 'entering' | 'active' | 'exiting';

@@ -11,6 +11,10 @@ import {
   codexExternalToolConfigOverrides,
   resolveCodexExternalToolConfigOverrides
 } from '../agent/codex/CodexToolConfig';
+import {
+  buildPromptRefinementFallbackPrompt,
+  buildPromptRefinementInstruction
+} from '../../shared/promptTemplates';
 
 const REFINEMENT_REASONING_EFFORT = 'low';
 const REFINEMENT_TIMEOUT_MS = 90_000;
@@ -44,7 +48,7 @@ export class PromptRefinementService {
     try {
       const modelOutput = await this.runModel({
         repositoryPath,
-        instruction: buildRefinementInstruction(trimmed),
+        instruction: buildPromptRefinementInstruction(trimmed),
         model,
         codexExecutable,
         toolSettings
@@ -178,29 +182,6 @@ async function runCodexRefinement({
   });
 }
 
-function buildRefinementInstruction(input: string): string {
-  return [
-    'You are refining a software task prompt for the repository in your current working directory.',
-    '',
-    'Before writing the prompt, inspect the repository with read-only commands. Review the file tree, package/build configuration, relevant implementation files, tests, and documentation. Do not modify any file.',
-    '',
-    'Return JSON only, with exactly these string fields:',
-    '{"titleSuggestion":"...","prompt":"..."}',
-    '',
-    'The prompt value must be implementation-ready and contain these Markdown headings:',
-    '## Goal',
-    '## Repository context',
-    '## Constraints',
-    '## Acceptance criteria',
-    '## Verification',
-    '',
-    'Repository context must name concrete files, modules, symbols, scripts, or architectural boundaries you actually inspected. Do not invent repository facts. Keep the requested scope intact and make acceptance criteria objectively testable.',
-    '',
-    'User request:',
-    input
-  ].join('\n');
-}
-
 function extractFinalAgentMessage(stdout: string): string | undefined {
   let finalMessage: string | undefined;
 
@@ -271,32 +252,11 @@ async function buildDeterministicFallback(
 ): Promise<RefinePromptResponse> {
   const context = await readRepositoryContext(repositoryPath);
   const titleSuggestion = titleFromInput(input);
-  const prompt = [
-    `# Task: ${titleSuggestion}`,
-    '',
-    '## Goal',
-    input,
-    '',
-    '## Repository context',
-    context,
-    '',
-    '## Constraints',
-    '- Work only inside the task worktree created by this app.',
-    '- Keep the change scoped to the requested task.',
-    '- Do not push, merge, close PRs, delete branches, or change repository settings.',
-    '- Preserve existing architecture and status-model boundaries.',
-    '',
-    '## Acceptance criteria',
-    '- Implement the requested behavior with the smallest coherent change.',
-    '- Preserve existing tests unless a test update is required by the requested behavior.',
-    '- Add focused tests only where they prove core behavior or prevent a likely regression.',
-    '- Update relevant phase/status docs when the change affects the delivery plan.',
-    '',
-    '## Verification',
-    '- Run relevant verification commands when practical.',
-    '- Report what changed, what was verified, and any remaining limitations.',
-    ''
-  ].join('\n');
+  const prompt = buildPromptRefinementFallbackPrompt({
+    titleSuggestion,
+    userRequest: input,
+    repositoryContext: context
+  });
 
   return {
     prompt,
@@ -331,7 +291,13 @@ async function readRepositoryContext(repositoryPath: string): Promise<string> {
       lines.push(`- Description: ${data.description}`);
     }
     if (data.scripts && typeof data.scripts === 'object') {
-      lines.push(`- Available npm scripts: ${Object.keys(data.scripts).slice(0, 8).join(', ')}`);
+      const scripts = Object.entries(data.scripts)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+        .slice(0, 8)
+        .map(([name, command]) => `${name}: ${command.replace(/\s+/g, ' ').trim()}`);
+      if (scripts.length > 0) {
+        lines.push(`- Available npm scripts: ${scripts.join('; ')}`);
+      }
     }
   }
 

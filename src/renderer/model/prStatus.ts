@@ -8,6 +8,7 @@ import type {
   ReviewRollupRecord,
   Task
 } from '../../shared/contracts';
+import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
@@ -447,32 +448,14 @@ export function buildFailingChecksInvestigationPrompt(view: PrStatusViewModel): 
   const failingChecks = view.checkGroups
     .find((group) => group.status === 'failed')
     ?.checks ?? [];
-  const checkLines = failingChecks.length
-    ? failingChecks.map(
-        (check) =>
-          `- ${check.name}${check.workflow ? ` (${check.workflow})` : ''}: ${[
-            `status ${check.state ?? check.status}`,
-            check.event ? `event ${check.event}` : undefined,
-            check.startedAt ? `started ${check.startedAt}` : undefined,
-            check.completedAt ? `completed ${check.completedAt}` : undefined,
-            check.link ?? 'no link available'
-          ]
-            .filter((part): part is string => Boolean(part))
-            .join(' | ')}`
-      )
-    : ['- Failing check details were not available from gh pr checks.'];
-  return [
-    `Investigate the failing GitHub checks for PR #${view.prNumber ?? 'unknown'} at head ${view.prHeadSha?.slice(0, 12) ?? 'unknown'}.`,
-    view.prUrl ? `PR URL: ${view.prUrl}` : undefined,
-    view.headRefName && view.baseRefName ? `Branch: ${view.headRefName} -> ${view.baseRefName}` : undefined,
-    '',
-    'Focus on these failing checks:',
-    ...checkLines,
-    '',
-    'Inspect the current worktree, identify likely causes, make local fixes if needed, and summarize what changed. Do not push unless the user approves.'
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
+  return buildFailingChecksInvestigationPromptTemplate({
+    prNumber: view.prNumber,
+    prHeadSha: view.prHeadSha,
+    prUrl: view.prUrl,
+    headRefName: view.headRefName,
+    baseRefName: view.baseRefName,
+    failingChecks
+  });
 }
 
 function terminalPrStatus(
