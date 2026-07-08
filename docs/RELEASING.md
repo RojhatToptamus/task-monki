@@ -62,16 +62,25 @@ Smoke test only against a throwaway local Git repository:
 1. Update `package.json` version.
 2. Update release notes or changelog content as needed.
 3. Commit the release prep.
-4. Create and push a tag that matches the release workflow trigger:
+4. Confirm `git status` is clean and the current commit is the release-prep
+   commit.
+5. Create and push a tag that matches the release workflow trigger:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.0-alpha.1
+git show --no-patch --oneline v0.1.0-alpha.1
+git push origin v0.1.0-alpha.1
 ```
+
+The tag must point at the committed release-prep change. The workflow builds the
+tagged commit, not whatever happens to be on `main` later.
 
 The GitHub Actions release workflow runs on tags matching
 `v[0-9]+.[0-9]+.[0-9]+*`. It creates a draft GitHub Release and uploads the
 unsigned artifacts.
+
+For an alpha, beta, or release-candidate build, mark the GitHub draft as a
+pre-release before publishing it.
 
 ## Draft Release Review
 
