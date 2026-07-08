@@ -1,7 +1,4 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { execFilePortable } from '../process/portableChildProcess';
 
 let configuredGitExecutable: string | undefined;
 
@@ -19,7 +16,7 @@ export function getGitExecutablePath(): string {
 }
 
 export async function git(cwd: string, argv: string[], timeout = 15_000): Promise<string> {
-  const { stdout } = await execFileAsync(getGitExecutablePath(), argv, {
+  const { stdout } = await execFilePortable(getGitExecutablePath(), argv, {
     cwd,
     timeout,
     maxBuffer: 20 * 1024 * 1024
@@ -32,7 +29,7 @@ export async function gitResult(
   argv: string[],
   timeout = 15_000
 ): Promise<GitResult> {
-  const { stdout, stderr } = await execFileAsync(getGitExecutablePath(), argv, {
+  const { stdout, stderr } = await execFilePortable(getGitExecutablePath(), argv, {
     cwd,
     timeout,
     maxBuffer: 20 * 1024 * 1024

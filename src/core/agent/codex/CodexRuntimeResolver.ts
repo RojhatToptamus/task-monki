@@ -1,16 +1,14 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
+import { execFilePortable, spawnPortable } from '../../process/portableChildProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
 } from './CodexRuntimeVersion';
-
-const execFileAsync = promisify(execFile);
 
 export const TASK_MONKI_CODEX_BIN_ENV = 'TASK_MONKI_CODEX_BIN';
 
@@ -257,7 +255,7 @@ export async function probeCodexVersion(
   cwd: string,
   environment?: NodeJS.ProcessEnv
 ): Promise<string> {
-  const { stdout } = await execFileAsync(executable, ['--version'], {
+  const { stdout } = await execFilePortable(executable, ['--version'], {
     cwd,
     env: sanitizeEnvironment(environment ?? process.env),
     timeout: 10_000,
@@ -325,7 +323,7 @@ async function probeJsonRpcCapabilities(
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
-  const child = spawn(executable, launch.argv, {
+  const child = spawnPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
       ...sanitizeEnvironment(options.environment ?? process.env),
@@ -523,7 +521,7 @@ async function execFileText(
   options: { cwd: string; environment?: NodeJS.ProcessEnv }
 ): Promise<string> {
   try {
-    const { stdout, stderr } = await execFileAsync(executable, argv, {
+    const { stdout, stderr } = await execFilePortable(executable, argv, {
       cwd: options.cwd,
       env: sanitizeEnvironment(options.environment ?? process.env),
       timeout: 10_000,
@@ -587,7 +585,7 @@ async function extensionCodexCandidates(extensionRoots: string[]): Promise<strin
         continue;
       }
       for (const platformDir of platformDirs.sort().reverse()) {
-        for (const name of process.platform === 'win32' ? ['codex.exe', 'codex'] : ['codex']) {
+        for (const name of process.platform === 'win32' ? windowsExecutableNames('codex') : ['codex']) {
           const candidate = path.join(binRoot, platformDir, name);
           if (await canAccess(candidate)) {
             candidates.push(candidate);
