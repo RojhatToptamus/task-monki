@@ -89,7 +89,10 @@ export function RepositorySwitcher({
         onContextMenu={(event) => openRepositoryMenu(activeRepositoryPath, event)}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="tm-nav__repo-dot" />
+        <span className="tm-nav__repo-icon" aria-hidden="true">
+          <RepositoryIcon />
+          <span className="tm-nav__repo-dot" />
+        </span>
         <span className="tm-nav__repo-text">
           <span className="tm-nav__repo-label">Repository</span>
           <span className="tm-nav__repo-name">{triggerLabel}</span>
@@ -164,6 +167,26 @@ export function RepositorySwitcher({
 
 function formatTaskCount(count: number): string {
   return `${count} task${count === 1 ? '' : 's'}`;
+}
+
+function RepositoryIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M6 3h9a3 3 0 0 1 3 3v13.5" />
+      <path d="M6 3a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h11a1 1 0 0 0 1-1v-1.5" />
+      <path d="M6 16.5h11" />
+    </svg>
+  );
 }
 
 function ChevronIcon({ open }: { open: boolean }) {

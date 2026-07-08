@@ -89,7 +89,7 @@ interface AppNotification {
   message: string;
 }
 
-const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
+const REVIEW_STARTED_NOTICE = 'Codex review started';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
@@ -983,6 +983,7 @@ export function App() {
           <MainColumn
             view={view}
             tasks={visibleTasks}
+            interactionRequests={snapshot.interactionRequests}
             theme={theme}
             onSetTheme={updateTheme}
             appSettings={appSettings}
@@ -998,6 +999,7 @@ export function App() {
             onAddRepository={addRepository}
             onFinishSetup={finishFirstLaunchSetup}
             onSelect={selectTask}
+            onRespondToInteraction={respondToInteraction}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
           />

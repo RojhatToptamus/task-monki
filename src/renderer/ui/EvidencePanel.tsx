@@ -463,13 +463,17 @@ export function EvidencePanel({
         </div>
       </section>
 
-      <section className="tm-evidence-summary" aria-label="Verified evidence">
-        <div className="tm-evidence-summary__head">
-          <div>
+      <details className="tm-evidence-summary" aria-label="Verified evidence">
+        <summary className="tm-evidence-summary__head">
+          <span className="tm-evidence-summary__title">
+            <span className="tm-evidence-summary__caret" aria-hidden="true">›</span>
             <h3>Verified evidence</h3>
-          </div>
+          </span>
+          <span className="tm-evidence-summary__strip">
+            {buildEvidenceStrip({ worktree, gitSnapshot, pullRequest })}
+          </span>
           {run ? <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span> : null}
-        </div>
+        </summary>
 
         {run || worktree || gitSnapshot || pullRequest ? (
           <div className="tm-evidence-summary__body">
@@ -517,7 +521,7 @@ export function EvidencePanel({
         ) : (
           <p className="muted">Prepare a worktree to capture Git and diff evidence.</p>
         )}
-      </section>
+      </details>
       {pathMenu ? (
         <OpenTargetContextMenu
           target={pathMenu.target}
@@ -536,6 +540,34 @@ function EvidenceFact({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+/**
+ * One-line evidence summary shown on the collapsed strip (audit §03 Evidence):
+ * the panel is ~200px of mostly-static facts, so the closed state carries just
+ * the load-bearing ones and the full grid expands on demand.
+ */
+function buildEvidenceStrip({
+  worktree,
+  gitSnapshot,
+  pullRequest
+}: {
+  worktree?: WorktreeRecord;
+  gitSnapshot?: GitSnapshotRecord;
+  pullRequest?: PullRequestSnapshotRecord;
+}): string {
+  const parts: string[] = [];
+  if (worktree) {
+    parts.push(`Worktree ${humanizeEnum(worktree.status)}`);
+  }
+  if (gitSnapshot) {
+    parts.push(`Git ${humanizeEnum(gitSnapshot.status)}`);
+  }
+  if (gitSnapshot?.headSha) {
+    parts.push(`Head ${gitSnapshot.headSha.slice(0, 7)}`);
+  }
+  parts.push(pullRequest?.status ? `PR ${humanizeEnum(pullRequest.status)}` : 'PR not created');
+  return parts.join(' · ');
 }
 
 function DiffTreeRow({

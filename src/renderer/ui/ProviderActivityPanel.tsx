@@ -8,6 +8,7 @@ import type {
   RunRecord
 } from '../../shared/contracts';
 import { RawProviderMessage } from './RawProviderMessage';
+import { PlanList } from './Plan';
 import { StructuredData, humanizeEnum } from './display';
 
 interface ProviderActivityPanelProps {
@@ -249,15 +250,7 @@ function PlanHistory({ plans }: { plans: AgentPlanRevisionRecord[] }) {
         </span>
       </header>
       {latest.explanation ? <p>{latest.explanation}</p> : null}
-      <ol className="provider-plan">
-        {latest.steps.map((step, index) => (
-          <li key={`${index}:${step.step}`} data-status={step.status}>
-            <span aria-hidden="true" />
-            <strong>{step.step}</strong>
-            <small>{humanizeEnum(step.status)}</small>
-          </li>
-        ))}
-      </ol>
+      <PlanList steps={latest.steps} showCaptions />
       {plans.length > 1 ? (
         <details className="provider-revisions">
           <summary>{plans.length - 1} earlier revisions</summary>

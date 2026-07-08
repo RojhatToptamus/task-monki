@@ -27,7 +27,6 @@
   --action: #c47e14;
   --success: #1a8f5e;
   --error: #cf4640;
-  --evidence: #127a5e;
 
   /* Derived semantic tokens */
   --border-hover: color-mix(in srgb, var(--accent) 32%, var(--border));
@@ -70,7 +69,6 @@
   --action: #e6a23c;
   --success: #37bd80;
   --error: #e0655c;
-  --evidence: #34bf94;
 
   /* Derived semantic tokens (dark) */
   --border-hover: color-mix(in srgb, var(--action) 45%, var(--border));
@@ -90,6 +88,15 @@
   --info-line: color-mix(in srgb, var(--info) 28%, var(--border));
   --success-soft: color-mix(in srgb, var(--success) 10%, var(--surface));
   --success-line: color-mix(in srgb, var(--success) 30%, var(--border));
+
+  /* Semantic status contract (audit §07): one status color per *question*, not
+     per state. These name the meaning so future code answers "what does this
+     color say?" instead of picking a raw hue. See DESIGN.md § Status color map. */
+  --state-working: var(--info); /* the agent is working (running/reviewing/refining) */
+  --state-waiting: var(--action); /* waiting on you (needs approval, ready for review) */
+  --state-blocked: var(--error); /* blocked / verdict against (needs changes, failed) */
+  --state-verified: var(--success); /* verified / complete (done, review passed) */
+  --state-idle: var(--neutral); /* idle / not yet (ready, not run, no PR, backlog) */
 }
 
 * {
@@ -111,21 +118,23 @@ body {
 }
 
 .tm-notifier {
+  /* Bottom-center, clear of the task-detail header where the mascot is pinned
+     top-right — a top-right toast would land on the mascot video. */
   position: fixed;
   left: 50%;
   bottom: 22px;
+  transform: translateX(-50%);
   z-index: 200;
   display: grid;
+  justify-items: center;
   gap: 9px;
   width: min(560px, calc(100vw - 32px));
-  transform: translateX(-50%);
   pointer-events: none;
 }
 
 .tm-notifier__item {
   display: inline-flex;
   align-items: center;
-  justify-self: center;
   gap: 10px;
   max-width: 100%;
   padding: 12px 17px;
@@ -195,15 +204,6 @@ body {
 @keyframes tm-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-@keyframes tm-shimmer {
-  0% {
-    background-position: -280px 0;
-  }
-  100% {
-    background-position: 280px 0;
   }
 }
 
@@ -2113,41 +2113,6 @@ textarea:focus-visible {
   font-size: 10.5px;
 }
 
-.provider-plan {
-  display: grid;
-  gap: 7px;
-  margin: 10px 0;
-  padding: 0;
-  list-style: none;
-}
-
-.provider-plan li {
-  display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-}
-
-.provider-plan li > span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--neutral);
-}
-
-.provider-plan li[data-status='IN_PROGRESS'] > span {
-  background: var(--info);
-}
-
-.provider-plan li[data-status='COMPLETED'] > span {
-  background: var(--success);
-}
-
-.provider-plan li small {
-  color: var(--muted);
-  font-size: 9.5px;
-}
-
 .provider-revisions {
   margin-top: 8px;
 }
@@ -2786,6 +2751,92 @@ textarea:focus-visible {
   text-underline-offset: 2px;
 }
 
+.field__refine:disabled {
+  cursor: default;
+}
+
+.field__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.field__restore {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.field__restore:not(:disabled):hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.field__prompt-shell {
+  display: grid;
+  gap: 8px;
+}
+
+/* Dim the input while refining without hiding the user's text. */
+.field__prompt-shell--running textarea {
+  opacity: 0.45;
+}
+
+/* The refined text shown as a proposal with Accept / Revert. */
+.field__proposal {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+  padding: 12px 13px;
+}
+
+.field__proposal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.field__proposal-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.field__proposal-body {
+  margin: 0 0 10px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12.5px/1.5 var(--font-mono);
+  color: var(--text-soft);
+}
+
+.field__proposal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Keeps the trigger button's label stable while running (audit §05): a small
+   spinner replaces the sparkle glyph instead of the label mutating to text. */
+.field__refine-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tm-spin 0.8s linear infinite;
+}
+
 .field input,
 .field textarea,
 .field select {
@@ -2801,6 +2852,14 @@ textarea:focus-visible {
 
 .field input {
   height: 42px;
+}
+
+/* Placeholders describe, they don't demonstrate — faint tone so they never
+   read as pre-filled content (audit New-task §03). */
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--faint);
+  opacity: 1;
 }
 
 .field select {
@@ -3417,6 +3476,20 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--surface2) 72%, var(--surface));
 }
 
+.tm-nav__repo-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* Expanded: the repo icon glyph collapses to zero and only the small status
+   dot shows inline (the original expanded look). */
+.tm-nav__repo-icon > svg {
+  display: none;
+}
+
 .tm-nav__repo-dot {
   width: 7px;
   height: 7px;
@@ -3439,7 +3512,7 @@ textarea:focus-visible {
 
 .tm-nav__repo-label {
   font-size: 9.5px;
-  color: var(--faint);
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -3677,28 +3750,33 @@ textarea:focus-visible {
   margin: 8px auto;
 }
 
-/* count becomes a small dot badge on the icon when collapsed */
+/* count stays a readable numeric badge on the icon when collapsed — a bare dot
+   makes "1" and "3" indistinguishable (audit §03 Menus & sidebar). */
 .tm-nav--collapsed .tm-nav__count {
   position: absolute;
-  top: 6px;
-  right: 7px;
-  min-width: 0;
-  width: 7px;
-  height: 7px;
-  padding: 0;
-  border-radius: 50%;
-  font-size: 0;
+  top: 2px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 15px;
   border: 1.5px solid var(--surface);
-  background: var(--neutral);
-  color: transparent;
+  background: var(--surface2);
+  color: var(--muted);
 }
 
 .tm-nav--collapsed .tm-nav__item--active .tm-nav__count {
   border-color: var(--surface2);
+  background: var(--surface);
 }
 
 .tm-nav--collapsed .tm-nav__count--urgent {
   background: var(--action);
+  color: var(--on-accent);
+  border-color: var(--surface);
 }
 
 .tm-nav--collapsed .tm-nav__repo {
@@ -3715,6 +3793,21 @@ textarea:focus-visible {
 
 .tm-nav--collapsed .tm-nav__repo-text {
   display: none;
+}
+
+/* Collapsed: show the repository glyph (not a bare mystery dot) with the status
+   dot as a small corner indicator (audit §03 Menus & sidebar). */
+.tm-nav--collapsed .tm-nav__repo-icon > svg {
+  display: block;
+}
+
+.tm-nav--collapsed .tm-nav__repo-icon .tm-nav__repo-dot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border: 1.5px solid var(--surface2);
 }
 
 .tm-nav--collapsed .tm-nav__repo-chevron {
@@ -3901,6 +3994,17 @@ textarea:focus-visible {
   gap: 14px;
   padding: 6px 24px 24px;
   overflow-x: auto;
+  /* Center the column set instead of pinning it left with a dead zone on wide
+     windows (audit §03 Board / §08). Columns still scroll on narrow windows. */
+  justify-content: center;
+}
+
+/* When the columns overflow the viewport, revert to left-aligned scrolling so
+   the first column isn't clipped by the centering. */
+@media (max-width: 1320px) {
+  .tm-board {
+    justify-content: flex-start;
+  }
 }
 
 .tm-col {
@@ -3966,6 +4070,9 @@ textarea:focus-visible {
   grid-template-columns: repeat(auto-fill, minmax(296px, 1fr));
   gap: 12px;
   align-items: start;
+  /* Cap list content so it doesn't stretch edge-to-edge on wide windows
+     (audit §08 content max-width). */
+  max-width: 1360px;
 }
 
 .tm-grid__empty {
@@ -4040,6 +4147,18 @@ textarea:focus-visible {
   flex: 0 0 auto;
 }
 
+.tm-pulse--action {
+  background: var(--action);
+}
+
+.tm-pulse--error {
+  background: var(--error);
+}
+
+.tm-pulse--info {
+  background: var(--info);
+}
+
 .tm-card__top {
   display: flex;
   align-items: center;
@@ -4049,7 +4168,7 @@ textarea:focus-visible {
 .tm-card__num {
   font-family: var(--font-mono);
   font-size: 10.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .tm-card__titlerow {
@@ -4081,6 +4200,17 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+/* Lineage cue for a forked task — relates the two same-titled cards so the
+   duplication reads as intentional, not a data bug (audit §03 Board). */
+.tm-card__lineage {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tm-card__evidence {
   display: flex;
   align-items: center;
@@ -4090,8 +4220,7 @@ textarea:focus-visible {
   margin-top: 3px;
   border-top: 1px solid var(--hair);
   color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -4101,6 +4230,12 @@ textarea:focus-visible {
   gap: 5px;
   min-width: 0;
   color: var(--muted);
+}
+
+/* Mono for the PR reference (a value); the status words stay sans. */
+.tm-card__evidence-value {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
 }
 
 .tm-card__evidence-dot {
@@ -4455,25 +4590,26 @@ textarea:focus-visible {
 }
 
 .tm-decision {
-  border: 1px solid var(--action-line);
+  /* Neutral surface card — the Inbox context already means "waiting on you", so
+     the tinted amber box + colored border (DESIGN.md §4 ban) is unnecessary;
+     tone lives in the single status dot in the head. */
+  border: 1px solid var(--border);
   border-radius: 13px;
-  background: var(--action-soft);
+  background: var(--surface);
   padding: 17px 18px;
 }
 
 .tm-decision__head {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   margin-bottom: 9px;
 }
 
 .tm-decision__kind {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--action-ink);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
 }
 
 .tm-decision__wait {
@@ -4530,6 +4666,13 @@ textarea:focus-visible {
   align-items: center;
   gap: 8px;
   margin-top: 14px;
+}
+
+.tm-decision__approve,
+.tm-decision__deny {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
 }
 
 .tm-decision__open {
@@ -4795,6 +4938,25 @@ textarea:focus-visible {
   padding: 6px 24px 28px;
 }
 
+/* Titled sections replace the one monolithic card (audit §03 Settings / §08). */
+.tm-settings__group {
+  max-width: 640px;
+  margin-bottom: 20px;
+}
+
+.tm-settings__group:last-child {
+  margin-bottom: 0;
+}
+
+.tm-settings__group-title {
+  margin: 0 0 8px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
 .tm-settings__card {
   max-width: 640px;
   border: 1px solid var(--border);
@@ -4848,10 +5010,28 @@ textarea:focus-visible {
   height: 32px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface2);
+  /* Drop the native OS chevron for a custom one so selects match the app's
+     other controls instead of reading as a third dialect (audit §03 Settings). */
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface2);
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) calc(50% - 1px),
+    calc(100% - 10px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
   color: var(--text);
-  padding: 0 10px;
+  padding: 0 28px 0 10px;
   font: 600 12px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.tm-settings__select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .tm-settings__input {
@@ -5214,8 +5394,10 @@ textarea:focus-visible {
   gap: 16px;
 }
 
+/* Reserve the mascot's footprint (right:24px + 104px) so the primary action
+   slot never slides under it. */
 .tm-detail__head--with-mascot .tm-detail__row {
-  padding-right: 120px;
+  padding-right: 144px;
 }
 
 .tm-detail__heading {
@@ -5234,7 +5416,7 @@ textarea:focus-visible {
 .tm-detail__num {
   font-family: var(--font-mono);
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .tm-detail__titlerow {
@@ -5309,6 +5491,9 @@ textarea:focus-visible {
   gap: 8px;
   flex: 0 0 auto;
   flex-wrap: wrap;
+  /* Center the primary action against the title block (audit §04 header
+     anatomy) so it reads as paired with the title, not pinned to the row top. */
+  align-self: center;
 }
 
 .tm-tabs {
@@ -5369,6 +5554,8 @@ textarea:focus-visible {
   gap: 16px;
   align-items: start;
   max-width: 1180px;
+  /* Center the capped content instead of pinning it left (audit §08). */
+  margin: 0 auto;
 }
 
 .tm-overview__col {
@@ -5376,6 +5563,118 @@ textarea:focus-visible {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+}
+
+/* One run surface: the plan, the review verdict, and the turn controls read as
+   one region for one concept (audit §04/§05). A tighter internal gap groups the
+   panels; the run status dot ties them together visually. */
+.tm-runsurface {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* The rail's single "what next" panel — the only filled button on the page. */
+.tm-nextaction {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+  padding: 16px;
+}
+
+.tm-nextaction__sentence {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.tm-nextaction__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tm-nextaction__actions .primary-button {
+  flex: 1 1 auto;
+}
+
+.tm-nextaction__quiet {
+  border: 0;
+  background: transparent;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.tm-nextaction__quiet:not(:disabled):hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tm-nextaction__quiet:disabled {
+  opacity: 0.5;
+}
+
+.tm-nextaction__requirements {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hair);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Collapsed request card: one-line summary once a run exists, expandable. */
+.tm-requestcard[open] {
+  padding-bottom: 18px;
+}
+
+.tm-requestcard__summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tm-requestcard__summary::-webkit-details-marker {
+  display: none;
+}
+
+.tm-requestcard__caret {
+  color: var(--muted);
+  font-size: 14px;
+  flex: 0 0 auto;
+  transition: transform 120ms ease;
+}
+
+.tm-requestcard[open] .tm-requestcard__caret {
+  transform: rotate(90deg);
+}
+
+.tm-requestcard__line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.tm-requestcard[open] .tm-requestcard__line {
+  display: none;
+}
+
+.tm-requestcard__prompt {
+  margin-top: 14px;
 }
 
 /* generic panel card */
@@ -5398,34 +5697,6 @@ textarea:focus-visible {
   font-size: 13px;
   line-height: 1.55;
   color: var(--text-soft);
-}
-
-.tm-finishpanel {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-}
-
-.tm-finishpanel__head,
-.tm-finishpanel__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.tm-finishpanel__head {
-  justify-content: space-between;
-}
-
-.tm-finishpanel .tm-panel__title {
-  margin: 0;
-}
-
-.tm-finishpanel__actions {
-  justify-content: flex-end;
-  flex: 1 1 320px;
-  margin-left: auto;
 }
 
 .tm-finishpanel__requirements {
@@ -5492,15 +5763,6 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
-.tm-finishpanel__mark-done-anyway {
-  border-color: var(--action-line);
-  color: var(--action-ink);
-}
-
-.tm-finishpanel__mark-done-anyway:not(:disabled):hover {
-  border-color: var(--action);
-}
-
 /* PR delivery status */
 .tm-prstatus {
   display: grid;
@@ -5556,7 +5818,7 @@ textarea:focus-visible {
 
 .tm-prstatus__refreshed {
   flex: 0 0 auto;
-  color: var(--faint);
+  color: var(--muted);
   font: 500 11px/1.4 var(--font-mono);
   white-space: nowrap;
 }
@@ -5701,7 +5963,7 @@ textarea:focus-visible {
 }
 
 .tm-prchecks__head span:last-child {
-  color: var(--faint);
+  color: var(--muted);
   font: 500 11.5px/1 var(--font-mono);
 }
 
@@ -5768,7 +6030,7 @@ textarea:focus-visible {
 
 .tm-prcheck__status > span:last-child {
   min-width: 46px;
-  color: var(--faint);
+  color: var(--muted);
   font: 500 11px/1.4 var(--font-mono);
   text-align: right;
 }
@@ -5822,7 +6084,7 @@ textarea:focus-visible {
 
 .tm-taskactivity__count {
   flex: 0 0 auto;
-  color: var(--faint);
+  color: var(--muted);
   font: 500 11px/1.4 var(--font-mono);
   white-space: nowrap;
 }
@@ -5854,7 +6116,7 @@ textarea:focus-visible {
 .tm-taskactivity__time {
   display: grid;
   gap: 1px;
-  color: var(--faint);
+  color: var(--muted);
   font: 500 10.5px/1.35 var(--font-mono);
   white-space: nowrap;
 }
@@ -5930,7 +6192,7 @@ textarea:focus-visible {
   gap: 5px;
   cursor: pointer;
   list-style: none;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 11.5px;
 }
 
@@ -6049,6 +6311,15 @@ textarea:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+/* When the running RunHeader fills the head, the head's own padding + divider
+   handle spacing — drop the RunHeader's default bottom margin so it centers in
+   the head row and aligns with the padded body below. */
+.tm-reviewcard__head--run .tm-runheader {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
 .tm-reviewcard__dot {
   width: 9px;
   height: 9px;
@@ -6079,8 +6350,7 @@ textarea:focus-visible {
   gap: 12px;
 }
 
-.tm-reviewcard__summary h4,
-.tm-reviewcard__running h4 {
+.tm-reviewcard__summary h4 {
   margin: 0;
   color: var(--text);
   font-size: 15px;
@@ -6088,7 +6358,6 @@ textarea:focus-visible {
 }
 
 .tm-reviewcard__summary p,
-.tm-reviewcard__running p,
 .tm-reviewcard__runningstate p {
   margin: 0;
   color: var(--text-soft);
@@ -6100,44 +6369,6 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.tm-reviewcard__running {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-}
-
-.tm-reviewcard__spinner {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  border: 2.5px solid var(--info-line);
-  border-top-color: var(--info);
-  border-radius: 50%;
-  animation: tm-spin 0.8s linear infinite;
-}
-
-.tm-reviewcard__progress {
-  height: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--surface2);
-}
-
-.tm-reviewcard__progress span {
-  display: block;
-  width: 45%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--info-line),
-    transparent
-  );
-  background-size: 280px 100%;
-  animation: tm-shimmer 1.1s linear infinite;
 }
 
 .tm-reviewcard__activity {
@@ -6210,31 +6441,12 @@ textarea:focus-visible {
 }
 
 .tm-reviewcard__actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  padding: 15px 18px;
+  padding: 13px 18px;
   border-top: 1px solid var(--border);
   background: var(--surface2);
 }
 
-.tm-reviewcard__actions p {
-  margin: 3px 0 0;
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.tm-reviewcard__eyebrow {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
 .tm-reviewcard__buttons {
-  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -6562,37 +6774,27 @@ textarea:focus-visible {
   gap: 0;
 }
 
-.tm-reviewdrawer__finding {
+/* Selectable FindingRow: same grammar as the read-only card row, with a leading
+   checkbox column so the drawer mirrors the review card exactly (audit §06). */
+.tm-finding--select .tm-finding__summary {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px 0;
-  border-top: 1px solid var(--hair);
-  background: transparent;
+  grid-template-columns: 15px 92px minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
   cursor: pointer;
+  color: var(--text);
 }
 
-.tm-reviewdrawer__finding input {
-  margin-top: 2px;
+.tm-finding--select .tm-finding__summary:hover {
+  background: var(--surface2);
+}
+
+.tm-finding__check {
+  margin-top: 3px;
   width: 15px;
   height: 15px;
   accent-color: var(--accent);
-}
-
-.tm-reviewdrawer__finding > span,
-.tm-reviewdrawer__finding > span > span {
-  display: grid;
-  gap: 5px;
-}
-
-.tm-reviewdrawer__finding strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.tm-reviewdrawer__finding code {
-  color: var(--muted);
-  font: 12px/1.4 var(--font-mono);
 }
 
 .tm-reviewdrawer textarea {
@@ -7080,17 +7282,63 @@ textarea:focus-visible {
   max-height: 180px;
 }
 
-/* plan card */
-.tm-run-progress__head {
+/* One run header for any async operation: dot · name · scope · elapsed · Stop
+   (audit §05/§06). tm-pulse animates the dot only while running. */
+.tm-runheader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
-.tm-run-progress__head .tm-panel__title {
+.tm-runheader__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.tm-runheader__name {
   margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  flex: 0 0 auto;
+}
+
+.tm-runheader__scope {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.tm-runheader__spacer {
+  flex: 1;
+}
+
+.tm-runheader__elapsed {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tm-runheader__stop {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+}
+
+.tm-runheader__trailing {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .tm-plan__steps {
@@ -7125,13 +7373,13 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
-.tm-plan__status {
-  font-size: 11px;
+.tm-plan__step-caption {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  font-size: 9.5px;
   color: var(--muted);
-  font-family: var(--font-mono);
-  text-align: right;
-  white-space: nowrap;
 }
+
 
 .tm-run-progress__working,
 .tm-run-progress__details,
@@ -7341,36 +7589,74 @@ textarea:focus-visible {
 }
 
 .tm-evidence-summary {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
   border: 1px solid var(--border);
   border-radius: 13px;
   background: var(--surface);
-  padding: 18px;
+  padding: 14px 18px;
+}
+
+.tm-evidence-summary[open] {
+  padding-bottom: 18px;
 }
 
 .tm-evidence-summary__head {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tm-evidence-summary__head::-webkit-details-marker {
+  display: none;
+}
+
+.tm-evidence-summary__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.tm-evidence-summary__caret {
+  color: var(--muted);
+  font-size: 14px;
+  transition: transform 120ms ease;
+}
+
+.tm-evidence-summary[open] .tm-evidence-summary__caret {
+  transform: rotate(90deg);
 }
 
 .tm-evidence-summary__head h3 {
-  margin: 0 0 3px;
+  margin: 0;
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
 }
 
-.tm-evidence-summary__head span,
-.tm-evidence-summary__run {
+/* The one-line strip carries the facts when collapsed; it disappears when the
+   full grid is expanded so the facts aren't stated twice. */
+.tm-evidence-summary__strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.tm-evidence-summary[open] .tm-evidence-summary__strip {
+  display: none;
 }
 
 .tm-evidence-summary__run {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
   font-family: var(--font-mono);
   white-space: nowrap;
 }
@@ -7378,6 +7664,7 @@ textarea:focus-visible {
 .tm-evidence-summary__body {
   display: grid;
   gap: 16px;
+  margin-top: 16px;
 }
 
 .tm-evidence-facts {
@@ -7675,7 +7962,7 @@ textarea:focus-visible {
 
 .tm-filefilter__menu-title {
   padding: 5px 9px 6px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -7845,7 +8132,7 @@ textarea:focus-visible {
 }
 
 .tm-difftree__count {
-  color: var(--faint);
+  color: var(--muted);
   font: 11px/1 var(--font-ui);
   white-space: nowrap;
 }
@@ -8012,7 +8299,7 @@ textarea:focus-visible {
 
 .tm-diffblock__label span:last-child {
   margin-left: auto;
-  color: var(--faint);
+  color: var(--muted);
   font-weight: 500;
 }
 
@@ -8083,7 +8370,7 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--surface) 12%, var(--code-bg));
   box-shadow: inset -1px 0 var(--hair);
   padding-right: 8px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 11px;
   opacity: 0.85;
   text-align: right;
@@ -8234,15 +8521,12 @@ textarea:focus-visible {
   gap: 14px;
 }
 
+/* Permanent fact → a plain muted caption, not a tinted full-width box
+   (DESIGN.md §4 ban on tinted boxes / audit §03 Debug). */
 .tm-debug__notice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: var(--info-soft);
-  border: 1px solid var(--info-line);
+  padding: 0 2px;
   font-size: 11.5px;
+  line-height: 1.5;
   color: var(--muted);
 }
 

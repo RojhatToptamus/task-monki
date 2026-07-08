@@ -12,7 +12,9 @@ import {
   finishActionsForTask,
   finishRequirementsForTask,
   getFinishEvidenceState,
-  markDoneModalCopy
+  markDoneModalCopy,
+  reviewFindingCountLabel,
+  tasksSpanMultipleRepositories
 } from './taskView';
 
 const now = '2026-06-24T10:00:00.000Z';
@@ -100,7 +102,7 @@ describe('task card view model', () => {
     expect(describeTaskHeaderState(task)).toEqual({ label: 'In review', tone: 'info' });
   });
 
-  it('builds a quiet evidence line while keeping bad evidence noticeable', () => {
+  it('drops the No-PR evidence line while keeping bad evidence noticeable', () => {
     const clean = evidenceLineForTask(
       createTask({
         projection: {
@@ -122,8 +124,8 @@ describe('task card view model', () => {
       })
     );
 
-    expect(clean).toEqual([{ label: 'No PR', tone: 'neutral' }]);
-    expect(dirty).toEqual([{ label: 'PR #82 | checks failing', tone: 'error' }]);
+    expect(clean).toEqual([]);
+    expect(dirty).toEqual([{ value: 'PR #82', label: 'checks failing', tone: 'error' }]);
   });
 
   it('keeps active follow-up work in progress and labels it as fixing review feedback', () => {
@@ -194,6 +196,71 @@ describe('task card view model', () => {
     expect(vm.stateLabel).toBe('Archived');
     expect(vm.stateTone).toBe('neutral');
     expect(vm.archived).toBe(true);
+  });
+
+  it('drops the repo line when cards share a single repository', () => {
+    const task = createTask();
+    expect(buildTaskCardVM(task, { showRepo: true }).meta).toBe('repo');
+    expect(buildTaskCardVM(task, { showRepo: false }).meta).toBeUndefined();
+  });
+
+  it('shows a lineage cue for a forked task', () => {
+    expect(buildTaskCardVM(createTask()).lineage).toBeUndefined();
+    const forked = createTask({ forkedFromTaskId: 'src12345-6789' });
+    expect(buildTaskCardVM(forked).lineage).toBe('fork of #src12345');
+  });
+
+  it('summarizes review findings by severity for the review queue', () => {
+    const withFindings = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        codexReview: {
+          status: 'NEEDS_CHANGES',
+          runId: 'r',
+          result: {
+            schemaVersion: 'codex-review/v1',
+            verdict: 'NEEDS_CHANGES',
+            summary: 'Fix these.',
+            findings: [
+              { id: 'a', severity: 'BLOCKER', title: 'A', explanation: 'x' },
+              { id: 'b', severity: 'MAJOR', title: 'B', explanation: 'y' },
+              { id: 'c', severity: 'MAJOR', title: 'C', explanation: 'z' }
+            ]
+          }
+        }
+      }
+    });
+    expect(reviewFindingCountLabel(withFindings)).toBe('1 blocker · 2 major');
+    expect(reviewFindingCountLabel(createTask())).toBeUndefined();
+  });
+
+  it('detects when a task set spans more than one repository', () => {
+    const a = createTask({ id: 'a', repositoryPath: '/tmp/repo-a' });
+    const b = createTask({ id: 'b', repositoryPath: '/tmp/repo-a' });
+    const c = createTask({ id: 'c', repositoryPath: '/tmp/repo-b' });
+    expect(tasksSpanMultipleRepositories([a, b])).toBe(false);
+    expect(tasksSpanMultipleRepositories([a, b, c])).toBe(true);
+    expect(tasksSpanMultipleRepositories([])).toBe(false);
+  });
+
+  it('suppresses a status pill that only restates its column', () => {
+    const ready = createTask({ workflowPhase: 'READY' });
+    expect(buildTaskCardVM(ready, { columnKey: 'ready' }).showState).toBe(false);
+    // The same "Ready" state keeps its pill outside the Backlog / Ready column.
+    expect(buildTaskCardVM(ready).showState).toBe(true);
+
+    const done = createTask({ workflowPhase: 'DONE' });
+    expect(buildTaskCardVM(done, { columnKey: 'done' }).showState).toBe(false);
+
+    // A pill that refines the Review column is kept.
+    const needsChanges = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        codexReview: { status: 'NEEDS_CHANGES', runId: 'r' }
+      },
+      workflowPhase: 'REVIEW'
+    });
+    expect(buildTaskCardVM(needsChanges, { columnKey: 'review' }).showState).toBe(true);
   });
 
   it('allows requesting changes from actionable review results', () => {
