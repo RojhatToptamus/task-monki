@@ -27,7 +27,7 @@ publish:
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
-  identity: null
+  sign: scripts/ad-hoc-mac-sign.cjs
   extraResources:
     - from: build/icon.png
       to: icon.png

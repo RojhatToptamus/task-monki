@@ -3,8 +3,10 @@
 Date: 2026-06-30
 
 Task Monki's MVP release channel uses unsigned artifacts attached to draft
-GitHub Releases. Code signing, notarization, package-manager publishing, and
-automatic updates are intentionally out of scope for this phase.
+GitHub Releases. Trusted Developer ID code signing, notarization,
+package-manager publishing, and automatic updates are intentionally out of
+scope for this phase. macOS app bundles are ad-hoc signed only to preserve
+bundle integrity before DMG/ZIP packaging.
 
 ## Release Artifacts
 
@@ -89,11 +91,43 @@ Before publishing the draft:
 - Confirm every expected platform artifact uploaded.
 - Confirm checksum files uploaded.
 - Download at least the current-platform artifact from GitHub and launch it.
-- Confirm release notes clearly state the artifacts are unsigned.
+- Confirm release notes clearly state the artifacts are unsigned; macOS is
+  ad-hoc signed only and is not Developer ID signed or notarized.
 - Confirm release notes link to `docs/INSTALL.md`.
 - Confirm manual update instructions are present.
-- Confirm known limitations mention no signing, notarization, package-manager
-  publishing, or automatic updater yet.
+- Confirm known limitations mention no trusted signing, notarization,
+  package-manager publishing, or automatic updater yet.
+
+Use grouped download sections in the release notes so users do not have to
+interpret GitHub's flat asset list:
+
+```md
+## Downloads
+
+### macOS
+
+- Apple silicon: `Task-Monki-<version>-mac-arm64.dmg`
+- Intel: `Task-Monki-<version>-mac-x64.dmg`
+
+### Windows
+
+- `Task-Monki-<version>-win-x64.exe`
+
+### Linux
+
+- AppImage: `Task-Monki-<version>-linux-x86_64.AppImage`
+- Debian/Ubuntu: `Task-Monki-<version>-linux-amd64.deb`
+
+### Checksums
+
+- `SHA256SUMS-macOS.txt`
+- `SHA256SUMS-Windows.txt`
+- `SHA256SUMS-Linux.txt`
+```
+
+Keep the platform artifact names clear and leave generated `.blockmap` and
+`latest-*.yml` assets attached for this alpha. They are normal electron-builder
+metadata, but they should not be presented as primary downloads in the notes.
 
 ## Future Signed Release Work
 

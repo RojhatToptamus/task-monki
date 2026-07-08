@@ -33,7 +33,7 @@ const hash = createHash('sha256');
 for (const filePath of files) {
   hash.update(path.relative(outputDir, filePath).split(path.sep).join('/'));
   hash.update('\0');
-  hash.update(fs.readFileSync(filePath));
+  hash.update(fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n'));
   hash.update('\0');
 }
 

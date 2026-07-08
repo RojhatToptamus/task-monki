@@ -3,8 +3,9 @@
 Date: 2026-07-01
 
 Task Monki is distributed through GitHub Releases as unsigned desktop builds.
-The app does not include an automatic updater yet. To update, download and
-install the newer release from GitHub.
+macOS app bundles are ad-hoc signed only to preserve bundle integrity; they are
+not Developer ID signed or notarized yet. The app does not include an automatic
+updater. To update, download and install the newer release from GitHub.
 
 ## Requirements
 
@@ -51,8 +52,8 @@ Use the asset that matches your platform:
 
 The current release channel is unsigned:
 
-- macOS may show a Gatekeeper warning because the app is not signed or
-  notarized yet.
+- macOS may show a Gatekeeper warning because the app is not Developer ID
+  signed or notarized yet.
 - Windows may show an unknown-publisher or SmartScreen warning.
 - Linux AppImage users may need to mark the file executable before launching.
 
