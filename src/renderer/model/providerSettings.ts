@@ -18,7 +18,8 @@ export const PROVIDER_SETTING_FIELDS: ProviderSettingField[] = [
   { key: 'serviceTier', label: 'Service tier' },
   { key: 'sandbox', label: 'Sandbox' },
   { key: 'networkAccess', label: 'Network' },
-  { key: 'approvalPolicy', label: 'Approval policy' }
+  { key: 'approvalPolicy', label: 'Approval policy' },
+  { key: 'approvalsReviewer', label: 'Approval reviewer' }
 ];
 
 export function compareProviderSetting(

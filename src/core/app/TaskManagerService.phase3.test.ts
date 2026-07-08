@@ -125,14 +125,16 @@ describe('Phase 3 delivery guards', () => {
           {
             sandbox: 'DANGER_FULL_ACCESS',
             networkAccess: true,
-            approvalPolicy: 'never'
+            approvalPolicy: 'never',
+            approvalsReviewer: 'auto_review'
           }
         ]
       })
     ).toEqual({
       sandbox: 'DANGER_FULL_ACCESS',
       networkAccess: true,
-      approvalPolicy: 'never'
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
     });
   });
 
@@ -144,14 +146,37 @@ describe('Phase 3 delivery guards', () => {
           {
             sandbox: 'DANGER_FULL_ACCESS',
             networkAccess: true,
-            approvalPolicy: 'never'
+            approvalPolicy: 'on-request',
+            approvalsReviewer: 'auto_review'
           }
         ]
       })
     ).toEqual({
       sandbox: 'READ_ONLY',
       networkAccess: true,
-      approvalPolicy: 'never'
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    });
+  });
+
+  it('preserves auto-review for implementation approval prompts', () => {
+    expect(
+      mergeRunSettings({
+        readOnly: false,
+        settings: [
+          {
+            sandbox: 'WORKSPACE_WRITE',
+            networkAccess: true,
+            approvalPolicy: 'on-request',
+            approvalsReviewer: 'auto_review'
+          }
+        ]
+      })
+    ).toEqual({
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review'
     });
   });
 });

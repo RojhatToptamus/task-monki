@@ -108,6 +108,8 @@ export type AgentSessionStatus =
   | 'DELETED'
   | 'UNKNOWN';
 
+export type AgentApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
+
 export interface AgentExecutionSettings {
   model?: string;
   modelProvider?: string;
@@ -116,6 +118,17 @@ export interface AgentExecutionSettings {
   sandbox?: 'READ_ONLY' | 'WORKSPACE_WRITE' | 'DANGER_FULL_ACCESS';
   networkAccess?: boolean;
   approvalPolicy?: string;
+  approvalsReviewer?: AgentApprovalsReviewer;
+}
+
+export const DEFAULT_AGENT_APPROVALS_REVIEWER: AgentApprovalsReviewer = 'user';
+
+export function normalizeAgentApprovalsReviewer(
+  value: unknown
+): AgentApprovalsReviewer {
+  return value === 'auto_review' || value === 'guardian_subagent'
+    ? value
+    : DEFAULT_AGENT_APPROVALS_REVIEWER;
 }
 
 export type CodexWebSearchMode = 'disabled' | 'cached' | 'live';

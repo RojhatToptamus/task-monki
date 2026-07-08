@@ -78,8 +78,9 @@ describe('CodexAppServerAdapter', () => {
         model: 'fake-model',
         reasoningEffort: 'high',
         sandbox: 'WORKSPACE_WRITE',
-        networkAccess: false,
-        approvalPolicy: 'never'
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review'
       }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -111,7 +112,11 @@ describe('CodexAppServerAdapter', () => {
       (candidate) =>
         candidate.agentUsageSnapshots.length > 0 &&
         candidate.agentGoalSnapshots.length > 0 &&
-        candidate.agentSettingsObservations.length > 0,
+        candidate.agentSettingsObservations.some(
+          (record) =>
+            record.settings.networkAccess === true &&
+            record.settings.approvalsReviewer === 'auto_review'
+        ),
       'provider observations'
     );
     const completed = snapshot.runs.find((candidate) => candidate.id === run.id);
@@ -126,13 +131,44 @@ describe('CodexAppServerAdapter', () => {
     expect(snapshot.agentPlanRevisions[0]?.steps[0]?.status).toBe('IN_PROGRESS');
     expect(snapshot.agentUsageSnapshots[0]?.total.totalTokens).toBe(120);
     expect(snapshot.agentGoalSnapshots[0]?.syncState).toBe('IN_SYNC');
-    expect(snapshot.agentSettingsObservations[0]?.source).toBe(
-      'THREAD_START_RESPONSE'
-    );
+    expect(
+      snapshot.agentSettingsObservations.some(
+        (record) =>
+          record.source === 'THREAD_START_RESPONSE' &&
+          record.settings.approvalsReviewer === 'auto_review'
+      )
+    ).toBe(true);
+    expect(
+      snapshot.agentSettingsObservations.some(
+        (record) =>
+          record.source === 'THREAD_SETTINGS_NOTIFICATION' &&
+          record.settings.networkAccess === true &&
+          record.settings.approvalsReviewer === 'auto_review'
+      )
+    ).toBe(true);
     expect(snapshot.agentServers[0]?.runtimeKind).toBe('APP_SERVER');
     expect(
       snapshot.agentServers.some((server) => server.runtimeKind !== 'APP_SERVER')
     ).toBe(false);
+    const finalJournal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(finalJournal);
+    expect(outbound.find((message) => message.method === 'thread/start')?.params)
+      .toMatchObject({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review'
+      });
+    expect(outbound.find((message) => message.method === 'turn/start')?.params)
+      .toMatchObject({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+        sandboxPolicy: {
+          type: 'workspaceWrite',
+          networkAccess: true
+        }
+      });
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -1037,8 +1073,8 @@ const threadResponse = (request = {}) => {
   serviceTier: null,
   cwd: process.cwd(),
   instructionSources: [],
-  approvalPolicy: approvalMode ? 'on-request' : 'never',
-  approvalsReviewer: 'user',
+  approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
+  approvalsReviewer: request.approvalsReviewer ?? 'user',
   sandbox: {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
@@ -1274,6 +1310,29 @@ rl.on('line', (line) => {
       send({ id: message.id, result: { turn: turn('inProgress') } });
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
+        send({ method: 'thread/settings/updated', params: {
+          threadId: 'thread-1',
+          threadSettings: {
+            cwd: message.params.cwd ?? process.cwd(),
+            approvalPolicy: message.params.approvalPolicy ?? 'on-request',
+            approvalsReviewer: message.params.approvalsReviewer ?? 'user',
+            sandboxPolicy: message.params.sandboxPolicy ?? {
+              type: 'workspaceWrite',
+              writableRoots: [process.cwd()],
+              networkAccess: false,
+              excludeTmpdirEnvVar: false,
+              excludeSlashTmp: false
+            },
+            activePermissionProfile: null,
+            model: message.params.model ?? 'fake-model',
+            modelProvider: 'openai',
+            serviceTier: message.params.serviceTier ?? null,
+            effort: message.params.effort ?? 'high',
+            summary: message.params.summary ?? null,
+            collaborationMode: null,
+            personality: message.params.personality ?? null
+          }
+        } });
         if (interruptMode) {
           return;
         }

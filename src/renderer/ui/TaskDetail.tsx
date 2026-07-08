@@ -88,6 +88,10 @@ import {
   buildReviewActivityViewModel,
   type ReviewActivityViewModel
 } from '../model/reviewActivity';
+import {
+  formatAgentNetworkAccess,
+  formatAgentPermissionMode
+} from '../model/agentPermissions';
 import { TaskActivityPanel } from './TaskActivityPanel';
 
 interface TaskDetailProps {
@@ -524,6 +528,7 @@ export function TaskDetail(props: TaskDetailProps) {
     run?.requestedSettings.reasoningEffort ??
     task.agentSettings.reasoningEffort ??
     'default';
+  const displayedAgentSettings = run?.requestedSettings ?? task.agentSettings;
 
   const dirtyFileCount =
     (gitSnapshot?.stagedCount ?? 0) +
@@ -576,6 +581,19 @@ export function TaskDetail(props: TaskDetailProps) {
             </div>
             <div className="tm-detail__titlerow">
               <h1 className="tm-detail__title">{task.title}</h1>
+              <TaskActionsMenu
+                taskId={task.id}
+                title={task.title}
+                archived={task.workflowPhase === 'ARCHIVED'}
+                openTarget={
+                  worktree
+                    ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
+                    : { type: 'repository', repositoryPath: task.repositoryPath }
+                }
+                onArchive={props.onArchive}
+                onRequestDelete={props.onRequestDelete}
+                className="tm-detail__taskmenu"
+              />
               {headActions.length > 0 ? (
                 <div className="tm-detail__titleactions">
                   {headActions.map((action) => (
@@ -591,19 +609,6 @@ export function TaskDetail(props: TaskDetailProps) {
                   ))}
                 </div>
               ) : null}
-              <TaskActionsMenu
-                taskId={task.id}
-                title={task.title}
-                archived={task.workflowPhase === 'ARCHIVED'}
-                openTarget={
-                  worktree
-                    ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
-                    : { type: 'repository', repositoryPath: task.repositoryPath }
-                }
-                onArchive={props.onArchive}
-                onRequestDelete={props.onRequestDelete}
-                className="tm-detail__taskmenu"
-              />
             </div>
             {worktree?.branchName ? (
               <div className="tm-detail__meta">{worktree.branchName}</div>
@@ -685,12 +690,12 @@ export function TaskDetail(props: TaskDetailProps) {
                 <div className="tm-config" style={{ marginTop: 14 }}>
                   <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
                   <ConfigRow
-                    k="Approval"
-                    v={
-                      run?.requestedSettings.approvalPolicy ??
-                      task.agentSettings.approvalPolicy ??
-                      'on-request'
-                    }
+                    k="Permissions"
+                    v={formatAgentPermissionMode(displayedAgentSettings)}
+                  />
+                  <ConfigRow
+                    k="Network"
+                    v={formatAgentNetworkAccess(displayedAgentSettings)}
                   />
                   <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
                 </div>

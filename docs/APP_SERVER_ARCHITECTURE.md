@@ -138,6 +138,7 @@ Task and review execution settings stored on task/run records include:
 - reasoning effort;
 - sandbox;
 - approval policy;
+- approval reviewer;
 - network access.
 
 Settings are validated against the live model catalog before a turn starts.

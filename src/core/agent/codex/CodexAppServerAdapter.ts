@@ -53,6 +53,7 @@ import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCode
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
+import type { ApprovalsReviewer } from './protocol/generated/v2/ApprovalsReviewer';
 import type { ThreadItem } from './protocol/generated/v2/ThreadItem';
 import type { Thread } from './protocol/generated/v2/Thread';
 import type { ThreadGoal } from './protocol/generated/v2/ThreadGoal';
@@ -235,7 +236,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       serviceTier: settings.serviceTier ?? null,
       cwd: input.worktreePath,
       approvalPolicy: toApprovalPolicy(settings),
-      approvalsReviewer: 'user',
+      approvalsReviewer: toApprovalsReviewer(settings),
       sandbox: toSandboxMode(settings),
       config: toThreadConfig(settings),
       ephemeral: false
@@ -273,7 +274,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       serviceTier: session.requestedSettings.serviceTier ?? null,
       cwd: session.worktreePath,
       approvalPolicy: toApprovalPolicy(session.requestedSettings),
-      approvalsReviewer: 'user',
+      approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
       sandbox: toSandboxMode(session.requestedSettings),
       config: toThreadConfig(session.requestedSettings)
     });
@@ -353,7 +354,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         input: [{ type: 'text', text: input.prompt, text_elements: [] }],
         cwd: session.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(settings),
         sandboxPolicy: toSandboxPolicy(settings, session.worktreePath),
         model: settings.model ?? null,
         serviceTier: settings.serviceTier ?? null,
@@ -524,7 +525,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         serviceTier: input.settings.serviceTier ?? null,
         cwd: target.worktreePath,
         approvalPolicy: toApprovalPolicy(input.settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(input.settings),
         sandbox: toSandboxMode(input.settings),
         config: toThreadConfig(input.settings),
         ephemeral: false
@@ -577,7 +578,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         serviceTier: settings.serviceTier ?? null,
         cwd: reviewSession.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(settings),
         sandbox: toSandboxMode(settings),
         config: toThreadConfig(settings),
         developerInstructions: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
@@ -735,7 +736,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
           threadId: session.providerSessionId,
           cwd: session.worktreePath,
           approvalPolicy: toApprovalPolicy(session.requestedSettings),
-          approvalsReviewer: 'user',
+          approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
           sandbox: toSandboxMode(session.requestedSettings)
         });
         await this.store.updateAgentSession(session.id, {
@@ -2220,6 +2221,13 @@ function toApprovalPolicy(
   settings: AgentExecutionSettings
 ): 'on-request' | 'never' {
   return settings.approvalPolicy === 'never' ? 'never' : 'on-request';
+}
+
+function toApprovalsReviewer(settings: AgentExecutionSettings): ApprovalsReviewer {
+  return settings.approvalsReviewer === 'auto_review' ||
+    settings.approvalsReviewer === 'guardian_subagent'
+    ? settings.approvalsReviewer
+    : 'user';
 }
 
 function toReviewTarget(target: AgentReviewTarget): ReviewTarget {

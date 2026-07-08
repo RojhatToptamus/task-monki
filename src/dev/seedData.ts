@@ -100,7 +100,8 @@ const DEFAULT_AGENT_SETTINGS: AgentExecutionSettings = {
   reasoningEffort: 'low',
   sandbox: 'WORKSPACE_WRITE',
   networkAccess: false,
-  approvalPolicy: 'on-request'
+  approvalPolicy: 'on-request',
+  approvalsReviewer: 'user'
 };
 
 export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [

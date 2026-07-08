@@ -6,6 +6,11 @@ import type {
   CreateTaskRequest,
   RefinePromptResponse
 } from '../../shared/contracts';
+import {
+  AGENT_PERMISSION_MODE_OPTIONS,
+  settingsForPermissionMode,
+  type SelectableAgentPermissionMode
+} from '../model/agentPermissions';
 
 interface NewTaskPanelProps {
   defaultRepositoryPath: string;
@@ -32,10 +37,9 @@ export function NewTaskPanel({
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
-  const [sandbox, setSandbox] =
-    useState<NonNullable<AgentExecutionSettings['sandbox']>>('WORKSPACE_WRITE');
+  const [permissionMode, setPermissionMode] =
+    useState<SelectableAgentPermissionMode>('ASK_FOR_APPROVAL');
   const [networkAccess, setNetworkAccess] = useState(false);
-  const [approvalPolicy, setApprovalPolicy] = useState('on-request');
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
 
@@ -57,6 +61,8 @@ export function NewTaskPanel({
 
   const selectedModel = models.find((candidate) => candidate.model === model);
   const repositoryPath = defaultRepositoryPath.trim();
+  const fullAccessSelected = permissionMode === 'FULL_ACCESS';
+  const effectiveNetworkAccess = fullAccessSelected || networkAccess;
   const reasoningEfforts = [
     ...new Set(
       [
@@ -85,6 +91,9 @@ export function NewTaskPanel({
       return;
     }
     try {
+      const permissionSettings = settingsForPermissionMode(permissionMode, {
+        networkAccess
+      });
       await onCreate({
         title,
         prompt,
@@ -93,9 +102,7 @@ export function NewTaskPanel({
           model: model || undefined,
           modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
           reasoningEffort: reasoningEffort || undefined,
-          sandbox,
-          networkAccess,
-          approvalPolicy
+          ...permissionSettings
         }
       });
     } catch (caught) {
@@ -236,42 +243,26 @@ export function NewTaskPanel({
               </div>
             </div>
 
-            <div className="field-grid field-grid--two">
+            <div className="field-grid">
               <label className="field">
                 <span className="field__label">
-                  Sandbox
+                  Permission mode
                   <HelpTooltip>
-                    Implementation runs default to workspace-write. Analysis and review
-                    runs always stay read-only.
+                    Applies to this task's implementation runs.
                   </HelpTooltip>
                 </span>
                 <select
-                  value={sandbox}
+                  value={permissionMode}
                   onChange={(event) =>
-                    setSandbox(event.target.value as NonNullable<AgentExecutionSettings['sandbox']>)
+                    setPermissionMode(event.target.value as SelectableAgentPermissionMode)
                   }
                   disabled={disabled}
                 >
-                  <option value="WORKSPACE_WRITE">Workspace write</option>
-                  <option value="READ_ONLY">Read only</option>
-                  <option value="DANGER_FULL_ACCESS">Full access</option>
-                </select>
-              </label>
-              <label className="field">
-                <span className="field__label">
-                  Approval policy
-                  <HelpTooltip align="right">
-                    Keep approvals on unless you are comfortable with the selected sandbox
-                    and repository access.
-                  </HelpTooltip>
-                </span>
-                <select
-                  value={approvalPolicy}
-                  onChange={(event) => setApprovalPolicy(event.target.value)}
-                  disabled={disabled}
-                >
-                  <option value="on-request">Ask before privileged actions</option>
-                  <option value="never">Never ask</option>
+                  {AGENT_PERMISSION_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </label>
             </div>
@@ -279,22 +270,24 @@ export function NewTaskPanel({
             <div className="network-toggle">
               <div className="network-toggle__copy">
                 <span className="network-toggle__title">
-                  Allow network access
+                  Network access
                 </span>
                 <span className="network-toggle__state">
-                  {networkAccess
-                    ? 'Enabled - agent may use the network during this run.'
-                    : 'Disabled - approval required before network use.'}
+                  {fullAccessSelected
+                    ? 'Enabled by full access.'
+                    : effectiveNetworkAccess
+                      ? 'Enabled - commands may use the network during this task.'
+                      : 'Disabled - network use stays outside the task boundary.'}
                 </span>
               </div>
               <button
                 type="button"
                 className={`network-toggle__switch ${
-                  networkAccess ? 'network-toggle__switch--on' : ''
+                  effectiveNetworkAccess ? 'network-toggle__switch--on' : ''
                 }`}
                 role="switch"
-                aria-checked={networkAccess}
-                disabled={disabled}
+                aria-checked={effectiveNetworkAccess}
+                disabled={disabled || fullAccessSelected}
                 onClick={() => setNetworkAccess((current) => !current)}
               >
                 <span />

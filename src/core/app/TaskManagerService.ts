@@ -45,6 +45,7 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
+  normalizeAgentApprovalsReviewer,
   normalizePullRequestTitle,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
@@ -1057,17 +1058,23 @@ export function mergeRunSettings(input: {
     {
       sandbox: defaultSandbox,
       networkAccess: false,
-      approvalPolicy: 'on-request'
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
     } satisfies AgentExecutionSettings,
     ...input.settings.filter(Boolean)
   );
+  const approvalPolicy = requestedSettings.approvalPolicy ?? 'on-request';
   return {
     ...requestedSettings,
     sandbox: input.readOnly
       ? 'READ_ONLY'
       : (requestedSettings.sandbox ?? defaultSandbox),
     networkAccess: requestedSettings.networkAccess ?? false,
-    approvalPolicy: requestedSettings.approvalPolicy ?? 'on-request'
+    approvalPolicy,
+    approvalsReviewer:
+      input.readOnly || approvalPolicy === 'never'
+        ? 'user'
+        : normalizeAgentApprovalsReviewer(requestedSettings.approvalsReviewer)
   };
 }
 
