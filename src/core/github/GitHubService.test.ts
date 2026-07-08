@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import type { Task, WorktreeRecord } from '../../shared/contracts';
+import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import {
   GitHubService,
   parseCiRollup,
@@ -289,9 +290,9 @@ async function writeFakePullRequestGh(
   logPath: string,
   options: { listRows: unknown[]; viewTitle: string }
 ): Promise<string> {
-  const ghPath = path.join(path.dirname(logPath), 'gh');
-  await fs.writeFile(
-    ghPath,
+  return writeNodeExecutable(
+    path.dirname(logPath),
+    'gh',
     `#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
@@ -325,11 +326,8 @@ if (args[0] === 'pr' && args[1] === 'checks') {
 }
 console.error('Unexpected gh invocation: ' + args.join(' '));
 process.exit(1);
-`,
-    'utf8'
+`
   );
-  await fs.chmod(ghPath, 0o755);
-  return ghPath;
 }
 
 async function readGhInvocations(logPath: string): Promise<string[][]> {

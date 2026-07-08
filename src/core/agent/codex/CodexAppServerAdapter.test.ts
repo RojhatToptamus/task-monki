@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
 
@@ -13,8 +14,7 @@ const APP_SERVER_INTEGRATION_TIMEOUT_MS = 10_000;
 describe('CodexAppServerAdapter', () => {
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript(), { mode: 0o755 });
+    const executable = await writeFakeCodexExecutable(dir);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
@@ -175,8 +175,7 @@ describe('CodexAppServerAdapter', () => {
 
   it('submits one typed approval response and waits for server resolution', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-'));
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('approval'), { mode: 0o755 });
+    const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -256,8 +255,7 @@ describe('CodexAppServerAdapter', () => {
 
   it('aborts pending approvals when the owning App Server exits', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-loss-'));
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('exit'), { mode: 0o755 });
+    const executable = await writeFakeCodexExecutable(dir, 'exit');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -299,8 +297,7 @@ describe('CodexAppServerAdapter', () => {
 
   it('marks a request stale when App Server clears it before a response', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-stale-'));
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('clear'), { mode: 0o755 });
+    const executable = await writeFakeCodexExecutable(dir, 'clear');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -339,8 +336,7 @@ describe('CodexAppServerAdapter', () => {
 
   it('discovers child sessions and correlates child-origin approvals', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('subagent'), { mode: 0o755 });
+    const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -429,10 +425,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-retarget-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('review-turn-start-mismatch'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-turn-start-mismatch'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -491,10 +487,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-effort-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('review-interrupt-no-active'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-no-active'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -571,10 +567,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-interrupt-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('review-interrupt-mismatch'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-mismatch'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -631,11 +627,9 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-interrupt-timeout-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(
-      executable,
-      fakeCodexScript('review-interrupt-ambiguous-no-terminal'),
-      { mode: 0o755 }
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-ambiguous-no-terminal'
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
@@ -687,10 +681,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-review-interrupt-idle-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('review-interrupt-no-active'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-no-active'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -744,10 +738,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-interrupt-terminal-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('interrupt-ambiguous-then-terminal'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'interrupt-ambiguous-then-terminal'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -785,10 +779,10 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-interrupt-timeout-')
     );
-    const executable = path.join(dir, 'fake-codex');
-    await fs.writeFile(executable, fakeCodexScript('interrupt-ambiguous-no-terminal'), {
-      mode: 0o755
-    });
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'interrupt-ambiguous-no-terminal'
+    );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -961,6 +955,13 @@ function readOutboundMessages(
     .map((line) => JSON.parse(line) as { direction: string; raw: string })
     .filter((entry) => entry.direction === 'OUTBOUND')
     .map((entry) => JSON.parse(entry.raw) as { method?: string; params?: unknown });
+}
+
+async function writeFakeCodexExecutable(
+  directory: string,
+  mode: Parameters<typeof fakeCodexScript>[0] = 'normal'
+): Promise<string> {
+  return writeNodeExecutable(directory, 'fake-codex', fakeCodexScript(mode));
 }
 
 function fakeCodexScript(

@@ -27,6 +27,9 @@ publish:
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  # Unsigned alpha builds are ad-hoc signed only. Enable Hardened Runtime with
+  # the future Developer ID signed and notarized release path.
+  hardenedRuntime: false
   sign: scripts/ad-hoc-mac-sign.cjs
   extraResources:
     - from: build/icon.png

@@ -33,13 +33,18 @@ describe('Task Monki development seed data', () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
     snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
-  }, 30_000);
+  }, 90_000);
 
   afterAll(async () => {
     if (rootDir) {
-      await fs.rm(rootDir, { recursive: true, force: true });
+      await fs.rm(rootDir, {
+        recursive: true,
+        force: true,
+        maxRetries: process.platform === 'win32' ? 10 : 0,
+        retryDelay: 100
+      });
     }
-  });
+  }, 30_000);
 
   it('creates a current-schema deterministic scenario catalog', async () => {
     const settings = await new AppSettingsStore(manifest.appSettingsPath).get();

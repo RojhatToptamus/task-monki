@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import {
   CodexRuntimeResolutionError,
   discoverCodexRuntimeCandidates,
@@ -177,10 +178,7 @@ async function writeFakeCodex(
     missingMethods?: TaskMonkiCodexAppServerMethod[];
   } = {}
 ): Promise<string> {
-  await fs.mkdir(directory, { recursive: true });
-  const executable = path.join(directory, name);
-  await fs.writeFile(executable, fakeCodexScript(options), { mode: 0o755 });
-  return executable;
+  return writeNodeExecutable(directory, name, fakeCodexScript(options));
 }
 
 function fakeCodexScript({

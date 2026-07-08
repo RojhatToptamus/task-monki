@@ -1,6 +1,6 @@
 # Installing Task Monki
 
-Date: 2026-07-01
+Date: 2026-07-08
 
 Task Monki is distributed through GitHub Releases as unsigned desktop builds.
 macOS app bundles are ad-hoc signed only to preserve bundle integrity; they are
@@ -45,8 +45,8 @@ Use the asset that matches your platform:
 | macOS Apple silicon | `Task-Monki-<version>-mac-arm64.dmg` or `.zip` |
 | macOS Intel | `Task-Monki-<version>-mac-x64.dmg` or `.zip` |
 | Windows | `Task-Monki-<version>-win-x64.exe` |
-| Linux universal | `Task-Monki-<version>-linux-x64.AppImage` |
-| Debian/Ubuntu | `Task-Monki-<version>-linux-x64.deb` |
+| Linux universal | `Task-Monki-<version>-linux-x86_64.AppImage` |
+| Debian/Ubuntu | `Task-Monki-<version>-linux-amd64.deb` |
 
 ## Unsigned Build Warnings
 
@@ -56,6 +56,30 @@ The current release channel is unsigned:
   signed or notarized yet.
 - Windows may show an unknown-publisher or SmartScreen warning.
 - Linux AppImage users may need to mark the file executable before launching.
+
+### macOS unsigned alpha
+
+This alpha is not Apple Developer ID signed or notarized yet.
+
+If macOS blocks the app, use Apple's documented manual override flow:
+
+1. Try opening `Task Monki.app` once.
+2. Open System Settings -> Privacy & Security.
+3. Scroll to Security.
+4. Click Open Anyway for Task Monki.
+5. Confirm with your password or Touch ID.
+
+Apple says the Open Anyway button is available for about an hour after you try
+to open the app. See
+[Apple's guide to opening an app from an unknown developer](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
+
+If there is no Open Anyway button, or Task Monki starts but stays stuck on the
+Dock with no window, quit the stuck `Task Monki` process and run:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/Task Monki.app"
+open "/Applications/Task Monki.app"
+```
 
 Only install releases from the project's GitHub Releases page. Check
 `SHA256SUMS-*.txt` when you need to verify a downloaded artifact.

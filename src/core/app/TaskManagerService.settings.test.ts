@@ -7,6 +7,10 @@ import { getGitExecutablePath, configureGitExecutablePath } from '../git/gitCli'
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import {
+  writeNodeExecutable,
+  writeOutputExecutable
+} from '../../testSupport/fakeExecutable';
 
 describe('TaskManagerService settings', () => {
   const originalGitPath = process.env.TASK_MANAGER_GIT_PATH;
@@ -23,7 +27,7 @@ describe('TaskManagerService settings', () => {
   it('applies external executable settings to Git operations', async () => {
     delete process.env.TASK_MANAGER_GIT_PATH;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-settings-'));
-    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version service-test');
+    const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version service-test');
     const service = new TaskManagerService(
       new FileTaskStore(path.join(dir, 'store')),
       dir,
@@ -54,7 +58,7 @@ describe('TaskManagerService settings', () => {
   it('uses the normalized Git executable instead of rereading raw env overrides', async () => {
     process.env.TASK_MANAGER_GIT_PATH = '   ';
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-git-env-'));
-    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version normalized-env');
+    const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version normalized-env');
     const service = new TaskManagerService(
       new FileTaskStore(path.join(dir, 'store')),
       dir,
@@ -95,7 +99,7 @@ describe('TaskManagerService settings', () => {
 
     await service.init();
     try {
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
       expect(snapshot.agentServers[0]?.argv).toEqual([
         'app-server',
         '--stdio',
@@ -156,7 +160,7 @@ describe('TaskManagerService settings', () => {
         }
       });
 
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
       expect(snapshot.agentServers).toHaveLength(1);
       expect((await service.getAgentProviderState()).preflight.warnings).toContain(
         'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
@@ -173,7 +177,7 @@ describe('TaskManagerService settings', () => {
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
-    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version git-only');
+    const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version git-only');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
       codexPath: executable,
@@ -189,7 +193,7 @@ describe('TaskManagerService settings', () => {
         }
       });
 
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
       expect(snapshot.agentServers).toHaveLength(1);
       expect(snapshot.agentServers[0]?.executable).toBe(executable);
       expect(getGitExecutablePath()).toBe(fakeGit);
@@ -251,7 +255,7 @@ describe('TaskManagerService settings', () => {
     await service.init();
     try {
       const status = await service.getExternalToolStatus();
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
 
       expect(status.tools.codex).toMatchObject({
         source: 'auto',
@@ -288,7 +292,7 @@ describe('TaskManagerService settings', () => {
 
     await service.init();
     try {
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
 
       expect(snapshot.agentServers[0]?.executable).toBe(customCodex);
       expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
@@ -316,7 +320,7 @@ describe('TaskManagerService settings', () => {
     await service.init();
     try {
       const status = await service.getExternalToolStatus();
-      const snapshot = await store.snapshot();
+      const snapshot = await waitForAgentServerSnapshot(store);
 
       expect(status.tools.codex).toMatchObject({
         source: 'env',
@@ -334,8 +338,8 @@ describe('TaskManagerService settings', () => {
 
   it('keeps the Settings row Auto test on env override precedence', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-auto-test-'));
-    const envCodex = await writeExecutable(dir, 'codex-env', 'codex-cli env-test');
-    const pathCodex = await writeExecutable(dir, 'codex', 'codex-cli path-test');
+    const envCodex = await writeOutputExecutable(dir, 'codex-env', 'codex-cli env-test');
+    const pathCodex = await writeOutputExecutable(dir, 'codex', 'codex-cli path-test');
     process.env[TASK_MONKI_CODEX_BIN_ENV] = envCodex;
     process.env.PATH = withPath(path.dirname(pathCodex));
     const service = new TaskManagerService(
@@ -374,12 +378,17 @@ function withPath(...entries: string[]): string {
   return [...entries, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
 }
 
-async function writeExecutable(dir: string, name: string, output: string): Promise<string> {
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, name);
-  await fs.writeFile(filePath, `#!/bin/sh\necho ${JSON.stringify(output)}\n`, 'utf8');
-  await fs.chmod(filePath, 0o755);
-  return filePath;
+async function waitForAgentServerSnapshot(
+  store: FileTaskStore
+): Promise<Awaited<ReturnType<FileTaskStore['snapshot']>>> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const snapshot = await store.snapshot();
+    if (snapshot.agentServers.length > 0) {
+      return snapshot;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for Codex App Server startup.');
 }
 
 async function writeFakeCodex(
@@ -390,10 +399,7 @@ async function writeFakeCodex(
     appServer?: 'stdio' | 'none';
   } = {}
 ): Promise<string> {
-  await fs.mkdir(directory, { recursive: true });
-  const executable = path.join(directory, name);
-  await fs.writeFile(executable, fakeCodexScript(options), { mode: 0o755 });
-  return executable;
+  return writeNodeExecutable(directory, name, fakeCodexScript(options));
 }
 
 function fakeCodexScript({

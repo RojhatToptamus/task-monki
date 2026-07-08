@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   CiChecksStatus,
   MergeStatus,
@@ -65,16 +65,21 @@ describe('FileTaskStore', () => {
       repositoryPath: dir
     });
 
-    await fs.chmod(dir, 0o500);
-    await expect(
-      store.createTask({
-        title: 'Fails while store is read-only',
-        prompt: 'This persist should fail.',
-        repositoryPath: dir
-      })
-    ).rejects.toThrow();
+    const writeFile = vi
+      .spyOn(fs, 'writeFile')
+      .mockRejectedValueOnce(new Error('Injected store write failure.'));
+    try {
+      await expect(
+        store.createTask({
+          title: 'Fails while store write is unavailable',
+          prompt: 'This persist should fail.',
+          repositoryPath: dir
+        })
+      ).rejects.toThrow('Injected store write failure');
+    } finally {
+      writeFile.mockRestore();
+    }
 
-    await fs.chmod(dir, 0o700);
     await store.createTask({
       title: 'Persists after recovery',
       prompt: 'This persist should succeed.',
