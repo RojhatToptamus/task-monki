@@ -14,10 +14,53 @@ import {
 export const DEFAULT_DEMO_API_PORT = 43099;
 
 const defaultAppSettings = {
+  schemaVersion: 3,
+  theme: "dark",
+  sidebarCollapsed: false,
+  showMascot: true,
+  firstLaunchSetupCompleted: true,
+  defaultModel: undefined,
+  defaultReasoningEffort: undefined,
+  promptRefinementModel: undefined,
+  reviewModel: undefined,
+  reviewReasoningEffort: undefined,
   codexExternalTools: {
     webSearchMode: "disabled",
     mcpServers: "disabled",
     apps: "disabled",
+  },
+  externalExecutables: {
+    gitExecutablePath: null,
+    codexExecutablePath: null,
+    ghExecutablePath: null,
+  },
+  repositories: {
+    knownPaths: [DEMO_REPOSITORY_PATH],
+    selectedPath: DEMO_REPOSITORY_PATH,
+  },
+};
+
+const externalToolDemoDefinitions = {
+  git: {
+    label: "Git",
+    required: true,
+    command: "git",
+    resolvedPath: "/usr/bin/git",
+    version: "git version 2.50.0",
+  },
+  codex: {
+    label: "Codex CLI",
+    required: true,
+    command: "codex",
+    resolvedPath: "/usr/local/bin/codex",
+    version: "codex-cli 0.141.0",
+  },
+  gh: {
+    label: "GitHub CLI",
+    required: false,
+    command: "gh",
+    resolvedPath: "/usr/local/bin/gh",
+    version: "gh version 2.74.0",
   },
 };
 
@@ -142,6 +185,11 @@ async function route({
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/settings/tools") {
+    sendJson(response, 200, createExternalToolStatus(appSettings));
+    return;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/tasks") {
     sendJson(response, 200, snapshot);
     return;
@@ -155,16 +203,33 @@ async function route({
   const body = await readJson(request);
 
   if (url.pathname === "/api/settings") {
-    appSettings.codexExternalTools = {
-      ...appSettings.codexExternalTools,
-      ...(body.codexExternalTools ?? {}),
-    };
+    mergeAppSettings(appSettings, body);
     broadcastUpdate(eventClients, {
       type: "provider.updated",
       taskId: "settings",
       payload: { source: "remotion-demo-settings" },
     });
     sendJson(response, 200, appSettings);
+    return;
+  }
+
+  if (url.pathname === "/api/settings/tools/test") {
+    sendJson(response, 200, createExternalToolProbe(appSettings, body));
+    return;
+  }
+
+  if (url.pathname === "/api/open-target/inspect") {
+    sendJson(response, 200, createOpenTargetInspection(body));
+    return;
+  }
+
+  if (url.pathname === "/api/open-target/execute") {
+    sendJson(response, 200, createOpenTargetActionResult(body));
+    return;
+  }
+
+  if (url.pathname === "/api/agent/goal/sync") {
+    sendJson(response, 200, {});
     return;
   }
 
@@ -420,6 +485,151 @@ async function route({
   }
 
   sendJson(response, 200, {});
+}
+
+function mergeAppSettings(appSettings, input) {
+  for (const key of [
+    "theme",
+    "sidebarCollapsed",
+    "showMascot",
+    "firstLaunchSetupCompleted",
+  ]) {
+    if (key in input) {
+      appSettings[key] = input[key];
+    }
+  }
+
+  for (const key of [
+    "defaultModel",
+    "defaultReasoningEffort",
+    "promptRefinementModel",
+    "reviewModel",
+    "reviewReasoningEffort",
+  ]) {
+    if (key in input) {
+      const value = input[key];
+      appSettings[key] =
+        typeof value === "string" && value.trim() ? value.trim() : undefined;
+    }
+  }
+
+  if (input.codexExternalTools) {
+    appSettings.codexExternalTools = {
+      ...appSettings.codexExternalTools,
+      ...input.codexExternalTools,
+    };
+  }
+
+  if (input.externalExecutables) {
+    appSettings.externalExecutables = {
+      ...appSettings.externalExecutables,
+      ...input.externalExecutables,
+    };
+  }
+
+  if (input.repositories) {
+    appSettings.repositories = {
+      ...appSettings.repositories,
+      ...input.repositories,
+    };
+  }
+}
+
+function createExternalToolStatus(appSettings) {
+  return {
+    tools: {
+      git: createExternalToolProbe(appSettings, { tool: "git" }),
+      codex: createExternalToolProbe(appSettings, { tool: "codex" }),
+      gh: createExternalToolProbe(appSettings, { tool: "gh" }),
+    },
+    refreshedAt: new Date("2026-06-29T09:55:00.000Z").toISOString(),
+  };
+}
+
+function createExternalToolProbe(appSettings, request) {
+  const tool =
+    request.tool in externalToolDemoDefinitions ? request.tool : "git";
+  const definition = externalToolDemoDefinitions[tool];
+  const configured = resolveDemoConfiguredExecutable(appSettings, {
+    ...request,
+    tool,
+  });
+  const configuredPath = configured.path;
+  const executable = configuredPath ?? definition.command;
+  return {
+    tool,
+    label: definition.label,
+    required: definition.required,
+    source: configured.source,
+    configuredPath,
+    executable,
+    resolvedPath: configuredPath ?? definition.resolvedPath,
+    status: "ok",
+    version: definition.version,
+    error: null,
+  };
+}
+
+function resolveDemoConfiguredExecutable(appSettings, request) {
+  if ("executablePath" in request) {
+    const requestedPath = normalizeDemoPath(request.executablePath);
+    if (requestedPath) {
+      return { path: requestedPath, source: "override" };
+    }
+  }
+
+  const settingsKey = {
+    git: "gitExecutablePath",
+    codex: "codexExecutablePath",
+    gh: "ghExecutablePath",
+  }[request.tool];
+  const settingsPath = normalizeDemoPath(
+    appSettings.externalExecutables[settingsKey],
+  );
+  return settingsPath
+    ? { path: settingsPath, source: "settings" }
+    : { path: null, source: "auto" };
+}
+
+function normalizeDemoPath(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function createOpenTargetInspection(input) {
+  const target = input.target ?? {
+    type: "repository",
+    repositoryPath: DEMO_REPOSITORY_PATH,
+  };
+  return {
+    target: {
+      type: target.type ?? "repository",
+      kind: target.type === "worktreeFile" ? "file" : "directory",
+    },
+    apps: [
+      { id: "default", label: "Finder" },
+      { id: "vscode", label: "Visual Studio Code" },
+      { id: "cursor", label: "Cursor" },
+    ],
+    preferredAppId: "default",
+    revealLabel: "Reveal in Finder",
+    canOpen: true,
+    canReveal: true,
+    canOpenTerminal: target.type !== "worktreeFile",
+    canCopyFileContents: target.type === "worktreeFile",
+    copyFileContentsDisabledReason:
+      target.type === "worktreeFile"
+        ? undefined
+        : "Only files can be copied in this demo.",
+  };
+}
+
+function createOpenTargetActionResult(input) {
+  return {
+    ok: true,
+    message: `Demo ${input.action ?? "open"} action completed.`,
+    clipboardText:
+      input.action === "copyPath" ? DEMO_REPOSITORY_PATH : undefined,
+  };
 }
 
 function resetSnapshot(snapshot) {

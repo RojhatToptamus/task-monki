@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { openBrowser } from "@remotion/renderer";
@@ -25,6 +25,7 @@ const appUrl = `http://127.0.0.1:${rendererPort}`;
 const title = "Protect delivery actions during review follow-up";
 
 async function main() {
+  await rm(screenshotDir, { recursive: true, force: true });
   await mkdir(screenshotDir, { recursive: true });
 
   const apiServer = await startDemoApiServer({ port: apiPort });
@@ -165,7 +166,7 @@ async function main() {
     await waitForText(page, "Delete...");
     await capture(page, "11-task-actions-menu");
     await clickByText(page, "Delete...");
-    await waitForText(page, "Will be deleted");
+    await waitForText(page, "Permanently removes this task");
     await capture(page, "12-delete-task-modal");
     await clickByText(page, "Cancel");
     await waitForPredicate(page, () => !document.querySelector(".tm-modal"));
@@ -255,7 +256,7 @@ async function main() {
       () => !document.querySelector(".tm-reviewdrawer"),
     );
     await waitForText(page, "Follow-up run started.");
-    await waitForText(page, "Review follow-up in progress");
+    await waitForText(page, "Follow-up work is running");
     await capture(page, "25-followup-running-overview");
     await waitForPredicate(
       page,
@@ -268,10 +269,10 @@ async function main() {
     await waitForText(page, "Changed files");
     await capture(page, "26-evidence-all");
     await clickByText(page, "Committed");
-    await waitForText(page, "COMMITTED");
+    await waitForDiffScope(page, "Committed");
     await capture(page, "27-evidence-committed");
     await clickByText(page, "Uncommitted");
-    await waitForText(page, "UNCOMMITTED");
+    await waitForDiffScope(page, "Uncommitted");
     await capture(page, "28-evidence-uncommitted");
 
     await clickByText(page, "Debug");
@@ -321,6 +322,19 @@ async function waitForText(page, text, timeoutMs = 15_000) {
     (expected) => document.body.textContent?.includes(expected) ?? false,
     text,
     timeoutMs,
+  );
+}
+
+async function waitForDiffScope(page, label) {
+  await waitForPredicate(
+    page,
+    (expected) => {
+      const selected = document.querySelector(
+        '.tm-diffscope-tabs button[aria-selected="true"]',
+      );
+      return selected?.textContent?.trim() === expected;
+    },
+    label,
   );
 }
 

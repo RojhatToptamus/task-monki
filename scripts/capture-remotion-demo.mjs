@@ -253,7 +253,7 @@ async function main() {
       () => !document.querySelector(".tm-reviewdrawer"),
     );
     await waitForText(page, "Follow-up run started.");
-    await waitForText(page, "Review follow-up in progress");
+    await waitForText(page, "Follow-up work is running");
     await settle(page);
     await capture(page, "23-followup-started-overview");
     await waitForPredicate(
@@ -273,12 +273,12 @@ async function main() {
     await capture(page, "26-evidence-all");
 
     await clickByText(page, "Uncommitted");
-    await waitForText(page, "UNCOMMITTED");
+    await waitForDiffScope(page, "Uncommitted");
     await settle(page);
     await capture(page, "27-evidence-uncommitted");
 
     await clickByText(page, "Committed");
-    await waitForText(page, "COMMITTED");
+    await waitForDiffScope(page, "Committed");
     await settle(page);
     await capture(page, "28-evidence-committed");
 
@@ -341,6 +341,19 @@ async function waitForText(page, text, timeoutMs = 15_000) {
     (expected) => document.body.textContent?.includes(expected) ?? false,
     text,
     timeoutMs,
+  );
+}
+
+async function waitForDiffScope(page, label) {
+  await waitForPredicate(
+    page,
+    (expected) => {
+      const selected = document.querySelector(
+        '.tm-diffscope-tabs button[aria-selected="true"]',
+      );
+      return selected?.textContent?.trim() === expected;
+    },
+    label,
   );
 }
 
