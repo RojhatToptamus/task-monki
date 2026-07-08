@@ -8,21 +8,23 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
+  InspectOpenTargetRequest,
+  OpenTargetActionResult,
+  OpenTargetInspection,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
   RepositoryPreflight,
-  RunTestsRequest,
   RunRecord,
   StartRunRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
-  TestRunRecord,
   TransitionTaskRequest,
   WorktreeRecord,
   RefreshEvidenceRequest,
@@ -35,6 +37,7 @@ import type {
   ReadProtocolMessageRequest,
   StartReviewRequest,
   SteerRunRequest,
+  TestExternalToolRequest,
   UpdateAppSettingsRequest
 } from '../../shared/contracts';
 
@@ -109,6 +112,13 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),
+    getExternalToolStatus: () => get(baseUrl, '/api/settings/tools'),
+    testExternalTool: (input: TestExternalToolRequest) =>
+      post(baseUrl, '/api/settings/tools/test', input),
+    inspectOpenTarget: (input: InspectOpenTargetRequest) =>
+      post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
+    executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
+      post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
@@ -131,7 +141,6 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     cancelRun: (input: CancelRunRequest) => post<void>(baseUrl, '/api/runs/cancel', input),
     respondToInteraction: (input: RespondToInteractionRequest) =>
       post(baseUrl, '/api/interactions/respond', input),
-    runTests: (input: RunTestsRequest) => post<TestRunRecord>(baseUrl, '/api/tests/run', input),
     refreshEvidence: (input: RefreshEvidenceRequest) =>
       post<GitSnapshotRecord>(baseUrl, '/api/evidence/refresh', input),
     createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>

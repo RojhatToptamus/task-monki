@@ -3,13 +3,23 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+let configuredGitExecutable: string | undefined;
+
 export interface GitResult {
   stdout: string;
   stderr: string;
 }
 
+export function configureGitExecutablePath(executable: string | undefined): void {
+  configuredGitExecutable = executable?.trim() || undefined;
+}
+
+export function getGitExecutablePath(): string {
+  return configuredGitExecutable ?? 'git';
+}
+
 export async function git(cwd: string, argv: string[], timeout = 15_000): Promise<string> {
-  const { stdout } = await execFileAsync('git', argv, {
+  const { stdout } = await execFileAsync(getGitExecutablePath(), argv, {
     cwd,
     timeout,
     maxBuffer: 20 * 1024 * 1024
@@ -22,7 +32,7 @@ export async function gitResult(
   argv: string[],
   timeout = 15_000
 ): Promise<GitResult> {
-  const { stdout, stderr } = await execFileAsync('git', argv, {
+  const { stdout, stderr } = await execFileAsync(getGitExecutablePath(), argv, {
     cwd,
     timeout,
     maxBuffer: 20 * 1024 * 1024

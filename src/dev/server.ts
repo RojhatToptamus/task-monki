@@ -2,6 +2,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { AppUpdateEvent } from '../shared/contracts';
 import { chooseRepositoryFolder } from './folderPicker';
@@ -10,8 +11,17 @@ const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
 const storeDir =
   process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-monki-dev-store');
+const appSettingsPath =
+  process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
 
-const service = new TaskManagerService(new FileTaskStore(storeDir), defaultRepositoryPath);
+const service = new TaskManagerService(
+  new FileTaskStore(storeDir),
+  defaultRepositoryPath,
+  undefined,
+  {
+    appSettingsStore: new AppSettingsStore(appSettingsPath)
+  }
+);
 const clients = new Set<http.ServerResponse>();
 let server: http.Server | undefined;
 let shutdownPromise: Promise<void> | undefined;
@@ -77,6 +87,26 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
 
     if (request.method === 'POST' && url.pathname === '/api/settings') {
       sendJson(response, 200, await service.updateAppSettings((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/settings/tools') {
+      sendJson(response, 200, await service.getExternalToolStatus());
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/settings/tools/test') {
+      sendJson(response, 200, await service.testExternalTool((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/open-target/inspect') {
+      sendJson(response, 200, await service.inspectOpenTarget((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/open-target/execute') {
+      sendJson(response, 200, await service.executeOpenTargetAction((await readJson(request)) as never));
       return;
     }
 
@@ -154,11 +184,6 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
         200,
         await service.respondToInteraction((await readJson(request)) as never)
       );
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/tests/run') {
-      sendJson(response, 200, await service.runTests((await readJson(request)) as never));
       return;
     }
 

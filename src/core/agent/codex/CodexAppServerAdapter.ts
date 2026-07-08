@@ -12,7 +12,6 @@ import type {
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
-  CodexExternalToolSettings,
   InteractionRequestRecord,
   RunRecord
 } from '../../../shared/contracts';
@@ -46,11 +45,15 @@ import {
   CodexAmbiguousMutationError,
   type CodexRpcClient
 } from './CodexRpcClient';
-import type { AgentProtocolMessageReference } from '../../../shared/agent';
+import type {
+  AgentProtocolMessageReference,
+  CodexExternalToolSettings
+} from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
+import type { ApprovalsReviewer } from './protocol/generated/v2/ApprovalsReviewer';
 import type { ThreadItem } from './protocol/generated/v2/ThreadItem';
 import type { Thread } from './protocol/generated/v2/Thread';
 import type { ThreadGoal } from './protocol/generated/v2/ThreadGoal';
@@ -87,12 +90,11 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
+import { CODEX_REVIEW_DEVELOPER_INSTRUCTIONS } from '../../../shared/promptTemplates';
 import {
-  CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
   codexReviewStatusFromResult,
   parseCodexReviewResult
 } from '../../review/CodexReviewContract';
-
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -102,8 +104,9 @@ const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'INTERRUPTING',
   'RECOVERY_REQUIRED'
 ];
-const TOOL_SETTINGS_PENDING_RESTART_WARNING =
-  'Codex external tool settings will apply after the App Server restarts.';
+
+const RUNTIME_CONFIG_PENDING_RESTART_WARNING =
+  'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
 
 function canRetargetReviewTurn(
   run: RunRecord,
@@ -156,7 +159,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private readonly interruptCompletionTimeoutMs: number;
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
-  private toolSettingsRestartPending = false;
+  private runtimeConfigRestartPending = false;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -233,7 +236,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       serviceTier: settings.serviceTier ?? null,
       cwd: input.worktreePath,
       approvalPolicy: toApprovalPolicy(settings),
-      approvalsReviewer: 'user',
+      approvalsReviewer: toApprovalsReviewer(settings),
       sandbox: toSandboxMode(settings),
       config: toThreadConfig(settings),
       ephemeral: false
@@ -271,7 +274,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       serviceTier: session.requestedSettings.serviceTier ?? null,
       cwd: session.worktreePath,
       approvalPolicy: toApprovalPolicy(session.requestedSettings),
-      approvalsReviewer: 'user',
+      approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
       sandbox: toSandboxMode(session.requestedSettings),
       config: toThreadConfig(session.requestedSettings)
     });
@@ -351,7 +354,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         input: [{ type: 'text', text: input.prompt, text_elements: [] }],
         cwd: session.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(settings),
         sandboxPolicy: toSandboxPolicy(settings, session.worktreePath),
         model: settings.model ?? null,
         serviceTier: settings.serviceTier ?? null,
@@ -522,7 +525,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         serviceTier: input.settings.serviceTier ?? null,
         cwd: target.worktreePath,
         approvalPolicy: toApprovalPolicy(input.settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(input.settings),
         sandbox: toSandboxMode(input.settings),
         config: toThreadConfig(input.settings),
         ephemeral: false
@@ -575,7 +578,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         serviceTier: settings.serviceTier ?? null,
         cwd: reviewSession.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
-        approvalsReviewer: 'user',
+        approvalsReviewer: toApprovalsReviewer(settings),
         sandbox: toSandboxMode(settings),
         config: toThreadConfig(settings),
         developerInstructions: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
@@ -733,7 +736,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
           threadId: session.providerSessionId,
           cwd: session.worktreePath,
           approvalPolicy: toApprovalPolicy(session.requestedSettings),
-          approvalsReviewer: 'user',
+          approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
           sandbox: toSandboxMode(session.requestedSettings)
         });
         await this.store.updateAgentSession(session.id, {
@@ -806,22 +809,24 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     return this.supervisor.shutdown();
   }
 
-  async updateToolSettings(
-    settings: CodexExternalToolSettings,
-    restart: boolean
-  ): Promise<void> {
-    this.supervisor.setToolSettings(settings);
+  async updateRuntimeConfig(input: {
+    executable?: string;
+    toolSettings: CodexExternalToolSettings;
+    restart: boolean;
+  }): Promise<void> {
+    this.supervisor.setExecutable(input.executable);
+    this.supervisor.setToolSettings(input.toolSettings);
     if (!this.initialized) {
       return;
     }
-    if (!restart) {
-      this.toolSettingsRestartPending = true;
+    if (!input.restart) {
+      this.runtimeConfigRestartPending = true;
       this.preflightState = {
         ...this.preflightState,
         warnings: [
           ...new Set([
             ...this.preflightState.warnings,
-            TOOL_SETTINGS_PENDING_RESTART_WARNING
+            RUNTIME_CONFIG_PENDING_RESTART_WARNING
           ])
         ]
       };
@@ -830,7 +835,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     }
 
     await this.shutdown();
-    this.toolSettingsRestartPending = false;
+    this.runtimeConfigRestartPending = false;
     this.boundClient = undefined;
     this.models = [];
     this.initialized = false;
@@ -902,11 +907,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     } catch (error) {
       problems.push(error instanceof Error ? error.message : String(error));
     }
-    if (this.supervisor.runtimeCompatibilityWarning) {
-      warnings.push(this.supervisor.runtimeCompatibilityWarning);
-    }
-    if (this.toolSettingsRestartPending) {
-      warnings.push(TOOL_SETTINGS_PENDING_RESTART_WARNING);
+    if (this.runtimeConfigRestartPending) {
+      warnings.push(RUNTIME_CONFIG_PENDING_RESTART_WARNING);
     }
 
     this.preflightState = {
@@ -2219,6 +2221,13 @@ function toApprovalPolicy(
   settings: AgentExecutionSettings
 ): 'on-request' | 'never' {
   return settings.approvalPolicy === 'never' ? 'never' : 'on-request';
+}
+
+function toApprovalsReviewer(settings: AgentExecutionSettings): ApprovalsReviewer {
+  return settings.approvalsReviewer === 'auto_review' ||
+    settings.approvalsReviewer === 'guardian_subagent'
+    ? settings.approvalsReviewer
+    : 'user';
 }
 
 function toReviewTarget(target: AgentReviewTarget): ReviewTarget {

@@ -8,10 +8,13 @@ import type {
   StatusProjection,
   Task,
   TaskSnapshot,
-  TestRunRecord,
   PullRequestSnapshotRecord
 } from '../../shared/contracts';
-import { TASK_STORE_SCHEMA_VERSION, createInitialProjection } from '../../shared/contracts';
+import {
+  TASK_STORE_SCHEMA_VERSION,
+  completionPolicyRequiresMerge,
+  createInitialProjection
+} from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
 
@@ -22,7 +25,6 @@ export function createEmptyState(): StoreState {
     iterations: [],
     worktrees: [],
     gitSnapshots: [],
-    testRuns: [],
     githubRepositories: [],
     branchPublications: [],
     pullRequests: [],
@@ -51,7 +53,6 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     iterations: [...state.iterations],
     worktrees: [...state.worktrees],
     gitSnapshots: [...state.gitSnapshots],
-    testRuns: [...state.testRuns],
     githubRepositories: [...state.githubRepositories],
     branchPublications: [...state.branchPublications],
     pullRequests: [...state.pullRequests],
@@ -74,9 +75,6 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
 
   const taskIndex = next.tasks.findIndex((task) => task.id === event.taskId);
   const runIndex = event.runId ? next.runs.findIndex((run) => run.id === event.runId) : -1;
-  const testRunIndex = event.testRunId
-    ? next.testRuns.findIndex((testRun) => testRun.id === event.testRunId)
-    : -1;
 
   if (taskIndex === -1 && event.type !== 'TASK_CREATED') {
     return next;
@@ -88,10 +86,6 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
 
   if (runIndex >= 0) {
     next.runs[runIndex] = reduceRun(next.runs[runIndex], event);
-  }
-
-  if (testRunIndex >= 0) {
-    next.testRuns[testRunIndex] = reduceTestRun(next.testRuns[testRunIndex], event);
   }
 
   if (taskIndex >= 0) {
@@ -116,7 +110,7 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     next.tasks[taskIndex] = {
       ...task,
       workflowPhase: reduceWorkflowPhase(task, event, currentRun),
-      projection: reduceProjection(task.projection, event, currentRun),
+      projection: reduceProjection(task.projection, event, currentRun, task),
       updatedAt: event.receivedAt
     };
   }
@@ -132,38 +126,6 @@ function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {
     eventType === 'PROCESS_SIGNALED' ||
     eventType === 'CANCEL_REQUESTED'
   );
-}
-
-export function reduceTestRun(testRun: TestRunRecord, event: DomainEvent): TestRunRecord {
-  switch (event.type) {
-    case 'TEST_PROCESS_STARTED':
-      return {
-        ...testRun,
-        status: 'RUNNING',
-        processStatus: 'RUNNING'
-      };
-    case 'TEST_RUN_COMPLETED': {
-      const exitCode = getNullableNumber(event.payload, 'exitCode');
-      const signal = getString(event.payload, 'signal') as NodeJS.Signals | undefined;
-      const error = getString(event.payload, 'error');
-      return {
-        ...testRun,
-        status: error ? 'ERROR' : signal ? 'CANCELED' : exitCode === 0 ? 'PASSED' : 'FAILED',
-        processStatus: signal ? 'SIGNALED' : 'EXITED',
-        exitCode,
-        signal: signal ?? null,
-        endedAt: event.receivedAt
-      };
-    }
-    case 'TEST_RESULT_STALE':
-      return {
-        ...testRun,
-        status: 'STALE',
-        staleReason: getString(event.payload, 'reason')
-      };
-    default:
-      return testRun;
-  }
 }
 
 export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
@@ -321,13 +283,23 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
     case 'TRANSITION_COMPLETED':
       return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
     case 'MERGE_SNAPSHOT_CAPTURED':
-      if (getString(event.payload, 'status') === 'MERGED') {
+      if (mergedSnapshotSatisfiesCompletionPolicy(task, event)) {
         return 'DONE';
       }
       return task.workflowPhase;
     default:
       return task.workflowPhase;
   }
+}
+
+function mergedSnapshotSatisfiesCompletionPolicy(task: Task, event: DomainEvent): boolean {
+  if (
+    getString(event.payload, 'status') !== 'MERGED' ||
+    !completionPolicyRequiresMerge(task.completionPolicy)
+  ) {
+    return false;
+  }
+  return task.completionPolicy === 'MERGED';
 }
 
 function isReviewRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
@@ -341,7 +313,8 @@ function isReviewRunEvent(task: Task, event: DomainEvent, run?: RunRecord): bool
 export function reduceProjection(
   projection: StatusProjection | undefined,
   event: DomainEvent,
-  run?: RunRecord
+  run?: RunRecord,
+  task?: Task
 ): StatusProjection {
   const base = projection ?? createInitialProjection(event.receivedAt);
   const findings = mergeFindings(base.findings, findingsForEvent(event, run));
@@ -368,7 +341,6 @@ export function reduceProjection(
         requestedAction: 'REQUESTED',
         worktree: 'CREATING',
         git: 'NOT_INSPECTED',
-        tests: 'NOT_RUN',
         summary: 'Task iteration created; preparing isolated worktree.',
         findings,
         updatedAt: event.receivedAt
@@ -477,52 +449,10 @@ export function reduceProjection(
       return {
         ...base,
         git: 'COMMITTED_UNPUSHED',
-        tests: 'STALE',
+        ciChecks: base.githubPullRequest === 'UNLINKED' ? base.ciChecks : 'STALE',
         codexReview: reduceCodexReview(base.codexReview, event, run),
         health: maxHealth(base.health, 'WARNING'),
-        summary: 'Delivery commit created. Re-run tests before publishing.',
-        findings,
-        updatedAt: event.receivedAt
-      };
-    case 'TEST_RUN_STARTED':
-      return {
-        ...base,
-        tests: 'QUEUED',
-        summary: 'Local test command queued.',
-        findings,
-        updatedAt: event.receivedAt
-      };
-    case 'TEST_PROCESS_STARTED':
-      return {
-        ...base,
-        tests: 'RUNNING',
-        summary: 'Local test command is running.',
-        findings,
-        updatedAt: event.receivedAt
-      };
-    case 'TEST_RUN_COMPLETED': {
-      const exitCode = getNullableNumber(event.payload, 'exitCode');
-      const signal = getString(event.payload, 'signal');
-      const error = getString(event.payload, 'error');
-      const tests = error ? 'ERROR' : signal ? 'CANCELED' : exitCode === 0 ? 'PASSED' : 'FAILED';
-      return {
-        ...base,
-        tests,
-        health: tests === 'PASSED' ? base.health : tests === 'FAILED' || tests === 'ERROR' ? 'ERROR' : 'WARNING',
-        summary:
-          tests === 'PASSED'
-            ? 'Local tests passed for the current Git generation.'
-            : `Local tests ended with ${tests}.`,
-        findings,
-        updatedAt: event.receivedAt
-      };
-    }
-    case 'TEST_RESULT_STALE':
-      return {
-        ...base,
-        tests: 'STALE',
-        health: maxHealth(base.health, 'WARNING'),
-        summary: 'Local test result is stale because the Git generation changed.',
+        summary: 'Delivery commit created. Push and refresh PR status for current GitHub evidence.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -579,6 +509,8 @@ export function reduceProjection(
       return {
         ...base,
         githubPullRequest: getPullRequestStatus(event.payload) ?? base.githubPullRequest,
+        githubPullRequestNumber: getNumber(event.payload, 'number') ?? base.githubPullRequestNumber,
+        githubPullRequestUrl: getString(event.payload, 'url') ?? base.githubPullRequestUrl,
         summary: `Pull request status: ${getPullRequestStatus(event.payload) ?? 'UNKNOWN'}.`,
         findings,
         updatedAt: event.receivedAt
@@ -606,18 +538,25 @@ export function reduceProjection(
       };
     case 'MERGE_SNAPSHOT_CAPTURED': {
       const merge = getMergeStatus(event.payload) ?? base.merge;
+      const completionSatisfied = task
+        ? mergedSnapshotSatisfiesCompletionPolicy(task, event)
+        : merge === 'MERGED';
       return {
         ...base,
         merge,
         health:
           merge === 'MERGED'
-            ? 'HEALTHY'
+            ? completionSatisfied
+              ? 'HEALTHY'
+              : base.health
             : merge === 'CLOSED_UNMERGED' || merge === 'BLOCKED'
               ? 'ERROR'
               : base.health,
         summary:
-          merge === 'MERGED'
+          merge === 'MERGED' && completionSatisfied
             ? 'GitHub reports the pull request merged. Completion policy is satisfied.'
+            : merge === 'MERGED'
+              ? 'GitHub reports the pull request merged.'
             : `GitHub merge state: ${merge}.`,
         findings,
         updatedAt: event.receivedAt
@@ -1289,18 +1228,6 @@ function findingsForEvent(event: DomainEvent, run?: RunRecord): Finding[] {
         code: 'WORKFLOW_TRANSITION_BLOCKED',
         severity: 'BLOCKED',
         message: getString(event.payload, 'reason') ?? 'Transition blocked.',
-        createdAt: event.receivedAt
-      }
-    ];
-  }
-
-  if (event.type === 'TEST_RUN_COMPLETED' && getNullableNumber(event.payload, 'exitCode') !== 0) {
-    return [
-      {
-        id: `${event.id}:test-failed`,
-        code: 'LOCAL_TESTS_NOT_PASSING',
-        severity: 'ERROR',
-        message: `Local tests exited with code ${getNullableNumber(event.payload, 'exitCode') ?? 'unknown'}.`,
         createdAt: event.receivedAt
       }
     ];

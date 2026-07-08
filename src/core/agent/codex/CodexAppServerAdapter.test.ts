@@ -32,12 +32,27 @@ describe('CodexAppServerAdapter', () => {
     expect(provider.models[0]?.model).toBe('fake-model');
     expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
     const initializedServer = (await store.snapshot()).agentServers[0];
+    expect(initializedServer.runtimeResolution).toMatchObject({
+      selectedExecutable: executable,
+      selectedSource: 'config',
+      selectedVersion: '0.141.0',
+      selectedLaunchArgv: ['app-server', '--stdio'],
+      requiredCapabilities: expect.arrayContaining(['thread/start', 'turn/start', 'review/start'])
+    });
+    expect(initializedServer.runtimeResolution?.probes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          executable,
+          source: 'config',
+          compatible: true,
+          version: '0.141.0',
+          launchForm: 'stdio-flag'
+        })
+      ])
+    );
     const initializedJournal = await fs.readFile(
       initializedServer.protocolJournalPath,
       'utf8'
-    );
-    expect(readOutboundMethods(initializedJournal)).not.toContain(
-      'modelProvider/capabilities/read'
     );
     const initializeMessage = readOutboundMessages(initializedJournal).find(
       (message) => message.method === 'initialize'
@@ -46,9 +61,14 @@ describe('CodexAppServerAdapter', () => {
       capabilities: {
         experimentalApi: false,
         requestAttestation: false,
-        optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+        optOutNotificationMethods: expect.arrayContaining(
+          [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
+        )
       }
     });
+    expect(readOutboundMethods(initializedJournal)).not.toContain(
+      'modelProvider/capabilities/read'
+    );
 
     const task = await store.createTask({
       title: 'App Server turn',
@@ -58,8 +78,9 @@ describe('CodexAppServerAdapter', () => {
         model: 'fake-model',
         reasoningEffort: 'high',
         sandbox: 'WORKSPACE_WRITE',
-        networkAccess: false,
-        approvalPolicy: 'never'
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review'
       }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -91,7 +112,11 @@ describe('CodexAppServerAdapter', () => {
       (candidate) =>
         candidate.agentUsageSnapshots.length > 0 &&
         candidate.agentGoalSnapshots.length > 0 &&
-        candidate.agentSettingsObservations.length > 0,
+        candidate.agentSettingsObservations.some(
+          (record) =>
+            record.settings.networkAccess === true &&
+            record.settings.approvalsReviewer === 'auto_review'
+        ),
       'provider observations'
     );
     const completed = snapshot.runs.find((candidate) => candidate.id === run.id);
@@ -106,13 +131,44 @@ describe('CodexAppServerAdapter', () => {
     expect(snapshot.agentPlanRevisions[0]?.steps[0]?.status).toBe('IN_PROGRESS');
     expect(snapshot.agentUsageSnapshots[0]?.total.totalTokens).toBe(120);
     expect(snapshot.agentGoalSnapshots[0]?.syncState).toBe('IN_SYNC');
-    expect(snapshot.agentSettingsObservations[0]?.source).toBe(
-      'THREAD_START_RESPONSE'
-    );
+    expect(
+      snapshot.agentSettingsObservations.some(
+        (record) =>
+          record.source === 'THREAD_START_RESPONSE' &&
+          record.settings.approvalsReviewer === 'auto_review'
+      )
+    ).toBe(true);
+    expect(
+      snapshot.agentSettingsObservations.some(
+        (record) =>
+          record.source === 'THREAD_SETTINGS_NOTIFICATION' &&
+          record.settings.networkAccess === true &&
+          record.settings.approvalsReviewer === 'auto_review'
+      )
+    ).toBe(true);
     expect(snapshot.agentServers[0]?.runtimeKind).toBe('APP_SERVER');
     expect(
       snapshot.agentServers.some((server) => server.runtimeKind !== 'APP_SERVER')
     ).toBe(false);
+    const finalJournal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(finalJournal);
+    expect(outbound.find((message) => message.method === 'thread/start')?.params)
+      .toMatchObject({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review'
+      });
+    expect(outbound.find((message) => message.method === 'turn/start')?.params)
+      .toMatchObject({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+        sandboxPolicy: {
+          type: 'workspaceWrite',
+          networkAccess: true
+        }
+      });
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -174,8 +230,6 @@ describe('CodexAppServerAdapter', () => {
     expect(resolved?.status).toBe('RESOLVED');
     expect(resolved?.responseRawMessage?.direction).toBe('OUTBOUND');
     expect((await store.getRun(run.id))?.status).toBe('COMPLETED');
-    expect((await store.getTask(task.id))?.projection.tests).toBe('NOT_RUN');
-    expect((await store.snapshot()).testRuns).toHaveLength(0);
     await expect(
       orchestrator.respondToInteraction({
         taskId: task.id,
@@ -928,8 +982,12 @@ if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli 0.141.0\\n');
   process.exit(0);
 }
-if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.includes('--json')) {
+if (process.argv[2] === 'mcp' && process.argv[3] === 'list') {
   process.stdout.write('[]\\n');
+  process.exit(0);
+}
+if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
+  process.stdout.write('Usage: codex app-server [OPTIONS]\\n  --stdio\\n  --listen <URL>\\n');
   process.exit(0);
 }
 
@@ -1015,8 +1073,8 @@ const threadResponse = (request = {}) => {
   serviceTier: null,
   cwd: process.cwd(),
   instructionSources: [],
-  approvalPolicy: approvalMode ? 'on-request' : 'never',
-  approvalsReviewer: 'user',
+  approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
+  approvalsReviewer: request.approvalsReviewer ?? 'user',
   sandbox: {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
@@ -1204,6 +1262,12 @@ rl.on('line', (line) => {
       } });
       break;
     }
+    case 'thread/goal/get':
+      send({ id: message.id, result: { goal: null } });
+      break;
+    case 'turn/steer':
+      send({ id: message.id, result: { turnId: 'turn-1' } });
+      break;
     case 'review/start':
       send({ id: message.id, result: {
         turn: { ...turn('inProgress'), id: reviewResponseTurnId },
@@ -1246,6 +1310,29 @@ rl.on('line', (line) => {
       send({ id: message.id, result: { turn: turn('inProgress') } });
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
+        send({ method: 'thread/settings/updated', params: {
+          threadId: 'thread-1',
+          threadSettings: {
+            cwd: message.params.cwd ?? process.cwd(),
+            approvalPolicy: message.params.approvalPolicy ?? 'on-request',
+            approvalsReviewer: message.params.approvalsReviewer ?? 'user',
+            sandboxPolicy: message.params.sandboxPolicy ?? {
+              type: 'workspaceWrite',
+              writableRoots: [process.cwd()],
+              networkAccess: false,
+              excludeTmpdirEnvVar: false,
+              excludeSlashTmp: false
+            },
+            activePermissionProfile: null,
+            model: message.params.model ?? 'fake-model',
+            modelProvider: 'openai',
+            serviceTier: message.params.serviceTier ?? null,
+            effort: message.params.effort ?? 'high',
+            summary: message.params.summary ?? null,
+            collaborationMode: null,
+            personality: message.params.personality ?? null
+          }
+        } });
         if (interruptMode) {
           return;
         }

@@ -108,6 +108,8 @@ export type AgentSessionStatus =
   | 'DELETED'
   | 'UNKNOWN';
 
+export type AgentApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
+
 export interface AgentExecutionSettings {
   model?: string;
   modelProvider?: string;
@@ -116,6 +118,17 @@ export interface AgentExecutionSettings {
   sandbox?: 'READ_ONLY' | 'WORKSPACE_WRITE' | 'DANGER_FULL_ACCESS';
   networkAccess?: boolean;
   approvalPolicy?: string;
+  approvalsReviewer?: AgentApprovalsReviewer;
+}
+
+export const DEFAULT_AGENT_APPROVALS_REVIEWER: AgentApprovalsReviewer = 'user';
+
+export function normalizeAgentApprovalsReviewer(
+  value: unknown
+): AgentApprovalsReviewer {
+  return value === 'auto_review' || value === 'guardian_subagent'
+    ? value
+    : DEFAULT_AGENT_APPROVALS_REVIEWER;
 }
 
 export type CodexWebSearchMode = 'disabled' | 'cached' | 'live';
@@ -128,8 +141,35 @@ export interface CodexExternalToolSettings {
   apps: CodexAppsMode;
 }
 
+export interface ExternalExecutablePathSettings {
+  gitExecutablePath: string | null;
+  codexExecutablePath: string | null;
+  ghExecutablePath: string | null;
+}
+
+export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
+
+export interface TaskManagerRepositorySettings {
+  knownPaths: string[];
+  selectedPath: string | null;
+}
+
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 3 as const;
+
 export interface TaskManagerAppSettings {
+  schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
+  theme: TaskManagerThemePreference;
+  sidebarCollapsed: boolean;
+  showMascot: boolean;
+  firstLaunchSetupCompleted: boolean;
+  defaultModel?: string;
+  defaultReasoningEffort?: string;
+  promptRefinementModel?: string;
+  reviewModel?: string;
+  reviewReasoningEffort?: string;
   codexExternalTools: CodexExternalToolSettings;
+  externalExecutables: ExternalExecutablePathSettings;
+  repositories: TaskManagerRepositorySettings;
 }
 
 export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
@@ -138,10 +178,26 @@ export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
   apps: 'disabled'
 };
 
+export const DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS: ExternalExecutablePathSettings = {
+  gitExecutablePath: null,
+  codexExecutablePath: null,
+  ghExecutablePath: null
+};
+
 export const DEFAULT_PROMPT_REFINEMENT_MODEL = 'gpt-5.3-codex-spark';
 
 export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
-  codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
+  schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+  theme: 'device',
+  sidebarCollapsed: false,
+  showMascot: true,
+  firstLaunchSetupCompleted: false,
+  codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
+  externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
+  repositories: {
+    knownPaths: [],
+    selectedPath: null
+  }
 };
 
 export type AgentObservationSource =
@@ -266,6 +322,27 @@ export type AgentJsonValue =
   | AgentJsonValue[]
   | { [key: string]: AgentJsonValue };
 
+export interface AgentRuntimeProbeDiagnostic {
+  executable: string;
+  source: string;
+  explicit: boolean;
+  compatible: boolean;
+  version?: string;
+  launchArgv?: string[];
+  launchForm?: string;
+  missingCapabilities?: string[];
+  detail: string;
+}
+
+export interface AgentRuntimeResolutionDiagnostics {
+  selectedExecutable: string;
+  selectedSource: string;
+  selectedVersion?: string;
+  selectedLaunchArgv?: string[];
+  requiredCapabilities: string[];
+  probes: AgentRuntimeProbeDiagnostic[];
+}
+
 export interface AgentServerInstance {
   id: string;
   provider: AgentProviderId;
@@ -278,6 +355,7 @@ export interface AgentServerInstance {
   runtimeVersion?: string;
   schemaVersion?: string;
   schemaHash?: string;
+  runtimeResolution?: AgentRuntimeResolutionDiagnostics;
   protocolJournalPath: string;
   startedAt: string;
   initializedAt?: string;

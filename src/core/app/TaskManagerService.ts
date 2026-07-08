@@ -16,7 +16,6 @@ import type {
   RefinePromptResponse,
   RepositoryPreflight,
   RunRecord,
-  RunTestsRequest,
   StartRunRequest,
   Task,
   TaskSnapshot,
@@ -33,16 +32,35 @@ import type {
   AgentExecutionSettings,
   AgentRunMode,
   TaskManagerAppSettings,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ExternalToolStatusReport,
+  TestExternalToolRequest,
+  ExternalToolProbeResult,
+  InspectOpenTargetRequest,
+  OpenTargetInspection,
+  ExecuteOpenTargetActionRequest,
+  OpenTargetActionResult
 } from '../../shared/contracts';
-import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/contracts';
+import {
+  DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  completionPolicyRequiresPassingChecks,
+  completionPolicyRequiresMerge,
+  normalizeAgentApprovalsReviewer,
+  normalizePullRequestTitle,
+  verifiedChecksMatchMergeHead
+} from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
-import { git, gitSucceeds } from '../git/gitCli';
+import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
 import { PromptRefinementService } from '../prompt/PromptRefinementService';
-import { LocalTestRunner } from '../test/LocalTestRunner';
+import {
+  buildContinuationPrompt,
+  buildForkAlternativeTaskPrompt,
+  buildInitialRunPrompt,
+  buildSteerInstruction
+} from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -51,16 +69,26 @@ import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
+import {
+  MemoryAppSettingsStore,
+  type AppSettingsStorage
+} from '../settings/AppSettingsStore';
+import { ExternalToolResolver } from '../tools/ExternalToolResolver';
+import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
   private readonly codexAdapter: CodexAppServerAdapter;
-  private readonly testRunner: LocalTestRunner;
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
   private readonly promptRefiner = new PromptRefinementService();
+  private readonly appSettingsStore: AppSettingsStorage;
+  private readonly externalToolResolver: ExternalToolResolver;
+  private readonly openTargets: OpenTargetService;
+  private readonly taskActionLocks = new Map<string, string>();
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
+  private codexExecutable: string | undefined;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -68,24 +96,37 @@ export class TaskManagerService {
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
+      gitPath?: string;
       ghPath?: string;
       codexPath?: string;
+      agentCwd?: string;
+      appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
+      openTargetHost?: OpenTargetHost;
     } = {}
   ) {
+    const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
     this.events = events;
+    this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
+    this.externalToolResolver = new ExternalToolResolver({
+      cwd: agentCwd,
+      overrides: {
+        git: options.gitPath,
+        codex: options.codexPath,
+        gh: options.ghPath
+      }
+    });
+    this.openTargets = new OpenTargetService(options.openTargetHost);
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
-      cwd: defaultRepositoryPath,
+      cwd: agentCwd,
       executable: options.codexPath,
       toolSettings: this.appSettings.codexExternalTools
     });
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ??
-        this.codexAdapter
+      options.agentProviderAdapter ?? this.codexAdapter
     );
-    this.testRunner = new LocalTestRunner(store, events);
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
         process.env.TASK_MANAGER_WORKTREE_ROOT ??
@@ -101,8 +142,8 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
-    this.appSettings = await this.store.getAppSettings();
-    await this.codexAdapter.updateToolSettings(this.appSettings.codexExternalTools, false);
+    this.appSettings = await this.appSettingsStore.get();
+    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
     await this.agents.initialize();
     const snapshot = await this.store.snapshot();
     const recoveryTaskIds = new Set(
@@ -122,24 +163,69 @@ export class TaskManagerService {
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.store.getAppSettings();
+    this.appSettings = await this.appSettingsStore.get();
     return structuredClone(this.appSettings);
   }
 
-  async updateAppSettings(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
-    const next = await this.store.updateAppSettings(input);
-    this.appSettings = next;
-    await this.codexAdapter.updateToolSettings(
-      next.codexExternalTools,
-      !(await this.hasActiveAgentRun())
+  async updateAppSettings(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    this.appSettings = await this.appSettingsStore.update(input);
+    const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
+    if (affectsExternalTools) {
+      const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
+      try {
+        await this.applyRuntimeSettings({
+          restartCodex: affectsCodexRuntime && !(await this.hasActiveAgentRun()),
+          updateCodex: affectsCodexRuntime
+        });
+      } catch {
+        // The setting is still saved; provider/tool status reports the runtime failure.
+      }
+      if (affectsCodexRuntime) {
+        this.events.emit({
+          type: 'provider.updated',
+          taskId: 'settings',
+          payload: await this.getAgentProviderState(),
+          at: new Date().toISOString()
+        });
+      }
+    }
+    return structuredClone(this.appSettings);
+  }
+
+  async getExternalToolStatus(): Promise<ExternalToolStatusReport> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.externalToolResolver.getStatus(this.appSettings.externalExecutables);
+  }
+
+  async testExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.externalToolResolver.probe(
+      input.tool,
+      this.appSettings.externalExecutables,
+      input
     );
-    this.events.emit({
-      type: 'provider.updated',
-      taskId: 'settings',
-      payload: await this.getAgentProviderState(),
-      at: new Date().toISOString()
+  }
+
+  async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.openTargets.inspect(input, {
+      snapshot: await this.store.snapshot(),
+      defaultRepositoryPath: this.defaultRepositoryPath,
+      appSettings: this.appSettings
     });
-    return structuredClone(next);
+  }
+
+  async executeOpenTargetAction(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult> {
+    this.appSettings = await this.appSettingsStore.get();
+    return this.openTargets.execute(input, {
+      snapshot: await this.store.snapshot(),
+      defaultRepositoryPath: this.defaultRepositoryPath,
+      appSettings: this.appSettings
+    });
   }
 
   validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
@@ -163,6 +249,7 @@ export class TaskManagerService {
       input.repositoryPath,
       input.input,
       input.model,
+      this.codexExecutable,
       this.appSettings.codexExternalTools
     );
     this.events.emit({
@@ -230,13 +317,17 @@ export class TaskManagerService {
   }
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
-    const task = await this.requireTask(input.taskId);
-    const worktree = await this.prepareWorktree({ taskId: task.id });
-    return this.startPreparedRun({
-      task,
-      worktree,
-      mode: input.mode,
-      settings: input.settings
+    return this.withTaskAction(input.taskId, 'Agent run', async () => {
+      const task = await this.requireTask(input.taskId);
+      const snapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
+      const worktree = await this.prepareWorktree({ taskId: task.id });
+      return this.startPreparedRun({
+        task,
+        worktree,
+        mode: input.mode,
+        settings: input.settings
+      });
     });
   }
 
@@ -281,73 +372,93 @@ export class TaskManagerService {
 
   async steerRun(input: SteerRunRequest): Promise<void> {
     const run = await this.requireRunForTask(input.runId, input.taskId);
-    return this.agents.steerRun(run.id, input.instruction);
+    const snapshot = await this.store.snapshot();
+    const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
+    return this.agents.steerRun(
+      run.id,
+      buildSteerInstruction({
+        instruction: input.instruction,
+        worktreePath: worktree?.worktreePath
+      })
+    );
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
-    const { task, run, iteration, worktree } = await this.requireContinuationContext(
-      input.taskId,
-      input.runId
-    );
-    assertContinuable(run);
-    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-    const settings = followUpSettings(task, run, input.settings, false);
-    const prompt = buildContinuationPrompt({
-      task,
-      run,
-      gitSnapshot,
-      instruction: input.instruction,
-      kind: 'continuation'
-    });
-    return this.agents.startTurn({
-      task,
-      iteration,
-      worktree,
-      sessionId: run.sessionId,
-      mode: 'FOLLOW_UP',
-      prompt,
-      settings,
-      generationKey: gitSnapshot.dirtyFingerprint,
-      beforeGitSnapshotId: gitSnapshot.id,
-      continuedFromRunId: run.id
+    return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
+      const { task, run, iteration, worktree } = await this.requireContinuationContext(
+        input.taskId,
+        input.runId
+      );
+      const snapshot = await this.store.snapshot();
+      assertContinuable(run);
+      this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
+        exceptRunId: run.id
+      });
+      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+      const settings = followUpSettings(task, run, input.settings, false);
+      const prompt = buildContinuationPrompt({
+        task,
+        run,
+        gitSnapshot,
+        instruction: input.instruction,
+        kind: 'continuation'
+      });
+      return this.agents.startTurn({
+        task,
+        iteration,
+        worktree,
+        sessionId: run.sessionId,
+        mode: 'FOLLOW_UP',
+        prompt,
+        settings,
+        generationKey: gitSnapshot.dirtyFingerprint,
+        beforeGitSnapshotId: gitSnapshot.id,
+        continuedFromRunId: run.id
+      });
     });
   }
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
-    const { task, run, iteration, worktree } = await this.requireContinuationContext(
-      input.taskId,
-      input.runId
-    );
-    assertRetryable(run);
-    if (input.strategy === 'FORK') {
-      return this.startForkedAlternative({
-        sourceTaskId: task.id,
-        sourceRun: run,
-        sourceWorktree: worktree,
-        instruction: input.instruction,
-        settings: input.settings
+    return this.withTaskAction(input.taskId, 'Agent retry', async () => {
+      const { task, run, iteration, worktree } = await this.requireContinuationContext(
+        input.taskId,
+        input.runId
+      );
+      const snapshot = await this.store.snapshot();
+      assertRetryable(run);
+      this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
+        exceptRunId: run.id
       });
-    }
-    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-    const settings = followUpSettings(task, run, input.settings, false);
-    const prompt = buildContinuationPrompt({
-      task,
-      run,
-      gitSnapshot,
-      instruction: input.instruction,
-      kind: 'retry'
-    });
-    return this.agents.startTurn({
-      task,
-      iteration,
-      worktree,
-      sessionId: run.sessionId,
-      mode: 'RETRY',
-      prompt,
-      settings,
-      generationKey: gitSnapshot.dirtyFingerprint,
-      beforeGitSnapshotId: gitSnapshot.id,
-      retryOfRunId: run.id
+      if (input.strategy === 'FORK') {
+        return this.startForkedAlternative({
+          sourceTaskId: task.id,
+          sourceRun: run,
+          sourceWorktree: worktree,
+          instruction: input.instruction,
+          settings: input.settings
+        });
+      }
+      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+      const settings = followUpSettings(task, run, input.settings, false);
+      const prompt = buildContinuationPrompt({
+        task,
+        run,
+        gitSnapshot,
+        instruction: input.instruction,
+        kind: 'retry'
+      });
+      return this.agents.startTurn({
+        task,
+        iteration,
+        worktree,
+        sessionId: run.sessionId,
+        mode: 'RETRY',
+        prompt,
+        settings,
+        generationKey: gitSnapshot.dirtyFingerprint,
+        beforeGitSnapshotId: gitSnapshot.id,
+        retryOfRunId: run.id
+      });
     });
   }
 
@@ -369,7 +480,6 @@ export class TaskManagerService {
         instruction: input.instruction
       }),
       repositoryPath: sourceTask.repositoryPath,
-      testCommand: sourceTask.testCommand,
       agentSettings: sourceTask.agentSettings,
       sourceTaskId: sourceTask.id,
       sourceRunId: input.sourceRun.id
@@ -404,42 +514,69 @@ export class TaskManagerService {
     }
   }
 
+  private async applyRuntimeSettings(input: {
+    restartCodex: boolean;
+    updateCodex: boolean;
+  }): Promise<ExternalToolStatusReport> {
+    const status = await this.externalToolResolver.getStatus(
+      this.appSettings.externalExecutables
+    );
+    configureGitExecutablePath(executableForRuntime(status.tools.git));
+    this.github.setExecutable(executableForRuntime(status.tools.gh));
+    if (input.updateCodex) {
+      this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
+      await this.codexAdapter.updateRuntimeConfig({
+        executable: this.codexExecutable,
+        toolSettings: this.appSettings.codexExternalTools,
+        restart: input.restartCodex
+      });
+    }
+    return status;
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
-    const task = await this.requireTask(input.taskId);
-    const snapshot = await this.store.snapshot();
-    const runId = input.runId ?? task.currentRunId;
-    if (!runId) {
-      throw new Error('Complete an agent turn before starting a detached review.');
-    }
-    const run = await this.requireRunForTask(runId, task.id);
-    if (ACTIVE_AGENT_RUN_STATUSES.has(run.status)) {
-      throw new Error('Wait for the active turn to finish before starting a review.');
-    }
-    const iteration = snapshot.iterations.find(
-      (candidate) => candidate.id === run.iterationId
-    );
-    const worktree = snapshot.worktrees.find(
-      (candidate) => candidate.id === run.worktreeId
-    );
-    if (!iteration || !worktree) {
-      throw new Error('The source run no longer has a valid task iteration.');
-    }
-    const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-    const settings = followUpSettings(task, run, input.settings, true);
-    return this.agents.startReview({
-      task,
-      iteration,
-      worktree,
-      sourceRun: run,
-      target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
-      settings,
-      generationKey: gitSnapshot.dirtyFingerprint,
-      beforeGitSnapshotId: gitSnapshot.id
+    return this.withTaskAction(input.taskId, 'Codex review', async () => {
+      const task = await this.requireTask(input.taskId);
+      const snapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
+      const runId = input.runId ?? task.currentRunId;
+      if (!runId) {
+        throw new Error('Complete an agent turn before starting a detached review.');
+      }
+      const run = await this.requireRunForTask(runId, task.id);
+      if (
+        ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
+          run.status
+        )
+      ) {
+        throw new Error('Wait for the active turn to finish before starting a review.');
+      }
+      const iteration = snapshot.iterations.find(
+        (candidate) => candidate.id === run.iterationId
+      );
+      const worktree = snapshot.worktrees.find(
+        (candidate) => candidate.id === run.worktreeId
+      );
+      if (!iteration || !worktree) {
+        throw new Error('The source run no longer has a valid task iteration.');
+      }
+      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+      const settings = followUpSettings(task, run, input.settings, true);
+      return this.agents.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun: run,
+        target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+        settings,
+        generationKey: gitSnapshot.dirtyFingerprint,
+        beforeGitSnapshotId: gitSnapshot.id
+      });
     });
   }
 
@@ -454,13 +591,6 @@ export class TaskManagerService {
 
   shutdown(): Promise<void> {
     return this.agents.shutdown();
-  }
-
-  async runTests(input: RunTestsRequest) {
-    const task = await this.requireTask(input.taskId);
-    const worktree = await this.requireWorktree(task);
-    const snapshot = await this.refreshEvidence({ taskId: task.id });
-    return this.testRunner.start(task, worktree, snapshot);
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
@@ -487,10 +617,25 @@ export class TaskManagerService {
   }
 
   async createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord> {
+    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+      this.createDeliveryCommitUnlocked(input)
+    );
+  }
+
+  private async createDeliveryCommitUnlocked(
+    input: CreateDeliveryCommitRequest
+  ): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
+    const snapshot = await this.store.snapshot();
+    this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
     const worktree = await this.requireWorktree(task);
     const latestGit = await this.refreshEvidence({ taskId: task.id });
-    if (latestGit.status === 'CONFLICTED' || latestGit.status === 'UNAVAILABLE') {
+    if (
+      latestGit.status === 'CONFLICTED' ||
+      latestGit.status === 'DIVERGED' ||
+      latestGit.status === 'UNAVAILABLE' ||
+      latestGit.status === 'UNKNOWN'
+    ) {
       throw new Error(`Cannot create delivery commit while Git status is ${latestGit.status}.`);
     }
     if (latestGit.workingDiffFileCount === 0 && latestGit.stagedCount === 0 && latestGit.untrackedCount === 0) {
@@ -527,7 +672,15 @@ export class TaskManagerService {
   }
 
   async publishBranch(input: PublishBranchRequest) {
+    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+      this.publishBranchUnlocked(input)
+    );
+  }
+
+  private async publishBranchUnlocked(input: PublishBranchRequest) {
     const task = await this.requireTask(input.taskId);
+    const snapshot = await this.store.snapshot();
+    this.assertNoActiveTaskRun(snapshot, task.id, 'publishing the branch');
     const worktree = await this.requireWorktree(task);
     const latestGit = await this.ensureCommittedPublishableGit(task);
 
@@ -554,30 +707,39 @@ export class TaskManagerService {
   }
 
   async createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord> {
+    return this.withTaskAction(input.taskId, 'GitHub delivery', () =>
+      this.createPullRequestUnlocked(input)
+    );
+  }
+
+  private async createPullRequestUnlocked(
+    input: CreatePullRequestRequest
+  ): Promise<PullRequestSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
+    const activeSnapshot = await this.store.snapshot();
+    this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
+    let latestGit: GitSnapshotRecord | undefined =
+      await this.ensureCommittedPublishableGit(task);
     let snapshot = await this.store.snapshot();
-    let latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
-    let latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
     let latestPublication = latestForIteration(
       snapshot.branchPublications,
       task.currentIterationId,
       'updatedAt'
     );
 
-    if (latestPublication?.status !== 'PUSHED') {
-      latestPublication = await this.publishBranch({ taskId: task.id });
+    if (latestPublication?.status !== 'PUSHED' || latestPublication.headSha !== latestGit.headSha) {
+      latestPublication = await this.publishBranchUnlocked({ taskId: task.id });
       snapshot = await this.store.snapshot();
       latestGit = latestForIteration(snapshot.gitSnapshots, task.currentIterationId, 'capturedAt');
-      latestTest = latestForIteration(snapshot.testRuns, task.currentIterationId, 'startedAt');
     }
     assertPublishReady(latestGit);
+    const title = normalizePullRequestTitle(input.title, task.title);
 
     const prBodyContent = await this.github.writePullRequestBody({
       filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
       task,
-      gitDiffStat: latestGit?.diffStat,
-      testStatus: latestTest?.status,
+      gitDiffStat: latestGit.diffStat,
       agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
@@ -587,9 +749,9 @@ export class TaskManagerService {
     const sync = await this.github.createOrFindDraftPullRequest({
       task,
       worktree,
-      headSha: latestGit?.headSha,
       baseRef: worktree.baseRef,
-      bodyFilePath: bodyPath
+      bodyFilePath: bodyPath,
+      title
     });
     sync.pullRequest.bodyArtifactId = bodyArtifact.id;
     const pullRequest = await this.store.recordPullRequestSync(sync);
@@ -603,68 +765,74 @@ export class TaskManagerService {
   }
 
   async refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined> {
-    const task = await this.requireTask(input.taskId);
-    const worktree = await this.requireWorktree(task);
-    const latest = await this.store.getLatestPullRequest(task.id);
-    if (!latest?.number && !latest?.url) {
-      return undefined;
-    }
-    try {
-      const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
-      const stored = await this.store.recordPullRequestSync(sync);
-      this.emitGitHubUpdate(task.id, worktree, stored);
-      return stored;
-    } catch (error) {
-      await this.store.appendEvent(
-        createDomainEvent({
-          type: 'GITHUB_SYNC_FAILED',
-          taskId: task.id,
-          iterationId: worktree.iterationId,
-          worktreeId: worktree.id,
-          source: 'github',
-          payload: { error: error instanceof Error ? error.message : String(error) }
-        })
-      );
-      throw error;
-    }
+    return this.withTaskAction(input.taskId, 'GitHub refresh', async () => {
+      const task = await this.requireTask(input.taskId);
+      const worktree = await this.requireWorktree(task);
+      const latest = await this.store.getLatestPullRequest(task.id);
+      if (!latest?.number && !latest?.url) {
+        return undefined;
+      }
+      try {
+        const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
+        const stored = await this.store.recordPullRequestSync(sync);
+        this.emitGitHubUpdate(task.id, worktree, stored);
+        return stored;
+      } catch (error) {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'GITHUB_SYNC_FAILED',
+            taskId: task.id,
+            iterationId: worktree.iterationId,
+            worktreeId: worktree.id,
+            source: 'github',
+            payload: { error: error instanceof Error ? error.message : String(error) }
+          })
+        );
+        throw error;
+      }
+    });
   }
 
   async transitionTask(input: TransitionTaskRequest): Promise<Task> {
-    const task = await this.requireTask(input.taskId);
-    const snapshot = await this.store.snapshot();
-    const latestGit = snapshot.gitSnapshots
-      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
-      .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
-    const latestTest = snapshot.testRuns
-      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
-    const latestPr = snapshot.pullRequests
-      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
-      .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
-    const latestMerge = snapshot.mergeSnapshots
-      .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
-      .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+    return this.withTaskAction(input.taskId, 'Workflow transition', async () => {
+      const task = await this.requireTask(input.taskId);
+      const snapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
+      const latestGit = snapshot.gitSnapshots
+        .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+      const latestPr = snapshot.pullRequests
+        .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+        .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+      const latestCi = snapshot.ciRollups
+        .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+        .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+      const latestMerge = snapshot.mergeSnapshots
+        .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
+        .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
 
-    const blockedReason = transitionBlocker(task, input.toPhase, {
-      hasWorktree: Boolean(task.currentWorktreeId),
-      hasGitSnapshot: Boolean(latestGit),
-      hasTestRun: Boolean(latestTest),
-      gitStatus: latestGit?.status ?? task.projection.git,
-      testStatus: latestTest?.status ?? task.projection.tests,
-      gitHeadSha: latestGit?.headSha,
-      testHeadSha: latestTest?.testedHeadSha,
-      testDirtyFingerprint: latestTest?.testedDirtyFingerprint,
-      gitDirtyFingerprint: latestGit?.dirtyFingerprint,
-      pullRequestStatus: latestPr?.status,
-      pullRequestHeadSha: latestPr?.headRefOid,
-      mergeStatus: latestMerge?.status
+      const blockedReason = transitionBlocker(task, input.toPhase, {
+        hasWorktree: Boolean(task.currentWorktreeId),
+        hasGitSnapshot: Boolean(latestGit),
+        gitStatus: latestGit?.status ?? task.projection.git,
+        gitHeadSha: latestGit?.headSha,
+        gitDirtyFingerprint: latestGit?.dirtyFingerprint,
+        pullRequestStatus: latestPr?.status,
+        pullRequestHeadSha: latestPr?.headRefOid,
+        ciStatus: latestCi?.status ?? task.projection.ciChecks,
+        ciHeadSha: latestCi?.headSha,
+        ciPullRequestNumber: latestCi?.pullRequestNumber,
+        mergeStatus: latestMerge?.status,
+        mergeHeadSha: latestMerge?.headSha,
+        mergePullRequestNumber: latestMerge?.pullRequestNumber
+      });
+      if (blockedReason) {
+        await this.store.recordBlockedTransition(task, input.toPhase, blockedReason);
+        throw new Error(blockedReason);
+      }
+
+      return this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
     });
-    if (blockedReason) {
-      await this.store.recordBlockedTransition(task, input.toPhase, blockedReason);
-      throw new Error(blockedReason);
-    }
-
-    return this.store.transitionTask(task.id, input.toPhase, 'Guarded transition accepted.');
   }
 
   async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
@@ -821,9 +989,49 @@ export class TaskManagerService {
   private async ensureCommittedPublishableGit(task: Task): Promise<GitSnapshotRecord> {
     const latestGit = await this.refreshEvidence({ taskId: task.id });
     if (latestGit.status === 'DIRTY') {
-      return this.createDeliveryCommit({ taskId: task.id });
+      return this.createDeliveryCommitUnlocked({ taskId: task.id });
     }
     return latestGit;
+  }
+
+  private async withTaskAction<T>(
+    taskId: string,
+    label: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    const current = this.taskActionLocks.get(taskId);
+    if (current) {
+      throw new Error(`${current} is already running for this task.`);
+    }
+    this.taskActionLocks.set(taskId, label);
+    try {
+      return await action();
+    } finally {
+      if (this.taskActionLocks.get(taskId) === label) {
+        this.taskActionLocks.delete(taskId);
+      }
+    }
+  }
+
+  private assertNoActiveTaskRun(
+    snapshot: TaskSnapshot,
+    taskId: string,
+    action: string,
+    options: { exceptRunId?: string } = {}
+  ): void {
+    const activeRun = snapshot.runs.find(
+      (run) =>
+        run.taskId === taskId &&
+        run.id !== options.exceptRunId &&
+        ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+    );
+    if (!activeRun) {
+      return;
+    }
+    if (activeRun.mode === 'REVIEW') {
+      throw new Error(`Wait for the Codex review to finish before ${action}.`);
+    }
+    throw new Error(`Stop or let the active agent run finish before ${action}.`);
   }
 }
 
@@ -850,88 +1058,24 @@ export function mergeRunSettings(input: {
     {
       sandbox: defaultSandbox,
       networkAccess: false,
-      approvalPolicy: 'on-request'
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
     } satisfies AgentExecutionSettings,
     ...input.settings.filter(Boolean)
   );
+  const approvalPolicy = requestedSettings.approvalPolicy ?? 'on-request';
   return {
     ...requestedSettings,
     sandbox: input.readOnly
       ? 'READ_ONLY'
       : (requestedSettings.sandbox ?? defaultSandbox),
     networkAccess: requestedSettings.networkAccess ?? false,
-    approvalPolicy: requestedSettings.approvalPolicy ?? 'on-request'
+    approvalPolicy,
+    approvalsReviewer:
+      input.readOnly || approvalPolicy === 'never'
+        ? 'user'
+        : normalizeAgentApprovalsReviewer(requestedSettings.approvalsReviewer)
   };
-}
-
-function buildContinuationPrompt(input: {
-  task: Task;
-  run: RunRecord;
-  gitSnapshot: GitSnapshotRecord;
-  instruction?: string;
-  kind: 'continuation' | 'retry';
-}): string {
-  const instruction = input.instruction?.trim();
-  return [
-    `Authoritative Task Monki goal:\n${input.task.prompt}`,
-    '',
-    `This is a ${input.kind} after run ${input.run.id} ended with ${input.run.status}.`,
-    `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
-    instruction ? `Additional user instruction:\n${instruction}` : undefined,
-    '',
-    `Repository root: ${input.gitSnapshot.worktreePath}`,
-    'Continue in the existing isolated task worktree.',
-    'Only modify files inside this worktree.',
-    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-    'Reinspect the current repository state instead of assuming the prior turn completed every step.',
-    'When finished, summarize the files changed and verification you performed.'
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
-}
-
-function buildInitialRunPrompt(input: {
-  task: Task;
-  worktree: WorktreeRecord;
-  settings: AgentExecutionSettings;
-  readOnlyMode: boolean;
-}): string {
-  return [
-    input.task.prompt,
-    '',
-    input.readOnlyMode
-      ? 'Analyze this task in an isolated Git worktree without modifying files.'
-      : 'You are implementing this task in an isolated Git worktree.',
-    `Repository root: ${input.worktree.worktreePath}`,
-    input.settings.sandbox === 'WORKSPACE_WRITE'
-      ? 'Only modify files inside this worktree.'
-      : 'Do not modify repository files.',
-    'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-    'When finished, summarize the files changed and verification you performed.'
-  ].join('\n');
-}
-
-function buildForkAlternativeTaskPrompt(input: {
-  task: Task;
-  run: RunRecord;
-  worktree: WorktreeRecord;
-  instruction?: string;
-}): string {
-  const instruction = input.instruction?.trim();
-  return [
-    'Alternative attempt for this Task Monki goal:',
-    input.task.prompt,
-    '',
-    `Source task: ${input.task.id}`,
-    `Source run: ${input.run.id} (${input.run.status})`,
-    `Source base: ${input.worktree.baseSha}`,
-    '',
-    'Start fresh from the source task base revision in this new isolated worktree.',
-    'Do not assume files changed by the source attempt are present.',
-    instruction ? `Alternative direction:\n${instruction}` : undefined
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n');
 }
 
 function assertContinuable(run: RunRecord): void {
@@ -954,6 +1098,26 @@ function assertRetryable(run: RunRecord): void {
   }
 }
 
+function executableForRuntime(result: ExternalToolProbeResult): string {
+  return result.resolvedPath ?? result.executable;
+}
+
+function explicitExecutableForCodexRuntime(
+  result: ExternalToolProbeResult
+): string | undefined {
+  if (result.source === 'auto') {
+    return undefined;
+  }
+  return result.configuredPath ?? result.executable;
+}
+
+function affectsCodexRuntimeSettings(input: UpdateAppSettingsRequest): boolean {
+  return Boolean(
+    input.codexExternalTools ||
+      (input.externalExecutables && 'codexExecutablePath' in input.externalExecutables)
+  );
+}
+
 const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'QUEUED',
   'STARTING',
@@ -964,17 +1128,9 @@ const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'RECOVERY_REQUIRED'
 ]);
 
-const ACTIVE_TEST_STATUSES = new Set(['QUEUED', 'RUNNING']);
-
-function activeTaskOperationBlocker(
-  task: Task,
-  evidence?: { testStatus?: string }
-): string | undefined {
+function activeTaskOperationBlocker(task: Task): string | undefined {
   if (ACTIVE_AGENT_RUN_STATUSES.has(task.projection.agentRun as RunRecord['status'])) {
     return 'Stop or let the active agent run finish before changing this task.';
-  }
-  if (ACTIVE_TEST_STATUSES.has(evidence?.testStatus ?? task.projection.tests)) {
-    return 'Wait for the active test run to finish before changing this task.';
   }
   if (['REQUESTED', 'STARTING', 'RUNNING', 'CANCEL_REQUESTED'].includes(task.projection.requestedAction)) {
     return 'Resolve the pending provider request before changing this task.';
@@ -988,15 +1144,6 @@ export function taskDeletionBlocker(task: Task, snapshot: TaskSnapshot): string 
   );
   if (activeRun) {
     return 'Stop or let the active agent run finish before deleting this task.';
-  }
-
-  const activeTest = snapshot.testRuns.find(
-    (testRun) =>
-      testRun.taskId === task.id &&
-      (ACTIVE_TEST_STATUSES.has(testRun.status) || testRun.processStatus === 'RUNNING')
-  );
-  if (activeTest) {
-    return 'Wait for the active test run to finish before deleting this task.';
   }
 
   const activeInteraction = snapshot.interactionRequests.find(
@@ -1015,16 +1162,17 @@ export function transitionBlocker(
   evidence: {
     hasWorktree: boolean;
     hasGitSnapshot?: boolean;
-    hasTestRun?: boolean;
-    gitStatus?: string;
-    testStatus?: string;
+    gitStatus?: Task['projection']['git'];
     gitHeadSha?: string;
-    testHeadSha?: string;
-    testDirtyFingerprint?: string;
     gitDirtyFingerprint?: string;
-    pullRequestStatus?: string;
+    pullRequestStatus?: Task['projection']['githubPullRequest'];
     pullRequestHeadSha?: string;
-    mergeStatus?: string;
+    ciStatus?: Task['projection']['ciChecks'];
+    ciHeadSha?: string;
+    ciPullRequestNumber?: number;
+    mergeStatus?: Task['projection']['merge'];
+    mergeHeadSha?: string;
+    mergePullRequestNumber?: number;
   }
 ): string | undefined {
   if (toPhase === 'IN_PROGRESS') {
@@ -1049,13 +1197,25 @@ export function transitionBlocker(
     return undefined;
   }
   if (toPhase === 'DONE') {
-    if (task.completionPolicy === 'MERGED' && evidence.mergeStatus !== 'MERGED') {
+    if (completionPolicyRequiresMerge(task.completionPolicy) && evidence.mergeStatus !== 'MERGED') {
       return 'GitHub must report the pull request merged before DONE.';
+    }
+    if (
+      completionPolicyRequiresPassingChecks(task.completionPolicy) &&
+      !verifiedChecksMatchMergeHead({
+        ciStatus: evidence.ciStatus,
+        ciHeadSha: evidence.ciHeadSha,
+        ciPullRequestNumber: evidence.ciPullRequestNumber,
+        mergeHeadSha: evidence.mergeHeadSha,
+        mergePullRequestNumber: evidence.mergePullRequestNumber
+      })
+    ) {
+      return 'GitHub checks must pass for the merged PR head before DONE.';
     }
     return undefined;
   }
   if (toPhase === 'ARCHIVED') {
-    return activeTaskOperationBlocker(task, { testStatus: evidence.testStatus });
+    return activeTaskOperationBlocker(task);
   }
   return undefined;
 }
@@ -1072,7 +1232,7 @@ function latestForIteration<T extends { iterationId: string }>(
 
 export function assertPublishReady(
   latestGit: GitSnapshotRecord | undefined
-): void {
+): asserts latestGit is GitSnapshotRecord {
   if (!latestGit) {
     throw new Error('Refresh Git evidence before opening a draft PR.');
   }
@@ -1082,7 +1242,13 @@ export function assertPublishReady(
   if (latestGit.status === 'CONFLICTED' || latestGit.status === 'UNAVAILABLE') {
     throw new Error(`Git status ${latestGit.status} blocks draft PR creation.`);
   }
-  if (latestGit.commitsAheadOfBase <= 0) {
+  if (latestGit.status === 'DIVERGED') {
+    throw new Error('Sync the branch before opening a draft PR.');
+  }
+  if (latestGit.status === 'UNKNOWN') {
+    throw new Error('Git status must be available before opening a draft PR.');
+  }
+  if (latestGit.commitsAheadOfBase <= 0 || latestGit.committedDiffFileCount <= 0) {
     throw new Error('The task branch has no committed changes to open a draft PR for.');
   }
 }

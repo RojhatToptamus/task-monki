@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-06-29
+Date: 2026-07-02
 
 This document describes the current architecture, not an old migration plan.
 
@@ -14,9 +14,8 @@ Task Monki owns:
 - task records and workflow phases;
 - isolated task worktrees and branches;
 - Git snapshots, dirty fingerprints, and diff artifacts;
-- test execution and test artifacts;
 - GitHub branch, PR, check, review, and merge evidence;
-- local completion and Done transitions.
+- local acceptance and Done transitions.
 
 Codex owns:
 
@@ -37,11 +36,10 @@ flowchart LR
   Orchestrator --> Adapter["AgentProviderAdapter"]
   Adapter --> Codex["CodexAppServerAdapter"]
   Codex --> RPC["CodexRpcClient"]
-  RPC --> Server["codex app-server --stdio"]
+  RPC --> Server["resolved codex app-server stdio transport"]
   RPC --> Journal["Protocol journal"]
   Journal --> Store["FileTaskStore"]
   Service --> Git["GitSnapshotService"]
-  Service --> Tests["LocalTestRunner"]
   Service --> GitHub["GitHubService"]
 ```
 
@@ -76,7 +74,9 @@ Reasons:
 
 The adapter must:
 
-- launch and initialize the App Server;
+- resolve, launch, and initialize a compatible App Server runtime;
+- probe Codex App Server support by capability rather than rejecting runtimes
+  solely because their version is newer than the generated protocol baseline;
 - start the embedded App Server from Task Monki's core app settings. The default
   is local-only: apps disabled, web search disabled, and discovered MCP servers
   disabled through per-server runtime config overrides so local coding turns do
@@ -127,42 +127,70 @@ If worktree or run startup fails after the alternative task is stored, Task
 Monki leaves the alternative visible and blocked rather than silently hiding the
 partial candidate.
 
-Read `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
+Read `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.
 
 ## Settings
 
-Task and review execution settings include:
+Task and review execution settings stored on task/run records include:
 
 - model;
 - reasoning effort;
 - sandbox;
 - approval policy;
-- network access;
-- test command.
+- approval reviewer;
+- network access.
 
 Settings are validated against the live model catalog before a turn starts.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
 
-Core app settings also include Codex external tool settings:
+App-level user preferences are separate from `FileTaskStore`. The Electron app
+stores them in `app-settings.json` directly under `app.getPath('userData')`.
+The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
+`app-settings.json` file beside the dev store. These settings include:
 
-- web search mode: disabled, cached, or live;
-- MCP servers: disabled or all configured servers;
-- apps/connectors: disabled or enabled.
+- theme, sidebar, and mascot preferences;
+- first-launch setup completion;
+- default implementation, review, and prompt-refinement models;
+- selected and known repositories;
+- Codex external tool modes for web search, MCP servers, and apps;
+- external executable path preferences for Git, Codex CLI, and GitHub CLI.
 
-These settings are persisted outside the task store schema and apply before the
-embedded App Server starts. If they change while no agent turn is active, Task
-Monki restarts the App Server so the new launch config is effective immediately.
-If an agent turn is active, the setting is stored and applies after the App
-Server restarts.
+Empty executable paths mean Auto-detect. The main process resolves and probes
+executables live; resolved paths and detected versions are not persisted. Git
+and Codex CLI are required, while GitHub CLI is optional. Environment variables
+`TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
+act as debug overrides ahead of saved settings.
 
-Prompt refinement uses a short-lived `codex exec --json --ephemeral` subprocess
-rather than the persistent App Server. Task Monki applies the same external tool
-settings to that subprocess and supplies compact local repository context itself.
-The refinement prompt must not ask the subprocess to inspect the repository with
-shell commands; prompt refinement is a fast rewrite step, not a detached agent
-investigation.
+Codex Auto-detect status may display the resolved `codex` path, but that
+auto-discovered path is not passed as an explicit App Server runtime. In Auto
+mode, App Server startup leaves the executable unset so capability-based
+runtime resolution can scan all candidates and choose a compatible runtime.
+Saved custom paths, constructor overrides, and `TASK_MONKI_CODEX_BIN` are
+intentional and are passed explicitly.
+
+## Runtime resolution
+
+Task Monki resolves a Codex executable before launching the long-lived App
+Server. Resolution checks explicit configuration first, then the
+`TASK_MONKI_CODEX_BIN` environment override, then every `codex` found on `PATH`,
+then known bundled runtimes such as Codex Desktop and the OpenAI Codex VS Code
+extension.
+
+Automatic discovery does not fail on the first stale binary. Each candidate is
+probed with `--version`, `codex app-server --help`, an isolated temporary
+`CODEX_HOME`, `initialize`, and the JSON-RPC methods Task Monki needs. The
+newest compatible automatically discovered runtime is selected. An explicit
+configured runtime is treated as intentional and must itself be compatible.
+The selected runtime, all candidate versions, rejected candidates, missing
+capabilities, and probe failures are persisted on the App Server instance and
+shown only in provider diagnostics/debug surfaces.
+
+The default transport is the documented local stdio App Server transport. Task
+Monki prefers `codex app-server --stdio`, uses `--listen stdio://` when that is
+the supported stdio form, and can fall back to `codex app-server` only when the
+runtime documents default stdio but not a stdio flag.
 
 Codex protocol detail:
 

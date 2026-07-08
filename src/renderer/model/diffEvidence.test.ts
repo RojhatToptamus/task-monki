@@ -145,6 +145,28 @@ deleted file mode 100644
     expect(filterDiffFiles(files, { query: 'src', status: 'deleted' })).toHaveLength(0);
   });
 
+  it('parses synthetic empty added-file diffs without hunks', () => {
+    const files = parseGitDiffEvidence(`# Git diff evidence
+
+## Unstaged diff
+diff --git a/empty.txt b/empty.txt
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/empty.txt
+`);
+
+    expect(files).toEqual([
+      expect.objectContaining({
+        path: 'empty.txt',
+        status: 'added',
+        additions: 0,
+        deletions: 0
+      })
+    ]);
+    expect(files[0].blocks[0]?.source).toBe('unstaged');
+  });
+
   it('separates committed and uncommitted evidence scopes', () => {
     const text = `# Git diff evidence
 

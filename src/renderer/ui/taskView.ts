@@ -1,9 +1,20 @@
-import type { CodexReviewGateStatus, Task, TestStatus, WorkflowPhase } from '../../shared/contracts';
+import type {
+  CodexReviewGateStatus,
+  MergeStatus,
+  Task,
+  VerifiedChecksEvidence,
+  WorkflowPhase
+} from '../../shared/contracts';
+import {
+  completionPolicyRequiresMerge,
+  completionPolicyRequiresPassingChecks,
+  verifiedChecksMatchMergeHead
+} from '../../shared/contracts';
 import {
   canCreateDeliveryCommit,
-  canCreatePullRequest,
   formatShortId
 } from '../model/selectors';
+import { buildBoardDeliveryLine } from '../model/prStatus';
 import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
 import { humanizeEnum } from './display';
 
@@ -13,9 +24,9 @@ import { humanizeEnum } from './display';
  */
 export type Tone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
-export interface Rollup {
+export interface CardEvidenceItem {
   label: string;
-  tone: Tone;
+  tone?: Tone;
 }
 
 export interface TaskCardVM {
@@ -23,12 +34,12 @@ export interface TaskCardVM {
   num: string;
   title: string;
   meta: string;
+  repositoryPath: string;
   stateLabel: string;
   stateTone: Tone;
   archived: boolean;
   hasDecision: boolean;
-  decisionLabel: string;
-  rollups: Rollup[];
+  evidence: CardEvidenceItem[];
 }
 
 export interface FinishEvidenceWarning {
@@ -37,12 +48,19 @@ export interface FinishEvidenceWarning {
 }
 
 export interface FinishEvidenceState {
-  mode: 'clean' | 'override';
+  mode: 'clean' | 'override' | 'blocked';
   warnings: FinishEvidenceWarning[];
 }
 
+export interface FinishRequirement {
+  label: string;
+  detail: string;
+  tone: Tone;
+  unresolved: boolean;
+}
+
 export interface FinishPanelAction {
-  id: 'create-draft-pr' | 'commit' | 'mark-done';
+  id: 'commit' | 'mark-done';
   label: string;
   kind: 'primary' | 'outline';
   disabled: boolean;
@@ -55,6 +73,10 @@ export interface MarkDoneModalCopy {
   fallbackWarningTitle: string;
   fallbackWarningDetail: string;
   confirmLabel: string;
+}
+
+export interface MarkDoneModalContext {
+  hasPullRequest?: boolean;
 }
 
 /** Human label + tone for a task's most salient run/phase state. */
@@ -78,13 +100,13 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
     switch (review.status) {
       case 'RUNNING':
-        return { label: 'AI reviewing', tone: 'info' };
+        return { label: 'Reviewing...', tone: 'info' };
       case 'PASSED':
         return { label: 'Review passed', tone: 'success' };
       case 'NEEDS_CHANGES':
         return { label: 'Needs changes', tone: 'error' };
       case 'INCONCLUSIVE':
-        return { label: 'Review complete', tone: 'action' };
+        return { label: 'Inconclusive', tone: 'action' };
       case 'FAILED':
         return { label: 'Review failed', tone: 'error' };
       case 'CANCELED':
@@ -126,6 +148,44 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   }
 }
 
+/** Header state should describe task/workflow context, not review verdict detail. */
+export function describeTaskHeaderState(task: Task): { label: string; tone: Tone } {
+  if (task.workflowPhase === 'DONE') {
+    return { label: 'Done', tone: 'success' };
+  }
+  if (task.workflowPhase === 'CANCELED' || task.workflowPhase === 'ARCHIVED') {
+    return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
+  }
+
+  const attention = describeTaskAttention(task);
+  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+    return {
+      label: attention.label,
+      tone: attention.tone === 'error' ? 'error' : 'action'
+    };
+  }
+
+  const run = task.projection.agentRun;
+  if (run === 'QUEUED' || run === 'STARTING' || run === 'RUNNING') {
+    return { label: humanizeEnum(run), tone: 'info' };
+  }
+  if (run === 'INTERRUPTING' || run === 'INTERRUPTED') {
+    return { label: humanizeEnum(run), tone: 'action' };
+  }
+  if (run === 'FAILED' || run === 'RECOVERY_REQUIRED' || run === 'LOST') {
+    return { label: attention?.label ?? humanizeEnum(run), tone: 'error' };
+  }
+
+  if (task.workflowPhase === 'REVIEW' || task.workflowPhase === 'IN_REVIEW') {
+    return { label: 'In review', tone: 'info' };
+  }
+  if (task.workflowPhase === 'IN_PROGRESS') {
+    return { label: 'In progress', tone: 'info' };
+  }
+
+  return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
+}
+
 export function codexReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
   return task.projection.codexReview ?? { status: 'NOT_RUN' };
 }
@@ -147,18 +207,52 @@ export function canRequestCodexReviewChanges(
 export function getFinishEvidenceState(
   task: Task,
   reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
-  dirtyFileCount?: number
+  dirtyFileCount?: number,
+  mergeStatus: MergeStatus = task.projection.merge,
+  ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
+  verifiedChecksEvidence?: VerifiedChecksEvidence
 ): FinishEvidenceState {
   const warnings = [
     reviewFinishWarning(reviewStatus),
-    testFinishWarning(task.projection.tests),
     gitFinishWarning(task, dirtyFileCount)
   ].filter((warning): warning is FinishEvidenceWarning => Boolean(warning));
+  const blockers = [
+    mergeFinishBlocker(task, mergeStatus),
+    verificationFinishBlocker(task, ciStatus, verifiedChecksEvidence)
+  ].filter((warning): warning is FinishEvidenceWarning => Boolean(warning));
+
+  if (blockers.length > 0) {
+    return {
+      mode: 'blocked',
+      warnings: [...warnings, ...blockers]
+    };
+  }
 
   return {
     mode: warnings.length === 0 ? 'clean' : 'override',
     warnings
   };
+}
+
+export function finishRequirementsForTask(
+  task: Task,
+  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  dirtyFileCount?: number,
+  mergeStatus: MergeStatus = task.projection.merge,
+  ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
+  verifiedChecksEvidence?: VerifiedChecksEvidence
+): FinishRequirement[] {
+  const requirements = [
+    reviewRequirement(reviewStatus),
+    treeRequirement(task.projection.git, dirtyFileCount)
+  ];
+  if (completionPolicyRequiresMerge(task.completionPolicy)) {
+    requirements.push(mergeRequirement(mergeStatus));
+  }
+  if (completionPolicyRequiresPassingChecks(task.completionPolicy)) {
+    requirements.push(checksRequirement(ciStatus, verifiedChecksEvidence));
+  }
+  return requirements;
 }
 
 export function finishActionsForTask(input: {
@@ -178,12 +272,6 @@ export function finishActionsForTask(input: {
 
   if (!reviewRunning) {
     actions.push({
-      id: 'create-draft-pr',
-      label: 'Create draft PR',
-      kind: 'primary',
-      disabled: !canCreatePullRequest(input.task) || busyOrPaused
-    });
-    actions.push({
       id: 'commit',
       label: 'Commit',
       kind: 'outline',
@@ -193,25 +281,39 @@ export function finishActionsForTask(input: {
 
   actions.push({
     id: 'mark-done',
-    label: input.finishEvidence.mode === 'clean' ? 'Mark done' : 'Mark done anyway',
+    label: input.finishEvidence.mode === 'override' ? 'Mark done anyway' : 'Mark done',
     kind: reviewRunning || actions.length > 0 ? 'outline' : 'primary',
-    disabled: busyOrPaused,
-    withIssues: input.finishEvidence.mode !== 'clean'
+    disabled: busyOrPaused || input.finishEvidence.mode === 'blocked',
+    withIssues: input.finishEvidence.mode === 'override'
   });
 
   return actions;
 }
 
-export function markDoneModalCopy(withIssues: boolean, busy: boolean): MarkDoneModalCopy {
+export function markDoneModalCopy(
+  withIssues: boolean,
+  busy: boolean,
+  context: MarkDoneModalContext = {}
+): MarkDoneModalCopy {
+  const hasPullRequest = Boolean(context.hasPullRequest);
   return {
     title: withIssues ? 'Mark done anyway' : 'Mark done',
-    body: withIssues
-      ? 'Marks this task done in Task Monki despite unresolved evidence. No commit or PR is created.'
-      : 'Marks this task done in Task Monki without creating a commit or PR.',
+    body: markDoneModalBody(withIssues, hasPullRequest),
     fallbackWarningTitle: 'Evidence is not fully passing.',
     fallbackWarningDetail: 'You are explicitly marking the current local result done.',
     confirmLabel: busy ? 'Marking done...' : withIssues ? 'Mark done anyway' : 'Mark done'
   };
+}
+
+function markDoneModalBody(withIssues: boolean, hasPullRequest: boolean): string {
+  if (withIssues) {
+    return hasPullRequest
+      ? 'Records this task as done in Task Monki. The existing PR is left unchanged, and these checks stay unresolved:'
+      : 'Records the current local result as done. No commit or PR is created, and these checks stay unresolved:';
+  }
+  return hasPullRequest
+    ? 'Records this task as done in Task Monki. The existing PR is left unchanged; no new commit or PR is created.'
+    : 'Records the current local result as done without creating a commit or PR.';
 }
 
 const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
@@ -266,50 +368,6 @@ function reviewFinishWarning(
   };
 }
 
-function testFinishWarning(status: TestStatus): FinishEvidenceWarning | undefined {
-  switch (status) {
-    case 'PASSED':
-      return undefined;
-    case 'FAILED':
-    case 'ERROR':
-      return {
-        title: `Local tests are ${humanizeEnum(status).toLowerCase()}.`,
-        detail: 'Fix or rerun tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'STALE':
-      return {
-        title: 'Local test evidence is stale.',
-        detail: 'Rerun tests for the current Git state before marking done cleanly.'
-      };
-    case 'NOT_RUN':
-      return {
-        title: 'No local test run is recorded.',
-        detail: 'Run tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'NOT_CONFIGURED':
-      return {
-        title: 'No local test command is configured.',
-        detail: 'Configure or run verification before marking done cleanly, or mark done anyway.'
-      };
-    case 'QUEUED':
-    case 'RUNNING':
-      return {
-        title: 'Local tests are still running.',
-        detail: 'Wait for tests to finish before marking done cleanly.'
-      };
-    case 'CANCELED':
-      return {
-        title: 'Local test run was canceled.',
-        detail: 'Rerun tests before marking done cleanly, or mark done anyway.'
-      };
-    case 'UNKNOWN':
-      return {
-        title: 'Local test state is unknown.',
-        detail: 'Refresh or rerun tests before marking done cleanly, or mark done anyway.'
-      };
-  }
-}
-
 function gitFinishWarning(
   task: Task,
   dirtyFileCount?: number
@@ -343,64 +401,86 @@ function gitFinishWarning(
   }
 }
 
+function mergeFinishBlocker(
+  task: Task,
+  mergeStatus: MergeStatus
+): FinishEvidenceWarning | undefined {
+  if (!completionPolicyRequiresMerge(task.completionPolicy) || mergeStatus === 'MERGED') {
+    return undefined;
+  }
+
+  return {
+    title: 'Pull request is not merged.',
+    detail: 'This task requires a merged PR before it can be marked done.'
+  };
+}
+
+function verificationFinishBlocker(
+  task: Task,
+  ciStatus: Task['projection']['ciChecks'],
+  evidence?: VerifiedChecksEvidence
+): FinishEvidenceWarning | undefined {
+  if (!completionPolicyRequiresPassingChecks(task.completionPolicy)) {
+    return undefined;
+  }
+  if (
+    verifiedChecksMatchMergeHead({
+      ...evidence,
+      ciStatus
+    })
+  ) {
+    return undefined;
+  }
+
+  return ciStatus === 'PASSING'
+    ? {
+        title: 'GitHub checks are not current.',
+        detail:
+          'This task requires passing GitHub checks for the merged PR head before it can be marked done.'
+      }
+    : {
+        title: 'GitHub checks are not passing.',
+        detail:
+          'This task requires passing GitHub checks for the merged PR head before it can be marked done.'
+      };
+}
+
 function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
   return ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'RECOVERY_REQUIRED', 'LOST'].includes(
     agentRun
   );
 }
 
-function gitRollup(task: Task): Rollup {
-  switch (task.projection.git) {
-    case 'CLEAN':
-      return { label: 'clean', tone: 'neutral' };
-    case 'DIRTY':
-      return { label: 'dirty', tone: 'action' };
-    case 'COMMITTED_UNPUSHED':
-      return { label: 'committed', tone: 'info' };
-    case 'PUSHED':
-      return { label: 'pushed', tone: 'success' };
-    case 'CONFLICTED':
-    case 'DIVERGED':
-      return { label: humanizeEnum(task.projection.git).toLowerCase(), tone: 'error' };
-    default:
-      return { label: '—', tone: 'neutral' };
-  }
+export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
+  return [{ label: buildBoardDeliveryLine(task), tone: deliveryLineTone(task) }];
 }
 
-function testsRollup(task: Task): Rollup {
-  switch (task.projection.tests) {
-    case 'PASSED':
-      return { label: 'pass', tone: 'success' };
-    case 'FAILED':
-    case 'ERROR':
-      return { label: 'fail', tone: 'error' };
-    case 'RUNNING':
-    case 'QUEUED':
-      return { label: 'running', tone: 'info' };
-    case 'STALE':
-      return { label: 'stale', tone: 'action' };
-    default:
-      return { label: '—', tone: 'neutral' };
+function deliveryLineTone(task: Task): Tone {
+  if (
+    task.projection.githubPullRequest === 'CLOSED_UNMERGED' ||
+    task.projection.ciChecks === 'FAILING' ||
+    task.projection.ciChecks === 'BLOCKED' ||
+    task.projection.reviews === 'CHANGES_REQUESTED'
+  ) {
+    return 'error';
   }
-}
-
-function prRollup(task: Task): Rollup {
-  switch (task.projection.githubPullRequest) {
-    case 'OPEN_DRAFT':
-      return { label: 'PR draft', tone: 'info' };
-    case 'OPEN_READY':
-      return { label: 'PR open', tone: 'info' };
-    case 'MERGED':
-      return { label: 'merged', tone: 'success' };
-    case 'CLOSED_UNMERGED':
-      return { label: 'PR closed', tone: 'error' };
-    default:
-      return { label: '—', tone: 'neutral' };
+  if (
+    task.projection.ciChecks === 'PENDING' ||
+    task.projection.ciChecks === 'CANCELED' ||
+    task.projection.ciChecks === 'STALE' ||
+    task.projection.reviews === 'REQUESTED' ||
+    task.projection.reviews === 'PENDING'
+  ) {
+    return 'action';
   }
-}
-
-export function rollupsForTask(task: Task): Rollup[] {
-  return [gitRollup(task), testsRollup(task), prRollup(task)];
+  if (
+    task.projection.githubPullRequest === 'MERGED' ||
+    task.projection.merge === 'MERGED' ||
+    (task.projection.ciChecks === 'PASSING' && task.projection.merge === 'MERGEABLE')
+  ) {
+    return 'success';
+  }
+  return 'neutral';
 }
 
 export function taskMeta(task: Task): string {
@@ -417,14 +497,129 @@ export function buildTaskCardVM(task: Task): TaskCardVM {
     num: `#${formatShortId(task.id)}`,
     title: task.title,
     meta: taskMeta(task),
+    repositoryPath: task.repositoryPath,
     stateLabel: state.label,
     stateTone: state.tone,
     archived: task.workflowPhase === 'ARCHIVED',
     hasDecision,
-    decisionLabel: hasDecision
-      ? `${humanizeEnum(task.projection.agentRun)} · needs you`
-      : '',
-    rollups: rollupsForTask(task)
+    evidence: evidenceLineForTask(task)
+  };
+}
+
+function reviewRequirement(status: CodexReviewGateStatus): FinishRequirement {
+  switch (status) {
+    case 'PASSED':
+      return { label: 'Review', detail: 'passed', tone: 'success', unresolved: false };
+    case 'NEEDS_CHANGES':
+      return { label: 'Review', detail: 'needs changes', tone: 'error', unresolved: true };
+    case 'RUNNING':
+      return { label: 'Review', detail: 'running', tone: 'info', unresolved: true };
+    case 'STALE':
+      return { label: 'Review', detail: 'stale', tone: 'action', unresolved: true };
+    case 'INCONCLUSIVE':
+      return { label: 'Review', detail: 'inconclusive', tone: 'action', unresolved: true };
+    case 'FAILED':
+      return { label: 'Review', detail: 'failed', tone: 'error', unresolved: true };
+    case 'CANCELED':
+      return { label: 'Review', detail: 'stopped', tone: 'action', unresolved: true };
+    case 'NOT_RUN':
+      return { label: 'Review', detail: 'not run', tone: 'action', unresolved: true };
+  }
+}
+
+function treeRequirement(
+  status: Task['projection']['git'],
+  dirtyFileCount?: number
+): FinishRequirement {
+  switch (status) {
+    case 'CLEAN':
+      return { label: 'Tree', detail: 'clean', tone: 'success', unresolved: false };
+    case 'PUSHED':
+      return { label: 'Tree', detail: 'pushed', tone: 'success', unresolved: false };
+    case 'COMMITTED_UNPUSHED':
+      return { label: 'Tree', detail: 'committed', tone: 'info', unresolved: false };
+    case 'DIRTY':
+      return {
+        label: 'Tree',
+        detail:
+          dirtyFileCount && dirtyFileCount > 0
+            ? `${dirtyFileCount} dirty`
+            : 'dirty',
+        tone: 'action',
+        unresolved: true
+      };
+    case 'CONFLICTED':
+    case 'DIVERGED':
+    case 'UNAVAILABLE':
+      return {
+        label: 'Tree',
+        detail: humanizeEnum(status).toLowerCase(),
+        tone: 'error',
+        unresolved: true
+      };
+    case 'NOT_INSPECTED':
+    case 'UNKNOWN':
+      return {
+        label: 'Tree',
+        detail: humanizeEnum(status).toLowerCase(),
+        tone: 'action',
+        unresolved: true
+      };
+  }
+}
+
+function mergeRequirement(status: MergeStatus): FinishRequirement {
+  switch (status) {
+    case 'MERGED':
+      return { label: 'Merge', detail: 'merged', tone: 'success', unresolved: false };
+    case 'MERGEABLE':
+      return { label: 'Merge', detail: 'ready, not merged', tone: 'action', unresolved: true };
+    case 'COMPUTING':
+      return { label: 'Merge', detail: 'checking', tone: 'info', unresolved: true };
+    case 'QUEUED':
+      return { label: 'Merge', detail: 'queued', tone: 'info', unresolved: true };
+    case 'BLOCKED':
+      return { label: 'Merge', detail: 'blocked', tone: 'error', unresolved: true };
+    case 'CLOSED_UNMERGED':
+      return { label: 'Merge', detail: 'closed unmerged', tone: 'error', unresolved: true };
+    case 'NOT_APPLICABLE':
+    case 'NOT_MERGED':
+    case 'UNKNOWN':
+      return {
+        label: 'Merge',
+        detail: humanizeEnum(status).toLowerCase(),
+        tone: 'action',
+        unresolved: true
+      };
+  }
+}
+
+function checksRequirement(
+  status: Task['projection']['ciChecks'],
+  evidence?: VerifiedChecksEvidence
+): FinishRequirement {
+  if (verifiedChecksMatchMergeHead({ ...evidence, ciStatus: status })) {
+    return { label: 'Checks', detail: 'passing', tone: 'success', unresolved: false };
+  }
+  if (status === 'PASSING') {
+    return { label: 'Checks', detail: 'not current', tone: 'action', unresolved: true };
+  }
+  if (status === 'FAILING' || status === 'BLOCKED') {
+    return {
+      label: 'Checks',
+      detail: humanizeEnum(status).toLowerCase(),
+      tone: 'error',
+      unresolved: true
+    };
+  }
+  if (status === 'PENDING') {
+    return { label: 'Checks', detail: 'pending', tone: 'info', unresolved: true };
+  }
+  return {
+    label: 'Checks',
+    detail: humanizeEnum(status).toLowerCase(),
+    tone: 'action',
+    unresolved: true
   };
 }
 

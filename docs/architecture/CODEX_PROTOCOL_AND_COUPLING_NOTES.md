@@ -11,17 +11,45 @@ logs were removed because they repeated stale implementation status.
 - Runtime compatibility constants live in
   `src/core/agent/codex/protocol/metadata.ts`.
 - The generated protocol files are source inputs and should stay checked in.
-- `npm run check:codex-protocol` verifies generated bindings match the expected
-  installed runtime.
+- `npm run check:codex-protocol` verifies the committed generated bindings still
+  hash to the pinned metadata value. In `--check` mode it does not execute the
+  installed Codex runtime and does not prove local runtime compatibility.
 
 ## Compatibility policy
 
-- Reject Codex versions older than `CODEX_PROTOCOL_RUNTIME_VERSION`.
-- Allow newer versions only in stable compatibility mode.
+- Resolve a compatible Codex executable before starting App Server instead of
+  blindly using the first `codex` on `PATH`.
+- Reject a runtime only when it cannot launch the required App Server
+  integration or lacks required JSON-RPC capabilities.
+- Accept newer Codex runtimes by default when the required App Server
+  capabilities work.
+- Treat `CODEX_PROTOCOL_RUNTIME_VERSION` as the generated binding baseline, not
+  a runtime minimum by itself.
 - Do not depend on experimental fields unless a feature has an explicit runtime
   allow-list and fallback.
 - Unknown server requests should be routed to an explicit unsupported path,
   not silently accepted as generated request types.
+
+## Runtime probing
+
+Task Monki probes candidate Codex executables in this order:
+
+1. explicit app configuration;
+2. `TASK_MONKI_CODEX_BIN`;
+3. all `codex` entries discovered on `PATH`;
+4. known bundled locations such as Codex Desktop and the OpenAI Codex VS Code
+   extension.
+
+The probe records `--version`, detects the supported stdio App Server launch
+form from `codex app-server --help`, starts the candidate with a temporary
+`CODEX_HOME`, initializes JSON-RPC, and verifies the methods Task Monki uses.
+Automatic discovery picks a compatible runtime instead of failing on an older
+incompatible candidate that appears earlier on `PATH`. Explicit configuration is
+treated as intentional and must be compatible.
+Resolution diagnostics are persisted with the selected App Server instance so
+provider debug surfaces can show the selected executable, candidate versions,
+rejected candidates, missing methods, and probe failures without presenting them
+as normal workflow warnings.
 
 ## Coupling boundary
 

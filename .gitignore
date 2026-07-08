@@ -1,9 +1,16 @@
 node_modules/
 dist-electron/
 dist-renderer/
+release/
+build/icon.iconset/
 .task-manager-dev-store/
 .playwright-mcp/
 .local/
+
+# Local mascot source/export artifacts. The app ships the optimized WebM files.
+/outputs/
+/public/assets/brand/task-monki-mascot.webm
+/public/assets/brand/videos/*.mp4
 
 # Documentation policy:
 # Track curated operational docs. Keep private strategy, phase snapshots,
@@ -15,8 +22,9 @@ docs/ui-reports/
 docs/**/*PLAN*.md
 docs/**/*STATUS*.md
 docs/**/*REPORT*.md
-docs/research/*FEASIBILITY*.md
-docs/research/*OPPORTUNITIES*.md
+!docs/workflows/PR_STATUS_CARD_FLOW.md
+docs/**/*FEASIBILITY*.md
+docs/**/*OPPORTUNITIES*.md
 docs/**/*.html
 docs/**/*.dc.html
 docs/**/*.png

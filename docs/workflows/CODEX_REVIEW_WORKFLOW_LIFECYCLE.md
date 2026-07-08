@@ -1,6 +1,6 @@
 # Codex Review Workflow Lifecycle
 
-Date: 2026-06-28
+Date: 2026-07-02
 
 Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
@@ -100,7 +100,7 @@ Expected UI:
 
 - Board column: Review.
 - Card chip: AI reviewing.
-- Review panel: running indicator and Stop review.
+- Review panel: running indicator, concise current review activity, and Stop review.
 - Finish actions: paused.
 - Review actions: paused except Stop review.
 - Agent implementation controls should not be shown for the review run as if it
@@ -167,6 +167,9 @@ Expected UI while follow-up is active:
   - no Mark done
   - no Commit
   - no Create draft PR
+- When the review gate is `NOT_RUN` but another task action pauses review
+  actions, keep `Run Codex review` visible and disabled with the pause reason
+  on hover instead of replacing it with inline explanatory text.
 - Header and evidence-side delivery actions are also disabled while review
   actions are paused, so Commit/Create PR cannot bypass the active follow-up.
 - Active agent controls remain available:
@@ -323,6 +326,9 @@ When the UI shows the wrong state:
   active.
 - Apply that pause consistently across review cards, finish panels, header
   buttons, and evidence-side delivery controls.
+- Disabled workflow actions should keep their normal button position and expose
+  pause/blocker reasons through the existing hover-title style, not dangling
+  helper text.
 - Do not move a task to Review while requested changes are still being
   implemented.
 - Do not hide the previous review completely during follow-up work. It is useful

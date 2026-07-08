@@ -4,6 +4,7 @@ import {
   buildRepositoryOptions,
   mergeRepositoryPath,
   normalizeRepositoryPath,
+  resolveRepositorySetupState,
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from './repositories';
@@ -77,6 +78,67 @@ describe('repository selection model', () => {
       '/repos/other'
     ]);
   });
+
+  it('keeps setup in loading while repositories are still loading', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: true,
+        options: [],
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('loading');
+  });
+
+  it('requires setup when no repository source is available', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsRepository');
+  });
+
+  it('keeps setup open when a repository exists but first-launch setup is incomplete', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '/repos/current',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsReview');
+  });
+
+  it('treats an active repository as complete after first-launch setup is finished', () => {
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options: [],
+        activeRepositoryPath: '/repos/current',
+        firstLaunchSetupCompleted: true
+      })
+    ).toBe('complete');
+  });
+
+  it('keeps saved repository options in setup until first-launch setup is finished', () => {
+    const options = buildRepositoryOptions({
+      defaultRepositoryPath: '',
+      storedRepositoryPaths: ['/repos/current'],
+      tasks: []
+    });
+
+    expect(
+      resolveRepositorySetupState({
+        loading: false,
+        options,
+        activeRepositoryPath: '',
+        firstLaunchSetupCompleted: false
+      })
+    ).toBe('needsReview');
+  });
 });
 
 function taskFixture(id: string, repositoryPath: string): Task {
@@ -89,7 +151,6 @@ function taskFixture(id: string, repositoryPath: string): Task {
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
     phaseVersion: 1,
-    testCommand: 'npm test',
     forkedAlternativeTaskIds: [],
     agentSettings: {},
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -101,7 +162,6 @@ function taskFixture(id: string, repositoryPath: string): Task {
       repositoryPreflight: 'UNKNOWN',
       worktree: 'NOT_CREATED',
       git: 'NOT_INSPECTED',
-      tests: 'NOT_RUN',
       githubRepository: 'NOT_CHECKED',
       branchPublication: 'NOT_PUSHED',
       githubPullRequest: 'UNLINKED',

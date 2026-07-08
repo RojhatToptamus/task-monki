@@ -170,36 +170,6 @@ describe('projection reducer', () => {
     expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
   });
 
-  it('keeps test execution as evidence without moving workflow phase', () => {
-    const task: Task = {
-      id: 'task-1',
-      title: 'Task',
-      prompt: 'Prompt',
-      repositoryPath: '/tmp/repo',
-      workflowPhase: 'REVIEW',
-      resolution: 'NONE',
-      completionPolicy: 'LOCAL_ACCEPTANCE',
-      phaseVersion: 2,
-      forkedAlternativeTaskIds: [],
-      currentIterationId: 'iteration-1',
-      agentSettings: {},
-      createdAt: now,
-      updatedAt: now,
-      projection: createInitialProjection(now)
-    };
-
-    const state = applyEventToState(
-      { ...createEmptyState(), tasks: [task] },
-      {
-        ...createEvent('TEST_RUN_STARTED', { command: 'npm test' }),
-        iterationId: 'iteration-1'
-      }
-    );
-
-    expect(state.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(state.tasks[0].projection.tests).toBe('QUEUED');
-  });
-
   it('keeps Codex review runs in Review and records an inconclusive review result', () => {
     const task: Task = {
       id: 'task-1',
@@ -432,7 +402,6 @@ describe('projection reducer', () => {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
         git: 'DIRTY',
-        tests: 'PASSED',
         codexReview: {
           status: 'PASSED',
           runId: 'review-run',
@@ -524,7 +493,7 @@ describe('projection reducer', () => {
     });
   });
 
-  it('keeps provider plans, usage, and goals separate from workflow and verified tests', () => {
+  it('keeps provider plans, usage, and goals separate from workflow evidence', () => {
     const task: Task = {
       id: 'task-1',
       title: 'Task',
@@ -561,8 +530,76 @@ describe('projection reducer', () => {
     });
 
     expect(withDivergence.tasks[0].workflowPhase).toBe('IN_PROGRESS');
-    expect(withDivergence.tasks[0].projection.tests).toBe('NOT_RUN');
     expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
+  });
+
+  it('only auto-completes merged snapshots when completion policy gates are satisfied', () => {
+    const mergeEvent = createEvent('MERGE_SNAPSHOT_CAPTURED', { status: 'MERGED' });
+    const verifiedWithFailingChecks = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [
+          createTask({
+            completionPolicy: 'MERGED_AND_VERIFIED',
+            projection: {
+              ...createInitialProjection(now),
+              ciChecks: 'FAILING',
+              health: 'ERROR',
+              summary: 'GitHub checks: FAILING.'
+            }
+          })
+        ]
+      },
+      mergeEvent
+    );
+    const manualTask = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [
+          createTask({
+            completionPolicy: 'MANUAL',
+            projection: { ...createInitialProjection(now), ciChecks: 'PASSING' }
+          })
+        ]
+      },
+      mergeEvent
+    );
+    const verifiedWithPassingChecks = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [
+          createTask({
+            completionPolicy: 'MERGED_AND_VERIFIED',
+            projection: { ...createInitialProjection(now), ciChecks: 'PASSING' }
+          })
+        ]
+      },
+      mergeEvent
+    );
+    const mergePolicyTask = applyEventToState(
+      {
+        ...createEmptyState(),
+        tasks: [
+          createTask({
+            completionPolicy: 'MERGED',
+            projection: { ...createInitialProjection(now), ciChecks: 'FAILING' }
+          })
+        ]
+      },
+      mergeEvent
+    );
+
+    expect(verifiedWithFailingChecks.tasks[0].workflowPhase).toBe('IN_REVIEW');
+    expect(verifiedWithFailingChecks.tasks[0].projection.health).toBe('ERROR');
+    expect(verifiedWithFailingChecks.tasks[0].projection.summary).toBe(
+      'GitHub reports the pull request merged.'
+    );
+    expect(manualTask.tasks[0].workflowPhase).toBe('IN_REVIEW');
+    expect(verifiedWithPassingChecks.tasks[0].workflowPhase).toBe('IN_REVIEW');
+    expect(verifiedWithPassingChecks.tasks[0].projection.summary).toBe(
+      'GitHub reports the pull request merged.'
+    );
+    expect(mergePolicyTask.tasks[0].workflowPhase).toBe('DONE');
   });
 });
 
@@ -621,6 +658,26 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
     diagnosticArtifactId: 'diagnostic',
     startedAt: now,
     eventCount: 0,
+    ...overrides
+  };
+}
+
+function createTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: 'task-1',
+    title: 'Task',
+    prompt: 'Prompt',
+    repositoryPath: '/tmp/repo',
+    workflowPhase: 'IN_REVIEW',
+    resolution: 'NONE',
+    completionPolicy: 'LOCAL_ACCEPTANCE',
+    phaseVersion: 1,
+    forkedAlternativeTaskIds: [],
+    currentIterationId: 'iteration-1',
+    agentSettings: {},
+    createdAt: now,
+    updatedAt: now,
+    projection: createInitialProjection(now),
     ...overrides
   };
 }

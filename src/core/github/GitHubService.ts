@@ -5,6 +5,8 @@ import type {
   BranchPublicationRecord,
   CiChecksStatus,
   CiRollupRecord,
+  GitHubCheckDetailRecord,
+  GitHubCheckStatus,
   GitHubRepositoryRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
@@ -36,8 +38,18 @@ interface ExecResult {
   stderr: string;
 }
 
+interface ExecError extends Error {
+  code?: number | string;
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
+}
+
 export class GitHubService {
-  constructor(private readonly ghExecutable = process.env.TASK_MANAGER_GH_PATH ?? 'gh') {}
+  constructor(private ghExecutable = 'gh') {}
+
+  setExecutable(executable: string | undefined): void {
+    this.ghExecutable = executable ?? 'gh';
+  }
 
   async preflight(task: Task, worktree: WorktreeRecord): Promise<Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>> {
     const remote = await detectGitHubRemote(worktree.worktreePath);
@@ -121,7 +133,7 @@ export class GitHubService {
         branchName,
         remoteRef: `${remoteName}/${branchName}`,
         status: 'FAILED',
-        error: errorMessage(error)
+        error: publishBranchErrorMessage(error)
       };
     }
   }
@@ -129,11 +141,11 @@ export class GitHubService {
   async createOrFindDraftPullRequest(input: {
     task: Task;
     worktree: WorktreeRecord;
-    headSha?: string;
     baseRef?: string;
     bodyFilePath: string;
+    title: string;
   }): Promise<GitHubPrSync> {
-    const existing = await this.findOpenPullRequest(input.worktree, input.headSha);
+    const existing = await this.findOpenPullRequest(input.worktree);
     if (existing) {
       return existing;
     }
@@ -144,7 +156,7 @@ export class GitHubService {
         'create',
         '--draft',
         '--title',
-        input.task.title,
+        input.title,
         '--body-file',
         input.bodyFilePath,
         '--base',
@@ -160,7 +172,7 @@ export class GitHubService {
     return this.viewPullRequest(input.worktree, url ?? input.worktree.branchName);
   }
 
-  async findOpenPullRequest(worktree: WorktreeRecord, headSha?: string): Promise<GitHubPrSync | undefined> {
+  async findOpenPullRequest(worktree: WorktreeRecord): Promise<GitHubPrSync | undefined> {
     const result = await this.exec(
       [
         'pr',
@@ -177,25 +189,33 @@ export class GitHubService {
       worktree.worktreePath
     );
     const rows = parseJson<unknown[]>(result.stdout, []);
-    const match = rows
-      .map((row) => parsePrView(row, worktree))
-      .find((row) => !headSha || row.pullRequest.headRefOid === headSha);
-    return match;
+    const match = rows.map((row) => parsePrView(row, worktree)).find((row) => row.pullRequest.number);
+    return match?.pullRequest.number
+      ? this.viewPullRequest(worktree, match.pullRequest.number)
+      : match;
   }
 
   async viewPullRequest(worktree: WorktreeRecord, selector: string | number): Promise<GitHubPrSync> {
-    const result = await this.exec(
-      ['pr', 'view', String(selector), '--json', prJsonFields],
-      worktree.worktreePath
+    const [viewResult, checksResult] = await Promise.all([
+      this.exec(['pr', 'view', String(selector), '--json', prJsonFields], worktree.worktreePath),
+      this.exec(
+        ['pr', 'checks', String(selector), '--json', prChecksJsonFields],
+        worktree.worktreePath,
+        30_000,
+        [8]
+      ).catch(() => undefined)
+    ]);
+    return parsePrView(
+      parseJson<Record<string, unknown>>(viewResult.stdout, {}),
+      worktree,
+      checksResult ? parseJson<unknown[]>(checksResult.stdout, []) : undefined
     );
-    return parsePrView(parseJson<Record<string, unknown>>(result.stdout, {}), worktree);
   }
 
   async writePullRequestBody(input: {
     filePath: string;
     task: Task;
     gitDiffStat?: string;
-    testStatus?: string;
     agentSummary?: string;
   }): Promise<string> {
     const body = [
@@ -205,7 +225,6 @@ export class GitHubService {
       '',
       '## Local evidence',
       '',
-      `- Test status: ${input.testStatus ?? 'unknown'}`,
       `- Diff stat: ${input.gitDiffStat?.trim() || 'No diff stat captured.'}`,
       '',
       '## Agent summary',
@@ -221,13 +240,35 @@ export class GitHubService {
     return body;
   }
 
-  private async exec(argv: string[], cwd: string, timeout = 30_000): Promise<ExecResult> {
-    const { stdout, stderr } = await execFileAsync(this.ghExecutable, argv, {
-      cwd,
-      timeout,
-      maxBuffer: 20 * 1024 * 1024
-    });
-    return { stdout, stderr };
+  private async exec(
+    argv: string[],
+    cwd: string,
+    timeout = 30_000,
+    allowedExitCodes: number[] = []
+  ): Promise<ExecResult> {
+    try {
+      const { stdout, stderr } = await execFileAsync(this.ghExecutable, argv, {
+        cwd,
+        timeout,
+        maxBuffer: 20 * 1024 * 1024
+      });
+      return { stdout, stderr };
+    } catch (error) {
+      const execError = error as ExecError;
+      const numericCode =
+        typeof execError.code === 'number'
+          ? execError.code
+          : typeof execError.code === 'string'
+            ? Number(execError.code)
+            : undefined;
+      if (numericCode !== undefined && allowedExitCodes.includes(numericCode)) {
+        return {
+          stdout: bufferToString(execError.stdout),
+          stderr: bufferToString(execError.stderr)
+        };
+      }
+      throw error;
+    }
   }
 }
 
@@ -273,7 +314,11 @@ export function parseGitHubRemoteUrl(
   return undefined;
 }
 
-export function parsePrView(raw: unknown, worktree: WorktreeRecord): GitHubPrSync {
+export function parsePrView(
+  raw: unknown,
+  worktree: WorktreeRecord,
+  rawCheckDetails?: unknown
+): GitHubPrSync {
   const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const number = numberField(data, 'number');
   const headSha = stringField(data, 'headRefOid');
@@ -299,7 +344,7 @@ export function parsePrView(raw: unknown, worktree: WorktreeRecord): GitHubPrSyn
       title: stringField(data, 'title'),
       raw
     },
-    ci: parseCiRollup(data.statusCheckRollup, worktree, number, headSha),
+    ci: parseCiRollup(data.statusCheckRollup, worktree, number, headSha, rawCheckDetails),
     reviews: parseReviewRollup(data, worktree, number, headSha),
     merge: parseMergeSnapshot(data, worktree, number, headSha)
   };
@@ -309,43 +354,52 @@ export function parseCiRollup(
   rawRollup: unknown,
   worktree: WorktreeRecord,
   pullRequestNumber?: number,
-  headSha?: string
+  headSha?: string,
+  rawCheckDetails?: unknown
 ): Omit<CiRollupRecord, 'id' | 'observedAt'> {
-  const rows = Array.isArray(rawRollup) ? rawRollup : [];
+  const checkDetails = parseCheckDetails(rawCheckDetails);
+  const rows = checkDetails.length > 0 ? checkDetails : Array.isArray(rawRollup) ? rawRollup : [];
   let passingCount = 0;
   let pendingCount = 0;
   let failingCount = 0;
   let skippedCount = 0;
+  let canceledCount = 0;
 
   for (const row of rows) {
-    const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
-    const conclusion = stringField(item, 'conclusion')?.toUpperCase();
-    const state = stringField(item, 'state')?.toUpperCase();
-    const status = stringField(item, 'status')?.toUpperCase();
-    const value = conclusion ?? state ?? status;
-
-    if (!value || ['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'].includes(value)) {
-      pendingCount += 1;
-    } else if (['SUCCESS', 'PASSING'].includes(value)) {
-      passingCount += 1;
-    } else if (['SKIPPED', 'NEUTRAL'].includes(value)) {
-      skippedCount += 1;
-    } else if (['FAILURE', 'FAILED', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED', 'CANCELLED', 'CANCELED'].includes(value)) {
-      failingCount += 1;
-    } else {
-      pendingCount += 1;
+    const status = isCheckDetail(row) ? row.status : normalizeRollupCheckStatus(row);
+    switch (status) {
+      case 'passed':
+        passingCount += 1;
+        break;
+      case 'failed':
+        failingCount += 1;
+        break;
+      case 'skipped':
+        skippedCount += 1;
+        break;
+      case 'canceled':
+        canceledCount += 1;
+        break;
+      case 'pending':
+        pendingCount += 1;
+        break;
     }
   }
 
   const totalCount = rows.length;
+  const nonSkippedCount = totalCount - skippedCount;
   const status: CiChecksStatus =
     totalCount === 0
       ? 'NO_CHECKS'
+      : nonSkippedCount === 0
+        ? 'NO_CHECKS'
       : failingCount > 0
         ? 'FAILING'
-        : pendingCount > 0
-          ? 'PENDING'
-          : 'PASSING';
+        : canceledCount > 0
+          ? 'CANCELED'
+          : pendingCount > 0
+            ? 'PENDING'
+            : 'PASSING';
 
   return {
     taskId: worktree.taskId,
@@ -360,6 +414,8 @@ export function parseCiRollup(
     passingCount,
     failingCount,
     skippedCount,
+    canceledCount,
+    checkDetails,
     raw: rawRollup
   };
 }
@@ -400,13 +456,21 @@ export function parseMergeSnapshot(
 ): Omit<MergeSnapshotRecord, 'id' | 'observedAt'> {
   const state = stringField(raw, 'state');
   const mergedAt = stringOrNullField(raw, 'mergedAt');
+  const mergeable = stringField(raw, 'mergeable')?.toUpperCase();
+  const mergeStateStatus = stringField(raw, 'mergeStateStatus')?.toUpperCase();
   const status = mergedAt
     ? 'MERGED'
     : state === 'CLOSED'
       ? 'CLOSED_UNMERGED'
       : state === 'MERGED'
         ? 'MERGED'
-        : 'NOT_MERGED';
+        : mergeStateStatus === 'CLEAN' || mergeStateStatus === 'HAS_HOOKS' || mergeable === 'MERGEABLE'
+          ? 'MERGEABLE'
+          : ['BLOCKED', 'DIRTY', 'BEHIND', 'DRAFT'].includes(mergeStateStatus ?? '')
+            ? 'BLOCKED'
+            : mergeStateStatus === 'UNKNOWN' || mergeable === 'UNKNOWN'
+              ? 'UNKNOWN'
+              : 'NOT_MERGED';
   return {
     taskId: worktree.taskId,
     iterationId: worktree.iterationId,
@@ -430,8 +494,97 @@ const prJsonFields = [
   'headRefOid',
   'headRefName',
   'baseRefName',
+  'mergeable',
+  'mergeStateStatus',
   'title'
 ].join(',');
+
+const prChecksJsonFields = [
+  'bucket',
+  'state',
+  'name',
+  'workflow',
+  'link',
+  'description',
+  'event',
+  'startedAt',
+  'completedAt'
+].join(',');
+
+const MAX_CHECK_DETAILS = 80;
+
+function parseCheckDetails(rawCheckDetails: unknown): GitHubCheckDetailRecord[] {
+  const rows = Array.isArray(rawCheckDetails) ? rawCheckDetails : [];
+  return rows.slice(0, MAX_CHECK_DETAILS).map((row) => {
+    const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
+    return {
+      name: stringField(item, 'name') ?? 'Unnamed check',
+      status: normalizeCheckStatus(stringField(item, 'bucket'), stringField(item, 'state')),
+      state: stringField(item, 'state'),
+      workflow: stringField(item, 'workflow'),
+      link: stringField(item, 'link'),
+      description: stringField(item, 'description'),
+      event: stringField(item, 'event'),
+      startedAt: stringField(item, 'startedAt'),
+      completedAt: stringField(item, 'completedAt')
+    };
+  });
+}
+
+function isCheckDetail(row: unknown): row is GitHubCheckDetailRecord {
+  return (
+    Boolean(row) &&
+    typeof row === 'object' &&
+    typeof (row as GitHubCheckDetailRecord).name === 'string' &&
+    typeof (row as GitHubCheckDetailRecord).status === 'string'
+  );
+}
+
+function normalizeRollupCheckStatus(row: unknown): GitHubCheckStatus {
+  const item = row && typeof row === 'object' ? (row as Record<string, unknown>) : {};
+  const value =
+    stringField(item, 'conclusion') ??
+    stringField(item, 'state') ??
+    stringField(item, 'status');
+  return normalizeCheckStatus(undefined, value);
+}
+
+function normalizeCheckStatus(bucket?: string, state?: string): GitHubCheckStatus {
+  const normalizedBucket = bucket?.toLowerCase();
+  if (normalizedBucket === 'pass') {
+    return 'passed';
+  }
+  if (normalizedBucket === 'fail') {
+    return 'failed';
+  }
+  if (normalizedBucket === 'skipping') {
+    return 'skipped';
+  }
+  if (normalizedBucket === 'cancel') {
+    return 'canceled';
+  }
+  if (normalizedBucket === 'pending') {
+    return 'pending';
+  }
+
+  const normalizedState = state?.toUpperCase();
+  if (!normalizedState || ['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'].includes(normalizedState)) {
+    return 'pending';
+  }
+  if (['SUCCESS', 'PASSING', 'PASSED'].includes(normalizedState)) {
+    return 'passed';
+  }
+  if (['SKIPPED', 'NEUTRAL'].includes(normalizedState)) {
+    return 'skipped';
+  }
+  if (['CANCELLED', 'CANCELED', 'CANCEL'].includes(normalizedState)) {
+    return 'canceled';
+  }
+  if (['FAILURE', 'FAILED', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(normalizedState)) {
+    return 'failed';
+  }
+  return 'pending';
+}
 
 function derivePullRequestStatus(input: {
   state?: string;
@@ -483,4 +636,25 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function publishBranchErrorMessage(error: unknown): string {
+  const message = errorMessage(error);
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes('fetch first') ||
+    normalized.includes('non-fast-forward') ||
+    normalized.includes('remote contains work') ||
+    normalized.includes('updates were rejected')
+  ) {
+    return 'Remote branch has newer commits. Sync the branch before pushing again.';
+  }
+  return message;
+}
+
+function bufferToString(value: string | Buffer | undefined): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  return value?.toString('utf8') ?? '';
 }

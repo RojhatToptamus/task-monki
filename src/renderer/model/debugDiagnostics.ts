@@ -41,7 +41,7 @@ function healthFindingTitle(code: string): string {
     case 'WORKFLOW_TRANSITION_BLOCKED':
       return 'Workflow transition blocked';
     case 'LOCAL_TESTS_NOT_PASSING':
-      return 'Local tests need attention';
+      return 'Local verification needs attention';
     case 'GITHUB_PREFLIGHT_NOT_READY':
       return 'GitHub setup needs attention';
     case 'BRANCH_PUBLISH_FAILED':

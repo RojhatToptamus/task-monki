@@ -1,0 +1,74 @@
+appId: dev.taskmonki.desktop
+productName: Task Monki
+copyright: Copyright © 2026 Task Monki contributors
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - dist-electron/**
+  - dist-renderer/**
+  - package.json
+
+extraMetadata:
+  main: dist-electron/electron/main.js
+
+artifactName: Task-Monki-${version}-${os}-${arch}.${ext}
+asar: true
+compression: maximum
+npmRebuild: false
+generateUpdatesFilesForAllChannels: false
+
+publish:
+  provider: github
+  releaseType: draft
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  identity: null
+  extraResources:
+    - from: build/icon.png
+      to: icon.png
+  extendInfo:
+    NSBluetoothAlwaysUsageDescription: Task Monki does not use Bluetooth access.
+    NSBluetoothPeripheralUsageDescription: Task Monki does not use Bluetooth access.
+    NSCameraUsageDescription: Task Monki does not use camera access.
+    NSMicrophoneUsageDescription: Task Monki does not use microphone access.
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
+dmg:
+  sign: false
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  category: Development
+  icon: build/icons
+  maintainer: Task Monki contributors
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64

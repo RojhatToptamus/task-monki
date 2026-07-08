@@ -1,11 +1,23 @@
-import type { CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import type { Task } from '../../shared/contracts';
 import {
   DEFAULT_PROMPT_REFINEMENT_MODEL,
-  type CodexExternalToolSettings,
-  type Task
+  type AgentModel,
+  type ExternalToolId,
+  type ExternalToolProbeResult,
+  type ExternalToolStatusReport,
+  type TaskManagerAppSettings,
+  type TestExternalToolRequest,
+  type UpdateAppSettingsRequest
 } from '../../shared/contracts';
-import type { AgentModel } from '../../shared/agent';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
+import {
+  areRequiredExternalToolsReady,
+  buildExecutableTestRequest,
+  selectExecutableDisplayStatus,
+  shouldShowExecutablePathControls
+} from '../model/executableSettings';
+import type { RepositorySetupState } from '../model/repositories';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
 import { TaskActionsMenu } from './TaskActionsMenu';
@@ -26,24 +38,21 @@ interface MainColumnProps {
   tasks: Task[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
-  appSettings: AppSettings;
-  onSetAppSettings(settings: AppSettings): void;
-  codexExternalTools: CodexExternalToolSettings;
-  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
+  appSettings: TaskManagerAppSettings;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  externalToolStatus?: ExternalToolStatusReport;
+  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
   activeRepositoryPath: string;
+  repositorySetupState: RepositorySetupState;
+  addingRepository: boolean;
+  onAddRepository(): Promise<boolean>;
+  onFinishSetup(): Promise<void>;
   onSelect(taskId: string): void;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
-}
-
-export interface AppSettings {
-  defaultModel?: string;
-  defaultReasoningEffort?: string;
-  promptRefinementModel?: string;
-  reviewModel?: string;
-  reviewReasoningEffort?: string;
 }
 
 const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
@@ -75,6 +84,24 @@ const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): str
   }
 };
 
+const SETUP_VIEW_TITLES: Record<
+  Exclude<RepositorySetupState, 'complete'>,
+  { title: string; subtitle: string }
+> = {
+  loading: {
+    title: 'Loading workspace',
+    subtitle: 'Checking saved repositories and tool status'
+  },
+  needsRepository: {
+    title: 'Set up Task Monki',
+    subtitle: 'Add a Git repository before creating tasks'
+  },
+  needsReview: {
+    title: 'Set up Task Monki',
+    subtitle: 'Review tools and defaults before entering the board'
+  }
+};
+
 export function MainColumn({
   view,
   tasks,
@@ -82,29 +109,56 @@ export function MainColumn({
   onSetTheme,
   appSettings,
   onSetAppSettings,
-  codexExternalTools,
-  onSetCodexExternalTools,
+  externalToolStatus,
+  onRefreshExternalTools,
+  onTestExternalTool,
   error,
   models,
   activeRepositoryPath,
+  repositorySetupState,
+  addingRepository,
+  onAddRepository,
+  onFinishSetup,
   onSelect,
   onArchive,
   onRequestDelete
 }: MainColumnProps) {
   const head = VIEW_TITLES[view];
+  const showRepositorySetup = repositorySetupState !== 'complete' && view !== 'settings';
+  const setupHead =
+    repositorySetupState === 'complete'
+      ? SETUP_VIEW_TITLES.needsReview
+      : SETUP_VIEW_TITLES[repositorySetupState];
 
   return (
     <main className="tm-main">
       <div className="tm-main__head">
         <div style={{ minWidth: 0 }}>
-          <h1 className="tm-main__title">{head.title}</h1>
-          <span className="tm-main__subtitle">{head.subtitle(tasks)}</span>
+          <h1 className="tm-main__title">{showRepositorySetup ? setupHead.title : head.title}</h1>
+          <span className="tm-main__subtitle">
+            {showRepositorySetup ? setupHead.subtitle : head.subtitle(tasks)}
+          </span>
         </div>
       </div>
 
       {error ? <div className="tm-error">{error}</div> : null}
 
-      {view === 'board' ? (
+      {showRepositorySetup ? (
+        <FirstLaunchSetup
+          state={repositorySetupState}
+          addingRepository={addingRepository}
+          appSettings={appSettings}
+          externalToolStatus={externalToolStatus}
+          models={models}
+          activeRepositoryPath={activeRepositoryPath}
+          onAddRepository={onAddRepository}
+          onFinishSetup={onFinishSetup}
+          onRefreshExternalTools={onRefreshExternalTools}
+          onTestExternalTool={onTestExternalTool}
+          onSetAppSettings={onSetAppSettings}
+        />
+      ) : null}
+      {!showRepositorySetup && view === 'board' ? (
         <BoardKanban
           tasks={tasks}
           onSelect={onSelect}
@@ -112,7 +166,7 @@ export function MainColumn({
           onRequestDelete={onRequestDelete}
         />
       ) : null}
-      {view === 'active' || view === 'review' || view === 'done' ? (
+      {!showRepositorySetup && (view === 'active' || view === 'review' || view === 'done') ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
           onSelect={onSelect}
@@ -120,20 +174,359 @@ export function MainColumn({
           onRequestDelete={onRequestDelete}
         />
       ) : null}
-      {view === 'inbox' ? <Inbox tasks={tasks} onSelect={onSelect} /> : null}
-      {view === 'settings' ? (
+      {!showRepositorySetup && view === 'inbox' ? (
+        <Inbox tasks={tasks} onSelect={onSelect} />
+      ) : null}
+      {!showRepositorySetup && view === 'settings' ? (
         <Settings
           theme={theme}
           onSetTheme={onSetTheme}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
-          codexExternalTools={codexExternalTools}
-          onSetCodexExternalTools={onSetCodexExternalTools}
+          externalToolStatus={externalToolStatus}
+          onRefreshExternalTools={onRefreshExternalTools}
+          onTestExternalTool={onTestExternalTool}
           models={models}
           activeRepositoryPath={activeRepositoryPath}
         />
       ) : null}
     </main>
+  );
+}
+
+function FirstLaunchSetup({
+  state,
+  addingRepository,
+  appSettings,
+  externalToolStatus,
+  models,
+  activeRepositoryPath,
+  onAddRepository,
+  onFinishSetup,
+  onRefreshExternalTools,
+  onTestExternalTool,
+  onSetAppSettings
+}: {
+  state: RepositorySetupState;
+  addingRepository: boolean;
+  appSettings: TaskManagerAppSettings;
+  externalToolStatus?: ExternalToolStatusReport;
+  models: AgentModel[];
+  activeRepositoryPath: string;
+  onAddRepository(): Promise<boolean>;
+  onFinishSetup(): Promise<void>;
+  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+}) {
+  const [isRefreshingTools, setIsRefreshingTools] = useState(false);
+  const [isFinishingSetup, setIsFinishingSetup] = useState(false);
+  const selectedModels = selectSettingsModels(models, appSettings);
+  const requiredToolsReady = areRequiredExternalToolsReady(externalToolStatus);
+  const isLoading = state === 'loading';
+  const hasRepository = Boolean(activeRepositoryPath);
+  const addRepositoryDisabled = isLoading || addingRepository;
+  const canFinishSetup =
+    hasRepository && requiredToolsReady && !isRefreshingTools && !isFinishingSetup;
+  const repositoryLabel = hasRepository
+    ? compactSettingsText(activeRepositoryPath, 72)
+    : 'Choose the Git repository for new tasks.';
+  const repositoryStepTone = isLoading ? 'pending' : hasRepository ? 'complete' : 'active';
+  const repositoryActionLabel = hasRepository ? 'Change repository' : 'Add repository';
+  const toolsDetail = externalToolStatus
+    ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and Codex are required.`
+    : 'Git and Codex are required before task runs can start.';
+
+  const refreshTools = async () => {
+    setIsRefreshingTools(true);
+    try {
+      await onRefreshExternalTools();
+    } finally {
+      setIsRefreshingTools(false);
+    }
+  };
+  const finishSetup = async () => {
+    if (!canFinishSetup) {
+      return;
+    }
+    setIsFinishingSetup(true);
+    try {
+      await onFinishSetup();
+    } catch {
+      setIsFinishingSetup(false);
+    }
+  };
+
+  return (
+    <div className="tm-setup">
+      <div className="tm-setup__inner">
+        <section className="tm-setup__panel" aria-label="First launch setup">
+          <SetupStep
+            title="Repository"
+            detail={
+              isLoading
+                ? 'Checking saved workspace state.'
+                : hasRepository
+                  ? `Repository ready: ${repositoryLabel}`
+                  : repositoryLabel
+            }
+            tone={repositoryStepTone}
+            actions={
+              <button
+                type="button"
+                className="tm-settings__button tm-settings__button--primary tm-setup__primary"
+                disabled={addRepositoryDisabled}
+                aria-busy={addingRepository}
+                onClick={() => void onAddRepository()}
+              >
+                <FolderIcon />
+                {repositoryActionLabel}
+              </button>
+            }
+          />
+
+          <SetupStep
+            title="Tools"
+            detail={toolsDetail}
+            tone={requiredToolsReady ? 'complete' : 'pending'}
+            actions={
+              <button
+                type="button"
+                className="tm-iconbtn"
+                disabled={isRefreshingTools}
+                aria-busy={isRefreshingTools}
+                aria-label="Re-check tools"
+                title="Re-check tools"
+                onClick={() => void refreshTools()}
+              >
+                <RefreshIcon />
+              </button>
+            }
+          >
+            <SetupToolList
+              appSettings={appSettings}
+              externalToolStatus={externalToolStatus}
+              onSetAppSettings={onSetAppSettings}
+              onTestExternalTool={onTestExternalTool}
+            />
+          </SetupStep>
+
+          <SetupStep
+            title="Defaults"
+            detail="Default model for new implementation tasks."
+            tone={models.length > 0 ? 'complete' : 'pending'}
+          >
+            <div className="tm-setup__model">
+              <ModelSettingRow
+                label="Default task model"
+                hint="Used for new implementation tasks"
+                value={selectedModels.selectedDefaultModel?.model ?? ''}
+                effortValue={selectedModels.selectedDefaultEffort}
+                models={models}
+                onModelChange={(model) => {
+                  const nextModel = models.find((candidate) => candidate.model === model);
+                  onSetAppSettings({
+                    defaultModel: model || null,
+                    defaultReasoningEffort:
+                      resolveReasoningEffort(
+                        nextModel,
+                        appSettings.defaultReasoningEffort
+                      ) ?? null
+                  });
+                }}
+                onEffortChange={(reasoningEffort) =>
+                  onSetAppSettings({
+                    defaultReasoningEffort: reasoningEffort || null
+                  })
+                }
+              />
+            </div>
+          </SetupStep>
+
+          <div className="tm-setup-finish">
+            <button
+              type="button"
+              className="tm-settings__button tm-settings__button--primary"
+              disabled={!canFinishSetup}
+              aria-busy={isFinishingSetup}
+              onClick={() => void finishSetup()}
+            >
+              Finish setup
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function SetupStep({
+  title,
+  detail,
+  tone,
+  actions,
+  children
+}: {
+  title: string;
+  detail: string;
+  tone: 'active' | 'complete' | 'pending';
+  actions?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={`tm-setup-step tm-setup-step--${tone}`}>
+      <span className="tm-setup-step__dot" aria-hidden="true" />
+      <div className="tm-setup-step__body">
+        <div className="tm-setup-step__head">
+          <div style={{ minWidth: 0 }}>
+            <h2>{title}</h2>
+            <p>{detail}</p>
+          </div>
+          {actions ? <div className="tm-setup-step__actions">{actions}</div> : null}
+        </div>
+        {children ? <div className="tm-setup-step__content">{children}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+function SetupToolList({
+  appSettings,
+  externalToolStatus,
+  onSetAppSettings,
+  onTestExternalTool
+}: {
+  appSettings: TaskManagerAppSettings;
+  externalToolStatus?: ExternalToolStatusReport;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+}) {
+  const rows: Array<{
+    key: ExternalToolId;
+    label: string;
+    hint: string;
+    value: string | null;
+    status?: ExternalToolProbeResult;
+    onSetPath(path: string | null): void;
+  }> = [
+    {
+      key: 'git',
+      label: 'Git',
+      hint: 'Required for repository evidence',
+      value: appSettings.externalExecutables.gitExecutablePath,
+      status: externalToolStatus?.tools.git,
+      onSetPath: (gitExecutablePath) =>
+        onSetAppSettings({
+          externalExecutables: { gitExecutablePath }
+        })
+    },
+    {
+      key: 'codex',
+      label: 'Codex',
+      hint: 'Required for agent runs',
+      value: appSettings.externalExecutables.codexExecutablePath,
+      status: externalToolStatus?.tools.codex,
+      onSetPath: (codexExecutablePath) =>
+        onSetAppSettings({
+          externalExecutables: { codexExecutablePath }
+        })
+    },
+    {
+      key: 'gh',
+      label: 'GitHub CLI',
+      hint: 'Optional for PR delivery',
+      value: appSettings.externalExecutables.ghExecutablePath,
+      status: externalToolStatus?.tools.gh,
+      onSetPath: (ghExecutablePath) =>
+        onSetAppSettings({
+          externalExecutables: { ghExecutablePath }
+        })
+    }
+  ];
+
+  return (
+    <div className="tm-setup-tools">
+      {rows.map((row) => {
+        const badge = describeToolStatus(row.status);
+        const shouldConfigure = shouldShowExecutablePathControls(row.status, row.value);
+        if (shouldConfigure) {
+          return (
+            <ExecutableSettingRow
+              key={row.key}
+              tool={row.key}
+              label={row.label === 'GitHub CLI' ? 'GitHub CLI' : `${row.label} executable`}
+              hint={row.hint}
+              value={row.value}
+              status={row.status}
+              onSetPath={row.onSetPath}
+              onTest={onTestExternalTool}
+            />
+          );
+        }
+        return (
+          <div className="tm-setup-tools__row" key={row.key}>
+            <span className={`tm-setup-tools__dot tm-setup-tools__dot--${badge.tone}`} />
+            <div className="tm-setup-tools__copy">
+              <strong>{row.label}</strong>
+              <span>{row.hint}</span>
+            </div>
+            <div className="tm-setup-tools__meta">
+              <strong>{badge.label}</strong>
+              <span>{describeToolStatusDetail(row.status)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function describeToolStatusDetail(status: ExternalToolProbeResult | undefined): string {
+  if (!status) {
+    return 'Not checked';
+  }
+  if (status.status === 'ok') {
+    return status.version ?? compactSettingsText(status.resolvedPath ?? status.executable, 42);
+  }
+  return compactSettingsText(status.error ?? 'Not available', 48);
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12a9 9 0 0 1-15.1 6.6" />
+      <path d="M3 12A9 9 0 0 1 18.1 5.4" />
+      <path d="M7 18.5H4.5V21" />
+      <path d="M17 5.5h2.5V3" />
+    </svg>
   );
 }
 
@@ -231,12 +624,6 @@ export function TaskCard({
         onClick={() => onSelect(vm.id)}
       />
       <div className="tm-card__body">
-        {vm.hasDecision ? (
-          <div className="tm-card__decisionbar">
-            <span className="tm-pulse" />
-            {vm.decisionLabel}
-          </div>
-        ) : null}
         <div className="tm-card__top">
           <span className="tm-card__num">{vm.num}</span>
           <span style={{ flex: 1 }} />
@@ -248,17 +635,23 @@ export function TaskCard({
             taskId={vm.id}
             title={vm.title}
             archived={vm.archived}
+            openTarget={{ type: 'repository', repositoryPath: vm.repositoryPath }}
             onArchive={onArchive}
             onRequestDelete={onRequestDelete}
             className="tm-card__actions"
           />
         </div>
         <div className="tm-card__meta">{vm.meta}</div>
-        <div className="tm-card__rollups">
-          {vm.rollups.map((rollup, index) => (
-            <span className="tm-rollup" key={index}>
-              <span className="tm-rollup__dot" style={dotStyle(rollup.tone)} />
-              {rollup.label}
+        <div className="tm-card__evidence" aria-label="Task evidence">
+          {vm.evidence.map((item, index) => (
+            <span
+              key={`${item.label}-${index}`}
+              className={`tm-card__evidence-item ${
+                item.tone ? `tm-card__evidence-item--${item.tone}` : ''
+              }`}
+            >
+              <span className="tm-card__evidence-dot" aria-hidden="true" />
+              {item.label}
             </span>
           ))}
         </div>
@@ -313,25 +706,18 @@ function Inbox({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void 
   );
 }
 
-function Settings({
-  theme,
-  onSetTheme,
-  appSettings,
-  onSetAppSettings,
-  codexExternalTools,
-  onSetCodexExternalTools,
-  models,
-  activeRepositoryPath
-}: {
-  theme: ThemePreference;
-  onSetTheme(theme: ThemePreference): void;
-  appSettings: AppSettings;
-  onSetAppSettings(settings: AppSettings): void;
-  codexExternalTools: CodexExternalToolSettings;
-  onSetCodexExternalTools(settings: Partial<CodexExternalToolSettings>): void;
-  models: AgentModel[];
-  activeRepositoryPath: string;
-}) {
+interface SelectedSettingsModels {
+  selectedDefaultModel?: AgentModel;
+  selectedPromptRefinementModel?: AgentModel;
+  selectedReviewModel?: AgentModel;
+  selectedDefaultEffort: string;
+  selectedReviewEffort: string;
+}
+
+function selectSettingsModels(
+  models: AgentModel[],
+  appSettings: TaskManagerAppSettings
+): SelectedSettingsModels {
   const defaultModel = models.find((model) => model.isDefault) ?? models[0];
   const selectedDefaultModel =
     models.find((model) => model.model === appSettings.defaultModel) ?? defaultModel;
@@ -345,13 +731,44 @@ function Settings({
     resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
   const selectedReviewEffort =
     resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '';
+
+  return {
+    selectedDefaultModel,
+    selectedPromptRefinementModel,
+    selectedReviewModel,
+    selectedDefaultEffort,
+    selectedReviewEffort
+  };
+}
+
+function Settings({
+  theme,
+  onSetTheme,
+  appSettings,
+  onSetAppSettings,
+  externalToolStatus,
+  onRefreshExternalTools,
+  onTestExternalTool,
+  models,
+  activeRepositoryPath
+}: {
+  theme: ThemePreference;
+  onSetTheme(theme: ThemePreference): void;
+  appSettings: TaskManagerAppSettings;
+  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  externalToolStatus?: ExternalToolStatusReport;
+  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+  models: AgentModel[];
+  activeRepositoryPath: string;
+}) {
+  const selectedModels = selectSettingsModels(models, appSettings);
   const rows: Array<{ k: string; hint: string; v: string }> = [
     {
       k: 'Repository',
       hint: 'Active task context',
       v: activeRepositoryPath ? repositoryName(activeRepositoryPath) : 'Not set'
-    },
-    { k: 'Test command', hint: 'Run for verification', v: 'npm test' }
+    }
   ];
 
   return (
@@ -385,109 +802,166 @@ function Settings({
             </button>
           </div>
         </div>
+        <SettingsSwitchRow
+          label="Mascot animation"
+          hint="Show the task detail mascot"
+          checked={appSettings.showMascot}
+          onChange={(showMascot) => onSetAppSettings({ showMascot })}
+        />
         <ModelSettingRow
           label="Default task model"
           hint="Used for new implementation tasks"
-          value={selectedDefaultModel?.model ?? ''}
-          effortValue={selectedDefaultEffort}
+          value={selectedModels.selectedDefaultModel?.model ?? ''}
+          effortValue={selectedModels.selectedDefaultEffort}
           models={models}
           onModelChange={(model) => {
             const nextModel = models.find((candidate) => candidate.model === model);
             onSetAppSettings({
-              ...appSettings,
-              defaultModel: model || undefined,
+              defaultModel: model || null,
               defaultReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.defaultReasoningEffort
-              )
+              ) ?? null
             });
           }}
           onEffortChange={(reasoningEffort) =>
             onSetAppSettings({
-              ...appSettings,
-              defaultReasoningEffort: reasoningEffort || undefined
+              defaultReasoningEffort: reasoningEffort || null
             })
           }
         />
         <ModelSettingRow
           label="Prompt refinement model"
           hint="Used when improving task descriptions"
-          value={selectedPromptRefinementModel?.model ?? ''}
+          value={selectedModels.selectedPromptRefinementModel?.model ?? ''}
           models={models}
           onModelChange={(model) =>
             onSetAppSettings({
-              ...appSettings,
-              promptRefinementModel: model || undefined
+              promptRefinementModel: model || null
             })
           }
         />
         <ModelSettingRow
           label="Codex review model"
           hint="Used for AI quality-gate reviews"
-          value={selectedReviewModel?.model ?? ''}
-          effortValue={selectedReviewEffort}
+          value={selectedModels.selectedReviewModel?.model ?? ''}
+          effortValue={selectedModels.selectedReviewEffort}
           models={models}
           onModelChange={(model) => {
             const nextModel = models.find((candidate) => candidate.model === model);
             onSetAppSettings({
-              ...appSettings,
-              reviewModel: model || undefined,
+              reviewModel: model || null,
               reviewReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.reviewReasoningEffort
-              )
+              ) ?? null
             });
           }}
           onEffortChange={(reasoningEffort) =>
             onSetAppSettings({
-              ...appSettings,
-              reviewReasoningEffort: reasoningEffort || undefined
+              reviewReasoningEffort: reasoningEffort || null
             })
           }
         />
         <ExternalToolSettingRow
           label="Web search"
           hint="Codex search tool"
-          value={codexExternalTools.webSearchMode}
+          value={appSettings.codexExternalTools.webSearchMode}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'cached', label: 'Cached' },
             { value: 'live', label: 'Live' }
           ]}
           onChange={(webSearchMode) =>
-            onSetCodexExternalTools({
-              webSearchMode
+            onSetAppSettings({
+              codexExternalTools: { webSearchMode }
             })
           }
         />
         <ExternalToolSettingRow
           label="MCP servers"
           hint="Configured Codex servers"
-          value={codexExternalTools.mcpServers}
+          value={appSettings.codexExternalTools.mcpServers}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'all', label: 'All enabled' }
           ]}
           onChange={(mcpServers) =>
-            onSetCodexExternalTools({
-              mcpServers
+            onSetAppSettings({
+              codexExternalTools: { mcpServers }
             })
           }
         />
         <ExternalToolSettingRow
           label="Apps"
           hint="Codex apps and connectors"
-          value={codexExternalTools.apps}
+          value={appSettings.codexExternalTools.apps}
           options={[
             { value: 'disabled', label: 'Disabled' },
             { value: 'enabled', label: 'Enabled' }
           ]}
           onChange={(apps) =>
-            onSetCodexExternalTools({
-              apps
+            onSetAppSettings({
+              codexExternalTools: { apps }
             })
           }
         />
+        <ExecutableSettingRow
+          tool="git"
+          label="Git executable"
+          hint="Required for repository evidence"
+          value={appSettings.externalExecutables.gitExecutablePath}
+          status={externalToolStatus?.tools.git}
+          onSetPath={(gitExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { gitExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <ExecutableSettingRow
+          tool="codex"
+          label="Codex executable"
+          hint="Required for agent runs"
+          value={appSettings.externalExecutables.codexExecutablePath}
+          status={externalToolStatus?.tools.codex}
+          onSetPath={(codexExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { codexExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <ExecutableSettingRow
+          tool="gh"
+          label="GitHub CLI"
+          hint="Optional for PR delivery"
+          value={appSettings.externalExecutables.ghExecutablePath}
+          status={externalToolStatus?.tools.gh}
+          onSetPath={(ghExecutablePath) =>
+            onSetAppSettings({
+              externalExecutables: { ghExecutablePath }
+            })
+          }
+          onTest={onTestExternalTool}
+        />
+        <div className="tm-settings__row">
+          <div style={{ minWidth: 0 }}>
+            <div className="tm-settings__k">Tool status</div>
+            <div className="tm-settings__hint">
+              {externalToolStatus
+                ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}`
+                : 'Not checked'}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="tm-settings__button"
+            onClick={() => void onRefreshExternalTools()}
+          >
+            Refresh
+          </button>
+        </div>
         {rows.map((row) => (
           <div className="tm-settings__row" key={row.k}>
             <div style={{ minWidth: 0 }}>
@@ -498,6 +972,37 @@ function Settings({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SettingsSwitchRow({
+  label,
+  hint,
+  checked,
+  onChange
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange(checked: boolean): void;
+}) {
+  return (
+    <div className="tm-settings__row">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">{label}</div>
+        <div className="tm-settings__hint">{hint}</div>
+      </div>
+      <button
+        type="button"
+        className={`network-toggle__switch ${checked ? 'network-toggle__switch--on' : ''}`}
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={() => onChange(!checked)}
+      >
+        <span />
+      </button>
     </div>
   );
 }
@@ -537,6 +1042,250 @@ function ExternalToolSettingRow<Value extends string>({
       </div>
     </div>
   );
+}
+
+function ExecutableSettingRow({
+  tool,
+  label,
+  hint,
+  value,
+  status,
+  onSetPath,
+  onTest
+}: {
+  tool: ExternalToolId;
+  label: string;
+  hint: string;
+  value: string | null;
+  status?: ExternalToolProbeResult;
+  onSetPath(path: string | null): void;
+  onTest(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+}) {
+  const savedPath = value ?? '';
+  const [mode, setMode] = useState<'auto' | 'custom'>(savedPath ? 'custom' : 'auto');
+  const [draftPath, setDraftPath] = useState(savedPath);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ExternalToolProbeResult>();
+  // Feedback shown below the controls after the user clicks Test. Kept separate
+  // from `testResult` (which feeds the passive badge) so the outcome message is
+  // only tied to an explicit test action.
+  const [testFeedback, setTestFeedback] = useState<ExecutableTestFeedback>();
+
+  const resetTestFeedback = () => {
+    setTestResult(undefined);
+    setTestFeedback(undefined);
+  };
+
+  useEffect(() => {
+    setMode(savedPath ? 'custom' : 'auto');
+    setDraftPath(savedPath);
+    resetTestFeedback();
+  }, [savedPath]);
+
+  const isCustom = mode === 'custom';
+  const normalizedDraft = draftPath.trim();
+  const hasPendingCustomPath = isCustom && normalizedDraft !== savedPath;
+  const displayStatus = selectExecutableDisplayStatus(status, testResult);
+  const badge = describeToolStatus(displayStatus);
+  const resolvedMeta = displayStatus
+    ? compactSettingsText(displayStatus.resolvedPath ?? displayStatus.executable)
+    : null;
+  const versionMeta =
+    displayStatus?.status === 'ok' && displayStatus.version ? displayStatus.version : null;
+
+  const runTest = async () => {
+    setIsTesting(true);
+    setTestResult(undefined);
+    setTestFeedback({ state: 'running' });
+    try {
+      const result = await onTest(buildExecutableTestRequest(tool, mode, draftPath));
+      setTestResult(result);
+      setTestFeedback(
+        result.status === 'ok'
+          ? {
+              state: 'passed',
+              path: result.resolvedPath ?? result.executable,
+              version: result.version
+            }
+          : { state: 'failed', message: result.error ?? 'The tool could not be verified.' }
+      );
+    } catch (caught) {
+      setTestFeedback({
+        state: 'failed',
+        message: caught instanceof Error ? caught.message : 'The test could not be run.'
+      });
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  return (
+    <div className="tm-exec">
+      <div className="tm-exec__head">
+        <div className="tm-exec__title" style={{ minWidth: 0 }}>
+          <div className="tm-settings__k">{label}</div>
+          <div className="tm-settings__hint">{hint}</div>
+        </div>
+        <span className={`tm-exec__badge tm-exec__badge--${badge.tone}`}>
+          <span className="tm-exec__dot" aria-hidden="true" />
+          {badge.label}
+        </span>
+      </div>
+
+      {resolvedMeta ? (
+        <div className="tm-exec__meta">
+          <span className="tm-exec__source">{humanizeEnum(displayStatus!.source)}</span>
+          <span className="tm-exec__path">{resolvedMeta}</span>
+          {versionMeta ? <span className="tm-exec__version">{versionMeta}</span> : null}
+        </div>
+      ) : null}
+
+      <div className="tm-exec__controls">
+        <select
+          className="tm-settings__select tm-settings__select--mode"
+          value={mode}
+          onChange={(event) => {
+            const nextMode = event.target.value === 'custom' ? 'custom' : 'auto';
+            setMode(nextMode);
+            resetTestFeedback();
+            if (nextMode === 'auto') {
+              setDraftPath('');
+              onSetPath(null);
+            }
+          }}
+          aria-label={`${label} mode`}
+        >
+          <option value="auto">Auto</option>
+          <option value="custom">Custom</option>
+        </select>
+        <input
+          className="tm-settings__input"
+          value={draftPath}
+          onChange={(event) => {
+            setDraftPath(event.target.value);
+            resetTestFeedback();
+          }}
+          disabled={!isCustom}
+          placeholder={displayStatus?.resolvedPath ?? displayStatus?.executable ?? 'Auto-detect'}
+          aria-label={`${label} path`}
+        />
+        <div className="tm-exec__actions">
+          {hasPendingCustomPath ? (
+            <button
+              type="button"
+              className="tm-settings__button tm-settings__button--primary"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                resetTestFeedback();
+                onSetPath(normalizedDraft || null);
+              }}
+            >
+              Save
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="tm-settings__button"
+            disabled={isTesting}
+            aria-busy={isTesting}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => void runTest()}
+          >
+            Test
+          </button>
+          <button
+            type="button"
+            className="tm-settings__button"
+            disabled={!savedPath && !draftPath}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              setMode('auto');
+              setDraftPath('');
+              resetTestFeedback();
+              onSetPath(null);
+            }}
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+
+      {testFeedback ? <ExecutableTestFeedbackStrip feedback={testFeedback} /> : null}
+    </div>
+  );
+}
+
+type ExecutableTestFeedback =
+  | { state: 'running' }
+  | { state: 'passed'; path: string; version: string | null }
+  | { state: 'failed'; message: string };
+
+function ExecutableTestFeedbackStrip({ feedback }: { feedback: ExecutableTestFeedback }) {
+  if (feedback.state === 'running') {
+    return (
+      <div className="tm-exec__test tm-exec__test--running" role="status" aria-live="polite">
+        <span className="tm-exec__spinner" aria-hidden="true" />
+        <span>Testing…</span>
+      </div>
+    );
+  }
+
+  if (feedback.state === 'passed') {
+    return (
+      <div className="tm-exec__test tm-exec__test--passed" role="status" aria-live="polite">
+        <span className="tm-exec__test-icon" aria-hidden="true">
+          ✓
+        </span>
+        <span className="tm-exec__test-text">
+          <strong>Test passed</strong>
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tm-exec__test tm-exec__test--failed" role="alert" aria-live="assertive">
+      <span className="tm-exec__test-icon" aria-hidden="true">
+        ✕
+      </span>
+      <span className="tm-exec__test-text">
+        <strong>Test failed</strong>
+        <span className="tm-exec__test-message">{feedback.message}</span>
+      </span>
+    </div>
+  );
+}
+
+function describeToolStatus(
+  status: ExternalToolProbeResult | undefined
+): { tone: 'ok' | 'error' | 'muted'; label: string } {
+  if (!status) {
+    return { tone: 'muted', label: 'Not checked' };
+  }
+  if (status.status === 'ok') {
+    return { tone: 'ok', label: 'Available' };
+  }
+  return {
+    tone: status.required ? 'error' : 'muted',
+    label: status.required ? 'Unavailable' : 'Optional'
+  };
+}
+
+function compactSettingsText(value: string, maxLength = 72): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  const headLength = 24;
+  const tailLength = Math.max(12, maxLength - headLength - 3);
+  return `${value.slice(0, headLength)}...${value.slice(-tailLength)}`;
+}
+
+function formatSettingsTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'recently';
+  }
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function ModelSettingRow({
@@ -611,11 +1360,25 @@ function ModelSettingRow({
   );
 }
 
-export function Chip({ tone, label }: { tone: Tone; label: string }) {
+export function Chip({
+  tone,
+  label,
+  compact = false
+}: {
+  tone: Tone;
+  label: string;
+  compact?: boolean;
+}) {
+  const classes = [
+    'status-pill',
+    `status-pill--${tone}`,
+    compact ? 'status-pill--compact' : ''
+  ].filter(Boolean);
+
   return (
-    <span className={`status-pill status-pill--${tone}`}>
-      <span className="status-pill__dot" />
-      {label}
+    <span className={classes.join(' ')}>
+      <span className="status-pill__dot" aria-hidden="true" />
+      <span className="status-pill__label">{label}</span>
     </span>
   );
 }

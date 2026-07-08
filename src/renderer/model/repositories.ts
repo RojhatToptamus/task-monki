@@ -8,6 +8,8 @@ export interface RepositoryOption {
   isDefault: boolean;
 }
 
+export type RepositorySetupState = 'loading' | 'needsRepository' | 'needsReview' | 'complete';
+
 export function normalizeRepositoryPath(repositoryPath: string): string {
   const trimmed = repositoryPath.trim();
   if (!trimmed) {
@@ -87,6 +89,23 @@ export function resolveSelectedRepositoryPath(
     return requested;
   }
   return options[0]?.path ?? '';
+}
+
+export function resolveRepositorySetupState(input: {
+  loading: boolean;
+  options: RepositoryOption[];
+  activeRepositoryPath: string;
+  firstLaunchSetupCompleted: boolean;
+}): RepositorySetupState {
+  if (input.loading) {
+    return 'loading';
+  }
+  const hasRepository =
+    Boolean(normalizeRepositoryPath(input.activeRepositoryPath)) || input.options.length > 0;
+  if (!hasRepository) {
+    return 'needsRepository';
+  }
+  return input.firstLaunchSetupCompleted ? 'complete' : 'needsReview';
 }
 
 export function mergeRepositoryPath(paths: string[], repositoryPath: string): string[] {

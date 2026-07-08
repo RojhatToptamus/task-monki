@@ -18,7 +18,7 @@ import type {
 
 export * from './agent';
 
-export const TASK_STORE_SCHEMA_VERSION = 8 as const;
+export const TASK_STORE_SCHEMA_VERSION = 9 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -45,6 +45,52 @@ export type CompletionPolicy =
   | 'MERGED'
   | 'MERGED_AND_VERIFIED'
   | 'MANUAL';
+
+export function completionPolicyRequiresMerge(policy: CompletionPolicy): boolean {
+  return policy === 'MERGED' || policy === 'MERGED_AND_VERIFIED';
+}
+
+export function completionPolicyRequiresPassingChecks(policy: CompletionPolicy): boolean {
+  return policy === 'MERGED_AND_VERIFIED';
+}
+
+export interface VerifiedChecksEvidence {
+  ciStatus?: CiChecksStatus;
+  ciHeadSha?: string;
+  ciPullRequestNumber?: number;
+  mergeHeadSha?: string;
+  mergePullRequestNumber?: number;
+}
+
+export function verifiedChecksMatchMergeHead(evidence: VerifiedChecksEvidence): boolean {
+  return (
+    evidence.ciStatus === 'PASSING' &&
+    typeof evidence.ciPullRequestNumber === 'number' &&
+    evidence.ciPullRequestNumber === evidence.mergePullRequestNumber &&
+    Boolean(
+      evidence.ciHeadSha &&
+        evidence.mergeHeadSha &&
+        evidence.ciHeadSha === evidence.mergeHeadSha
+    )
+  );
+}
+
+export const PULL_REQUEST_TITLE_MAX_LENGTH = 256;
+
+export function normalizePullRequestTitle(
+  title: string | null | undefined,
+  fallback: string
+): string {
+  return (
+    compactPullRequestTitle(title) ||
+    compactPullRequestTitle(fallback) ||
+    'Task Monki PR'
+  );
+}
+
+function compactPullRequestTitle(title: string | null | undefined): string {
+  return (title ?? '').replace(/\s+/g, ' ').trim().slice(0, PULL_REQUEST_TITLE_MAX_LENGTH).trim();
+}
 
 export type RequestedActionStatus =
   | 'NONE'
@@ -95,18 +141,6 @@ export type GitStatus =
   | 'UNAVAILABLE'
   | 'UNKNOWN';
 
-export type TestStatus =
-  | 'NOT_CONFIGURED'
-  | 'NOT_RUN'
-  | 'QUEUED'
-  | 'RUNNING'
-  | 'PASSED'
-  | 'FAILED'
-  | 'ERROR'
-  | 'CANCELED'
-  | 'STALE'
-  | 'UNKNOWN';
-
 export type GitHubRepositoryStatus =
   | 'NOT_CHECKED'
   | 'READY'
@@ -145,6 +179,20 @@ export type CiChecksStatus =
   | 'BLOCKED'
   | 'STALE'
   | 'UNKNOWN';
+
+export type GitHubCheckStatus = 'passed' | 'failed' | 'pending' | 'skipped' | 'canceled';
+
+export interface GitHubCheckDetailRecord {
+  name: string;
+  status: GitHubCheckStatus;
+  state?: string;
+  workflow?: string;
+  link?: string;
+  description?: string;
+  event?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
 
 export type ReviewStatus =
   | 'NOT_APPLICABLE'
@@ -225,12 +273,6 @@ export type DomainEventType =
   | 'GIT_SNAPSHOT_CAPTURED'
   | 'DELIVERY_COMMIT_CREATED'
   | 'DIFF_ARTIFACT_CREATED'
-  | 'TEST_RUN_STARTED'
-  | 'TEST_PROCESS_STARTED'
-  | 'TEST_STDOUT_CHUNK'
-  | 'TEST_STDERR_CHUNK'
-  | 'TEST_RUN_COMPLETED'
-  | 'TEST_RESULT_STALE'
   | 'PROMPT_REFINED'
   | 'GITHUB_PREFLIGHT_COMPLETED'
   | 'BRANCH_PUBLISH_REQUESTED'
@@ -281,8 +323,6 @@ export type ArtifactKind =
   | 'agent-final'
   | 'diff'
   | 'git-snapshot'
-  | 'test-stdout'
-  | 'test-stderr'
   | 'pr-body';
 
 export interface Finding {
@@ -301,10 +341,11 @@ export interface StatusProjection {
   repositoryPreflight: RepositoryPreflightStatus;
   worktree: WorktreeStatus;
   git: GitStatus;
-  tests: TestStatus;
   githubRepository: GitHubRepositoryStatus;
   branchPublication: BranchPublicationStatus;
   githubPullRequest: PullRequestStatus;
+  githubPullRequestNumber?: number;
+  githubPullRequestUrl?: string;
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
   /**
@@ -333,12 +374,10 @@ export interface Task {
   currentAgentSessionId?: string;
   currentIterationId?: string;
   currentWorktreeId?: string;
-  currentTestRunId?: string;
   forkedAlternativeTaskIds: string[];
   forkedFromTaskId?: string;
   forkedFromRunId?: string;
   agentSettings: AgentExecutionSettings;
-  testCommand?: string;
   createdAt: string;
   updatedAt: string;
   projection: StatusProjection;
@@ -441,29 +480,6 @@ export interface RunRecord {
   finalMessage?: string;
 }
 
-export interface TestRunRecord {
-  id: string;
-  taskId: string;
-  iterationId: string;
-  worktreeId: string;
-  generationKey: string;
-  command: string;
-  executable: string;
-  argv: string[];
-  cwd: string;
-  status: TestStatus;
-  processStatus: ProcessStatus;
-  stdoutArtifactId: string;
-  stderrArtifactId: string;
-  startedAt: string;
-  endedAt?: string;
-  exitCode?: number | null;
-  signal?: NodeJS.Signals | null;
-  testedHeadSha?: string;
-  testedDirtyFingerprint?: string;
-  staleReason?: string;
-}
-
 export interface GitHubRepositoryRecord {
   id: string;
   taskId: string;
@@ -530,6 +546,8 @@ export interface CiRollupRecord {
   passingCount: number;
   failingCount: number;
   skippedCount: number;
+  canceledCount: number;
+  checkDetails: GitHubCheckDetailRecord[];
   observedAt: string;
   raw?: unknown;
 }
@@ -564,7 +582,6 @@ export interface ArtifactRecord {
   id: string;
   taskId: string;
   runId?: string;
-  testRunId?: string;
   kind: ArtifactKind;
   path: string;
   byteCount: number;
@@ -582,7 +599,6 @@ export interface DomainEvent {
   serverInstanceId?: string;
   agentItemId?: string;
   interactionRequestId?: string;
-  testRunId?: string;
   worktreeId?: string;
   source:
     | 'ui'
@@ -592,7 +608,6 @@ export interface DomainEvent {
     | 'repository'
     | 'projection'
     | 'git'
-    | 'test'
     | 'github'
     | 'prompt';
   sourceEventId: string;
@@ -618,7 +633,6 @@ export interface TaskSnapshot {
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
   gitSnapshots: GitSnapshotRecord[];
-  testRuns: TestRunRecord[];
   githubRepositories: GitHubRepositoryRecord[];
   branchPublications: BranchPublicationRecord[];
   pullRequests: PullRequestSnapshotRecord[];
@@ -643,7 +657,7 @@ export interface CreateTaskRequest {
   title: string;
   prompt: string;
   repositoryPath: string;
-  testCommand?: string;
+  completionPolicy?: CompletionPolicy;
   agentSettings?: AgentExecutionSettings;
 }
 
@@ -690,10 +704,6 @@ export interface SyncAgentGoalRequest {
   sessionId: string;
 }
 
-export interface UpdateAppSettingsRequest {
-  codexExternalTools?: import('./agent').CodexExternalToolSettings;
-}
-
 export interface RespondToInteractionRequest {
   taskId: string;
   runId: string;
@@ -702,10 +712,6 @@ export interface RespondToInteractionRequest {
 }
 
 export interface PrepareWorktreeRequest {
-  taskId: string;
-}
-
-export interface RunTestsRequest {
   taskId: string;
 }
 
@@ -757,6 +763,124 @@ export interface RefinePromptResponse {
   source: 'model' | 'deterministic-fallback';
 }
 
+export interface UpdateAppSettingsRequest {
+  theme?: import('./agent').TaskManagerThemePreference;
+  sidebarCollapsed?: boolean;
+  showMascot?: boolean;
+  firstLaunchSetupCompleted?: boolean;
+  defaultModel?: string | null;
+  defaultReasoningEffort?: string | null;
+  promptRefinementModel?: string | null;
+  reviewModel?: string | null;
+  reviewReasoningEffort?: string | null;
+  codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
+  externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
+  repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+}
+
+export type ExternalToolId = 'git' | 'codex' | 'gh';
+export type ExternalToolResolutionSource = 'env' | 'override' | 'settings' | 'auto';
+export type ExternalToolProbeStatus = 'ok' | 'error';
+
+export interface ExternalToolProbeResult {
+  tool: ExternalToolId;
+  label: string;
+  required: boolean;
+  source: ExternalToolResolutionSource;
+  configuredPath: string | null;
+  executable: string;
+  resolvedPath: string | null;
+  status: ExternalToolProbeStatus;
+  version: string | null;
+  error: string | null;
+}
+
+export interface ExternalToolStatusReport {
+  tools: Record<ExternalToolId, ExternalToolProbeResult>;
+  refreshedAt: string;
+}
+
+export interface TestExternalToolRequest {
+  tool: ExternalToolId;
+  executablePath?: string | null;
+}
+
+export type OpenTargetAppId =
+  | 'vscode'
+  | 'vscode-insiders'
+  | 'cursor'
+  | 'windsurf'
+  | 'sublime'
+  | 'intellij-idea'
+  | 'xcode'
+  | 'default';
+
+export type OpenTargetAppIcon = { kind: 'image'; dataUrl: string };
+
+export interface OpenTargetDetectedApp {
+  id: OpenTargetAppId;
+  label: string;
+  icon?: OpenTargetAppIcon;
+}
+
+export type OpenTargetRef =
+  | {
+      type: 'repository';
+      repositoryPath: string;
+    }
+  | {
+      type: 'worktree';
+      worktreeId: string;
+      taskId?: string;
+    }
+  | {
+      type: 'worktreeFile';
+      worktreeId: string;
+      relativePath: string;
+      taskId?: string;
+      line?: number;
+      column?: number;
+    };
+
+export interface InspectOpenTargetRequest {
+  target: OpenTargetRef;
+}
+
+export interface OpenTargetInspection {
+  target: {
+    type: OpenTargetRef['type'];
+    kind: 'file' | 'directory' | 'other' | 'missing';
+  };
+  apps: OpenTargetDetectedApp[];
+  preferredAppId: OpenTargetAppId;
+  revealLabel: string;
+  canOpen: boolean;
+  canReveal: boolean;
+  canOpenTerminal: boolean;
+  canCopyFileContents: boolean;
+  copyFileContentsDisabledReason?: string;
+  disabledReason?: string;
+}
+
+export type OpenTargetAction =
+  | 'open'
+  | 'reveal'
+  | 'openTerminal'
+  | 'copyPath'
+  | 'copyFileContents';
+
+export interface ExecuteOpenTargetActionRequest {
+  target: OpenTargetRef;
+  action: OpenTargetAction;
+  appId?: OpenTargetAppId;
+}
+
+export interface OpenTargetActionResult {
+  ok: boolean;
+  message?: string;
+  clipboardText?: string;
+}
+
 export interface GitHubPreflightRequest {
   taskId: string;
 }
@@ -767,6 +891,7 @@ export interface PublishBranchRequest {
 
 export interface CreatePullRequestRequest {
   taskId: string;
+  title?: string;
 }
 
 export interface RefreshGitHubRequest {
@@ -785,9 +910,6 @@ export interface AppUpdateEvent {
     | 'interaction.updated'
     | 'worktree.updated'
     | 'git.updated'
-    | 'test.started'
-    | 'test.output'
-    | 'test.terminal'
     | 'github.updated'
     | 'prompt.refined'
     | 'provider.updated'
@@ -797,7 +919,6 @@ export interface AppUpdateEvent {
   taskId: string;
   iterationId?: string;
   runId?: string;
-  testRunId?: string;
   worktreeId?: string;
   payload: unknown;
   at: string;
@@ -811,6 +932,12 @@ export interface TaskManagerApi {
   updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<import('./agent').TaskManagerAppSettings>;
+  getExternalToolStatus(): Promise<ExternalToolStatusReport>;
+  testExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
+  inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection>;
+  executeOpenTargetAction(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
   createTask(input: CreateTaskRequest): Promise<Task>;
@@ -826,7 +953,6 @@ export interface TaskManagerApi {
   respondToInteraction(
     input: RespondToInteractionRequest
   ): Promise<InteractionRequestRecord>;
-  runTests(input: RunTestsRequest): Promise<TestRunRecord>;
   refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord>;
   createDeliveryCommit(input: CreateDeliveryCommitRequest): Promise<GitSnapshotRecord>;
   preflightGitHub(input: GitHubPreflightRequest): Promise<GitHubRepositoryRecord>;
@@ -850,7 +976,6 @@ export function createInitialProjection(now: string): StatusProjection {
     repositoryPreflight: 'UNKNOWN',
     worktree: 'NOT_CREATED',
     git: 'NOT_INSPECTED',
-    tests: 'NOT_RUN',
     githubRepository: 'NOT_CHECKED',
     branchPublication: 'NOT_PUSHED',
     githubPullRequest: 'UNLINKED',

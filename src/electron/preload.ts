@@ -7,7 +7,9 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
+  InspectOpenTargetRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
@@ -15,17 +17,31 @@ import type {
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
-  RunTestsRequest,
   StartRunRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
+  TestExternalToolRequest,
   TaskManagerApi,
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import type { WindowChromePlatform } from '../shared/shell';
+
+function getWindowChromePlatform(): WindowChromePlatform {
+  if (process.platform === 'darwin') {
+    return 'macos';
+  }
+  if (process.platform === 'win32') {
+    return 'windows';
+  }
+  if (process.platform === 'linux') {
+    return 'linux';
+  }
+  return 'other';
+}
 
 const api: TaskManagerApi = {
   getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
@@ -33,6 +49,13 @@ const api: TaskManagerApi = {
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
     ipcRenderer.invoke('settings:update', input),
+  getExternalToolStatus: () => ipcRenderer.invoke('settings:tools:status'),
+  testExternalTool: (input: TestExternalToolRequest) =>
+    ipcRenderer.invoke('settings:tools:test', input),
+  inspectOpenTarget: (input: InspectOpenTargetRequest) =>
+    ipcRenderer.invoke('openTarget:inspect', input),
+  executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
+    ipcRenderer.invoke('openTarget:execute', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),
@@ -51,7 +74,6 @@ const api: TaskManagerApi = {
   cancelRun: (input: CancelRunRequest) => ipcRenderer.invoke('codex:cancelRun', input),
   respondToInteraction: (input: RespondToInteractionRequest) =>
     ipcRenderer.invoke('agent:respondToInteraction', input),
-  runTests: (input: RunTestsRequest) => ipcRenderer.invoke('test:run', input),
   refreshEvidence: (input: RefreshEvidenceRequest) => ipcRenderer.invoke('evidence:refresh', input),
   createDeliveryCommit: (input: CreateDeliveryCommitRequest) =>
     ipcRenderer.invoke('git:deliveryCommit', input),
@@ -73,3 +95,6 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
+contextBridge.exposeInMainWorld('taskManagerShell', {
+  windowChromePlatform: getWindowChromePlatform()
+});

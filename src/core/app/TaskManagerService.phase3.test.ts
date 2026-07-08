@@ -7,7 +7,7 @@ import {
 } from './TaskManagerService';
 
 describe('Phase 3 delivery guards', () => {
-  it('allows draft PR publication readiness without local test evidence', () => {
+  it('allows draft PR publication readiness from committed Git evidence', () => {
     expect(() => assertPublishReady(gitSnapshot('head-1', 'fingerprint-1'))).not.toThrow();
   });
 
@@ -15,6 +15,12 @@ describe('Phase 3 delivery guards', () => {
     expect(() =>
       assertPublishReady(gitSnapshot('head-1', 'fingerprint-1', { commitsAheadOfBase: 0 }))
     ).toThrow('no committed changes');
+  });
+
+  it('blocks draft PR publication readiness when the branch has diverged', () => {
+    expect(() =>
+      assertPublishReady(gitSnapshot('head-1', 'fingerprint-1', { status: 'DIVERGED' }))
+    ).toThrow('Sync the branch');
   });
 
   it('allows IN_REVIEW only for a matching open pull request', () => {
@@ -40,6 +46,75 @@ describe('Phase 3 delivery guards', () => {
         mergeStatus: 'NOT_MERGED'
       })
     ).toContain('merged');
+    expect(
+      transitionBlocker(
+        { completionPolicy: 'MERGED_AND_VERIFIED', projection: {} } as never,
+        'DONE',
+        {
+          hasWorktree: true,
+          mergeStatus: 'NOT_MERGED'
+        }
+      )
+    ).toContain('merged');
+    expect(
+      transitionBlocker(
+        { completionPolicy: 'MERGED_AND_VERIFIED', projection: {} } as never,
+        'DONE',
+        {
+          hasWorktree: true,
+          mergeStatus: 'MERGED',
+          ciStatus: 'FAILING'
+        }
+      )
+    ).toContain('checks');
+    expect(
+      transitionBlocker(
+        { completionPolicy: 'MERGED_AND_VERIFIED', projection: {} } as never,
+        'DONE',
+        {
+          hasWorktree: true,
+          mergeStatus: 'MERGED',
+          ciStatus: 'PASSING'
+        }
+      )
+    ).toContain('merged PR head');
+    expect(
+      transitionBlocker(
+        { completionPolicy: 'MERGED_AND_VERIFIED', projection: {} } as never,
+        'DONE',
+        {
+          hasWorktree: true,
+          mergeStatus: 'MERGED',
+          mergeHeadSha: 'merged-head',
+          mergePullRequestNumber: 82,
+          ciStatus: 'PASSING',
+          ciHeadSha: 'old-head',
+          ciPullRequestNumber: 82
+        }
+      )
+    ).toContain('merged PR head');
+    expect(
+      transitionBlocker(
+        { completionPolicy: 'MERGED_AND_VERIFIED', projection: {} } as never,
+        'DONE',
+        {
+          hasWorktree: true,
+          mergeStatus: 'MERGED',
+          mergeHeadSha: 'merged-head',
+          mergePullRequestNumber: 82,
+          ciStatus: 'PASSING',
+          ciHeadSha: 'merged-head',
+          ciPullRequestNumber: 82
+        }
+      )
+    ).toBeUndefined();
+    expect(
+      transitionBlocker({ completionPolicy: 'MERGED', projection: {} } as never, 'DONE', {
+        hasWorktree: true,
+        mergeStatus: 'MERGED',
+        ciStatus: 'FAILING'
+      })
+    ).toBeUndefined();
   });
 
   it('preserves explicit implementation run safety settings', () => {
@@ -50,14 +125,16 @@ describe('Phase 3 delivery guards', () => {
           {
             sandbox: 'DANGER_FULL_ACCESS',
             networkAccess: true,
-            approvalPolicy: 'never'
+            approvalPolicy: 'never',
+            approvalsReviewer: 'auto_review'
           }
         ]
       })
     ).toEqual({
       sandbox: 'DANGER_FULL_ACCESS',
       networkAccess: true,
-      approvalPolicy: 'never'
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
     });
   });
 
@@ -69,14 +146,37 @@ describe('Phase 3 delivery guards', () => {
           {
             sandbox: 'DANGER_FULL_ACCESS',
             networkAccess: true,
-            approvalPolicy: 'never'
+            approvalPolicy: 'on-request',
+            approvalsReviewer: 'auto_review'
           }
         ]
       })
     ).toEqual({
       sandbox: 'READ_ONLY',
       networkAccess: true,
-      approvalPolicy: 'never'
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user'
+    });
+  });
+
+  it('preserves auto-review for implementation approval prompts', () => {
+    expect(
+      mergeRunSettings({
+        readOnly: false,
+        settings: [
+          {
+            sandbox: 'WORKSPACE_WRITE',
+            networkAccess: true,
+            approvalPolicy: 'on-request',
+            approvalsReviewer: 'auto_review'
+          }
+        ]
+      })
+    ).toEqual({
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review'
     });
   });
 });

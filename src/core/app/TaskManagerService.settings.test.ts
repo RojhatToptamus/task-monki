@@ -1,32 +1,98 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
+import { getGitExecutablePath, configureGitExecutablePath } from '../git/gitCli';
+import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
-describe('TaskManagerService app settings', () => {
-  it('uses persisted Codex external tool settings before provider startup', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-service-'));
-    const repoDir = path.join(dir, 'repo');
-    const storeDir = path.join(dir, 'store');
-    await fs.mkdir(repoDir, { recursive: true });
-    const executable = path.join(dir, 'fake-codex.js');
-    await fs.writeFile(executable, fakeCodexScript(), { mode: 0o700 });
+describe('TaskManagerService settings', () => {
+  const originalGitPath = process.env.TASK_MANAGER_GIT_PATH;
+  const originalCodexBin = process.env[TASK_MONKI_CODEX_BIN_ENV];
+  const originalPath = process.env.PATH;
 
-    const store = new FileTaskStore(storeDir);
-    await store.updateAppSettings({
-      codexExternalTools: {
-        webSearchMode: 'cached',
-        mcpServers: 'all',
-        apps: 'enabled'
+  afterEach(() => {
+    restoreEnv('TASK_MANAGER_GIT_PATH', originalGitPath);
+    restoreEnv(TASK_MONKI_CODEX_BIN_ENV, originalCodexBin);
+    restoreEnv('PATH', originalPath);
+    configureGitExecutablePath(undefined);
+  });
+
+  it('applies external executable settings to Git operations', async () => {
+    delete process.env.TASK_MANAGER_GIT_PATH;
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-settings-'));
+    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version service-test');
+    const service = new TaskManagerService(
+      new FileTaskStore(path.join(dir, 'store')),
+      dir,
+      undefined,
+      {
+        appSettingsStore: new MemoryAppSettingsStore(),
+        codexPath: 'codex-not-used'
+      }
+    );
+
+    await service.updateAppSettings({
+      externalExecutables: {
+        gitExecutablePath: fakeGit
       }
     });
 
-    const service = new TaskManagerService(store, repoDir, undefined, {
+    expect(getGitExecutablePath()).toBe(fakeGit);
+    await expect(service.getExternalToolStatus()).resolves.toMatchObject({
+      tools: {
+        git: {
+          status: 'ok',
+          version: 'git version service-test'
+        }
+      }
+    });
+  });
+
+  it('uses the normalized Git executable instead of rereading raw env overrides', async () => {
+    process.env.TASK_MANAGER_GIT_PATH = '   ';
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-git-env-'));
+    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version normalized-env');
+    const service = new TaskManagerService(
+      new FileTaskStore(path.join(dir, 'store')),
+      dir,
+      undefined,
+      {
+        appSettingsStore: new MemoryAppSettingsStore(),
+        codexPath: 'codex-not-used'
+      }
+    );
+
+    await service.updateAppSettings({
+      externalExecutables: {
+        gitExecutablePath: fakeGit
+      }
+    });
+
+    expect(getGitExecutablePath()).toBe(fakeGit);
+  });
+
+  it('uses persisted Codex external tool settings before provider startup', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-service-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
       codexPath: executable,
+      appSettingsStore: new MemoryAppSettingsStore({
+        codexExternalTools: {
+          webSearchMode: 'cached',
+          mcpServers: 'all',
+          apps: 'enabled'
+        }
+      }),
       worktreeRoot: path.join(dir, 'worktrees')
     });
+
     await service.init();
     try {
       const snapshot = await store.snapshot();
@@ -44,16 +110,15 @@ describe('TaskManagerService app settings', () => {
   });
 
   it('defers provider restart while a run requires recovery', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-recovery-'));
-    const repoDir = path.join(dir, 'repo');
-    const storeDir = path.join(dir, 'store');
-    await fs.mkdir(repoDir, { recursive: true });
-    const executable = path.join(dir, 'fake-codex.js');
-    await fs.writeFile(executable, fakeCodexScript(), { mode: 0o700 });
-
-    const store = new FileTaskStore(storeDir);
-    const service = new TaskManagerService(store, repoDir, undefined, {
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
       codexPath: executable,
+      appSettingsStore: new MemoryAppSettingsStore(),
       worktreeRoot: path.join(dir, 'worktrees')
     });
     await service.init();
@@ -61,7 +126,7 @@ describe('TaskManagerService app settings', () => {
       const task = await store.createTask({
         title: 'Recovery settings guard',
         prompt: 'Keep recovery state stable.',
-        repositoryPath: repoDir
+        repositoryPath: dir
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -94,23 +159,275 @@ describe('TaskManagerService app settings', () => {
       const snapshot = await store.snapshot();
       expect(snapshot.agentServers).toHaveLength(1);
       expect((await service.getAgentProviderState()).preflight.warnings).toContain(
-        'Codex external tool settings will apply after the App Server restarts.'
+        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
       );
     } finally {
       await service.shutdown();
     }
   });
+
+  it('does not restart Codex when only the Git executable path changes', async () => {
+    delete process.env.TASK_MANAGER_GIT_PATH;
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-git-only-settings-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const fakeGit = await writeExecutable(dir, 'fake-git', 'git version git-only');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+
+    await service.init();
+    try {
+      await service.updateAppSettings({
+        externalExecutables: {
+          gitExecutablePath: fakeGit
+        }
+      });
+
+      const snapshot = await store.snapshot();
+      expect(snapshot.agentServers).toHaveLength(1);
+      expect(snapshot.agentServers[0]?.executable).toBe(executable);
+      expect(getGitExecutablePath()).toBe(fakeGit);
+      expect((await service.getAgentProviderState()).preflight.warnings).not.toContain(
+        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('shows an auto-detected Codex path without persisting it', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-status-'));
+    const codex = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    process.env.PATH = withPath(path.dirname(codex));
+    const settingsStore = new MemoryAppSettingsStore();
+    const service = new TaskManagerService(
+      new FileTaskStore(path.join(dir, 'store')),
+      dir,
+      undefined,
+      {
+        appSettingsStore: settingsStore
+      }
+    );
+
+    const status = await service.getExternalToolStatus();
+    const settings = await service.getAppSettings();
+
+    expect(status.tools.codex).toMatchObject({
+      source: 'auto',
+      executable: 'codex',
+      resolvedPath: codex,
+      status: 'ok',
+      version: 'codex-cli 9.9.9'
+    });
+    expect(settings.externalExecutables.codexExecutablePath).toBeNull();
+  });
+
+  it('leaves Auto App Server launch unpinned so compatibility resolution can skip stale PATH binaries', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-auto-runtime-'));
+    const staleCodex = await writeFakeCodex(path.join(dir, 'stale'), 'codex', {
+      version: '0.22.0',
+      appServer: 'none'
+    });
+    const compatibleCodex = await writeFakeCodex(path.join(dir, 'compatible'), 'codex', {
+      version: '9.9.9'
+    });
+    process.env.PATH = withPath(path.dirname(staleCodex), path.dirname(compatibleCodex));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+
+    await service.init();
+    try {
+      const status = await service.getExternalToolStatus();
+      const snapshot = await store.snapshot();
+
+      expect(status.tools.codex).toMatchObject({
+        source: 'auto',
+        resolvedPath: staleCodex,
+        version: 'codex-cli 0.22.0'
+      });
+      expect(snapshot.agentServers[0]?.executable).toBe(compatibleCodex);
+      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedExecutable).toBe(
+        compatibleCodex
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('passes a custom Codex executable path explicitly to App Server launch', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-custom-runtime-'));
+    const customCodex = await writeFakeCodex(path.join(dir, 'custom'), 'codex-custom', {
+      version: '9.9.9'
+    });
+    process.env.PATH = withPath(path.dirname(customCodex));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore({
+        externalExecutables: {
+          gitExecutablePath: null,
+          codexExecutablePath: customCodex,
+          ghExecutablePath: null
+        }
+      }),
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+
+    await service.init();
+    try {
+      const snapshot = await store.snapshot();
+
+      expect(snapshot.agentServers[0]?.executable).toBe(customCodex);
+      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('reports TASK_MONKI_CODEX_BIN as env and passes it explicitly to App Server launch', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-env-runtime-'));
+    const envCodex = await writeFakeCodex(path.join(dir, 'env'), 'codex-env', {
+      version: '9.9.9'
+    });
+    const pathCodex = await writeFakeCodex(path.join(dir, 'path'), 'codex', {
+      version: '9.8.0'
+    });
+    process.env[TASK_MONKI_CODEX_BIN_ENV] = envCodex;
+    process.env.PATH = withPath(path.dirname(pathCodex));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+
+    await service.init();
+    try {
+      const status = await service.getExternalToolStatus();
+      const snapshot = await store.snapshot();
+
+      expect(status.tools.codex).toMatchObject({
+        source: 'env',
+        configuredPath: envCodex,
+        executable: envCodex,
+        resolvedPath: envCodex,
+        status: 'ok'
+      });
+      expect(snapshot.agentServers[0]?.executable).toBe(envCodex);
+      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('keeps the Settings row Auto test on env override precedence', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-auto-test-'));
+    const envCodex = await writeExecutable(dir, 'codex-env', 'codex-cli env-test');
+    const pathCodex = await writeExecutable(dir, 'codex', 'codex-cli path-test');
+    process.env[TASK_MONKI_CODEX_BIN_ENV] = envCodex;
+    process.env.PATH = withPath(path.dirname(pathCodex));
+    const service = new TaskManagerService(
+      new FileTaskStore(path.join(dir, 'store')),
+      dir,
+      undefined,
+      {
+        appSettingsStore: new MemoryAppSettingsStore()
+      }
+    );
+
+    const result = await service.testExternalTool({
+      tool: 'codex',
+      executablePath: null
+    });
+
+    expect(result).toMatchObject({
+      source: 'env',
+      executable: envCodex,
+      resolvedPath: envCodex,
+      status: 'ok',
+      version: 'codex-cli env-test'
+    });
+  });
 });
 
-function fakeCodexScript(): string {
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+function withPath(...entries: string[]): string {
+  return [...entries, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
+}
+
+async function writeExecutable(dir: string, name: string, output: string): Promise<string> {
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, name);
+  await fs.writeFile(filePath, `#!/bin/sh\necho ${JSON.stringify(output)}\n`, 'utf8');
+  await fs.chmod(filePath, 0o755);
+  return filePath;
+}
+
+async function writeFakeCodex(
+  directory: string,
+  name: string,
+  options: {
+    version?: string;
+    appServer?: 'stdio' | 'none';
+  } = {}
+): Promise<string> {
+  await fs.mkdir(directory, { recursive: true });
+  const executable = path.join(directory, name);
+  await fs.writeFile(executable, fakeCodexScript(options), { mode: 0o755 });
+  return executable;
+}
+
+function fakeCodexScript({
+  version = '0.141.0',
+  appServer = 'stdio'
+}: {
+  version?: string;
+  appServer?: 'stdio' | 'none';
+}): string {
   return `#!/usr/bin/env node
+const appServer = ${JSON.stringify(appServer)};
+
 if (process.argv.includes('--version')) {
-  process.stdout.write('codex-cli 0.141.0\\n');
+  process.stdout.write('codex-cli ${version}\\n');
   process.exit(0);
 }
+
 if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.includes('--json')) {
   process.stdout.write('[{"name":"docs","enabled":true,"transport":{"type":"stdio","command":"docs-mcp"}}]\\n');
   process.exit(0);
+}
+
+if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
+  if (appServer === 'none') {
+    process.stdout.write('Usage: codex [OPTIONS] [PROMPT]\\n');
+  } else {
+    process.stdout.write('Usage: codex app-server [OPTIONS]\\n  --stdio\\n  --listen <URL>\\n');
+  }
+  process.exit(0);
+}
+
+if (process.argv[2] !== 'app-server' || !process.argv.includes('--stdio')) {
+  process.stderr.write('unsupported command\\n');
+  process.exit(2);
 }
 
 const readline = require('node:readline');
@@ -123,8 +440,8 @@ rl.on('line', (line) => {
   switch (message.method) {
     case 'initialize':
       send({ id: message.id, result: {
-        userAgent: 'fake',
-        codexHome: process.cwd(),
+        userAgent: 'fake-codex/${version}',
+        codexHome: process.env.CODEX_HOME || process.cwd(),
         platformFamily: 'unix',
         platformOs: 'macos'
       } });
@@ -161,8 +478,20 @@ rl.on('line', (line) => {
         nextCursor: null
       } });
       break;
+    case 'thread/start':
+    case 'thread/resume':
+    case 'thread/fork':
+    case 'thread/read':
+    case 'thread/goal/get':
+    case 'thread/goal/set':
+    case 'turn/start':
+    case 'turn/steer':
+    case 'turn/interrupt':
+    case 'review/start':
+      send({ id: message.id, error: { code: -32602, message: 'probe-only fake method' } });
+      break;
     default:
-      send({ id: message.id, error: { message: 'unsupported ' + message.method } });
+      send({ id: message.id, error: { code: -32601, message: 'unsupported ' + message.method } });
   }
 });
 `;

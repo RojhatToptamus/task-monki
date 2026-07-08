@@ -1,8 +1,5 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { RepositoryPreflight } from '../../shared/contracts';
-
-const execFileAsync = promisify(execFile);
+import { git } from '../git/gitCli';
 
 export async function validateRepositoryPath(repositoryPath: string): Promise<RepositoryPreflight> {
   const checkedAt = new Date().toISOString();
@@ -33,15 +30,6 @@ export async function validateRepositoryPath(repositoryPath: string): Promise<Re
       checkedAt
     };
   }
-}
-
-async function git(cwd: string, argv: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', argv, {
-    cwd,
-    timeout: 10_000,
-    maxBuffer: 1024 * 1024
-  });
-  return stdout;
 }
 
 function parseRemotes(output: string): RepositoryPreflight['remotes'] {

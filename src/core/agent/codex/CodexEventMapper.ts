@@ -9,6 +9,7 @@ import type {
   AgentSessionRecord,
   RunRecord
 } from '../../../shared/contracts';
+import { normalizeAgentApprovalsReviewer } from '../../../shared/contracts';
 import type { Account } from './protocol/generated/v2/Account';
 import type { Model } from './protocol/generated/v2/Model';
 import type { SandboxPolicy } from './protocol/generated/v2/SandboxPolicy';
@@ -58,6 +59,7 @@ export function settingsFromThreadResponse(response: {
   serviceTier: string | null;
   reasoningEffort: string | null;
   approvalPolicy: unknown;
+  approvalsReviewer?: unknown;
   sandbox: SandboxPolicy;
 }): AgentExecutionSettings {
   return {
@@ -67,6 +69,7 @@ export function settingsFromThreadResponse(response: {
     reasoningEffort: response.reasoningEffort ?? undefined,
     approvalPolicy:
       typeof response.approvalPolicy === 'string' ? response.approvalPolicy : 'granular',
+    approvalsReviewer: normalizeAgentApprovalsReviewer(response.approvalsReviewer),
     sandbox: mapSandbox(response.sandbox),
     networkAccess:
       response.sandbox.type === 'dangerFullAccess'
@@ -89,6 +92,7 @@ export function settingsFromThreadSettings(
       typeof settings.approvalPolicy === 'string'
         ? settings.approvalPolicy
         : 'granular',
+    approvalsReviewer: normalizeAgentApprovalsReviewer(settings.approvalsReviewer),
     sandbox: mapSandbox(settings.sandboxPolicy),
     networkAccess:
       settings.sandboxPolicy.type === 'dangerFullAccess'

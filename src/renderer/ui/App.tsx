@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
+  DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
   type CreateTaskRequest,
   type AgentInteractionDecision,
   type AgentProviderState,
   type AgentRetryStrategy,
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
-  DEFAULT_TASK_MANAGER_APP_SETTINGS,
-  type CodexExternalToolSettings,
   type DeleteTaskResult,
+  type ExternalToolStatusReport,
   type GitSnapshotRecord,
   type InteractionRequestRecord,
   type Task,
   type TaskManagerAppSettings,
   type TaskSnapshot,
+  type UpdateAppSettingsRequest,
   type WorkflowPhase,
   type WorktreeRecord
 } from '../../shared/contracts';
@@ -28,23 +28,23 @@ import {
   selectLatestCiRollup,
   selectLatestReviewRollup,
   selectLatestMergeSnapshot,
-  selectLatestTestRun,
   selectTaskEvents,
   selectTaskRuns,
   formatShortId
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
-import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
+import { areRequiredExternalToolsReady } from '../model/executableSettings';
 import {
   buildRepositoryOptions,
   isSameRepositoryPath,
   mergeRepositoryPath,
   normalizeRepositoryPath,
   repositoryDisplayPath,
+  resolveRepositorySetupState,
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from '../model/repositories';
-import { MainColumn, type AppSettings } from './MainColumn';
+import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
@@ -57,7 +57,6 @@ const emptySnapshot: TaskSnapshot = {
   iterations: [],
   worktrees: [],
   gitSnapshots: [],
-  testRuns: [],
   githubRepositories: [],
   branchPublications: [],
   pullRequests: [],
@@ -91,22 +90,15 @@ interface AppNotification {
 }
 
 const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
-const APP_SETTINGS_STORAGE_KEY = 'task-monki-app-settings';
-const REPOSITORIES_STORAGE_KEY = 'task-monki-repositories';
-const SELECTED_REPOSITORY_STORAGE_KEY = 'task-monki-selected-repository';
-const APP_UPDATE_REFRESH_DELAY_MS = 100;
-const CODEX_EXTERNAL_TOOLS_SAVE_DELAY_MS = 350;
+
+function resolveWindowChromePlatform() {
+  return window.taskManagerShell?.windowChromePlatform ?? 'other';
+}
 
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
-  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState(() =>
-    getInitialSelectedRepositoryPath()
-  );
-  const [knownRepositoryPaths, setKnownRepositoryPaths] = useState<string[]>(() =>
-    getInitialRepositoryPaths()
-  );
   const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
@@ -115,24 +107,16 @@ export function App() {
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
-  const [theme, setTheme] = useState<ThemePreference>(() => getInitialTheme());
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => getInitialCollapsed());
-  const [appSettings, setAppSettings] = useState<AppSettings>(() => getInitialAppSettings());
-  const [coreAppSettings, setCoreAppSettings] = useState<TaskManagerAppSettings>(
+  const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
   );
+  const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const snapshotRefreshRequestRef = useRef(0);
-  const providerStateRequestRef = useRef(0);
-  const coreAppSettingsRef = useRef<TaskManagerAppSettings>(DEFAULT_TASK_MANAGER_APP_SETTINGS);
-  const codexExternalToolsSaveTimerRef = useRef<number | undefined>(undefined);
-  const codexExternalToolsSaveRequestRef = useRef(0);
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
   const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
-  const toggleSidebar = useCallback(() => setIsSidebarCollapsed((current) => !current), []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setNotifications((current) => [...current.slice(-2), { id, tone, message }]);
@@ -150,84 +134,52 @@ export function App() {
     },
     [notify]
   );
+  const updateAppSettings = useCallback(
+    async (patch: UpdateAppSettingsRequest, successMessage = 'Settings updated.') => {
+      try {
+        const nextSettings = await taskManagerApi.updateAppSettings(patch);
+        setAppSettings(nextSettings);
+        if (patch.externalExecutables || patch.codexExternalTools) {
+          setExternalToolStatus(await taskManagerApi.getExternalToolStatus());
+        }
+        if (successMessage) {
+          notify(successMessage, 'success');
+        }
+        return nextSettings;
+      } catch (caught) {
+        reportActionError(caught, 'Failed to update settings.');
+        return undefined;
+      }
+    },
+    [notify, reportActionError]
+  );
   const updateTheme = useCallback(
     (nextTheme: ThemePreference) => {
-      setTheme(nextTheme);
-      notify('Theme updated.', 'success');
+      void updateAppSettings({ theme: nextTheme }, 'Theme updated.');
     },
-    [notify]
+    [updateAppSettings]
   );
-  const updateAppSettings = useCallback(
-    (nextSettings: AppSettings) => {
-      setAppSettings(nextSettings);
-      notify('Settings updated.', 'success');
-    },
-    [notify]
-  );
+  const toggleSidebar = useCallback(() => {
+    void updateAppSettings({ sidebarCollapsed: !appSettings.sidebarCollapsed }, '');
+  }, [appSettings.sidebarCollapsed, updateAppSettings]);
 
   const refresh = useCallback(async () => {
-    const requestId = ++snapshotRefreshRequestRef.current;
     const next = await taskManagerApi.listTasks();
-    if (requestId === snapshotRefreshRequestRef.current) {
-      setSnapshot(next);
-    }
+    setSnapshot(next);
   }, []);
-  const refreshProviderState = useCallback(async () => {
-    const requestId = ++providerStateRequestRef.current;
-    const next = await taskManagerApi.getAgentProviderState();
-    if (requestId === providerStateRequestRef.current) {
-      setProviderState(next);
-    }
+  const refreshExternalToolStatus = useCallback(async () => {
+    const next = await taskManagerApi.getExternalToolStatus();
+    setExternalToolStatus(next);
+    return next;
   }, []);
-  const updateCodexExternalTools = useCallback(
-    (patch: Partial<CodexExternalToolSettings>) => {
-      const nextSettings: TaskManagerAppSettings = {
-        ...coreAppSettingsRef.current,
-        codexExternalTools: {
-          ...coreAppSettingsRef.current.codexExternalTools,
-          ...patch
-        }
-      };
-      coreAppSettingsRef.current = nextSettings;
-      setCoreAppSettings(nextSettings);
-      if (codexExternalToolsSaveTimerRef.current !== undefined) {
-        window.clearTimeout(codexExternalToolsSaveTimerRef.current);
-      }
-      codexExternalToolsSaveTimerRef.current = window.setTimeout(() => {
-        const requestId = ++codexExternalToolsSaveRequestRef.current;
-        const codexExternalTools = coreAppSettingsRef.current.codexExternalTools;
-        void taskManagerApi
-          .updateAppSettings({ codexExternalTools })
-          .then((stored) => {
-            if (requestId !== codexExternalToolsSaveRequestRef.current) {
-              return;
-            }
-            coreAppSettingsRef.current = stored;
-            setCoreAppSettings(stored);
-            notify('Settings updated.', 'success');
-            void refreshProviderState();
-          })
-          .catch((caught: unknown) => {
-            reportActionError(caught, 'Could not update settings.');
-          });
-      }, CODEX_EXTERNAL_TOOLS_SAVE_DELAY_MS);
+  const testExternalTool = useCallback(
+    async (input: Parameters<typeof taskManagerApi.testExternalTool>[0]) => {
+      const result = await taskManagerApi.testExternalTool(input);
+      await refreshExternalToolStatus();
+      return result;
     },
-    [notify, refreshProviderState, reportActionError]
+    [refreshExternalToolStatus]
   );
-  const updateRefreshScheduler = useMemo(
-    () =>
-      createUpdateRefreshScheduler({
-        delayMs: APP_UPDATE_REFRESH_DELAY_MS,
-        refresh,
-        setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
-        clearTimer: (handle) => window.clearTimeout(handle as number)
-      }),
-    [refresh]
-  );
-
-  useEffect(() => {
-    window.localStorage.setItem('task-monki-theme', theme);
-  }, [theme]);
 
   useEffect(() => {
     const media = window.matchMedia?.('(prefers-color-scheme: dark)');
@@ -240,39 +192,22 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem('task-monki-sidebar-collapsed', isSidebarCollapsed ? '1' : '0');
-  }, [isSidebarCollapsed]);
-
-  useEffect(() => {
-    window.localStorage.setItem(APP_SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
-  }, [appSettings]);
-
-  useEffect(() => {
-    window.localStorage.setItem(REPOSITORIES_STORAGE_KEY, JSON.stringify(knownRepositoryPaths));
-  }, [knownRepositoryPaths]);
-
-  useEffect(() => {
-    if (selectedRepositoryPath) {
-      window.localStorage.setItem(SELECTED_REPOSITORY_STORAGE_KEY, selectedRepositoryPath);
-    }
-  }, [selectedRepositoryPath]);
-
-  useEffect(() => {
     let canceled = false;
 
     async function load() {
       try {
-        const [repoPath, provider, storedAppSettings] = await Promise.all([
+        const [repoPath, provider, settings, tools] = await Promise.all([
           taskManagerApi.getDefaultRepositoryPath(),
           taskManagerApi.getAgentProviderState(),
           taskManagerApi.getAppSettings(),
+          taskManagerApi.getExternalToolStatus(),
           refresh()
         ]);
         if (!canceled) {
           setDefaultRepositoryPath(repoPath);
           setProviderState(provider);
-          coreAppSettingsRef.current = storedAppSettings;
-          setCoreAppSettings(storedAppSettings);
+          setAppSettings(settings);
+          setExternalToolStatus(tools);
         }
       } catch (caught) {
         if (!canceled) {
@@ -294,22 +229,16 @@ export function App() {
   useEffect(() => {
     return taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
-        void refreshProviderState();
+        void taskManagerApi.getAgentProviderState().then(setProviderState);
       }
-      updateRefreshScheduler.request();
+      void refresh();
     });
-  }, [refreshProviderState, updateRefreshScheduler]);
+  }, [refresh]);
 
-  useEffect(() => () => updateRefreshScheduler.dispose(), [updateRefreshScheduler]);
-
-  useEffect(
-    () => () => {
-      if (codexExternalToolsSaveTimerRef.current !== undefined) {
-        window.clearTimeout(codexExternalToolsSaveTimerRef.current);
-      }
-    },
-    []
-  );
+  const theme = appSettings.theme;
+  const isSidebarCollapsed = appSettings.sidebarCollapsed;
+  const knownRepositoryPaths = appSettings.repositories.knownPaths;
+  const selectedRepositoryPath = appSettings.repositories.selectedPath ?? '';
 
   const repositoryOptions = useMemo(
     () =>
@@ -324,6 +253,14 @@ export function App() {
     repositoryOptions,
     selectedRepositoryPath
   );
+  const repositorySetupState = resolveRepositorySetupState({
+    loading: isLoading,
+    options: repositoryOptions,
+    activeRepositoryPath,
+    firstLaunchSetupCompleted: appSettings.firstLaunchSetupCompleted
+  });
+  const canCreateTask =
+    !isLoading && Boolean(activeRepositoryPath) && repositorySetupState === 'complete';
   const visibleTasks = useMemo(
     () => tasksForRepository(snapshot.tasks, activeRepositoryPath),
     [activeRepositoryPath, snapshot.tasks]
@@ -331,9 +268,12 @@ export function App() {
 
   useEffect(() => {
     if (activeRepositoryPath && activeRepositoryPath !== selectedRepositoryPath) {
-      setSelectedRepositoryPath(activeRepositoryPath);
+      void updateAppSettings(
+        { repositories: { selectedPath: activeRepositoryPath } },
+        ''
+      );
     }
-  }, [activeRepositoryPath, selectedRepositoryPath]);
+  }, [activeRepositoryPath, selectedRepositoryPath, updateAppSettings]);
 
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
   const selectedTask =
@@ -429,7 +369,6 @@ export function App() {
   const selectedGitSnapshot = selectedTask
     ? selectLatestGitSnapshot(snapshot, selectedTask)
     : undefined;
-  const selectedTestRun = selectedTask ? selectLatestTestRun(snapshot, selectedTask) : undefined;
   const selectedGitHubRepository = selectedTask
     ? selectLatestGitHubRepository(snapshot, selectedTask)
     : undefined;
@@ -487,10 +426,7 @@ export function App() {
 
   const refinePrompt = async (repositoryPath: string, input: string) => {
     try {
-      const refinementModel = selectModel(
-        providerModels,
-        appSettings.promptRefinementModel ?? DEFAULT_PROMPT_REFINEMENT_MODEL
-      );
+      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
       const refined = await taskManagerApi.refinePrompt({
         repositoryPath,
         input,
@@ -526,28 +462,6 @@ export function App() {
     }
   };
 
-  const refreshEvidence = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.refreshEvidence({ taskId });
-      notify('Evidence refreshed.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to refresh evidence.');
-    }
-  };
-
-  const runTests = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.runTests({ taskId });
-      notify('Test run started.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to run tests.');
-    }
-  };
-
   const createDeliveryCommit = async (taskId: string) => {
     setError(undefined);
     try {
@@ -559,21 +473,10 @@ export function App() {
     }
   };
 
-  const preflightGitHub = async (taskId: string) => {
+  const createPullRequest = async (taskId: string, title?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.preflightGitHub({ taskId });
-      notify('GitHub capability checked.', 'success');
-      await refresh();
-    } catch (caught) {
-      reportActionError(caught, 'Failed to check GitHub capability.');
-    }
-  };
-
-  const createPullRequest = async (taskId: string) => {
-    setError(undefined);
-    try {
-      await taskManagerApi.createPullRequest({ taskId });
+      await taskManagerApi.createPullRequest({ taskId, title });
       notify('Draft pull request created.', 'success');
       await refresh();
     } catch (caught) {
@@ -585,7 +488,6 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.refreshGitHub({ taskId });
-      notify('GitHub state refreshed.', 'success');
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to refresh GitHub.');
@@ -769,13 +671,23 @@ export function App() {
   };
 
   const selectRepository = useCallback(
-    (repositoryPath: string) => {
+    async (repositoryPath: string) => {
       const normalized = normalizeRepositoryPath(repositoryPath);
       if (!normalized || normalized === activeRepositoryPath) {
         return;
       }
-      setKnownRepositoryPaths((current) => mergeRepositoryPath(current, normalized));
-      setSelectedRepositoryPath(normalized);
+      const nextSettings = await updateAppSettings(
+        {
+          repositories: {
+            knownPaths: mergeRepositoryPath(knownRepositoryPaths, normalized),
+            selectedPath: normalized
+          }
+        },
+        ''
+      );
+      if (!nextSettings) {
+        return;
+      }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
@@ -783,7 +695,7 @@ export function App() {
       setError(undefined);
       notify(`Switched to ${repositoryDisplayPath(normalized)}.`, 'success');
     },
-    [activeRepositoryPath, notify]
+    [activeRepositoryPath, knownRepositoryPaths, notify, updateAppSettings]
   );
 
   const addRepository = useCallback(async () => {
@@ -802,8 +714,18 @@ export function App() {
       }
 
       const repositoryRoot = normalizeRepositoryPath(preflight.root ?? normalized);
-      setKnownRepositoryPaths((current) => mergeRepositoryPath(current, repositoryRoot));
-      setSelectedRepositoryPath(repositoryRoot);
+      const nextSettings = await updateAppSettings(
+        {
+          repositories: {
+            knownPaths: mergeRepositoryPath(knownRepositoryPaths, repositoryRoot),
+            selectedPath: repositoryRoot
+          }
+        },
+        ''
+      );
+      if (!nextSettings) {
+        return false;
+      }
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
@@ -816,7 +738,36 @@ export function App() {
     } finally {
       setIsAddingRepository(false);
     }
-  }, [notify, reportActionError]);
+  }, [knownRepositoryPaths, notify, reportActionError, updateAppSettings]);
+
+  const finishFirstLaunchSetup = useCallback(async () => {
+    if (!activeRepositoryPath) {
+      const message = 'Add a repository before finishing setup.';
+      reportActionError(new Error(message), message);
+      throw new Error(message);
+    }
+    try {
+      const latestToolStatus = await taskManagerApi.getExternalToolStatus();
+      setExternalToolStatus(latestToolStatus);
+      if (!areRequiredExternalToolsReady(latestToolStatus)) {
+        throw new Error('Git and Codex must be available before setup can finish.');
+      }
+      const nextSettings = await taskManagerApi.updateAppSettings({
+        firstLaunchSetupCompleted: true
+      });
+      setAppSettings(nextSettings);
+      setView('board');
+      setSelectedTaskId(undefined);
+      setLastTaskId(undefined);
+      setIsDetailOpen(false);
+      setIsNewTaskOpen(false);
+      setError(undefined);
+      notify('Setup complete.', 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Could not finish setup.');
+      throw caught;
+    }
+  }, [activeRepositoryPath, notify, reportActionError]);
 
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
@@ -850,10 +801,18 @@ export function App() {
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
+  const windowChromePlatform = resolveWindowChromePlatform();
 
   return (
-    <div className="tm-app app-shell" data-theme={resolvedTheme}>
-      <header className="tm-titlebar">
+    <div
+      className="tm-app app-shell"
+      data-theme={resolvedTheme}
+      data-window-platform={windowChromePlatform}
+    >
+      <header className="tm-titlebar" data-window-platform={windowChromePlatform}>
+        {windowChromePlatform === 'macos' ? (
+          <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
+        ) : null}
         <button
           type="button"
           className="tm-iconbtn"
@@ -890,7 +849,8 @@ export function App() {
           type="button"
           className="tm-newtask"
           onClick={openNewTask}
-          disabled={isLoading || !activeRepositoryPath}
+          disabled={!canCreateTask}
+          title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
         >
           + New task
         </button>
@@ -903,8 +863,8 @@ export function App() {
               className="tm-nav__brand-mark"
               src={
                 resolvedTheme === 'dark'
-                  ? '/assets/brand/monkey_icon_cream.svg'
-                  : '/assets/brand/monkey_icon_charcoal.svg'
+                  ? './assets/brand/monkey_icon_cream.svg'
+                  : './assets/brand/monkey_icon_charcoal.svg'
               }
               alt=""
               aria-hidden="true"
@@ -981,7 +941,6 @@ export function App() {
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
-            testRun={selectedTestRun}
             githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
@@ -1003,6 +962,7 @@ export function App() {
             )}
             artifacts={snapshot.artifacts}
             interactions={selectedInteractions}
+            showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
             onCancel={cancelRun}
@@ -1012,10 +972,7 @@ export function App() {
             onReview={startReview}
             onSyncAgentGoal={syncAgentGoal}
             onRespondToInteraction={respondToInteraction}
-            onRefreshEvidence={refreshEvidence}
-            onRunTests={runTests}
             onCreateDeliveryCommit={createDeliveryCommit}
-            onPreflightGitHub={preflightGitHub}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
             onTransition={transitionTask}
@@ -1030,11 +987,16 @@ export function App() {
             onSetTheme={updateTheme}
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
-            codexExternalTools={coreAppSettings.codexExternalTools}
-            onSetCodexExternalTools={updateCodexExternalTools}
+            externalToolStatus={externalToolStatus}
+            onRefreshExternalTools={refreshExternalToolStatus}
+            onTestExternalTool={testExternalTool}
             error={error}
             models={providerModels}
             activeRepositoryPath={activeRepositoryPath}
+            repositorySetupState={repositorySetupState}
+            addingRepository={isAddingRepository}
+            onAddRepository={addRepository}
+            onFinishSetup={finishFirstLaunchSetup}
             onSelect={selectTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
@@ -1048,7 +1010,7 @@ export function App() {
           models={providerModels}
           preflight={providerState?.preflight}
           defaultAgentSettings={defaultTaskSettings}
-          disabled={isLoading || !activeRepositoryPath}
+          disabled={!canCreateTask}
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
           onClose={closeNewTask}
@@ -1133,33 +1095,27 @@ function DeleteTaskModal({
           <div>
             <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
             <p>
-              This permanently removes only the selected task. Fork alternatives and source
-              tasks stay in place.
+              Permanently removes this task and its stored evidence. Fork alternatives and the
+              repository stay in place.
             </p>
           </div>
         </div>
 
         <div className="tm-delete-modal__grid">
           <section className="tm-delete-modal__col tm-delete-modal__col--remove">
-            <h4>
-              Will be deleted
-            </h4>
+            <h4>Deleted</h4>
             <ul>
               <li>Task record and workflow state</li>
-              <li>Runs, events, artifacts, and provider session records</li>
-              <li>Stored Git, test, GitHub, PR, review, and merge evidence</li>
-              <li>Source and alternative links that point at this task</li>
+              <li>Runs, events, and provider sessions</li>
+              <li>Stored Git, test, and GitHub evidence</li>
             </ul>
           </section>
           <section className="tm-delete-modal__col tm-delete-modal__col--keep">
-            <h4>
-              Stays untouched
-            </h4>
+            <h4>Kept</h4>
             <ul>
-              <li>Fork alternatives or source tasks</li>
-              <li>Original repository or Git history</li>
-              <li>Remote branch, pull request, commits, or merge history</li>
-              <li>Provider remote thread data</li>
+              <li>Repository and Git history</li>
+              <li>Remote branch, PR, and commits</li>
+              <li>Fork alternatives and source tasks</li>
             </ul>
           </section>
         </div>
@@ -1248,70 +1204,6 @@ function describeWorktreeRemoval(
     status: 'available',
     detail: `${worktree.worktreePath} will be removed from disk.`
   };
-}
-
-function getInitialTheme(): ThemePreference {
-  const stored = window.localStorage.getItem('task-monki-theme');
-  if (stored === 'light' || stored === 'dark' || stored === 'device') {
-    return stored;
-  }
-  return 'device';
-}
-
-function getInitialCollapsed(): boolean {
-  return window.localStorage.getItem('task-monki-sidebar-collapsed') === '1';
-}
-
-function getInitialAppSettings(): AppSettings {
-  try {
-    const raw = window.localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return {
-      defaultModel: typeof parsed.defaultModel === 'string' ? parsed.defaultModel : undefined,
-      defaultReasoningEffort:
-        typeof parsed.defaultReasoningEffort === 'string'
-          ? parsed.defaultReasoningEffort
-          : undefined,
-      reviewModel: typeof parsed.reviewModel === 'string' ? parsed.reviewModel : undefined,
-      promptRefinementModel:
-        typeof parsed.promptRefinementModel === 'string'
-          ? parsed.promptRefinementModel
-          : undefined,
-      reviewReasoningEffort:
-        typeof parsed.reviewReasoningEffort === 'string'
-          ? parsed.reviewReasoningEffort
-          : undefined
-    };
-  } catch {
-    return {};
-  }
-}
-
-function getInitialRepositoryPaths(): string[] {
-  try {
-    const raw = window.localStorage.getItem(REPOSITORIES_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed.reduce<string[]>((paths, value) => {
-      return typeof value === 'string' ? mergeRepositoryPath(paths, value) : paths;
-    }, []);
-  } catch {
-    return [];
-  }
-}
-
-function getInitialSelectedRepositoryPath(): string {
-  return normalizeRepositoryPath(
-    window.localStorage.getItem(SELECTED_REPOSITORY_STORAGE_KEY) ?? ''
-  );
 }
 
 function NavItem({

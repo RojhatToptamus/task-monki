@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
   AppUpdateEvent,
   ContinueRunRequest,
@@ -10,28 +12,37 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   GitHubPreflightRequest,
+  InspectOpenTargetRequest,
+  ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
-  RunTestsRequest,
   StartRunRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
   SyncAgentGoalRequest,
   ReadProtocolMessageRequest,
+  TestExternalToolRequest,
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import { createElectronOpenTargetHost } from './openTargetHost';
+import { getMacDockIconPath } from './dockIcon';
+import { getMainWindowChromeOptions } from './windowChrome';
+import { shouldCreateWindowOnActivate } from './windowLifecycle';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
 let serviceCreated = false;
+let ipcHandlersInstalled = false;
 let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
+
+const appId = 'dev.taskmonki.desktop';
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -41,6 +52,7 @@ function createWindow(): void {
     minHeight: 720,
     title: 'Task Monki',
     backgroundColor: '#101217',
+    ...getMainWindowChromeOptions(process.platform),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -53,6 +65,21 @@ function createWindow(): void {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
     void mainWindow.loadFile(path.join(__dirname, '../../dist-renderer/index.html'));
+  }
+}
+
+function configureMacDockIcon(): void {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  const iconPath = getMacDockIconPath({
+    appPath: app.getAppPath(),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath
+  });
+  if (fs.existsSync(iconPath)) {
+    app.dock.setIcon(iconPath);
   }
 }
 
@@ -72,6 +99,16 @@ function installIpcHandlers(): void {
   ipcMain.handle('settings:get', () => service.getAppSettings());
   ipcMain.handle('settings:update', async (_, input: UpdateAppSettingsRequest) => {
     return service.updateAppSettings(input);
+  });
+  ipcMain.handle('settings:tools:status', () => service.getExternalToolStatus());
+  ipcMain.handle('settings:tools:test', async (_, input: TestExternalToolRequest) => {
+    return service.testExternalTool(input);
+  });
+  ipcMain.handle('openTarget:inspect', async (_, input: InspectOpenTargetRequest) => {
+    return service.inspectOpenTarget(input);
+  });
+  ipcMain.handle('openTarget:execute', async (_, input: ExecuteOpenTargetActionRequest) => {
+    return service.executeOpenTargetAction(input);
   });
 
   ipcMain.handle('repository:validate', async (_, repositoryPath: string) => {
@@ -136,10 +173,6 @@ function installIpcHandlers(): void {
     }
   );
 
-  ipcMain.handle('test:run', async (_, input: RunTestsRequest) => {
-    return service.runTests(input);
-  });
-
   ipcMain.handle('evidence:refresh', async (_, input: RefreshEvidenceRequest) => {
     return service.refreshEvidence(input);
   });
@@ -182,16 +215,60 @@ function installIpcHandlers(): void {
       return service.readProtocolMessage(input);
     }
   );
+  ipcHandlersInstalled = true;
 }
 
 function broadcast(event: AppUpdateEvent): void {
   mainWindow?.webContents.send('app:update', event);
 }
 
+function configureDesktopCliPath(): void {
+  const existingPath = process.env.PATH ?? '';
+  const existingEntries = existingPath.split(path.delimiter).filter(Boolean);
+  const windowsLocalGitPath = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'cmd')
+    : undefined;
+  const commonEntries =
+    process.platform === 'darwin'
+      ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+      : process.platform === 'linux'
+        ? ['/usr/local/bin', '/usr/bin', '/bin']
+        : [
+            'C:\\Program Files\\Git\\cmd',
+            'C:\\Program Files\\GitHub CLI',
+            windowsLocalGitPath
+          ];
+
+  const entries = [
+    ...commonEntries.filter((entry): entry is string => Boolean(entry)),
+    ...existingEntries
+  ];
+  process.env.PATH = [...new Set(entries)].join(path.delimiter);
+}
+
+function resolveDefaultRepositoryPath(): string {
+  if (process.env.TASK_MANAGER_REPO_PATH !== undefined) {
+    return process.env.TASK_MANAGER_REPO_PATH;
+  }
+  return app.isPackaged ? '' : process.cwd();
+}
+
 app.whenReady().then(async () => {
+  app.setAppUserModelId(appId);
+  configureDesktopCliPath();
+  configureMacDockIcon();
+  const defaultRepositoryPath = resolveDefaultRepositoryPath();
   service = new TaskManagerService(
     new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
-    process.cwd()
+    defaultRepositoryPath,
+    undefined,
+    {
+      agentCwd: defaultRepositoryPath || app.getPath('home'),
+      appSettingsStore: new AppSettingsStore(
+        path.join(app.getPath('userData'), 'app-settings.json')
+      ),
+      openTargetHost: createElectronOpenTargetHost()
+    }
   );
   serviceCreated = true;
   await service.init();
@@ -225,7 +302,12 @@ app.on('before-quit', (event) => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  if (
+    shouldCreateWindowOnActivate({
+      ipcHandlersInstalled,
+      openWindowCount: BrowserWindow.getAllWindows().length
+    })
+  ) {
     createWindow();
   }
 });

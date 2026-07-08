@@ -33,19 +33,16 @@ import type {
   RunRecord,
   StatusProjection,
   Task,
-  TaskManagerAppSettings,
   TaskIteration,
   TaskSnapshot,
-  TestRunRecord,
-  UpdateAppSettingsRequest,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
-  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
-  DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
+  completionPolicyRequiresMerge,
+  completionPolicyRequiresPassingChecks,
   createInitialProjection,
-  type CodexExternalToolSettings
+  verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
@@ -120,15 +117,7 @@ export interface CreateAgentServerInput {
   runtimeVersion?: string;
   schemaVersion?: string;
   schemaHash?: string;
-}
-
-interface CreateTestRunInput {
-  task: Task;
-  worktree: WorktreeRecord;
-  gitSnapshot: GitSnapshotRecord;
-  commandLine: string;
-  executable: string;
-  argv: string[];
+  runtimeResolution?: AgentServerInstance['runtimeResolution'];
 }
 
 interface PrSyncInput {
@@ -138,23 +127,85 @@ interface PrSyncInput {
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
 }
 
-interface PersistedState extends StoreState {}
+function completionPolicyAfterPullRequestSync(
+  task: Task,
+  pullRequestStatus: PullRequestSnapshotRecord['status']
+): Task['completionPolicy'] {
+  if (pullRequestStatus === 'UNLINKED') {
+    return task.completionPolicy;
+  }
+  if (
+    task.completionPolicy === 'LOCAL_ACCEPTANCE' ||
+    task.completionPolicy === 'ARTIFACT_ACCEPTANCE'
+  ) {
+    return 'MERGED';
+  }
+  return task.completionPolicy;
+}
+
+function shouldCompleteFromPullRequestSync(
+  task: Task,
+  pullRequest: PullRequestSnapshotRecord,
+  ci: CiRollupRecord,
+  merge: MergeSnapshotRecord
+): boolean {
+  if (merge.status !== 'MERGED' || !completionPolicyRequiresMerge(task.completionPolicy)) {
+    return false;
+  }
+  if (
+    pullRequest.number !== merge.pullRequestNumber ||
+    !pullRequest.headRefOid ||
+    pullRequest.headRefOid !== merge.headSha
+  ) {
+    return false;
+  }
+  return (
+    !completionPolicyRequiresPassingChecks(task.completionPolicy) ||
+    verifiedChecksMatchMergeHead({
+      ciStatus: ci.status,
+      ciHeadSha: ci.headSha,
+      ciPullRequestNumber: ci.pullRequestNumber,
+      mergeHeadSha: merge.headSha,
+      mergePullRequestNumber: merge.pullRequestNumber
+    })
+  );
+}
+
+const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
+  'ARTIFACT_ACCEPTANCE',
+  'LOCAL_ACCEPTANCE',
+  'MERGED',
+  'MERGED_AND_VERIFIED',
+  'MANUAL'
+];
+
+function normalizeCreateTaskCompletionPolicy(
+  value: CreateTaskRequest['completionPolicy']
+): Task['completionPolicy'] {
+  if (value === undefined) {
+    return 'LOCAL_ACCEPTANCE';
+  }
+  if (CREATE_TASK_COMPLETION_POLICIES.includes(value)) {
+    return value;
+  }
+  throw new Error(`Invalid completion policy: ${String(value)}`);
+}
+
+type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
+  schemaVersion?: unknown;
+  testRuns?: unknown;
+};
 
 export class FileTaskStore {
   private readonly storePath: string;
-  private readonly appSettingsPath: string;
   private readonly artifactsDir: string;
   private readonly protocolJournal: AgentProtocolJournal;
   private state: StoreState = createEmptyState();
-  private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private loaded = false;
-  private appSettingsLoaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
-  private appSettingsWriteQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly baseDir: string) {
     this.storePath = path.join(baseDir, 'store.json');
-    this.appSettingsPath = path.join(baseDir, 'app-settings.json');
     this.artifactsDir = path.join(baseDir, 'artifacts');
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
   }
@@ -168,11 +219,10 @@ export class FileTaskStore {
 
     try {
       const raw = await fs.readFile(this.storePath, 'utf8');
-      const normalized = normalizeLoadedState(
-        requireCurrentState(JSON.parse(raw) as PersistedState)
-      );
+      const migrated = migratePersistedState(JSON.parse(raw) as PersistedState);
+      const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
       this.state = normalized.state;
-      if (normalized.changed) {
+      if (migrated.changed || normalized.changed) {
         await this.persist();
       }
     } catch (error) {
@@ -186,44 +236,9 @@ export class FileTaskStore {
     this.loaded = true;
   }
 
-  private async initAppSettings(): Promise<void> {
-    if (this.appSettingsLoaded) {
-      return;
-    }
-
-    try {
-      const raw = await fs.readFile(this.appSettingsPath, 'utf8');
-      this.appSettings = normalizeLoadedAppSettings(JSON.parse(raw) as unknown);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      this.appSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
-    }
-
-    this.appSettingsLoaded = true;
-  }
-
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return clone(this.state);
-  }
-
-  async getAppSettings(): Promise<TaskManagerAppSettings> {
-    await this.initAppSettings();
-    return clone(this.appSettings);
-  }
-
-  async updateAppSettings(
-    input: UpdateAppSettingsRequest
-  ): Promise<TaskManagerAppSettings> {
-    await this.initAppSettings();
-    this.appSettings = normalizeLoadedAppSettings({
-      ...this.appSettings,
-      ...input
-    });
-    await this.persistAppSettingsQueued();
-    return clone(this.appSettings);
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
@@ -456,16 +471,10 @@ export class FileTaskStore {
         .filter((worktree) => worktree.taskId === taskId)
         .map((worktree) => worktree.id)
     );
-    const testRunIds = new Set(
-      this.state.testRuns
-        .filter((testRun) => testRun.taskId === taskId)
-        .map((testRun) => testRun.id)
-    );
     const artifactsToDelete = this.state.artifacts.filter(
       (artifact) =>
         artifact.taskId === taskId ||
-        (artifact.runId ? runIds.has(artifact.runId) : false) ||
-        (artifact.testRunId ? testRunIds.has(artifact.testRunId) : false)
+        (artifact.runId ? runIds.has(artifact.runId) : false)
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
@@ -478,7 +487,6 @@ export class FileTaskStore {
       iterations: this.state.iterations.filter((iteration) => iteration.taskId !== taskId),
       worktrees: this.state.worktrees.filter((worktree) => worktree.taskId !== taskId),
       gitSnapshots: this.state.gitSnapshots.filter((snapshot) => snapshot.taskId !== taskId),
-      testRuns: this.state.testRuns.filter((testRun) => testRun.taskId !== taskId),
       githubRepositories: this.state.githubRepositories.filter(
         (record) => record.taskId !== taskId
       ),
@@ -533,8 +541,7 @@ export class FileTaskStore {
           !eventBelongsToDeletedTask(event, taskId, {
             runIds,
             sessionIds,
-            worktreeIds,
-            testRunIds
+            worktreeIds
           })
       ),
       artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
@@ -571,9 +578,8 @@ export class FileTaskStore {
       repositoryPath: input.repositoryPath.trim(),
       workflowPhase: 'READY',
       resolution: 'NONE',
-      completionPolicy: 'LOCAL_ACCEPTANCE',
+      completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       phaseVersion: 1,
-      testCommand: input.testCommand?.trim() || 'npm test',
       forkedAlternativeTaskIds: [],
       forkedFromTaskId: fork?.sourceTaskId,
       forkedFromRunId: fork?.sourceRunId,
@@ -621,7 +627,6 @@ export class FileTaskStore {
         payload: {
           title: task.title,
           repositoryPath: task.repositoryPath,
-          testCommand: task.testCommand,
           forkedFromTaskId: task.forkedFromTaskId,
           forkedFromRunId: task.forkedFromRunId
         }
@@ -664,6 +669,7 @@ export class FileTaskStore {
       runtimeVersion: input.runtimeVersion,
       schemaVersion: input.schemaVersion,
       schemaHash: input.schemaHash,
+      runtimeResolution: clone(input.runtimeResolution),
       protocolJournalPath: this.protocolJournal.pathFor(id),
       startedAt: now
     };
@@ -1766,81 +1772,8 @@ export class FileTaskStore {
       false
     );
 
-    await this.markStaleTestsForSnapshot(stored, false);
     await this.persistQueued();
     return clone(stored);
-  }
-
-  async createTestRun(input: CreateTestRunInput): Promise<TestRunRecord> {
-    await this.init();
-
-    const now = new Date().toISOString();
-    const testRunId = randomUUID();
-    const stdoutArtifact = await this.createArtifactRecord(input.task.id, 'test-stdout', {
-      testRunId
-    });
-    const stderrArtifact = await this.createArtifactRecord(input.task.id, 'test-stderr', {
-      testRunId
-    });
-    await Promise.all([
-      fs.writeFile(stdoutArtifact.path, '', 'utf8'),
-      fs.writeFile(stderrArtifact.path, '', 'utf8')
-    ]);
-
-    const testRun: TestRunRecord = {
-      id: testRunId,
-      taskId: input.task.id,
-      iterationId: input.worktree.iterationId,
-      worktreeId: input.worktree.id,
-      generationKey: input.gitSnapshot.dirtyFingerprint,
-      command: input.commandLine,
-      executable: input.executable,
-      argv: input.argv,
-      cwd: input.worktree.worktreePath,
-      status: 'QUEUED',
-      processStatus: 'CREATED',
-      stdoutArtifactId: stdoutArtifact.id,
-      stderrArtifactId: stderrArtifact.id,
-      startedAt: now,
-      testedHeadSha: input.gitSnapshot.headSha,
-      testedDirtyFingerprint: input.gitSnapshot.dirtyFingerprint
-    };
-
-    this.state = {
-      ...this.state,
-      tasks: this.state.tasks.map((existing) =>
-        existing.id === input.task.id
-          ? {
-              ...existing,
-              currentTestRunId: testRun.id,
-              updatedAt: now
-            }
-          : existing
-      ),
-      testRuns: [testRun, ...this.state.testRuns],
-      artifacts: [stdoutArtifact, stderrArtifact, ...this.state.artifacts]
-    };
-
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'TEST_RUN_STARTED',
-        taskId: input.task.id,
-        iterationId: input.worktree.iterationId,
-        worktreeId: input.worktree.id,
-        testRunId: testRun.id,
-        source: 'test',
-        payload: {
-          command: input.commandLine,
-          cwd: input.worktree.worktreePath,
-          testedHeadSha: input.gitSnapshot.headSha,
-          testedDirtyFingerprint: input.gitSnapshot.dirtyFingerprint
-        }
-      }),
-      false
-    );
-
-    await this.persistQueued();
-    return clone(testRun);
   }
 
   async transitionTask(taskId: string, toPhase: Task['workflowPhase'], reason: string): Promise<Task> {
@@ -1956,9 +1889,10 @@ export class FileTaskStore {
       ...this.state,
       branchPublications: [stored, ...this.state.branchPublications]
     };
+    const eventType = branchPublicationEventType(stored.status);
     await this.appendEvent(
       createDomainEvent({
-        type: stored.status === 'PUSHED' ? 'BRANCH_PUBLISHED' : 'BRANCH_PUBLISH_FAILED',
+        type: eventType,
         taskId: stored.taskId,
         iterationId: stored.iterationId,
         worktreeId: stored.worktreeId,
@@ -2025,14 +1959,20 @@ export class FileTaskStore {
 
     this.state = {
       ...this.state,
-      tasks: this.state.tasks.map((task) =>
-        task.id === pullRequest.taskId && pullRequest.status !== 'UNLINKED'
-          ? {
+      tasks: this.state.tasks.map((task) => {
+        if (task.id !== pullRequest.taskId) {
+          return task;
+        }
+        const completionPolicy = completionPolicyAfterPullRequestSync(task, pullRequest.status);
+        return completionPolicy === task.completionPolicy
+          ? task
+          : {
               ...task,
-              completionPolicy: 'MERGED'
-            }
-          : task
-      ),
+              completionPolicy,
+              updatedAt: observedAt,
+              phaseVersion: task.phaseVersion + 1
+            };
+      }),
       pullRequests: [pullRequest, ...this.state.pullRequests],
       ciRollups: [ci, ...this.state.ciRollups],
       reviewRollups: [reviews, ...this.state.reviewRollups],
@@ -2089,7 +2029,7 @@ export class FileTaskStore {
       this.state = {
         ...this.state,
         tasks: this.state.tasks.map((task) =>
-          task.id === merge.taskId
+          task.id === merge.taskId && shouldCompleteFromPullRequestSync(task, pullRequest, ci, merge)
             ? {
                 ...task,
                 workflowPhase: 'DONE',
@@ -2219,17 +2159,16 @@ export class FileTaskStore {
   private async createArtifactRecord(
     taskId: string,
     kind: ArtifactKind,
-    ids: { runId?: string; testRunId?: string } = {}
+    ids: { runId?: string } = {}
   ): Promise<ArtifactRecord> {
     const now = new Date().toISOString();
     const id = randomUUID();
-    const ownerId = ids.runId ?? ids.testRunId ?? 'task';
+    const ownerId = ids.runId ?? 'task';
     const fileName = `${taskId}-${ownerId}-${kind}-${id}.log`;
     return {
       id,
       taskId,
       runId: ids.runId,
-      testRunId: ids.testRunId,
       kind,
       path: path.join(this.artifactsDir, fileName),
       byteCount: 0,
@@ -2238,70 +2177,9 @@ export class FileTaskStore {
     };
   }
 
-  private async markStaleTestsForSnapshot(
-    snapshot: GitSnapshotRecord,
-    persist: boolean
-  ): Promise<void> {
-    const staleRuns = this.state.testRuns.filter(
-      (testRun) =>
-        testRun.taskId === snapshot.taskId &&
-        testRun.iterationId === snapshot.iterationId &&
-        ['PASSED', 'FAILED'].includes(testRun.status) &&
-        (testRun.testedHeadSha !== snapshot.headSha ||
-          testRun.testedDirtyFingerprint !== snapshot.dirtyFingerprint)
-    );
-
-    for (const testRun of staleRuns) {
-      const reason = 'Git generation changed after this test run completed.';
-      this.state = {
-        ...this.state,
-        testRuns: this.state.testRuns.map((candidate) =>
-          candidate.id === testRun.id
-            ? {
-                ...candidate,
-                status: 'STALE',
-                staleReason: reason
-              }
-            : candidate
-        )
-      };
-
-      await this.appendEvent(
-        createDomainEvent({
-          type: 'TEST_RESULT_STALE',
-          taskId: testRun.taskId,
-          iterationId: testRun.iterationId,
-          worktreeId: testRun.worktreeId,
-          testRunId: testRun.id,
-          source: 'test',
-          payload: {
-            reason,
-            testedHeadSha: testRun.testedHeadSha,
-            currentHeadSha: snapshot.headSha,
-            testedDirtyFingerprint: testRun.testedDirtyFingerprint,
-            currentDirtyFingerprint: snapshot.dirtyFingerprint
-          }
-        }),
-        false
-      );
-    }
-
-    if (persist && staleRuns.length > 0) {
-      await this.persistQueued();
-    }
-  }
-
   private async persistQueued(): Promise<void> {
     const operation = this.writeQueue.catch(() => undefined).then(() => this.persist());
     this.writeQueue = operation.catch(() => undefined);
-    await operation;
-  }
-
-  private async persistAppSettingsQueued(): Promise<void> {
-    const operation = this.appSettingsWriteQueue
-      .catch(() => undefined)
-      .then(() => this.persistAppSettings());
-    this.appSettingsWriteQueue = operation.catch(() => undefined);
     await operation;
   }
 
@@ -2314,17 +2192,6 @@ export class FileTaskStore {
     });
     await fs.chmod(tmpPath, 0o600);
     await fs.rename(tmpPath, this.storePath);
-  }
-
-  private async persistAppSettings(): Promise<void> {
-    await fs.mkdir(this.baseDir, { recursive: true });
-    const tmpPath = `${this.appSettingsPath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.appSettings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.chmod(tmpPath, 0o600);
-    await fs.rename(tmpPath, this.appSettingsPath);
   }
 }
 
@@ -2340,7 +2207,6 @@ function requireCurrentState(state: PersistedState): StoreState {
     'iterations',
     'worktrees',
     'gitSnapshots',
-    'testRuns',
     'githubRepositories',
     'branchPublications',
     'pullRequests',
@@ -2365,7 +2231,26 @@ function requireCurrentState(state: PersistedState): StoreState {
       throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
     }
   }
-  return state;
+  return state as StoreState;
+}
+
+function migratePersistedState(state: PersistedState): {
+  state: PersistedState;
+  changed: boolean;
+} {
+  if (state.schemaVersion !== 8) {
+    return { state, changed: false };
+  }
+
+  // Schema 8 differs from schema 9 only by this retired collection.
+  const { testRuns: _legacyTestRuns, ...currentState } = state;
+  return {
+    state: {
+      ...currentState,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    },
+    changed: true
+  };
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
@@ -2550,7 +2435,6 @@ function eventBelongsToDeletedTask(
     runIds: Set<string>;
     sessionIds: Set<string>;
     worktreeIds: Set<string>;
-    testRunIds: Set<string>;
   }
 ): boolean {
   if (event.taskId === taskId) {
@@ -2563,9 +2447,6 @@ function eventBelongsToDeletedTask(
     return true;
   }
   if (event.worktreeId && ids.worktreeIds.has(event.worktreeId)) {
-    return true;
-  }
-  if (event.testRunId && ids.testRunIds.has(event.testRunId)) {
     return true;
   }
   return false;
@@ -2667,52 +2548,6 @@ function findSourceRunForReviewRepair(
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
 }
 
-function normalizeLoadedAppSettings(value: unknown): TaskManagerAppSettings {
-  const record = objectRecord(value);
-  return {
-    codexExternalTools: normalizeCodexExternalToolSettings(
-      record?.codexExternalTools
-    )
-  };
-}
-
-function normalizeCodexExternalToolSettings(value: unknown): CodexExternalToolSettings {
-  const record = objectRecord(value);
-  return {
-    webSearchMode: isCodexWebSearchMode(record?.webSearchMode)
-      ? record.webSearchMode
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.webSearchMode,
-    mcpServers: isCodexMcpServersMode(record?.mcpServers)
-      ? record.mcpServers
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.mcpServers,
-    apps: isCodexAppsMode(record?.apps)
-      ? record.apps
-      : DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS.apps
-  };
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function isCodexWebSearchMode(
-  value: unknown
-): value is CodexExternalToolSettings['webSearchMode'] {
-  return value === 'disabled' || value === 'cached' || value === 'live';
-}
-
-function isCodexMcpServersMode(
-  value: unknown
-): value is CodexExternalToolSettings['mcpServers'] {
-  return value === 'disabled' || value === 'all';
-}
-
-function isCodexAppsMode(value: unknown): value is CodexExternalToolSettings['apps'] {
-  return value === 'disabled' || value === 'enabled';
-}
-
 function clone<T>(value: T): T {
   if (value === undefined) {
     return value;
@@ -2744,6 +2579,21 @@ function validateAgentServerTransition(
   if (!allowed[current].includes(next)) {
     throw new Error(`Invalid agent server transition: ${current} -> ${next}`);
   }
+}
+
+function branchPublicationEventType(
+  status: BranchPublicationRecord['status']
+): Extract<
+  DomainEvent['type'],
+  'BRANCH_PUBLISH_REQUESTED' | 'BRANCH_PUBLISHED' | 'BRANCH_PUBLISH_FAILED'
+> {
+  if (status === 'PUSHED') {
+    return 'BRANCH_PUBLISHED';
+  }
+  if (status === 'PUSHING') {
+    return 'BRANCH_PUBLISH_REQUESTED';
+  }
+  return 'BRANCH_PUBLISH_FAILED';
 }
 
 function validateInteractionTransition(

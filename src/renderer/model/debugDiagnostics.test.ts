@@ -55,7 +55,7 @@ describe('debug diagnostics model', () => {
         ],
         ['WORKTREE_OPERATION_FAILED', 'Worktree operation failed'],
         ['WORKFLOW_TRANSITION_BLOCKED', 'Workflow transition blocked'],
-        ['LOCAL_TESTS_NOT_PASSING', 'Local tests need attention'],
+        ['LOCAL_TESTS_NOT_PASSING', 'Local verification needs attention'],
         ['GITHUB_PREFLIGHT_NOT_READY', 'GitHub setup needs attention'],
         ['BRANCH_PUBLISH_FAILED', 'Branch publish failed'],
         ['PR_CLOSED_WITHOUT_MERGE', 'Pull request closed without merge']

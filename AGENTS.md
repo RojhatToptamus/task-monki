@@ -18,10 +18,15 @@ local acceptance.
 - `docs/APP_SERVER_ARCHITECTURE.md`
   - App Server process model, records, adapter responsibilities, and recovery
     rules.
-- `docs/research/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
+- `DESIGN.md`
+  - Frontend and design guidance for coherent Task Monki UI changes.
+- `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
   - Required reading before changing review, request-changes, stale-review,
     follow-up, or interrupt behavior.
-- `docs/research/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+- `docs/workflows/PR_STATUS_CARD_FLOW.md`
+  - Required reading before changing PR Status, GitHub delivery evidence, or
+    merge/check completion rules.
+- `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
   - Required reading before changing Codex protocol handling or generated
     bindings.
 
@@ -52,6 +57,21 @@ git diff --check
 
 Run targeted tests while iterating, then run the full relevant set before
 finishing changes that touch storage, workflow, protocol, or renderer behavior.
+
+## Seeded UI And Workflow Testing
+
+- Before testing UI or workflow states, run `npm run dev:seed` and use the
+  generated `.local/task-monki-dev-seed/manifest.json`.
+- Start local development from the generated environment:
+  `source .local/task-monki-dev-seed/dev-api.env`, then `npm run dev:api` and
+  `npm run dev:renderer`.
+- Use stable scenario slugs such as `[seed:delivery-checks-failed]` instead of
+  guessing app state or manually clicking through setup.
+- If an important state is missing, extend `src/dev/seedData.ts` and
+  `src/dev/seedData.test.ts`; do not rely on stale static fixtures or
+  hand-edited store JSON.
+- `scripts/serve-readme-screenshot-data.mjs` is screenshot-only legacy data and
+  is not authoritative for workflow testing.
 
 ## Development Rules
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import type {
   ArtifactRecord,
   BranchPublicationRecord,
@@ -9,27 +9,30 @@ import type {
   PullRequestSnapshotRecord,
   ReviewRollupRecord,
   RunRecord,
-  TestRunRecord,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
+  buildDiffFileTree,
   filterDiffFiles,
   parseGitDiffEvidence,
   parseGitDiffEvidenceForScope,
   type DiffFile,
   type DiffEvidenceScope,
   type DiffFileStatusFilter,
-  type DiffLine
+  type DiffLine,
+  type DiffTreeNode
 } from '../model/diffEvidence';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { openTargetMenuPosition } from '../model/openTargetMenu';
 import { StatusChip } from './StatusBadge';
 import { humanizeEnum } from './display';
+import { OpenTargetContextMenu } from './OpenTargetMenu';
+import type { OpenTargetRef } from '../../shared/contracts';
 
 interface EvidencePanelProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
-  testRun?: TestRunRecord;
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -41,7 +44,6 @@ interface EvidencePanelProps {
 
 interface LoadedArtifacts {
   diff: string;
-  test: string;
 }
 
 const DIFF_STATUS_FILTERS: Array<{ value: DiffFileStatusFilter; label: string }> = [
@@ -58,11 +60,14 @@ const DIFF_SCOPE_TABS: Array<{ value: DiffEvidenceScope; label: string }> = [
   { value: 'uncommitted', label: 'Uncommitted' }
 ];
 
+const DEFAULT_DIFF_BROWSER_HEIGHT = 640;
+const MIN_DIFF_BROWSER_HEIGHT = 420;
+const MAX_DIFF_BROWSER_HEIGHT = 1100;
+
 export function EvidencePanel({
   run,
   worktree,
   gitSnapshot,
-  testRun,
   githubRepository,
   branchPublication,
   pullRequest,
@@ -71,7 +76,7 @@ export function EvidencePanel({
   mergeSnapshot,
   artifacts
 }: EvidencePanelProps) {
-  const [artifactText, setArtifactText] = useState<LoadedArtifacts>({ diff: '', test: '' });
+  const [artifactText, setArtifactText] = useState<LoadedArtifacts>({ diff: '' });
   const [artifactError, setArtifactError] = useState<string | undefined>();
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [selectedFileId, setSelectedFileId] = useState<string | undefined>();
@@ -79,12 +84,17 @@ export function EvidencePanel({
   const [fileFilter, setFileFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<DiffFileStatusFilter>('all');
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [pathMenu, setPathMenu] = useState<{
+    target: OpenTargetRef;
+    position: { x: number; y: number };
+  }>();
+  const [collapsedDirectoryIds, setCollapsedDirectoryIds] = useState<Set<string>>(() => new Set());
+  const [filePanelCollapsed, setFilePanelCollapsed] = useState(false);
+  const [diffBrowserHeight, setDiffBrowserHeight] = useState(DEFAULT_DIFF_BROWSER_HEIGHT);
+  const resizeStateRef = useRef<{ startY: number; startHeight: number } | undefined>(undefined);
 
   const diffArtifact = gitSnapshot?.diffArtifactId
     ? artifacts.find((artifact) => artifact.id === gitSnapshot.diffArtifactId)
-    : undefined;
-  const testStdoutArtifact = testRun
-    ? artifacts.find((artifact) => artifact.id === testRun.stdoutArtifactId)
     : undefined;
 
   useEffect(() => {
@@ -92,34 +102,22 @@ export function EvidencePanel({
 
     async function loadArtifacts() {
       setArtifactError(undefined);
-      setArtifactText({ diff: '', test: '' });
-      setLoadingArtifacts(Boolean(diffArtifact || testStdoutArtifact));
+      setArtifactText({ diff: '' });
 
-      const next: LoadedArtifacts = { diff: '', test: '' };
+      setLoadingArtifacts(Boolean(diffArtifact));
+      const next: LoadedArtifacts = { diff: '' };
       const errors: string[] = [];
 
-      await Promise.all([
-        diffArtifact
-          ? taskManagerApi
-              .readArtifact({ artifactId: diffArtifact.id })
-              .then((text) => {
-                next.diff = text;
-              })
-              .catch((error: unknown) => {
-                errors.push(error instanceof Error ? error.message : 'Could not read diff.');
-              })
-          : Promise.resolve(),
-        testStdoutArtifact
-          ? taskManagerApi
-              .readArtifact({ artifactId: testStdoutArtifact.id })
-              .then((text) => {
-                next.test = text;
-              })
-              .catch((error: unknown) => {
-                errors.push(error instanceof Error ? error.message : 'Could not read test output.');
-              })
-          : Promise.resolve()
-      ]);
+      if (diffArtifact) {
+        await taskManagerApi
+          .readArtifact({ artifactId: diffArtifact.id })
+          .then((text) => {
+            next.diff = text;
+          })
+          .catch((error: unknown) => {
+            errors.push(error instanceof Error ? error.message : 'Could not read diff.');
+          });
+      }
 
       if (!canceled) {
         setArtifactText(next);
@@ -136,9 +134,6 @@ export function EvidencePanel({
     diffArtifact?.id,
     diffArtifact?.byteCount,
     diffArtifact?.updatedAt,
-    testStdoutArtifact?.id,
-    testStdoutArtifact?.byteCount,
-    testStdoutArtifact?.updatedAt
   ]);
 
   const diffFilesByScope = useMemo(
@@ -160,18 +155,76 @@ export function EvidencePanel({
     filteredDiffFiles.find((file) => file.id === selectedFileId) ?? filteredDiffFiles[0];
   const diffContext = getDiffScopeContext(diffScope, worktree);
   const visibleTotals = getDiffTotals(filteredDiffFiles);
+  const fileTree = useMemo(() => buildDiffFileTree(filteredDiffFiles), [filteredDiffFiles]);
+  const diffBrowserClassName = `tm-diffbrowser ${
+    filePanelCollapsed ? 'tm-diffbrowser--files-collapsed' : ''
+  }`;
+  const diffBrowserStyle = {
+    '--tm-diffbrowser-height': `${diffBrowserHeight}px`
+  } as CSSProperties;
+  const filePanelToggleLabel = filePanelCollapsed ? 'Expand file panel' : 'Collapse file panel';
+  const showDiffViewerEmpty = filePanelCollapsed;
+
+  function toggleDirectory(directoryId: string) {
+    setCollapsedDirectoryIds((current) => {
+      const next = new Set(current);
+      if (next.has(directoryId)) {
+        next.delete(directoryId);
+      } else {
+        next.add(directoryId);
+      }
+      return next;
+    });
+  }
+
+  function resizeDiffBrowser(nextHeight: number) {
+    setDiffBrowserHeight(
+      clamp(nextHeight, MIN_DIFF_BROWSER_HEIGHT, MAX_DIFF_BROWSER_HEIGHT)
+    );
+  }
+
+  function openPathMenu(
+    relativePath: string,
+    event: MouseEvent,
+    line?: number
+  ) {
+    if (!worktree) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setPathMenu({
+      target: {
+        type: 'worktreeFile',
+        taskId: worktree.taskId,
+        worktreeId: worktree.id,
+        relativePath,
+        line
+      },
+      position: openTargetMenuPosition(event.clientX, event.clientY)
+    });
+  }
 
   return (
     <>
       {artifactError ? <p className="form-error">{artifactError}</p> : null}
 
-      <section className="tm-diffbrowser" aria-label="Changed files">
+      <section className={diffBrowserClassName} aria-label="Changed files" style={diffBrowserStyle}>
         <aside className="tm-diffbrowser__files">
           <div className="tm-diffbrowser__files-head">
-            <h3>Changed files</h3>
-            <span>{fileCountLabel(diffFiles.length, filteredDiffFiles.length, filterActive)}</span>
+            {!filePanelCollapsed ? (
+              <div className="tm-diffbrowser__files-title">
+                <h3>Changed files</h3>
+                <span className="tm-diffbrowser__files-summary">
+                  <span>{fileCountLabel(diffFiles.length, filteredDiffFiles.length, filterActive)}</span>
+                  {filteredDiffFiles.length > 0 ? (
+                    <DiffStat additions={visibleTotals.additions} deletions={visibleTotals.deletions} />
+                  ) : null}
+                </span>
+              </div>
+            ) : null}
           </div>
-          {diffArtifact ? (
+          {!filePanelCollapsed && diffArtifact ? (
             loadingArtifacts && !artifactText.diff ? (
               <p className="tm-diffbrowser__empty">Loading diff...</p>
             ) : hasDiffFiles ? (
@@ -294,34 +347,17 @@ export function EvidencePanel({
                 </div>
 
                 {filteredDiffFiles.length > 0 ? (
-                  <div className="tm-diffbrowser__groups" role="listbox" aria-label="Changed files">
-                    <div className="tm-diffgroup__head">
-                      <svg
-                        className="tm-diffgroup__chevron"
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.4"
-                        aria-hidden="true"
-                      >
-                        <path d="M9 6l6 6-6 6" />
-                      </svg>
-                      <span className={`tm-diffsource-dot tm-diffsource-dot--${diffScope}`} />
-                      <strong>{diffContext.groupLabel}</strong>
-                      <span>{filteredDiffFiles.length} files</span>
-                      <span className="tm-diffgroup__stat">
-                        <span>+{visibleTotals.additions}</span>
-                        <span>-{visibleTotals.deletions}</span>
-                      </span>
-                    </div>
-                    {filteredDiffFiles.map((file) => (
-                      <DiffFileListItem
-                        key={file.id}
-                        file={file}
-                        selected={selectedFile?.id === file.id}
+                  <div className="tm-diffbrowser__tree" role="tree" aria-label="Changed files">
+                    {fileTree.children.map((node) => (
+                      <DiffTreeRow
+                        key={node.id}
+                        node={node}
+                        depth={0}
+                        selectedFileId={selectedFile?.id}
+                        collapsedDirectoryIds={collapsedDirectoryIds}
+                        onToggleDirectory={toggleDirectory}
                         onSelectFile={setSelectedFileId}
+                        onOpenPathMenu={openPathMenu}
                       />
                     ))}
                   </div>
@@ -334,24 +370,96 @@ export function EvidencePanel({
             ) : (
               <p className="tm-diffbrowser__empty">No file changes in the captured diff.</p>
             )
-          ) : (
+          ) : !filePanelCollapsed ? (
             <p className="tm-diffbrowser__empty">Refresh evidence to capture a diff artifact.</p>
-          )}
+          ) : null}
         </aside>
 
         <div className="tm-diffviewer">
           {selectedFile ? (
-            <DiffFileView file={selectedFile} context={diffContext} />
+            <DiffFileView
+              file={selectedFile}
+              context={diffContext}
+              filePanelCollapsed={filePanelCollapsed}
+              filePanelToggleLabel={filePanelToggleLabel}
+              onToggleFilePanel={() => setFilePanelCollapsed((collapsed) => !collapsed)}
+              onOpenPathMenu={openPathMenu}
+            />
           ) : (
-            <div className="tm-diffviewer__empty">
-              <strong>{filterActive ? 'No matching files' : 'No files in this scope'}</strong>
-              <span>
-                {filterActive
-                  ? 'Adjust the file filter to inspect the captured diff.'
-                  : diffEmptyMessage(diffScope, false)}
-              </span>
-            </div>
+            <>
+              <div className="tm-diffviewer__head tm-diffviewer__head--empty">
+                <FilePanelToggleButton
+                  collapsed={filePanelCollapsed}
+                  label={filePanelToggleLabel}
+                  onToggle={() => setFilePanelCollapsed((collapsed) => !collapsed)}
+                />
+              </div>
+              {showDiffViewerEmpty ? (
+                <div className="tm-diffviewer__empty">
+                  <strong>{filterActive ? 'No matching files' : 'No files in this scope'}</strong>
+                  <span>
+                    {filterActive
+                      ? 'Adjust the file filter to inspect the captured diff.'
+                      : diffEmptyMessage(diffScope, false)}
+                  </span>
+                </div>
+              ) : null}
+            </>
           )}
+        </div>
+        <div
+          className="tm-diffbrowser__resize"
+          role="separator"
+          aria-label="Resize diff browser"
+          aria-orientation="horizontal"
+          aria-valuemin={MIN_DIFF_BROWSER_HEIGHT}
+          aria-valuemax={MAX_DIFF_BROWSER_HEIGHT}
+          aria-valuenow={diffBrowserHeight}
+          tabIndex={0}
+          title="Resize diff browser"
+          onPointerDown={(event) => {
+            resizeStateRef.current = {
+              startY: event.clientY,
+              startHeight: diffBrowserHeight
+            };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const resizeState = resizeStateRef.current;
+            if (!resizeState) {
+              return;
+            }
+            resizeDiffBrowser(resizeState.startHeight + event.clientY - resizeState.startY);
+          }}
+          onPointerUp={(event) => {
+            resizeStateRef.current = undefined;
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onPointerCancel={(event) => {
+            resizeStateRef.current = undefined;
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              resizeDiffBrowser(diffBrowserHeight + 32);
+            } else if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              resizeDiffBrowser(diffBrowserHeight - 32);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              resizeDiffBrowser(MIN_DIFF_BROWSER_HEIGHT);
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              resizeDiffBrowser(MAX_DIFF_BROWSER_HEIGHT);
+            }
+          }}
+        >
+          <span aria-hidden="true" />
         </div>
       </section>
 
@@ -363,12 +471,11 @@ export function EvidencePanel({
           {run ? <span className="tm-evidence-summary__run">Run {run.id.slice(0, 8)}</span> : null}
         </div>
 
-        {run || worktree || gitSnapshot || testRun || pullRequest ? (
+        {run || worktree || gitSnapshot || pullRequest ? (
           <div className="tm-evidence-summary__body">
             <div className="evidence-grid">
               {worktree ? <StatusChip label="Worktree" value={worktree.status} /> : null}
               {gitSnapshot ? <StatusChip label="Git" value={gitSnapshot.status} /> : null}
-              {testRun ? <StatusChip label="Tests" value={testRun.status} /> : null}
               {githubRepository ? <StatusChip label="GitHub" value={githubRepository.status} /> : null}
               {branchPublication ? <StatusChip label="Publish" value={branchPublication.status} /> : null}
               {pullRequest ? <StatusChip label="PR" value={pullRequest.status} /> : null}
@@ -392,16 +499,6 @@ export function EvidencePanel({
                 }
               />
               <EvidenceFact
-                label="Tests"
-                value={
-                  testRun
-                    ? `${humanizeEnum(testRun.status)} · exit ${
-                        testRun.exitCode === undefined ? 'unknown' : String(testRun.exitCode)
-                      }`
-                    : 'not run'
-                }
-              />
-              <EvidenceFact
                 label="Remote"
                 value={
                   githubRepository?.owner && githubRepository.repo
@@ -418,18 +515,15 @@ export function EvidencePanel({
             </div>
           </div>
         ) : (
-          <p className="muted">Prepare a worktree to capture Git, diff, and test evidence.</p>
+          <p className="muted">Prepare a worktree to capture Git and diff evidence.</p>
         )}
       </section>
-
-      {testStdoutArtifact ? (
-        <details className="tm-evidence-test">
-          <summary>
-            <span>Test output</span>
-            <small>{testStdoutArtifact.byteCount.toLocaleString()} bytes</small>
-          </summary>
-          <pre>{artifactText.test || (loadingArtifacts ? 'Loading test output...' : 'No test output.')}</pre>
-        </details>
+      {pathMenu ? (
+        <OpenTargetContextMenu
+          target={pathMenu.target}
+          position={pathMenu.position}
+          onClose={() => setPathMenu(undefined)}
+        />
       ) : null}
     </>
   );
@@ -444,77 +538,139 @@ function EvidenceFact({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DiffFileListItem({
-  file,
-  selected,
-  onSelectFile
+function DiffTreeRow({
+  node,
+  depth,
+  selectedFileId,
+  collapsedDirectoryIds,
+  onToggleDirectory,
+  onSelectFile,
+  onOpenPathMenu
 }: {
-  file: DiffFile;
-  selected: boolean;
+  node: DiffTreeNode;
+  depth: number;
+  selectedFileId?: string;
+  collapsedDirectoryIds: Set<string>;
+  onToggleDirectory(directoryId: string): void;
   onSelectFile(fileId: string): void;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent): void;
 }) {
-  const { name, directory } = splitFilePath(file.path);
+  const rowStyle = {
+    '--tm-difftree-indent': `${depth * 14}px`
+  } as CSSProperties;
+
+  if (node.type === 'directory') {
+    const collapsed = collapsedDirectoryIds.has(node.id);
+    return (
+      <div className="tm-difftree__group" role="none">
+        <button
+          type="button"
+          className="tm-difftree__row tm-difftree__row--directory"
+          role="treeitem"
+          aria-level={depth + 1}
+          aria-expanded={!collapsed}
+          style={rowStyle}
+          onClick={() => onToggleDirectory(node.id)}
+          onContextMenu={(event) => onOpenPathMenu?.(node.path, event)}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowRight' && collapsed) {
+              event.preventDefault();
+              onToggleDirectory(node.id);
+            } else if (event.key === 'ArrowLeft' && !collapsed) {
+              event.preventDefault();
+              onToggleDirectory(node.id);
+            }
+          }}
+        >
+          <ChevronIcon className="tm-difftree__chevron" />
+          <span className="tm-difftree__folder" aria-hidden="true" />
+          <span className="tm-difftree__name">{node.name}</span>
+          <span className="tm-difftree__count">{fileCountShortLabel(node.fileCount)}</span>
+          <DiffStat additions={node.additions} deletions={node.deletions} />
+        </button>
+        {!collapsed ? (
+          <div role="group">
+            {node.children.map((child) => (
+              <DiffTreeRow
+                key={child.id}
+                node={child}
+                depth={depth + 1}
+                selectedFileId={selectedFileId}
+                collapsedDirectoryIds={collapsedDirectoryIds}
+                onToggleDirectory={onToggleDirectory}
+                onSelectFile={onSelectFile}
+                onOpenPathMenu={onOpenPathMenu}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  const selected = selectedFileId === node.file.id;
   return (
     <button
       type="button"
-      className={`tm-difffile ${selected ? 'tm-difffile--selected' : ''}`}
-      role="option"
+      className={`tm-difftree__row tm-difftree__row--file ${
+        selected ? 'tm-difftree__row--selected' : ''
+      }`}
+      role="treeitem"
+      aria-level={depth + 1}
       aria-selected={selected}
-      onClick={() => onSelectFile(file.id)}
+      style={rowStyle}
+      title={node.path}
+      onClick={() => onSelectFile(node.file.id)}
+      onContextMenu={(event) => onOpenPathMenu?.(node.file.path, event)}
     >
-      <span className={`tm-difffile__status tm-difffile__status--${file.status}`}>
-        {statusShortLabel(file.status)}
-      </span>
-      <span className="tm-difffile__text">
-        <span className="tm-difffile__name">{name}</span>
-        <span className="tm-difffile__path">{directory}</span>
-      </span>
-      <span className="tm-difffile__sources" aria-hidden="true">
-        {file.blocks.some((block) => block.source === 'committed') ? (
-          <span className="tm-diffsource-dot tm-diffsource-dot--committed" />
-        ) : null}
-        {file.blocks.some((block) => block.source === 'staged' || block.source === 'unstaged') ? (
-          <span className="tm-diffsource-dot tm-diffsource-dot--uncommitted" />
-        ) : null}
-      </span>
-      <span className="tm-difffile__stat">
-        <span>+{file.additions}</span>
-        <span>-{file.deletions}</span>
-      </span>
+      <span className="tm-difftree__spacer" aria-hidden="true" />
+      <StatusIcon status={node.file.status} />
+      <span className="tm-difftree__name tm-difftree__name--file">{node.name}</span>
+      <span className="tm-difftree__count" aria-hidden="true" />
+      <DiffStat additions={node.additions} deletions={node.deletions} />
     </button>
   );
 }
 
-function DiffFileView({ file, context }: { file: DiffFile; context: DiffScopeContext }) {
+function DiffFileView({
+  file,
+  context,
+  filePanelCollapsed,
+  filePanelToggleLabel,
+  onToggleFilePanel,
+  onOpenPathMenu
+}: {
+  file: DiffFile;
+  context: DiffScopeContext;
+  filePanelCollapsed: boolean;
+  filePanelToggleLabel: string;
+  onToggleFilePanel(): void;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent, line?: number): void;
+}) {
   return (
     <>
       <div className="tm-diffviewer__head">
-        <div className="tm-diffviewer__title">
-          <span className={`tm-difffile__status tm-difffile__status--${file.status}`}>
-            {statusShortLabel(file.status)}
+        <FilePanelToggleButton
+          collapsed={filePanelCollapsed}
+          label={filePanelToggleLabel}
+          onToggle={onToggleFilePanel}
+        />
+        <div className="tm-diffviewer__identity">
+          <StatusIcon status={file.status} />
+          <span
+            className="tm-diffviewer__titletext"
+            onContextMenu={(event) => onOpenPathMenu?.(file.path, event)}
+          >
+            <strong>{file.path}</strong>
+            <small>
+              {context.label} · {context.comparison}
+              {file.oldPath ? ` · renamed from ${file.oldPath}` : ''}
+            </small>
           </span>
-          <strong>{file.path}</strong>
-          {file.oldPath ? <small>renamed from {file.oldPath}</small> : null}
         </div>
-        <span className="tm-diffviewer__stat">
-          <span>+{file.additions}</span>
-          <span>-{file.deletions}</span>
-        </span>
-      </div>
-      <div className="tm-diffviewer__compare">
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          aria-hidden="true"
-        >
-          <path d="M8 7h12M8 7l3-3M8 7l3 3M16 17H4M16 17l-3-3M16 17l-3 3" />
-        </svg>
-        <strong>{context.label}</strong>
-        <span>{context.comparison}</span>
+        <div className="tm-diffviewer__actions">
+          <DiffStat additions={file.additions} deletions={file.deletions} />
+        </div>
       </div>
       <div className="tm-diffviewer__body">
         {file.blocks.map((block) => (
@@ -522,7 +678,7 @@ function DiffFileView({ file, context }: { file: DiffFile; context: DiffScopeCon
             <div className={`tm-diffblock__label tm-diffblock__label--${block.source}`}>
               <span className={`tm-diffsource-dot tm-diffsource-dot--${block.source}`} />
               <strong>{blockTitle(block.source)}</strong>
-              <span>{blockComparison(block.source, context)}</span>
+              <span>{diffBlockLineCount(block.lines)}</span>
             </div>
             <div className="tm-difflines">
               {block.lines
@@ -531,7 +687,12 @@ function DiffFileView({ file, context }: { file: DiffFile; context: DiffScopeCon
                   line.kind === 'hunk' ? (
                     <DiffHunkRow key={`${block.id}:${index}`} line={line} />
                   ) : (
-                    <DiffLineRow key={`${block.id}:${index}`} line={line} />
+                    <DiffLineRow
+                      key={`${block.id}:${index}`}
+                      line={line}
+                      file={file}
+                      onOpenPathMenu={onOpenPathMenu}
+                    />
                   )
                 )}
             </div>
@@ -539,6 +700,83 @@ function DiffFileView({ file, context }: { file: DiffFile; context: DiffScopeCon
         ))}
       </div>
     </>
+  );
+}
+
+function FilePanelToggleButton({
+  collapsed,
+  label,
+  onToggle
+}: {
+  collapsed: boolean;
+  label: string;
+  onToggle(): void;
+}) {
+  return (
+    <button
+      type="button"
+      className="tm-diffbrowser__pane-toggle tm-diffbrowser__pane-toggle--viewer"
+      aria-label={label}
+      aria-expanded={!collapsed}
+      title={label}
+      onClick={onToggle}
+    >
+      <PanelToggleIcon collapsed={collapsed} />
+    </button>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      aria-hidden="true"
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+function PanelToggleIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="M10 5v14" />
+      <path d={collapsed ? 'M14 9l3 3-3 3' : 'M17 9l-3 3 3 3'} />
+    </svg>
+  );
+}
+
+function StatusIcon({ status }: { status: DiffFile['status'] }) {
+  return (
+    <span className={`tm-difffile__status tm-difffile__status--${status}`}>
+      {statusShortLabel(status)}
+    </span>
+  );
+}
+
+function DiffStat({ additions, deletions }: { additions: number; deletions: number }) {
+  return (
+    <span className="tm-diffstat">
+      <span>+{additions}</span>
+      <span>-{deletions}</span>
+    </span>
   );
 }
 
@@ -550,36 +788,51 @@ function DiffHunkRow({ line }: { line: DiffLine }) {
   );
 }
 
-function DiffLineRow({ line }: { line: DiffLine }) {
-  const { sign, code } = diffLineParts(line);
+function DiffLineRow({
+  line,
+  file,
+  onOpenPathMenu
+}: {
+  line: DiffLine;
+  file: DiffFile;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent, line?: number): void;
+}) {
+  const code = diffLineCode(line);
+  const targetLine = line.newLine ?? line.oldLine;
   return (
-    <div className={`tm-diffline tm-diffline--${line.kind}`}>
+    <div
+      className={`tm-diffline tm-diffline--${line.kind}`}
+      onContextMenu={(event) => onOpenPathMenu?.(file.path, event, targetLine)}
+    >
       <span className="tm-diffline__num">{line.oldLine ?? ''}</span>
       <span className="tm-diffline__num">{line.newLine ?? ''}</span>
-      <span className="tm-diffline__sign">{sign}</span>
       <code>{code || ' '}</code>
     </div>
   );
 }
 
-function diffLineParts(line: DiffLine): { sign: string; code: string } {
+function diffLineCode(line: DiffLine): string {
   if (line.kind === 'addition' && line.content.startsWith('+')) {
-    return { sign: '+', code: line.content.slice(1) };
+    return line.content.slice(1);
   }
   if (line.kind === 'deletion' && line.content.startsWith('-')) {
-    return { sign: '-', code: line.content.slice(1) };
+    return line.content.slice(1);
   }
   if (line.kind === 'context' && line.content.startsWith(' ')) {
-    return { sign: '', code: line.content.slice(1) };
+    return line.content.slice(1);
   }
-  return { sign: '', code: line.content };
+  return line.content;
 }
 
 function fileCountLabel(total: number, visible: number, filterActive: boolean): string {
   if (filterActive) {
-    return `${visible} of ${total} changes`;
+    return `${visible} / ${total} files`;
   }
-  return `${total} ${total === 1 ? 'change' : 'changes'}`;
+  return fileCountShortLabel(total);
+}
+
+function fileCountShortLabel(count: number): string {
+  return `${count} ${count === 1 ? 'file' : 'files'}`;
 }
 
 function diffEmptyMessage(scope: DiffEvidenceScope, filterActive: boolean): string {
@@ -611,7 +864,6 @@ function statusShortLabel(status: DiffFile['status']): string {
 
 interface DiffScopeContext {
   label: string;
-  groupLabel: string;
   baseLabel: string;
   comparison: string;
 }
@@ -622,21 +874,18 @@ function getDiffScopeContext(scope: DiffEvidenceScope, worktree?: WorktreeRecord
     case 'committed':
       return {
         label: 'Committed',
-        groupLabel: 'COMMITTED',
         baseLabel,
         comparison: `${baseLabel} → HEAD`
       };
     case 'uncommitted':
       return {
         label: 'Uncommitted',
-        groupLabel: 'UNCOMMITTED',
         baseLabel,
         comparison: 'HEAD → local'
       };
     case 'all':
       return {
         label: 'All changes',
-        groupLabel: 'ALL CHANGES',
         baseLabel,
         comparison: `${baseLabel} → local`
       };
@@ -653,41 +902,28 @@ function getDiffTotals(files: DiffFile[]): { additions: number; deletions: numbe
   );
 }
 
-function splitFilePath(path: string): { name: string; directory: string } {
-  const slash = path.lastIndexOf('/');
-  if (slash === -1) {
-    return { name: path, directory: 'Root' };
-  }
-  return {
-    name: path.slice(slash + 1),
-    directory: path.slice(0, slash)
-  };
-}
-
 function blockTitle(source: DiffLineBlockSource): string {
   switch (source) {
     case 'committed':
-      return 'COMMITTED';
+      return 'Committed';
     case 'staged':
-      return 'STAGED';
+      return 'Staged';
     case 'unstaged':
-      return 'UNSTAGED';
+      return 'Unstaged';
     case 'local':
-      return 'LOCAL';
+      return 'Local';
   }
 }
 
 type DiffLineBlockSource = DiffFile['blocks'][number]['source'];
 
-function blockComparison(source: DiffLineBlockSource, context: DiffScopeContext): string {
-  switch (source) {
-    case 'committed':
-      return `${context.baseLabel} → HEAD`;
-    case 'staged':
-      return 'HEAD → staged';
-    case 'unstaged':
-      return 'staged → local';
-    case 'local':
-      return context.comparison;
-  }
+function diffBlockLineCount(lines: DiffLine[]): string {
+  const changedLineCount = lines.filter(
+    (line) => line.kind === 'addition' || line.kind === 'deletion'
+  ).length;
+  return `${changedLineCount} ${changedLineCount === 1 ? 'change' : 'changes'}`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

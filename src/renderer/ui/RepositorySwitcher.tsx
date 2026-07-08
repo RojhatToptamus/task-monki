@@ -1,5 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import type { RepositoryOption } from '../model/repositories';
+import { openTargetMenuPosition } from '../model/openTargetMenu';
+import { OpenTargetContextMenu } from './OpenTargetMenu';
+import type { OpenTargetRef } from '../../shared/contracts';
 
 interface RepositorySwitcherProps {
   activeRepositoryPath: string;
@@ -19,6 +22,10 @@ export function RepositorySwitcher({
   onAddRepository
 }: RepositorySwitcherProps) {
   const [open, setOpen] = useState(false);
+  const [pathMenu, setPathMenu] = useState<{
+    target: OpenTargetRef;
+    position: { x: number; y: number };
+  }>();
   const rootRef = useRef<HTMLDivElement>(null);
   const activeOption = options.find((option) => option.path === activeRepositoryPath);
   const triggerLabel = activeOption?.displayPath ?? 'Add repository';
@@ -55,6 +62,18 @@ export function RepositorySwitcher({
     }
   };
 
+  const openRepositoryMenu = (repositoryPath: string, event: MouseEvent) => {
+    if (!repositoryPath) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setPathMenu({
+      target: { type: 'repository', repositoryPath },
+      position: openTargetMenuPosition(event.clientX, event.clientY)
+    });
+  };
+
   return (
     <div
       className={`tm-repo-switcher ${collapsed ? 'tm-repo-switcher--collapsed' : ''}`}
@@ -67,6 +86,7 @@ export function RepositorySwitcher({
         aria-label="Repository menu"
         aria-haspopup="menu"
         aria-expanded={open}
+        onContextMenu={(event) => openRepositoryMenu(activeRepositoryPath, event)}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="tm-nav__repo-dot" />
@@ -96,6 +116,7 @@ export function RepositorySwitcher({
                       active ? 'tm-repo-menu__item--active' : ''
                     }`}
                     key={option.path}
+                    onContextMenu={(event) => openRepositoryMenu(option.path, event)}
                     onClick={() => {
                       onSelect(option.path);
                       setOpen(false);
@@ -129,6 +150,13 @@ export function RepositorySwitcher({
             </button>
           </div>
         </div>
+      ) : null}
+      {pathMenu ? (
+        <OpenTargetContextMenu
+          target={pathMenu.target}
+          position={pathMenu.position}
+          onClose={() => setPathMenu(undefined)}
+        />
       ) : null}
     </div>
   );
