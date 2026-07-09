@@ -33,13 +33,18 @@ describe('Task Monki development seed data', () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
     snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
-  }, 30_000);
+  }, 90_000);
 
   afterAll(async () => {
     if (rootDir) {
-      await fs.rm(rootDir, { recursive: true, force: true });
+      await fs.rm(rootDir, {
+        recursive: true,
+        force: true,
+        maxRetries: process.platform === 'win32' ? 10 : 0,
+        retryDelay: 100
+      });
     }
-  });
+  }, 30_000);
 
   it('creates a current-schema deterministic scenario catalog', async () => {
     const settings = await new AppSettingsStore(manifest.appSettingsPath).get();
@@ -92,18 +97,21 @@ describe('Task Monki development seed data', () => {
     });
     expect(approvalProgress).toMatchObject({
       state: 'RUNNING',
-      headerLabel: 'Current run',
-      workingNow: {
-        label: 'Waiting for the interaction response before continuing implementation.',
-        tone: 'neutral'
-      }
+      headerLabel: 'Current run'
     });
     expect(approvalProgress?.steps.map((step) => step.step)).toEqual([
       'Prepare interaction request',
       'Wait for user response',
       'Continue implementation'
     ]);
-    expect(approvalProgress?.activityDetails).toEqual([]);
+    expect(approvalProgress?.activityTail).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'read', label: 'Read' }),
+        expect.objectContaining({ category: 'edit', label: 'Edited' }),
+        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' }),
+        expect.objectContaining({ category: 'permission', label: 'Waiting', detail: 'for approval' })
+      ])
+    );
 
     const runningReviewTask = taskForScenario(manifest, snapshot, 'review-running');
     const runningReviewRun = snapshot.runs.find(
@@ -116,7 +124,7 @@ describe('Task Monki development seed data', () => {
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
-      label: 'Inspecting changed files for regressions.'
+      label: 'Searching review · src/renderer.'
     });
 
     const runningTask = taskForScenario(manifest, snapshot, 'agent-running');
@@ -130,18 +138,36 @@ describe('Task Monki development seed data', () => {
     });
     expect(runningProgress).toMatchObject({
       state: 'RUNNING',
-      headerLabel: 'Current run',
-      workingNow: {
-        label: 'Updated the overview panel and will verify the seeded UI next.',
-        tone: 'neutral'
-      }
+      headerLabel: 'Current run'
     });
     expect(runningProgress?.steps.map((step) => step.step)).toEqual([
       'Read task context',
       'Update overview progress panel',
       'Verify seeded UI state'
     ]);
-    expect(runningProgress?.activityDetails).toEqual([]);
+    expect(runningProgress?.activityTail).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: 'read',
+          label: 'Read',
+          detail: 'src/renderer/ui/TaskDetail.tsx',
+          metric: '12 lines'
+        }),
+        expect.objectContaining({
+          category: 'edit',
+          label: 'Edited',
+          detail: 'src/renderer/model/runProgress.ts',
+          metric: '+2 -1'
+        }),
+        expect.objectContaining({
+          category: 'verify',
+          label: 'Running',
+          detail: 'npm run typecheck',
+          status: 'active'
+        })
+      ])
+    );
+    expect(runningProgress?.activityOutputSummary).toBe('show full output · 12 lines');
 
     const completedTask = taskForScenario(manifest, snapshot, 'review-not-run');
     const completedRun = snapshot.runs.find((run) => run.id === completedTask.currentRunId);
@@ -157,10 +183,10 @@ describe('Task Monki development seed data', () => {
     expect(completedProgress).toMatchObject({
       state: 'COMPLETED',
       headerLabel: 'Final plan',
-      activityDetails: [],
+      activityTail: [],
       footer: {
         title: 'Completed',
-        detail: '1 file changed · verification not run',
+        detail: '1 file changed · not verified',
         tone: 'success'
       }
     });

@@ -18,6 +18,7 @@ describe('TaskManagerService progress harness', () => {
       const providerPrompt = scenario.agent.startedTurns[0]?.prompt ?? '';
       expect(providerPrompt).toContain('Task Monki progress contract');
       expect(providerPrompt).toContain('Keep exactly one step in progress');
+      expect(providerPrompt).toContain('provider tool telemetry');
       expect(providerPrompt).toContain('Progress:');
 
       const startedRun = await requireRun(scenario.store.getRun(run.id));
@@ -36,6 +37,54 @@ describe('TaskManagerService progress harness', () => {
         },
         providerCompletedAt: '2026-07-07T10:01:00.000Z'
       });
+      await scenario.store.upsertAgentItem({
+        taskId: task.id,
+        iterationId: startedRun.iterationId,
+        runId: startedRun.id,
+        sessionId: startedRun.sessionId,
+        providerItemId: 'command-read-1',
+        type: 'COMMAND_EXECUTION',
+        status: 'COMPLETED',
+        payload: {
+          type: 'commandExecution',
+          id: 'command-read-1',
+          command: "sed -n '1,2p' README.md",
+          cwd: scenario.repositoryPath,
+          commandActions: [
+            {
+              type: 'read',
+              command: "sed -n '1,2p' README.md",
+              name: 'README.md',
+              path: `${scenario.repositoryPath}/README.md`
+            }
+          ],
+          aggregatedOutput: '# Scenario\n',
+          exitCode: 0,
+          durationMs: 25
+        },
+        providerCompletedAt: '2026-07-07T10:02:00.000Z'
+      });
+      await scenario.store.upsertAgentItem({
+        taskId: task.id,
+        iterationId: startedRun.iterationId,
+        runId: startedRun.id,
+        sessionId: startedRun.sessionId,
+        providerItemId: 'file-change-1',
+        type: 'FILE_CHANGE',
+        status: 'COMPLETED',
+        payload: {
+          type: 'fileChange',
+          id: 'file-change-1',
+          changes: [
+            {
+              path: 'hello.txt',
+              kind: { type: 'add' },
+              diff: '+++ b/hello.txt\n+hello\n'
+            }
+          ]
+        },
+        providerCompletedAt: '2026-07-07T10:03:00.000Z'
+      });
 
       let snapshot = await scenario.store.snapshot();
       let view = buildRunProgressViewModel({
@@ -53,10 +102,28 @@ describe('TaskManagerService progress harness', () => {
             status: 'IN_PROGRESS'
           }
         ],
-        workingNow: {
-          label: 'Finished discovery and will add hello.txt next.',
-          tone: 'neutral'
-        }
+        activityTail: [
+          expect.objectContaining({
+            category: 'other',
+            label: 'Finished discovery and will add hello.txt next.',
+            detail: undefined,
+            tone: 'neutral',
+            status: 'completed'
+          }),
+          expect.objectContaining({
+            category: 'read',
+            label: 'Read',
+            detail: 'README.md',
+            metric: '1 line'
+          }),
+          expect.objectContaining({
+            category: 'write',
+            label: 'Wrote',
+            detail: 'hello.txt',
+            metric: '+1'
+          })
+        ],
+        activityOutputSummary: 'show full output · 1 line'
       });
 
       await scenario.store.recordAgentPlanRevision({
@@ -89,10 +156,26 @@ describe('TaskManagerService progress harness', () => {
           { step: 'Add hello file', status: 'IN_PROGRESS' },
           { step: 'Verify repository status', status: 'PENDING' }
         ],
-        workingNow: {
-          label: 'Finished discovery and will add hello.txt next.',
-          tone: 'neutral'
-        }
+        activityTail: [
+          expect.objectContaining({
+            category: 'other',
+            label: 'Finished discovery and will add hello.txt next.',
+            detail: undefined
+          }),
+          expect.objectContaining({
+            category: 'read',
+            label: 'Read',
+            detail: 'README.md',
+            metric: '1 line'
+          }),
+          expect.objectContaining({
+            category: 'write',
+            label: 'Wrote',
+            detail: 'hello.txt',
+            metric: '+1'
+          })
+        ],
+        activityOutputSummary: 'show full output · 1 line'
       });
     } finally {
       await scenario.service.shutdown();

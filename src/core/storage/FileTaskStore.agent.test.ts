@@ -185,7 +185,9 @@ describe('FileTaskStore agent persistence', () => {
 
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     expect(journal.trim().split('\n')).toHaveLength(2);
-    expect((await fs.stat(server.protocolJournalPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(server.protocolJournalPath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('rejects old store formats instead of maintaining compatibility code', async () => {

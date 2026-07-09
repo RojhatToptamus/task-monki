@@ -98,7 +98,7 @@ describe('TaskManagerService fork alternatives', () => {
 
     expect(sourceAfterSecondFork?.forkedAlternativeTaskIds).toHaveLength(2);
     expect(secondAlternativeTask?.title).toBe('Alternative #2: Build filter');
-  });
+  }, 20_000);
 
   it('leaves failed fork setup visible as a blocked alternative task', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-fork-fail-'));

@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { spawnPortable } from './portableChildProcess';
 
 export interface ProcessSpec {
   executable: string;
@@ -40,7 +41,7 @@ export class ProcessSupervisor {
       error: [Error];
     }>();
 
-    const child = spawn(spec.executable, spec.argv, {
+    const child = spawnPortable(spec.executable, spec.argv, {
       cwd: spec.cwd,
       env: sanitizeEnvironment(spec.env ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],

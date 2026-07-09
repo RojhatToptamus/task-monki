@@ -62,6 +62,35 @@ every yes."
 
 ---
 
+## 3a. Status color map (one color per *question*, not per state)
+
+Every status color must answer exactly one question. Pick the color by what the
+state is asking of the reader, never by which hue "feels" right. Named aliases
+live in `styles.css` (`--state-*`) and resolve to the raw tone tokens; use the
+alias so the meaning is legible at the call site.
+
+| Token             | Raw       | Means                    | Covers                                                       |
+| ----------------- | --------- | ------------------------ | ------------------------------------------------------------ |
+| `--state-working` | `--info`  | The agent is working     | Running, Reviewing, Fixing review feedback, Refining         |
+| `--state-waiting` | `--action`| Waiting on **you**       | Needs approval, Ready for review, PR review waiting, stale review |
+| `--state-blocked` | `--error` | Blocked / verdict against| Needs changes, blocker findings, failed runs, destructive    |
+| `--state-verified`| `--success`| Verified / complete     | Done, review passed, evidence verified, tool available       |
+| `--state-idle`    | `--neutral`| Idle / not yet          | Ready, Not run, No PR, backlog                               |
+
+- **One dot, load-bearing.** Tone shows as a single status dot (`.status-pill`,
+  `.tm-pulse`, `.tm-plan__dot`), never as tinted boxes, colored borders, or
+  colored headline text (see §3.3 and §4).
+- **Differentiate urgency by weight, not hue.** A decision that blocks the
+  pipeline (Needs approval) gets the filled treatment + an Inbox count; passive
+  waiting (Ready for review) gets a dot + text only. Both are amber.
+- **Mono is for values, sans for status words.** Status words render in sans
+  chips (`.status-pill__label`); mono (`.status-pill__value`) is reserved for
+  ids, branches, and counts — never for status words.
+- There is no `--evidence` status color. Teal is not a state; do not reintroduce
+  it as a status dot (it is indistinguishable from `--success` in dark mode).
+
+---
+
 ## 4. Hard bans (this is what "AI slop" means here — do not ship these)
 
 - ❌ Rows/walls of badges or pills; the same label repeated as a badge and as text.

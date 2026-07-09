@@ -60,6 +60,124 @@ describe('review activity model', () => {
     expect(JSON.stringify(view)).not.toContain('git diff');
   });
 
+  it('uses structured review telemetry when the provider emits no progress prose', () => {
+    const reviewRun = runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' });
+
+    const view = buildReviewActivityViewModel({
+      reviewRun,
+      reviewRunning: true,
+      useRunActivity: true,
+      items: [
+        itemFixture({
+          id: 'read-command',
+          runId: reviewRun.id,
+          type: 'COMMAND_EXECUTION',
+          payload: {
+            command: "sed -n '1,80p' src/renderer/ui/TaskDetail.tsx",
+            commandActions: [
+              {
+                type: 'read',
+                command: "sed -n '1,80p' src/renderer/ui/TaskDetail.tsx",
+                path: '/Users/rojhat/project/src/renderer/ui/TaskDetail.tsx'
+              }
+            ]
+          },
+          providerCompletedAt: '2026-07-07T10:06:00.000Z'
+        }),
+        itemFixture({
+          id: 'search-command',
+          runId: reviewRun.id,
+          type: 'COMMAND_EXECUTION',
+          payload: {
+            command: 'rg review src/renderer',
+            commandActions: [
+              { type: 'search', query: 'review', path: 'src/renderer' }
+            ]
+          },
+          providerCompletedAt: '2026-07-07T10:07:00.000Z'
+        })
+      ]
+    });
+
+    expect(view).toEqual({ label: 'Searching review · src/renderer.' });
+    expect(JSON.stringify(view)).not.toContain('/Users/rojhat/project');
+  });
+
+  it('maps structured review file and verification activity without raw shell wrappers', () => {
+    const reviewRun = runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' });
+
+    const fileView = buildReviewActivityViewModel({
+      reviewRun,
+      reviewRunning: true,
+      useRunActivity: true,
+      items: [
+        itemFixture({
+          id: 'file-change',
+          runId: reviewRun.id,
+          type: 'FILE_CHANGE',
+          payload: {
+            changes: [
+              {
+                path: 'src/renderer/model/reviewActivity.ts',
+                kind: { type: 'patch' },
+                diff: '--- a/src/renderer/model/reviewActivity.ts\n+++ b/src/renderer/model/reviewActivity.ts\n-old\n+new\n'
+              }
+            ]
+          },
+          providerCompletedAt: '2026-07-07T10:06:00.000Z'
+        })
+      ]
+    });
+    const verifyView = buildReviewActivityViewModel({
+      reviewRun,
+      reviewRunning: true,
+      useRunActivity: true,
+      items: [
+        itemFixture({
+          id: 'verify-command',
+          runId: reviewRun.id,
+          type: 'COMMAND_EXECUTION',
+          status: 'IN_PROGRESS',
+          payload: {
+            command: "/bin/zsh -lc 'npm test -- reviewActivity'",
+            commandActions: [{ type: 'unknown' }]
+          },
+          providerStartedAt: '2026-07-07T10:07:00.000Z'
+        })
+      ]
+    });
+
+    expect(fileView).toEqual({
+      label: 'Inspecting file changes in src/renderer/model/reviewActivity.ts.'
+    });
+    expect(verifyView).toEqual({ label: 'Running verification.' });
+    expect(JSON.stringify(verifyView)).not.toContain('/bin/zsh');
+  });
+
+  it('does not reuse implementation telemetry for the running review card', () => {
+    const reviewRun = runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' });
+
+    const view = buildReviewActivityViewModel({
+      reviewRun,
+      reviewRunning: true,
+      useRunActivity: true,
+      items: [
+        itemFixture({
+          id: 'implementation-command',
+          runId: 'implementation-run',
+          type: 'COMMAND_EXECUTION',
+          payload: {
+            command: 'npm run typecheck',
+            commandActions: [{ type: 'unknown' }]
+          },
+          providerCompletedAt: '2026-07-07T10:07:00.000Z'
+        })
+      ]
+    });
+
+    expect(view).toEqual({ label: 'Preparing review context.' });
+  });
+
   it('maps final review JSON to a compact activity label instead of raw output', () => {
     const reviewRun = runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' });
 

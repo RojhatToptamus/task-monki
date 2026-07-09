@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
-import { promisify } from 'node:util';
 import type {
   BranchPublicationRecord,
   CiChecksStatus,
@@ -15,8 +13,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import { git } from '../git/gitCli';
-
-const execFileAsync = promisify(execFile);
+import { execFilePortable } from '../process/portableChildProcess';
 
 export interface GitHubRemote {
   remoteName: string;
@@ -247,7 +244,7 @@ export class GitHubService {
     allowedExitCodes: number[] = []
   ): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFileAsync(this.ghExecutable, argv, {
+      const { stdout, stderr } = await execFilePortable(this.ghExecutable, argv, {
         cwd,
         timeout,
         maxBuffer: 20 * 1024 * 1024

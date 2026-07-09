@@ -6,6 +6,15 @@ import type {
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
+import {
+  buildRunActivityProjection,
+  type RunActivityCategory,
+  type RunActivityTone
+} from './runActivity';
+import {
+  buildOverviewRunActivityRows,
+  type OverviewActivityRow
+} from './overviewRunActivity';
 
 export type RunProgressState =
   | 'RUNNING'
@@ -14,24 +23,21 @@ export type RunProgressState =
   | 'INTERRUPTED'
   | 'RECOVERY_REQUIRED';
 
-export type RunProgressTone = 'neutral' | 'success' | 'action' | 'error';
+export type RunProgressTone = RunActivityTone;
 
 export interface RunProgressStep {
   step: string;
   status: AgentPlanStep['status'];
+  /**
+   * A placeholder step standing in for a plan the provider hasn't sent yet
+   * ("Waiting for provider plan…"). The card shimmers it so the wait reads as
+   * live, distinct from a real active step that just carries weight.
+   */
+  pending?: boolean;
 }
 
-export interface RunProgressActivityDetail {
-  label: string;
-  tone: RunProgressTone;
-  at: string;
-}
-
-export interface RunProgressWorkingNow {
-  label: string;
-  tone: RunProgressTone;
-  at: string;
-}
+export type { RunActivityCategory };
+export type RunActivityEntry = OverviewActivityRow;
 
 export interface RunProgressFooter {
   title: string;
@@ -45,19 +51,18 @@ export interface RunProgressViewModel {
   state: RunProgressState;
   headerLabel: string;
   steps: RunProgressStep[];
-  workingNow?: RunProgressWorkingNow;
-  activityDetails: RunProgressActivityDetail[];
+  activityTail: RunActivityEntry[];
+  activityOutputSummary?: string;
   footer?: RunProgressFooter;
 }
 
-interface ActivityCandidate extends RunProgressActivityDetail {
-  dedupeKey: string;
+interface ActivityProjection {
+  tail: RunActivityEntry[];
+  outputSummary?: string;
 }
 
-const ACTIVITY_DETAILS_LIMIT = 6;
+const ACTIVITY_TAIL_LIMIT = 5;
 const PLAN_STEP_LIMIT = 6;
-const WORKING_TEXT_LIMIT = 180;
-const DETAIL_TEXT_LIMIT = 120;
 const FOOTER_TEXT_LIMIT = 120;
 
 const PROGRESS_RUN_MODES = new Set<RunRecord['mode']>([
@@ -95,10 +100,10 @@ export function buildRunProgressViewModel(input: {
     latestPlan && latestPlan.steps.length > 0
       ? normalizePlanSteps(latestPlan.steps)
       : fallbackStepsForRun(progressRun, state);
-  const activities = state === 'RUNNING' ? activitiesForRun(progressRun.id, input.items) : [];
-  const workingNow = state === 'RUNNING' ? activities[0] : undefined;
-  const activityDetails =
-    state === 'RUNNING' ? activities.slice(workingNow ? 1 : 0) : [];
+  const activityProjection =
+    state === 'RUNNING'
+      ? activityProjectionForRun(progressRun, input.items)
+      : { tail: [] };
   const footer =
     state === 'RUNNING'
       ? undefined
@@ -110,8 +115,8 @@ export function buildRunProgressViewModel(input: {
     state,
     headerLabel: headerLabelForState(state),
     steps,
-    workingNow,
-    activityDetails,
+    activityTail: activityProjection.tail,
+    activityOutputSummary: activityProjection.outputSummary,
     footer
   };
 }
@@ -197,7 +202,7 @@ function fallbackStepsForRun(
   state: RunProgressState
 ): RunProgressStep[] {
   if (state === 'RUNNING') {
-    return [{ step: waitingStepLabel(run.status), status: 'IN_PROGRESS' }];
+    return [{ step: waitingStepLabel(run.status), status: 'IN_PROGRESS', pending: true }];
   }
   return [
     {
@@ -207,228 +212,16 @@ function fallbackStepsForRun(
   ];
 }
 
-function activitiesForRun(
-  runId: string,
+function activityProjectionForRun(
+  run: RunRecord,
   items: AgentItemRecord[]
-): RunProgressActivityDetail[] {
-  const seen = new Set<string>();
-  const activities: RunProgressActivityDetail[] = [];
-  const candidates = items
-    .filter((item) => item.runId === runId)
-    .map(activityFromItem)
-    .filter((item): item is ActivityCandidate => item !== undefined)
-    .sort((a, b) => b.at.localeCompare(a.at));
-
-  for (const candidate of candidates) {
-    if (seen.has(candidate.dedupeKey)) {
-      continue;
-    }
-    seen.add(candidate.dedupeKey);
-    activities.push({
-      label: candidate.label,
-      tone: candidate.tone,
-      at: candidate.at
-    });
-    if (activities.length >= ACTIVITY_DETAILS_LIMIT + 1) {
-      break;
-    }
-  }
-
-  return activities;
-}
-
-function activityFromItem(item: AgentItemRecord): ActivityCandidate | undefined {
-  const payload = objectPayload(item.payload);
-  const at = item.providerCompletedAt ?? item.providerStartedAt ?? item.updatedAt ?? item.createdAt;
-  switch (item.type) {
-    case 'AGENT_MESSAGE': {
-      const text = stringValue(payload.text);
-      const label = text ? curateAgentMessage(text, item.status) : undefined;
-      return label
-        ? {
-            label,
-            tone: activityToneForLabel(label, item.status),
-            at,
-            dedupeKey: `message:${normalizeKey(label)}`
-          }
-        : undefined;
-    }
-    case 'COMMAND_EXECUTION': {
-      const command = stringValue(payload.command);
-      const label = commandActivityLabel(command, item.status);
-      return label
-        ? {
-            label,
-            tone: commandActivityTone(command, item.status),
-            at,
-            dedupeKey: `command:${normalizeKey(label)}:${normalizeKey(command ?? '')}`
-          }
-        : undefined;
-    }
-    case 'FILE_CHANGE':
-      return item.status === 'STARTED' || item.status === 'IN_PROGRESS'
-        ? {
-            label: 'Editing files.',
-            tone: 'neutral',
-            at,
-            dedupeKey: 'file-change'
-          }
-        : undefined;
-    case 'MCP_TOOL_CALL':
-    case 'DYNAMIC_TOOL_CALL':
-      return item.status === 'STARTED' || item.status === 'IN_PROGRESS'
-        ? {
-            label: 'Using tool.',
-            tone: 'neutral',
-            at,
-            dedupeKey: `tool:${normalizeKey(stringValue(payload.tool) ?? stringValue(payload.name) ?? '')}`
-          }
-        : undefined;
-    case 'WEB_SEARCH':
-      return item.status === 'STARTED' || item.status === 'IN_PROGRESS'
-        ? {
-            label: 'Searching documentation.',
-            tone: 'neutral',
-            at,
-            dedupeKey: `web-search:${normalizeKey(stringValue(payload.query) ?? '')}`
-          }
-        : undefined;
-    case 'SUBAGENT':
-      return item.status === 'STARTED' || item.status === 'IN_PROGRESS'
-        ? {
-            label: 'Waiting for delegated work.',
-            tone: 'neutral',
-            at,
-            dedupeKey: `subagent:${normalizeKey(stringValue(payload.tool) ?? stringValue(payload.agentThreadId) ?? '')}`
-          }
-        : undefined;
-    default:
-      return undefined;
-  }
-}
-
-function itemTone(status: AgentItemRecord['status']): RunProgressTone {
-  switch (status) {
-    case 'COMPLETED':
-      return 'success';
-    case 'FAILED':
-    case 'DECLINED':
-    case 'INTERRUPTED':
-      return 'error';
-    case 'STARTED':
-    case 'IN_PROGRESS':
-      return 'action';
-    default:
-      return 'neutral';
-  }
-}
-
-function activityToneForLabel(
-  label: string,
-  status: AgentItemRecord['status']
-): RunProgressTone {
-  if (status === 'FAILED' || status === 'DECLINED' || status === 'INTERRUPTED') {
-    return 'error';
-  }
-  if (/^Verification (finished|failed)\./.test(label)) {
-    return itemTone(status);
-  }
-  if (label === 'Running verification.') {
-    return 'action';
-  }
-  return 'neutral';
-}
-
-function commandActivityLabel(
-  command: string | undefined,
-  status: AgentItemRecord['status']
-): string | undefined {
-  const lower = (command ?? '').toLowerCase();
-  const failed = status === 'FAILED' || status === 'DECLINED' || status === 'INTERRUPTED';
-  const completed = status === 'COMPLETED';
-  if (looksLikeVerificationCommand(lower)) {
-    if (failed) {
-      return 'Verification failed.';
-    }
-    return completed ? 'Verification finished.' : 'Running verification.';
-  }
-  if (looksLikeGitCommand(lower)) {
-    if (failed) {
-      return 'Git check failed.';
-    }
-    return completed ? 'Checked local Git state.' : 'Checking local Git state.';
-  }
-  if (looksLikeReadCommand(lower)) {
-    if (failed) {
-      return 'Context read failed.';
-    }
-    return completed ? undefined : 'Reading project context.';
-  }
-  if (failed) {
-    return 'Command failed.';
-  }
-  return undefined;
-}
-
-function commandActivityTone(
-  command: string | undefined,
-  status: AgentItemRecord['status']
-): RunProgressTone {
-  const lower = (command ?? '').toLowerCase();
-  if (looksLikeVerificationCommand(lower)) {
-    return itemTone(status);
-  }
-  if (status === 'FAILED' || status === 'DECLINED' || status === 'INTERRUPTED') {
-    return 'error';
-  }
-  return 'neutral';
-}
-
-function looksLikeVerificationCommand(command: string): boolean {
-  return /\b(test|vitest|jest|pytest|typecheck|tsc|eslint|lint|build|check:codex-protocol|diff --check|prettier --check|cargo test|scarb test)\b/.test(
-    command
-  );
-}
-
-function looksLikeGitCommand(command: string): boolean {
-  return /\bgit\s+(status|diff|show|log|rev-parse|branch)\b/.test(command);
-}
-
-function looksLikeReadCommand(command: string): boolean {
-  return /\b(rg|grep|sed|cat|ls|find|wc|tree|nl)\b/.test(command);
-}
-
-function curateAgentMessage(
-  text: string,
-  status: AgentItemRecord['status']
-): string | undefined {
-  const cleaned = cleanOverviewText(text).replace(/^progress:\s*/i, '');
-  if (!cleaned) {
-    return undefined;
-  }
-  if (looksLikeOverviewNoise(cleaned)) {
-    return undefined;
-  }
-  const readable = readableOverviewSentence(cleaned, WORKING_TEXT_LIMIT);
-  if (readable) {
-    return readable;
-  }
-
-  const lower = cleaned.toLowerCase();
-  const path = shortPath(extractPath(cleaned));
-  if (/\b(edit(?:ed|ing)?|updat(?:e|ed|ing)?|wir(?:e|ed|ing)?|implement(?:ed|ing)?|add(?:ed|ing)?|fix(?:ed|ing)?|writ(?:e|ing|ten)?|chang(?:e|ed|ing))\b/.test(lower)) {
-    return path ? `Editing ${path}.` : 'Editing files.';
-  }
-  if (/\b(read(?:ing)?|inspect(?:ed|ing)?|trace(?:d|ing)?|confirm(?:ed|ing)?|check(?:ed|ing)?|discover(?:ed|ing)?|review(?:ed|ing)?)\b/.test(lower)) {
-    return path ? `Reading ${path}.` : 'Reading project context.';
-  }
-  if (/\b(summar|final)\b/.test(lower)) {
-    return 'Summarizing changes.';
-  }
-  if (/\b(verif|test|typecheck|build|check)\b/.test(lower)) {
-    return status === 'COMPLETED' ? 'Verification finished.' : 'Running verification.';
-  }
-  return truncateAtWord(cleaned, DETAIL_TEXT_LIMIT);
+): ActivityProjection {
+  const projection = buildRunActivityProjection({ run, items });
+  const overviewRows = buildOverviewRunActivityRows(projection.rows);
+  return {
+    tail: overviewRows.slice(-ACTIVITY_TAIL_LIMIT),
+    outputSummary: projection.outputSummary
+  };
 }
 
 function footerForRun(
@@ -512,7 +305,7 @@ function verificationFooterText(status: CiChecksStatus | undefined): string {
     case 'STALE':
     case 'UNKNOWN':
     default:
-      return 'verification not run';
+      return 'not verified';
   }
 }
 
@@ -550,16 +343,6 @@ function terminalStepLabel(state: RunProgressState): string {
   return 'Recovery is required before progress can continue';
 }
 
-function objectPayload(payload: unknown): Record<string, unknown> {
-  return payload && typeof payload === 'object' && !Array.isArray(payload)
-    ? payload as Record<string, unknown>
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
 function normalizeLabel(text: string): string {
   return text
     .replace(/\s+/g, ' ')
@@ -581,45 +364,6 @@ function cleanOverviewText(text: string | undefined): string {
     });
 }
 
-function looksLikeOverviewNoise(text: string): boolean {
-  return /(?:\/bin\/(?:zsh|bash|sh)|\s-lc\s|turn\/[a-z-]+|item\/[a-z-]+|jsonrpc|protocol message|provideritemid)/i.test(
-    text
-  );
-}
-
-function readableOverviewSentence(text: string, maxLength: number): string | undefined {
-  const normalized = normalizeLabel(text);
-  if (!normalized) {
-    return undefined;
-  }
-  if (normalized.length <= maxLength) {
-    return ensureSentencePunctuation(normalized);
-  }
-  const sentences = normalized.match(/[^.!?]+[.!?]+(?:\s|$)/g) ?? [];
-  if (sentences.length > 0) {
-    const joined: string[] = [];
-    for (const sentence of sentences) {
-      const next = [...joined, sentence.trim()].join(' ');
-      if (next.length > maxLength) {
-        break;
-      }
-      joined.push(sentence.trim());
-      if (joined.length >= 2) {
-        break;
-      }
-    }
-    const candidate = joined.join(' ').trim();
-    if (candidate.length >= 24) {
-      return ensureSentencePunctuation(candidate);
-    }
-  }
-  return undefined;
-}
-
-function extractPath(text: string): string | undefined {
-  return text.match(/(?:^|\s)([./~\w-]+(?:\/[\w.-]+)+)(?=$|\s|[.,;:)])/u)?.[1];
-}
-
 function shortPath(path: string | undefined): string | undefined {
   if (!path) {
     return undefined;
@@ -629,26 +373,27 @@ function shortPath(path: string | undefined): string | undefined {
   if (segments.length === 0) {
     return undefined;
   }
-  return segments.slice(-2).join('/');
+  const anchor = ['src', 'tests', 'test', 'docs', 'scripts'].find((candidate) =>
+    segments.includes(candidate)
+  );
+  if (anchor) {
+    const index = segments.indexOf(anchor);
+    const anchored = segments.slice(index);
+    return anchored.length <= 5 ? anchored.join('/') : anchored.slice(-5).join('/');
+  }
+  const repoIndex = segments.lastIndexOf('repo');
+  if (repoIndex >= 0 && repoIndex < segments.length - 1) {
+    const repoRelative = segments.slice(repoIndex + 1);
+    return repoRelative.length <= 5 ? repoRelative.join('/') : repoRelative.slice(-5).join('/');
+  }
+  if (!cleaned.startsWith('/') && segments.length <= 5) {
+    return segments.join('/');
+  }
+  return segments.slice(-3).join('/');
 }
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
-}
-
-function ensureSentencePunctuation(text: string): string {
-  return /[.!?]$/.test(text) ? text : `${text}.`;
-}
-
-function truncateAtWord(text: string, maxLength: number): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxLength) {
-    return ensureSentencePunctuation(normalized);
-  }
-  const sliced = normalized.slice(0, Math.max(0, maxLength - 1));
-  const boundary = sliced.lastIndexOf(' ');
-  const clipped = (boundary > 40 ? sliced.slice(0, boundary) : sliced).trimEnd();
-  return `${clipped}...`;
 }
 
 function truncateText(text: string, maxLength: number): string {

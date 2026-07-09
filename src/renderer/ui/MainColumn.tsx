@@ -1,5 +1,9 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
-import type { Task } from '../../shared/contracts';
+import type {
+  AgentInteractionDecision,
+  InteractionRequestRecord,
+  Task
+} from '../../shared/contracts';
 import {
   DEFAULT_PROMPT_REFINEMENT_MODEL,
   type AgentModel,
@@ -11,6 +15,7 @@ import {
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
 import { resolveReasoningEffort } from '../model/agentExecutionSettings';
+import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import {
   areRequiredExternalToolsReady,
   buildExecutableTestRequest,
@@ -28,6 +33,7 @@ import {
   columnTasks,
   repositoryName,
   tasksForView,
+  tasksSpanMultipleRepositories,
   type NavView,
   type TaskCardVM,
   type Tone
@@ -36,6 +42,7 @@ import {
 interface MainColumnProps {
   view: NavView;
   tasks: Task[];
+  interactionRequests: InteractionRequestRecord[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   appSettings: TaskManagerAppSettings;
@@ -51,6 +58,10 @@ interface MainColumnProps {
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
   onSelect(taskId: string): void;
+  onRespondToInteraction(
+    interaction: InteractionRequestRecord,
+    decision: AgentInteractionDecision
+  ): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
 }
@@ -105,6 +116,7 @@ const SETUP_VIEW_TITLES: Record<
 export function MainColumn({
   view,
   tasks,
+  interactionRequests,
   theme,
   onSetTheme,
   appSettings,
@@ -120,6 +132,7 @@ export function MainColumn({
   onAddRepository,
   onFinishSetup,
   onSelect,
+  onRespondToInteraction,
   onArchive,
   onRequestDelete
 }: MainColumnProps) {
@@ -169,13 +182,19 @@ export function MainColumn({
       {!showRepositorySetup && (view === 'active' || view === 'review' || view === 'done') ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
+          view={view}
           onSelect={onSelect}
           onArchive={onArchive}
           onRequestDelete={onRequestDelete}
         />
       ) : null}
       {!showRepositorySetup && view === 'inbox' ? (
-        <Inbox tasks={tasks} onSelect={onSelect} />
+        <Inbox
+          tasks={tasks}
+          interactionRequests={interactionRequests}
+          onSelect={onSelect}
+          onRespondToInteraction={onRespondToInteraction}
+        />
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
         <Settings
@@ -541,6 +560,7 @@ function BoardKanban({
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
+  const showRepo = tasksSpanMultipleRepositories(tasks);
   return (
     <div className="tm-board">
       {BOARD_COLUMNS.map((column) => {
@@ -556,7 +576,7 @@ function BoardKanban({
               {cards.map((task) => (
                 <TaskCard
                   key={task.id}
-                  vm={buildTaskCardVM(task)}
+                  vm={buildTaskCardVM(task, { showRepo, columnKey: column.key })}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onRequestDelete={onRequestDelete}
@@ -572,15 +592,19 @@ function BoardKanban({
 
 function CardGrid({
   tasks,
+  view,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   tasks: Task[];
+  view: NavView;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
+  const showRepo = tasksSpanMultipleRepositories(tasks);
+  const showReviewCount = view === 'review';
   return (
     <div className="tm-grid">
       {tasks.length === 0 ? (
@@ -590,7 +614,7 @@ function CardGrid({
           {tasks.map((task) => (
             <TaskCard
               key={task.id}
-              vm={buildTaskCardVM(task)}
+              vm={buildTaskCardVM(task, { showRepo, showReviewCount })}
               onSelect={onSelect}
               onArchive={onArchive}
               onRequestDelete={onRequestDelete}
@@ -627,7 +651,7 @@ export function TaskCard({
         <div className="tm-card__top">
           <span className="tm-card__num">{vm.num}</span>
           <span style={{ flex: 1 }} />
-          <Chip tone={vm.stateTone} label={vm.stateLabel} />
+          {vm.showState ? <Chip tone={vm.stateTone} label={vm.stateLabel} /> : null}
         </div>
         <div className="tm-card__titlerow">
           <strong className="tm-card__title">{vm.title}</strong>
@@ -641,7 +665,13 @@ export function TaskCard({
             className="tm-card__actions"
           />
         </div>
-        <div className="tm-card__meta">{vm.meta}</div>
+        {vm.lineage ? (
+          <div className="tm-card__lineage">
+            <span aria-hidden="true">↳</span> {vm.lineage}
+          </div>
+        ) : null}
+        {vm.meta ? <div className="tm-card__meta">{vm.meta}</div> : null}
+        {vm.evidence.length > 0 ? (
         <div className="tm-card__evidence" aria-label="Task evidence">
           {vm.evidence.map((item, index) => (
             <span
@@ -651,16 +681,46 @@ export function TaskCard({
               }`}
             >
               <span className="tm-card__evidence-dot" aria-hidden="true" />
-              {item.label}
+              {item.value ? (
+                <span className="tm-card__evidence-value">{item.value}</span>
+              ) : null}
+              <span className="tm-card__evidence-label">{item.label}</span>
             </span>
           ))}
         </div>
+        ) : null}
       </div>
     </article>
   );
 }
 
-function Inbox({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void }) {
+function activeInteractionForTask(
+  interactionRequests: InteractionRequestRecord[],
+  taskId: string
+): InteractionRequestRecord | undefined {
+  return interactionRequests
+    .filter(
+      (interaction) =>
+        interaction.taskId === taskId &&
+        ['PENDING', 'RESPONDING'].includes(interaction.status)
+    )
+    .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt))[0];
+}
+
+function Inbox({
+  tasks,
+  interactionRequests,
+  onSelect,
+  onRespondToInteraction
+}: {
+  tasks: Task[];
+  interactionRequests: InteractionRequestRecord[];
+  onSelect(id: string): void;
+  onRespondToInteraction(
+    interaction: InteractionRequestRecord,
+    decision: AgentInteractionDecision
+  ): Promise<void>;
+}) {
   const decisions = tasks.filter((task) => describeTaskAttention(task));
 
   return (
@@ -673,34 +733,96 @@ function Inbox({ tasks, onSelect }: { tasks: Task[]; onSelect(id: string): void 
             <span>Nothing needs your decision. The pipeline is running itself.</span>
           </div>
         ) : (
-          decisions.map((task) => {
-            const attention = describeTaskAttention(task);
-            return (
-              <div className="tm-decision" key={task.id}>
-                <div className="tm-decision__head">
-                  <span className="tm-pulse" />
-                  <span className="tm-decision__kind">{attention?.label}</span>
-                </div>
-                <strong className="tm-decision__title">{task.title}</strong>
-                <div className="tm-decision__task">
-                  {repositoryName(task.repositoryPath)} · {humanizeEnum(task.workflowPhase)}
-                </div>
-                <p className="tm-decision__summary">
-                  {attention?.detail ?? task.projection.summary}
-                </p>
-                <div className="tm-decision__actions">
-                  <button
-                    type="button"
-                    className="tm-decision__open"
-                    onClick={() => onSelect(task.id)}
-                  >
-                    Open task →
-                  </button>
-                </div>
-              </div>
-            );
-          })
+          decisions.map((task) => (
+            <InboxDecisionCard
+              key={task.id}
+              task={task}
+              interaction={activeInteractionForTask(interactionRequests, task.id)}
+              onSelect={onSelect}
+              onRespondToInteraction={onRespondToInteraction}
+            />
+          ))
         )}
+      </div>
+    </div>
+  );
+}
+
+function InboxDecisionCard({
+  task,
+  interaction,
+  onSelect,
+  onRespondToInteraction
+}: {
+  task: Task;
+  interaction?: InteractionRequestRecord;
+  onSelect(id: string): void;
+  onRespondToInteraction(
+    interaction: InteractionRequestRecord,
+    decision: AgentInteractionDecision
+  ): Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const attention = describeTaskAttention(task);
+  const dotTone =
+    attention?.tone === 'error' ? 'error' : attention?.tone === 'info' ? 'info' : 'action';
+  // Inline decisions come straight from the interaction's allowed actions, so
+  // answering here drives the same handler the detail page uses (no new IPC).
+  const inline = interaction ? inboxInteractionDecisions(interaction) : {};
+
+  const respond = async (decision: AgentInteractionDecision) => {
+    if (!interaction || busy) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await onRespondToInteraction(interaction, decision);
+    } catch {
+      // The app shell surfaces the error and keeps the card so the user retries.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="tm-decision">
+      <div className="tm-decision__head">
+        <span className={`tm-pulse tm-pulse--${dotTone}`} />
+        <span className="tm-decision__kind">{attention?.label}</span>
+      </div>
+      <strong className="tm-decision__title">{task.title}</strong>
+      <div className="tm-decision__task">
+        {repositoryName(task.repositoryPath)} · {humanizeEnum(task.workflowPhase)}
+      </div>
+      <p className="tm-decision__summary">{attention?.detail ?? task.projection.summary}</p>
+      <div className="tm-decision__actions">
+        {inline.approve ? (
+          <button
+            type="button"
+            className="primary-button tm-decision__approve"
+            disabled={busy}
+            onClick={() => void respond(inline.approve!.decision)}
+          >
+            {inline.approve.label}
+          </button>
+        ) : null}
+        {inline.deny ? (
+          <button
+            type="button"
+            className="outline-button tm-decision__deny"
+            disabled={busy}
+            onClick={() => void respond(inline.deny!.decision)}
+          >
+            {inline.deny.label}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="tm-decision__open"
+          onClick={() => onSelect(task.id)}
+        >
+          Open task →
+        </button>
       </div>
     </div>
   );
@@ -773,7 +895,7 @@ function Settings({
 
   return (
     <div className="tm-settings">
-      <div className="tm-settings__card">
+      <SettingsGroup title="Appearance">
         <div className="tm-settings__row">
           <div style={{ minWidth: 0 }}>
             <div className="tm-settings__k">Theme</div>
@@ -808,6 +930,9 @@ function Settings({
           checked={appSettings.showMascot}
           onChange={(showMascot) => onSetAppSettings({ showMascot })}
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Models">
         <ModelSettingRow
           label="Default task model"
           hint="Used for new implementation tasks"
@@ -863,6 +988,9 @@ function Settings({
             })
           }
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Codex tools">
         <ExternalToolSettingRow
           label="Web search"
           hint="Codex search tool"
@@ -906,6 +1034,9 @@ function Settings({
             })
           }
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Executables">
         <ExecutableSettingRow
           tool="git"
           label="Git executable"
@@ -962,6 +1093,9 @@ function Settings({
             Refresh
           </button>
         </div>
+      </SettingsGroup>
+
+      <SettingsGroup title="Workspace">
         {rows.map((row) => (
           <div className="tm-settings__row" key={row.k}>
             <div style={{ minWidth: 0 }}>
@@ -971,8 +1105,17 @@ function Settings({
             <span className="tm-settings__v">{row.v}</span>
           </div>
         ))}
-      </div>
+      </SettingsGroup>
     </div>
+  );
+}
+
+function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="tm-settings__group" aria-label={title}>
+      <h2 className="tm-settings__group-title">{title}</h2>
+      <div className="tm-settings__card">{children}</div>
+    </section>
   );
 }
 

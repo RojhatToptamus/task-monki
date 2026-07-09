@@ -800,7 +800,8 @@ async function createImplementedTask(
       { step: 'Verify local state', status: 'COMPLETED' }
     ],
     message: 'Progress: Summarizing completed seed implementation.',
-    explanation: 'Implementation completed.'
+    explanation: 'Implementation completed.',
+    verificationStatus: 'COMPLETED'
   });
   await completeRun(ctx, started, 'Seed implementation completed.', state.gitSnapshot?.id);
   return { ...state, task: await requireTask(ctx, state.task.id), run: await requireRun(ctx, started.id) };
@@ -833,7 +834,8 @@ async function createAgentScenario(
           { step: 'Wait for user response', status: 'IN_PROGRESS' },
           { step: 'Continue implementation', status: 'PENDING' }
         ],
-        message: 'Progress: Waiting for the interaction response before continuing implementation.'
+        message: 'Progress: Waiting for the interaction response before continuing implementation.',
+        verificationStatus: 'COMPLETED'
       });
     }
     if (variant === 'interaction-stale') {
@@ -864,6 +866,7 @@ async function seedActiveRunProgress(
     steps?: Array<{ step: string; status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' }>;
     message?: string;
     explanation?: string;
+    verificationStatus?: 'IN_PROGRESS' | 'COMPLETED';
   } = {}
 ): Promise<void> {
   const steps = input.steps ?? [
@@ -887,7 +890,104 @@ async function seedActiveRunProgress(
       runId: run.id
     })
   });
+  await seedCommandExecution(ctx, run, {
+    suffix: 'read',
+    status: 'COMPLETED',
+    command: "sed -n '1,80p' src/renderer/ui/TaskDetail.tsx",
+    commandActions: [
+      {
+        type: 'read',
+        command: "sed -n '1,80p' src/renderer/ui/TaskDetail.tsx",
+        name: 'TaskDetail.tsx',
+        path: `${ctx.repositoryPath}/src/renderer/ui/TaskDetail.tsx`
+      }
+    ],
+    aggregatedOutput: Array.from({ length: 12 }, (_, index) => `seed overview line ${index + 1}`).join('\n'),
+    durationMs: 180
+  });
+  await seedFileChange(ctx, run);
+  await seedCommandExecution(ctx, run, {
+    suffix: 'verify',
+    status: input.verificationStatus ?? 'IN_PROGRESS',
+    command: 'npm run typecheck',
+    commandActions: [{ type: 'unknown', command: 'npm run typecheck' }],
+    durationMs: input.verificationStatus === 'COMPLETED' ? 320 : null
+  });
   await seedAgentMessage(ctx, run, message);
+}
+
+async function seedCommandExecution(
+  ctx: SeedContext,
+  run: RunRecord,
+  input: {
+    suffix: string;
+    status: 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
+    command: string;
+    commandActions: Array<Record<string, unknown>>;
+    aggregatedOutput?: string;
+    durationMs?: number | null;
+  }
+): Promise<void> {
+  await ctx.store.upsertAgentItem({
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    sessionId: run.sessionId,
+    providerItemId: `seed-command-${input.suffix}-${run.id}`,
+    type: 'COMMAND_EXECUTION',
+    status: input.status,
+    payload: {
+      type: 'commandExecution',
+      id: `seed-command-${input.suffix}-${run.id}`,
+      command: input.command,
+      cwd: ctx.repositoryPath,
+      commandActions: input.commandActions,
+      aggregatedOutput: input.aggregatedOutput ?? null,
+      exitCode: input.status === 'FAILED' ? 1 : input.status === 'COMPLETED' ? 0 : null,
+      durationMs: input.durationMs ?? null
+    },
+    rawMessage: await rawMessage(ctx, 'INBOUND', {
+      type: 'item/commandExecution',
+      runId: run.id
+    }),
+    providerStartedAt: new Date().toISOString(),
+    providerCompletedAt: input.status === 'IN_PROGRESS' ? undefined : new Date().toISOString()
+  });
+}
+
+async function seedFileChange(ctx: SeedContext, run: RunRecord): Promise<void> {
+  await ctx.store.upsertAgentItem({
+    taskId: run.taskId,
+    iterationId: run.iterationId,
+    runId: run.id,
+    sessionId: run.sessionId,
+    providerItemId: `seed-file-change-${run.id}`,
+    type: 'FILE_CHANGE',
+    status: 'COMPLETED',
+    payload: {
+      type: 'fileChange',
+      id: `seed-file-change-${run.id}`,
+      changes: [
+        {
+          path: 'src/renderer/model/runProgress.ts',
+          kind: { type: 'update', move_path: null },
+          diff: [
+            '--- a/src/renderer/model/runProgress.ts',
+            '+++ b/src/renderer/model/runProgress.ts',
+            '-export const oldActivity = true;',
+            '+export const activityTail = true;',
+            '+export const activityMetrics = true;'
+          ].join('\n')
+        }
+      ]
+    },
+    rawMessage: await rawMessage(ctx, 'INBOUND', {
+      type: 'item/fileChange',
+      runId: run.id
+    }),
+    providerStartedAt: new Date().toISOString(),
+    providerCompletedAt: new Date().toISOString()
+  });
 }
 
 async function seedAgentMessage(
@@ -932,12 +1032,15 @@ async function createReviewScenario(
     beforeGitSnapshotId: state.gitSnapshot?.id
   });
   if (definition.slug === 'review-running') {
-    await seedAgentMessage(
-      ctx,
-      review,
-      'Progress: Inspecting changed files for regressions.',
-      'review-progress'
-    );
+    await seedCommandExecution(ctx, review, {
+      suffix: 'review-search',
+      status: 'COMPLETED',
+      command: 'rg review src/renderer',
+      commandActions: [
+        { type: 'search', query: 'review', path: 'src/renderer' }
+      ],
+      durationMs: 90
+    });
     return { ...state, task: await requireTask(ctx, state.task.id), run: review };
   }
 
@@ -1300,7 +1403,8 @@ async function createInteraction(
             approvalId: `seed-approval-${ctx.protocolCounter}`,
             reason: 'Seeded command approval.',
             command: 'npm test',
-            cwd: ctx.repositoryPath
+            cwd: ctx.repositoryPath,
+            commandActions: [{ type: 'unknown', command: 'npm test' }]
           },
     allowedActions:
       type === 'USER_INPUT'

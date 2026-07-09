@@ -1,12 +1,9 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   type CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-
-const execFileAsync = promisify(execFile);
+import { execFilePortable } from '../../process/portableChildProcess';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
 interface CodexMcpServerListEntry {
@@ -82,7 +79,7 @@ export async function listDisabledCodexMcpServerConfigOverrides(
   cwd: string,
   environment?: NodeJS.ProcessEnv
 ): Promise<string[]> {
-  const { stdout } = await execFileAsync(executable, ['mcp', 'list', '--json'], {
+  const { stdout } = await execFilePortable(executable, ['mcp', 'list', '--json'], {
     cwd,
     env: sanitizeEnvironment(environment ?? process.env),
     timeout: CODEX_MCP_LIST_TIMEOUT_MS,

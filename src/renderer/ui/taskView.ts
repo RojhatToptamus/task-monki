@@ -1,4 +1,5 @@
 import type {
+  CodexReviewFinding,
   CodexReviewGateStatus,
   MergeStatus,
   Task,
@@ -14,7 +15,7 @@ import {
   canCreateDeliveryCommit,
   formatShortId
 } from '../model/selectors';
-import { buildBoardDeliveryLine } from '../model/prStatus';
+import { buildBoardDeliveryParts } from '../model/prStatus';
 import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
 import { humanizeEnum } from './display';
 
@@ -25,6 +26,9 @@ import { humanizeEnum } from './display';
 export type Tone = 'neutral' | 'info' | 'action' | 'success' | 'error';
 
 export interface CardEvidenceItem {
+  /** Mono value part (e.g. a PR reference), rendered before the label. */
+  value?: string;
+  /** Sans status words describing the delivery state. */
   label: string;
   tone?: Tone;
 }
@@ -33,13 +37,31 @@ export interface TaskCardVM {
   id: string;
   num: string;
   title: string;
-  meta: string;
+  meta?: string;
+  /** Lineage cue for a forked task, e.g. "fork of #task-rev"; undefined otherwise. */
+  lineage?: string;
   repositoryPath: string;
   stateLabel: string;
   stateTone: Tone;
+  showState: boolean;
   archived: boolean;
   hasDecision: boolean;
   evidence: CardEvidenceItem[];
+}
+
+export interface TaskCardOptions {
+  /** Show the repository name; false collapses it when all cards share one repo. */
+  showRepo?: boolean;
+  /**
+   * The board column the card sits in, if any. Lets a card suppress a status
+   * pill that only restates its column (e.g. "Ready" inside Backlog / Ready).
+   */
+  columnKey?: string;
+  /**
+   * Show the review finding-count triage line ("1 blocker · 2 major") — used by
+   * the Review queue where that count is the signal engineers scan for.
+   */
+  showReviewCount?: boolean;
 }
 
 export interface FinishEvidenceWarning {
@@ -452,7 +474,53 @@ function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boo
 }
 
 export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
-  return [{ label: buildBoardDeliveryLine(task), tone: deliveryLineTone(task) }];
+  const { ref, status } = buildBoardDeliveryParts(task);
+  // "No PR" is the absence of delivery state, not information — reserve the
+  // footer for cards that actually carry a PR/check/merge signal (DESIGN.md §6).
+  if (ref === 'No PR' || !status) {
+    return [];
+  }
+  // Mono for the PR reference (a value); sans for the status words.
+  return [{ value: ref, label: status, tone: deliveryLineTone(task) }];
+}
+
+const FINDING_SEVERITY_LABELS: Array<{
+  severity: CodexReviewFinding['severity'];
+  singular: string;
+}> = [
+  { severity: 'BLOCKER', singular: 'blocker' },
+  { severity: 'MAJOR', singular: 'major' },
+  { severity: 'MINOR', singular: 'minor' },
+  { severity: 'NIT', singular: 'nit' }
+];
+
+/**
+ * The triage signal an engineer scans a review queue for: a compact count of
+ * findings by severity, e.g. "1 blocker · 2 major" (audit §03 Review queue).
+ * Returns undefined when there is no recorded review result with findings.
+ */
+export function reviewFindingCountLabel(task: Task): string | undefined {
+  const findings = codexReviewGate(task).result?.findings;
+  if (!findings || findings.length === 0) {
+    return undefined;
+  }
+  const parts = FINDING_SEVERITY_LABELS.map(({ severity, singular }) => {
+    const count = findings.filter((finding) => finding.severity === severity).length;
+    return count > 0 ? `${count} ${singular}` : undefined;
+  }).filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+/** The most salient severity tone across a task's review findings. */
+export function reviewFindingTone(task: Task): Tone {
+  const findings = codexReviewGate(task).result?.findings ?? [];
+  if (findings.some((finding) => finding.severity === 'BLOCKER')) {
+    return 'error';
+  }
+  if (findings.some((finding) => finding.severity === 'MAJOR')) {
+    return 'action';
+  }
+  return 'info';
 }
 
 function deliveryLineTone(task: Task): Tone {
@@ -487,23 +555,63 @@ export function taskMeta(task: Task): string {
   return repositoryName(task.repositoryPath);
 }
 
-export function buildTaskCardVM(task: Task): TaskCardVM {
+export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): TaskCardVM {
+  const { showRepo = true, columnKey, showReviewCount = false } = options;
   const state = describeTaskState(task);
   const hasDecision = ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
     task.projection.agentRun
   );
+  const evidence = evidenceLineForTask(task);
+  if (showReviewCount) {
+    const findingLabel = reviewFindingCountLabel(task);
+    if (findingLabel) {
+      // Lead with the triage signal engineers scan the review queue for.
+      evidence.unshift({ label: findingLabel, tone: reviewFindingTone(task) });
+    }
+  }
   return {
     id: task.id,
     num: `#${formatShortId(task.id)}`,
     title: task.title,
-    meta: taskMeta(task),
+    meta: showRepo ? taskMeta(task) : undefined,
+    lineage: task.forkedFromTaskId
+      ? `fork of #${formatShortId(task.forkedFromTaskId)}`
+      : undefined,
     repositoryPath: task.repositoryPath,
     stateLabel: state.label,
     stateTone: state.tone,
+    showState: !stateRestatesColumn(state.label, columnKey),
     archived: task.workflowPhase === 'ARCHIVED',
     hasDecision,
-    evidence: evidenceLineForTask(task)
+    evidence
   };
+}
+
+/**
+ * True when a card's state pill merely repeats the column it sits in — e.g.
+ * "Ready" inside Backlog / Ready or "Done" inside Done. Pills are kept where
+ * they refine the column (e.g. "Needs changes" within Review).
+ */
+function stateRestatesColumn(stateLabel: string, columnKey: string | undefined): boolean {
+  if (columnKey === 'ready') {
+    return stateLabel === 'Ready' || stateLabel === 'Backlog';
+  }
+  if (columnKey === 'done') {
+    return stateLabel === 'Done';
+  }
+  return false;
+}
+
+/** Whether a set of tasks spans more than one repository. */
+export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
+  const seen = new Set<string>();
+  for (const task of tasks) {
+    seen.add(task.repositoryPath);
+    if (seen.size > 1) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function reviewRequirement(status: CodexReviewGateStatus): FinishRequirement {

@@ -7,6 +7,7 @@ import {
   createTaskMonkiScenario,
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
+import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 
 describe('TaskManagerService review and PR action coordination', () => {
   it('makes review and PR actions deterministic around a running review', async () => {
@@ -170,9 +171,9 @@ async function recordPullRequestForRun(
 
 async function writeFakeGh(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-fake-gh-'));
-  const ghPath = path.join(dir, 'gh');
-  await fs.writeFile(
-    ghPath,
+  return writeNodeExecutable(
+    dir,
+    'gh',
     `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === 'pr' && args[1] === 'view') {
@@ -198,9 +199,6 @@ if (args[0] === 'pr' && args[1] === 'view') {
   console.error('Unexpected gh invocation: ' + args.join(' '));
   process.exit(1);
 }
-`,
-    'utf8'
+`
   );
-  await fs.chmod(ghPath, 0o755);
-  return ghPath;
 }

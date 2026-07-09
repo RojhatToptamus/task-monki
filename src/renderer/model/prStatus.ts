@@ -428,20 +428,36 @@ function createDraftPrAvailability(
   };
 }
 
-export function buildBoardDeliveryLine(task: Task): string {
+export interface BoardDeliveryParts {
+  /** Mono value part — a PR reference like "PR #82", or "No PR". */
+  ref: string;
+  /** Sans status words like "checks failing", when there is delivery state. */
+  status?: string;
+}
+
+/**
+ * The board card's delivery line split into a mono value (the PR reference) and
+ * a sans status phrase, so status words never render in mono (audit §06/§07:
+ * mono is reserved for values — ids, branches, counts).
+ */
+export function buildBoardDeliveryParts(task: Task): BoardDeliveryParts {
   const number = task.projection.githubPullRequestNumber;
-  const prefix =
+  const ref =
     task.projection.githubPullRequest === 'UNLINKED' ||
     task.projection.githubPullRequest === 'NOT_CREATED'
       ? 'No PR'
       : number
         ? `PR #${number}`
         : 'PR';
-  if (prefix === 'No PR') {
-    return prefix;
+  if (ref === 'No PR') {
+    return { ref };
   }
-  const status = boardDeliveryStatus(task);
-  return status ? `${prefix} | ${status}` : prefix;
+  return { ref, status: boardDeliveryStatus(task) };
+}
+
+export function buildBoardDeliveryLine(task: Task): string {
+  const { ref, status } = buildBoardDeliveryParts(task);
+  return status ? `${ref} | ${status}` : ref;
 }
 
 export function buildFailingChecksInvestigationPrompt(view: PrStatusViewModel): string {

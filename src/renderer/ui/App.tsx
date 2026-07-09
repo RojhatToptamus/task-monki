@@ -89,7 +89,7 @@ interface AppNotification {
   message: string;
 }
 
-const REVIEW_STARTED_NOTICE = 'Codex review started — task stays in Review';
+const REVIEW_STARTED_NOTICE = 'Codex review started';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
@@ -364,6 +364,15 @@ export function App() {
           )
         : [],
     [selectedTask, snapshot.agentSubagentObservations]
+  );
+  const selectedGitSnapshots = useMemo(
+    () =>
+      selectedTask
+        ? snapshot.gitSnapshots.filter(
+            (gitSnapshot) => gitSnapshot.taskId === selectedTask.id
+          )
+        : [],
+    [selectedTask, snapshot.gitSnapshots]
   );
   const selectedWorktree = selectedTask ? selectCurrentWorktree(snapshot, selectedTask) : undefined;
   const selectedGitSnapshot = selectedTask
@@ -941,6 +950,7 @@ export function App() {
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
+            gitSnapshots={selectedGitSnapshots}
             githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}
@@ -983,6 +993,7 @@ export function App() {
           <MainColumn
             view={view}
             tasks={visibleTasks}
+            interactionRequests={snapshot.interactionRequests}
             theme={theme}
             onSetTheme={updateTheme}
             appSettings={appSettings}
@@ -998,6 +1009,7 @@ export function App() {
             onAddRepository={addRepository}
             onFinishSetup={finishFirstLaunchSetup}
             onSelect={selectTask}
+            onRespondToInteraction={respondToInteraction}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
           />

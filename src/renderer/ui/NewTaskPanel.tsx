@@ -42,6 +42,12 @@ export function NewTaskPanel({
   const [networkAccess, setNetworkAccess] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
+  // Refinement is a proposal, not a silent overwrite (audit §05). While running,
+  // `isRefining` dims the textarea. On completion `proposal` holds the refined
+  // text for Accept/Revert. After acceptance `restorable` keeps the pre-refine
+  // prompt so "Restore original" can undo it — one stored string buys trust.
+  const [proposal, setProposal] = useState<{ prompt: string; titleSuggestion: string }>();
+  const [restorable, setRestorable] = useState<string>();
 
   useEffect(() => {
     if (model) {
@@ -116,16 +122,38 @@ export function NewTaskPanel({
       setError('Select a repository before refining the description.');
       return;
     }
+    setProposal(undefined);
+    setRestorable(undefined);
     setIsRefining(true);
     try {
       const refined = await onRefinePrompt(repositoryPath, prompt);
-      setPrompt(refined.prompt);
-      setTitle((current) => current || refined.titleSuggestion);
+      // Present as a proposal instead of overwriting the user's input.
+      setProposal({ prompt: refined.prompt, titleSuggestion: refined.titleSuggestion });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not refine prompt.');
     } finally {
       setIsRefining(false);
     }
+  };
+
+  const acceptProposal = () => {
+    if (!proposal) {
+      return;
+    }
+    setRestorable(prompt); // keep the pre-refine prompt retrievable
+    setPrompt(proposal.prompt);
+    setTitle((current) => current || proposal.titleSuggestion);
+    setProposal(undefined);
+  };
+
+  const revertProposal = () => setProposal(undefined);
+
+  const restoreOriginal = () => {
+    if (restorable === undefined) {
+      return;
+    }
+    setPrompt(restorable);
+    setRestorable(undefined);
   };
 
   return (
@@ -159,7 +187,7 @@ export function NewTaskPanel({
               <input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
-                placeholder="Add settings validation"
+                placeholder="Short imperative summary"
                 disabled={disabled}
                 autoFocus
               />
@@ -170,23 +198,47 @@ export function NewTaskPanel({
                 <span className="field__label">
                   <label htmlFor="task-description">Description</label>
                 </span>
-                <button
-                  className="field__refine"
-                  type="button"
-                  disabled={disabled || isRefining || !prompt.trim() || !repositoryPath}
-                  onClick={() => void refine()}
-                >
-                  <SparkleIcon />
-                  {isRefining ? 'Refining...' : 'Refine'}
-                </button>
+                <span className="field__header-actions">
+                  {restorable !== undefined && !proposal ? (
+                    <button
+                      className="field__restore"
+                      type="button"
+                      disabled={disabled || isRefining}
+                      onClick={restoreOriginal}
+                    >
+                      Restore original
+                    </button>
+                  ) : null}
+                  <button
+                    className="field__refine"
+                    type="button"
+                    disabled={disabled || isRefining || !prompt.trim() || !repositoryPath || Boolean(proposal)}
+                    aria-busy={isRefining}
+                    onClick={() => void refine()}
+                  >
+                    <SparkleIcon />
+                    <span className={isRefining ? 'field__refine-label tm-shimmer-text' : 'field__refine-label'}>
+                      {isRefining ? 'Refining' : 'Refine'}
+                    </span>
+                  </button>
+                </span>
               </span>
-              <textarea
-                id="task-description"
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Describe the implementation request, constraints, and expected verification."
-                disabled={disabled}
-              />
+              <div className={`field__prompt-shell ${isRefining ? 'field__prompt-shell--running' : ''}`}>
+                <textarea
+                  id="task-description"
+                  value={prompt}
+                  onChange={(event) => setPrompt(event.target.value)}
+                  placeholder="Describe the implementation request, constraints, and expected verification."
+                  disabled={disabled || isRefining}
+                />
+              </div>
+              {proposal ? (
+                <RefinementProposal
+                  refined={proposal.prompt}
+                  onAccept={acceptProposal}
+                  onRevert={revertProposal}
+                />
+              ) : null}
             </div>
           </section>
 
@@ -379,4 +431,36 @@ function formatEffortLabel(effort: string): string {
     return 'X-high';
   }
   return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+/**
+ * The refined description shown as a proposal (audit §05): the AI's rewrite is
+ * previewed with Accept / Revert instead of silently replacing the user's text,
+ * because AI editing user input is the one place trust demands ceremony.
+ */
+function RefinementProposal({
+  refined,
+  onAccept,
+  onRevert
+}: {
+  refined: string;
+  onAccept(): void;
+  onRevert(): void;
+}) {
+  return (
+    <div className="field__proposal" role="group" aria-label="Refined description proposal">
+      <div className="field__proposal-head">
+        <span className="field__proposal-title">Refined description</span>
+      </div>
+      <pre className="field__proposal-body">{refined}</pre>
+      <div className="field__proposal-actions">
+        <button type="button" className="outline-button" onClick={onRevert}>
+          Revert
+        </button>
+        <button type="button" className="primary-button" onClick={onAccept}>
+          Accept
+        </button>
+      </div>
+    </div>
+  );
 }

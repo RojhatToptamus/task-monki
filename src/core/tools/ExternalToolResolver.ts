@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import type { ExternalExecutablePathSettings } from '../../shared/agent';
 import type {
   ExternalToolId,
@@ -12,8 +10,7 @@ import type {
   TestExternalToolRequest
 } from '../../shared/contracts';
 import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
-
-const execFileAsync = promisify(execFile);
+import { execFilePortable } from '../process/portableChildProcess';
 
 const TOOL_DEFINITIONS: Record<
   ExternalToolId,
@@ -113,7 +110,7 @@ export async function probeExecutable(input: {
 }): Promise<ExternalToolProbeResult> {
   const resolvedPath = await resolveExecutablePath(input.executable, input.env);
   try {
-    const { stdout, stderr } = await execFileAsync(input.executable, input.versionArgs, {
+    const { stdout, stderr } = await execFilePortable(input.executable, input.versionArgs, {
       cwd: input.cwd,
       env: input.env,
       timeout: 10_000,

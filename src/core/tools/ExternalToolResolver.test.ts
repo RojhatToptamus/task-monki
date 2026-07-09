@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
+import { writeOutputExecutable } from '../../testSupport/fakeExecutable';
 import { ExternalToolResolver, resolveConfiguredExecutable } from './ExternalToolResolver';
 import type { ExternalExecutablePathSettings } from '../../shared/agent';
 
@@ -15,7 +16,7 @@ const autoSettings: ExternalExecutablePathSettings = {
 describe('ExternalToolResolver', () => {
   it('auto-detects tools from PATH and reports live versions', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-tools-'));
-    const git = await writeExecutable(dir, 'git', 'git version 9.9.9');
+    const git = await writeOutputExecutable(dir, 'git', 'git version 9.9.9');
     const resolver = new ExternalToolResolver({
       cwd: dir,
       env: {
@@ -37,7 +38,7 @@ describe('ExternalToolResolver', () => {
 
   it('uses explicit custom settings paths', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-tools-custom-'));
-    const codex = await writeExecutable(dir, 'custom-codex', 'codex-cli 1.2.3');
+    const codex = await writeOutputExecutable(dir, 'custom-codex', 'codex-cli 1.2.3');
     const resolver = new ExternalToolResolver({ cwd: dir, env: { PATH: '' } });
 
     const result = await resolver.probe('codex', {
@@ -145,10 +146,3 @@ describe('ExternalToolResolver', () => {
     expect(result.error).toMatch(/ENOENT|no such file/i);
   });
 });
-
-async function writeExecutable(dir: string, name: string, output: string): Promise<string> {
-  const filePath = path.join(dir, name);
-  await fs.writeFile(filePath, `#!/bin/sh\necho ${JSON.stringify(output)}\n`, 'utf8');
-  await fs.chmod(filePath, 0o755);
-  return filePath;
-}

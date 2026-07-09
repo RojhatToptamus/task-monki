@@ -1,10 +1,11 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { spawnPortable } from '../process/portableChildProcess';
 import type {
   ExecuteOpenTargetActionRequest,
   InspectOpenTargetRequest,
@@ -558,7 +559,7 @@ export function createNodeOpenTargetHost(): OpenTargetHost {
       return fs.readFile(filePath);
     },
     async launchExecutable(executable, argv, cwd) {
-      const child = spawn(executable, argv, {
+      const child = spawnPortable(executable, argv, {
         cwd,
         detached: true,
         stdio: 'ignore'

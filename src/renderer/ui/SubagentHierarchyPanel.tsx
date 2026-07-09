@@ -6,6 +6,7 @@ import type {
   InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
+import { buildRunActivityProjection } from '../model/runActivity';
 import { RawProviderMessage } from './RawProviderMessage';
 import { humanizeEnum } from './display';
 
@@ -218,12 +219,11 @@ function SubagentRunSummary({
   items: AgentItemRecord[];
   interactions: InteractionRequestRecord[];
 }) {
-  const visibleItems = [...items]
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .filter((item) =>
-      ['COMMAND_EXECUTION', 'AGENT_MESSAGE', 'USER_MESSAGE'].includes(item.type)
-    )
-    .slice(-5);
+  const activityRows = buildRunActivityProjection({
+    run,
+    items,
+    interactions
+  }).rows.slice(-5);
   return (
     <details className="subagent-run">
       <summary>
@@ -235,17 +235,16 @@ function SubagentRunSummary({
         </small>
       </summary>
       <div>
-        {visibleItems.map((item) => (
-          <p key={item.id}>
-            <strong>{humanizeEnum(item.type)}:</strong> {summarizeItem(item)}
-          </p>
-        ))}
-        {interactions.map((interaction) => (
-          <p key={interaction.id}>
-            <strong>{humanizeEnum(interaction.type)}:</strong>{' '}
-            {humanizeEnum(interaction.status)}
-          </p>
-        ))}
+        {activityRows.length > 0 ? (
+          activityRows.map((row) => (
+            <p key={row.key}>
+              <strong>{row.label}:</strong>{' '}
+              {[row.detail, row.metric].filter(Boolean).join(' · ') || row.status}
+            </p>
+          ))
+        ) : (
+          <p className="muted">No curated activity rows for this turn.</p>
+        )}
       </div>
     </details>
   );
@@ -304,33 +303,6 @@ function groupBy<T>(
     }
   }
   return grouped;
-}
-
-function summarizeItem(item: AgentItemRecord): string {
-  const payload = asObject(item.payload);
-  if (item.type === 'COMMAND_EXECUTION') {
-    return stringValue(payload.command) ?? 'command details unavailable';
-  }
-  if (item.type === 'AGENT_MESSAGE') {
-    return stringValue(payload.text) ?? 'message text unavailable';
-  }
-  if (item.type === 'USER_MESSAGE' && Array.isArray(payload.content)) {
-    return payload.content
-      .map((entry) => stringValue(asObject(entry).text))
-      .filter((value): value is string => Boolean(value))
-      .join(' ');
-  }
-  return humanizeEnum(item.status);
-}
-
-function asObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
 }
 
 function shortId(value: string): string {

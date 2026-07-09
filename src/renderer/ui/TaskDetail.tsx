@@ -34,6 +34,7 @@ import type {
   WorktreeRecord
 } from '../../shared/contracts';
 import {
+  canCreateDeliveryCommit,
   canPrepareWorktree,
   canStartRun,
   formatShortId
@@ -49,15 +50,26 @@ import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import { Chip, dotStyle } from './MainColumn';
 import {
+  FINDING_LEVELS,
+  FindingRow,
+  findingLevel,
+  formatFindingLocation,
+  shortFindingRef
+} from './Findings';
+import { PlanList, type PlanListMarker, type PlanStepMarker } from './Plan';
+import {
+  selectNextAction,
+  type NextActionId,
+  type NextActionModel
+} from '../model/nextAction';
+import {
   canRequestCodexReviewChanges,
   codexReviewGate,
   describeTaskHeaderState,
   finishRequirementsForTask,
-  finishActionsForTask,
   getFinishEvidenceState,
   markDoneModalCopy,
   type FinishEvidenceState,
-  type FinishPanelAction,
   type FinishRequirement,
   type Tone
 } from './taskView';
@@ -82,6 +94,8 @@ import {
 } from '../model/taskActivity';
 import {
   buildRunProgressViewModel,
+  type RunProgressFooter,
+  type RunProgressStep,
   type RunProgressViewModel
 } from '../model/runProgress';
 import {
@@ -93,6 +107,8 @@ import {
   formatAgentPermissionMode
 } from '../model/agentPermissions';
 import { TaskActivityPanel } from './TaskActivityPanel';
+import { RunActivityTimeline } from './RunActivityTimeline';
+import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 
 interface TaskDetailProps {
   error?: string;
@@ -100,6 +116,7 @@ interface TaskDetailProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
+  gitSnapshots: GitSnapshotRecord[];
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -164,6 +181,7 @@ export function TaskDetail(props: TaskDetailProps) {
     run,
     worktree,
     gitSnapshot,
+    gitSnapshots,
     pullRequest,
     interactions,
     sessions,
@@ -180,6 +198,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
   const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestInstruction, setRequestInstruction] = useState('');
+  const [evidenceGitSnapshotId, setEvidenceGitSnapshotId] = useState<string | undefined>();
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
@@ -223,6 +242,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setSelectedReviewFindingIds([]);
     setDraftPrModalOpen(false);
     setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
+    setEvidenceGitSnapshotId(undefined);
   }, [task?.id, task?.title]);
 
   useEffect(() => {
@@ -312,8 +332,6 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewActionsPausedReason: ReviewActionPauseReason | undefined =
     deliveryActionBusy ? 'delivery-running' : reviewPauseReason;
   const reviewActionsPaused = Boolean(reviewActionsPausedReason);
-  const canStartCodexReview =
-    Boolean(reviewSourceRun) && !reviewActionsPaused && reviewPhaseVisible;
   const deliverySourceRun =
     (task.currentRunId
       ? props.runs.find((candidate) => candidate.id === task.currentRunId && candidate.mode !== 'REVIEW')
@@ -361,6 +379,15 @@ export function TaskDetail(props: TaskDetailProps) {
       }),
     [run, props.runs, planRevisions, props.items, gitSnapshot, ciRollup?.status, task.projection.ciChecks]
   );
+  // The run the progress card reflects (for its RunHeader's elapsed timer + Stop)
+  // and its scope in mono (audit §05 RunHeader row).
+  const progressRun = runProgress
+    ? props.runs.find((candidate) => candidate.id === runProgress.runId)
+    : undefined;
+  const runProgressScope = describeGitSnapshot(gitSnapshot);
+  const evidenceGitSnapshot = evidenceGitSnapshotId
+    ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId) ?? gitSnapshot
+    : gitSnapshot;
 
   const runReviewAction = async (action: () => Promise<void>) => {
     if (reviewActionInFlightRef.current) {
@@ -495,6 +522,60 @@ export function TaskDetail(props: TaskDetailProps) {
     });
   };
 
+  // Dispatch the rail's single recommended action to the existing handler for
+  // its id, so the Next-action panel drives the same code paths the scattered
+  // card/rail buttons used to.
+  const onNextAction = (id: NextActionId) => {
+    switch (id) {
+      case 'run-review':
+      case 'run-review-again':
+        if (reviewSourceRun) {
+          void runCodexReview(reviewSourceRun.id);
+        }
+        return;
+      case 'request-changes':
+        openRequestChanges();
+        return;
+      case 'commit':
+        void runDeliveryAction(async () => {
+          await props.onCreateDeliveryCommit(task.id);
+        });
+        return;
+      case 'mark-done':
+        setMarkDoneModal('clean');
+        return;
+      case 'mark-done-anyway':
+        setMarkDoneModal('issues');
+        return;
+      case 'move-to-review':
+        void props.onTransition(task.id, 'REVIEW');
+        return;
+    }
+  };
+
+  const nextActionState = (id: NextActionId): { disabled?: boolean; title?: string } => {
+    const busy = reviewActionBusy || deliveryActionBusy;
+    switch (id) {
+      case 'run-review':
+      case 'run-review-again':
+        return {
+          disabled: !reviewSourceRun || reviewActionsPaused || busy,
+          title: reviewActionsPaused ? 'Review actions are paused.' : undefined
+        };
+      case 'request-changes':
+        return { disabled: reviewActionsPaused || reviewActionBusy };
+      case 'commit':
+        return { disabled: !canCreateDeliveryCommit(task) || reviewActionsPaused || busy };
+      case 'mark-done':
+      case 'mark-done-anyway':
+        return { disabled: reviewActionsPaused || busy || finishEvidence.mode === 'blocked' };
+      case 'move-to-review':
+        return { disabled: busy };
+      default:
+        return {};
+    }
+  };
+
   const primaryAction = getPrimaryAction({
     task,
     onPrepareWorktree: props.onPrepareWorktree,
@@ -566,6 +647,28 @@ export function TaskDetail(props: TaskDetailProps) {
     finishVerifiedChecksEvidence
   );
   const isFailed = ['FAILED', 'LOST', 'RECOVERY_REQUIRED'].includes(task.projection.agentRun);
+
+  // The single "what next" model for the rail. Kept in one place so the header,
+  // run surface, and rail all agree instead of each inventing an action.
+  const awaitingMoveToReview =
+    task.projection.agentRun === 'COMPLETED' &&
+    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase);
+  const reviewHasOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
+  const reviewHasActionableFindings =
+    Boolean(reviewSourceRun) &&
+    canRequestCodexReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+  const nextAction = selectNextAction({
+    task,
+    reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
+    finishEvidence,
+    requirements: finishRequirements,
+    hasReviewSource: Boolean(reviewSourceRun),
+    reviewHasActionableFindings,
+    canCommit: canCreateDeliveryCommit(task),
+    awaitingMoveToReview,
+    runInFlight: Boolean(activeImplementationRun) || reviewPending
+  });
+
   const detailHeadClassName = props.showMascot
     ? 'tm-detail__head tm-detail__head--with-mascot'
     : 'tm-detail__head';
@@ -594,26 +697,29 @@ export function TaskDetail(props: TaskDetailProps) {
                 onRequestDelete={props.onRequestDelete}
                 className="tm-detail__taskmenu"
               />
-              {headActions.length > 0 ? (
-                <div className="tm-detail__titleactions">
-                  {headActions.map((action) => (
-                    <button
-                      key={action.label}
-                      type="button"
-                      className={`tm-headbtn ${action.kind === 'primary' ? 'tm-headbtn--primary' : ''}`}
-                      disabled={action.disabled}
-                      onClick={action.onClick}
-                    >
-                      {action.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
             </div>
             {worktree?.branchName ? (
               <div className="tm-detail__meta">{worktree.branchName}</div>
             ) : null}
           </div>
+          {/* Primary action gets its own header slot on the right, out of the
+              title row, so it never crowds the title or the mascot (audit §04
+              header anatomy: id · status · title · branch · [Primary action]). */}
+          {headActions.length > 0 ? (
+            <div className="tm-detail__titleactions">
+              {headActions.map((action) => (
+                <button
+                  key={action.label}
+                  type="button"
+                  className={`tm-headbtn ${action.kind === 'primary' ? 'tm-headbtn--primary' : ''}`}
+                  disabled={action.disabled}
+                  onClick={action.onClick}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
         {props.showMascot ? (
           <TaskMascotVideo
@@ -624,7 +730,14 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
         <div className="tm-tabs">
           <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
-          <TabButton label="Evidence" active={tab === 'evidence'} onClick={() => setTab('evidence')} />
+          <TabButton
+            label="Evidence"
+            active={tab === 'evidence'}
+            onClick={() => {
+              setEvidenceGitSnapshotId(undefined);
+              setTab('evidence');
+            }}
+          />
           <TabButton
             label="Debug"
             active={tab === 'debug'}
@@ -639,25 +752,8 @@ export function TaskDetail(props: TaskDetailProps) {
 
         {tab === 'overview' ? (
           <div className="tm-overview">
+            {/* WORK STREAM — live run state on top, static request collapsed below. */}
             <div className="tm-overview__col">
-              {reviewPhaseVisible ? (
-                <CodexReviewPanel
-                  reviewGate={reviewGate}
-                  reviewRun={reviewRun}
-                  sourceRun={reviewSourceRun}
-                  gitSnapshot={gitSnapshot}
-                  reviewActivity={reviewActivity}
-                  actionBusy={reviewActionBusy}
-                  reviewPending={reviewPending}
-                  canStartReview={canStartCodexReview}
-                  actionsPaused={reviewActionsPaused}
-                  actionsPausedReason={reviewActionsPausedReason}
-                  onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
-                  onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
-                  onOpenRequestChanges={openRequestChanges}
-                />
-              ) : null}
-
               <InteractionPanel
                 interactions={interactions}
                 sessions={sessions}
@@ -681,39 +777,96 @@ export function TaskDetail(props: TaskDetailProps) {
                 </div>
               ) : null}
 
-              <div className="tm-panel">
-                <h3 className="tm-panel__title">Request</h3>
-                <details className="tm-raw">
-                  <summary>Prompt · {promptLineCount} lines</summary>
-                  <pre>{task.prompt}</pre>
-                </details>
-                <div className="tm-config" style={{ marginTop: 14 }}>
-                  <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
-                  <ConfigRow
-                    k="Permissions"
-                    v={formatAgentPermissionMode(displayedAgentSettings)}
+              {/* One run surface: plan/activity, review verdict, and turn controls
+                  as one region for one concept (audit §04/§05). */}
+              <div className="tm-runsurface">
+                {runProgress ? (
+                  <RunProgressCard
+                    progress={runProgress}
+                    runStartedAt={progressRun?.startedAt}
+                    scope={runProgressScope}
+                    animate={!prefersReducedMotion}
+                    completedChangeSummary={
+                      progressRun ? (
+                        <CompletedChangeSummaryPanel
+                          run={progressRun}
+                          gitSnapshots={gitSnapshots}
+                          artifacts={props.artifacts}
+                          onReviewChanges={(snapshotId) => {
+                            setEvidenceGitSnapshotId(snapshotId);
+                            setTab('evidence');
+                          }}
+                        />
+                      ) : undefined
+                    }
+                    onShowDebug={() => setTab('debug')}
+                    onStop={
+                      runProgress.state === 'RUNNING' && progressRun
+                        ? () => void props.onCancel(runProgress.runId)
+                        : undefined
+                    }
+                    stopDisabled={reviewActionBusy || deliveryActionBusy}
                   />
-                  <ConfigRow
-                    k="Network"
-                    v={formatAgentNetworkAccess(displayedAgentSettings)}
+                ) : null}
+
+                {reviewPhaseVisible ? (
+                  <CodexReviewPanel
+                    reviewGate={reviewGate}
+                    reviewRun={reviewRun}
+                    sourceRun={reviewSourceRun}
+                    gitSnapshot={gitSnapshot}
+                    reviewActivity={reviewActivity}
+                    actionBusy={reviewActionBusy}
+                    reviewPending={reviewPending}
+                    actionsPaused={reviewActionsPaused}
+                    actionsPausedReason={reviewActionsPausedReason}
+                    onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
+                    onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
-                  <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
-                </div>
+                ) : null}
+
+                <AgentControlPanel
+                  run={run}
+                  interactions={interactions}
+                  onSteer={props.onSteer}
+                  onInterrupt={props.onCancel}
+                  onContinue={props.onContinue}
+                  onRetry={props.onRetry}
+                />
               </div>
 
-              {runProgress ? <RunProgressCard progress={runProgress} /> : null}
-
-              <AgentControlPanel
-                run={run}
-                interactions={interactions}
-                onSteer={props.onSteer}
-                onInterrupt={props.onCancel}
-                onContinue={props.onContinue}
-                onRetry={props.onRetry}
+              <RequestCard
+                prompt={task.prompt}
+                promptLineCount={promptLineCount}
+                summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
+                  displayedAgentSettings
+                )} · ${promptLineCount}-line prompt`}
+                hasRun={Boolean(run)}
+                config={
+                  <>
+                    <ConfigRow k="Model / effort" v={`${model} / ${effort}`} />
+                    <ConfigRow
+                      k="Permissions"
+                      v={formatAgentPermissionMode(displayedAgentSettings)}
+                    />
+                    <ConfigRow k="Network" v={formatAgentNetworkAccess(displayedAgentSettings)} />
+                    <ConfigRow k="Branch" v={worktree?.branchName ?? 'Not created'} />
+                  </>
+                }
               />
             </div>
 
+            {/* DECISION RAIL — one Next action, then delivery, then timeline. */}
             <div className="tm-overview__col">
+              {reviewPhaseVisible ? (
+                <NextActionPanel
+                  model={nextAction}
+                  requirements={finishRequirements}
+                  onAction={onNextAction}
+                  actionState={nextActionState}
+                />
+              ) : null}
+
               <PrStatusCard
                 view={prStatus}
                 actionState={prActionState}
@@ -732,26 +885,6 @@ export function TaskDetail(props: TaskDetailProps) {
               />
 
               <TaskActivityPanel view={overviewActivity} variant="overview" />
-
-              {reviewPhaseVisible ? (
-                <FinishPanel
-                  task={task}
-                  reviewStatus={reviewPending ? 'RUNNING' : reviewGate.status}
-                  finishEvidence={finishEvidence}
-                  requirements={finishRequirements}
-                  actionBusy={reviewActionBusy}
-                  actionsPaused={reviewActionsPaused}
-                  actionsPausedReason={reviewActionsPausedReason}
-                  onOpenMarkDone={(withIssues) =>
-                    setMarkDoneModal(withIssues ? 'issues' : 'clean')
-                  }
-                  onCreateDeliveryCommit={() =>
-                    void runDeliveryAction(async () => {
-                      await props.onCreateDeliveryCommit(task.id);
-                    })
-                  }
-                />
-              ) : null}
             </div>
           </div>
         ) : null}
@@ -761,7 +894,7 @@ export function TaskDetail(props: TaskDetailProps) {
             <EvidencePanel
               run={run}
               worktree={worktree}
-              gitSnapshot={gitSnapshot}
+              gitSnapshot={evidenceGitSnapshot}
               githubRepository={props.githubRepository}
               branchPublication={props.branchPublication}
               pullRequest={pullRequest}
@@ -792,6 +925,7 @@ export function TaskDetail(props: TaskDetailProps) {
               sessions={sessions}
               items={props.items}
               planRevisions={planRevisions}
+              interactions={interactions}
               events={props.events}
             />
             <ProviderOverviewPanel
@@ -960,6 +1094,126 @@ function ConfigRow({ k, v }: { k: string; v: string }) {
   );
 }
 
+/**
+ * The task's static request (prompt + run config). It outranks live state on
+ * the current page (audit §04: "static config outranks live state"), so once a
+ * run exists it collapses to a one-line summary and expands on demand; before a
+ * run it stays open as the primary thing on the page.
+ */
+function RequestCard({
+  prompt,
+  promptLineCount,
+  summaryLine,
+  config,
+  hasRun
+}: {
+  prompt: string;
+  promptLineCount: number;
+  summaryLine: string;
+  config: ReactNode;
+  hasRun: boolean;
+}) {
+  return (
+    <details className="tm-panel tm-requestcard" open={!hasRun}>
+      <summary className="tm-requestcard__summary">
+        <span className="tm-requestcard__caret" aria-hidden="true">
+          ›
+        </span>
+        <h3 className="tm-panel__title" style={{ margin: 0 }}>
+          Request
+        </h3>
+        <span className="tm-requestcard__line">{summaryLine}</span>
+      </summary>
+      <details className="tm-raw tm-requestcard__prompt">
+        <summary>Prompt · {promptLineCount} lines</summary>
+        <pre>{prompt}</pre>
+      </details>
+      <div className="tm-config" style={{ marginTop: 14 }}>
+        {config}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * The one place the Overview answers "what should I do next?" (audit §04). Shows
+ * a status sentence, the single recommended action as the page's only filled
+ * button, and any escape hatches as quiet buttons — always in the same rail
+ * spot, so the answer stops being scattered across header, card footers and rail.
+ */
+function NextActionPanel({
+  model,
+  requirements,
+  onAction,
+  actionState
+}: {
+  model: NextActionModel;
+  requirements: FinishRequirement[];
+  onAction(id: NextActionId): void;
+  actionState(id: NextActionId): { disabled?: boolean; title?: string };
+}) {
+  const { primary, secondaries } = model;
+  const hasActions = Boolean(primary) || secondaries.length > 0;
+  // Drop the Review requirement — its verdict already lives in the run surface's
+  // review card, so restating it here would say the same fact twice (DESIGN.md §6).
+  const gatingRequirements = requirements.filter(
+    (requirement) => requirement.label !== 'Review'
+  );
+  return (
+    <section className="tm-nextaction" aria-label="Next action">
+      <p className="tm-nextaction__sentence">{model.sentence}</p>
+      {hasActions ? (
+        <div className="tm-nextaction__actions">
+          {primary ? (
+            <ActionButtonTitle
+              disabled={actionState(primary.id).disabled}
+              title={actionState(primary.id).title}
+            >
+              <button
+                type="button"
+                className="primary-button"
+                disabled={actionState(primary.id).disabled}
+                onClick={() => onAction(primary.id)}
+              >
+                {primary.label}
+              </button>
+            </ActionButtonTitle>
+          ) : null}
+          {secondaries.map((secondary) => (
+            <ActionButtonTitle
+              key={secondary.id}
+              disabled={actionState(secondary.id).disabled}
+              title={actionState(secondary.id).title}
+            >
+              <button
+                type="button"
+                className="tm-nextaction__quiet"
+                disabled={actionState(secondary.id).disabled}
+                onClick={() => onAction(secondary.id)}
+              >
+                {secondary.label}
+              </button>
+            </ActionButtonTitle>
+          ))}
+        </div>
+      ) : null}
+      {gatingRequirements.length > 0 ? (
+        <div className="tm-nextaction__requirements" aria-label="Finish requirements">
+          {gatingRequirements.map((requirement) => (
+            <span
+              key={requirement.label}
+              className={`tm-finishpanel__requirement tm-finishpanel__requirement--${requirement.tone}`}
+            >
+              <span className="tm-finishpanel__requirement-dot" aria-hidden="true" />
+              {requirement.label} {requirement.detail}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function TaskHealthFindings({ findings }: { findings: Finding[] }) {
   if (findings.length === 0) {
     return null;
@@ -985,28 +1239,15 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
           const tone = healthFindingTone(finding.severity);
           const view = describeHealthFinding(finding);
           return (
-            <details
+            <FindingRow
               key={finding.id}
-              className={`tm-finding tm-finding--${tone}`}
+              tone={tone}
+              severityLabel={humanizeEnum(finding.severity)}
+              title={view.title}
+              reference={view.meta}
               open={index === 0}
-            >
-              <summary>
-                <span className="tm-finding__severity">
-                  <span className="tm-finding__severity-dot" />
-                  <span>{humanizeEnum(finding.severity).toUpperCase()}</span>
-                </span>
-                <span className="tm-finding__main">
-                  <span className="tm-finding__title">{view.title}</span>
-                  <span className="tm-finding__ref">{view.meta}</span>
-                </span>
-                <span className="tm-finding__chevron" aria-hidden="true">
-                  ›
-                </span>
-              </summary>
-              <div className="tm-finding__detail">
-                <p>{view.detail}</p>
-              </div>
-            </details>
+              detail={<p>{view.detail}</p>}
+            />
           );
         })}
       </div>
@@ -1014,67 +1255,205 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
   );
 }
 
-function RunProgressCard({ progress }: { progress: RunProgressViewModel }) {
-  const steps = progress.steps;
-  const showActivityDetails = progress.state === 'RUNNING' && progress.activityDetails.length > 0;
+/**
+ * The one header row for any async operation (audit §05/§06): a status dot that
+ * pulses while running, the operation name, its scope in mono, a live elapsed
+ * timer, and Stop. Used by the run-progress card and the review card so every
+ * running surface reads the same way instead of inventing its own header.
+ */
+function RunHeader({
+  running,
+  tone,
+  operationName,
+  scope,
+  startedAt,
+  onStop,
+  stopDisabled,
+  stopTitle,
+  trailingLabel,
+  pulse
+}: {
+  running: boolean;
+  tone: Tone;
+  operationName: string;
+  scope?: string;
+  startedAt?: string;
+  onStop?: () => void;
+  stopDisabled?: boolean;
+  stopTitle?: string;
+  trailingLabel?: string;
+  /** Pulse the status dot. Defaults to `running`; pass false to hold it still. */
+  pulse?: boolean;
+}) {
+  const elapsed = useElapsed(startedAt, running);
+  const dotPulses = pulse ?? running;
   return (
-    <div className="tm-panel">
-      <div className="tm-run-progress__head">
-        <h3 className="tm-panel__title">Agent progress</h3>
-        <span className="tm-plan__status">{progress.headerLabel}</span>
-      </div>
-      <div className="tm-plan__steps">
-        {steps.map((step, index) => {
-          const tone = planStepTone(step.status);
-          const active = step.status === 'IN_PROGRESS';
-          return (
-            <div className="tm-plan__step" key={`${step.status}:${step.step}:${index}`}>
-              <span className="tm-plan__dot" style={dotStyle(tone)} />
-              <span className={`tm-plan__label ${active ? 'tm-plan__label--active' : ''}`}>
-                {step.step}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      {progress.workingNow ? (
-        <div className="tm-run-progress__working">
-          <div className="tm-run-progress__subhead">Working now</div>
-          <div className="tm-run-progress__activity-row">
-            <span className="tm-run-progress__activity-mark" />
-            <span className="tm-run-progress__activity-label">{progress.workingNow.label}</span>
-          </div>
-        </div>
+    <div className="tm-runheader">
+      <span
+        className={`tm-runheader__dot ${dotPulses ? 'tm-pulse' : ''}`}
+        style={{ background: `var(--${tone})` }}
+        aria-hidden="true"
+      />
+      <h3 className="tm-runheader__name">{operationName}</h3>
+      {scope ? <span className="tm-runheader__scope">{scope}</span> : null}
+      <span className="tm-runheader__spacer" />
+      {running && elapsed !== undefined ? (
+        <span
+          className="tm-runheader__elapsed"
+          aria-label={`Elapsed ${formatElapsed(elapsed)}`}
+        >
+          {formatElapsed(elapsed)}
+        </span>
       ) : null}
-      {showActivityDetails ? (
-        <details className="tm-run-progress__details">
-          <summary>Show activity</summary>
-          <div className="tm-run-progress__activity-list">
-            {progress.activityDetails.map((activity, index) => (
-              <div
-                className="tm-run-progress__activity-row"
-                key={`${activity.at}:${activity.label}:${index}`}
-              >
-                <span className="tm-run-progress__activity-mark" />
-                <span className="tm-run-progress__activity-label">{activity.label}</span>
-              </div>
-            ))}
-          </div>
-        </details>
+      {running && onStop ? (
+        <ActionButtonTitle disabled={stopDisabled} title={stopTitle}>
+          <button
+            type="button"
+            className="outline-button outline-button--danger tm-runheader__stop"
+            disabled={stopDisabled}
+            onClick={onStop}
+          >
+            Stop
+          </button>
+        </ActionButtonTitle>
       ) : null}
-      {progress.footer ? (
-        <div className="tm-run-progress__footer">
-          <span className="tm-plan__dot" style={dotStyle(progress.footer.tone)} />
-          <span className="tm-run-progress__footer-copy">
-            <span className="tm-run-progress__footer-title">{progress.footer.title}</span>
-            {progress.footer.detail ? (
-              <span className="tm-run-progress__footer-detail">{progress.footer.detail}</span>
-            ) : null}
-          </span>
-        </div>
+      {!running && trailingLabel ? (
+        <span className="tm-runheader__trailing">{trailingLabel}</span>
       ) : null}
     </div>
   );
+}
+
+function RunProgressCard({
+  progress,
+  runStartedAt,
+  scope,
+  onShowDebug,
+  onStop,
+  stopDisabled,
+  stopTitle,
+  completedChangeSummary,
+  animate = true
+}: {
+  progress: RunProgressViewModel;
+  runStartedAt?: string;
+  scope?: string;
+  onShowDebug?: () => void;
+  onStop?: () => void;
+  stopDisabled?: boolean;
+  stopTitle?: string;
+  completedChangeSummary?: ReactNode;
+  /** Run the two live loops (header pulse, active-ring spin). Off when resting. */
+  animate?: boolean;
+}) {
+  const steps = progress.steps;
+  const running = progress.state === 'RUNNING';
+  // A still card reads as "done" (spec §Motion): only the running header dot
+  // pulses and the active-step ring spins, and only while the run is live.
+  const liveMotion = animate && running;
+  const marker = planMarkerForState(progress.state, steps);
+  return (
+    <div className="tm-panel">
+      <RunHeader
+        running={running}
+        tone={runProgressHeaderTone(progress.state)}
+        pulse={liveMotion}
+        operationName="Agent progress"
+        scope={scope}
+        startedAt={runStartedAt}
+        onStop={onStop}
+        stopDisabled={stopDisabled}
+        stopTitle={stopTitle}
+        trailingLabel={running ? undefined : progress.headerLabel}
+      />
+      <PlanList steps={steps} marker={marker} animate={liveMotion} />
+      {running ? (
+        <RunActivityTimeline
+          rows={progress.activityTail}
+          outputSummary={progress.activityOutputSummary}
+          onShowDebug={onShowDebug}
+        />
+      ) : null}
+      {!running ? completedChangeSummary : null}
+      {progress.footer ? (
+        <ProgressFooter footer={progress.footer} />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The state-dependent outcome footer (spec §Failed/§Interrupted/§Completed).
+ *
+ * Completion stays quiet but explicit: a single text line carries the run
+ * outcome and the local-evidence facts (file count · verification result).
+ * Failed and interrupted footers keep a title + detail because they state who
+ * stopped it or why; failure is the one tinted focal point.
+ */
+function ProgressFooter({ footer }: { footer: RunProgressFooter }) {
+  if (footer.tone === 'success') {
+    const detail = footer.detail ? `${footer.title}: ${footer.detail}` : footer.title;
+    return (
+      <div className="tm-run-progress__footer tm-run-progress__footer--success tm-run-progress__footer--quiet">
+        <span className="tm-run-progress__footer-detail">{detail}</span>
+      </div>
+    );
+  }
+  return (
+    <div className={`tm-run-progress__footer tm-run-progress__footer--${footer.tone}`}>
+      <span className="tm-plan__dot" style={dotStyle(footer.tone)} />
+      <span className="tm-run-progress__footer-copy">
+        <span className="tm-run-progress__footer-title">{footer.title}</span>
+        {footer.detail ? (
+          <span className="tm-run-progress__footer-detail">{footer.detail}</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The header status dot tone per run state (spec §Color: one dot, in the header
+ * only): info while running, success/error/neutral once the run settles.
+ */
+function runProgressHeaderTone(state: RunProgressViewModel['state']): Tone {
+  switch (state) {
+    case 'RUNNING':
+      return 'info';
+    case 'COMPLETED':
+      return 'success';
+    case 'INTERRUPTED':
+      return 'neutral';
+    default:
+      return 'error';
+  }
+}
+
+/**
+ * Pin a run-outcome marker to the step a terminal run left off on: × on the
+ * failing step, a filled neutral dot where an interrupted run stopped. The step
+ * is the last in-progress one, falling back to the first pending step, so the
+ * plan shows exactly where work halted (spec Failed/Interrupted notes).
+ */
+function planMarkerForState(
+  state: RunProgressViewModel['state'],
+  steps: RunProgressStep[]
+): PlanListMarker | undefined {
+  const kind: PlanStepMarker | undefined =
+    state === 'FAILED' || state === 'RECOVERY_REQUIRED'
+      ? 'failed'
+      : state === 'INTERRUPTED'
+        ? 'stopped'
+        : undefined;
+  if (!kind) {
+    return undefined;
+  }
+  const inProgress = steps.map((step) => step.status).lastIndexOf('IN_PROGRESS');
+  const index = inProgress >= 0 ? inProgress : steps.findIndex((step) => step.status === 'PENDING');
+  if (index < 0) {
+    return undefined;
+  }
+  return { index, kind };
 }
 
 function CodexReviewPanel({
@@ -1085,12 +1464,10 @@ function CodexReviewPanel({
   reviewActivity,
   actionBusy,
   reviewPending,
-  canStartReview,
   actionsPaused,
   actionsPausedReason,
   onRunReview,
-  onStopReview,
-  onOpenRequestChanges
+  onStopReview
 }: {
   reviewGate: NonNullable<Task['projection']['codexReview']>;
   reviewRun?: RunRecord;
@@ -1099,33 +1476,20 @@ function CodexReviewPanel({
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
-  canStartReview: boolean;
   actionsPaused: boolean;
   actionsPausedReason?: ReviewActionPauseReason;
   onRunReview(sourceRunId: string): void;
   onStopReview(reviewRunId: string): void;
-  onOpenRequestChanges(findingIds?: string[]): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
   const ui = reviewGateUi(effectiveStatus);
   const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
   const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
-  const canRequestChanges =
-    Boolean(sourceRun) &&
-    !actionsPaused &&
-    canRequestCodexReviewChanges(reviewGate, effectiveStatus, hasReviewOutput);
   const canRunAgain = Boolean(sourceRun) && !actionsPaused;
   const sourceRunId = sourceRun?.id;
   const currentDiff = describeGitSnapshot(gitSnapshot);
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
-  const reviewActionsBlockedByImplementation = actionsPausedReason === 'implementation-running';
-  const reviewActionsBlockedByDelivery = actionsPausedReason === 'delivery-running';
-  const suggestedReviewAction = reviewActionsBlockedByImplementation
-    ? 'Follow-up work is running. Review actions are paused until the agent finishes, then this task returns for re-review.'
-    : reviewActionsBlockedByDelivery
-      ? 'GitHub action is in progress. Review actions resume when it finishes.'
-      : undefined;
   const staleContextNote =
     effectiveStatus === 'STALE' && hasReviewOutput
       ? 'Previous review output is shown for context only. Re-run the review before acting on the current diff.'
@@ -1174,36 +1538,69 @@ function CodexReviewPanel({
     }
     return undefined;
   };
-  const requestChangesDisabledTitle = (): string | undefined =>
-    actionBusy ? 'Review action is in progress.' : undefined;
+  // Contextual utilities kept in the card footer (Stop while running, re-run once
+  // a review exists). The recommended action is promoted to the Next-action rail.
+  const reviewCardUtilities: Array<{
+    key: string;
+    label: string;
+    disabled: boolean;
+    title?: string;
+    onClick(): void;
+  }> = [];
+  // While running, Stop lives in the RunHeader (audit §05). Otherwise the footer
+  // keeps re-run as a contextual utility.
+  if (
+    !reviewIsRunning &&
+    !actionsPaused &&
+    effectiveStatus !== 'NOT_RUN' &&
+    ['PASSED', 'NEEDS_CHANGES', 'INCONCLUSIVE', 'FAILED', 'CANCELED', 'STALE'].includes(
+      effectiveStatus
+    )
+  ) {
+    reviewCardUtilities.push({
+      key: 'run-again',
+      label: 'Run review again',
+      disabled: !canRunAgain || actionBusy || !sourceRunId,
+      title: runReviewDisabledTitle(canRunAgain),
+      onClick: () => sourceRunId && onRunReview(sourceRunId)
+    });
+  }
 
   return (
     <>
       <section className={`tm-reviewcard tm-reviewcard--${ui.tone}`}>
-        <div className="tm-reviewcard__head">
-          <span className="tm-reviewcard__dot" style={dotStyle(ui.tone)} />
-          <div>
-            <h3 className="tm-panel__title" style={{ margin: 0 }}>
-              Codex review
-            </h3>
+        {reviewIsRunning ? (
+          // Wrap in the head so the RunHeader gets the same 16/18 inset + divider
+          // as the resting head; a bare RunHeader here would sit flush to the
+          // card edges while the padded body below stays inset (misaligned).
+          <div className="tm-reviewcard__head tm-reviewcard__head--run">
+            <RunHeader
+              running
+              tone="info"
+              operationName="Reviewing"
+              scope={reviewedDiff}
+              startedAt={reviewRun?.startedAt}
+              onStop={() => reviewRun && onStopReview(reviewRun.id)}
+              stopDisabled={!canStopReview || actionBusy || !reviewRun}
+              stopTitle={stopReviewDisabledTitle()}
+            />
           </div>
-          <span className="tm-reviewcard__spacer" />
-          <Chip tone={ui.tone} label={ui.label} />
-        </div>
+        ) : (
+          <div className="tm-reviewcard__head">
+            <span className="tm-reviewcard__dot" style={dotStyle(ui.tone)} />
+            <div>
+              <h3 className="tm-panel__title" style={{ margin: 0 }}>
+                Codex review
+              </h3>
+            </div>
+            <span className="tm-reviewcard__spacer" />
+            <Chip tone={ui.tone} label={ui.label} />
+          </div>
+        )}
 
         <div className="tm-reviewcard__body">
           {reviewIsRunning ? (
             <div className="tm-reviewcard__runningstate">
-              <div className="tm-reviewcard__running">
-                <span className="tm-reviewcard__spinner" />
-                <div>
-                  <h4>Reviewing the current diff</h4>
-                  <p>{reviewedDiff}</p>
-                </div>
-              </div>
-              <div className="tm-reviewcard__progress" aria-hidden="true">
-                <span />
-              </div>
               <div className="tm-reviewcard__activity" aria-live="polite">
                 <span className="tm-reviewcard__activity-k">Current activity</span>
                 <div className="tm-reviewcard__activity-row">
@@ -1247,135 +1644,31 @@ function CodexReviewPanel({
 
         </div>
 
-        <div className="tm-reviewcard__actions">
-          {suggestedReviewAction ? (
-            <div>
-              <span className="tm-reviewcard__eyebrow">Suggested next action</span>
-              <p>{suggestedReviewAction}</p>
+        {reviewCardUtilities.length > 0 ? (
+          <div className="tm-reviewcard__actions">
+            {/* Contextual utilities only — the recommended primary (run review /
+                request changes / commit / mark done) lives in the rail's Next
+                action panel so the page has one filled button (audit §04). */}
+            <div className="tm-reviewcard__buttons">
+              {reviewCardUtilities.map((utility) => (
+                <ActionButtonTitle
+                  key={utility.key}
+                  disabled={utility.disabled}
+                  title={utility.title}
+                >
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={utility.disabled}
+                    onClick={utility.onClick}
+                  >
+                    {utility.label}
+                  </button>
+                </ActionButtonTitle>
+              ))}
             </div>
-          ) : null}
-          <div className="tm-reviewcard__buttons">
-            {effectiveStatus === 'NOT_RUN' ? (
-              <>
-                <ActionButtonTitle
-                  disabled={!canStartReview || actionBusy || !sourceRunId || actionsPaused}
-                  title={runReviewDisabledTitle(canStartReview)}
-                >
-                  <button
-                    type="button"
-                    className="primary-button"
-                    disabled={!canStartReview || actionBusy || !sourceRunId || actionsPaused}
-                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
-                  >
-                    Run Codex review
-                  </button>
-                </ActionButtonTitle>
-              </>
-            ) : null}
-
-            {reviewIsRunning ? (
-              <>
-                <ActionButtonTitle
-                  disabled={!canStopReview || actionBusy || !reviewRun}
-                  title={stopReviewDisabledTitle()}
-                >
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={!canStopReview || actionBusy || !reviewRun}
-                    onClick={() => reviewRun && onStopReview(reviewRun.id)}
-                  >
-                    Stop review
-                  </button>
-                </ActionButtonTitle>
-              </>
-            ) : null}
-
-            {!actionsPaused && effectiveStatus === 'PASSED' ? (
-              <>
-                <ActionButtonTitle
-                  disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  title={runReviewDisabledTitle(canRunAgain)}
-                >
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={!canRunAgain || actionBusy || !sourceRunId}
-                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
-                  >
-                    Run review again
-                  </button>
-                </ActionButtonTitle>
-              </>
-            ) : null}
-
-            {!actionsPaused && ['NEEDS_CHANGES', 'INCONCLUSIVE'].includes(effectiveStatus) ? (
-              <>
-                {canRequestChanges ? (
-                  <ActionButtonTitle
-                    disabled={actionBusy}
-                    title={requestChangesDisabledTitle()}
-                  >
-                    <button
-                      type="button"
-                      className="primary-button"
-                      disabled={actionBusy}
-                      onClick={() => onOpenRequestChanges()}
-                    >
-                      Request changes
-                    </button>
-                  </ActionButtonTitle>
-                ) : null}
-                <ActionButtonTitle
-                  disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  title={runReviewDisabledTitle(canRunAgain)}
-                >
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={!canRunAgain || actionBusy || !sourceRunId}
-                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
-                  >
-                    Run review again
-                  </button>
-                </ActionButtonTitle>
-              </>
-            ) : null}
-
-            {!actionsPaused && ['FAILED', 'CANCELED', 'STALE'].includes(effectiveStatus) ? (
-              <>
-                <ActionButtonTitle
-                  disabled={!canRunAgain || actionBusy || !sourceRunId}
-                  title={runReviewDisabledTitle(canRunAgain)}
-                >
-                  <button
-                    type="button"
-                    className="primary-button"
-                    disabled={!canRunAgain || actionBusy || !sourceRunId}
-                    onClick={() => sourceRunId && onRunReview(sourceRunId)}
-                  >
-                    Run review again
-                  </button>
-                </ActionButtonTitle>
-                {canRequestChanges ? (
-                  <ActionButtonTitle
-                    disabled={actionBusy}
-                    title={requestChangesDisabledTitle()}
-                  >
-                    <button
-                      type="button"
-                      className="outline-button"
-                      disabled={actionBusy}
-                      onClick={() => onOpenRequestChanges()}
-                    >
-                      Request changes
-                    </button>
-                  </ActionButtonTitle>
-                ) : null}
-              </>
-            ) : null}
           </div>
-        </div>
+        ) : null}
       </section>
     </>
   );
@@ -1469,9 +1762,12 @@ function PrStatusCard({
               disabled={actionState.createOrPushDisabled}
               title={createOrPushTitle}
             >
+              {/* Delivery is a parallel path, not the recommended next step —
+                  the single filled primary stays with the header / Next action
+                  (audit §04 primary-action singleton). */}
               <button
                 type="button"
-                className="primary-button"
+                className="outline-button"
                 disabled={actionState.createOrPushDisabled}
                 onClick={onCreateDraftPr}
               >
@@ -1486,7 +1782,7 @@ function PrStatusCard({
             >
               <button
                 type="button"
-                className="primary-button"
+                className="outline-button"
                 disabled={actionState.createOrPushDisabled}
                 onClick={onPushUpdate}
               >
@@ -1658,121 +1954,6 @@ function ChevronRightIcon() {
   );
 }
 
-function FinishPanel({
-  task,
-  reviewStatus,
-  finishEvidence,
-  requirements,
-  actionBusy,
-  actionsPaused,
-  actionsPausedReason,
-  onOpenMarkDone,
-  onCreateDeliveryCommit
-}: {
-  task: Task;
-  reviewStatus: CodexReviewGateStatus;
-  finishEvidence: FinishEvidenceState;
-  requirements: FinishRequirement[];
-  actionBusy: boolean;
-  actionsPaused: boolean;
-  actionsPausedReason?: ReviewActionPauseReason;
-  onOpenMarkDone(withIssues: boolean): void;
-  onCreateDeliveryCommit(): void;
-}) {
-  if (task.workflowPhase === 'DONE') {
-    return null;
-  }
-
-  const actions = finishActionsForTask({
-    task,
-    reviewStatus,
-    finishEvidence,
-    actionBusy,
-    actionsPaused
-  });
-  const pausedText =
-    actionsPausedReason === 'implementation-running'
-      ? 'Finish actions pause while the agent is running.'
-      : actionsPausedReason === 'delivery-running'
-        ? 'Finish actions pause during GitHub actions.'
-      : 'Finish actions pause while review runs.';
-  const disabledTitle = (action: FinishPanelAction): string | undefined => {
-    if (!action.disabled) {
-      return undefined;
-    }
-    if (actionsPaused) {
-      return pausedText;
-    }
-    if (actionBusy || reviewStatus === 'RUNNING') {
-      return 'Finish action is in progress.';
-    }
-    if (action.id === 'commit') {
-      return 'No uncommitted task changes are available to commit.';
-    }
-    if (finishEvidence.mode === 'blocked') {
-      return finishEvidence.warnings.map((warning) => warning.detail).join(' ');
-    }
-    return undefined;
-  };
-
-  return (
-    <section className="tm-panel tm-finishpanel" aria-label="Finish task">
-      <div className="tm-finishpanel__head">
-        <h3 className="tm-panel__title">Finish</h3>
-        <div className="tm-finishpanel__actions">
-          {actions.map((action) => (
-            <ActionButtonTitle
-              key={action.id}
-              disabled={action.disabled}
-              title={disabledTitle(action)}
-            >
-              <button
-                type="button"
-                className={`${action.kind === 'primary' ? 'primary-button' : 'outline-button'} ${
-                  action.id === 'mark-done' && action.withIssues
-                    ? 'tm-finishpanel__mark-done-anyway'
-                    : ''
-                }`}
-                disabled={action.disabled}
-                onClick={
-                  action.id === 'commit'
-                      ? onCreateDeliveryCommit
-                      : () => onOpenMarkDone(Boolean(action.withIssues))
-                }
-              >
-                {action.label}
-              </button>
-            </ActionButtonTitle>
-          ))}
-        </div>
-      </div>
-      <div className="tm-finishpanel__requirements" aria-label="Finish requirements">
-        {requirements.map((requirement) => (
-          <span
-            key={requirement.label}
-            className={`tm-finishpanel__requirement tm-finishpanel__requirement--${requirement.tone}`}
-          >
-            <span className="tm-finishpanel__requirement-dot" aria-hidden="true" />
-            {requirement.label} {requirement.detail}
-          </span>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-const FINDING_LEVELS: Array<{
-  severity: CodexReviewFinding['severity'];
-  label: string;
-  tone: Tone;
-  rank: number;
-}> = [
-  { severity: 'BLOCKER', label: 'Blocker', tone: 'error', rank: 0 },
-  { severity: 'MAJOR', label: 'Major', tone: 'action', rank: 1 },
-  { severity: 'MINOR', label: 'Minor', tone: 'info', rank: 2 },
-  { severity: 'NIT', label: 'Nit', tone: 'neutral', rank: 3 }
-];
-
 function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
   if (findings.length === 0) {
     return null;
@@ -1787,29 +1968,20 @@ function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
         {sortedFindings.map((finding, index) => {
           const level = findingLevel(finding.severity);
           return (
-            <details
-              className={`tm-finding tm-finding--${level.tone}`}
+            <FindingRow
               key={finding.id}
+              tone={level.tone}
+              severityLabel={level.label}
+              title={finding.title}
+              reference={shortFindingRef(finding)}
               open={index === 0}
-            >
-              <summary>
-                <span className="tm-finding__severity">
-                  <span className="tm-finding__severity-dot" />
-                  <span>{level.label.toUpperCase()}</span>
-                </span>
-                <span className="tm-finding__main">
-                  <span className="tm-finding__title">{finding.title}</span>
-                  <span className="tm-finding__ref">{shortFindingRef(finding)}</span>
-                </span>
-                <span className="tm-finding__chevron" aria-hidden="true">
-                  ›
-                </span>
-              </summary>
-              <div className="tm-finding__detail">
-                <p>{finding.explanation}</p>
-                {finding.recommendation ? <p>{finding.recommendation}</p> : null}
-              </div>
-            </details>
+              detail={
+                <>
+                  <p>{finding.explanation}</p>
+                  {finding.recommendation ? <p>{finding.recommendation}</p> : null}
+                </>
+              }
+            />
           );
         })}
       </div>
@@ -1882,23 +2054,23 @@ function ReviewRequestDrawer({
           <section className="tm-reviewdrawer__section">
             <h4>Findings to attach · {selectedCount} selected</h4>
             {findings.length > 0 ? (
-              <div className="tm-reviewdrawer__findings">
-                {findings.map((finding) => (
-                  <label className="tm-reviewdrawer__finding" key={finding.id}>
-                    <input
-                      type="checkbox"
-                      checked={selectedFindingIds.includes(finding.id)}
-                      onChange={() => onToggleFinding(finding.id)}
+              <div className="tm-reviewdrawer__findings tm-reviewfindings__list">
+                {findings.map((finding) => {
+                  const level = findingLevel(finding.severity);
+                  return (
+                    <FindingRow
+                      key={finding.id}
+                      tone={level.tone}
+                      severityLabel={level.label}
+                      title={finding.title}
+                      reference={shortFindingRef(finding)}
+                      selection={{
+                        checked: selectedFindingIds.includes(finding.id),
+                        onToggle: () => onToggleFinding(finding.id)
+                      }}
                     />
-                    <span>
-                      <span>
-                        <SeverityPill severity={finding.severity} />
-                        <strong>{finding.title}</strong>
-                      </span>
-                      <code>{formatFindingLocation(finding)}</code>
-                    </span>
-                  </label>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <p className="tm-reviewdrawer__empty">
@@ -1937,30 +2109,6 @@ function ReviewRequestDrawer({
       </aside>
     </div>
   );
-}
-
-function SeverityPill({ severity }: { severity: CodexReviewFinding['severity'] }) {
-  const level = findingLevel(severity);
-  return (
-    <span className={`tm-severity tm-severity--${level.tone}`}>
-      {level.label}
-    </span>
-  );
-}
-
-function findingLevel(severity: CodexReviewFinding['severity']) {
-  return (
-    FINDING_LEVELS.find((candidate) => candidate.severity === severity) ??
-    FINDING_LEVELS[FINDING_LEVELS.length - 1]
-  );
-}
-
-function shortFindingRef(finding: CodexReviewFinding): string {
-  if (!finding.path) {
-    return formatFindingLocation(finding);
-  }
-  const filename = finding.path.split('/').filter(Boolean).at(-1) ?? finding.path;
-  return finding.line ? `${filename}:${finding.line}` : filename;
 }
 
 function formatReviewTime(value: string | undefined): string {
@@ -2059,15 +2207,6 @@ function MarkDoneModal({
   );
 }
 
-function planStepTone(status: string): Tone {
-  if (status === 'COMPLETED') {
-    return 'success';
-  }
-  if (status === 'IN_PROGRESS') {
-    return 'action';
-  }
-  return 'neutral';
-}
 
 function healthFindingRank(severity: Finding['severity']): number {
   switch (severity) {
@@ -2229,15 +2368,6 @@ function defaultSelectedFindingIds(findings: CodexReviewFinding[]): string[] {
   return (blocking.length > 0 ? blocking : findings).map((finding) => finding.id);
 }
 
-function formatFindingLocation(finding: CodexReviewFinding): string {
-  if (!finding.path) {
-    return 'location not specified';
-  }
-  if (!finding.line) {
-    return finding.path;
-  }
-  return `${finding.path}:${finding.line}`;
-}
 
 type MascotVideoLayerPhase = 'entering' | 'active' | 'exiting';
 
@@ -2399,6 +2529,43 @@ function usePrefersReducedMotion(): boolean {
   }, []);
 
   return prefersReducedMotion;
+}
+
+/**
+ * Live-ticking elapsed milliseconds since `startedAt` while `active`. Returns
+ * undefined when there is no start time. Ticks once a second so an open run
+ * surface shows how long an unbounded operation has been going — the honest
+ * answer a horizontal progress bar cannot give.
+ */
+function useElapsed(startedAt: string | undefined, active: boolean): number | undefined {
+  const startMs = startedAt ? Date.parse(startedAt) : NaN;
+  const hasStart = Number.isFinite(startMs);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active || !hasStart) {
+      return;
+    }
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active, hasStart, startMs]);
+
+  if (!hasStart) {
+    return undefined;
+  }
+  return Math.max(0, now - startMs);
+}
+
+/** Format an elapsed duration as m:ss, or h:mm:ss past an hour (e.g. "0:42"). */
+function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  const mm = hours > 0 ? String(minutes).padStart(2, '0') : String(minutes);
+  const ss = String(seconds).padStart(2, '0');
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 function getPrimaryAction(input: {

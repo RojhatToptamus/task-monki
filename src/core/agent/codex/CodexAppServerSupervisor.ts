@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentRuntimeResolutionDiagnostics,
   AgentServerInstance,
   CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
+import { spawnPortable } from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
@@ -225,7 +226,7 @@ export class CodexAppServerSupervisor {
     this.server = server;
 
     try {
-      const child = spawn(executable, argv, {
+      const child = spawnPortable(executable, argv, {
         cwd: this.options.cwd,
         env: sanitizeEnvironment(this.options.environment ?? process.env),
         stdio: ['pipe', 'pipe', 'pipe'],

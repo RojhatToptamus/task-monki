@@ -168,6 +168,11 @@ Ready:
 In Progress:
 
 - Show the active implementation-side run.
+- In Overview, keep the provider plan as the primary progress structure. For a
+  running run, a compact activity tail may summarize recent provider telemetry
+  such as reads, searches, file changes, verification commands, tool calls, and
+  approval waits. This tail is context only; completed, failed, interrupted, and
+  recovery-required runs should return to the plan plus local-evidence footer.
 - Allow steering, approval/input responses, and interrupt controls.
 - Do not show review completion actions.
 
