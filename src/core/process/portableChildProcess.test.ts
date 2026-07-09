@@ -30,14 +30,14 @@ describe('prepareProcessCommand', () => {
         '/d',
         '/s',
         '/c',
-        '""C:\\Users\\Runner Admin\\AppData\\Local\\Temp\\fake-codex.cmd" "app-server" "--listen" "stdio://""'
+        'call "C:\\Users\\Runner Admin\\AppData\\Local\\Temp\\fake-codex.cmd" "app-server" "--listen" "stdio://"'
       ]
     });
   });
 
   it('escapes percent expansion in Windows batch arguments', () => {
     expect(prepareProcessCommand('C:\\bin\\tool.cmd', ['%PATH%'], 'win32')).toMatchObject({
-      argv: ['/d', '/s', '/c', '""C:\\bin\\tool.cmd" "%%PATH%%""']
+      argv: ['/d', '/s', '/c', 'call "C:\\bin\\tool.cmd" "%%PATH%%"']
     });
   });
 });

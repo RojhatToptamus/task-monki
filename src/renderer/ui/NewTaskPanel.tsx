@@ -216,12 +216,10 @@ export function NewTaskPanel({
                     aria-busy={isRefining}
                     onClick={() => void refine()}
                   >
-                    {isRefining ? (
-                      <span className="field__refine-spinner" aria-hidden="true" />
-                    ) : (
-                      <SparkleIcon />
-                    )}
-                    Refine
+                    <SparkleIcon />
+                    <span className={isRefining ? 'field__refine-label tm-shimmer-text' : 'field__refine-label'}>
+                      {isRefining ? 'Refining' : 'Refine'}
+                    </span>
                   </button>
                 </span>
               </span>

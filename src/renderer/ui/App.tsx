@@ -365,6 +365,15 @@ export function App() {
         : [],
     [selectedTask, snapshot.agentSubagentObservations]
   );
+  const selectedGitSnapshots = useMemo(
+    () =>
+      selectedTask
+        ? snapshot.gitSnapshots.filter(
+            (gitSnapshot) => gitSnapshot.taskId === selectedTask.id
+          )
+        : [],
+    [selectedTask, snapshot.gitSnapshots]
+  );
   const selectedWorktree = selectedTask ? selectCurrentWorktree(snapshot, selectedTask) : undefined;
   const selectedGitSnapshot = selectedTask
     ? selectLatestGitSnapshot(snapshot, selectedTask)
@@ -941,6 +950,7 @@ export function App() {
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
+            gitSnapshots={selectedGitSnapshots}
             githubRepository={selectedGitHubRepository}
             branchPublication={selectedBranchPublication}
             pullRequest={selectedPullRequest}

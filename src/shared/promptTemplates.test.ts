@@ -31,6 +31,9 @@ describe('prompt templates', () => {
     expect(prompt).toContain('Task Monki progress contract');
     expect(prompt).toContain(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT);
     expect(prompt).toContain('Use 3-6 high-level outcome steps');
+    expect(prompt).toContain(
+      'Task Monki derives routine read/search/edit/run activity from provider tool telemetry'
+    );
     expect(prompt).toContain('write short progress messages beginning with "Progress:"');
     expect(prompt).toContain('Task Monki independently verifies Git, tests, reviews, and delivery');
   });

@@ -8,7 +8,7 @@ import type {
 import { buildRunProgressViewModel } from './runProgress';
 
 describe('run progress model', () => {
-  it('shows a running plan with one visible working-now line', () => {
+  it('shows a running plan with a compact activity tail', () => {
     const implementationRun = runFixture({ id: 'run-impl', mode: 'IMPLEMENTATION' });
     const reviewRun = runFixture({ id: 'run-review', mode: 'REVIEW', startedAt: '2026-07-07T10:05:00.000Z' });
 
@@ -38,7 +38,7 @@ describe('run progress model', () => {
           providerItemId: 'command-1',
           type: 'COMMAND_EXECUTION',
           status: 'IN_PROGRESS',
-          payload: { command: 'npm test' },
+          payload: { command: 'npm test', commandActions: [{ type: 'unknown', command: 'npm test' }] },
           providerStartedAt: '2026-07-07T10:05:00.000Z'
         }),
         itemFixture({
@@ -61,14 +61,22 @@ describe('run progress model', () => {
       'Trace state',
       'Show progress fallback'
     ]);
-    expect(view?.workingNow).toMatchObject({
-      label: 'Editing src/renderer/model/runProgress.ts.',
-      tone: 'neutral'
-    });
-    expect(view?.activityDetails.map((activity) => activity.label)).toEqual([
-      'Running verification.'
+    expect(view?.activityTail).toMatchObject([
+      {
+        category: 'verify',
+        label: 'Running',
+        detail: 'npm test',
+        tone: 'action',
+        status: 'active'
+      },
+      {
+        category: 'other',
+        label: 'Editing src/renderer/model/runProgress.ts.',
+        detail: undefined,
+        tone: 'neutral',
+        status: 'completed'
+      }
     ]);
-    expect(view?.activityDetails.map((activity) => activity.tone)).toEqual(['action']);
   });
 
   it('shows a waiting state for active runs before a provider plan exists', () => {
@@ -91,56 +99,79 @@ describe('run progress model', () => {
           status: 'IN_PROGRESS'
         }
       ],
-      activityDetails: []
+      activityTail: []
     });
-    expect(view?.workingNow).toBeUndefined();
     expect(view?.footer).toBeUndefined();
   });
 
-  it('caps running activity details and keeps them out of plan rows', () => {
+  it('groups commandActions read/search/list into activity entries', () => {
     const run = runFixture({ id: 'run-1', status: 'RUNNING' });
 
     const view = buildRunProgressViewModel({
       preferredRun: run,
       runs: [run],
       planRevisions: [],
-      items: Array.from({ length: 12 }, (_, index) =>
+      items: [
         itemFixture({
-          id: `message-${index}`,
-          providerItemId: `message-${index}`,
-          payload: { text: `Progress: Reading src/file-${index}.ts.` },
-          providerCompletedAt: `2026-07-07T10:${String(index).padStart(2, '0')}:00.000Z`
+          id: 'command-actions',
+          providerItemId: 'command-actions',
+          type: 'COMMAND_EXECUTION',
+          status: 'COMPLETED',
+          payload: {
+            command: "/bin/zsh -lc 'sed -n 1,3p src/renderer/pages/Settings.tsx'",
+            commandActions: [
+              {
+                type: 'read',
+                command: 'sed -n 1,3p src/renderer/pages/Settings.tsx',
+                name: 'Settings.tsx',
+                path: '/Users/rojhat/project/src/renderer/pages/Settings.tsx'
+              },
+              {
+                type: 'search',
+                command: 'rg RunProgress src/renderer',
+                query: 'RunProgress',
+                path: 'src/renderer'
+              },
+              {
+                type: 'listFiles',
+                command: 'ls src/renderer',
+                path: 'src/renderer'
+              }
+            ],
+            aggregatedOutput: 'line 1\nline 2\nline 3'
+          },
+          providerCompletedAt: '2026-07-07T10:04:00.000Z'
         })
-      )
+      ]
     });
 
-    expect(view?.steps).toEqual([
+    expect(view?.activityTail).toMatchObject([
       {
-        step: 'Waiting for provider plan...',
-        status: 'IN_PROGRESS'
+        category: 'read',
+        label: 'Read',
+        detail: 'src/renderer/pages/Settings.tsx',
+        metric: '3 lines',
+        status: 'completed'
+      },
+      {
+        category: 'search',
+        label: 'Searched',
+        detail: 'RunProgress · src/renderer',
+        status: 'completed'
+      },
+      {
+        category: 'list',
+        label: 'Listed',
+        detail: 'src/renderer',
+        status: 'completed'
       }
     ]);
-    expect(view?.activityDetails).toHaveLength(6);
-    expect(view?.workingNow?.label).toBe('Reading src/file-11.ts.');
-    expect(view?.activityDetails.map((activity) => activity.label)).toEqual([
-      'Reading src/file-10.ts.',
-      'Reading src/file-9.ts.',
-      'Reading src/file-8.ts.',
-      'Reading src/file-7.ts.',
-      'Reading src/file-6.ts.',
-      'Reading src/file-5.ts.'
-    ]);
-    expect(view?.activityDetails.map((activity) => activity.tone)).toEqual([
-      'neutral',
-      'neutral',
-      'neutral',
-      'neutral',
-      'neutral',
-      'neutral'
-    ]);
+    expect(view?.activityOutputSummary).toBe('show full output · 3 lines');
+    expect(JSON.stringify(view)).not.toContain('/Users/rojhat/project');
+    expect(JSON.stringify(view)).not.toContain('/bin/zsh');
   });
 
-  it('does not expose raw command text in overview activity', () => {
+  it('does not expose shell wrappers or full absolute paths in command rows', () => {
     const run = runFixture({ id: 'run-1', status: 'RUNNING' });
 
     const view = buildRunProgressViewModel({
@@ -153,20 +184,26 @@ describe('run progress model', () => {
           providerItemId: 'command',
           type: 'COMMAND_EXECUTION',
           status: 'IN_PROGRESS',
-          payload: { command: "/bin/zsh -lc 'npm test -- --runInBand'" },
+          payload: {
+            command: "/bin/zsh -lc 'npm test -- --runInBand /Users/rojhat/project/src/renderer/model/runProgress.ts'",
+            commandActions: [{ type: 'unknown', command: 'npm test -- --runInBand' }]
+          },
           providerStartedAt: '2026-07-07T10:04:00.000Z'
         })
       ]
     });
 
     const serialized = JSON.stringify(view);
-    expect(view?.workingNow?.label).toBe('Running verification.');
+    expect(view?.activityTail[0]).toMatchObject({
+      category: 'verify',
+      label: 'Running',
+      detail: 'npm test -- --runInBand src/renderer/model/runProgress.ts'
+    });
     expect(serialized).not.toContain('/bin/zsh');
-    expect(serialized).not.toContain('npm test');
-    expect(serialized).not.toContain('--runInBand');
+    expect(serialized).not.toContain('/Users/rojhat/project');
   });
 
-  it('excludes working now from expanded activity and tones ordinary rows neutrally', () => {
+  it('maps file changes to write, edit, and delete rows with compact metrics', () => {
     const run = runFixture({ id: 'run-1', status: 'RUNNING' });
 
     const view = buildRunProgressViewModel({
@@ -175,55 +212,122 @@ describe('run progress model', () => {
       planRevisions: [],
       items: [
         itemFixture({
-          id: 'message-new',
-          providerItemId: 'message-new',
-          payload: {
-            text: 'Progress: The app and HTML pages are in place. Switching to verification.'
-          },
-          providerCompletedAt: '2026-07-07T10:06:00.000Z'
-        }),
-        itemFixture({
-          id: 'message-duplicate',
-          providerItemId: 'message-duplicate',
-          payload: {
-            text: 'Progress: The app and HTML pages are in place. Switching to verification.'
-          },
-          providerCompletedAt: '2026-07-07T10:05:00.000Z'
-        }),
-        itemFixture({
-          id: 'file-change',
-          providerItemId: 'file-change',
+          id: 'file-changes',
+          providerItemId: 'file-changes',
           type: 'FILE_CHANGE',
-          status: 'IN_PROGRESS',
-          payload: {},
-          providerStartedAt: '2026-07-07T10:04:00.000Z'
+          status: 'COMPLETED',
+          payload: {
+            changes: [
+              {
+                path: 'src/renderer/pages/Home.tsx',
+                kind: { type: 'add' },
+                diff: '+++ b/src/renderer/pages/Home.tsx\n+one\n+two\n'
+              },
+              {
+                path: 'src/renderer/router.tsx',
+                kind: { type: 'update', move_path: null },
+                diff: '--- a/src/renderer/router.tsx\n+++ b/src/renderer/router.tsx\n-old\n+new\n+extra\n'
+              },
+              {
+                path: 'src/renderer/old.tsx',
+                kind: { type: 'delete' },
+                diff: '--- a/src/renderer/old.tsx\n-old\n'
+              }
+            ]
+          },
+          providerCompletedAt: '2026-07-07T10:04:00.000Z'
+        })
+      ]
+    });
+
+    expect(view?.activityTail).toMatchObject([
+      {
+        category: 'write',
+        label: 'Wrote',
+        detail: 'src/renderer/pages/Home.tsx',
+        metric: '+2'
+      },
+      {
+        category: 'edit',
+        label: 'Edited',
+        detail: 'src/renderer/router.tsx',
+        metric: '+2 -1'
+      },
+      {
+        category: 'edit',
+        label: 'Deleted',
+        detail: 'src/renderer/old.tsx',
+        metric: '-1'
+      }
+    ]);
+    expect(view?.activityTail.map((activity) => activity.tone)).toEqual(['neutral', 'neutral', 'neutral']);
+  });
+
+  it('maps verification and git commands cleanly', () => {
+    const run = runFixture({ id: 'run-1', status: 'RUNNING' });
+
+    const view = buildRunProgressViewModel({
+      preferredRun: run,
+      runs: [run],
+      planRevisions: [],
+      items: [
+        itemFixture({
+          id: 'git-command',
+          providerItemId: 'git-command',
+          type: 'COMMAND_EXECUTION',
+          status: 'COMPLETED',
+          payload: {
+            command: 'git status --short',
+            commandActions: [{ type: 'unknown', command: 'git status --short' }],
+            durationMs: 120
+          },
+          providerCompletedAt: '2026-07-07T10:03:00.000Z'
         }),
         itemFixture({
           id: 'verification',
           providerItemId: 'verification',
           type: 'COMMAND_EXECUTION',
           status: 'COMPLETED',
-          payload: { command: 'npm test' },
-          providerCompletedAt: '2026-07-07T10:03:00.000Z'
+          payload: {
+            command: 'npm run typecheck',
+            commandActions: [{ type: 'unknown', command: 'npm run typecheck' }],
+            exitCode: 0,
+            durationMs: 12_000
+          },
+          providerCompletedAt: '2026-07-07T10:04:00.000Z'
         })
       ]
     });
 
-    expect(view?.workingNow).toMatchObject({
-      label: 'The app and HTML pages are in place. Switching to verification.',
-      tone: 'neutral'
-    });
-    expect(view?.activityDetails.map((activity) => activity.label)).toEqual([
-      'Editing files.',
-      'Verification finished.'
-    ]);
-    expect(view?.activityDetails.map((activity) => activity.tone)).toEqual([
-      'neutral',
-      'success'
+    expect(view?.activityTail).toMatchObject([
+      {
+        category: 'bash',
+        label: 'Ran',
+        detail: '2 commands',
+        tone: 'neutral',
+        status: 'completed',
+        grouped: true,
+        children: [
+          {
+            category: 'git',
+            label: 'Ran',
+            detail: 'git status --short',
+            metric: 'for 120ms',
+            status: 'completed'
+          },
+          {
+            category: 'verify',
+            label: 'Ran',
+            detail: 'npm run typecheck',
+            metric: 'for 12s',
+            status: 'completed'
+          }
+        ]
+      }
     ]);
   });
 
-  it('omits completed generic telemetry and maps only useful command intent', () => {
+  it('omits completed generic commands but shows active and failed generic commands', () => {
     const run = runFixture({ id: 'run-1', status: 'RUNNING' });
 
     const view = buildRunProgressViewModel({
@@ -232,48 +336,113 @@ describe('run progress model', () => {
       planRevisions: [],
       items: [
         itemFixture({
-          id: 'unknown-command',
-          providerItemId: 'unknown-command',
+          id: 'completed-generic',
+          providerItemId: 'completed-generic',
           type: 'COMMAND_EXECUTION',
           status: 'COMPLETED',
           payload: { command: 'node scripts/generated-helper.mjs' },
           providerCompletedAt: '2026-07-07T10:06:00.000Z'
         }),
         itemFixture({
-          id: 'completed-file-change',
-          providerItemId: 'completed-file-change',
-          type: 'FILE_CHANGE',
-          status: 'COMPLETED',
-          payload: {},
-          providerCompletedAt: '2026-07-07T10:05:00.000Z'
-        }),
-        itemFixture({
-          id: 'read-command',
-          providerItemId: 'read-command',
-          type: 'COMMAND_EXECUTION',
-          status: 'COMPLETED',
-          payload: { command: 'rg "Agent progress" src' },
-          providerCompletedAt: '2026-07-07T10:04:00.000Z'
-        }),
-        itemFixture({
-          id: 'git-command',
-          providerItemId: 'git-command',
+          id: 'active-generic',
+          providerItemId: 'active-generic',
           type: 'COMMAND_EXECUTION',
           status: 'IN_PROGRESS',
-          payload: { command: 'git status --short' },
-          providerStartedAt: '2026-07-07T10:03:00.000Z'
+          payload: { command: 'node scripts/generate-fixture.mjs' },
+          providerStartedAt: '2026-07-07T10:04:00.000Z'
+        }),
+        itemFixture({
+          id: 'failed-generic',
+          providerItemId: 'failed-generic',
+          type: 'COMMAND_EXECUTION',
+          status: 'FAILED',
+          payload: { command: 'node scripts/generate-fixture.mjs', exitCode: 1 },
+          providerCompletedAt: '2026-07-07T10:05:00.000Z'
         })
       ]
     });
 
-    expect(view?.workingNow).toMatchObject({
-      label: 'Checking local Git state.',
-      tone: 'neutral'
+    expect(view?.activityTail).toMatchObject([
+      {
+        category: 'bash',
+        label: 'Running',
+        detail: 'node scripts/generate-fixture.mjs',
+        status: 'active',
+        tone: 'action'
+      },
+      {
+        category: 'error',
+        label: 'Command failed',
+        detail: 'node scripts/generate-fixture.mjs',
+        metric: 'exit 1',
+        status: 'failed',
+        tone: 'error'
+      }
+    ]);
+    expect(JSON.stringify(view)).not.toContain('generated-helper');
+  });
+
+  it('caps the activity tail to the latest five entries in chronological order', () => {
+    const run = runFixture({ id: 'run-1', status: 'RUNNING' });
+
+    const view = buildRunProgressViewModel({
+      preferredRun: run,
+      runs: [run],
+      planRevisions: [],
+      items: Array.from({ length: 8 }, (_, index) =>
+        itemFixture({
+          id: `message-${index}`,
+          providerItemId: `message-${index}`,
+          payload: { text: `Progress: Reading src/file-${index}.ts.` },
+          providerCompletedAt: `2026-07-07T10:0${index}:00.000Z`
+        })
+      )
     });
-    expect(view?.activityDetails).toEqual([]);
-    expect(JSON.stringify(view)).not.toContain('Command finished');
-    expect(JSON.stringify(view)).not.toContain('File changes captured');
-    expect(JSON.stringify(view)).not.toContain('Project context read');
+
+    expect(view?.steps).toEqual([
+      {
+        step: 'Waiting for provider plan...',
+        status: 'IN_PROGRESS',
+        pending: true
+      }
+    ]);
+    expect(view?.activityTail).toHaveLength(5);
+    expect(view?.activityTail.map((activity) => activity.label)).toEqual([
+      'Reading src/file-3.ts.',
+      'Reading src/file-4.ts.',
+      'Reading src/file-5.ts.',
+      'Reading src/file-6.ts.',
+      'Reading src/file-7.ts.'
+    ]);
+  });
+
+  it('summarizes raw command output without exposing it in overview activity', () => {
+    const run = runFixture({ id: 'run-1', status: 'RUNNING' });
+
+    const view = buildRunProgressViewModel({
+      preferredRun: run,
+      runs: [run],
+      planRevisions: [],
+      items: [
+        itemFixture({
+          id: 'command',
+          providerItemId: 'command',
+          type: 'COMMAND_EXECUTION',
+          status: 'COMPLETED',
+          payload: {
+            command: 'npm test',
+            commandActions: [{ type: 'unknown', command: 'npm test' }],
+            exitCode: 0,
+            aggregatedOutput: 'secret output\nsecond line'
+          },
+          providerCompletedAt: '2026-07-07T10:04:00.000Z'
+        })
+      ]
+    });
+
+    expect(view?.activityOutputSummary).toBe('show full output · 2 lines');
+    expect(JSON.stringify(view)).not.toContain('secret output');
+    expect(JSON.stringify(view)).not.toContain('second line');
   });
 
   it('shows the final provider plan with a compact local-evidence footer', () => {
@@ -312,14 +481,14 @@ describe('run progress model', () => {
     expect(view).toMatchObject({
       state: 'COMPLETED',
       headerLabel: 'Final plan',
-      activityDetails: [],
+      activityTail: [],
       footer: {
         title: 'Completed',
         detail: '3 files changed · verification passed',
         tone: 'success'
       }
     });
-    expect(view?.workingNow).toBeUndefined();
+    expect(view?.activityTail).toEqual([]);
     expect(JSON.stringify(view)).not.toContain('/Users/rojhat');
     expect(JSON.stringify(view)).not.toContain('Implemented [the panel]');
   });
@@ -355,13 +524,12 @@ describe('run progress model', () => {
       expect(view).toMatchObject({
         state,
         headerLabel: 'Last known plan',
-        activityDetails: [],
+        activityTail: [],
         footer: {
           title
         }
       });
       expect(view?.footer?.detail).not.toContain('/Users/rojhat');
-      expect(view?.workingNow).toBeUndefined();
     }
   });
 

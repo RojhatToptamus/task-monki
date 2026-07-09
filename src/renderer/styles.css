@@ -207,6 +207,18 @@ body {
   }
 }
 
+/* The live-label background-clip shimmer (spec §Motion): a bright band that
+   travels left-to-right across the text. Paired with a 200% background-size and
+   a slow (~2.6s) linear duration so the sweep reads as calm, not flickery. */
+@keyframes tm-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0% 0;
+  }
+}
+
 button,
 input,
 textarea {
@@ -2026,6 +2038,157 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+.provider-activity-sections {
+  display: grid;
+  gap: 9px;
+}
+
+.provider-activity-section {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+}
+
+.provider-activity-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.provider-activity-section h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.provider-activity-section > header span {
+  color: var(--muted);
+  font: 9.5px/1.4 var(--font-mono);
+}
+
+.provider-activity-rows {
+  display: grid;
+  gap: 5px;
+}
+
+.provider-activity-row {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 10.5px;
+}
+
+.provider-activity-row__main {
+  display: grid;
+  grid-template-columns: minmax(52px, max-content) minmax(0, 1fr) max-content;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-activity-row__label {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.provider-activity-row__detail {
+  min-width: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.provider-activity-row__status {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.provider-activity-row__status--active {
+  color: var(--action-ink);
+}
+
+.provider-activity-row__status--failed {
+  color: var(--error);
+}
+
+.provider-activity-row__children {
+  color: var(--muted);
+}
+
+.provider-activity-row__children summary {
+  cursor: pointer;
+  font: 9.5px/1.4 var(--font-mono);
+}
+
+.provider-activity-row__children div {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.provider-activity-row__children p {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.provider-activity-row__children small {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.provider-raw-protocol {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.provider-raw-protocol > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  cursor: pointer;
+  background: var(--surface2);
+  list-style: none;
+}
+
+.provider-raw-protocol > summary::-webkit-details-marker {
+  display: none;
+}
+
+.provider-raw-protocol > summary > span {
+  display: grid;
+  gap: 2px;
+}
+
+.provider-raw-protocol summary strong {
+  font-size: 11.5px;
+}
+
+.provider-raw-protocol summary small {
+  color: var(--muted);
+  font: 9.5px/1.4 var(--font-mono);
+}
+
+.provider-raw-protocol__body {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border-top: 1px solid var(--border);
+}
+
 .provider-item {
   padding: 11px 12px;
   border: 1px solid var(--border);
@@ -2755,6 +2918,13 @@ textarea:focus-visible {
   cursor: default;
 }
 
+/* While refining, the label shimmers in accent tones — the same live-text
+   treatment the agent-progress card uses for its running command. */
+.field__refine .tm-shimmer-text {
+  --tm-shimmer-dim: color-mix(in srgb, var(--accent) 45%, transparent);
+  --tm-shimmer-bright: var(--accent);
+}
+
 .field__header-actions {
   display: inline-flex;
   align-items: center;
@@ -2823,18 +2993,6 @@ textarea:focus-visible {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-/* Keeps the trigger button's label stable while running (audit §05): a small
-   spinner replaces the sparkle glyph instead of the label mutating to text. */
-.field__refine-spinner {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: tm-spin 0.8s linear infinite;
 }
 
 .field input,
@@ -4136,6 +4294,26 @@ textarea:focus-visible {
 .tm-taskmenu__item:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--action) 65%, transparent);
   outline-offset: 2px;
+}
+
+/* Reusable live-text shimmer: a bright band travels left-to-right across the
+   text to signal active, unbounded work (spec §Motion). The two gradient stops
+   are tokens so callers can tint it to their surface (e.g. accent on a button).
+   Defaults to the muted→text ramp used by the agent-progress card. */
+.tm-shimmer-text {
+  --tm-shimmer-dim: var(--muted);
+  --tm-shimmer-bright: var(--text);
+  background-image: linear-gradient(
+    90deg,
+    var(--tm-shimmer-dim) 35%,
+    var(--tm-shimmer-bright) 50%,
+    var(--tm-shimmer-dim) 65%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: tm-shimmer 2.6s linear infinite;
 }
 
 .tm-pulse {
@@ -5476,6 +5654,50 @@ textarea:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .tm-detail__mascot-video {
     transition: none;
+  }
+
+  /* Hold the agent-progress card still: no fade-up, ring spin, or shimmer. The
+     live command falls back to a solid bright label rather than a moving gradient. */
+  .tm-run-activity--live .tm-run-activity__row {
+    animation: none;
+  }
+
+  .tm-plan__ring--spin {
+    animation: none;
+  }
+
+  .tm-plan__label--shimmer {
+    animation: none;
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--text);
+  }
+
+  .tm-shimmer-text {
+    animation: none;
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    color: var(--tm-shimmer-bright);
+  }
+
+  .tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
+    animation: none;
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+  }
+
+  .tm-run-activity--live
+    .tm-run-activity__row--active
+    .tm-run-activity__copy
+    .tm-run-activity__label,
+  .tm-run-activity--live
+    .tm-run-activity__row--active
+    .tm-run-activity__copy
+    .tm-run-activity__detail--command {
+    color: var(--text);
   }
 }
 
@@ -7341,18 +7563,22 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+/* The plan owns the card (spec §Plan): a 16px icon gutter carries a check / ring
+   / hollow dot per step; only the active step gains weight, the rest recede. */
 .tm-plan__steps {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 1px;
 }
 
 .tm-plan__step {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
+  min-height: 26px;
 }
 
+/* The footer's summary dot — a plain state dot, not a plan glyph. */
 .tm-plan__dot {
   width: 9px;
   height: 9px;
@@ -7361,16 +7587,122 @@ textarea:focus-visible {
   margin-top: 4px;
 }
 
-.tm-plan__label {
-  flex: 1;
-  font-size: 12.5px;
-  line-height: 1.35;
-  color: var(--text-soft);
+/* Icon gutter: fixed width so every step's label starts at the same column. */
+.tm-plan__glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
+.tm-plan__check {
+  width: 13px;
+  height: 13px;
+  stroke: var(--success);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tm-plan__x {
+  width: 12px;
+  height: 12px;
+  stroke: var(--error-ink);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.tm-plan__ring {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.tm-plan__ring--spin {
+  animation: tm-spin 900ms linear infinite;
+}
+
+.tm-plan__ring-track {
+  stroke: var(--border-strong);
+  stroke-width: 2;
+  fill: none;
+}
+
+.tm-plan__ring-arc {
+  stroke: var(--info);
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+}
+
+.tm-plan__pending {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+}
+
+.tm-plan__stopdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--neutral);
+  opacity: 0.85;
+}
+
+.tm-plan__label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+/* Only the active step carries weight (spec §Plan). */
 .tm-plan__label--active {
   color: var(--text);
   font-weight: 600;
+}
+
+/* The waiting placeholder shimmers so the wait reads as live (spec §Waiting). */
+.tm-plan__label--shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted) 35%,
+    var(--text) 50%,
+    var(--muted) 65%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: tm-shimmer 2.6s linear infinite;
+}
+
+/* Interrupted keeps the stopped step legible (text-soft), not faint. */
+.tm-plan__label--stopped {
+  color: var(--text-soft);
+}
+
+/* The failing step keeps weight so the eye lands where work halted. */
+.tm-plan__label--failed {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tm-plan__marker {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.tm-plan__marker--failed {
+  color: var(--error-ink);
+}
+
+.tm-plan__marker--stopped {
+  color: var(--neutral);
 }
 
 .tm-plan__step-caption {
@@ -7381,103 +7713,451 @@ textarea:focus-visible {
 }
 
 
-.tm-run-progress__working,
-.tm-run-progress__details,
+.tm-run-activity,
+.tm-change-summary,
 .tm-run-progress__footer {
   margin-top: 9px;
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
 
-.tm-run-progress__subhead,
-.tm-run-progress__details summary {
-  margin-bottom: 6px;
-  font-size: 11px;
-  color: var(--muted);
-  font-family: var(--font-mono);
+.tm-change-summary__head {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 9px;
 }
 
-.tm-run-progress__details summary {
-  display: inline-flex;
+.tm-change-summary__icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface2) 72%, transparent);
+  color: var(--muted);
+}
+
+.tm-change-summary__icon svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tm-change-summary__title {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 10px;
+}
+
+.tm-change-summary__title h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.tm-change-summary__files {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface2) 42%, transparent);
+}
+
+.tm-change-summary__file,
+.tm-change-summary__more > summary {
+  min-height: 34px;
+  border-top: 1px solid var(--hair);
+}
+
+.tm-change-summary__file:first-child {
+  border-top: 0;
+}
+
+.tm-change-summary__file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 12px;
+  padding: 6px 12px;
+}
+
+.tm-change-summary__path {
+  min-width: 0;
+  overflow: hidden;
+  font: 11.5px/1.35 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-change-summary__dir {
+  color: var(--faint);
+}
+
+.tm-change-summary__base {
+  color: var(--text-soft);
+}
+
+.tm-change-summary__more > summary {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  color: var(--text-soft);
   cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 600;
   list-style: none;
 }
 
-.tm-run-progress__details summary::-webkit-details-marker {
+.tm-change-summary__more > summary::-webkit-details-marker {
   display: none;
 }
 
-.tm-run-progress__details summary::after {
+.tm-change-summary__more > summary::after {
   content: '›';
-  margin-left: 6px;
+  margin-left: 8px;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 140ms ease, color 140ms ease;
+}
+
+.tm-change-summary__more[open] > summary::after {
+  color: var(--muted);
   transform: rotate(90deg);
-  transition: transform 140ms ease;
 }
 
-.tm-run-progress__details[open] summary::after {
-  transform: rotate(270deg);
-}
-
-.tm-run-progress__activity-list {
-  display: grid;
-  gap: 5px;
-  max-height: 112px;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.tm-run-progress__activity-row {
+/* A quiet tail (spec §Activity): borderless icons, verb in UI type, target in
+   mono, duration right-aligned. Hover fills surface2 at a 7px radius, bleeding
+   8px past the text column. No progress bars, no bordered icon chips. */
+.tm-run-activity__head {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 0 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  text-transform: uppercase;
 }
 
-.tm-run-progress__activity-mark {
-  width: 10px;
-  height: 1px;
-  margin-top: 8px;
-  border-radius: 999px;
-  flex: 0 0 auto;
-  background: var(--hair);
+.tm-run-activity__head span:last-child {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  opacity: 0.72;
 }
 
-.tm-run-progress__activity-label {
+.tm-run-activity__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tm-run-activity__row {
+  border-radius: 7px;
+}
+
+/* New tail rows enter with a 6px fade-up (spec §Motion). */
+.tm-run-activity--live .tm-run-activity__row {
+  animation: tm-fade 240ms ease both;
+}
+
+.tm-run-activity__row:not(details),
+.tm-run-activity__summary {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 0 9px;
+  min-height: 30px;
+  margin: 0 -8px;
+  padding: 4px 8px;
+  border-radius: 7px;
+}
+
+/* Prose rows top-align: the icon sits with the first line of wrapped text. */
+.tm-run-activity__row--prose:not(details) {
+  align-items: start;
+  min-height: 0;
+  padding: 6px 8px;
+}
+
+.tm-run-activity__row:not(details):hover,
+.tm-run-activity__summary:hover {
+  background: var(--surface2);
+}
+
+.tm-run-activity__summary {
+  position: relative;
+  grid-template-columns: 18px minmax(0, 1fr) 12px;
+  align-items: center;
+  gap: 0 9px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.tm-run-activity__summary::-webkit-details-marker {
+  display: none;
+}
+
+.tm-run-activity__summary::after {
+  content: '›';
+  justify-self: center;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 150ms ease;
+}
+
+.tm-run-activity__row[open] > .tm-run-activity__summary::after {
+  transform: rotate(90deg);
+}
+
+/* Borderless glyphs — the icon is the target-type cue, not a bordered chip. */
+.tm-run-activity__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--faint);
+}
+
+.tm-run-activity__row--prose > .tm-run-activity__icon {
+  padding-top: 3px;
+  align-self: start;
+}
+
+.tm-run-activity__icon svg {
+  width: 13px;
+  height: 13px;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tm-run-activity__row--active > .tm-run-activity__icon,
+.tm-run-activity__row--active > .tm-run-activity__summary .tm-run-activity__icon {
+  color: var(--info);
+}
+
+.tm-run-activity__row--failed > .tm-run-activity__icon,
+.tm-run-activity__row--failed > .tm-run-activity__summary .tm-run-activity__icon {
+  color: var(--error-ink);
+}
+
+.tm-run-activity__copy {
   min-width: 0;
-  flex: 1;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0 6px;
+  align-items: baseline;
+  overflow: hidden;
+}
+
+/* Prose narration wraps to full width rather than truncating. */
+.tm-run-activity__row--prose .tm-run-activity__copy {
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.tm-run-activity__summary .tm-run-activity__copy {
+  grid-column: 2;
+}
+
+.tm-run-activity__copy--child {
   font-size: 11.5px;
-  line-height: 1.35;
+}
+
+.tm-run-activity__label {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-soft);
+  font-weight: 400;
+}
+
+/* "Ran 2 commands" — the count itself is the bright artifact. */
+.tm-run-activity__row--command .tm-run-activity__label,
+.tm-run-activity__row--context .tm-run-activity__label {
+  color: var(--text-soft);
+}
+
+.tm-run-activity__row--prose .tm-run-activity__label {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-soft);
   overflow-wrap: anywhere;
 }
 
-.tm-run-progress__working .tm-run-progress__activity-label {
+.tm-run-activity__detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-run-activity__detail--command,
+.tm-run-activity__detail--path {
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-soft);
 }
 
+.tm-run-activity__detail--count {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The whole live row copy shimmers as one text run — verb + target together
+   ("Running npm test"), not just the mono target (spec §Motion). The gradient
+   lives on the copy container and clips across every child glyph, so the two
+   spans sweep in a single phase; children inherit the clipped fill. */
+.tm-run-activity__row--active .tm-run-activity__label,
+.tm-run-activity__row--active .tm-run-activity__detail--command {
+  color: var(--text);
+}
+
+.tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted) 35%,
+    var(--text) 50%,
+    var(--muted) 65%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: tm-shimmer 2.6s linear infinite;
+}
+
+.tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy .tm-run-activity__label,
+.tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy .tm-run-activity__detail--command {
+  color: transparent;
+}
+
+.tm-run-activity__metric {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Grouped-command children indent under a 1px left rail. */
+.tm-run-activity__children {
+  margin: 2px 0 6px 8px;
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tm-run-activity__child {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+.tm-run-activity__child .tm-run-activity__copy {
+  flex: 1;
+}
+
+.tm-run-activity__output {
+  margin-top: 7px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tm-run-activity__output:hover:not(:disabled) {
+  color: var(--muted);
+}
+
+.tm-run-activity__output:disabled {
+  cursor: default;
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+/* State-dependent outcome footer (spec §Failed/§Interrupted/§Completed): the
+   footer states the fact and tints only for failure. Title tone tracks the run
+   result; detail stays muted so the sentence, not the color, carries meaning. */
 .tm-run-progress__footer {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 9px;
 }
 
 .tm-run-progress__footer-copy {
   display: flex;
   min-width: 0;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  font-size: 11.5px;
-  line-height: 1.35;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .tm-run-progress__footer-title {
-  color: var(--text);
+  color: var(--text-soft);
+  font-size: 12.5px;
   font-weight: 600;
 }
 
 .tm-run-progress__footer-detail {
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* Failed is the one focal point: a softly tinted footer with an error-ink title. */
+.tm-run-progress__footer--error {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error) 7%, transparent);
+}
+
+.tm-run-progress__footer--error .tm-run-progress__footer-title {
+  color: var(--error-ink);
+}
+
+/* Completed reads success in the title; no changes still gets a calm green line. */
+.tm-run-progress__footer--success .tm-run-progress__footer-title {
+  color: var(--success-ink);
+}
+
+/* Completed is already told by the green header dot: the footer drops the dot and
+   title and states only the fact the dot can't carry (files · verification). */
+.tm-run-progress__footer--quiet {
+  align-items: baseline;
+}
+
+.tm-run-progress__footer--quiet .tm-run-progress__footer-detail {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 /* config grid */

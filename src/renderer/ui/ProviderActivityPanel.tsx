@@ -5,8 +5,15 @@ import type {
   AgentProtocolMessageReference,
   AgentSessionRecord,
   DomainEvent,
+  InteractionRequestRecord,
   RunRecord
 } from '../../shared/contracts';
+import {
+  buildRunActivityProjection,
+  compactActivitySummary,
+  type RunActivityRow,
+  type RunActivitySection
+} from '../model/runActivity';
 import { RawProviderMessage } from './RawProviderMessage';
 import { PlanList } from './Plan';
 import { StructuredData, humanizeEnum } from './display';
@@ -16,6 +23,7 @@ interface ProviderActivityPanelProps {
   sessions: AgentSessionRecord[];
   items: AgentItemRecord[];
   planRevisions: AgentPlanRevisionRecord[];
+  interactions: InteractionRequestRecord[];
   events: DomainEvent[];
 }
 
@@ -29,6 +37,7 @@ export function ProviderActivityPanel({
   sessions,
   items,
   planRevisions,
+  interactions,
   events
 }: ProviderActivityPanelProps) {
   const runForest = useMemo(() => buildRunForest(runs), [runs]);
@@ -40,6 +49,10 @@ export function ProviderActivityPanel({
   const plansByRun = useMemo(
     () => groupBy(planRevisions, (plan) => plan.runId),
     [planRevisions]
+  );
+  const interactionsByRun = useMemo(
+    () => groupBy(interactions, (interaction) => interaction.runId),
+    [interactions]
   );
   const eventsByRun = useMemo(
     () =>
@@ -55,7 +68,7 @@ export function ProviderActivityPanel({
     [events]
   );
   const hasLiveRun = runs.some((run) =>
-    ['STARTING', 'RUNNING', 'QUEUED'].includes(run.status)
+    ['STARTING', 'RUNNING', 'QUEUED', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(run.status)
   );
 
   if (runs.length === 0) {
@@ -81,6 +94,7 @@ export function ProviderActivityPanel({
               sessionById={sessionById}
               itemsByRun={itemsByRun}
               plansByRun={plansByRun}
+              interactionsByRun={interactionsByRun}
               eventsByRun={eventsByRun}
             />
           ))}
@@ -97,6 +111,7 @@ function ProviderRunView({
   sessionById,
   itemsByRun,
   plansByRun,
+  interactionsByRun,
   eventsByRun
 }: {
   node: ProviderRunNode;
@@ -105,6 +120,7 @@ function ProviderRunView({
   sessionById: Map<string, AgentSessionRecord>;
   itemsByRun: Map<string, AgentItemRecord[]>;
   plansByRun: Map<string, AgentPlanRevisionRecord[]>;
+  interactionsByRun: Map<string, InteractionRequestRecord[]>;
   eventsByRun: Map<string, DomainEvent[]>;
 }) {
   const run = node.run;
@@ -115,7 +131,15 @@ function ProviderRunView({
   const plans = [...(plansByRun.get(run.id) ?? [])].sort(
     (a, b) => a.revision - b.revision
   );
+  const runInteractions = [...(interactionsByRun.get(run.id) ?? [])].sort((a, b) =>
+    a.requestedAt.localeCompare(b.requestedAt)
+  );
   const providerEvents = eventsByRun.get(run.id) ?? [];
+  const activityProjection = buildRunActivityProjection({
+    run,
+    items: runItems,
+    interactions: runInteractions
+  });
   const childLabel =
     session?.role === 'SUBAGENT'
       ? session.providerNickname ?? session.providerRole ?? 'Subagent'
@@ -171,13 +195,29 @@ function ProviderRunView({
             ) : null}
           </div>
           {plans.length > 0 ? <PlanHistory plans={plans} /> : null}
-          {runItems.map((item) => (
-            <ProviderItem key={item.id} item={item} />
-          ))}
-          {providerEvents.map((event) => (
-            <ProviderLifecycleEvent key={event.id} event={event} />
-          ))}
-          {runItems.length === 0 && plans.length === 0 ? (
+          <ProviderActivitySections sections={activityProjection.sections} />
+          {runItems.length > 0 || providerEvents.length > 0 ? (
+            <details className="provider-raw-protocol">
+              <summary>
+                <span>
+                  <strong>Raw protocol</strong>
+                  <small>
+                    {runItems.length} {runItems.length === 1 ? 'item' : 'items'} ·{' '}
+                    {providerEvents.length} {providerEvents.length === 1 ? 'event' : 'events'}
+                  </small>
+                </span>
+              </summary>
+              <div className="provider-raw-protocol__body">
+                {runItems.map((item) => (
+                  <ProviderItem key={item.id} item={item} />
+                ))}
+                {providerEvents.map((event) => (
+                  <ProviderLifecycleEvent key={event.id} event={event} />
+                ))}
+              </div>
+            </details>
+          ) : null}
+          {runItems.length === 0 && plans.length === 0 && runInteractions.length === 0 ? (
             <p className="muted">No materialized provider items for this turn.</p>
           ) : null}
         </div>
@@ -193,12 +233,68 @@ function ProviderRunView({
               sessionById={sessionById}
               itemsByRun={itemsByRun}
               plansByRun={plansByRun}
+              interactionsByRun={interactionsByRun}
               eventsByRun={eventsByRun}
             />
           ))}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function ProviderActivitySections({ sections }: { sections: RunActivitySection[] }) {
+  if (sections.length === 0) {
+    return null;
+  }
+  return (
+    <div className="provider-activity-sections">
+      {sections.map((section) => (
+        <section className="provider-activity-section" key={section.key}>
+          <header>
+            <h4>{section.title}</h4>
+            <span>
+              {section.rows.length} {section.rows.length === 1 ? 'row' : 'rows'}
+            </span>
+          </header>
+          <div className="provider-activity-rows">
+            {section.rows.map((row) => (
+              <ProviderActivityRowView key={row.key} row={row} />
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ProviderActivityRowView({ row }: { row: RunActivityRow }) {
+  const detail = [row.detail, row.metric].filter(Boolean).join(' · ');
+  return (
+    <article className={`provider-activity-row provider-activity-row--${row.category}`}>
+      <div className="provider-activity-row__main">
+        <span className="provider-activity-row__label">{row.label}</span>
+        <span className="provider-activity-row__detail">{detail || 'No detail reported'}</span>
+        <span className={`provider-activity-row__status provider-activity-row__status--${row.status}`}>
+          {humanizeEnum(row.status)}
+        </span>
+      </div>
+      {row.grouped && row.children && row.children.length > 0 ? (
+        <details className="provider-activity-row__children">
+          <summary>
+            {row.children.length} {row.children.length === 1 ? 'detail' : 'details'}
+          </summary>
+          <div>
+            {row.children.map((child) => (
+              <p key={child.key}>
+                <span>{compactActivitySummary(child)}</span>
+                <small>{new Date(child.at).toLocaleTimeString()}</small>
+              </p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </article>
   );
 }
 
@@ -244,7 +340,7 @@ function PlanHistory({ plans }: { plans: AgentPlanRevisionRecord[] }) {
   return (
     <div className="provider-item provider-item--plan">
       <header>
-        <strong>Provider plan</strong>
+        <strong>Plan history</strong>
         <span>
           Revision {latest.revision} of {plans.length}
         </span>

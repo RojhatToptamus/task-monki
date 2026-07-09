@@ -33,7 +33,7 @@ export function prepareProcessCommand(
   ].join(' ');
   return {
     executable: env.ComSpec ?? env.COMSPEC ?? 'cmd.exe',
-    argv: ['/d', '/s', '/c', `"${commandLine}"`]
+    argv: ['/d', '/s', '/c', `call ${commandLine}`]
   };
 }
 

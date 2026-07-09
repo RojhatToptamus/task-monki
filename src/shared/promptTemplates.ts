@@ -59,6 +59,7 @@ export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract:
 - Keep exactly one step in progress while actively working.
 - Update the plan before the first meaningful edit, after completing a step, before verification, and when scope changes.
 - Send brief progress notes after meaningful milestones: what changed, what is next, and blockers or risks if any.
+- Task Monki derives routine read/search/edit/run activity from provider tool telemetry. Use Progress: messages only for meaningful milestones, blockers, risks, and transitions; do not narrate every file read, search, command, or protocol event.
 - If no plan/progress mechanism is available, write short progress messages beginning with "Progress:" at the same milestones.
 - Do not claim verification until commands, tests, or checks actually ran.
 - For trivial or read-only turns, skip the plan and briefly say why.

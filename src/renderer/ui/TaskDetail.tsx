@@ -56,7 +56,7 @@ import {
   formatFindingLocation,
   shortFindingRef
 } from './Findings';
-import { PlanList } from './Plan';
+import { PlanList, type PlanListMarker, type PlanStepMarker } from './Plan';
 import {
   selectNextAction,
   type NextActionId,
@@ -94,6 +94,8 @@ import {
 } from '../model/taskActivity';
 import {
   buildRunProgressViewModel,
+  type RunProgressFooter,
+  type RunProgressStep,
   type RunProgressViewModel
 } from '../model/runProgress';
 import {
@@ -105,6 +107,8 @@ import {
   formatAgentPermissionMode
 } from '../model/agentPermissions';
 import { TaskActivityPanel } from './TaskActivityPanel';
+import { RunActivityTimeline } from './RunActivityTimeline';
+import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 
 interface TaskDetailProps {
   error?: string;
@@ -112,6 +116,7 @@ interface TaskDetailProps {
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
+  gitSnapshots: GitSnapshotRecord[];
   githubRepository?: GitHubRepositoryRecord;
   branchPublication?: BranchPublicationRecord;
   pullRequest?: PullRequestSnapshotRecord;
@@ -176,6 +181,7 @@ export function TaskDetail(props: TaskDetailProps) {
     run,
     worktree,
     gitSnapshot,
+    gitSnapshots,
     pullRequest,
     interactions,
     sessions,
@@ -192,6 +198,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const [draftPrModalOpen, setDraftPrModalOpen] = useState(false);
   const [draftPrTitle, setDraftPrTitle] = useState('');
   const [requestInstruction, setRequestInstruction] = useState('');
+  const [evidenceGitSnapshotId, setEvidenceGitSnapshotId] = useState<string | undefined>();
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [deliveryActionBusy, setDeliveryActionBusy] = useState(false);
   const [reviewStartPending, setReviewStartPending] = useState(false);
@@ -235,6 +242,7 @@ export function TaskDetail(props: TaskDetailProps) {
     setSelectedReviewFindingIds([]);
     setDraftPrModalOpen(false);
     setDraftPrTitle(task ? normalizePullRequestTitle(undefined, task.title) : '');
+    setEvidenceGitSnapshotId(undefined);
   }, [task?.id, task?.title]);
 
   useEffect(() => {
@@ -377,6 +385,9 @@ export function TaskDetail(props: TaskDetailProps) {
     ? props.runs.find((candidate) => candidate.id === runProgress.runId)
     : undefined;
   const runProgressScope = describeGitSnapshot(gitSnapshot);
+  const evidenceGitSnapshot = evidenceGitSnapshotId
+    ? gitSnapshots.find((candidate) => candidate.id === evidenceGitSnapshotId) ?? gitSnapshot
+    : gitSnapshot;
 
   const runReviewAction = async (action: () => Promise<void>) => {
     if (reviewActionInFlightRef.current) {
@@ -719,7 +730,14 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
         <div className="tm-tabs">
           <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
-          <TabButton label="Evidence" active={tab === 'evidence'} onClick={() => setTab('evidence')} />
+          <TabButton
+            label="Evidence"
+            active={tab === 'evidence'}
+            onClick={() => {
+              setEvidenceGitSnapshotId(undefined);
+              setTab('evidence');
+            }}
+          />
           <TabButton
             label="Debug"
             active={tab === 'debug'}
@@ -767,6 +785,21 @@ export function TaskDetail(props: TaskDetailProps) {
                     progress={runProgress}
                     runStartedAt={progressRun?.startedAt}
                     scope={runProgressScope}
+                    animate={!prefersReducedMotion}
+                    completedChangeSummary={
+                      progressRun ? (
+                        <CompletedChangeSummaryPanel
+                          run={progressRun}
+                          gitSnapshots={gitSnapshots}
+                          artifacts={props.artifacts}
+                          onReviewChanges={(snapshotId) => {
+                            setEvidenceGitSnapshotId(snapshotId);
+                            setTab('evidence');
+                          }}
+                        />
+                      ) : undefined
+                    }
+                    onShowDebug={() => setTab('debug')}
                     onStop={
                       runProgress.state === 'RUNNING' && progressRun
                         ? () => void props.onCancel(runProgress.runId)
@@ -861,7 +894,7 @@ export function TaskDetail(props: TaskDetailProps) {
             <EvidencePanel
               run={run}
               worktree={worktree}
-              gitSnapshot={gitSnapshot}
+              gitSnapshot={evidenceGitSnapshot}
               githubRepository={props.githubRepository}
               branchPublication={props.branchPublication}
               pullRequest={pullRequest}
@@ -892,6 +925,7 @@ export function TaskDetail(props: TaskDetailProps) {
               sessions={sessions}
               items={props.items}
               planRevisions={planRevisions}
+              interactions={interactions}
               events={props.events}
             />
             <ProviderOverviewPanel
@@ -1236,7 +1270,8 @@ function RunHeader({
   onStop,
   stopDisabled,
   stopTitle,
-  trailingLabel
+  trailingLabel,
+  pulse
 }: {
   running: boolean;
   tone: Tone;
@@ -1247,12 +1282,15 @@ function RunHeader({
   stopDisabled?: boolean;
   stopTitle?: string;
   trailingLabel?: string;
+  /** Pulse the status dot. Defaults to `running`; pass false to hold it still. */
+  pulse?: boolean;
 }) {
   const elapsed = useElapsed(startedAt, running);
+  const dotPulses = pulse ?? running;
   return (
     <div className="tm-runheader">
       <span
-        className={`tm-runheader__dot ${running ? 'tm-pulse' : ''}`}
+        className={`tm-runheader__dot ${dotPulses ? 'tm-pulse' : ''}`}
         style={{ background: `var(--${tone})` }}
         aria-hidden="true"
       />
@@ -1290,25 +1328,36 @@ function RunProgressCard({
   progress,
   runStartedAt,
   scope,
+  onShowDebug,
   onStop,
   stopDisabled,
-  stopTitle
+  stopTitle,
+  completedChangeSummary,
+  animate = true
 }: {
   progress: RunProgressViewModel;
   runStartedAt?: string;
   scope?: string;
+  onShowDebug?: () => void;
   onStop?: () => void;
   stopDisabled?: boolean;
   stopTitle?: string;
+  completedChangeSummary?: ReactNode;
+  /** Run the two live loops (header pulse, active-ring spin). Off when resting. */
+  animate?: boolean;
 }) {
   const steps = progress.steps;
   const running = progress.state === 'RUNNING';
-  const showActivityDetails = running && progress.activityDetails.length > 0;
+  // A still card reads as "done" (spec §Motion): only the running header dot
+  // pulses and the active-step ring spins, and only while the run is live.
+  const liveMotion = animate && running;
+  const marker = planMarkerForState(progress.state, steps);
   return (
     <div className="tm-panel">
       <RunHeader
         running={running}
-        tone={running ? 'info' : 'neutral'}
+        tone={runProgressHeaderTone(progress.state)}
+        pulse={liveMotion}
         operationName="Agent progress"
         scope={scope}
         startedAt={runStartedAt}
@@ -1317,45 +1366,94 @@ function RunProgressCard({
         stopTitle={stopTitle}
         trailingLabel={running ? undefined : progress.headerLabel}
       />
-      <PlanList steps={steps} />
-      {progress.workingNow ? (
-        <div className="tm-run-progress__working">
-          <div className="tm-run-progress__subhead">Working now</div>
-          <div className="tm-run-progress__activity-row">
-            <span className="tm-run-progress__activity-mark" />
-            <span className="tm-run-progress__activity-label">{progress.workingNow.label}</span>
-          </div>
-        </div>
+      <PlanList steps={steps} marker={marker} animate={liveMotion} />
+      {running ? (
+        <RunActivityTimeline
+          rows={progress.activityTail}
+          outputSummary={progress.activityOutputSummary}
+          onShowDebug={onShowDebug}
+        />
       ) : null}
-      {showActivityDetails ? (
-        <details className="tm-run-progress__details">
-          <summary>Show activity</summary>
-          <div className="tm-run-progress__activity-list">
-            {progress.activityDetails.map((activity, index) => (
-              <div
-                className="tm-run-progress__activity-row"
-                key={`${activity.at}:${activity.label}:${index}`}
-              >
-                <span className="tm-run-progress__activity-mark" />
-                <span className="tm-run-progress__activity-label">{activity.label}</span>
-              </div>
-            ))}
-          </div>
-        </details>
-      ) : null}
+      {!running ? completedChangeSummary : null}
       {progress.footer ? (
-        <div className="tm-run-progress__footer">
-          <span className="tm-plan__dot" style={dotStyle(progress.footer.tone)} />
-          <span className="tm-run-progress__footer-copy">
-            <span className="tm-run-progress__footer-title">{progress.footer.title}</span>
-            {progress.footer.detail ? (
-              <span className="tm-run-progress__footer-detail">{progress.footer.detail}</span>
-            ) : null}
-          </span>
-        </div>
+        <ProgressFooter footer={progress.footer} />
       ) : null}
     </div>
   );
+}
+
+/**
+ * The state-dependent outcome footer (spec §Failed/§Interrupted/§Completed).
+ *
+ * Completion stays quiet but explicit: a single text line carries the run
+ * outcome and the local-evidence facts (file count · verification result).
+ * Failed and interrupted footers keep a title + detail because they state who
+ * stopped it or why; failure is the one tinted focal point.
+ */
+function ProgressFooter({ footer }: { footer: RunProgressFooter }) {
+  if (footer.tone === 'success') {
+    const detail = footer.detail ? `${footer.title}: ${footer.detail}` : footer.title;
+    return (
+      <div className="tm-run-progress__footer tm-run-progress__footer--success tm-run-progress__footer--quiet">
+        <span className="tm-run-progress__footer-detail">{detail}</span>
+      </div>
+    );
+  }
+  return (
+    <div className={`tm-run-progress__footer tm-run-progress__footer--${footer.tone}`}>
+      <span className="tm-plan__dot" style={dotStyle(footer.tone)} />
+      <span className="tm-run-progress__footer-copy">
+        <span className="tm-run-progress__footer-title">{footer.title}</span>
+        {footer.detail ? (
+          <span className="tm-run-progress__footer-detail">{footer.detail}</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The header status dot tone per run state (spec §Color: one dot, in the header
+ * only): info while running, success/error/neutral once the run settles.
+ */
+function runProgressHeaderTone(state: RunProgressViewModel['state']): Tone {
+  switch (state) {
+    case 'RUNNING':
+      return 'info';
+    case 'COMPLETED':
+      return 'success';
+    case 'INTERRUPTED':
+      return 'neutral';
+    default:
+      return 'error';
+  }
+}
+
+/**
+ * Pin a run-outcome marker to the step a terminal run left off on: × on the
+ * failing step, a filled neutral dot where an interrupted run stopped. The step
+ * is the last in-progress one, falling back to the first pending step, so the
+ * plan shows exactly where work halted (spec Failed/Interrupted notes).
+ */
+function planMarkerForState(
+  state: RunProgressViewModel['state'],
+  steps: RunProgressStep[]
+): PlanListMarker | undefined {
+  const kind: PlanStepMarker | undefined =
+    state === 'FAILED' || state === 'RECOVERY_REQUIRED'
+      ? 'failed'
+      : state === 'INTERRUPTED'
+        ? 'stopped'
+        : undefined;
+  if (!kind) {
+    return undefined;
+  }
+  const inProgress = steps.map((step) => step.status).lastIndexOf('IN_PROGRESS');
+  const index = inProgress >= 0 ? inProgress : steps.findIndex((step) => step.status === 'PENDING');
+  if (index < 0) {
+    return undefined;
+  }
+  return { index, kind };
 }
 
 function CodexReviewPanel({
