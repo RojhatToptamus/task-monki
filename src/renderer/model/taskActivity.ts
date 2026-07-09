@@ -15,7 +15,7 @@ export type TaskActivityActor =
   | 'User'
   | 'Task Monki'
   | 'Agent'
-  | 'Codex review'
+  | 'Review'
   | 'Git'
   | 'GitHub';
 
@@ -205,7 +205,7 @@ function buildTaskActivityItems(
     }
   }
 
-  const staleReview = input.task ? currentStaleCodexReviewItem(input.task) : undefined;
+  const staleReview = input.task ? currentStaleReviewItem(input.task) : undefined;
   if (staleReview) {
     items.push({ ...staleReview, order });
   }
@@ -352,8 +352,8 @@ function runStartedItem(
       return item(
         event,
         'review',
-        'Codex review',
-        'Codex review started',
+        'Review',
+        'Review started',
         reviewStartedEvidence(payload),
         'info'
       );
@@ -393,8 +393,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Codex review',
-          'Codex review passed',
+          'Review',
+          'Review passed',
           undefined,
           'success'
         );
@@ -402,8 +402,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Codex review',
-          'Codex requested changes',
+          'Review',
+          'Review requested changes',
           undefined,
           'action'
         );
@@ -411,8 +411,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Codex review',
-          'Codex review inconclusive',
+          'Review',
+          'Review inconclusive',
           undefined,
           'action'
         );
@@ -420,8 +420,8 @@ function runCompletedItem(
         return item(
           event,
           'review',
-          'Codex review',
-          'Codex review completed',
+          'Review',
+          'Review completed',
           undefined,
           'success'
         );
@@ -459,14 +459,14 @@ function runFailedItem(
   const error = stringField(payload, 'error') ?? stringField(payload, 'terminalReason');
   const title =
     mode === 'REVIEW'
-      ? 'Codex review failed'
+      ? 'Review failed'
       : mode === 'FOLLOW_UP'
         ? 'Follow-up implementation failed'
         : 'Implementation failed';
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
-    mode === 'REVIEW' ? 'Codex review' : 'Agent',
+    mode === 'REVIEW' ? 'Review' : 'Agent',
     title,
     evidence(
       mode === 'REVIEW'
@@ -485,14 +485,14 @@ function runInterruptedItem(
 ): TaskActivityCandidate {
   const title =
     mode === 'REVIEW'
-      ? 'Codex review stopped'
+      ? 'Review stopped'
       : mode === 'FOLLOW_UP'
         ? 'Follow-up implementation stopped'
         : 'Implementation stopped';
   return item(
     event,
     mode === 'REVIEW' ? 'review' : 'run',
-    mode === 'REVIEW' ? 'Codex review' : 'Agent',
+    mode === 'REVIEW' ? 'Review' : 'Agent',
     title,
     evidence('Run stopped before it completed.', evidenceRows(stringField(payload, 'terminalReason'))),
     'action'
@@ -948,7 +948,7 @@ function runtimeReconciledItem(
   return undefined;
 }
 
-function currentStaleCodexReviewItem(task: Task): TaskActivityItem | undefined {
+function currentStaleReviewItem(task: Task): TaskActivityItem | undefined {
   const review = task.projection.codexReview;
   if (review?.status !== 'STALE') {
     return undefined;
@@ -958,11 +958,11 @@ function currentStaleCodexReviewItem(task: Task): TaskActivityItem | undefined {
     id: `codex-review-stale:${review.runId ?? task.id}:${at}`,
     at,
     actor: 'Task Monki',
-    title: 'Codex review is stale',
+    title: 'Review is stale',
     tone: 'action',
     category: 'review',
-    evidence: evidence('Run a fresh Codex review before treating the review result as current.', [
-      { label: 'Reason', value: 'The diff changed after the last Codex review.' }
+    evidence: evidence('Run a fresh review before treating the review result as current.', [
+      { label: 'Reason', value: 'The diff changed after the last review.' }
     ]),
     provenance: {
       runId: review.runId,

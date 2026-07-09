@@ -173,6 +173,8 @@ In Progress:
   such as reads, searches, file changes, verification commands, tool calls, and
   approval waits. This tail is context only; completed, failed, interrupted, and
   recovery-required runs should return to the plan plus local-evidence footer.
+  The detailed data flow and invariants are documented in
+  `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
 - Do not show review completion actions.
 

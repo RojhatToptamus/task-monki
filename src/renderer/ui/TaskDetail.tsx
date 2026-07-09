@@ -48,27 +48,25 @@ import { ProviderActivityPanel } from './ProviderActivityPanel';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 import { SubagentHierarchyPanel } from './SubagentHierarchyPanel';
 import { TaskActionsMenu } from './TaskActionsMenu';
-import { Chip, dotStyle } from './MainColumn';
+import { Chip } from './StatusBadge';
 import {
-  FINDING_LEVELS,
   FindingRow,
   findingLevel,
   formatFindingLocation,
   shortFindingRef
 } from './Findings';
-import { PlanList, type PlanListMarker, type PlanStepMarker } from './Plan';
 import {
   selectNextAction,
   type NextActionId,
   type NextActionModel
 } from '../model/nextAction';
 import {
-  canRequestCodexReviewChanges,
-  codexReviewGate,
+  canRequestReviewChanges,
   describeTaskHeaderState,
   finishRequirementsForTask,
   getFinishEvidenceState,
   markDoneModalCopy,
+  taskReviewGate,
   type FinishEvidenceState,
   type FinishRequirement,
   type Tone
@@ -92,23 +90,21 @@ import {
   projectDebugTaskActivity,
   projectOverviewTaskActivity
 } from '../model/taskActivity';
-import {
-  buildRunProgressViewModel,
-  type RunProgressFooter,
-  type RunProgressStep,
-  type RunProgressViewModel
-} from '../model/runProgress';
-import {
-  buildReviewActivityViewModel,
-  type ReviewActivityViewModel
-} from '../model/reviewActivity';
+import { buildRunProgressViewModel } from '../model/runProgress';
+import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
   formatAgentNetworkAccess,
   formatAgentPermissionMode
 } from '../model/agentPermissions';
+import { ActionButtonTitle } from './ActionButtonTitle';
+import {
+  ReviewPanel,
+  type ReviewActionPauseReason
+} from './ReviewPanel';
 import { TaskActivityPanel } from './TaskActivityPanel';
-import { RunActivityTimeline } from './RunActivityTimeline';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
+import { RunProgressCard } from './RunProgressCard';
+import { describeGitSnapshot } from './gitSnapshotCopy';
 
 interface TaskDetailProps {
   error?: string;
@@ -165,11 +161,6 @@ interface HeadAction {
 }
 
 type DetailTab = 'overview' | 'evidence' | 'debug';
-type ReviewActionPauseReason =
-  | 'review-starting'
-  | 'review-running'
-  | 'implementation-running'
-  | 'delivery-running';
 
 const REVIEW_START_PENDING_TIMEOUT_MS = 5000;
 const REVIEW_MASCOT_MIN_ACTIVE_MS = 1600;
@@ -207,7 +198,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const deliveryActionInFlightRef = useRef(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   const prefersReducedMotion = usePrefersReducedMotion();
-  const reviewGate = task ? codexReviewGate(task) : undefined;
+  const reviewGate = task ? taskReviewGate(task) : undefined;
   const reviewIsRunning = reviewGate?.status === 'RUNNING';
   const reviewPending = reviewStartPending && !reviewIsRunning;
   const reviewMascotHoldActive = reviewMascotHoldGeneration > 0;
@@ -417,7 +408,7 @@ export function TaskDetail(props: TaskDetailProps) {
     }
   };
 
-  const runCodexReview = async (sourceRunId: string) => {
+  const runReview = async (sourceRunId: string) => {
     if (reviewActionInFlightRef.current) {
       return;
     }
@@ -438,7 +429,7 @@ export function TaskDetail(props: TaskDetailProps) {
     if (
       !reviewSourceRun ||
       reviewActionsPaused ||
-      !canRequestCodexReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
+      !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
     ) {
       return;
     }
@@ -530,7 +521,7 @@ export function TaskDetail(props: TaskDetailProps) {
       case 'run-review':
       case 'run-review-again':
         if (reviewSourceRun) {
-          void runCodexReview(reviewSourceRun.id);
+          void runReview(reviewSourceRun.id);
         }
         return;
       case 'request-changes':
@@ -656,7 +647,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const reviewHasOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
   const reviewHasActionableFindings =
     Boolean(reviewSourceRun) &&
-    canRequestCodexReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
+    canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
@@ -810,7 +801,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 ) : null}
 
                 {reviewPhaseVisible ? (
-                  <CodexReviewPanel
+                  <ReviewPanel
                     reviewGate={reviewGate}
                     reviewRun={reviewRun}
                     sourceRun={reviewSourceRun}
@@ -820,7 +811,7 @@ export function TaskDetail(props: TaskDetailProps) {
                     reviewPending={reviewPending}
                     actionsPaused={reviewActionsPaused}
                     actionsPausedReason={reviewActionsPausedReason}
-                    onRunReview={(sourceRunId) => void runCodexReview(sourceRunId)}
+                    onRunReview={(sourceRunId) => void runReview(sourceRunId)}
                     onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
                 ) : null}
@@ -1255,425 +1246,6 @@ function TaskHealthFindings({ findings }: { findings: Finding[] }) {
   );
 }
 
-/**
- * The one header row for any async operation (audit §05/§06): a status dot that
- * pulses while running, the operation name, its scope in mono, a live elapsed
- * timer, and Stop. Used by the run-progress card and the review card so every
- * running surface reads the same way instead of inventing its own header.
- */
-function RunHeader({
-  running,
-  tone,
-  operationName,
-  scope,
-  startedAt,
-  onStop,
-  stopDisabled,
-  stopTitle,
-  trailingLabel,
-  pulse
-}: {
-  running: boolean;
-  tone: Tone;
-  operationName: string;
-  scope?: string;
-  startedAt?: string;
-  onStop?: () => void;
-  stopDisabled?: boolean;
-  stopTitle?: string;
-  trailingLabel?: string;
-  /** Pulse the status dot. Defaults to `running`; pass false to hold it still. */
-  pulse?: boolean;
-}) {
-  const elapsed = useElapsed(startedAt, running);
-  const dotPulses = pulse ?? running;
-  return (
-    <div className="tm-runheader">
-      <span
-        className={`tm-runheader__dot ${dotPulses ? 'tm-pulse' : ''}`}
-        style={{ background: `var(--${tone})` }}
-        aria-hidden="true"
-      />
-      <h3 className="tm-runheader__name">{operationName}</h3>
-      {scope ? <span className="tm-runheader__scope">{scope}</span> : null}
-      <span className="tm-runheader__spacer" />
-      {running && elapsed !== undefined ? (
-        <span
-          className="tm-runheader__elapsed"
-          aria-label={`Elapsed ${formatElapsed(elapsed)}`}
-        >
-          {formatElapsed(elapsed)}
-        </span>
-      ) : null}
-      {running && onStop ? (
-        <ActionButtonTitle disabled={stopDisabled} title={stopTitle}>
-          <button
-            type="button"
-            className="outline-button outline-button--danger tm-runheader__stop"
-            disabled={stopDisabled}
-            onClick={onStop}
-          >
-            Stop
-          </button>
-        </ActionButtonTitle>
-      ) : null}
-      {!running && trailingLabel ? (
-        <span className="tm-runheader__trailing">{trailingLabel}</span>
-      ) : null}
-    </div>
-  );
-}
-
-function RunProgressCard({
-  progress,
-  runStartedAt,
-  scope,
-  onShowDebug,
-  onStop,
-  stopDisabled,
-  stopTitle,
-  completedChangeSummary,
-  animate = true
-}: {
-  progress: RunProgressViewModel;
-  runStartedAt?: string;
-  scope?: string;
-  onShowDebug?: () => void;
-  onStop?: () => void;
-  stopDisabled?: boolean;
-  stopTitle?: string;
-  completedChangeSummary?: ReactNode;
-  /** Run the two live loops (header pulse, active-ring spin). Off when resting. */
-  animate?: boolean;
-}) {
-  const steps = progress.steps;
-  const running = progress.state === 'RUNNING';
-  // A still card reads as "done" (spec §Motion): only the running header dot
-  // pulses and the active-step ring spins, and only while the run is live.
-  const liveMotion = animate && running;
-  const marker = planMarkerForState(progress.state, steps);
-  return (
-    <div className="tm-panel">
-      <RunHeader
-        running={running}
-        tone={runProgressHeaderTone(progress.state)}
-        pulse={liveMotion}
-        operationName="Agent progress"
-        scope={scope}
-        startedAt={runStartedAt}
-        onStop={onStop}
-        stopDisabled={stopDisabled}
-        stopTitle={stopTitle}
-        trailingLabel={running ? undefined : progress.headerLabel}
-      />
-      <PlanList steps={steps} marker={marker} animate={liveMotion} />
-      {running ? (
-        <RunActivityTimeline
-          rows={progress.activityTail}
-          outputSummary={progress.activityOutputSummary}
-          onShowDebug={onShowDebug}
-        />
-      ) : null}
-      {!running ? completedChangeSummary : null}
-      {progress.footer ? (
-        <ProgressFooter footer={progress.footer} />
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The state-dependent outcome footer (spec §Failed/§Interrupted/§Completed).
- *
- * Completion stays quiet but explicit: a single text line carries the run
- * outcome and the local-evidence facts (file count · verification result).
- * Failed and interrupted footers keep a title + detail because they state who
- * stopped it or why; failure is the one tinted focal point.
- */
-function ProgressFooter({ footer }: { footer: RunProgressFooter }) {
-  if (footer.tone === 'success') {
-    const detail = footer.detail ? `${footer.title}: ${footer.detail}` : footer.title;
-    return (
-      <div className="tm-run-progress__footer tm-run-progress__footer--success tm-run-progress__footer--quiet">
-        <span className="tm-run-progress__footer-detail">{detail}</span>
-      </div>
-    );
-  }
-  return (
-    <div className={`tm-run-progress__footer tm-run-progress__footer--${footer.tone}`}>
-      <span className="tm-plan__dot" style={dotStyle(footer.tone)} />
-      <span className="tm-run-progress__footer-copy">
-        <span className="tm-run-progress__footer-title">{footer.title}</span>
-        {footer.detail ? (
-          <span className="tm-run-progress__footer-detail">{footer.detail}</span>
-        ) : null}
-      </span>
-    </div>
-  );
-}
-
-/**
- * The header status dot tone per run state (spec §Color: one dot, in the header
- * only): info while running, success/error/neutral once the run settles.
- */
-function runProgressHeaderTone(state: RunProgressViewModel['state']): Tone {
-  switch (state) {
-    case 'RUNNING':
-      return 'info';
-    case 'COMPLETED':
-      return 'success';
-    case 'INTERRUPTED':
-      return 'neutral';
-    default:
-      return 'error';
-  }
-}
-
-/**
- * Pin a run-outcome marker to the step a terminal run left off on: × on the
- * failing step, a filled neutral dot where an interrupted run stopped. The step
- * is the last in-progress one, falling back to the first pending step, so the
- * plan shows exactly where work halted (spec Failed/Interrupted notes).
- */
-function planMarkerForState(
-  state: RunProgressViewModel['state'],
-  steps: RunProgressStep[]
-): PlanListMarker | undefined {
-  const kind: PlanStepMarker | undefined =
-    state === 'FAILED' || state === 'RECOVERY_REQUIRED'
-      ? 'failed'
-      : state === 'INTERRUPTED'
-        ? 'stopped'
-        : undefined;
-  if (!kind) {
-    return undefined;
-  }
-  const inProgress = steps.map((step) => step.status).lastIndexOf('IN_PROGRESS');
-  const index = inProgress >= 0 ? inProgress : steps.findIndex((step) => step.status === 'PENDING');
-  if (index < 0) {
-    return undefined;
-  }
-  return { index, kind };
-}
-
-function CodexReviewPanel({
-  reviewGate,
-  reviewRun,
-  sourceRun,
-  gitSnapshot,
-  reviewActivity,
-  actionBusy,
-  reviewPending,
-  actionsPaused,
-  actionsPausedReason,
-  onRunReview,
-  onStopReview
-}: {
-  reviewGate: NonNullable<Task['projection']['codexReview']>;
-  reviewRun?: RunRecord;
-  sourceRun?: RunRecord;
-  gitSnapshot?: GitSnapshotRecord;
-  reviewActivity?: ReviewActivityViewModel;
-  actionBusy: boolean;
-  reviewPending: boolean;
-  actionsPaused: boolean;
-  actionsPausedReason?: ReviewActionPauseReason;
-  onRunReview(sourceRunId: string): void;
-  onStopReview(reviewRunId: string): void;
-}) {
-  const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
-  const ui = reviewGateUi(effectiveStatus);
-  const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
-  const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
-  const canRunAgain = Boolean(sourceRun) && !actionsPaused;
-  const sourceRunId = sourceRun?.id;
-  const currentDiff = describeGitSnapshot(gitSnapshot);
-  const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
-  const reviewIsRunning = effectiveStatus === 'RUNNING';
-  const staleContextNote =
-    effectiveStatus === 'STALE' && hasReviewOutput
-      ? 'Previous review output is shown for context only. Re-run the review before acting on the current diff.'
-      : undefined;
-  const reviewActionPauseTitle = (): string | undefined => {
-    switch (actionsPausedReason) {
-      case 'delivery-running':
-        return 'Review actions pause during GitHub actions.';
-      case 'implementation-running':
-        return 'Review actions pause while the agent is running.';
-      case 'review-starting':
-        return 'Review is starting.';
-      case 'review-running':
-        return 'Review is already running.';
-      default:
-        return undefined;
-    }
-  };
-  const runReviewDisabledTitle = (canRun: boolean): string | undefined => {
-    if (actionsPaused) {
-      return reviewActionPauseTitle();
-    }
-    if (actionBusy) {
-      return 'Review action is in progress.';
-    }
-    if (!sourceRunId) {
-      return 'No completed implementation run is available to review.';
-    }
-    if (!canRun) {
-      return 'Review cannot start from the current task state.';
-    }
-    return undefined;
-  };
-  const stopReviewDisabledTitle = (): string | undefined => {
-    if (actionBusy) {
-      return 'Review action is in progress.';
-    }
-    if (reviewPending) {
-      return 'Review is starting.';
-    }
-    if (!reviewRun) {
-      return 'No running review is available.';
-    }
-    if (!canStopReview) {
-      return 'The current review cannot be stopped.';
-    }
-    return undefined;
-  };
-  // Contextual utilities kept in the card footer (Stop while running, re-run once
-  // a review exists). The recommended action is promoted to the Next-action rail.
-  const reviewCardUtilities: Array<{
-    key: string;
-    label: string;
-    disabled: boolean;
-    title?: string;
-    onClick(): void;
-  }> = [];
-  // While running, Stop lives in the RunHeader (audit §05). Otherwise the footer
-  // keeps re-run as a contextual utility.
-  if (
-    !reviewIsRunning &&
-    !actionsPaused &&
-    effectiveStatus !== 'NOT_RUN' &&
-    ['PASSED', 'NEEDS_CHANGES', 'INCONCLUSIVE', 'FAILED', 'CANCELED', 'STALE'].includes(
-      effectiveStatus
-    )
-  ) {
-    reviewCardUtilities.push({
-      key: 'run-again',
-      label: 'Run review again',
-      disabled: !canRunAgain || actionBusy || !sourceRunId,
-      title: runReviewDisabledTitle(canRunAgain),
-      onClick: () => sourceRunId && onRunReview(sourceRunId)
-    });
-  }
-
-  return (
-    <>
-      <section className={`tm-reviewcard tm-reviewcard--${ui.tone}`}>
-        {reviewIsRunning ? (
-          // Wrap in the head so the RunHeader gets the same 16/18 inset + divider
-          // as the resting head; a bare RunHeader here would sit flush to the
-          // card edges while the padded body below stays inset (misaligned).
-          <div className="tm-reviewcard__head tm-reviewcard__head--run">
-            <RunHeader
-              running
-              tone="info"
-              operationName="Reviewing"
-              scope={reviewedDiff}
-              startedAt={reviewRun?.startedAt}
-              onStop={() => reviewRun && onStopReview(reviewRun.id)}
-              stopDisabled={!canStopReview || actionBusy || !reviewRun}
-              stopTitle={stopReviewDisabledTitle()}
-            />
-          </div>
-        ) : (
-          <div className="tm-reviewcard__head">
-            <span className="tm-reviewcard__dot" style={dotStyle(ui.tone)} />
-            <div>
-              <h3 className="tm-panel__title" style={{ margin: 0 }}>
-                Codex review
-              </h3>
-            </div>
-            <span className="tm-reviewcard__spacer" />
-            <Chip tone={ui.tone} label={ui.label} />
-          </div>
-        )}
-
-        <div className="tm-reviewcard__body">
-          {reviewIsRunning ? (
-            <div className="tm-reviewcard__runningstate">
-              <div className="tm-reviewcard__activity" aria-live="polite">
-                <span className="tm-reviewcard__activity-k">Current activity</span>
-                <div className="tm-reviewcard__activity-row">
-                  <span className="tm-reviewcard__activity-dot" />
-                  <span className="tm-reviewcard__activity-text">
-                    {reviewActivity?.label ?? 'Preparing review context.'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="tm-reviewcard__summary">
-              <p>{reviewBody(reviewGate, reviewRun)}</p>
-              {effectiveStatus === 'NOT_RUN' ? (
-                <div className="tm-reviewcard__meta tm-reviewcard__meta--box">
-                  <span>Will review</span>
-                  <strong>{currentDiff}</strong>
-                  <span>Last result</span>
-                  <strong>none</strong>
-                </div>
-              ) : (
-                <div className="tm-reviewcard__meta">
-                  <span>Last reviewed</span>
-                  <strong>{formatReviewTime(reviewGate.updatedAt)}</strong>
-                  <span>Reviewed diff</span>
-                  <strong>{reviewedDiff}</strong>
-                </div>
-              )}
-              {staleContextNote ? (
-                <p className="tm-reviewcard__contextnote">{staleContextNote}</p>
-              ) : null}
-              <ReviewFindingsList findings={reviewGate.result?.findings ?? []} />
-              {reviewRun?.finalMessage ? (
-                <details className="tm-raw tm-reviewcard__raw">
-                  <summary>Raw review output</summary>
-                  <pre>{reviewRun.finalMessage}</pre>
-                </details>
-              ) : null}
-            </div>
-          )}
-
-        </div>
-
-        {reviewCardUtilities.length > 0 ? (
-          <div className="tm-reviewcard__actions">
-            {/* Contextual utilities only — the recommended primary (run review /
-                request changes / commit / mark done) lives in the rail's Next
-                action panel so the page has one filled button (audit §04). */}
-            <div className="tm-reviewcard__buttons">
-              {reviewCardUtilities.map((utility) => (
-                <ActionButtonTitle
-                  key={utility.key}
-                  disabled={utility.disabled}
-                  title={utility.title}
-                >
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={utility.disabled}
-                    onClick={utility.onClick}
-                  >
-                    {utility.label}
-                  </button>
-                </ActionButtonTitle>
-              ))}
-            </div>
-          </div>
-        ) : null}
-      </section>
-    </>
-  );
-}
-
 function PrStatusCard({
   view,
   actionState,
@@ -1907,25 +1479,6 @@ function formatCheckDuration(startedAt?: string, completedAt?: string): string |
   return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
 }
 
-function ActionButtonTitle({
-  title,
-  disabled,
-  children
-}: {
-  title?: string;
-  disabled?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <span
-      className={`tm-actiontitle${disabled ? ' tm-actiontitle--disabled' : ''}`}
-      title={title}
-    >
-      {children}
-    </span>
-  );
-}
-
 function RefreshIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -1951,66 +1504,6 @@ function ChevronRightIcon() {
         strokeLinejoin="round"
       />
     </svg>
-  );
-}
-
-function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
-  if (findings.length === 0) {
-    return null;
-  }
-  const sortedFindings = [...findings].sort(
-    (a, b) => findingLevel(a.severity).rank - findingLevel(b.severity).rank
-  );
-  return (
-    <div className="tm-reviewfindings">
-      <SeverityDistribution findings={findings} />
-      <div className="tm-reviewfindings__list">
-        {sortedFindings.map((finding, index) => {
-          const level = findingLevel(finding.severity);
-          return (
-            <FindingRow
-              key={finding.id}
-              tone={level.tone}
-              severityLabel={level.label}
-              title={finding.title}
-              reference={shortFindingRef(finding)}
-              open={index === 0}
-              detail={
-                <>
-                  <p>{finding.explanation}</p>
-                  {finding.recommendation ? <p>{finding.recommendation}</p> : null}
-                </>
-              }
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function SeverityDistribution({ findings }: { findings: CodexReviewFinding[] }) {
-  const counts = FINDING_LEVELS.map((level) => ({
-    ...level,
-    count: findings.filter((finding) => finding.severity === level.severity).length
-  }));
-  return (
-    <div className="tm-reviewfindings__distribution">
-      <div className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
-        {counts.map((level) => (
-          <span
-            key={level.severity}
-            className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}${
-              level.count > 0 ? '' : ' tm-reviewfindings__count--empty'
-            }`}
-          >
-            <span className="tm-reviewfindings__count-dot" />
-            <strong>{level.count}</strong>
-            {level.label}
-          </span>
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -2109,30 +1602,6 @@ function ReviewRequestDrawer({
       </aside>
     </div>
   );
-}
-
-function formatReviewTime(value: string | undefined): string {
-  if (!value) {
-    return 'unknown';
-  }
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return 'unknown';
-  }
-  const elapsedMs = Date.now() - timestamp;
-  if (elapsedMs >= 0 && elapsedMs < 60_000) {
-    return 'just now';
-  }
-  if (elapsedMs >= 0 && elapsedMs < 60 * 60_000) {
-    const minutes = Math.max(1, Math.round(elapsedMs / 60_000));
-    return `${minutes}m ago`;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(new Date(timestamp));
 }
 
 function isReviewPhase(phase: WorkflowPhase): boolean {
@@ -2236,85 +1705,6 @@ function healthFindingTone(severity: Finding['severity']): Tone {
   }
 }
 
-function reviewGateUi(status: NonNullable<Task['projection']['codexReview']>['status']): {
-  label: string;
-  tone: Tone;
-} {
-  switch (status) {
-    case 'RUNNING':
-      return { label: 'Reviewing...', tone: 'info' };
-    case 'PASSED':
-      return { label: 'Passed', tone: 'success' };
-    case 'NEEDS_CHANGES':
-      return { label: 'Needs changes', tone: 'error' };
-    case 'INCONCLUSIVE':
-      return { label: 'Inconclusive', tone: 'action' };
-    case 'FAILED':
-      return { label: 'Failed', tone: 'error' };
-    case 'CANCELED':
-      return { label: 'Stopped', tone: 'action' };
-    case 'STALE':
-      return { label: 'Stale', tone: 'action' };
-    case 'NOT_RUN':
-      return { label: 'Not run', tone: 'neutral' };
-  }
-}
-
-function reviewBody(
-  reviewGate: NonNullable<Task['projection']['codexReview']>,
-  reviewRun?: RunRecord
-): string {
-  if (reviewRun?.terminalReason) {
-    return reviewRun.terminalReason;
-  }
-  if (reviewGate.summary) {
-    return reviewGate.summary;
-  }
-  switch (reviewGate.status) {
-    case 'NOT_RUN':
-      return 'Run a review before marking done or shipping this diff.';
-    case 'PASSED':
-      return 'No blocking issues were reported for the reviewed diff.';
-    case 'NEEDS_CHANGES':
-      return 'Send the findings back to the agent, then re-review.';
-    case 'INCONCLUSIVE':
-      return 'The review finished without a clear pass or fail verdict. Read the output, then request changes or mark done explicitly.';
-    case 'FAILED':
-      return 'The review did not complete. Re-run it or inspect Debug.';
-    case 'CANCELED':
-      return 'The partial review result was discarded.';
-    case 'STALE':
-      return 'The diff changed after the last review.';
-    case 'RUNNING':
-      return 'Codex is reviewing the current diff.';
-  }
-}
-
-function describeGitSnapshot(snapshot?: GitSnapshotRecord): string {
-  if (!snapshot) {
-    return 'not captured';
-  }
-  const files =
-    snapshot.workingDiffFileCount ||
-    snapshot.committedDiffFileCount ||
-    snapshot.stagedCount + snapshot.unstagedCount + snapshot.untrackedCount;
-  const fileLabel = `${files} file${files === 1 ? '' : 's'}`;
-  const head = snapshot.headSha?.slice(0, 8) ?? 'unknown';
-  return `${head} · ${fileLabel} · ${snapshot.status.toLowerCase()}`;
-}
-
-function describeReviewedDiff(
-  reviewGate: NonNullable<Task['projection']['codexReview']>,
-  currentSnapshot?: GitSnapshotRecord
-): string {
-  const head = reviewGate.reviewedHeadSha ?? currentSnapshot?.headSha;
-  const fingerprint = reviewGate.reviewedDirtyFingerprint;
-  if (!head && !fingerprint) {
-    return 'not captured';
-  }
-  return `${head?.slice(0, 8) ?? 'unknown'}${fingerprint ? ` · fp ${fingerprint.slice(0, 8)}` : ''}`;
-}
-
 function defaultReviewFollowUpInstruction(
   task: Task,
   reviewGate: NonNullable<Task['projection']['codexReview']>,
@@ -2325,7 +1715,7 @@ function defaultReviewFollowUpInstruction(
     selectedFindingIds.includes(finding.id)
   );
   const lines = [
-    `Address the Codex review result for "${task.title}".`,
+    `Address the review result for "${task.title}".`,
     '',
     `Review status: ${humanizeEnum(reviewGate.status)}.`
   ];
@@ -2529,43 +1919,6 @@ function usePrefersReducedMotion(): boolean {
   }, []);
 
   return prefersReducedMotion;
-}
-
-/**
- * Live-ticking elapsed milliseconds since `startedAt` while `active`. Returns
- * undefined when there is no start time. Ticks once a second so an open run
- * surface shows how long an unbounded operation has been going — the honest
- * answer a horizontal progress bar cannot give.
- */
-function useElapsed(startedAt: string | undefined, active: boolean): number | undefined {
-  const startMs = startedAt ? Date.parse(startedAt) : NaN;
-  const hasStart = Number.isFinite(startMs);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!active || !hasStart) {
-      return;
-    }
-    setNow(Date.now());
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [active, hasStart, startMs]);
-
-  if (!hasStart) {
-    return undefined;
-  }
-  return Math.max(0, now - startMs);
-}
-
-/** Format an elapsed duration as m:ss, or h:mm:ss past an hour (e.g. "0:42"). */
-function formatElapsed(elapsedMs: number): string {
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
-  const hours = Math.floor(totalSeconds / 3600);
-  const mm = hours > 0 ? String(minutes).padStart(2, '0') : String(minutes);
-  const ss = String(seconds).padStart(2, '0');
-  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 function getPrimaryAction(input: {

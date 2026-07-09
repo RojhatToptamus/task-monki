@@ -3,7 +3,7 @@ import type { CodexReviewFinding } from '../../shared/contracts';
 import type { Tone } from './taskView';
 
 /**
- * Severity ordering + tone/label for a Codex review finding. Shared by every
+ * Severity ordering + tone/label for a review finding. Shared by every
  * surface that renders findings (review card, request-changes drawer) so
  * severity always looks and sorts the same (audit §06 FindingRow).
  */

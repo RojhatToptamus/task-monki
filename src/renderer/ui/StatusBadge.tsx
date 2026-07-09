@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { formatStatusValue } from './display';
 
 interface StatusBadgeProps {
@@ -34,6 +35,35 @@ export function StatusChip({ label, value, tone = 'neutral', muted = false }: St
       <strong className="status-pill__value">{formatStatusValue(value)}</strong>
     </span>
   );
+}
+
+export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
+
+export function Chip({
+  tone,
+  label,
+  compact = false
+}: {
+  tone: StatusPillTone;
+  label: string;
+  compact?: boolean;
+}) {
+  const classes = [
+    'status-pill',
+    `status-pill--${tone}`,
+    compact ? 'status-pill--compact' : ''
+  ].filter(Boolean);
+
+  return (
+    <span className={classes.join(' ')}>
+      <span className="status-pill__dot" aria-hidden="true" />
+      <span className="status-pill__label">{label}</span>
+    </span>
+  );
+}
+
+export function dotStyle(tone: StatusPillTone): CSSProperties {
+  return { background: `var(--${tone})` };
 }
 
 function toneForValue(value: string): StatusBadgeProps['tone'] {

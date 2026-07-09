@@ -8,7 +8,16 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: Verify ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-latest
+          - platform: Windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

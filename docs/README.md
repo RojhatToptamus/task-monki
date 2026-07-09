@@ -21,7 +21,10 @@ behavior and architecture, not private roadmap sequencing.
 3. `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
    - Authoritative review workflow lifecycle. Read before touching review,
      follow-up, stale-review, or interrupt behavior.
-4. `docs/DEV_SEEDING.md`
+4. `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`
+   - Authoritative Overview agent progress and activity model documentation:
+     data flow, renderer behavior, evidence boundaries, and invariants.
+5. `docs/DEV_SEEDING.md`
    - Deterministic local seed data for UI and workflow testing.
 
 ### Architecture

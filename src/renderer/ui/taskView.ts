@@ -118,7 +118,7 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
     };
   }
 
-  const review = codexReviewGate(task);
+  const review = taskReviewGate(task);
   if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
     switch (review.status) {
       case 'RUNNING':
@@ -208,11 +208,11 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
 }
 
-export function codexReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
+export function taskReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
   return task.projection.codexReview ?? { status: 'NOT_RUN' };
 }
 
-export function canRequestCodexReviewChanges(
+export function canRequestReviewChanges(
   review: NonNullable<Task['projection']['codexReview']>,
   effectiveStatus = review.status,
   hasReviewOutput = Boolean(review.result)
@@ -228,7 +228,7 @@ export function canRequestCodexReviewChanges(
 
 export function getFinishEvidenceState(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  reviewStatus: CodexReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -258,7 +258,7 @@ export function getFinishEvidenceState(
 
 export function finishRequirementsForTask(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  reviewStatus: CodexReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -345,7 +345,7 @@ const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
 ]);
 
 function isFixingReviewFeedback(task: Task): boolean {
-  const review = codexReviewGate(task);
+  const review = taskReviewGate(task);
   return (
     task.workflowPhase === 'IN_PROGRESS' &&
     REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
@@ -362,31 +362,31 @@ function reviewFinishWarning(
   }
   if (status === 'STALE') {
     return {
-      title: 'Codex review is stale.',
+      title: 'Review is stale.',
       detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   if (status === 'NEEDS_CHANGES') {
     return {
-      title: 'Codex review requested changes.',
+      title: 'Review requested changes.',
       detail: 'Request changes or mark the current result done as an owner override.'
     };
   }
   if (status === 'RUNNING') {
     return {
-      title: 'Codex review is running.',
+      title: 'Review is running.',
       detail: 'Wait for the review to finish before marking done cleanly.'
     };
   }
   if (status === 'FAILED' || status === 'INCONCLUSIVE' || status === 'CANCELED') {
     return {
-      title: `Codex review is ${humanizeEnum(status).toLowerCase()}.`,
+      title: `Review is ${humanizeEnum(status).toLowerCase()}.`,
       detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   return {
-    title: 'No passing Codex review is recorded.',
-    detail: 'Run Codex review before marking done cleanly, or mark done anyway.'
+    title: 'No passing review is recorded.',
+    detail: 'Run review before marking done cleanly, or mark done anyway.'
   };
 }
 
@@ -500,7 +500,7 @@ const FINDING_SEVERITY_LABELS: Array<{
  * Returns undefined when there is no recorded review result with findings.
  */
 export function reviewFindingCountLabel(task: Task): string | undefined {
-  const findings = codexReviewGate(task).result?.findings;
+  const findings = taskReviewGate(task).result?.findings;
   if (!findings || findings.length === 0) {
     return undefined;
   }
@@ -513,7 +513,7 @@ export function reviewFindingCountLabel(task: Task): string | undefined {
 
 /** The most salient severity tone across a task's review findings. */
 export function reviewFindingTone(task: Task): Tone {
-  const findings = codexReviewGate(task).result?.findings ?? [];
+  const findings = taskReviewGate(task).result?.findings ?? [];
   if (findings.some((finding) => finding.severity === 'BLOCKER')) {
     return 'error';
   }
@@ -801,5 +801,5 @@ export function columnTasks(tasks: Task[], column: BoardColumnDef): Task[] {
 }
 
 function isReviewQueueTask(task: Task): boolean {
-  return REVIEW_PHASES.includes(task.workflowPhase) || codexReviewGate(task).status === 'RUNNING';
+  return REVIEW_PHASES.includes(task.workflowPhase) || taskReviewGate(task).status === 'RUNNING';
 }

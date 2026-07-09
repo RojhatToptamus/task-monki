@@ -45,6 +45,8 @@ describe('RunActivityTimeline', () => {
     );
 
     expect(html).toContain('Activity');
+    expect(html).toContain('<details');
+    expect(html).toContain('open=""');
     expect(html).toContain('Ran');
     expect(html).toContain('3 commands');
     expect(html).toContain('git diff --check');

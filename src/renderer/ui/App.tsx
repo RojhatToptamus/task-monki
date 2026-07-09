@@ -89,7 +89,7 @@ interface AppNotification {
   message: string;
 }
 
-const REVIEW_STARTED_NOTICE = 'Codex review started';
+const REVIEW_STARTED_NOTICE = 'Review started';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';

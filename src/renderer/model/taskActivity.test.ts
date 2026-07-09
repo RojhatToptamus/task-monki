@@ -259,7 +259,7 @@ describe('task activity model', () => {
     });
   });
 
-  it('keeps Codex review and GitHub review decisions separate', () => {
+  it('keeps local review and GitHub review decisions separate', () => {
     const runs = [run({ id: 'review-run', mode: 'REVIEW' })];
     const view = buildOverviewTaskActivityViewModel({
       task: taskFixture(),
@@ -288,13 +288,13 @@ describe('task activity model', () => {
     });
 
     expect(view.items.map((item) => `${item.actor}: ${item.title}`)).toEqual([
-      'Codex review: Codex requested changes',
+      'Review: Review requested changes',
       'GitHub: GitHub requested changes'
     ]);
     expect(view.items[0].evidence).toBeUndefined();
   });
 
-  it('surfaces stale Codex review as current Task Monki state', () => {
+  it('surfaces stale local review as current Task Monki state', () => {
     const task = taskFixture({
       projection: {
         ...createInitialProjection(timeAt(0)),
@@ -330,13 +330,13 @@ describe('task activity model', () => {
     });
 
     expect(view.items[0]).toMatchObject({
-      actor: 'Codex review',
-      title: 'Codex review passed'
+      actor: 'Review',
+      title: 'Review passed'
     });
     expect(view.items[0].evidence).toBeUndefined();
     expect(view.items[1]).toMatchObject({
       actor: 'Task Monki',
-      title: 'Codex review is stale',
+      title: 'Review is stale',
       tone: 'action'
     });
   });

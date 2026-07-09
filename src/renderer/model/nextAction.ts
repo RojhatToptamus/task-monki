@@ -51,7 +51,7 @@ export interface NextActionInput {
 }
 
 const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
-const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run Codex review' };
+const RUN_REVIEW: NextActionChoice = { id: 'run-review', label: 'Run review' };
 const RUN_REVIEW_AGAIN: NextActionChoice = { id: 'run-review-again', label: 'Run review again' };
 const COMMIT: NextActionChoice = { id: 'commit', label: 'Commit' };
 const MOVE_TO_REVIEW: NextActionChoice = { id: 'move-to-review', label: 'Move to review' };
@@ -95,7 +95,7 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     return {
       sentence:
         reviewStatus === 'RUNNING'
-          ? 'Codex is reviewing the current diff.'
+          ? 'Reviewing the current diff.'
           : 'The agent is working — follow progress above.',
       secondaries: []
     };
@@ -113,7 +113,7 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     case 'NOT_RUN':
       return {
         sentence: hasReviewSource
-          ? 'Ready for review — run Codex against the current diff.'
+          ? 'Ready for review — run a review against the current diff.'
           : 'Run an implementation before reviewing.',
         primary: hasReviewSource ? RUN_REVIEW : undefined,
         secondaries: []

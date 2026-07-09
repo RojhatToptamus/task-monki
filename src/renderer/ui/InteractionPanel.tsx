@@ -286,7 +286,7 @@ function FileChangeRequest({
     <>
       <dl className="interaction-details">
         <dt>Reason</dt>
-        <dd>{request.reason ?? 'Codex requested permission to apply file changes.'}</dd>
+        <dd>{request.reason ?? 'Agent requested permission to apply file changes.'}</dd>
         {request.grantRoot ? (
           <>
             <dt>Requested root</dt>
@@ -355,7 +355,7 @@ function PermissionRequest({
     <>
       <dl className="interaction-details">
         <dt>Reason</dt>
-        <dd>{request.reason ?? 'Codex requested additional runtime permissions.'}</dd>
+        <dd>{request.reason ?? 'Agent requested additional runtime permissions.'}</dd>
         <dt>Working directory</dt>
         <dd>{request.cwd}</dd>
         <dt>Requested permissions</dt>
@@ -787,7 +787,7 @@ function interactionTitle(type: InteractionRequestRecord['type']): string {
     case 'MCP_ELICITATION':
       return 'Respond to MCP request';
     case 'USER_INPUT':
-      return 'Answer Codex question';
+      return 'Answer agent question';
     case 'DYNAMIC_TOOL':
       return 'Unsupported dynamic tool';
   }

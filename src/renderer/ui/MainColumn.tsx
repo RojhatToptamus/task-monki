@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type {
   AgentInteractionDecision,
   InteractionRequestRecord,
@@ -25,6 +25,7 @@ import {
 import type { RepositorySetupState } from '../model/repositories';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
+import { Chip, dotStyle } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import type { ThemePreference } from './theme';
 import {
@@ -967,7 +968,7 @@ function Settings({
           }
         />
         <ModelSettingRow
-          label="Codex review model"
+          label="Review model"
           hint="Used for AI quality-gate reviews"
           value={selectedModels.selectedReviewModel?.model ?? ''}
           effortValue={selectedModels.selectedReviewEffort}
@@ -1501,31 +1502,4 @@ function ModelSettingRow({
       </div>
     </div>
   );
-}
-
-export function Chip({
-  tone,
-  label,
-  compact = false
-}: {
-  tone: Tone;
-  label: string;
-  compact?: boolean;
-}) {
-  const classes = [
-    'status-pill',
-    `status-pill--${tone}`,
-    compact ? 'status-pill--compact' : ''
-  ].filter(Boolean);
-
-  return (
-    <span className={classes.join(' ')}>
-      <span className="status-pill__dot" aria-hidden="true" />
-      <span className="status-pill__label">{label}</span>
-    </span>
-  );
-}
-
-export function dotStyle(tone: Tone): CSSProperties {
-  return { background: `var(--${tone})` };
 }

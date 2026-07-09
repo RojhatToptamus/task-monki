@@ -4,7 +4,7 @@ import type { Task } from '../../shared/contracts';
 import {
   BOARD_COLUMNS,
   buildTaskCardVM,
-  canRequestCodexReviewChanges,
+  canRequestReviewChanges,
   columnTasks,
   computeNavCounts,
   describeTaskHeaderState,
@@ -278,25 +278,25 @@ describe('task card view model', () => {
     };
 
     expect(
-      canRequestCodexReviewChanges({ status: 'NEEDS_CHANGES', result })
+      canRequestReviewChanges({ status: 'NEEDS_CHANGES', result })
     ).toBe(true);
     expect(
-      canRequestCodexReviewChanges({ status: 'NEEDS_CHANGES' })
+      canRequestReviewChanges({ status: 'NEEDS_CHANGES' })
     ).toBe(true);
     expect(
-      canRequestCodexReviewChanges({ status: 'INCONCLUSIVE' })
+      canRequestReviewChanges({ status: 'INCONCLUSIVE' })
     ).toBe(true);
     expect(
-      canRequestCodexReviewChanges({ status: 'CANCELED', result })
+      canRequestReviewChanges({ status: 'CANCELED', result })
     ).toBe(false);
     expect(
-      canRequestCodexReviewChanges({ status: 'STALE', result })
+      canRequestReviewChanges({ status: 'STALE', result })
     ).toBe(false);
     expect(
-      canRequestCodexReviewChanges({ status: 'FAILED' }, 'FAILED', true)
+      canRequestReviewChanges({ status: 'FAILED' }, 'FAILED', true)
     ).toBe(true);
     expect(
-      canRequestCodexReviewChanges({ status: 'FAILED' })
+      canRequestReviewChanges({ status: 'FAILED' })
     ).toBe(false);
   });
 
@@ -415,7 +415,7 @@ describe('task card view model', () => {
         mode: 'override',
         warnings: [
           {
-            title: 'Codex review is stale.',
+            title: 'Review is stale.',
             detail: 'Run review again before marking done cleanly, or mark done anyway.'
           }
         ]
