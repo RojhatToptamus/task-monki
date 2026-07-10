@@ -8,5 +8,5 @@
     "types": ["node", "electron"]
   },
   "include": ["src/core/**/*.ts", "src/shared/**/*.ts", "src/electron/**/*.ts", "src/dev/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/core/preview/prototypes/**"]
 }

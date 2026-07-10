@@ -47,6 +47,7 @@
     "electron-builder": "^24.13.3",
     "typescript": "^5.9.3",
     "vite": "^5.4.21",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "yaml": "^2.9.0"
   }
 }
