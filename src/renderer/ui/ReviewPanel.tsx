@@ -5,7 +5,6 @@ import type {
   RunRecord
 } from '../../shared/contracts';
 import type { ReviewActivityViewModel } from '../model/reviewActivity';
-import { ActionButtonTitle } from './ActionButtonTitle';
 import {
   FINDING_LEVELS,
   FindingRow,
@@ -13,7 +12,7 @@ import {
   shortFindingRef
 } from './Findings';
 import { RunHeader } from './RunHeader';
-import { Chip, dotStyle } from './StatusBadge';
+import { dotStyle } from './StatusBadge';
 import {
   describeGitSnapshot,
   describeReviewedDiff
@@ -29,71 +28,26 @@ export type ReviewActionPauseReason =
 export function ReviewPanel({
   reviewGate,
   reviewRun,
-  sourceRun,
   gitSnapshot,
   reviewActivity,
   actionBusy,
   reviewPending,
-  actionsPaused,
-  actionsPausedReason,
-  onRunReview,
   onStopReview
 }: {
   reviewGate: CodexReviewGateProjection;
   reviewRun?: RunRecord;
-  sourceRun?: RunRecord;
   gitSnapshot?: GitSnapshotRecord;
   reviewActivity?: ReviewActivityViewModel;
   actionBusy: boolean;
   reviewPending: boolean;
-  actionsPaused: boolean;
-  actionsPausedReason?: ReviewActionPauseReason;
-  onRunReview(sourceRunId: string): void;
   onStopReview(reviewRunId: string): void;
 }) {
   const effectiveStatus = reviewPending ? 'RUNNING' : reviewGate.status;
   const ui = reviewGateUi(effectiveStatus);
   const canStopReview = Boolean(reviewRun && effectiveStatus === 'RUNNING' && !reviewPending);
-  const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
-  const canRunAgain = Boolean(sourceRun) && !actionsPaused;
-  const sourceRunId = sourceRun?.id;
   const currentDiff = describeGitSnapshot(gitSnapshot);
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
-  const staleContextNote =
-    effectiveStatus === 'STALE' && hasReviewOutput
-      ? 'Previous review output is shown for context only. Re-run the review before acting on the current diff.'
-      : undefined;
-
-  const reviewActionPauseTitle = (): string | undefined => {
-    switch (actionsPausedReason) {
-      case 'delivery-running':
-        return 'Review actions pause during GitHub actions.';
-      case 'implementation-running':
-        return 'Review actions pause while the agent is running.';
-      case 'review-starting':
-        return 'Review is starting.';
-      case 'review-running':
-        return 'Review is already running.';
-      default:
-        return undefined;
-    }
-  };
-  const runReviewDisabledTitle = (canRun: boolean): string | undefined => {
-    if (actionsPaused) {
-      return reviewActionPauseTitle();
-    }
-    if (actionBusy) {
-      return 'Review action is in progress.';
-    }
-    if (!sourceRunId) {
-      return 'No completed implementation run is available to review.';
-    }
-    if (!canRun) {
-      return 'Review cannot start from the current task state.';
-    }
-    return undefined;
-  };
   const stopReviewDisabledTitle = (): string | undefined => {
     if (actionBusy) {
       return 'Review action is in progress.';
@@ -109,31 +63,6 @@ export function ReviewPanel({
     }
     return undefined;
   };
-  const reviewCardUtilities: Array<{
-    key: string;
-    label: string;
-    disabled: boolean;
-    title?: string;
-    onClick(): void;
-  }> = [];
-
-  if (
-    !reviewIsRunning &&
-    !actionsPaused &&
-    effectiveStatus !== 'NOT_RUN' &&
-    ['PASSED', 'NEEDS_CHANGES', 'INCONCLUSIVE', 'FAILED', 'CANCELED', 'STALE'].includes(
-      effectiveStatus
-    )
-  ) {
-    reviewCardUtilities.push({
-      key: 'run-again',
-      label: 'Run review again',
-      disabled: !canRunAgain || actionBusy || !sourceRunId,
-      title: runReviewDisabledTitle(canRunAgain),
-      onClick: () => sourceRunId && onRunReview(sourceRunId)
-    });
-  }
-
   return (
     <section className={`tm-reviewcard tm-reviewcard--${ui.tone}`}>
       {reviewIsRunning ? (
@@ -158,7 +87,7 @@ export function ReviewPanel({
             </h3>
           </div>
           <span className="tm-reviewcard__spacer" />
-          <Chip tone={ui.tone} label={ui.label} />
+          <span className="tm-reviewcard__status">{ui.label}</span>
         </div>
       )}
 
@@ -193,9 +122,6 @@ export function ReviewPanel({
                 <strong>{reviewedDiff}</strong>
               </div>
             )}
-            {staleContextNote ? (
-              <p className="tm-reviewcard__contextnote">{staleContextNote}</p>
-            ) : null}
             <ReviewFindingsList findings={reviewGate.result?.findings ?? []} />
             {reviewRun?.finalMessage ? (
               <details className="tm-raw tm-reviewcard__raw">
@@ -207,28 +133,6 @@ export function ReviewPanel({
         )}
       </div>
 
-      {reviewCardUtilities.length > 0 ? (
-        <div className="tm-reviewcard__actions">
-          <div className="tm-reviewcard__buttons">
-            {reviewCardUtilities.map((utility) => (
-              <ActionButtonTitle
-                key={utility.key}
-                disabled={utility.disabled}
-                title={utility.title}
-              >
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={utility.disabled}
-                  onClick={utility.onClick}
-                >
-                  {utility.label}
-                </button>
-              </ActionButtonTitle>
-            ))}
-          </div>
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -348,6 +252,9 @@ function reviewBody(
   if (reviewRun?.terminalReason) {
     return reviewRun.terminalReason;
   }
+  if (reviewGate.status === 'STALE') {
+    return 'Reviewed diff no longer matches the worktree.';
+  }
   if (reviewGate.summary) {
     return reviewGate.summary;
   }
@@ -364,8 +271,6 @@ function reviewBody(
       return 'The review did not complete. Re-run it or inspect Debug.';
     case 'CANCELED':
       return 'The partial review result was discarded.';
-    case 'STALE':
-      return 'The diff changed after the last review.';
     case 'RUNNING':
       return 'Reviewing the current diff.';
   }

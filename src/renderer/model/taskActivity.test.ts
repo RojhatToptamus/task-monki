@@ -288,7 +288,7 @@ describe('task activity model', () => {
     });
 
     expect(view.items.map((item) => `${item.actor}: ${item.title}`)).toEqual([
-      'Review: Review requested changes',
+      'Review: Requested changes',
       'GitHub: GitHub requested changes'
     ]);
     expect(view.items[0].evidence).toBeUndefined();
@@ -331,14 +331,15 @@ describe('task activity model', () => {
 
     expect(view.items[0]).toMatchObject({
       actor: 'Review',
-      title: 'Review passed'
+      title: 'Passed'
     });
     expect(view.items[0].evidence).toBeUndefined();
     expect(view.items[1]).toMatchObject({
       actor: 'Task Monki',
-      title: 'Review is stale',
+      title: 'Review became stale',
       tone: 'action'
     });
+    expect(view.items[1].evidence).toBeUndefined();
   });
 
   it('collapses repeated Git snapshots but keeps real Git state changes', () => {

@@ -9,6 +9,9 @@ controls and platform titlebar behavior.
 
 - The main window uses `titleBarStyle: "hiddenInset"` with native traffic-light
   controls.
+- The native controls are recentered from the current web-content zoom factor
+  whenever the renderer viewport scale changes, keeping them on the same
+  vertical centerline as the app titlebar buttons.
 - The renderer topbar is a draggable Electron titlebar region. The app
   deliberately delegates double-clicks in that draggable region to native macOS
   titlebar behavior, respecting the user's Desktop & Dock setting: Fill, Zoom,
@@ -32,8 +35,9 @@ controls and platform titlebar behavior.
 ## Implementation Notes
 
 - Chrome options live in `src/electron/windowChrome.ts`.
-- `src/electron/preload.ts` exposes only a renderer platform label for shell
-  layout. It is not workflow state and must not affect task projections.
+- `src/electron/preload.ts` exposes a renderer platform label and a scoped
+  request to resync native window chrome. Neither is workflow state and neither
+  may affect task projections.
 - Do not add renderer double-click handlers to draggable titlebar regions.
   Electron drag regions intentionally suppress normal pointer events, and the
   OS should own titlebar double-click behavior.

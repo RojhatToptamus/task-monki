@@ -28,7 +28,7 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
-import type { WindowChromePlatform } from '../shared/shell';
+import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 
 function getWindowChromePlatform(): WindowChromePlatform {
   if (process.platform === 'darwin') {
@@ -95,6 +95,9 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
-contextBridge.exposeInMainWorld('taskManagerShell', {
-  windowChromePlatform: getWindowChromePlatform()
-});
+const shellApi: TaskManagerShellApi = {
+  windowChromePlatform: getWindowChromePlatform(),
+  syncWindowChrome: () => ipcRenderer.send('windowChrome:sync')
+};
+
+contextBridge.exposeInMainWorld('taskManagerShell', shellApi);

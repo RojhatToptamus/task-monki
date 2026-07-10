@@ -10,7 +10,7 @@ import type {
   AgentUserInputRequest,
   InteractionRequestRecord
 } from '../../shared/contracts';
-import { StructuredData, humanizeEnum } from './display';
+import { StructuredData } from './display';
 
 interface InteractionPanelProps {
   interactions: InteractionRequestRecord[];
@@ -45,16 +45,36 @@ export function InteractionPanel({
     return null;
   }
 
+  const commandApproval = active.type === 'COMMAND_APPROVAL';
+
   return (
-    <section className="interaction-card" id="action-required" aria-live="polite">
+    <section
+      className={`interaction-card ${commandApproval ? 'interaction-card--command' : ''}`}
+      id="action-required"
+      aria-live="polite"
+    >
       <header className="interaction-card__header">
-        <div>
-          <span className="interaction-card__eyebrow">Action required</span>
-          <h3>{interactionTitle(active.type)}</h3>
-        </div>
-        <span className="count-pill">
-          {activeCount > 1 ? `${activeCount} pending` : humanizeEnum(active.status)}
-        </span>
+        {commandApproval ? (
+          <h3>
+            <span className="interaction-card__dot" aria-hidden="true" />
+            {interactionTitle(active.type)}
+          </h3>
+        ) : (
+          <div>
+            <span className="interaction-card__eyebrow">
+              <span className="interaction-card__dot" aria-hidden="true" />
+              Action required
+            </span>
+            <h3>{interactionTitle(active.type)}</h3>
+          </div>
+        )}
+        {commandApproval ? (
+          activeCount > 1 ? (
+            <span className="interaction-card__waiting">{activeCount} pending</span>
+          ) : null
+        ) : (
+          <InteractionWaiting requestedAt={active.requestedAt} count={activeCount} />
+        )}
       </header>
       <InteractionBody
         interaction={active}
@@ -76,13 +96,7 @@ function InteractionBody({
 }) {
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const [now, setNow] = useState(Date.now());
   const [formValues, setFormValues] = useState<Record<string, FormValue>>({});
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     setError(undefined);
@@ -105,16 +119,9 @@ function InteractionBody({
 
   return (
     <>
-      <div className="interaction-card__meta">
-        <span>Waiting {formatElapsed(now - Date.parse(interaction.requestedAt))}</span>
-        <span>Request {String(interaction.providerRequestId)}</span>
-      </div>
-      <div className="interaction-card__source">
-        <strong>Source thread</strong>
-        <span>{formatSessionSource(sourceSession, interaction.sessionId)}</span>
-      </div>
       {interaction.policyWarnings.map((warning) => (
         <p className="interaction-card__warning" key={warning}>
+          <span aria-hidden="true" />
           {warning}
         </p>
       ))}
@@ -155,11 +162,33 @@ function InteractionBody({
       ) : (
         <p className="muted">This dynamic client tool was rejected automatically.</p>
       )}
+      {interaction.type === 'COMMAND_APPROVAL' ? null : (
+        <InteractionTechnicalDetails
+          interaction={interaction}
+          sourceSession={sourceSession}
+        />
+      )}
       {interaction.status === 'RESPONDING' ? (
         <p className="muted">Decision sent. Waiting for App Server confirmation…</p>
       ) : null}
       {error ? <p className="form-error">{error}</p> : null}
     </>
+  );
+}
+
+function InteractionWaiting({ requestedAt, count }: { requestedAt: string; count: number }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <span className="interaction-card__waiting">
+      Waiting {formatElapsed(now - Date.parse(requestedAt))}
+      {count > 1 ? ` · ${count} pending` : ''}
+    </span>
   );
 }
 
@@ -169,108 +198,90 @@ function CommandRequest({
   onRespond
 }: InteractionSectionProps) {
   const request = interaction.request as AgentCommandApprovalRequest;
+  const displayCommand = unwrapShellCommand(request.command);
+  const canRememberCommand =
+    hasAction(interaction, 'ACCEPT_EXEC_POLICY_AMENDMENT') &&
+    Boolean(request.proposedExecPolicyAmendment?.length);
+  const canAllowForSession = hasAction(interaction, 'ACCEPT_FOR_SESSION');
+  const [alwaysAllow, setAlwaysAllow] = useState(false);
+  const useAlwaysAllow = alwaysAllow && canRememberCommand;
+
+  useEffect(() => {
+    setAlwaysAllow(false);
+  }, [interaction.id]);
+
+  const submitPersistentChoice = () => {
+    if (useAlwaysAllow) {
+      return onRespond({
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT_EXEC_POLICY_AMENDMENT',
+        amendment: request.proposedExecPolicyAmendment ?? []
+      });
+    }
+    if (canAllowForSession) {
+      return onRespond({
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT_FOR_SESSION'
+      });
+    }
+    return onRespond({
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT_EXEC_POLICY_AMENDMENT',
+      amendment: request.proposedExecPolicyAmendment ?? []
+    });
+  };
+
   return (
     <>
-      <dl className="interaction-details">
-        {request.command ? (
-          <>
-            <dt>Command</dt>
-            <dd>
-              <code>{request.command}</code>
-            </dd>
-          </>
-        ) : null}
-        {request.cwd ? (
-          <>
-            <dt>Working directory</dt>
-            <dd>{request.cwd}</dd>
-          </>
-        ) : null}
-        {request.reason ? (
-          <>
-            <dt>Reason</dt>
-            <dd>{request.reason}</dd>
-          </>
-        ) : null}
-        {request.networkApprovalContext ? (
-          <>
-            <dt>Network</dt>
-            <dd>
-              {request.networkApprovalContext.protocol}://
-              {request.networkApprovalContext.host}
-            </dd>
-          </>
-        ) : null}
-        {request.commandActions?.length ? (
-          <>
-            <dt>Parsed actions</dt>
-            <dd>
-              <StructuredData value={request.commandActions} />
-            </dd>
-          </>
-        ) : null}
-      </dl>
-      <div className="interaction-actions">
-        {hasAction(interaction, 'ACCEPT') ? (
-          <ActionButton
-            label="Allow once"
+      {displayCommand ? (
+        <pre className="interaction-command">
+          <code>{displayCommand}</code>
+        </pre>
+      ) : null}
+      <div className="interaction-command__footer">
+        {canRememberCommand && canAllowForSession ? (
+          <label className="interaction-remember">
+            <input
+              type="checkbox"
+              checked={alwaysAllow}
+              disabled={disabled}
+              onChange={(event) => setAlwaysAllow(event.target.checked)}
+            />
+            <span>Always allow matching commands</span>
+          </label>
+        ) : (
+          <span />
+        )}
+        <div className="interaction-actions interaction-actions--command">
+          <RejectButtons
+            interaction={interaction}
+            interactionType="COMMAND_APPROVAL"
             disabled={disabled}
-            onClick={() =>
-              onRespond({
-                interactionType: 'COMMAND_APPROVAL',
-                action: 'ACCEPT'
-              })
-            }
+            declineLabel="Deny"
+            showCancel={false}
+            onRespond={onRespond}
           />
-        ) : null}
-        {hasAction(interaction, 'ACCEPT_FOR_SESSION') ? (
-          <ActionButton
-            label="Allow for session"
-            disabled={disabled}
-            onClick={() =>
-              onRespond({
-                interactionType: 'COMMAND_APPROVAL',
-                action: 'ACCEPT_FOR_SESSION'
-              })
-            }
-          />
-        ) : null}
-        {hasAction(interaction, 'ACCEPT_EXEC_POLICY_AMENDMENT') &&
-        request.proposedExecPolicyAmendment ? (
-          <ActionButton
-            label="Apply command rule"
-            disabled={disabled}
-            onClick={() =>
-              onRespond({
-                interactionType: 'COMMAND_APPROVAL',
-                action: 'ACCEPT_EXEC_POLICY_AMENDMENT',
-                amendment: request.proposedExecPolicyAmendment ?? []
-              })
-            }
-          />
-        ) : null}
-        {hasAction(interaction, 'APPLY_NETWORK_POLICY_AMENDMENT')
-          ? request.proposedNetworkPolicyAmendments?.map((amendment) => (
-              <ActionButton
-                key={`${amendment.action}:${amendment.host}`}
-                label={`${amendment.action} ${amendment.host}`}
-                disabled={disabled}
-                onClick={() =>
-                  onRespond({
-                    interactionType: 'COMMAND_APPROVAL',
-                    action: 'APPLY_NETWORK_POLICY_AMENDMENT',
-                    amendment
-                  })
-                }
-              />
-            ))
-          : null}
-        <RejectButtons
-          interaction={interaction}
-          interactionType="COMMAND_APPROVAL"
-          disabled={disabled}
-          onRespond={onRespond}
-        />
+          {hasAction(interaction, 'ACCEPT') ? (
+            <ActionButton
+              label="Allow once"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() =>
+                onRespond({
+                  interactionType: 'COMMAND_APPROVAL',
+                  action: 'ACCEPT'
+                })
+              }
+            />
+          ) : null}
+          {canAllowForSession || canRememberCommand ? (
+            <ActionButton
+              label={useAlwaysAllow || !canAllowForSession ? 'Always allow' : 'Allow for session'}
+              disabled={disabled}
+              onClick={submitPersistentChoice}
+            />
+          ) : null}
+        </div>
       </div>
     </>
   );
@@ -325,6 +336,7 @@ function FileChangeRequest({
         {hasAction(interaction, 'ACCEPT_FOR_SESSION') ? (
           <ActionButton
             label="Allow root for session"
+            variant="secondary"
             disabled={disabled}
             onClick={() =>
               onRespond({
@@ -380,6 +392,7 @@ function PermissionRequest({
         {hasAction(interaction, 'GRANT_SESSION') ? (
           <ActionButton
             label="Grant for session"
+            variant="secondary"
             disabled={disabled}
             onClick={() =>
               onRespond({
@@ -666,9 +679,13 @@ function RejectButtons({
   interaction,
   interactionType,
   disabled,
+  declineLabel = 'Deny request',
+  showCancel = true,
   onRespond
 }: InteractionSectionProps & {
   interactionType: 'COMMAND_APPROVAL' | 'FILE_CHANGE_APPROVAL' | 'MCP_ELICITATION';
+  declineLabel?: string;
+  showCancel?: boolean;
 }) {
   return (
     <>
@@ -684,13 +701,13 @@ function RejectButtons({
             } as AgentInteractionDecision)
           }
         >
-          Decline
+          {declineLabel}
         </button>
       ) : null}
-      {hasAction(interaction, 'CANCEL') ? (
+      {showCancel && hasAction(interaction, 'CANCEL') ? (
         <button
           type="button"
-          className="danger-button"
+          className="outline-button outline-button--danger interaction-actions__stop"
           disabled={disabled}
           onClick={() =>
             void onRespond({
@@ -699,7 +716,7 @@ function RejectButtons({
             } as AgentInteractionDecision)
           }
         >
-          Cancel turn
+          Stop current turn…
         </button>
       ) : null}
     </>
@@ -708,23 +725,69 @@ function RejectButtons({
 
 function ActionButton({
   label,
+  variant = 'primary',
   disabled,
   onClick
 }: {
   label: string;
+  variant?: 'primary' | 'secondary';
   disabled: boolean;
   onClick(): Promise<void>;
 }) {
   return (
     <button
       type="button"
-      className="primary-button"
+      className={variant === 'primary' ? 'primary-button' : 'outline-button'}
       disabled={disabled}
       onClick={() => void onClick()}
     >
       {label}
     </button>
   );
+}
+
+function InteractionTechnicalDetails({
+  interaction,
+  sourceSession
+}: {
+  interaction: InteractionRequestRecord;
+  sourceSession?: AgentSessionRecord;
+}) {
+  const commandRequest =
+    interaction.type === 'COMMAND_APPROVAL'
+      ? (interaction.request as AgentCommandApprovalRequest)
+      : undefined;
+  return (
+    <details className="interaction-technical">
+      <summary>Request details</summary>
+      <dl className="interaction-details interaction-details--technical">
+        <dt>Source</dt>
+        <dd>{formatSessionSource(sourceSession, interaction.sessionId)}</dd>
+        <dt>Request ID</dt>
+        <dd><code>{String(interaction.providerRequestId)}</code></dd>
+        {commandRequest?.command ? (
+          <>
+            <dt>Exact command</dt>
+            <dd><code>{commandRequest.command}</code></dd>
+          </>
+        ) : null}
+        {commandRequest?.cwd ? (
+          <>
+            <dt>Working directory</dt>
+            <dd><code>{commandRequest.cwd}</code></dd>
+          </>
+        ) : null}
+      </dl>
+    </details>
+  );
+}
+
+function unwrapShellCommand(command: string | undefined): string | undefined {
+  if (!command) {
+    return undefined;
+  }
+  const match = command.match(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/);
+  return match?.[2] ?? command;
 }
 
 function buildMcpContent(
@@ -779,11 +842,11 @@ function hasAction(
 function interactionTitle(type: InteractionRequestRecord['type']): string {
   switch (type) {
     case 'COMMAND_APPROVAL':
-      return 'Review command execution';
+      return 'Command approval';
     case 'FILE_CHANGE_APPROVAL':
-      return 'Review file changes';
+      return 'File change approval';
     case 'PERMISSION_APPROVAL':
-      return 'Review additional permissions';
+      return 'Permission approval';
     case 'MCP_ELICITATION':
       return 'Respond to MCP request';
     case 'USER_INPUT':

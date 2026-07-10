@@ -512,7 +512,9 @@ Purpose: scan pipeline state.
 
 Layout:
 
-- `.tm-board` with 24px side padding and horizontal columns.
+- `.tm-board` with 24px side padding and four fluid columns. Each column keeps
+  a 260px minimum and the board scrolls horizontally when the window is too
+  narrow for all four.
 - `.tm-col__head` uses dot, label, count.
 - `.tm-card` carries task title, ID, repo metadata, and a short evidence strip.
 
@@ -538,7 +540,10 @@ Layout:
 
 - Header: `.tm-detail__head`, title, IDs, action cluster.
 - Tabs: `.tm-tabs`, `.tm-tab`.
-- Body: `.tm-overview` with primary column `1.55fr` and secondary column `1fr`.
+- Body: `.tm-overview` is centered and capped at 1180px, with a `1.55fr`
+  primary work column and a `1fr` context column.
+- The two-column gutter is 16px. At narrower window widths the columns stack
+  without changing their internal hierarchy.
 - Panels: `.tm-panel`, 16px gaps.
 
 Hierarchy:
@@ -553,6 +558,35 @@ Rules:
 - Keep action labels direct: Start, Continue, Request review, Draft PR, Merge.
 - Provider terminology belongs in panels, not top-level headers, unless the user
   is in a debug/evidence tab.
+
+### Action Required / Approval
+
+Purpose: let the user authorize the smallest safe scope without reading raw
+provider protocol data.
+
+Hierarchy:
+
+1. Waiting dot and approval type.
+2. Effective command.
+3. Optional one-line persistence choice.
+4. Deny, allow once, and session/always-allow actions.
+
+Rules:
+
+- The card shell stays neutral; `--state-waiting` appears only in the status dot.
+- The effective command appears once. Do not repeat it in scope, policy, parsed
+  action, or provider-detail sections.
+- `Allow once` approves only the current request. `Allow for session` is the
+  default persistent action for the current session.
+- When the provider offers a matching-command rule, expose it as the single
+  checkbox `Always allow matching commands`; checking it changes the persistent
+  action to `Always allow`.
+- `Deny` rejects the request. Command approval does not expose the separate
+  stop-turn action.
+- Provider rationale, source session, request ID, shell wrapper, absolute
+  working directory, parsed actions, and raw JSON stay out of the command
+  approval surface. Policy warnings remain visible when they remove approval
+  choices.
 
 ### PR / CI Status
 

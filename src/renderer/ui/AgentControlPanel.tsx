@@ -52,6 +52,12 @@ export function AgentControlPanel({
     run.status === 'LOST' ||
     run.recoveryState === 'REQUIRES_USER_ACTION' ||
     run.recoveryState === 'UNRECOVERABLE';
+  const hasAvailableControls =
+    isRunning || canFollowUp || canContinue || canRetry || recoveryVisible || staleInteractions.length > 0;
+
+  if (!hasAvailableControls) {
+    return null;
+  }
 
   const submit = async () => {
     if (!mode) {

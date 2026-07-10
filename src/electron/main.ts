@@ -32,7 +32,7 @@ import type {
 } from '../shared/contracts';
 import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
-import { getMainWindowChromeOptions } from './windowChrome';
+import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
 
 let mainWindow: BrowserWindow | undefined;
@@ -43,6 +43,15 @@ let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
 
 const appId = 'dev.taskmonki.desktop';
+
+function syncWindowChrome(window: BrowserWindow): void {
+  if (process.platform !== 'darwin' || window.isDestroyed()) {
+    return;
+  }
+  window.setWindowButtonPosition(
+    getMacTrafficLightPosition(window.webContents.getZoomFactor())
+  );
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -60,11 +69,21 @@ function createWindow(): void {
       sandbox: true
     }
   });
+  const createdWindow = mainWindow;
+
+  createdWindow.webContents.on('did-finish-load', () => {
+    syncWindowChrome(createdWindow);
+  });
+  createdWindow.webContents.on('zoom-changed', () => {
+    setTimeout(() => {
+      syncWindowChrome(createdWindow);
+    }, 0);
+  });
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+    void createdWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../../dist-renderer/index.html'));
+    void createdWindow.loadFile(path.join(__dirname, '../../dist-renderer/index.html'));
   }
 }
 
@@ -84,6 +103,12 @@ function configureMacDockIcon(): void {
 }
 
 function installIpcHandlers(): void {
+  ipcMain.on('windowChrome:sync', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (window) {
+      syncWindowChrome(window);
+    }
+  });
   ipcMain.handle('repository:defaultPath', () => service.getDefaultRepositoryPath());
   ipcMain.handle('repository:chooseFolder', async () => {
     const options: OpenDialogOptions = {

@@ -18,14 +18,10 @@ describe('ReviewPanel', () => {
           updatedAt: '2026-07-07T10:00:00.000Z'
         }}
         reviewRun={runFixture({ id: 'review-run', mode: 'REVIEW', status: 'RUNNING' })}
-        sourceRun={runFixture({ id: 'source-run' })}
         gitSnapshot={gitSnapshotFixture()}
         reviewActivity={{ label: 'Reading src/renderer/ui/TaskDetail.tsx.' }}
         actionBusy={false}
         reviewPending={false}
-        actionsPaused
-        actionsPausedReason="review-running"
-        onRunReview={() => {}}
         onStopReview={() => {}}
       />
     );
@@ -37,7 +33,7 @@ describe('ReviewPanel', () => {
     expect(html).toContain('Stop');
   });
 
-  it('renders stale review output as context with a quiet rerun utility', () => {
+  it('renders stale review output as context without duplicating the next action', () => {
     const html = renderToStaticMarkup(
       <ReviewPanel
         reviewGate={{
@@ -62,22 +58,18 @@ describe('ReviewPanel', () => {
             ]
           }
         }}
-        sourceRun={runFixture({ id: 'source-run' })}
         gitSnapshot={gitSnapshotFixture()}
         actionBusy={false}
         reviewPending={false}
-        actionsPaused={false}
-        onRunReview={() => {}}
         onStopReview={() => {}}
       />
     );
 
-    expect(html).toContain('Previous review found a blocker.');
-    expect(html).toContain('Previous review output is shown for context only.');
+    expect(html).toContain('Reviewed diff no longer matches the worktree.');
     expect(html).toContain('Reviewed diff');
     expect(html).toContain('feedface');
     expect(html).toContain('Request can hang');
-    expect(html).toContain('Run review again');
+    expect(html).not.toContain('Run review again');
   });
 });
 

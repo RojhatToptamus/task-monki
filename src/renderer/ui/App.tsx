@@ -114,6 +114,7 @@ export function App() {
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const windowChromePlatform = resolveWindowChromePlatform();
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
   const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
@@ -190,6 +191,35 @@ export function App() {
     media.addEventListener('change', onChange);
     return () => media.removeEventListener('change', onChange);
   }, []);
+
+  useEffect(() => {
+    if (windowChromePlatform !== 'macos') {
+      return;
+    }
+
+    let pendingFrame: number | undefined;
+    const syncWindowChrome = () => {
+      if (pendingFrame !== undefined) {
+        window.cancelAnimationFrame(pendingFrame);
+      }
+      pendingFrame = window.requestAnimationFrame(() => {
+        pendingFrame = undefined;
+        window.taskManagerShell?.syncWindowChrome();
+      });
+    };
+
+    syncWindowChrome();
+    window.addEventListener('resize', syncWindowChrome);
+    window.visualViewport?.addEventListener('resize', syncWindowChrome);
+
+    return () => {
+      window.removeEventListener('resize', syncWindowChrome);
+      window.visualViewport?.removeEventListener('resize', syncWindowChrome);
+      if (pendingFrame !== undefined) {
+        window.cancelAnimationFrame(pendingFrame);
+      }
+    };
+  }, [windowChromePlatform]);
 
   useEffect(() => {
     let canceled = false;
@@ -810,7 +840,6 @@ export function App() {
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
-  const windowChromePlatform = resolveWindowChromePlatform();
 
   return (
     <div

@@ -277,7 +277,7 @@ function itemForEvent(
         event,
         'run',
         'Agent',
-        'Agent needs input',
+        'Needs input',
         evidence('Respond before the run can continue.', evidenceRows(interactionDetail(payload))),
         'action'
       );
@@ -394,7 +394,7 @@ function runCompletedItem(
           event,
           'review',
           'Review',
-          'Review passed',
+          'Passed',
           undefined,
           'success'
         );
@@ -403,7 +403,7 @@ function runCompletedItem(
           event,
           'review',
           'Review',
-          'Review requested changes',
+          'Requested changes',
           undefined,
           'action'
         );
@@ -412,7 +412,7 @@ function runCompletedItem(
           event,
           'review',
           'Review',
-          'Review inconclusive',
+          'Inconclusive',
           undefined,
           'action'
         );
@@ -421,7 +421,7 @@ function runCompletedItem(
           event,
           'review',
           'Review',
-          'Review completed',
+          'Completed',
           undefined,
           'success'
         );
@@ -958,12 +958,9 @@ function currentStaleReviewItem(task: Task): TaskActivityItem | undefined {
     id: `codex-review-stale:${review.runId ?? task.id}:${at}`,
     at,
     actor: 'Task Monki',
-    title: 'Review is stale',
+    title: 'Review became stale',
     tone: 'action',
     category: 'review',
-    evidence: evidence('Run a fresh review before treating the review result as current.', [
-      { label: 'Reason', value: 'The diff changed after the last review.' }
-    ]),
     provenance: {
       runId: review.runId,
       artifactId: review.finalArtifactId

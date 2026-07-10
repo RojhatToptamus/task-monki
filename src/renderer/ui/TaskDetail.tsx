@@ -804,14 +804,10 @@ export function TaskDetail(props: TaskDetailProps) {
                   <ReviewPanel
                     reviewGate={reviewGate}
                     reviewRun={reviewRun}
-                    sourceRun={reviewSourceRun}
                     gitSnapshot={gitSnapshot}
                     reviewActivity={reviewActivity}
                     actionBusy={reviewActionBusy}
                     reviewPending={reviewPending}
-                    actionsPaused={reviewActionsPaused}
-                    actionsPausedReason={reviewActionsPausedReason}
-                    onRunReview={(sourceRunId) => void runReview(sourceRunId)}
                     onStopReview={(reviewRunId) => void stopReview(reviewRunId)}
                   />
                 ) : null}
@@ -847,7 +843,8 @@ export function TaskDetail(props: TaskDetailProps) {
               />
             </div>
 
-            {/* DECISION RAIL — one Next action, then delivery, then timeline. */}
+            {/* CONTEXT RAIL — delivery state and history stay secondary to the
+                current decision and the work stream. */}
             <div className="tm-overview__col">
               {reviewPhaseVisible ? (
                 <NextActionPanel
