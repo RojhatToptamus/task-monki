@@ -332,6 +332,8 @@ export interface PreviewOciObjectIdentity {
   labelsDigest: string;
   imageReference?: string;
   imageId?: string;
+  scope?: 'generation' | 'preview';
+  retainedForReset?: boolean;
   publishedPorts?: PreviewOciPublishedPort[];
 }
 
@@ -390,6 +392,7 @@ export interface PreviewNodeAttemptRecord {
 
 export interface ResolvePreviewRequest {
   taskId: string;
+  scenarioId?: string;
 }
 
 export type ResolvePreviewResult =
@@ -404,11 +407,19 @@ export interface ApprovePreviewPlanRequest {
 
 export interface StartPreviewRequest {
   taskId: string;
+  scenarioId?: string;
 }
 
 export interface StopPreviewRequest {
   taskId: string;
   generationId: string;
+}
+
+export interface ResetPreviewDataRequest {
+  taskId: string;
+  generationId: string;
+  resourceId: string;
+  scenarioId: string;
 }
 
 export interface OpenPreviewRequest {

@@ -389,6 +389,7 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('preview-active-approval-required', 'preview', 'Active preview needs new approval', 'The current preview remains actionable while a changed plan awaits approval.', ['preview:READY', 'replacement:APPROVAL_REQUIRED']),
   scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
   scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
+  scenario('preview-oci-ready', 'preview', 'OCI preview ready', 'PostgreSQL and Redis are ready after the selected migration and seed scenario.', ['preview:READY', 'resources:POSTGRES_REDIS']),
   scenario('preview-replacing', 'preview', 'Preview replacing', 'The active preview stays routed while a candidate waits for readiness.', ['preview:REPLACING']),
   scenario('preview-replacement-failed', 'preview', 'Preview replacement failed', 'A failed candidate leaves the active preview available.', ['preview:READY', 'replacement:FAILED']),
   scenario('preview-failed', 'preview', 'Preview failed', 'A preview job failed with retained bounded logs.', ['preview:FAILED']),
@@ -739,6 +740,7 @@ async function seedScenario(
     case 'preview-active-approval-required':
     case 'preview-preparing':
     case 'preview-ready':
+    case 'preview-oci-ready':
     case 'preview-replacing':
     case 'preview-replacement-failed':
     case 'preview-failed':
@@ -836,6 +838,7 @@ async function createPreviewScenario(
 ): Promise<SeededTaskState> {
   const state = await createWorktreeState(ctx, definition, 'clean');
   if (definition.slug === 'preview-missing-recipe') return state;
+  const ociReady = definition.slug === 'preview-oci-ready';
   const now = new Date().toISOString();
   const plan = await ctx.store.savePreviewPlan({
     id: `seed-plan-${definition.slug}`,
@@ -861,17 +864,53 @@ async function createPreviewScenario(
           env: {},
           role: 'generic',
           retrySafe: false
-        }
+        },
+        ...(ociReady ? [
+          {
+            id: 'migrate', label: 'Migrate database', cwd: '.',
+            command: ['node', 'scripts/migrate.mjs'],
+            needs: { database: 'ready' as const },
+            env: { DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' } },
+            role: 'migration' as const, retrySafe: false
+          },
+          {
+            id: 'seed', label: 'Seed development data', cwd: '.',
+            command: ['node', 'scripts/seed.mjs'],
+            needs: { migrate: 'succeeded' as const, database: 'ready' as const, cache: 'ready' as const },
+            env: {
+              DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' },
+              REDIS_URL: { type: 'redis-url' as const, resource: 'cache' }
+            },
+            role: 'seed' as const, retrySafe: true
+          }
+        ] : [])
       ],
-      resources: [],
+      resources: ociReady ? [
+        {
+          id: 'database', label: 'PostgreSQL', type: 'postgres' as const,
+          image: 'postgres:17-alpine', database: 'app', scope: 'preview' as const,
+          limits: { cpus: 1, memoryMb: 256, diskMb: 1024, pids: 128 }
+        },
+        {
+          id: 'cache', label: 'Redis', type: 'redis' as const,
+          image: 'redis:7-alpine', scope: 'generation' as const,
+          limits: { cpus: 0.5, memoryMb: 128, diskMb: 256, pids: 64 }
+        }
+      ] : [],
       services: [
         {
           id: 'web',
           label: 'Start web application',
           cwd: '.',
           command: ['node', 'server.mjs'],
-          needs: { prepare: 'succeeded' },
-          env: { NODE_ENV: 'development' },
+          needs: ociReady
+            ? { prepare: 'succeeded' as const, seed: 'succeeded' as const, database: 'ready' as const, cache: 'ready' as const }
+            : { prepare: 'succeeded' as const },
+          env: ociReady ? {
+            NODE_ENV: 'development',
+            DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' },
+            REDIS_URL: { type: 'redis-url' as const, resource: 'cache' }
+          } : { NODE_ENV: 'development' },
           ports: { http: { env: 'PORT' } },
           ready: { type: 'http', port: 'http', path: '/health/ready', timeoutSeconds: 30 },
           critical: true,
@@ -880,8 +919,10 @@ async function createPreviewScenario(
       ],
       workers: [],
       routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
-      scenarios: [{ id: 'default', jobs: [], resources: [] }],
-      selectedScenarioId: 'default'
+      scenarios: ociReady
+        ? [{ id: 'full', label: 'Full sample data', jobs: ['migrate', 'seed'], resources: ['database', 'cache'] }]
+        : [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: ociReady ? 'full' : 'default'
     },
     warnings: [
       'Native preview commands run as your local user and are not sandboxed.',
@@ -1048,7 +1089,7 @@ async function createPreviewScenario(
 
 function previewStateForSeed(slug: string): PreviewGenerationState {
   if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
-  if (['preview-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
+  if (['preview-ready', 'preview-oci-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
   if (slug === 'preview-failed') return 'FAILED';
   if (slug === 'preview-stopped') return 'STOPPED';
   if (slug === 'preview-recovery-required') return 'RECOVERY_REQUIRED';

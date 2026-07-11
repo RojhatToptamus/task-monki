@@ -135,10 +135,10 @@ mode or follow-up behavior.
 Local previews are a separate Task Monki-owned domain. They are not Codex
 turns, agent run modes, workflow transitions, or provider evidence. The
 renderer can only call typed preview operations: resolve, approve, start, open,
-stop, and read a recorded log artifact.
+stop, reset owned data, and read a recorded log artifact.
 
-The native preview runtime supports macOS task worktrees with bounded jobs,
-services, workers, and routes. Task Monki:
+The preview runtime supports macOS task worktrees with bounded native jobs,
+services, workers, routes, and managed OCI resources. Task Monki:
 
 - reads only a bounded, regular `.taskmonki/preview.yaml` contained by the
   verified worktree, then parses it with the restricted v1 schema;
@@ -151,6 +151,19 @@ services, workers, and routes. Task Monki:
   manifest, with production entry/path/aggregate/manifest limits, leaving the
   task worktree editable and unchanged;
 - persists generation/resource intent before launcher or filesystem effects;
+- probes a Docker-compatible engine through one explicit context, binds approval
+  and every OCI record to its context/endpoint/engine identity, and treats an
+  engine retarget as an ownership mismatch;
+- supports typed PostgreSQL and Redis plus a constrained generic OCI resource;
+  each generation receives a labeled network, exact container/volume IDs,
+  generated credentials, and dynamic loopback-only published ports;
+- passes generated database/cache URLs only to nodes with explicit ready
+  dependencies, runs selected migration/seed scenarios in dependency order,
+  and never automatically retries a migration whose completion is ambiguous;
+- keeps generation data isolated by default, can retain an explicitly
+  preview-scoped volume across generation replacement, and implements reset by
+  retaining non-target data, deleting only the exact selected owned volume,
+  then running a newly approved generation of the selected scenario;
 - schedules the declared dependency DAG with at most four concurrent native
   effects, so a shared monorepo install runs once while independent branches
   can progress in parallel;
@@ -175,19 +188,20 @@ services, workers, and routes. Task Monki:
   generation;
 - preserves the stable gateway authority upstream and rewrites absolute
   target-origin redirects back to that authority;
-- stores compact preview records in schema 11, retains at most 20 terminal
+- stores compact preview records in schema 12, retains at most 20 terminal
   generations per task and 20 completed argv probe attempts per live node,
   and keeps each stdout/stderr artifact bounded;
 - tails only the selected artifact through bounded byte-range reads rather
   than refreshing the full task snapshot for each log update;
-- detaches routes first and stops/removes only exact verified processes and
-  marker-owned workspaces; ambiguous cleanup remains `CLEANUP_INCOMPLETE`.
+- detaches routes first and stops/removes only exact verified processes,
+  engine-bound labeled OCI IDs, and marker-owned workspaces; ambiguous cleanup
+  remains `CLEANUP_INCOMPLETE`.
 
 Graceful app quit stops managed previews before the Codex provider. Restart
 reconciliation does not adopt native services or workers: it stops every exact
-verified owner and records `CLEANUP_INCOMPLETE` for ambiguous identities
-without signaling them. Preview events do not update `Task.workflowPhase` or
-the agent projection.
+verified native or OCI owner and records `CLEANUP_INCOMPLETE` for ambiguous
+identities without signaling or deleting them. Preview events do not update
+`Task.workflowPhase` or the agent projection.
 
 ## Settings
 

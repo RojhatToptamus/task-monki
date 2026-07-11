@@ -636,6 +636,152 @@ routes:
     expect(snapshot.tasks.some((candidate) => candidate.id === task.id)).toBe(false);
     expect(snapshot.previewResources.some((resource) => resource.taskId === task.id)).toBe(false);
   }, 20_000);
+
+  it.runIf(process.env.TASK_MONKI_OCI_INTEGRATION === '1')(
+    'runs a real frontend, API, worker, PostgreSQL, Redis, migration, and seed graph',
+    async () => {
+      const scenario = await createTaskMonkiScenario({
+        name: 'task-monki-oci-stack',
+        previewEnabled: true,
+        previewOciExecutablePath: process.env.TASK_MONKI_OCI_BIN || 'docker',
+        previewOciContextName: process.env.TASK_MONKI_OCI_CONTEXT || 'desktop-linux'
+      });
+      scenarios.push(scenario);
+      await fs.mkdir(path.join(scenario.repositoryPath, '.taskmonki'), { recursive: true });
+      await fs.mkdir(path.join(scenario.repositoryPath, 'scripts'), { recursive: true });
+      await fs.writeFile(path.join(scenario.repositoryPath, 'scripts', 'connect.mjs'), `
+import net from 'node:net';
+export function connect(value) {
+  const url = new URL(value);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(url.port), url.hostname);
+    socket.setTimeout(5000);
+    socket.once('connect', () => { socket.destroy(); resolve(); });
+    socket.once('timeout', () => { socket.destroy(); reject(new Error('dependency timeout')); });
+    socket.once('error', reject);
+  });
+}
+`);
+      await fs.writeFile(path.join(scenario.repositoryPath, 'scripts', 'data-job.mjs'), `
+import fs from 'node:fs/promises'; import { connect } from './connect.mjs';
+await Promise.all([connect(process.env.DATABASE_URL), connect(process.env.REDIS_URL)]);
+const role = process.argv[2];
+const file = '.scenario-order';
+const previous = await fs.readFile(file, 'utf8').catch(() => '');
+if (role === 'seed' && previous !== 'migration\\n') throw new Error('seed ran before migration');
+await fs.appendFile(file, role + '\\n');
+`);
+      await fs.writeFile(path.join(scenario.repositoryPath, 'api.mjs'), `
+import http from 'node:http'; import { connect } from './scripts/connect.mjs';
+await Promise.all([connect(process.env.DATABASE_URL), connect(process.env.REDIS_URL)]);
+http.createServer((request, response) => {
+  response.writeHead(request.url === '/ready' ? 204 : 200).end(request.url === '/ready' ? undefined : 'api');
+}).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+      await fs.writeFile(path.join(scenario.repositoryPath, 'worker.mjs'), `
+import { connect } from './scripts/connect.mjs';
+await Promise.all([connect(process.env.DATABASE_URL), connect(process.env.REDIS_URL)]);
+setInterval(() => {}, 1000);
+`);
+      await fs.writeFile(path.join(scenario.repositoryPath, 'frontend.mjs'), `
+import http from 'node:http';
+const ready = await fetch(process.env.API_ORIGIN + '/ready');
+if (!ready.ok) throw new Error('API is not ready');
+http.createServer((request, response) => {
+  if (request.url === '/ready') return response.writeHead(204).end();
+  response.end('frontend');
+}).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+      await fs.writeFile(path.join(scenario.repositoryPath, '.taskmonki', 'preview.yaml'), `version: 1
+resources:
+  database:
+    type: postgres
+    limits: { cpus: 1, memoryMb: 256, diskMb: 512, pids: 128 }
+  cache:
+    type: redis
+    limits: { cpus: 0.5, memoryMb: 128, diskMb: 256, pids: 64 }
+jobs:
+  migrate:
+    command: [node, scripts/data-job.mjs, migration]
+    role: migration
+    retrySafe: false
+    needs: { database: ready, cache: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+      REDIS_URL: { type: redis-url, resource: cache }
+  seed:
+    command: [node, scripts/data-job.mjs, seed]
+    role: seed
+    retrySafe: true
+    needs: { migrate: succeeded, database: ready, cache: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+      REDIS_URL: { type: redis-url, resource: cache }
+services:
+  api:
+    command: [node, api.mjs]
+    needs: { seed: succeeded, database: ready, cache: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+      REDIS_URL: { type: redis-url, resource: cache }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready, timeoutSeconds: 10 }
+  frontend:
+    command: [node, frontend.mjs]
+    needs: { api: ready }
+    env:
+      API_ORIGIN: { type: service-origin, service: api, port: http }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready, timeoutSeconds: 10 }
+workers:
+  worker:
+    command: [node, worker.mjs]
+    needs: { seed: succeeded, database: ready, cache: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+      REDIS_URL: { type: redis-url, resource: cache }
+routes:
+  app: { service: frontend, port: http, primary: true }
+scenarios:
+  full: { jobs: [migrate, seed], resources: [database, cache] }
+defaultScenario: full
+`);
+      await git(scenario.repositoryPath, ['add', '.']);
+      await git(scenario.repositoryPath, ['commit', '-m', 'Add OCI preview stack fixture']);
+      const task = await scenario.createTask({ title: 'Full OCI stack' });
+      await scenario.service.prepareWorktree({ taskId: task.id });
+      const resolved = await scenario.service.resolvePreview({ taskId: task.id, scenarioId: 'full' });
+      if (resolved.status !== 'PLAN') throw new Error('Expected OCI preview plan.');
+      await scenario.service.approvePreviewPlan({
+        taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+      });
+      let ready: PreviewGenerationRecord;
+      try {
+        ready = await scenario.service.startPreview({ taskId: task.id, scenarioId: 'full' });
+      } catch (error) {
+        const attempt = (await scenario.store.snapshot()).previewNodeAttempts.find(
+          (candidate) => candidate.taskId === task.id && candidate.nodeId === 'migrate'
+        );
+        const stderr = attempt
+          ? await scenario.store.readArtifactRange(attempt.stderrArtifactId, 0, 64 * 1024)
+          : undefined;
+        throw new Error(`OCI stack startup failed: ${stderr?.chunk || String(error)}`, { cause: error });
+      }
+      expect(ready.state).toBe('READY');
+      await expect(requestRoute(
+        ready.routes[0].gatewayPort, ready.routes[0].hostname, '/'
+      )).resolves.toMatchObject({ status: 200, body: 'frontend' });
+      const attempts = (await scenario.store.snapshot()).previewNodeAttempts;
+      expect(attempts.find((attempt) => attempt.nodeId === 'migrate')?.state).toBe('SUCCEEDED');
+      expect(attempts.find((attempt) => attempt.nodeId === 'seed')?.state).toBe('SUCCEEDED');
+      await scenario.service.stopPreview({ taskId: task.id, generationId: ready.id });
+      const resources = (await scenario.store.snapshot()).previewResources.filter(
+        (resource) => resource.taskId === task.id && resource.adapterKind !== 'NATIVE_PROCESS'
+      );
+      expect(resources.every((resource) => resource.state === 'STOPPED')).toBe(true);
+    },
+    180_000
+  );
 });
 
 type ServiceMode =

@@ -58,8 +58,8 @@ decisions or verified local evidence.
 ## Local preview
 
 Preview is independent of task workflow phase and provider-run state. The
-Preview card shows the approved execution authority, active/candidate status,
-stable routes, and recorded native-node evidence.
+Preview card shows the approved execution authority, selected data scenario,
+active/candidate status, stable routes, and recorded native/OCI evidence.
 
 When an active preview exists, Start becomes Replace. During replacement the
 card keeps Open current available and Cancel replacement targets only the
@@ -72,6 +72,14 @@ logs remain selectable without replacing the active preview's workflow state.
 The log viewer selects one node attempt and one stream at a time. It tails that
 artifact through bounded range reads while open and stops polling when closed;
 normal task snapshot refreshes are not a log transport.
+
+Recipes may declare managed PostgreSQL, Redis, or constrained generic OCI
+resources. Migration and seed jobs belong to explicit scenarios; choosing a
+different scenario changes the execution digest and requires approval. Reset
+data is an explicit destructive action on one recorded owned volume: Task Monki
+retains other data volumes, replaces the selected resource with a new identity,
+and reruns only the approved scenario. Attached dependencies and user secrets
+are not part of this phase.
 
 ## Activity Timeline
 

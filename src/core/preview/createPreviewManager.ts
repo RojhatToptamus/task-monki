@@ -16,6 +16,7 @@ import { PreviewOpenService, type PreviewUrlHost } from './runtime/PreviewOpenSe
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
 import { MacPreviewListenerInspector } from './runtime/PreviewListenerInspector';
 import { OciEngineAdapter } from './runtime/OciEngineAdapter';
+import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
@@ -46,13 +47,15 @@ export function createPreviewManager(
     env: options.ociEnv
   });
   const gateway = new PreviewGateway();
+  const ociRuntime = new OciResourceRuntime(store, ociEngine, new PreviewReadinessService());
   const graph = new PreviewGraph(
     store,
     new NativeJobRunner(store, launcher),
     nativeRuntime,
     new PreviewReadinessService(),
     new PreviewPortAllocator(),
-    new MacPreviewListenerInspector()
+    new MacPreviewListenerInspector(),
+    ociRuntime
   );
   return new PreviewManager(
     store,
@@ -64,7 +67,8 @@ export function createPreviewManager(
     graph,
     gateway,
     nativeRuntime,
-    new PreviewReconciler(store, gateway, nativeRuntime, source),
-    new PreviewOpenService(store, options.openHost)
+    new PreviewReconciler(store, gateway, nativeRuntime, source, ociRuntime),
+    new PreviewOpenService(store, options.openHost),
+    ociRuntime
   );
 }

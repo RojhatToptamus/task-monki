@@ -24,17 +24,19 @@ export function PreviewPanel(props: {
   approvals: PreviewApprovalRecord[];
   generations: PreviewGenerationRecord[];
   attempts: PreviewNodeAttemptRecord[];
-  onResolve(taskId: string): Promise<void>;
+  onResolve(taskId: string, scenarioId?: string): Promise<void>;
   onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
-  onStart(taskId: string): Promise<void>;
+  onStart(taskId: string, scenarioId?: string): Promise<void>;
   onOpen(taskId: string, generationId: string, routeId: string): Promise<void>;
   onStop(taskId: string, generationId: string): Promise<void>;
+  onResetData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
   onReadLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<ReadPreviewLogResult>;
 }) {
   const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
   const [logs, setLogs] = useState<string>();
   const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
   const [selectedStream, setSelectedStream] = useState<'stdout' | 'stderr'>('stdout');
+  const [resetBusy, setResetBusy] = useState<string>();
   const view = buildPreviewViewModel(props);
   const tone = view.tone === 'warning' ? 'warning' : view.tone === 'neutral' ? 'neutral' : view.tone;
 
@@ -46,7 +48,9 @@ export function PreviewPanel(props: {
       if (action === 'APPROVE' && view.plan) {
         await props.onApprove(props.task.id, view.plan.id, view.plan.executionDigest);
       }
-      if (action === 'START') await props.onStart(props.task.id);
+      if (action === 'START') {
+        await props.onStart(props.task.id, view.plan?.executionPlan.selectedScenarioId);
+      }
       const openGeneration = selectPreviewActionGeneration(view, 'OPEN');
       if (action === 'OPEN' && openGeneration) {
         const route = openGeneration.routes.find((candidate) => candidate.state === 'ATTACHED');
@@ -116,6 +120,19 @@ export function PreviewPanel(props: {
     setLogs('');
   };
 
+  const resetData = async (resourceId: string) => {
+    const generation = view.activeGeneration ?? view.generation;
+    const scenarioId = view.plan?.executionPlan.selectedScenarioId;
+    if (!generation || !scenarioId || resetBusy) return;
+    if (!window.confirm(`Reset owned preview data for ${resourceId} and rerun scenario ${scenarioId}?`)) return;
+    setResetBusy(resourceId);
+    try {
+      await props.onResetData(props.task.id, generation.id, resourceId, scenarioId);
+    } finally {
+      setResetBusy(undefined);
+    }
+  };
+
   return (
     <section className="tm-panel tm-preview" aria-label="Preview">
       <div className="tm-preview__head">
@@ -123,6 +140,21 @@ export function PreviewPanel(props: {
         <StatusChip label="Status" value={view.status} tone={tone} />
       </div>
       <p className="tm-panel__lead">{view.summary}</p>
+
+      {view.plan && view.plan.executionPlan.scenarios.length > 1 ? (
+        <label className="tm-field">
+          <span>Data scenario</span>
+          <select
+            value={view.plan.executionPlan.selectedScenarioId}
+            disabled={busy.size > 0 || Boolean(resetBusy)}
+            onChange={(event) => void props.onResolve(props.task.id, event.target.value)}
+          >
+            {view.plan.executionPlan.scenarios.map((scenario) => (
+              <option key={scenario.id} value={scenario.id}>{scenario.label ?? scenario.id}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
 
       {view.plan ? <PreviewPlanSummary plan={view.plan} expanded={!view.approval} /> : null}
 
@@ -147,6 +179,19 @@ export function PreviewPanel(props: {
             View logs
           </button>
         ) : null}
+        {(view.activeGeneration ?? view.generation)?.state === 'READY' && view.plan ? view.plan.executionPlan.resources
+          .filter((resource) => resource.type !== 'oci' || resource.dataMount)
+          .map((resource) => (
+            <button
+              key={`reset-${resource.id}`}
+              type="button"
+              className="outline-button"
+              disabled={Boolean(resetBusy) || busy.size > 0}
+              onClick={() => void resetData(resource.id)}
+            >
+              {resetBusy === resource.id ? 'Resetting…' : `Reset ${resource.id} data`}
+            </button>
+          )) : null}
       </div>
 
       {logs !== undefined ? (

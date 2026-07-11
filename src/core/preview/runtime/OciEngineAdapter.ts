@@ -43,6 +43,11 @@ export interface OciEngineAdapterOptions {
   execute?: OciCommandExecutor;
 }
 
+export interface OciRunOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
 export class OciEngineAdapter {
   private readonly executable: string;
   private readonly cwd: string;
@@ -145,12 +150,20 @@ export class OciEngineAdapter {
     return ['--context', validateContextName(contextName), ...argv];
   }
 
-  run(argv: string[], env: NodeJS.ProcessEnv = this.env): Promise<OciCommandResult> {
+  environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+    return { ...this.env, ...overrides };
+  }
+
+  run(
+    argv: string[],
+    env: NodeJS.ProcessEnv = this.env,
+    options: OciRunOptions = {}
+  ): Promise<OciCommandResult> {
     return this.execute(this.executable, argv, {
       cwd: this.cwd,
       env,
-      timeoutMs: OCI_COMMAND_TIMEOUT_MS,
-      maxOutputBytes: MAX_OCI_COMMAND_OUTPUT_BYTES
+      timeoutMs: options.timeoutMs ?? OCI_COMMAND_TIMEOUT_MS,
+      maxOutputBytes: options.maxOutputBytes ?? MAX_OCI_COMMAND_OUTPUT_BYTES
     });
   }
 

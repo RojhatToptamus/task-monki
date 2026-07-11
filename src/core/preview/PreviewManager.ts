@@ -19,11 +19,13 @@ import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
-import { PreviewRecipeLoader } from './PreviewRecipeLoader';
+import { PreviewRecipeLoader, selectPreviewScenario } from './PreviewRecipeLoader';
 import { PreviewReconciler } from './PreviewReconciler';
 import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService } from './runtime/PreviewOpenService';
+import { OciResourceRuntime } from './runtime/OciResourceRuntime';
+import { PreviewJobCompletionAmbiguousError } from './runtime/NativeJobRunner';
 
 export interface PreviewTaskContext {
   task: Task;
@@ -57,7 +59,8 @@ export class PreviewManager {
     private readonly gateway: PreviewGateway,
     private readonly nativeRuntime: NativeServiceRuntime,
     private readonly reconciler: PreviewReconciler,
-    private readonly opener: PreviewOpenService
+    private readonly opener: PreviewOpenService,
+    private readonly ociRuntime?: OciResourceRuntime
   ) {}
 
   async init(
@@ -70,10 +73,13 @@ export class PreviewManager {
     return listening;
   }
 
-  async resolve(context: PreviewTaskContext): Promise<ResolvePreviewResult> {
+  async resolve(context: PreviewTaskContext, scenarioId?: string): Promise<ResolvePreviewResult> {
     const loaded = await this.recipeLoader.load(context.worktree.worktreePath);
     if (loaded.status === 'MISSING') return { status: 'UNAVAILABLE', reason: loaded.reason };
-    const candidate = await this.planResolver.resolve({ ...context, parsed: loaded.parsed });
+    const parsed = scenarioId
+      ? selectPreviewScenario(loaded.parsed, scenarioId)
+      : loaded.parsed;
+    const candidate = await this.planResolver.resolve({ ...context, parsed });
     const latest = await this.store.getLatestPreviewPlan(context.task.id);
     const plan =
       latest &&
@@ -98,8 +104,8 @@ export class PreviewManager {
     context: PreviewTaskContext;
     gitSnapshot: GitSnapshotRecord;
     reobserveGit(): Promise<GitSnapshotRecord>;
-  }): Promise<PreparedPreviewGeneration> {
-    const resolved = await this.resolve(input.context);
+  }, scenarioId?: string): Promise<PreparedPreviewGeneration> {
+    const resolved = await this.resolve(input.context, scenarioId);
     if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
     const approval = await this.approvalPolicy.requireMatching(resolved.plan);
     const sourceHeadSha = input.gitSnapshot.headSha;
@@ -219,6 +225,7 @@ export class PreviewManager {
               return [route.id, `http://${hostname}:${this.requireGatewayPort()}`];
             })
           ),
+          ociEngineIdentity: prepared.plan.ociCapability?.identity,
           signal: controller.signal,
           updateGenerationState: async (state) => {
             generation = await this.saveGeneration({ ...generation, state });
@@ -319,12 +326,13 @@ export class PreviewManager {
         this.live.delete(generation.id);
       } else {
         for (const resource of await this.store.getPreviewResources(generation.id)) {
-          if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
-          if (resource.adapterKind !== 'NATIVE_PROCESS') {
-            cleanupIncomplete = true;
-            continue;
-          }
-          const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
+          if (resource.state === 'STOPPED') continue;
+          if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
+          const result = resource.adapterKind === 'NATIVE_PROCESS'
+            ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
+            : this.ociRuntime
+              ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
+              : 'REFUSED';
           if (result === 'REFUSED') cleanupIncomplete = true;
         }
       }
@@ -385,6 +393,42 @@ export class PreviewManager {
         throw new Error('Task preview cleanup is incomplete; task deletion was refused.');
       }
     }
+    if (await this.ociRuntime?.cleanupTaskResources(taskId) === 'REFUSED') {
+      throw new Error('Task preview OCI cleanup is incomplete; task deletion was refused.');
+    }
+  }
+
+  async resetData(input: {
+    taskId: string;
+    generationId: string;
+    resourceId: string;
+    scenarioId: string;
+  }): Promise<void> {
+    if (!this.ociRuntime) throw new Error('OCI preview resources are unavailable.');
+    const generation = await this.requireGeneration(input.generationId);
+    if (generation.taskId !== input.taskId) {
+      throw new Error('Preview generation was not found for this task.');
+    }
+    const plan = await this.store.getPreviewPlan(generation.planId);
+    if (!plan || plan.executionPlan.selectedScenarioId !== input.scenarioId) {
+      throw new Error('Preview reset scenario does not match the approved generation.');
+    }
+    const scenario = plan.executionPlan.scenarios.find((candidate) => candidate.id === input.scenarioId);
+    const resource = plan.executionPlan.resources.find((candidate) => candidate.id === input.resourceId);
+    if (!scenario?.resources.includes(input.resourceId) || !resource) {
+      throw new Error('Preview reset resource is not part of the approved scenario.');
+    }
+    if (resource.type === 'oci' && !resource.dataMount) {
+      throw new Error('Preview resource has no owned data volume to reset.');
+    }
+    if (!['STOPPED', 'FAILED'].includes(generation.state)) {
+      await this.ociRuntime.prepareDataReset(generation.id);
+      await this.stop(generation.id);
+    }
+    const reset = await this.ociRuntime.resetDataResource(input.taskId, input.resourceId);
+    if (reset === 'REFUSED') {
+      throw new Error(`Preview data reset could not verify ${input.resourceId} ownership.`);
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -399,6 +443,9 @@ export class PreviewManager {
         }
       }
     }
+    if (await this.ociRuntime?.cleanupTaskResources() === 'REFUSED') {
+      failures.push('preview-scoped-oci-resources');
+    }
     await this.gateway.close();
     if (failures.length > 0) {
       throw new Error(
@@ -412,6 +459,10 @@ export class PreviewManager {
     error: unknown
   ): Promise<void> {
     const current = (await this.store.getPreviewGeneration(generation.id)) ?? generation;
+    const nonRetryableMigrationAmbiguity =
+      error instanceof PreviewJobCompletionAmbiguousError &&
+      error.role === 'migration' &&
+      !error.retrySafe;
     this.detachRoutes(current);
     let cleanupIncomplete = false;
     const live = this.live.get(current.id);
@@ -421,12 +472,14 @@ export class PreviewManager {
       this.live.delete(current.id);
     } else {
       for (const resource of await this.store.getPreviewResources(current.id)) {
-        if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
-        if (resource.adapterKind !== 'NATIVE_PROCESS') {
-          cleanupIncomplete = true;
-          continue;
-        }
-        if ((await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)) === 'REFUSED') {
+        if (resource.state === 'STOPPED') continue;
+        if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
+        const result = resource.adapterKind === 'NATIVE_PROCESS'
+          ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
+          : this.ociRuntime
+            ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
+            : 'REFUSED';
+        if (result === 'REFUSED') {
           cleanupIncomplete = true;
         }
       }
@@ -441,7 +494,11 @@ export class PreviewManager {
     await this.saveGeneration({
       ...current,
       routes: current.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
-      state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+      state: cleanupIncomplete
+        ? 'CLEANUP_INCOMPLETE'
+        : nonRetryableMigrationAmbiguity
+          ? 'RECOVERY_REQUIRED'
+          : 'FAILED',
       failureReason: boundedError(error),
       cleanupReason: cleanupIncomplete ? 'Failure cleanup could not verify every resource.' : undefined
     });

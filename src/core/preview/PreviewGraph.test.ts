@@ -25,6 +25,59 @@ describe('PreviewGraph', () => {
     await running.stop();
   });
 
+  it('starts selected OCI resources before migration and seed jobs and resolves generated URLs', async () => {
+    const starts: string[] = [];
+    const jobEnvironments: Record<string, Record<string, string>> = {};
+    const plan = graphPlan({
+      resources: [{
+        id: 'cache', type: 'redis', image: 'redis:7-alpine', scope: 'generation', limits: {}
+      }],
+      jobs: [
+        {
+          ...job('migrate', ['node', 'migrate.mjs'], { cache: 'ready' }),
+          role: 'migration', retrySafe: false,
+          env: { REDIS_URL: { type: 'redis-url', resource: 'cache' } }
+        },
+        {
+          ...job('seed', ['node', 'seed.mjs'], { migrate: 'succeeded' }),
+          role: 'seed', retrySafe: true
+        }
+      ],
+      services: [], workers: [], routes: [],
+      scenarios: [{ id: 'full', jobs: ['migrate', 'seed'], resources: ['cache'] }],
+      selectedScenarioId: 'full'
+    });
+    const graph = new PreviewGraph(
+      {} as never,
+      {
+        async run(input: { node: { id: string }; env: Record<string, string> }) {
+          starts.push(input.node.id);
+          jobEnvironments[input.node.id] = input.env;
+        }
+      } as never,
+      {} as never, {} as never, {} as never, {} as never,
+      {
+        async startGeneration() {
+          return {
+            async startResource(resource: { id: string }) {
+              starts.push(resource.id);
+              return { ports: { redis: 41234 }, redisUrl: 'redis://:generated@127.0.0.1:41234/0' };
+            },
+            async stop() { return 'STOPPED' as const; }
+          };
+        }
+      } as never
+    );
+    const running = await graph.start({
+      taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, ociEngineIdentity: {} as never,
+      async updateGenerationState() {}
+    });
+    expect(starts).toEqual(['cache', 'migrate', 'seed']);
+    expect(jobEnvironments.migrate.REDIS_URL).toBe('redis://:generated@127.0.0.1:41234/0');
+    await running.stop();
+  });
+
   it('fails closed for a cycle even if a malformed plan bypasses recipe validation', async () => {
     const plan = graphPlan({
       jobs: [
@@ -283,14 +336,18 @@ describe('PreviewGraph', () => {
 });
 
 function graphPlan(
-  input: Pick<PreviewExecutionPlan, 'jobs' | 'services' | 'workers' | 'routes'>
+  input: Pick<PreviewExecutionPlan, 'jobs' | 'services' | 'workers' | 'routes'> &
+    Partial<Pick<PreviewExecutionPlan, 'resources' | 'scenarios' | 'selectedScenarioId'>>
 ): PreviewExecutionPlan {
   return {
     version: 1,
-    ...input,
-    resources: [],
-    scenarios: [{ id: 'default', jobs: [], resources: [] }],
-    selectedScenarioId: 'default'
+    jobs: input.jobs,
+    services: input.services,
+    workers: input.workers,
+    routes: input.routes,
+    resources: input.resources ?? [],
+    scenarios: input.scenarios ?? [{ id: 'default', jobs: [], resources: [] }],
+    selectedScenarioId: input.selectedScenarioId ?? 'default'
   };
 }
 

@@ -550,10 +550,10 @@ export function App() {
     }
   };
 
-  const resolvePreview = async (taskId: string) => {
+  const resolvePreview = async (taskId: string, scenarioId?: string) => {
     setError(undefined);
     try {
-      const result = await taskManagerApi.resolvePreview({ taskId });
+      const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
       if (result.status === 'UNAVAILABLE') throw new Error(result.reason);
       await refresh();
     } catch (caught) {
@@ -574,10 +574,10 @@ export function App() {
     }
   };
 
-  const startPreview = async (taskId: string) => {
+  const startPreview = async (taskId: string, scenarioId?: string) => {
     setError(undefined);
     try {
-      await taskManagerApi.startPreview({ taskId });
+      await taskManagerApi.startPreview({ taskId, scenarioId });
       notify('Preview is ready.', 'success');
       await refresh();
     } catch (caught) {
@@ -595,6 +595,24 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not stop preview safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const resetPreviewData = async (
+    taskId: string,
+    generationId: string,
+    resourceId: string,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.resetPreviewData({ taskId, generationId, resourceId, scenarioId });
+      notify('Preview data reset and scenario completed.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not reset preview data safely.');
       await refresh();
       throw caught;
     }
@@ -1110,6 +1128,7 @@ export function App() {
             onStartPreview={startPreview}
             onOpenPreview={openPreview}
             onStopPreview={stopPreview}
+            onResetPreviewData={resetPreviewData}
             onReadPreviewLog={readPreviewLog}
             onTransition={transitionTask}
             onArchive={archiveTask}

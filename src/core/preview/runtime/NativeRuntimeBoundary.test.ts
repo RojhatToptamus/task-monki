@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PreviewNativeProcessIdentity } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
-import { NativeJobRunner } from './NativeJobRunner';
+import { NativeJobRunner, PreviewJobCompletionAmbiguousError } from './NativeJobRunner';
 import type { NativeLaunchInput } from './NativeLauncherHost';
 import { NativeServiceRuntime } from './NativeServiceRuntime';
 
@@ -16,6 +16,45 @@ afterEach(async () => {
 });
 
 describe('native runtime launcher boundary evidence', () => {
+  it('marks a non-retry-safe migration ambiguous instead of treating it as a normal failure', async () => {
+    const fixture = await runtimeFixture();
+    const identity: PreviewNativeProcessIdentity = {
+      receiptPath: path.join(fixture.generationRoot, 'runtime', 'migration.json'),
+      ownershipToken: 'token',
+      commandDigest: 'digest',
+      launcher: { pid: 123, processGroupId: 123, startedAt: 'start', command: 'launcher token' },
+      target: { pid: 124, processGroupId: 124, startedAt: 'start', command: 'node migrate.mjs' }
+    };
+    const launcher = {
+      async launch(input: NativeLaunchInput) {
+        const ownedIdentity = { ...identity, receiptPath: input.receiptPath };
+        await input.persistPrepared(ownedIdentity);
+        await input.persistStarted?.(ownedIdentity);
+        return {
+          identity: ownedIdentity,
+          completion: Promise.reject(new Error('launcher connection lost')),
+          async stop() {}
+        };
+      }
+    };
+    await expect(new NativeJobRunner(fixture.store, launcher as never).run({
+      taskId: fixture.taskId,
+      generationId: fixture.generationId,
+      generationRoot: fixture.generationRoot,
+      sourcePath: fixture.sourcePath,
+      markerDigest: 'marker',
+      node: {
+        id: 'migrate', cwd: '.', command: ['node', 'migrate.mjs'], needs: {}, env: {},
+        role: 'migration', retrySafe: false
+      }
+    })).rejects.toMatchObject({
+      role: 'migration', retrySafe: false
+    } satisfies Partial<PreviewJobCompletionAmbiguousError>);
+    const snapshot = await fixture.store.snapshot();
+    expect(snapshot.previewNodeAttempts[0].state).toBe('RECOVERY_REQUIRED');
+    expect(snapshot.previewResources[0].state).toBe('CLEANUP_INCOMPLETE');
+  });
+
   it.each(['JOB', 'SERVICE'] as const)(
     'makes the %s attempt and resource terminal when failure follows PREPARED persistence',
     async (kind) => {

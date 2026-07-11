@@ -26,6 +26,7 @@ import type {
   ReadArtifactRequest,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ResetPreviewDataRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   RepositoryPreflight,
@@ -176,6 +177,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenPreviewResult>(baseUrl, '/api/preview/open', input),
     readPreviewLog: (input: ReadPreviewLogRequest) =>
       post<ReadPreviewLogResult>(baseUrl, '/api/preview/log/read', input),
+    resetPreviewData: (input: ResetPreviewDataRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

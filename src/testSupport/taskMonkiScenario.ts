@@ -36,6 +36,9 @@ interface ScenarioOptions {
   name?: string;
   ghPath?: string;
   previewEnabled?: boolean;
+  previewOciExecutablePath?: string;
+  previewOciContextName?: string;
+  previewOciEnv?: NodeJS.ProcessEnv;
 }
 
 interface CreateScenarioTaskInput {
@@ -90,7 +93,10 @@ export async function createTaskMonkiScenario(
     previewLauncherPath: path.join(
       process.cwd(),
       'src/core/preview/runtime/native-preview-launcher.mjs'
-    )
+    ),
+    previewOciExecutablePath: options.previewOciExecutablePath,
+    previewOciContextName: options.previewOciContextName,
+    previewOciEnv: options.previewOciEnv
   });
   await service.init();
 

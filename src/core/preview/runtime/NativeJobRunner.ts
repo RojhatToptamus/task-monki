@@ -168,7 +168,12 @@ export class NativeJobRunner {
         cleanupError: (error instanceof Error ? error.message : String(error)).slice(0, 512),
         updatedAt: endedAt
       });
-      throw error;
+      throw new PreviewJobCompletionAmbiguousError(
+        input.node.id,
+        input.node.role,
+        input.node.retrySafe,
+        error
+      );
     } finally {
       if (timeout) clearTimeout(timeout);
       input.signal?.removeEventListener('abort', onAbort);
@@ -215,6 +220,20 @@ export class PreviewJobFailure extends Error {
     readonly resource: PreviewNativeResourceRecord
   ) {
     super(`Preview job ${nodeId} failed with ${receipt.exitCode ?? receipt.signal ?? receipt.state}.`);
+  }
+}
+
+export class PreviewJobCompletionAmbiguousError extends Error {
+  constructor(
+    nodeId: string,
+    readonly role: PreviewJobPlan['role'],
+    readonly retrySafe: boolean,
+    cause: unknown
+  ) {
+    super(
+      `Preview ${role} job ${nodeId} completion is ambiguous; automatic rerun is ${retrySafe ? 'permitted only after verified cleanup' : 'blocked'}.`,
+      { cause }
+    );
   }
 }
 

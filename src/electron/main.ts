@@ -21,6 +21,7 @@ import type {
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   ReadPreviewLogRequest,
+  ResetPreviewDataRequest,
   ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
@@ -247,6 +248,9 @@ function installIpcHandlers(): void {
   );
   ipcMain.handle('preview:log:read', async (_, input: ReadPreviewLogRequest) =>
     service.readPreviewLog(input)
+  );
+  ipcMain.handle('preview:resetData', async (_, input: ResetPreviewDataRequest) =>
+    service.resetPreviewData(input)
   );
 
   ipcMain.handle('task:transition', async (_, input: TransitionTaskRequest) => {

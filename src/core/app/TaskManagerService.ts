@@ -47,6 +47,7 @@ import type {
   PreviewGenerationRecord,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
+  ResetPreviewDataRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
@@ -663,7 +664,7 @@ export class TaskManagerService {
     this.assertPreviewEnabled();
     return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
       const context = await this.requirePreviewContext(input.taskId);
-      const result = await this.previews.resolve(context);
+      const result = await this.previews.resolve(context, input.scenarioId);
       this.events.emit({
         type: 'preview.updated',
         taskId: input.taskId,
@@ -716,7 +717,7 @@ export class TaskManagerService {
         context,
         gitSnapshot,
         reobserveGit: () => this.refreshEvidence({ taskId: input.taskId })
-      });
+      }, input.scenarioId);
     });
     return this.previews.execute(prepared);
   }
@@ -728,6 +729,12 @@ export class TaskManagerService {
       throw new Error('Preview generation was not found for this task.');
     }
     return this.previews.stop(generation.id);
+  }
+
+  async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    await this.previews.resetData(input);
+    return this.startPreview({ taskId: input.taskId, scenarioId: input.scenarioId });
   }
 
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {

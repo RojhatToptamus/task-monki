@@ -1,18 +1,19 @@
-import type { PreviewGenerationRecord, PreviewResourceRecord } from '../../shared/contracts';
+import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
+import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 
 const TERMINAL_GENERATIONS: PreviewGenerationRecord['state'][] = ['STOPPED'];
-const TERMINAL_RESOURCES: PreviewResourceRecord['state'][] = ['STOPPED', 'EXITED', 'FAILED'];
 
 export class PreviewReconciler {
   constructor(
     private readonly store: FileTaskStore,
     private readonly gateway: PreviewGateway,
     private readonly nativeRuntime: NativeServiceRuntime,
-    private readonly sourcePreparer: PreviewSourcePreparer
+    private readonly sourcePreparer: PreviewSourcePreparer,
+    private readonly ociRuntime?: OciResourceRuntime
   ) {}
 
   async reconcile(): Promise<void> {
@@ -22,6 +23,7 @@ export class PreviewReconciler {
       if (TERMINAL_GENERATIONS.includes(generation.state)) continue;
       await this.reconcileGeneration(generation);
     }
+    await this.ociRuntime?.cleanupTaskResources();
     for (const taskId of new Set(generations.map((generation) => generation.taskId))) {
       await this.store.prunePreviewHistory(taskId);
     }
@@ -31,12 +33,13 @@ export class PreviewReconciler {
     let cleanupIncomplete = false;
     const resources = await this.store.getPreviewResources(generation.id);
     for (const resource of resources) {
-      if (TERMINAL_RESOURCES.includes(resource.state)) continue;
-      if (resource.adapterKind !== 'NATIVE_PROCESS') {
-        cleanupIncomplete = true;
-        continue;
-      }
-      const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
+      if (resource.state === 'STOPPED') continue;
+      if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
+      const result = resource.adapterKind === 'NATIVE_PROCESS'
+        ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
+        : this.ociRuntime
+          ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
+          : 'REFUSED';
       if (result === 'REFUSED') cleanupIncomplete = true;
     }
     if (!cleanupIncomplete) {
