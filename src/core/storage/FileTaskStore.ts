@@ -29,6 +29,11 @@ import type {
   InteractionRequestStatus,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   StatusProjection,
@@ -210,6 +215,10 @@ export class FileTaskStore {
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
   }
 
+  getStoreIdentity(): string {
+    return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+  }
+
   async init(): Promise<void> {
     if (this.loaded) {
       return;
@@ -244,6 +253,208 @@ export class FileTaskStore {
   async getTask(taskId: string): Promise<Task | undefined> {
     await this.init();
     return clone(this.state.tasks.find((task) => task.id === taskId));
+  }
+
+  async getPreviewPlan(planId: string): Promise<PreviewPlanRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewPlans.find((plan) => plan.id === planId));
+  }
+
+  async getLatestPreviewPlan(taskId: string): Promise<PreviewPlanRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewPlans
+        .filter((plan) => plan.taskId === taskId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    );
+  }
+
+  async getMatchingPreviewApproval(
+    taskId: string,
+    executionDigest: string
+  ): Promise<PreviewApprovalRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewApprovals
+        .filter(
+          (approval) =>
+            approval.taskId === taskId &&
+            approval.executionDigest === executionDigest &&
+            !approval.invalidatedAt
+        )
+        .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))[0]
+    );
+  }
+
+  async getPreviewGeneration(generationId: string): Promise<PreviewGenerationRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewGenerations.find((generation) => generation.id === generationId)
+    );
+  }
+
+  async getPreviewGenerations(taskId?: string): Promise<PreviewGenerationRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewGenerations.filter(
+        (generation) => !taskId || generation.taskId === taskId
+      )
+    );
+  }
+
+  async getPreviewNodeAttempts(generationId: string): Promise<PreviewNodeAttemptRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewNodeAttempts.filter((attempt) => attempt.generationId === generationId)
+    );
+  }
+
+  async getPreviewResources(generationId?: string): Promise<PreviewResourceRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewResources.filter(
+        (resource) => !generationId || resource.generationId === generationId
+      )
+    );
+  }
+
+  async savePreviewPlan(plan: PreviewPlanRecord): Promise<PreviewPlanRecord> {
+    await this.init();
+    const now = new Date().toISOString();
+    this.state = {
+      ...this.state,
+      previewPlans: [
+        plan,
+        ...this.state.previewPlans.filter((candidate) => candidate.id !== plan.id)
+      ],
+      previewApprovals: this.state.previewApprovals.map((approval) =>
+        approval.taskId === plan.taskId &&
+        approval.executionDigest !== plan.executionDigest &&
+        !approval.invalidatedAt
+          ? {
+              ...approval,
+              invalidatedAt: now,
+              invalidatedReason: 'Preview execution plan changed.'
+            }
+          : approval
+      )
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PREVIEW_PLAN_RESOLVED',
+        taskId: plan.taskId,
+        iterationId: plan.iterationId,
+        worktreeId: plan.worktreeId,
+        previewPlanId: plan.id,
+        source: 'preview',
+        payload: { executionDigest: plan.executionDigest }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(plan);
+  }
+
+  async savePreviewApproval(approval: PreviewApprovalRecord): Promise<PreviewApprovalRecord> {
+    await this.init();
+    this.state = {
+      ...this.state,
+      previewApprovals: [
+        approval,
+        ...this.state.previewApprovals.filter((candidate) => candidate.id !== approval.id)
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PREVIEW_PLAN_APPROVED',
+        taskId: approval.taskId,
+        previewPlanId: approval.planId,
+        source: 'preview',
+        payload: { executionDigest: approval.executionDigest, scope: approval.scope }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(approval);
+  }
+
+  async savePreviewGeneration(
+    generation: PreviewGenerationRecord
+  ): Promise<PreviewGenerationRecord> {
+    await this.init();
+    const exists = this.state.previewGenerations.some(
+      (candidate) => candidate.id === generation.id
+    );
+    this.state = {
+      ...this.state,
+      previewGenerations: [
+        generation,
+        ...this.state.previewGenerations.filter((candidate) => candidate.id !== generation.id)
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: exists ? 'PREVIEW_GENERATION_UPDATED' : 'PREVIEW_GENERATION_CREATED',
+        taskId: generation.taskId,
+        iterationId: generation.iterationId,
+        worktreeId: generation.worktreeId,
+        previewPlanId: generation.planId,
+        previewGenerationId: generation.id,
+        source: 'preview',
+        payload: { state: generation.state, freshness: generation.freshness }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(generation);
+  }
+
+  async savePreviewNodeAttempt(
+    attempt: PreviewNodeAttemptRecord
+  ): Promise<PreviewNodeAttemptRecord> {
+    await this.init();
+    this.state = {
+      ...this.state,
+      previewNodeAttempts: [
+        attempt,
+        ...this.state.previewNodeAttempts.filter((candidate) => candidate.id !== attempt.id)
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PREVIEW_NODE_UPDATED',
+        taskId: attempt.taskId,
+        previewGenerationId: attempt.generationId,
+        source: 'preview',
+        payload: { nodeId: attempt.nodeId, state: attempt.state }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(attempt);
+  }
+
+  async savePreviewResource(resource: PreviewResourceRecord): Promise<PreviewResourceRecord> {
+    await this.init();
+    this.state = {
+      ...this.state,
+      previewResources: [
+        resource,
+        ...this.state.previewResources.filter((candidate) => candidate.id !== resource.id)
+      ]
+    };
+    await this.appendEvent(
+      createDomainEvent({
+        type: 'PREVIEW_RESOURCE_UPDATED',
+        taskId: resource.taskId,
+        previewGenerationId: resource.generationId,
+        source: 'preview',
+        payload: { resourceId: resource.id, state: resource.state }
+      }),
+      false
+    );
+    await this.persistQueued();
+    return clone(resource);
   }
 
   async getRun(runId: string): Promise<RunRecord | undefined> {
@@ -457,6 +668,16 @@ export class FileTaskStore {
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
+    const activePreviewResource = this.state.previewResources.find(
+      (resource) =>
+        resource.taskId === taskId &&
+        !['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
+    );
+    if (activePreviewResource) {
+      throw new Error(
+        `Task has an active or unverified preview resource: ${activePreviewResource.id}. Stop or reconcile it before deletion.`
+      );
+    }
 
     const runIds = new Set(
       this.state.runs.filter((run) => run.taskId === taskId).map((run) => run.id)
@@ -535,6 +756,19 @@ export class FileTaskStore {
           request.taskId !== taskId &&
           !runIds.has(request.runId) &&
           !sessionIds.has(request.sessionId)
+      ),
+      previewPlans: this.state.previewPlans.filter((record) => record.taskId !== taskId),
+      previewApprovals: this.state.previewApprovals.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewGenerations: this.state.previewGenerations.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewNodeAttempts: this.state.previewNodeAttempts.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewResources: this.state.previewResources.filter(
+        (record) => record.taskId !== taskId
       ),
       events: this.state.events.filter(
         (event) =>
@@ -2077,6 +2311,83 @@ export class FileTaskStore {
     };
   }
 
+  async createPreviewArtifact(
+    taskId: string,
+    kind: 'preview-stdout' | 'preview-stderr'
+  ): Promise<ArtifactRecord> {
+    await this.init();
+    const artifact = await this.createArtifactRecord(taskId, kind);
+    await fs.mkdir(path.dirname(artifact.path), { recursive: true });
+    await fs.writeFile(artifact.path, '', { encoding: 'utf8', mode: 0o600 });
+    this.state = {
+      ...this.state,
+      artifacts: [artifact, ...this.state.artifacts]
+    };
+    await this.persistQueued();
+    return clone(artifact);
+  }
+
+  async appendBoundedArtifact(
+    artifactId: string,
+    chunk: string | Buffer,
+    maxBytes = 256 * 1024
+  ): Promise<{ byteCount: number; truncated: boolean }> {
+    await this.init();
+    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) {
+      throw new Error(`Artifact not found: ${artifactId}`);
+    }
+    if (artifact.byteCount >= maxBytes) {
+      return { byteCount: artifact.byteCount, truncated: true };
+    }
+
+    const marker = Buffer.from('\n[Task Monki preview log truncated]\n', 'utf8');
+    const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+    const remaining = maxBytes - artifact.byteCount;
+    const truncated = input.byteLength > remaining;
+    const output = truncated
+      ? Buffer.concat([
+          input.subarray(0, Math.max(0, remaining - marker.byteLength)),
+          marker.subarray(0, Math.min(marker.byteLength, remaining))
+        ])
+      : input;
+    if (output.byteLength > 0) {
+      await fs.appendFile(artifact.path, output);
+    }
+
+    const byteCount = artifact.byteCount + output.byteLength;
+    const updatedAt = new Date().toISOString();
+    this.state = {
+      ...this.state,
+      artifacts: this.state.artifacts.map((candidate) =>
+        candidate.id === artifactId ? { ...candidate, byteCount, updatedAt } : candidate
+      )
+    };
+    return { byteCount, truncated };
+  }
+
+  async syncArtifactByteCount(artifactId: string): Promise<ArtifactRecord> {
+    await this.init();
+    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
+    const stat = await fs.stat(artifact.path).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    const updated: ArtifactRecord = {
+      ...artifact,
+      byteCount: stat?.size ?? 0,
+      updatedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      artifacts: this.state.artifacts.map((candidate) =>
+        candidate.id === artifactId ? updated : candidate
+      )
+    };
+    return clone(updated);
+  }
+
   async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
     await this.init();
 
@@ -2223,6 +2534,11 @@ function requireCurrentState(state: PersistedState): StoreState {
     'agentSettingsObservations',
     'agentSubagentObservations',
     'interactionRequests',
+    'previewPlans',
+    'previewApprovals',
+    'previewGenerations',
+    'previewNodeAttempts',
+    'previewResources',
     'events',
     'artifacts'
   ];
@@ -2238,19 +2554,30 @@ function migratePersistedState(state: PersistedState): {
   state: PersistedState;
   changed: boolean;
 } {
-  if (state.schemaVersion !== 8) {
-    return { state, changed: false };
+  let next = state;
+  let changed = false;
+
+  if (next.schemaVersion === 8) {
+    // Schema 8 differs from schema 9 only by this retired collection.
+    const { testRuns: _legacyTestRuns, ...schemaNineState } = next;
+    next = { ...schemaNineState, schemaVersion: 9 };
+    changed = true;
   }
 
-  // Schema 8 differs from schema 9 only by this retired collection.
-  const { testRuns: _legacyTestRuns, ...currentState } = state;
-  return {
-    state: {
-      ...currentState,
+  if (next.schemaVersion === 9) {
+    next = {
+      ...next,
+      previewPlans: [],
+      previewApprovals: [],
+      previewGenerations: [],
+      previewNodeAttempts: [],
+      previewResources: [],
       schemaVersion: TASK_STORE_SCHEMA_VERSION
-    },
-    changed: true
-  };
+    };
+    changed = true;
+  }
+
+  return { state: next, changed };
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {

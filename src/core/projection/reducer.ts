@@ -41,6 +41,11 @@ export function createEmptyState(): StoreState {
     agentSettingsObservations: [],
     agentSubagentObservations: [],
     interactionRequests: [],
+    previewPlans: [],
+    previewApprovals: [],
+    previewGenerations: [],
+    previewNodeAttempts: [],
+    previewResources: [],
     events: [],
     artifacts: []
   };
@@ -69,6 +74,11 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     agentSettingsObservations: [...state.agentSettingsObservations],
     agentSubagentObservations: [...state.agentSubagentObservations],
     interactionRequests: [...state.interactionRequests],
+    previewPlans: [...state.previewPlans],
+    previewApprovals: [...state.previewApprovals],
+    previewGenerations: [...state.previewGenerations],
+    previewNodeAttempts: [...state.previewNodeAttempts],
+    previewResources: [...state.previewResources],
     events: [...state.events, event],
     artifacts: [...state.artifacts]
   };
@@ -81,6 +91,12 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
   }
 
   if (event.type === 'TASK_CREATED') {
+    return next;
+  }
+
+  // Preview is an independent Task Monki domain. Its lifecycle is persisted in
+  // preview collections and must never advance or rewrite task workflow truth.
+  if (event.type.startsWith('PREVIEW_')) {
     return next;
   }
 

@@ -33,7 +33,8 @@ const defaultSettings: TaskManagerAppSettings = {
   repositories: {
     knownPaths: ['/repo'],
     selectedPath: '/repo'
-  }
+  },
+  previewGateway: { port: null }
 };
 
 describe('OpenTargetService', () => {
@@ -633,6 +634,11 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     agentSettingsObservations: [],
     agentSubagentObservations: [],
     interactionRequests: [],
+    previewPlans: [],
+    previewApprovals: [],
+    previewGenerations: [],
+    previewNodeAttempts: [],
+    previewResources: [],
     events: [],
     artifacts: []
   };

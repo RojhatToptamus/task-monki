@@ -143,6 +143,15 @@ describe('AppSettingsStore', () => {
     });
   });
 
+  it('persists only a valid high preview gateway port', async () => {
+    expect(normalizeAppSettings({ previewGateway: { port: 9999 } }).previewGateway.port).toBeNull();
+    expect(normalizeAppSettings({ previewGateway: { port: 31337 } }).previewGateway.port).toBe(31337);
+    const store = new MemoryAppSettingsStore();
+    await expect(store.update({ previewGateway: { port: 41234 } })).resolves.toMatchObject({
+      previewGateway: { port: 41234 }
+    });
+  });
+
   it('moves invalid JSON aside and recreates normalized defaults', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-invalid-'));
     const settingsPath = path.join(dir, 'app-settings.json');

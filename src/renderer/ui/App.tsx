@@ -73,6 +73,11 @@ const emptySnapshot: TaskSnapshot = {
   agentSettingsObservations: [],
   agentSubagentObservations: [],
   interactionRequests: [],
+  previewPlans: [],
+  previewApprovals: [],
+  previewGenerations: [],
+  previewNodeAttempts: [],
+  previewResources: [],
   events: [],
   artifacts: []
 };
@@ -395,6 +400,21 @@ export function App() {
         : [],
     [selectedTask, snapshot.agentSubagentObservations]
   );
+  const selectedPreviewPlans = selectedTask
+    ? snapshot.previewPlans.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewApprovals = selectedTask
+    ? snapshot.previewApprovals.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewGenerations = selectedTask
+    ? snapshot.previewGenerations.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewNodeAttempts = selectedTask
+    ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewResources = selectedTask
+    ? snapshot.previewResources.filter((record) => record.taskId === selectedTask.id)
+    : [];
   const selectedGitSnapshots = useMemo(
     () =>
       selectedTask
@@ -530,6 +550,76 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to refresh GitHub.');
+    }
+  };
+
+  const resolvePreview = async (taskId: string) => {
+    setError(undefined);
+    try {
+      const result = await taskManagerApi.resolvePreview({ taskId });
+      if (result.status === 'UNAVAILABLE') throw new Error(result.reason);
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not resolve preview configuration.');
+      throw caught;
+    }
+  };
+
+  const approvePreview = async (taskId: string, planId: string, executionDigest: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.approvePreviewPlan({ taskId, planId, executionDigest });
+      notify('Preview plan approved.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not approve preview plan.');
+      throw caught;
+    }
+  };
+
+  const startPreview = async (taskId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.startPreview({ taskId });
+      notify('Preview is ready.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not start preview.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const stopPreview = async (taskId: string, generationId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.stopPreview({ taskId, generationId });
+      notify('Preview stopped.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not stop preview safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const openPreview = async (taskId: string, generationId: string, routeId: string) => {
+    setError(undefined);
+    try {
+      const result = await taskManagerApi.openPreview({ taskId, generationId, routeId });
+      if (!result.opened) window.open(result.url, '_blank', 'noopener,noreferrer');
+    } catch (caught) {
+      reportActionError(caught, 'Could not open preview.');
+      throw caught;
+    }
+  };
+
+  const readPreviewLog = async (taskId: string, artifactId: string) => {
+    try {
+      return await taskManagerApi.readPreviewLog({ taskId, artifactId });
+    } catch (caught) {
+      reportActionError(caught, 'Could not read preview logs.');
+      throw caught;
     }
   };
 
@@ -1001,6 +1091,11 @@ export function App() {
             )}
             artifacts={snapshot.artifacts}
             interactions={selectedInteractions}
+            previewPlans={selectedPreviewPlans}
+            previewApprovals={selectedPreviewApprovals}
+            previewGenerations={selectedPreviewGenerations}
+            previewNodeAttempts={selectedPreviewNodeAttempts}
+            previewResources={selectedPreviewResources}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
@@ -1014,6 +1109,12 @@ export function App() {
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
+            onResolvePreview={resolvePreview}
+            onApprovePreview={approvePreview}
+            onStartPreview={startPreview}
+            onOpenPreview={openPreview}
+            onStopPreview={stopPreview}
+            onReadPreviewLog={readPreviewLog}
             onTransition={transitionTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}

@@ -153,6 +153,130 @@ describe('FileTaskStore', () => {
     expect(rewritten.testRuns).toBeUndefined();
   });
 
+  it('migrates representative schema 9 data without loss and initializes preview collections', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema9-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Existing schema 9 task',
+      prompt: 'Preserve all existing records.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/schema-nine',
+      worktreePath: dir,
+      baseSha: 'base-sha'
+    });
+
+    const storePath = path.join(dir, 'store.json');
+    const current = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    const {
+      previewPlans: _plans,
+      previewApprovals: _approvals,
+      previewGenerations: _generations,
+      previewNodeAttempts: _attempts,
+      previewResources: _resources,
+      ...schemaNine
+    } = current;
+    await fs.writeFile(
+      storePath,
+      `${JSON.stringify({ ...schemaNine, schemaVersion: 9 }, null, 2)}\n`,
+      'utf8'
+    );
+
+    const migrated = await new FileTaskStore(dir).snapshot();
+    expect(migrated.schemaVersion).toBe(10);
+    expect(migrated.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(migrated.iterations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: iteration.id })])
+    );
+    expect(migrated.worktrees).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: worktree.id })])
+    );
+    expect(migrated.previewPlans).toEqual([]);
+    expect(migrated.previewApprovals).toEqual([]);
+    expect(migrated.previewGenerations).toEqual([]);
+    expect(migrated.previewNodeAttempts).toEqual([]);
+    expect(migrated.previewResources).toEqual([]);
+  });
+
+  it('persists preview records and refuses task deletion while ownership is unresolved', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Preview task',
+      prompt: 'Run the preview.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/preview',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const now = new Date().toISOString();
+    const plan = await store.savePreviewPlan({
+      id: 'plan-1',
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: 'recipe',
+      executionDigest: 'execution',
+      executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+      warnings: [],
+      createdAt: now
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval-1',
+      taskId: task.id,
+      planId: plan.id,
+      executionDigest: plan.executionDigest,
+      scope: 'TASK',
+      approvedAt: now
+    });
+    const generation = await store.savePreviewGeneration({
+      id: 'generation-1',
+      previewKey: 'preview-task',
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      planId: plan.id,
+      approvalId: approval.id,
+      executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git-1',
+      sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty',
+      workspacePath: path.join(dir, 'preview-runtime', 'generation-1'),
+      state: 'CREATED',
+      freshness: 'CURRENT',
+      routes: [],
+      createdAt: now,
+      updatedAt: now
+    });
+    const resource = await store.savePreviewResource({
+      id: 'resource-1',
+      taskId: task.id,
+      generationId: generation.id,
+      logicalNodeId: 'web',
+      adapterKind: 'NATIVE_PROCESS',
+      state: 'INTENDED',
+      ownershipMarkerDigest: 'marker',
+      updatedAt: now
+    });
+
+    await expect(store.deleteTask(task.id)).rejects.toThrow('active or unverified preview resource');
+    await store.savePreviewResource({ ...resource, state: 'STOPPED', updatedAt: new Date().toISOString() });
+    await store.deleteTask(task.id);
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.previewPlans).toEqual([]);
+    expect(snapshot.previewApprovals).toEqual([]);
+    expect(snapshot.previewGenerations).toEqual([]);
+    expect(snapshot.previewResources).toEqual([]);
+  });
+
   it('links forked alternative tasks to their source task and run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-fork-'));
     const store = new FileTaskStore(dir);

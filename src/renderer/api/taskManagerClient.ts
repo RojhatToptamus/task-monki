@@ -1,5 +1,6 @@
 import type {
   AppUpdateEvent,
+  ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
   BranchPublicationRecord,
@@ -15,17 +16,26 @@ import type {
   InspectOpenTargetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  ReadPreviewLogRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
   RepositoryPreflight,
   RunRecord,
   StartRunRequest,
+  StartPreviewRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
   TransitionTaskRequest,
+  StopPreviewRequest,
   WorktreeRecord,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
@@ -153,6 +163,18 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord>(baseUrl, '/api/github/pr/create', input),
     refreshGitHub: (input: RefreshGitHubRequest) =>
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
+    resolvePreview: (input: ResolvePreviewRequest) =>
+      post<ResolvePreviewResult>(baseUrl, '/api/preview/resolve', input),
+    approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
+      post<PreviewApprovalRecord>(baseUrl, '/api/preview/approve', input),
+    startPreview: (input: StartPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/start', input),
+    stopPreview: (input: StopPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/stop', input),
+    openPreview: (input: OpenPreviewRequest) =>
+      post<OpenPreviewResult>(baseUrl, '/api/preview/open', input),
+    readPreviewLog: (input: ReadPreviewLogRequest) =>
+      post<string>(baseUrl, '/api/preview/log/read', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

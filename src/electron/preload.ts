@@ -11,13 +11,18 @@ import type {
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
   PrepareWorktreeRequest,
+  ApprovePreviewPlanRequest,
+  OpenPreviewRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
+  ReadPreviewLogRequest,
+  ResolvePreviewRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
   StartRunRequest,
+  StartPreviewRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -26,6 +31,7 @@ import type {
   TestExternalToolRequest,
   TaskManagerApi,
   TransitionTaskRequest,
+  StopPreviewRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
@@ -82,6 +88,13 @@ const api: TaskManagerApi = {
   createPullRequest: (input: CreatePullRequestRequest) =>
     ipcRenderer.invoke('github:createPullRequest', input),
   refreshGitHub: (input: RefreshGitHubRequest) => ipcRenderer.invoke('github:refresh', input),
+  resolvePreview: (input: ResolvePreviewRequest) => ipcRenderer.invoke('preview:resolve', input),
+  approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
+    ipcRenderer.invoke('preview:approve', input),
+  startPreview: (input: StartPreviewRequest) => ipcRenderer.invoke('preview:start', input),
+  stopPreview: (input: StopPreviewRequest) => ipcRenderer.invoke('preview:stop', input),
+  openPreview: (input: OpenPreviewRequest) => ipcRenderer.invoke('preview:open', input),
+  readPreviewLog: (input: ReadPreviewLogRequest) => ipcRenderer.invoke('preview:log:read', input),
   transitionTask: (input: TransitionTaskRequest) => ipcRenderer.invoke('task:transition', input),
   deleteTask: (input: DeleteTaskRequest) => ipcRenderer.invoke('task:delete', input),
   readArtifact: (input: ReadArtifactRequest) => ipcRenderer.invoke('artifact:read', input),

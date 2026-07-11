@@ -27,6 +27,11 @@ import type {
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -105,6 +110,7 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
+import { PreviewPanel } from './PreviewPanel';
 
 interface TaskDetailProps {
   error?: string;
@@ -132,6 +138,11 @@ interface TaskDetailProps {
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
   interactions: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewResources: PreviewResourceRecord[];
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -148,6 +159,12 @@ interface TaskDetailProps {
   onCreateDeliveryCommit(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string, title?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
+  onResolvePreview(taskId: string): Promise<void>;
+  onApprovePreview(taskId: string, planId: string, executionDigest: string): Promise<void>;
+  onStartPreview(taskId: string): Promise<void>;
+  onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
+  onStopPreview(taskId: string, generationId: string): Promise<void>;
+  onReadPreviewLog(taskId: string, artifactId: string): Promise<string>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
@@ -870,6 +887,23 @@ export function TaskDetail(props: TaskDetailProps) {
                   })
                 }
                 onInvestigate={() => void investigateFailingChecks()}
+              />
+
+              <PreviewPanel
+                key={task.id}
+                task={task}
+                worktree={worktree}
+                plans={props.previewPlans}
+                approvals={props.previewApprovals}
+                generations={props.previewGenerations}
+                attempts={props.previewNodeAttempts}
+                resources={props.previewResources}
+                onResolve={props.onResolvePreview}
+                onApprove={props.onApprovePreview}
+                onStart={props.onStartPreview}
+                onOpen={props.onOpenPreview}
+                onStop={props.onStopPreview}
+                onReadLog={props.onReadPreviewLog}
               />
 
               <TaskActivityPanel view={overviewActivity} variant="overview" />

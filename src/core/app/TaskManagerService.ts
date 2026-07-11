@@ -39,7 +39,17 @@ import type {
   InspectOpenTargetRequest,
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
-  OpenTargetActionResult
+  OpenTargetActionResult,
+  ApprovePreviewPlanRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  ReadPreviewLogRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  StartPreviewRequest,
+  StopPreviewRequest
 } from '../../shared/contracts';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
@@ -75,6 +85,9 @@ import {
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
+import { PreviewManager } from '../preview/PreviewManager';
+import { createPreviewManager } from '../preview/createPreviewManager';
+import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -86,6 +99,9 @@ export class TaskManagerService {
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
+  private readonly previews: PreviewManager;
+  private readonly previewEnabled: boolean;
+  private readonly previewReconcile: boolean;
   private readonly taskActionLocks = new Map<string, string>();
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private codexExecutable: string | undefined;
@@ -103,6 +119,14 @@ export class TaskManagerService {
       appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
       openTargetHost?: OpenTargetHost;
+      previewManager?: PreviewManager;
+      previewRoot?: string;
+      previewLauncherPath?: string;
+      previewLauncherExecPath?: string;
+      previewLauncherEnv?: NodeJS.ProcessEnv;
+      previewOpenHost?: PreviewUrlHost;
+      previewEnabled?: boolean;
+      previewReconcile?: boolean;
     } = {}
   ) {
     const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
@@ -117,6 +141,22 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
+    this.previewEnabled = options.previewEnabled === true;
+    this.previewReconcile = options.previewReconcile !== false;
+    this.previews =
+      options.previewManager ??
+      createPreviewManager(store, events, {
+        previewRoot:
+          options.previewRoot ??
+          process.env.TASK_MANAGER_PREVIEW_ROOT ??
+          path.join(os.tmpdir(), 'task-monki-preview-runtime'),
+        launcherPath:
+          options.previewLauncherPath ??
+          path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
+        launcherExecPath: options.previewLauncherExecPath,
+        launcherEnv: options.previewLauncherEnv,
+        openHost: options.previewOpenHost
+      });
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
@@ -144,6 +184,16 @@ export class TaskManagerService {
     await this.store.init();
     this.appSettings = await this.appSettingsStore.get();
     await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
+    if (this.previewEnabled) {
+      const gateway = await this.previews.init(this.appSettings.previewGateway.port ?? 0, {
+        reconcile: this.previewReconcile
+      });
+      if (this.appSettings.previewGateway.port !== gateway.port) {
+        this.appSettings = await this.appSettingsStore.update({
+          previewGateway: { port: gateway.port }
+        });
+      }
+    }
     await this.agents.initialize();
     const snapshot = await this.store.snapshot();
     const recoveryTaskIds = new Set(
@@ -589,8 +639,95 @@ export class TaskManagerService {
     return this.agents.respondToInteraction(input);
   }
 
-  shutdown(): Promise<void> {
-    return this.agents.shutdown();
+  async shutdown(): Promise<void> {
+    let previewError: unknown;
+    try {
+      await this.previews.shutdown();
+    } catch (error) {
+      previewError = error;
+    }
+    await this.agents.shutdown();
+    if (previewError) throw previewError;
+  }
+
+  async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const result = await this.previews.resolve(context);
+      this.events.emit({
+        type: 'preview.updated',
+        taskId: input.taskId,
+        iterationId: context.iteration.id,
+        worktreeId: context.worktree.id,
+        payload: result,
+        at: new Date().toISOString()
+      });
+      return result;
+    });
+  }
+
+  async approvePreviewPlan(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    this.assertPreviewEnabled();
+    const approval = await this.previews.approve(input);
+    this.events.emit({
+      type: 'preview.updated',
+      taskId: input.taskId,
+      payload: approval,
+      at: approval.approvedAt
+    });
+    return approval;
+  }
+
+  async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    if (process.platform !== 'darwin') {
+      throw new Error('Phase 1 native previews are supported on macOS only.');
+    }
+    const prepared = await this.withTaskAction(input.taskId, 'Preview source capture', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const currentSnapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
+      const activeGeneration = currentSnapshot.previewGenerations.find(
+        (generation) =>
+          generation.taskId === input.taskId &&
+          !['STOPPED', 'FAILED', 'CLEANUP_INCOMPLETE'].includes(generation.state)
+      );
+      if (activeGeneration) {
+        throw new Error('Stop the current task preview before starting another Phase 1 generation.');
+      }
+      const gitSnapshot = await this.refreshEvidence({ taskId: input.taskId });
+      if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
+        throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
+      }
+      return this.previews.prepare({
+        context,
+        gitSnapshot,
+        reobserveGit: () => this.refreshEvidence({ taskId: input.taskId })
+      });
+    });
+    return this.previews.execute(prepared);
+  }
+
+  async stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    const generation = await this.store.getPreviewGeneration(input.generationId);
+    if (!generation || generation.taskId !== input.taskId) {
+      throw new Error('Preview generation was not found for this task.');
+    }
+    return this.previews.stop(generation.id);
+  }
+
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    this.assertPreviewEnabled();
+    return this.previews.open(input);
+  }
+
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<string> {
+    this.assertPreviewEnabled();
+    return this.previews.readLog(input);
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
@@ -605,6 +742,7 @@ export class TaskManagerService {
     const snapshot = await inspectGitSnapshot(storedWorktree);
     const diffEvidence = await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
+    await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({
       type: 'git.updated',
       taskId: task.id,
@@ -843,6 +981,10 @@ export class TaskManagerService {
       throw new Error(blockedReason);
     }
 
+    // Preview cleanup is part of deletion authority. The store keeps its
+    // resource ledger intact if any process or workspace identity is ambiguous.
+    await this.previews.stopTask(task.id);
+
     let removedWorktree = false;
     if (input.removeWorktree) {
       const worktrees = snapshot.worktrees.filter((worktree) => worktree.taskId === task.id);
@@ -975,6 +1117,21 @@ export class TaskManagerService {
     return worktree;
   }
 
+  private async requirePreviewContext(taskId: string) {
+    const task = await this.requireTask(taskId);
+    const worktree = await this.requireWorktree(task);
+    const verified = await this.worktrees.verify(worktree);
+    const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    if (storedWorktree.status !== 'PRESENT') {
+      throw new Error(`Worktree is not ready for preview: ${storedWorktree.status}.`);
+    }
+    const iteration = await this.store.getCurrentIteration(task.id);
+    if (!iteration || iteration.id !== storedWorktree.iterationId) {
+      throw new Error('Preview worktree does not match the current task iteration.');
+    }
+    return { task, iteration, worktree: storedWorktree };
+  }
+
   private emitGitHubUpdate(taskId: string, worktree: WorktreeRecord, payload: unknown): void {
     this.events.emit({
       type: 'github.updated',
@@ -1010,6 +1167,12 @@ export class TaskManagerService {
       if (this.taskActionLocks.get(taskId) === label) {
         this.taskActionLocks.delete(taskId);
       }
+    }
+  }
+
+  private assertPreviewEnabled(): void {
+    if (!this.previewEnabled) {
+      throw new Error('Preview runtime is not configured in this Task Monki host.');
     }
   }
 

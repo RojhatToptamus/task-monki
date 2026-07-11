@@ -11,16 +11,21 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
+  ReadPreviewLogRequest,
+  ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
   StartRunRequest,
+  StartPreviewRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -28,12 +33,15 @@ import type {
   ReadProtocolMessageRequest,
   TestExternalToolRequest,
   TransitionTaskRequest,
+  StopPreviewRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
+import { resolveNativePreviewLauncherPath } from '../core/preview/runtime/launcherPath';
+import { createElectronPreviewUrlHost } from './previewOpenHost';
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
@@ -222,6 +230,25 @@ function installIpcHandlers(): void {
     return service.refreshGitHub(input);
   });
 
+  ipcMain.handle('preview:resolve', async (_, input: ResolvePreviewRequest) =>
+    service.resolvePreview(input)
+  );
+  ipcMain.handle('preview:approve', async (_, input: ApprovePreviewPlanRequest) =>
+    service.approvePreviewPlan(input)
+  );
+  ipcMain.handle('preview:start', async (_, input: StartPreviewRequest) =>
+    service.startPreview(input)
+  );
+  ipcMain.handle('preview:stop', async (_, input: StopPreviewRequest) =>
+    service.stopPreview(input)
+  );
+  ipcMain.handle('preview:open', async (_, input: OpenPreviewRequest) =>
+    service.openPreview(input)
+  );
+  ipcMain.handle('preview:log:read', async (_, input: ReadPreviewLogRequest) =>
+    service.readPreviewLog(input)
+  );
+
   ipcMain.handle('task:transition', async (_, input: TransitionTaskRequest) => {
     return service.transitionTask(input);
   });
@@ -292,7 +319,17 @@ app.whenReady().then(async () => {
       appSettingsStore: new AppSettingsStore(
         path.join(app.getPath('userData'), 'app-settings.json')
       ),
-      openTargetHost: createElectronOpenTargetHost()
+      openTargetHost: createElectronOpenTargetHost(),
+      previewEnabled: true,
+      previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
+      previewLauncherPath: resolveNativePreviewLauncherPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
+      previewLauncherExecPath: process.execPath,
+      previewLauncherEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      previewOpenHost: createElectronPreviewUrlHost()
     }
   );
   serviceCreated = true;

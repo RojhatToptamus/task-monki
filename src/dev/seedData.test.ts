@@ -17,6 +17,7 @@ import {
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
 import { buildRunProgressViewModel } from '../renderer/model/runProgress';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
+import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
   DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
@@ -59,7 +60,9 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_STORE_DIR: manifest.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot
+      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0'
     });
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
@@ -73,6 +76,31 @@ describe('Task Monki development seed data', () => {
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
+  });
+
+  it('seeds every Phase 1 preview UI state without embedding runtime logs in the snapshot', () => {
+    const view = (slug: string) => {
+      const task = taskForScenario(manifest, snapshot, slug);
+      return buildPreviewViewModel({
+        task,
+        worktree: snapshot.worktrees.find((record) => record.id === task.currentWorktreeId),
+        plans: snapshot.previewPlans.filter((record) => record.taskId === task.id),
+        approvals: snapshot.previewApprovals.filter((record) => record.taskId === task.id),
+        generations: snapshot.previewGenerations.filter((record) => record.taskId === task.id),
+        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id),
+        resources: snapshot.previewResources.filter((record) => record.taskId === task.id)
+      });
+    };
+    expect(view('preview-missing-recipe').status).toBe('Not checked');
+    expect(view('preview-approval-required').status).toBe('Approval required');
+    expect(view('preview-preparing').status).toBe('Preparing source');
+    expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-failed').status).toBe('Failed');
+    expect(view('preview-stale').status).toContain('stale');
+    expect(view('preview-stopped').status).toBe('Stopped');
+    expect(view('preview-recovery-required').status).toBe('Cleanup incomplete');
+    expect(view('preview-cleanup-incomplete').status).toBe('Cleanup incomplete');
+    expect(JSON.stringify(snapshot)).not.toContain('intentional seeded preview failure');
   });
 
   it('drives review, interaction, PR, and completion states from records and events', () => {

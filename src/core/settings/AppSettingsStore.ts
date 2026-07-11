@@ -139,7 +139,8 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    repositories
+    repositories,
+    previewGateway: normalizePreviewGateway(record.previewGateway)
   };
 }
 
@@ -193,6 +194,12 @@ export function mergeAppSettings(
       ...input.repositories
     });
   }
+  if (input.previewGateway) {
+    patch.previewGateway = normalizePreviewGateway({
+      ...current.previewGateway,
+      ...input.previewGateway
+    });
+  }
   return normalizeAppSettings({
     ...current,
     ...patch
@@ -233,6 +240,16 @@ function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
   return {
     knownPaths,
     selectedPath
+  };
+}
+
+function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
+  const record = isRecord(value) ? value : {};
+  const port = record.port;
+  return {
+    port: Number.isInteger(port) && Number(port) >= 10_000 && Number(port) <= 65_535
+      ? Number(port)
+      : null
   };
 }
 

@@ -32,6 +32,9 @@ environment variables written to `dev-api.env`:
 - `TASK_MANAGER_APP_SETTINGS_PATH`
 - `TASK_MANAGER_REPO_PATH`
 - `TASK_MANAGER_WORKTREE_ROOT`
+- `TASK_MANAGER_PREVIEW_ROOT`
+- `TASK_MANAGER_PREVIEW_RECONCILE=0` (keeps synthetic preview UI states intact;
+  normal product/dev runs reconcile by default)
 
 The default seed root is `.local/task-monki-dev-seed`, which is ignored by git.
 Reset safety is marker-based: non-empty directories without the Task Monki seed
@@ -57,6 +60,8 @@ states:
 - completion policy: `MERGED_AND_VERIFIED` with failing, stale, and passing
   checks, plus `MANUAL` with a merged PR
 - terminal workflow: fork alternative, canceled, archived
+- preview: missing recipe, approval required, preparing, ready, failed, stale,
+  stopped, recovery required, and cleanup incomplete
 
 Each task title starts with `[seed:<slug>]`, so the UI can be searched by slug.
 

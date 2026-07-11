@@ -20,7 +20,8 @@ import type {
   RunRecord,
   Task,
   TaskIteration,
-  WorktreeRecord
+  WorktreeRecord,
+  PreviewGenerationState
 } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
@@ -39,7 +40,8 @@ export type DevSeedScenarioGroup =
   | 'review'
   | 'delivery'
   | 'completion'
-  | 'workflow';
+  | 'workflow'
+  | 'preview';
 
 export type DevSeedScenarioSet = 'all' | DevSeedScenarioGroup;
 
@@ -66,6 +68,7 @@ export interface DevSeedManifest {
   storeDir: string;
   repositoryPath: string;
   worktreeRoot: string;
+  previewRoot: string;
   appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
@@ -74,6 +77,8 @@ export interface DevSeedManifest {
     TASK_MANAGER_APP_SETTINGS_PATH: string;
     TASK_MANAGER_REPO_PATH: string;
     TASK_MANAGER_WORKTREE_ROOT: string;
+    TASK_MANAGER_PREVIEW_ROOT: string;
+    TASK_MANAGER_PREVIEW_RECONCILE: '0';
   };
   counts: {
     tasks: number;
@@ -90,6 +95,7 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   storeDir?: string;
   repositoryPath?: string;
   worktreeRoot?: string;
+  previewRoot?: string;
   appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
@@ -374,7 +380,16 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   ]),
   scenario('task-archived', 'workflow', 'Archived task', 'Task is archived as a terminal workflow state.', [
     'phase:ARCHIVED'
-  ])
+  ]),
+  scenario('preview-missing-recipe', 'preview', 'Preview recipe missing', 'The task has a worktree but no explicit preview recipe.', ['preview:UNAVAILABLE']),
+  scenario('preview-approval-required', 'preview', 'Preview approval required', 'A resolved native plan awaits explicit approval.', ['preview:APPROVAL_REQUIRED']),
+  scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
+  scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
+  scenario('preview-failed', 'preview', 'Preview failed', 'A preview job failed with retained bounded logs.', ['preview:FAILED']),
+  scenario('preview-stale', 'preview', 'Preview stale', 'A ready preview serves captured source older than current Git evidence.', ['preview:READY', 'freshness:STALE']),
+  scenario('preview-stopped', 'preview', 'Preview stopped', 'Owned runtime state was removed while compact evidence remains.', ['preview:STOPPED']),
+  scenario('preview-recovery-required', 'preview', 'Preview recovery required', 'Restart recovery has not yet verified the recorded process.', ['preview:RECOVERY_REQUIRED']),
+  scenario('preview-cleanup-incomplete', 'preview', 'Preview cleanup incomplete', 'Task Monki refused cleanup because ownership could not be verified.', ['preview:CLEANUP_INCOMPLETE'])
 ];
 
 interface SeedPaths {
@@ -382,6 +397,7 @@ interface SeedPaths {
   storeDir: string;
   repositoryPath: string;
   worktreeRoot: string;
+  previewRoot: string;
   appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
@@ -512,7 +528,9 @@ export async function seedTaskMonkiDevelopmentData(
       TASK_MANAGER_STORE_DIR: paths.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: paths.appSettingsPath,
       TASK_MANAGER_REPO_PATH: paths.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot
+      TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: paths.previewRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0'
     },
     counts: {
       tasks: snapshot.tasks.length,
@@ -552,7 +570,7 @@ function scenariosForSet(set: DevSeedScenarioSet): DevSeedScenarioDefinition[] {
 }
 
 function assertValidScenarioSet(value: string): asserts value is DevSeedScenarioSet {
-  if (!['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow'].includes(value)) {
+  if (!['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview'].includes(value)) {
     throw new Error(`Unknown seed scenario set: ${value}`);
   }
 }
@@ -564,6 +582,7 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
     storeDir: path.resolve(options.storeDir ?? path.join(rootDir, 'store')),
     repositoryPath: path.resolve(options.repositoryPath ?? path.join(rootDir, 'repo')),
     worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
+    previewRoot: path.resolve(options.previewRoot ?? path.join(rootDir, 'preview-runtime')),
     appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
     manifestPath: path.join(rootDir, 'manifest.json'),
     envFilePath: path.join(rootDir, 'dev-api.env')
@@ -703,6 +722,16 @@ async function seedScenario(
       const state = await createImplementedTask(ctx, definition);
       return { task: await ctx.store.transitionTask(state.task.id, 'ARCHIVED', 'Seed archived state') };
     }
+    case 'preview-missing-recipe':
+    case 'preview-approval-required':
+    case 'preview-preparing':
+    case 'preview-ready':
+    case 'preview-failed':
+    case 'preview-stale':
+    case 'preview-stopped':
+    case 'preview-recovery-required':
+    case 'preview-cleanup-incomplete':
+      return { task: (await createPreviewScenario(ctx, definition)).task };
     default:
       throw new Error(`No seed builder registered for ${definition.slug}`);
   }
@@ -784,6 +813,173 @@ async function createWorktreeState(
 
   task = await requireTask(ctx, task.id);
   return { task, iteration, worktree: storedWorktree, gitSnapshot };
+}
+
+async function createPreviewScenario(
+  ctx: SeedContext,
+  definition: DevSeedScenarioDefinition
+): Promise<SeededTaskState> {
+  const state = await createWorktreeState(ctx, definition, 'clean');
+  if (definition.slug === 'preview-missing-recipe') return state;
+  const now = new Date().toISOString();
+  const plan = await ctx.store.savePreviewPlan({
+    id: `seed-plan-${definition.slug}`,
+    taskId: state.task.id,
+    iterationId: state.iteration.id,
+    worktreeId: state.worktree.id,
+    recipePath: '.taskmonki/preview.yaml',
+    recipeVersion: 1,
+    recipeDigest: `seed-recipe-${definition.slug}`,
+    executionDigest: 'seed-preview-execution-v1',
+    executionPlan: {
+      version: 1,
+      jobs: [
+        {
+          id: 'prepare',
+          label: 'Prepare application',
+          cwd: '.',
+          command: ['node', 'scripts/prepare-preview.mjs'],
+          needs: {}
+        }
+      ],
+      services: [
+        {
+          id: 'web',
+          label: 'Start web application',
+          cwd: '.',
+          command: ['node', 'server.mjs'],
+          needs: { prepare: 'succeeded' },
+          env: { NODE_ENV: 'development' },
+          ports: { http: { env: 'PORT' } },
+          ready: { type: 'http', port: 'http', path: '/health/ready', timeoutSeconds: 30 }
+        }
+      ],
+      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
+    },
+    warnings: [
+      'Native preview commands run as your local user and are not sandboxed.',
+      'Commands may access the network; Task Monki does not enforce a no-network mode in Phase 1.'
+    ],
+    createdAt: now
+  });
+  if (definition.slug === 'preview-approval-required') return state;
+  const approval = await ctx.store.savePreviewApproval({
+    id: `seed-approval-${definition.slug}`,
+    taskId: state.task.id,
+    planId: plan.id,
+    executionDigest: plan.executionDigest,
+    scope: 'TASK',
+    approvedAt: now
+  });
+  const generationState = previewStateForSeed(definition.slug);
+  const generationId = `seed-generation-${definition.slug}`;
+  const manifest = await ctx.store.writeTextArtifact(
+    state.task.id,
+    'preview-source-manifest',
+    `${JSON.stringify({ version: 1, headSha: state.gitSnapshot?.headSha, entries: [], digest: 'seed-manifest' })}\n`
+  );
+  const routeAttached = generationState === 'READY';
+  const generation = await ctx.store.savePreviewGeneration({
+    id: generationId,
+    previewKey: `task-${state.task.id.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 16)}`,
+    taskId: state.task.id,
+    iterationId: state.iteration.id,
+    worktreeId: state.worktree.id,
+    planId: plan.id,
+    approvalId: approval.id,
+    executionDigest: plan.executionDigest,
+    sourceGitSnapshotId: state.gitSnapshot?.id ?? 'seed-git',
+    sourceHeadSha: state.gitSnapshot?.headSha ?? ctx.baseSha,
+    sourceDirtyFingerprint: state.gitSnapshot?.dirtyFingerprint ?? 'seed-dirty',
+    sourceManifestArtifactId: manifest.id,
+    sourceManifestDigest: 'seed-manifest',
+    workspacePath: path.join(ctx.previewRoot, state.task.id, generationId),
+    state: generationState,
+    freshness: definition.slug === 'preview-stale' ? 'STALE' : 'CURRENT',
+    routes: routeAttached
+      ? [
+          {
+            id: 'app',
+            hostname: `app.seed-${definition.slug}.preview.localhost`,
+            url: `http://app.seed-${definition.slug}.preview.localhost:31337/`,
+            gatewayPort: 31337,
+            targetHost: '127.0.0.1',
+            targetPort: 41000 + ctx.scenarios.length,
+            state: 'ATTACHED'
+          }
+        ]
+      : [],
+    failureReason:
+      generationState === 'FAILED' ? 'Preview job prepare failed with exit code 7.' : undefined,
+    cleanupReason:
+      generationState === 'CLEANUP_INCOMPLETE'
+        ? 'Recorded native process identity could not be verified; cleanup was refused.'
+        : undefined,
+    createdAt: now,
+    updatedAt: now,
+    readyAt: routeAttached ? now : undefined,
+    stoppedAt: generationState === 'STOPPED' ? now : undefined
+  });
+  if (generationState === 'PREPARING_SOURCE') return state;
+  const stdout = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stdout');
+  const stderr = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stderr');
+  if (generationState === 'FAILED') {
+    await ctx.store.appendBoundedArtifact(stderr.id, 'intentional seeded preview failure\n');
+  }
+  const attemptState =
+    generationState === 'READY' ? 'READY'
+    : generationState === 'STOPPED' ? 'STOPPED'
+    : generationState === 'FAILED' ? 'FAILED'
+    : 'RECOVERY_REQUIRED';
+  await ctx.store.savePreviewNodeAttempt({
+    id: `seed-attempt-${definition.slug}`,
+    taskId: state.task.id,
+    generationId: generation.id,
+    nodeId: generationState === 'FAILED' ? 'prepare' : 'web',
+    kind: generationState === 'FAILED' ? 'JOB' : 'SERVICE',
+    attempt: 1,
+    commandDigest: 'seed-command',
+    state: attemptState,
+    stdoutArtifactId: stdout.id,
+    stderrArtifactId: stderr.id,
+    startedAt: now,
+    endedAt: ['FAILED', 'STOPPED'].includes(generationState) ? now : undefined,
+    exitCode: generationState === 'FAILED' ? 7 : undefined,
+    readiness: generationState === 'READY'
+      ? { status: 'PASSED', lastStatusCode: 204, observedAt: now }
+      : undefined
+  });
+  await ctx.store.savePreviewResource({
+    id: `seed-resource-${definition.slug}`,
+    taskId: state.task.id,
+    generationId: generation.id,
+    logicalNodeId: generationState === 'FAILED' ? 'prepare' : 'web',
+    adapterKind: 'NATIVE_PROCESS',
+    state:
+      generationState === 'READY' ? 'RUNNING'
+      : generationState === 'STOPPED' ? 'STOPPED'
+      : generationState === 'FAILED' ? 'FAILED'
+      : generationState === 'CLEANUP_INCOMPLETE' ? 'CLEANUP_INCOMPLETE'
+      : 'PREPARED',
+    ownershipMarkerDigest: 'seed-marker',
+    receiptPath: path.join(ctx.previewRoot, state.task.id, generation.id, 'runtime', 'seed.json'),
+    targetHost: '127.0.0.1',
+    targetPort: 41000 + ctx.scenarios.length,
+    updatedAt: now,
+    cleanupError:
+      generationState === 'CLEANUP_INCOMPLETE' ? 'Seeded unverified ownership identity.' : undefined
+  });
+  return state;
+}
+
+function previewStateForSeed(slug: string): PreviewGenerationState {
+  if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
+  if (slug === 'preview-ready' || slug === 'preview-stale') return 'READY';
+  if (slug === 'preview-failed') return 'FAILED';
+  if (slug === 'preview-stopped') return 'STOPPED';
+  if (slug === 'preview-recovery-required') return 'RECOVERY_REQUIRED';
+  if (slug === 'preview-cleanup-incomplete') return 'CLEANUP_INCOMPLETE';
+  throw new Error(`No seeded preview state for ${slug}.`);
 }
 
 async function createImplementedTask(

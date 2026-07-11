@@ -6064,6 +6064,106 @@ textarea:focus-visible {
   color: var(--text-soft);
 }
 
+.tm-preview__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.tm-preview__head .tm-panel__title {
+  margin: 0;
+}
+
+.tm-preview__plan {
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
+  padding: 10px 0;
+  margin-bottom: 14px;
+}
+
+.tm-preview__plan > summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tm-preview__planbody {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.tm-preview__planline {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11.5px;
+}
+
+.tm-preview__planline > span {
+  color: var(--muted);
+}
+
+.tm-preview__planline code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.tm-preview__warning {
+  margin: 2px 0 0;
+  color: var(--warning-ink);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.tm-preview__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tm-preview__actions .primary-button,
+.tm-preview__actions .outline-button {
+  min-height: 32px;
+}
+
+.tm-preview__logs-button {
+  border: 0;
+  background: transparent;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tm-preview__logs-button:not(:disabled):hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tm-preview__logs {
+  max-height: 220px;
+  overflow: auto;
+  margin: 14px 0 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .tm-finishpanel__requirements {
   display: flex;
   flex-wrap: wrap;

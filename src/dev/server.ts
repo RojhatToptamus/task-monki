@@ -13,13 +13,22 @@ const storeDir =
   process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-monki-dev-store');
 const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
+const previewRoot =
+  process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
 
 const service = new TaskManagerService(
   new FileTaskStore(storeDir),
   defaultRepositoryPath,
   undefined,
   {
-    appSettingsStore: new AppSettingsStore(appSettingsPath)
+    appSettingsStore: new AppSettingsStore(appSettingsPath),
+    previewEnabled: true,
+    previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
+    previewRoot,
+    previewLauncherPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/native-preview-launcher.mjs'
+    )
   }
 );
 const clients = new Set<http.ServerResponse>();
@@ -214,6 +223,31 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
 
     if (request.method === 'POST' && url.pathname === '/api/github/refresh') {
       sendJson(response, 200, await service.refreshGitHub((await readJson(request)) as never));
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/preview/resolve') {
+      sendJson(response, 200, await service.resolvePreview((await readJson(request)) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
+      sendJson(response, 200, await service.approvePreviewPlan((await readJson(request)) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/start') {
+      sendJson(response, 200, await service.startPreview((await readJson(request)) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
+      sendJson(response, 200, await service.stopPreview((await readJson(request)) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/open') {
+      sendJson(response, 200, await service.openPreview((await readJson(request)) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/log/read') {
+      sendJson(response, 200, await service.readPreviewLog((await readJson(request)) as never));
       return;
     }
 

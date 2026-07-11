@@ -130,6 +130,40 @@ partial candidate.
 Read `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.
 
+## Local preview control plane
+
+Local previews are a separate Task Monki-owned domain. They are not Codex
+turns, agent run modes, workflow transitions, or provider evidence. The
+renderer can only call typed preview operations: resolve, approve, start, open,
+stop, and read a recorded log artifact.
+
+Phase 1 supports macOS native previews for one task repository, preparation
+jobs, and one routed web service. Task Monki:
+
+- parses only `.taskmonki/preview.yaml` with the restricted v1 schema;
+- records a normalized execution digest and task-scoped approval before any
+  command can run;
+- captures tracked plus non-ignored untracked source into
+  `preview-runtime/<task>/<generation>/source` using a double-observed content
+  manifest, leaving the task worktree editable and unchanged;
+- persists generation/resource intent before launcher or filesystem effects;
+- starts every native node through the bundled Node-mode launcher handshake,
+  recording its ownership token, PID, process-group ID, OS start identity,
+  command, and receipt before committing target spawn;
+- waits for direct loopback HTTP readiness before attaching a stable
+  `.preview.localhost` route through the main-process gateway;
+- stores compact preview records in schema 10 while keeping source manifests
+  and bounded stdout/stderr in artifacts;
+- detaches routes first and stops/removes only exact verified processes and
+  marker-owned workspaces.
+
+Graceful app quit stops managed previews before the Codex provider. Restart
+reconciliation does not adopt Phase 1 native services: it stops exact verified
+owners and records `CLEANUP_INCOMPLETE` for ambiguous identities without
+signaling them. Preview events do not update `Task.workflowPhase` or the agent
+projection. Windows and Linux retain the shared interfaces but are unsupported
+for Phase 1 execution until equivalent ownership/process-tree tests exist.
+
 ## Settings
 
 Task and review execution settings stored on task/run records include:
@@ -156,6 +190,7 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - selected and known repositories;
 - Codex external tool modes for web search, MCP servers, and apps;
 - external executable path preferences for Git, Codex CLI, and GitHub CLI.
+- the persisted high loopback port used by the local preview gateway.
 
 Empty executable paths mean Auto-detect. The main process resolves and probes
 executables live; resolved paths and detected versions are not persisted. Git

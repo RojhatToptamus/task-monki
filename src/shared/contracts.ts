@@ -15,10 +15,26 @@ import type {
   AgentUsageSnapshotRecord,
   InteractionRequestRecord
 } from './agent';
+import type {
+  ApprovePreviewPlanRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewResourceRecord,
+  ReadPreviewLogRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  StartPreviewRequest,
+  StopPreviewRequest
+} from './preview';
 
 export * from './agent';
+export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 9 as const;
+export const TASK_STORE_SCHEMA_VERSION = 10 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -314,7 +330,14 @@ export type DomainEventType =
   | 'CANCEL_REQUESTED'
   | 'ARTIFACT_CREATED'
   | 'PROJECTION_UPDATED'
-  | 'REPOSITORY_PREFLIGHT_COMPLETED';
+  | 'REPOSITORY_PREFLIGHT_COMPLETED'
+  | 'PREVIEW_PLAN_RESOLVED'
+  | 'PREVIEW_PLAN_APPROVED'
+  | 'PREVIEW_GENERATION_CREATED'
+  | 'PREVIEW_GENERATION_UPDATED'
+  | 'PREVIEW_NODE_UPDATED'
+  | 'PREVIEW_RESOURCE_UPDATED'
+  | 'PREVIEW_RECONCILED';
 
 export type ArtifactKind =
   | 'agent-prompt'
@@ -323,7 +346,10 @@ export type ArtifactKind =
   | 'agent-final'
   | 'diff'
   | 'git-snapshot'
-  | 'pr-body';
+  | 'pr-body'
+  | 'preview-source-manifest'
+  | 'preview-stdout'
+  | 'preview-stderr';
 
 export interface Finding {
   id: string;
@@ -600,6 +626,8 @@ export interface DomainEvent {
   agentItemId?: string;
   interactionRequestId?: string;
   worktreeId?: string;
+  previewPlanId?: string;
+  previewGenerationId?: string;
   source:
     | 'ui'
     | 'provider'
@@ -609,7 +637,8 @@ export interface DomainEvent {
     | 'projection'
     | 'git'
     | 'github'
-    | 'prompt';
+    | 'prompt'
+    | 'preview';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -649,6 +678,11 @@ export interface TaskSnapshot {
   agentSettingsObservations: AgentSettingsObservationRecord[];
   agentSubagentObservations: AgentSubagentObservationRecord[];
   interactionRequests: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
 }
@@ -776,6 +810,7 @@ export interface UpdateAppSettingsRequest {
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+  previewGateway?: Partial<import('./agent').PreviewGatewaySettings>;
 }
 
 export type ExternalToolId = 'git' | 'codex' | 'gh';
@@ -915,11 +950,14 @@ export interface AppUpdateEvent {
     | 'provider.updated'
     | 'projection.updated'
     | 'finding.updated'
+    | 'preview.updated'
+    | 'preview.log.updated'
     | 'task.deleted';
   taskId: string;
   iterationId?: string;
   runId?: string;
   worktreeId?: string;
+  previewGenerationId?: string;
   payload: unknown;
   at: string;
 }
@@ -959,6 +997,12 @@ export interface TaskManagerApi {
   publishBranch(input: PublishBranchRequest): Promise<BranchPublicationRecord>;
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
+  resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult>;
+  approvePreviewPlan(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord>;
+  startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<string>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

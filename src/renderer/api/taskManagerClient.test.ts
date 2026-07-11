@@ -134,3 +134,39 @@ describe('createBrowserTaskManagerApi settings', () => {
     });
   });
 });
+
+describe('createBrowserTaskManagerApi preview contract', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses typed preview operation endpoints rather than accepting an arbitrary URL', async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return { ok: true, json: async () => ({}) } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    await api.resolvePreview({ taskId: 'task-1' });
+    await api.approvePreviewPlan({ taskId: 'task-1', planId: 'plan-1', executionDigest: 'digest' });
+    await api.startPreview({ taskId: 'task-1' });
+    await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
+    await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
+    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1' });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://127.0.0.1:3099/api/preview/resolve',
+      'http://127.0.0.1:3099/api/preview/approve',
+      'http://127.0.0.1:3099/api/preview/start',
+      'http://127.0.0.1:3099/api/preview/open',
+      'http://127.0.0.1:3099/api/preview/stop',
+      'http://127.0.0.1:3099/api/preview/log/read'
+    ]);
+    expect(calls[3]?.body).toEqual({
+      taskId: 'task-1',
+      generationId: 'generation-1',
+      routeId: 'app'
+    });
+  });
+});
