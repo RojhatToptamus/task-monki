@@ -137,8 +137,8 @@ turns, agent run modes, workflow transitions, or provider evidence. The
 renderer can only call typed preview operations: resolve, approve, start, open,
 stop, and read a recorded log artifact.
 
-Phase 1 supports macOS native previews for one task repository, preparation
-jobs, and one routed web service. Task Monki:
+The native preview runtime supports macOS task worktrees with bounded jobs,
+services, workers, and routes. Task Monki:
 
 - reads only a bounded, regular `.taskmonki/preview.yaml` contained by the
   verified worktree, then parses it with the restricted v1 schema;
@@ -151,28 +151,38 @@ jobs, and one routed web service. Task Monki:
   manifest, with production entry/path/aggregate/manifest limits, leaving the
   task worktree editable and unchanged;
 - persists generation/resource intent before launcher or filesystem effects;
+- schedules the declared dependency DAG with at most four concurrent native
+  effects, so a shared monorepo install runs once while independent branches
+  can progress in parallel;
 - starts every native node through the bundled Node-mode launcher handshake,
   recording its ownership token, PID, process-group ID, OS start identity,
   command, and receipt before committing target spawn; the live launcher also
   removes verified group descendants when the target leader exits;
-- waits for direct loopback HTTP response headers under an absolute,
-  cancelable deadline, then verifies that every allocated-port listener is
-  loopback-only and belongs to the recorded target process group before
-  attaching a stable `.preview.localhost` route through the main-process
-  gateway;
+- supports HTTP, TCP, and finite argv readiness plus periodic liveness probes;
+  port probes verify that every allocated-port listener is loopback-only and
+  belongs to the recorded target process group;
+- resolves only typed, non-secret service and stable-route origins into node
+  environments; arbitrary secret or environment import remains unsupported;
+- applies bounded restart policies per service or worker, and fails the
+  generation only when a critical node exhausts its policy;
+- keeps the active generation routed while a candidate starts, atomically
+  switches every stable `.preview.localhost` hostname only after all required
+  nodes are ready, then stops the retired graph in reverse dependency order;
+  failed or canceled candidates do not detach the active generation;
 - preserves the stable gateway authority upstream and rewrites absolute
   target-origin redirects back to that authority;
-- stores compact preview records in schema 10 while keeping source manifests
-  and bounded stdout/stderr in artifacts;
+- stores compact preview records in schema 11, retains at most 20 terminal
+  generations per task, and keeps each stdout/stderr artifact bounded;
+- tails only the selected artifact through bounded byte-range reads rather
+  than refreshing the full task snapshot for each log update;
 - detaches routes first and stops/removes only exact verified processes and
   marker-owned workspaces; ambiguous cleanup remains `CLEANUP_INCOMPLETE`.
 
 Graceful app quit stops managed previews before the Codex provider. Restart
-reconciliation does not adopt Phase 1 native services: it stops exact verified
-owners and records `CLEANUP_INCOMPLETE` for ambiguous identities without
-signaling them. Preview events do not update `Task.workflowPhase` or the agent
-projection. Windows and Linux retain the shared interfaces but are unsupported
-for Phase 1 execution until equivalent ownership/process-tree tests exist.
+reconciliation does not adopt native services or workers: it stops every exact
+verified owner and records `CLEANUP_INCOMPLETE` for ambiguous identities
+without signaling them. Preview events do not update `Task.workflowPhase` or
+the agent projection.
 
 ## Settings
 

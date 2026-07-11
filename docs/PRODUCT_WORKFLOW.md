@@ -55,6 +55,22 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Local preview
+
+Preview is independent of task workflow phase and provider-run state. The
+Preview card shows the approved execution authority, active/candidate status,
+stable routes, and recorded native-node evidence.
+
+When an active preview exists, Start becomes Replace. During replacement the
+card keeps Open current available and Cancel replacement targets only the
+candidate. A failed candidate remains visible in history but must not hide or
+detach the active preview. After cutover, the new generation is active and the
+old generation is retired and cleaned.
+
+The log viewer selects one node attempt and one stream at a time. It tails that
+artifact through bounded range reads while open and stops polling when closed;
+normal task snapshot refreshes are not a log transport.
+
 ## Activity Timeline
 
 The Overview may show `Activity Timeline` below PR Status. It is a curated task
