@@ -25,7 +25,7 @@ describe('preview view model', () => {
     const unchecked = buildPreviewViewModel({
       task,
       worktree: { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryPath: '/repo', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: task.createdAt, updatedAt: task.updatedAt },
-      plans: [], approvals: [], generations: [], attempts: [], resources: []
+      plans: [], approvals: [], generations: [], attempts: []
     });
     expect(unchecked.actions[0]?.id).toBe('RESOLVE');
 
@@ -37,7 +37,7 @@ describe('preview view model', () => {
       warnings: [], createdAt: task.createdAt
     };
     const approvalRequired = buildPreviewViewModel({
-      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [], generations: [], attempts: [], resources: []
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [], generations: [], attempts: []
     });
     expect(approvalRequired.actions[0]?.id).toBe('APPROVE');
   });
@@ -50,7 +50,7 @@ describe('preview view model', () => {
       plans: [plan],
       approvals: [{ id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest, scope: 'TASK', approvedAt: task.createdAt }],
       generations: [{ id: 'generation', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: 'approval', executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY', routingState: 'ACTIVE', freshness: 'STALE', routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt }],
-      attempts: [], resources: []
+      attempts: []
     });
     expect(view.status).toContain('stale');
     expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
@@ -63,20 +63,60 @@ describe('preview view model', () => {
     const candidate = { ...active, id: 'candidate', workspacePath: '/candidate', state: 'WAITING_READY' as const, routingState: 'CANDIDATE' as const, replacesGenerationId: active.id, updatedAt: new Date(Date.parse(task.updatedAt) + 1).toISOString() };
     const replacing = buildPreviewViewModel({
       task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
-      generations: [candidate, active], attempts: [], resources: []
+      generations: [candidate, active], attempts: []
     });
     expect(replacing.status).toBe('Replacing');
     expect(replacing.activeGeneration?.id).toBe(active.id);
     expect(replacing.actions.map((action) => action.label)).toEqual(['Open current', 'Cancel replacement']);
 
     const failed = { ...candidate, state: 'FAILED' as const, failureReason: 'candidate failed' };
+    const failedAttempt = {
+      id: 'failed-attempt', taskId: task.id, generationId: failed.id, nodeId: 'web', kind: 'SERVICE' as const,
+      attempt: 1, commandDigest: 'command', state: 'FAILED' as const,
+      stdoutArtifactId: 'stdout', stderrArtifactId: 'stderr', endedAt: failed.updatedAt
+    };
     const preserved = buildPreviewViewModel({
       task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
-      generations: [failed, active], attempts: [], resources: []
+      generations: [failed, active], attempts: [failedAttempt]
     });
     expect(preserved.status).toBe('Running');
     expect(preserved.generation?.id).toBe(active.id);
     expect(preserved.summary).toContain('candidate failed');
+    expect(preserved.latestAttempt?.id).toBe(failedAttempt.id);
+  });
+
+  it('keeps current preview controls visible while a changed plan awaits approval or replacement', () => {
+    const oldPlan = testPlan();
+    const active = {
+      id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
+      worktreeId: 'worktree-1', planId: oldPlan.id, approvalId: 'old-approval',
+      executionDigest: oldPlan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty', workspacePath: '/active', state: 'READY' as const,
+      routingState: 'ACTIVE' as const, freshness: 'CURRENT' as const, routes: [],
+      createdAt: task.createdAt, updatedAt: task.updatedAt
+    };
+    const changedPlan = {
+      ...oldPlan,
+      id: 'plan-2',
+      executionDigest: 'changed-execution',
+      createdAt: '2026-01-02T00:00:00.000Z'
+    };
+    const approvalRequired = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [changedPlan, oldPlan], approvals: [],
+      generations: [active], attempts: []
+    });
+    expect(approvalRequired.actions.map((action) => action.id)).toEqual(['OPEN', 'APPROVE', 'STOP']);
+
+    const approved = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [changedPlan, oldPlan],
+      approvals: [{
+        id: 'new-approval', taskId: task.id, planId: changedPlan.id,
+        executionDigest: changedPlan.executionDigest, scope: 'TASK', approvedAt: changedPlan.createdAt
+      }],
+      generations: [active], attempts: []
+    });
+    expect(approved.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
+    expect(approved.actions.find((action) => action.id === 'START')?.label).toBe('Replace');
   });
 
   it('renders every approval authority without ambiguous argv or hidden literal values', () => {

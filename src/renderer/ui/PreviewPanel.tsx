@@ -4,7 +4,6 @@ import type {
   PreviewGenerationRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
-  PreviewResourceRecord,
   ReadPreviewLogResult,
   Task,
   WorktreeRecord
@@ -23,7 +22,6 @@ export function PreviewPanel(props: {
   approvals: PreviewApprovalRecord[];
   generations: PreviewGenerationRecord[];
   attempts: PreviewNodeAttemptRecord[];
-  resources: PreviewResourceRecord[];
   onResolve(taskId: string): Promise<void>;
   onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -33,7 +31,6 @@ export function PreviewPanel(props: {
 }) {
   const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
   const [logs, setLogs] = useState<string>();
-  const [loadingLogs, setLoadingLogs] = useState(false);
   const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
   const [selectedStream, setSelectedStream] = useState<'stdout' | 'stderr'>('stdout');
   const view = buildPreviewViewModel(props);
@@ -109,16 +106,11 @@ export function PreviewPanel(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedArtifactId, logs === undefined, props.task.id]);
 
-  const readLogs = async () => {
-    if (!view.latestAttempt || loadingLogs) return;
-    setLoadingLogs(true);
-    try {
-      setSelectedAttemptId(view.latestAttempt.id);
-      setSelectedStream('stdout');
-      setLogs('');
-    } finally {
-      setLoadingLogs(false);
-    }
+  const readLogs = () => {
+    if (!view.latestAttempt) return;
+    setSelectedAttemptId(view.latestAttempt.id);
+    setSelectedStream('stdout');
+    setLogs('');
   };
 
   return (
@@ -147,10 +139,9 @@ export function PreviewPanel(props: {
           <button
             type="button"
             className="tm-preview__logs-button"
-            disabled={loadingLogs}
-            onClick={() => void readLogs()}
+            onClick={readLogs}
           >
-            {loadingLogs ? 'Loading logs…' : 'View logs'}
+            View logs
           </button>
         ) : null}
       </div>
@@ -164,7 +155,11 @@ export function PreviewPanel(props: {
               onChange={(event) => setSelectedAttemptId(event.target.value)}
             >
               {props.attempts
-                .filter((attempt) => attempt.generationId === view.generation?.id)
+                .filter(
+                  (attempt) =>
+                    attempt.generationId ===
+                    (view.latestAttempt?.generationId ?? view.generation?.id)
+                )
                 .map((attempt) => (
                   <option key={attempt.id} value={attempt.id}>{attempt.nodeId} · attempt {attempt.attempt} · {attempt.state}</option>
                 ))}

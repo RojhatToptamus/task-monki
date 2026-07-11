@@ -412,9 +412,6 @@ export function App() {
   const selectedPreviewNodeAttempts = selectedTask
     ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
     : [];
-  const selectedPreviewResources = selectedTask
-    ? snapshot.previewResources.filter((record) => record.taskId === selectedTask.id)
-    : [];
   const selectedGitSnapshots = useMemo(
     () =>
       selectedTask
@@ -1095,7 +1092,6 @@ export function App() {
             previewApprovals={selectedPreviewApprovals}
             previewGenerations={selectedPreviewGenerations}
             previewNodeAttempts={selectedPreviewNodeAttempts}
-            previewResources={selectedPreviewResources}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}

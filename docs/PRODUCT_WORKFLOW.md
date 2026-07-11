@@ -65,7 +65,9 @@ When an active preview exists, Start becomes Replace. During replacement the
 card keeps Open current available and Cancel replacement targets only the
 candidate. A failed candidate remains visible in history but must not hide or
 detach the active preview. After cutover, the new generation is active and the
-old generation is retired and cleaned.
+old generation is retired and cleaned. Open and Stop current also remain
+available when a changed recipe is awaiting approval, and failed-candidate
+logs remain selectable without replacing the active preview's workflow state.
 
 The log viewer selects one node attempt and one stream at a time. It tails that
 artifact through bounded range reads while open and stops polling when closed;

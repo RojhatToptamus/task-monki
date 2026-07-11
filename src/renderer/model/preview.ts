@@ -3,7 +3,6 @@ import type {
   PreviewGenerationRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
-  PreviewResourceRecord,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -140,7 +139,6 @@ export function buildPreviewViewModel(input: {
   approvals: PreviewApprovalRecord[];
   generations: PreviewGenerationRecord[];
   attempts: PreviewNodeAttemptRecord[];
-  resources: PreviewResourceRecord[];
 }): PreviewViewModel {
   if (!input.worktree || input.worktree.status !== 'PRESENT') {
     return {
@@ -187,8 +185,9 @@ export function buildPreviewViewModel(input: {
       candidate.state === 'FAILED'
   );
   const generation = replacementGeneration ?? activeGeneration ?? generations[0];
+  const diagnosticGeneration = replacementGeneration ?? failedReplacement ?? generation;
   const latestAttempt = input.attempts
-    .filter((attempt) => attempt.generationId === generation?.id)
+    .filter((attempt) => attempt.generationId === diagnosticGeneration?.id)
     .sort((a, b) => (b.endedAt ?? b.startedAt ?? '').localeCompare(a.endedAt ?? a.startedAt ?? ''))[0];
 
   if (!approval) {
@@ -201,21 +200,37 @@ export function buildPreviewViewModel(input: {
       activeGeneration,
       replacementGeneration,
       latestAttempt,
-      actions: [{ id: 'APPROVE', label: 'Approve plan', kind: 'primary' }]
+      actions: [
+        ...(activeGeneration
+          ? [
+              { id: 'OPEN' as const, label: 'Open current', kind: 'primary' as const },
+              { id: 'APPROVE' as const, label: 'Approve plan', kind: 'secondary' as const },
+              { id: 'STOP' as const, label: 'Stop current', kind: 'secondary' as const }
+            ]
+          : [{ id: 'APPROVE' as const, label: 'Approve plan', kind: 'primary' as const }])
+      ]
     };
   }
   if (!generation || generation.executionDigest !== plan.executionDigest) {
     return {
       status: 'Ready to start',
       tone: 'action',
-      summary: 'The current execution plan is approved. Source will be captured outside the task worktree.',
+      summary: activeGeneration
+        ? 'The current preview remains available. The approved plan can replace it after captured source is verified.'
+        : 'The current execution plan is approved. Source will be captured outside the task worktree.',
       plan,
       approval,
       generation,
       activeGeneration,
       replacementGeneration,
       latestAttempt,
-      actions: [{ id: 'START', label: 'Start preview', kind: 'primary' }]
+      actions: activeGeneration
+        ? [
+            { id: 'OPEN', label: 'Open current', kind: 'primary' },
+            { id: 'START', label: 'Replace', kind: 'secondary' },
+            { id: 'STOP', label: 'Stop current', kind: 'secondary' }
+          ]
+        : [{ id: 'START', label: 'Start preview', kind: 'primary' }]
     };
   }
   if (replacementGeneration) {

@@ -386,6 +386,7 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   ]),
   scenario('preview-missing-recipe', 'preview', 'Preview recipe missing', 'The task has a worktree but no explicit preview recipe.', ['preview:UNAVAILABLE']),
   scenario('preview-approval-required', 'preview', 'Preview approval required', 'A resolved native plan awaits explicit approval.', ['preview:APPROVAL_REQUIRED']),
+  scenario('preview-active-approval-required', 'preview', 'Active preview needs new approval', 'The current preview remains actionable while a changed plan awaits approval.', ['preview:READY', 'replacement:APPROVAL_REQUIRED']),
   scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
   scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
   scenario('preview-replacing', 'preview', 'Preview replacing', 'The active preview stays routed while a candidate waits for readiness.', ['preview:REPLACING']),
@@ -735,6 +736,7 @@ async function seedScenario(
     }
     case 'preview-missing-recipe':
     case 'preview-approval-required':
+    case 'preview-active-approval-required':
     case 'preview-preparing':
     case 'preview-ready':
     case 'preview-replacing':
@@ -843,7 +845,10 @@ async function createPreviewScenario(
     recipePath: '.taskmonki/preview.yaml',
     recipeVersion: 1,
     recipeDigest: `seed-recipe-${definition.slug}`,
-    executionDigest: 'seed-preview-execution-v1',
+    executionDigest:
+      definition.slug === 'preview-active-approval-required'
+        ? 'seed-preview-execution-v2'
+        : 'seed-preview-execution-v1',
     executionPlan: {
       version: 1,
       jobs: [
@@ -879,11 +884,21 @@ async function createPreviewScenario(
     createdAt: now
   });
   if (definition.slug === 'preview-approval-required') return state;
+  const generationPlan =
+    definition.slug === 'preview-active-approval-required'
+      ? await ctx.store.savePreviewPlan({
+          ...plan,
+          id: `seed-plan-${definition.slug}-active`,
+          recipeDigest: `seed-recipe-${definition.slug}-active`,
+          executionDigest: 'seed-preview-execution-v1',
+          createdAt: new Date(Date.parse(now) - 1).toISOString()
+        })
+      : plan;
   const approval = await ctx.store.savePreviewApproval({
     id: `seed-approval-${definition.slug}`,
     taskId: state.task.id,
-    planId: plan.id,
-    executionDigest: plan.executionDigest,
+    planId: generationPlan.id,
+    executionDigest: generationPlan.executionDigest,
     scope: 'TASK',
     approvedAt: now
   });
@@ -901,9 +916,9 @@ async function createPreviewScenario(
     taskId: state.task.id,
     iterationId: state.iteration.id,
     worktreeId: state.worktree.id,
-    planId: plan.id,
+    planId: generationPlan.id,
     approvalId: approval.id,
-    executionDigest: plan.executionDigest,
+    executionDigest: generationPlan.executionDigest,
     sourceGitSnapshotId: state.gitSnapshot?.id ?? 'seed-git',
     sourceHeadSha: state.gitSnapshot?.headSha ?? ctx.baseSha,
     sourceDirtyFingerprint: state.gitSnapshot?.dirtyFingerprint ?? 'seed-dirty',
@@ -1027,7 +1042,7 @@ async function createPreviewScenario(
 
 function previewStateForSeed(slug: string): PreviewGenerationState {
   if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
-  if (['preview-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed'].includes(slug)) return 'READY';
+  if (['preview-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
   if (slug === 'preview-failed') return 'FAILED';
   if (slug === 'preview-stopped') return 'STOPPED';
   if (slug === 'preview-recovery-required') return 'RECOVERY_REQUIRED';

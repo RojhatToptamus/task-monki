@@ -90,12 +90,14 @@ describe('Task Monki development seed data', () => {
         plans: snapshot.previewPlans.filter((record) => record.taskId === task.id),
         approvals: snapshot.previewApprovals.filter((record) => record.taskId === task.id),
         generations: snapshot.previewGenerations.filter((record) => record.taskId === task.id),
-        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id),
-        resources: snapshot.previewResources.filter((record) => record.taskId === task.id)
+        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id)
       });
     };
     expect(view('preview-missing-recipe').status).toBe('Not checked');
     expect(view('preview-approval-required').status).toBe('Approval required');
+    expect(view('preview-active-approval-required').actions.map((action) => action.id)).toEqual([
+      'OPEN', 'APPROVE', 'STOP'
+    ]);
     expect(view('preview-preparing').status).toBe('Preparing source');
     expect(view('preview-ready').status).toBe('Running');
     expect(view('preview-replacing').status).toBe('Replacing');

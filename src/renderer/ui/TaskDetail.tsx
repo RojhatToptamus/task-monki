@@ -31,7 +31,6 @@ import type {
   PreviewGenerationRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
-  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -142,7 +141,6 @@ interface TaskDetailProps {
   previewApprovals: PreviewApprovalRecord[];
   previewGenerations: PreviewGenerationRecord[];
   previewNodeAttempts: PreviewNodeAttemptRecord[];
-  previewResources: PreviewResourceRecord[];
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -897,7 +895,6 @@ export function TaskDetail(props: TaskDetailProps) {
                 approvals={props.previewApprovals}
                 generations={props.previewGenerations}
                 attempts={props.previewNodeAttempts}
-                resources={props.previewResources}
                 onResolve={props.onResolvePreview}
                 onApprove={props.onApprovePreview}
                 onStart={props.onStartPreview}
