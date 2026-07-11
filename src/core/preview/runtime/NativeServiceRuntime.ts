@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
+  PreviewNativeResourceRecord,
   PreviewNodeAttemptRecord,
-  PreviewResourceRecord,
   PreviewServicePlan,
   PreviewWorkerPlan
 } from '../../../shared/contracts';
@@ -18,7 +18,7 @@ import { resolvePreparedNodeCwd } from './NativeJobRunner';
 
 export interface RunningNativeService {
   attempt: PreviewNodeAttemptRecord;
-  resource: PreviewResourceRecord;
+  resource: PreviewNativeResourceRecord;
   owned: NativeOwnedProcess;
   stdoutArtifactId: string;
   stderrArtifactId: string;
@@ -80,7 +80,7 @@ export class NativeServiceRuntime {
         : input.portValues[input.node.ready.port];
     const resourceId = randomUUID();
     const receiptPath = path.join(input.generationRoot, 'runtime', `${resourceId}.json`);
-    let resource: PreviewResourceRecord = {
+    let resource: PreviewNativeResourceRecord = {
       id: resourceId,
       taskId: input.taskId,
       generationId: input.generationId,
@@ -210,7 +210,7 @@ export class NativeServiceRuntime {
     };
   }
 
-  async stop(resource: PreviewResourceRecord): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+  async stop(resource: PreviewNativeResourceRecord): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
     this.stopping.add(resource.id);
     const owned = this.live.get(resource.id);
     let result: 'STOPPED' | 'ALREADY_EXITED' | 'REFUSED';

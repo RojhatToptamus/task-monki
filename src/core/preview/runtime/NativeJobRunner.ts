@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   PreviewJobPlan,
+  PreviewNativeResourceRecord,
   PreviewNodeKind,
-  PreviewNodeAttemptRecord,
-  PreviewResourceRecord
+  PreviewNodeAttemptRecord
 } from '../../../shared/contracts';
 import { canonicalProspectivePath, isPathWithin } from '../PreviewPaths';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
@@ -18,7 +18,7 @@ import {
 
 export interface NativeJobResult {
   attempt: PreviewNodeAttemptRecord;
-  resource: PreviewResourceRecord;
+  resource: PreviewNativeResourceRecord;
   receipt: NativeLauncherReceipt;
 }
 
@@ -62,7 +62,7 @@ export class NativeJobRunner {
     attempt = await this.store.savePreviewNodeAttempt(attempt);
     const resourceId = randomUUID();
     const receiptPath = path.join(input.generationRoot, 'runtime', `${resourceId}.json`);
-    let resource: PreviewResourceRecord = {
+    let resource: PreviewNativeResourceRecord = {
       id: resourceId,
       taskId: input.taskId,
       generationId: input.generationId,
@@ -212,7 +212,7 @@ export class PreviewJobFailure extends Error {
     nodeId: string,
     readonly receipt: NativeLauncherReceipt,
     readonly attempt: PreviewNodeAttemptRecord,
-    readonly resource: PreviewResourceRecord
+    readonly resource: PreviewNativeResourceRecord
   ) {
     super(`Preview job ${nodeId} failed with ${receipt.exitCode ?? receipt.signal ?? receipt.state}.`);
   }

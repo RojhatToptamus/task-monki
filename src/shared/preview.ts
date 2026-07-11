@@ -222,16 +222,57 @@ export interface PreviewNativeProcessIdentity {
   target?: PreviewProcessIdentity;
 }
 
-export interface PreviewResourceRecord {
+export type PreviewOciCapabilityStatus =
+  | 'READY'
+  | 'ENGINE_MISSING'
+  | 'ENGINE_UNAVAILABLE'
+  | 'UNSUPPORTED_ENGINE';
+
+export interface PreviewOciEngineIdentity {
+  contextName: string;
+  endpointDigest: string;
+  engineId: string;
+  serverVersion: string;
+  apiVersion: string;
+  operatingSystem: string;
+  architecture: string;
+}
+
+export interface PreviewOciEngineCapability {
+  status: PreviewOciCapabilityStatus;
+  contextName?: string;
+  identity?: PreviewOciEngineIdentity;
+  supportsMemoryLimit: boolean;
+  supportsCpuLimit: boolean;
+  supportsPidsLimit: boolean;
+  reason?: string;
+}
+
+export interface PreviewOciPublishedPort {
+  containerPort: number;
+  protocol: 'tcp' | 'udp';
+  hostIp: '127.0.0.1';
+  hostPort: number;
+}
+
+export interface PreviewOciObjectIdentity {
+  engine: PreviewOciEngineIdentity;
+  objectId?: string;
+  objectName: string;
+  labelsDigest: string;
+  imageReference?: string;
+  imageId?: string;
+  publishedPorts?: PreviewOciPublishedPort[];
+}
+
+interface PreviewResourceRecordBase {
   id: string;
   taskId: string;
   generationId: string;
   logicalNodeId: string;
-  adapterKind: 'NATIVE_PROCESS';
   state: 'INTENDED' | 'PREPARED' | 'RUNNING' | 'STOPPED' | 'EXITED' | 'FAILED' | 'CLEANUP_INCOMPLETE';
   ownershipMarkerDigest: string;
   receiptPath?: string;
-  native?: PreviewNativeProcessIdentity;
   targetHost?: '127.0.0.1';
   targetPort?: number;
   creationAttemptedAt?: string;
@@ -239,6 +280,20 @@ export interface PreviewResourceRecord {
   cleanupError?: string;
   updatedAt: string;
 }
+
+export interface PreviewNativeResourceRecord extends PreviewResourceRecordBase {
+  adapterKind: 'NATIVE_PROCESS';
+  native?: PreviewNativeProcessIdentity;
+  oci?: never;
+}
+
+export interface PreviewOciResourceRecord extends PreviewResourceRecordBase {
+  adapterKind: 'OCI_CONTAINER' | 'OCI_NETWORK' | 'OCI_VOLUME';
+  native?: never;
+  oci: PreviewOciObjectIdentity;
+}
+
+export type PreviewResourceRecord = PreviewNativeResourceRecord | PreviewOciResourceRecord;
 
 export interface PreviewNodeAttemptRecord {
   id: string;

@@ -320,6 +320,10 @@ export class PreviewManager {
       } else {
         for (const resource of await this.store.getPreviewResources(generation.id)) {
           if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
+          if (resource.adapterKind !== 'NATIVE_PROCESS') {
+            cleanupIncomplete = true;
+            continue;
+          }
           const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
           if (result === 'REFUSED') cleanupIncomplete = true;
         }
@@ -418,6 +422,10 @@ export class PreviewManager {
     } else {
       for (const resource of await this.store.getPreviewResources(current.id)) {
         if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
+        if (resource.adapterKind !== 'NATIVE_PROCESS') {
+          cleanupIncomplete = true;
+          continue;
+        }
         if ((await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)) === 'REFUSED') {
           cleanupIncomplete = true;
         }

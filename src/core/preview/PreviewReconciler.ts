@@ -32,6 +32,10 @@ export class PreviewReconciler {
     const resources = await this.store.getPreviewResources(generation.id);
     for (const resource of resources) {
       if (TERMINAL_RESOURCES.includes(resource.state)) continue;
+      if (resource.adapterKind !== 'NATIVE_PROCESS') {
+        cleanupIncomplete = true;
+        continue;
+      }
       const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
       if (result === 'REFUSED') cleanupIncomplete = true;
     }

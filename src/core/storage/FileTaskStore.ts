@@ -32,6 +32,8 @@ import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PreviewNodeAttemptRecord,
+  PreviewNativeResourceRecord,
+  PreviewOciResourceRecord,
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReviewRollupRecord,
@@ -604,6 +606,8 @@ export class FileTaskStore {
     return clone(attempt);
   }
 
+  async savePreviewResource(resource: PreviewNativeResourceRecord): Promise<PreviewNativeResourceRecord>;
+  async savePreviewResource(resource: PreviewOciResourceRecord): Promise<PreviewOciResourceRecord>;
   async savePreviewResource(resource: PreviewResourceRecord): Promise<PreviewResourceRecord> {
     await this.init();
     this.assertPreviewChildReferences(resource.taskId, resource.generationId, 'resource');
