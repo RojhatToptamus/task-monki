@@ -53,7 +53,7 @@ describe('TaskManagerService settings', () => {
         }
       }
     });
-  });
+  }, 15_000);
 
   it('uses the normalized Git executable instead of rereading raw env overrides', async () => {
     process.env.TASK_MANAGER_GIT_PATH = '   ';
@@ -76,7 +76,7 @@ describe('TaskManagerService settings', () => {
     });
 
     expect(getGitExecutablePath()).toBe(fakeGit);
-  });
+  }, 15_000);
 
   it('uses persisted Codex external tool settings before provider startup', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];

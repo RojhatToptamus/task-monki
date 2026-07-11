@@ -370,6 +370,10 @@ export class CodexAppServerSupervisor {
   }
 
   private async failProtocol(error: Error): Promise<void> {
+    // Once an intentional shutdown owns the lifecycle, EOF or a final partial
+    // frame must not race the close handler and reclassify that exit as a
+    // protocol failure.
+    if (this.shuttingDown) return;
     if (this.server) {
       const stored = await this.store.getAgentServer(this.server.id);
       if (stored) {
