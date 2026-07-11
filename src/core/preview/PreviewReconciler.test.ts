@@ -1,17 +1,26 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { git } from '../git/gitCli';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewReconciler } from './PreviewReconciler';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
-import { NativeLauncherHost } from './runtime/NativeLauncherHost';
+import { NativeLauncherHost, type NativeOwnedProcess } from './runtime/NativeLauncherHost';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 const launcherPath = path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs');
+const fixtures: Array<{ root: string; host: NativeLauncherHost; owned: NativeOwnedProcess }> = [];
+afterEach(async () => {
+  await Promise.all(
+    fixtures.splice(0).map(async (fixture) => {
+      await fixture.host.stopVerified(fixture.owned.identity).catch(() => undefined);
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    })
+  );
+});
 
 describeMac('PreviewReconciler macOS ownership integration', () => {
   it('never reports a lost preview ready and stops only the exact persisted owner', async () => {
@@ -72,9 +81,19 @@ async function runningGeneration() {
     repositoryPath: repo, taskId: task.id, generationId, expectedHeadSha: head
   });
   const now = new Date().toISOString();
+  const plan = await store.savePreviewPlan({
+    id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+    recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+    warnings: [], createdAt: now
+  });
+  const approval = await store.savePreviewApproval({
+    id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+    scope: 'TASK', approvedAt: now
+  });
   await store.savePreviewGeneration({
     id: generationId, previewKey: 'task-reconcile', taskId: task.id, iterationId: iteration.id,
-    worktreeId: worktree.id, planId: 'plan', approvalId: 'approval', executionDigest: 'digest',
+    worktreeId: worktree.id, planId: plan.id, approvalId: approval.id, executionDigest: 'digest',
     sourceGitSnapshotId: 'git', sourceHeadSha: head, sourceDirtyFingerprint: 'dirty',
     workspacePath: prepared.generationRoot, state: 'READY', freshness: 'CURRENT',
     routes: [{ id: 'app', hostname: 'app.task-reconcile.preview.localhost', url: 'http://app.task-reconcile.preview.localhost:31234/', gatewayPort: 31234, targetHost: '127.0.0.1', targetPort: 41234, state: 'ATTACHED' }],
@@ -109,7 +128,8 @@ async function runningGeneration() {
   resource = await store.savePreviewResource({ ...resource, state: 'RUNNING', native: owned.identity, updatedAt: new Date().toISOString() });
   const gateway = new PreviewGateway();
   const runtime = new NativeServiceRuntime(store, host);
-  return {
+  const fixture = {
+    root,
     store,
     taskId: task.id,
     generationId,
@@ -119,6 +139,8 @@ async function runningGeneration() {
     owned,
     reconciler: new PreviewReconciler(store, gateway, runtime, source)
   };
+  fixtures.push(fixture);
+  return fixture;
 }
 
 async function expectProcessMissing(pid: number) {

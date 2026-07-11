@@ -6,6 +6,7 @@ import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { AppUpdateEvent } from '../shared/contracts';
 import { chooseRepositoryFolder } from './folderPicker';
+import { authorizeDevApiRequest } from './devApiAuthorization';
 
 const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
@@ -15,6 +16,14 @@ const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
 const previewRoot =
   process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
+const devApiToken = process.env.TASK_MANAGER_DEV_API_TOKEN ?? '';
+const rendererOrigin =
+  process.env.TASK_MANAGER_RENDERER_ORIGIN ?? 'http://127.0.0.1:5173';
+if (!devApiToken) {
+  throw new Error(
+    'TASK_MANAGER_DEV_API_TOKEN is required. Run npm run dev:seed and source dev-api.env.'
+  );
+}
 
 const service = new TaskManagerService(
   new FileTaskStore(storeDir),
@@ -43,7 +52,8 @@ function sendEvent(response: http.ServerResponse, event: AppUpdateEvent): void {
 function sendJson(response: http.ServerResponse, statusCode: number, body: unknown): void {
   response.writeHead(statusCode, {
     'content-type': 'application/json',
-    'access-control-allow-origin': '*',
+    'access-control-allow-origin': rendererOrigin,
+    vary: 'Origin',
     'access-control-allow-headers': 'content-type',
     'access-control-allow-methods': 'GET,POST,OPTIONS'
   });
@@ -61,6 +71,15 @@ async function readJson(request: http.IncomingMessage): Promise<unknown> {
 async function route(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
 
+  const authorization = authorizeDevApiRequest(request.headers, {
+    token: devApiToken,
+    rendererOrigin
+  });
+  if (!authorization.authorized) {
+    sendJson(response, 403, { error: authorization.reason });
+    return;
+  }
+
   if (request.method === 'OPTIONS') {
     sendJson(response, 204, {});
     return;
@@ -71,7 +90,8 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
       connection: 'keep-alive',
-      'access-control-allow-origin': '*'
+      'access-control-allow-origin': rendererOrigin,
+      vary: 'Origin'
     });
     clients.add(response);
     request.on('close', () => clients.delete(response));

@@ -4,11 +4,7 @@ import { PreviewGateway } from './PreviewGateway';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 
-const TERMINAL_GENERATIONS: PreviewGenerationRecord['state'][] = [
-  'STOPPED',
-  'FAILED',
-  'CLEANUP_INCOMPLETE'
-];
+const TERMINAL_GENERATIONS: PreviewGenerationRecord['state'][] = ['STOPPED'];
 const TERMINAL_RESOURCES: PreviewResourceRecord['state'][] = ['STOPPED', 'EXITED', 'FAILED'];
 
 export class PreviewReconciler {
@@ -49,12 +45,16 @@ export class PreviewReconciler {
     await this.store.savePreviewGeneration({
       ...generation,
       routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
-      state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'STOPPED',
+      state:
+        cleanupIncomplete ? 'CLEANUP_INCOMPLETE'
+        : generation.state === 'FAILED' ? 'FAILED'
+        : 'STOPPED',
       cleanupReason: cleanupIncomplete
         ? 'Restart reconciliation found an unverified process or workspace identity.'
         : 'Stopped and cleaned during Task Monki restart reconciliation.',
       updatedAt: new Date().toISOString(),
-      stoppedAt: cleanupIncomplete ? undefined : new Date().toISOString()
+      stoppedAt:
+        cleanupIncomplete || generation.state === 'FAILED' ? undefined : new Date().toISOString()
     });
   }
 }

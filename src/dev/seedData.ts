@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type {
   AgentExecutionSettings,
   AgentProtocolMessageReference,
@@ -79,6 +80,8 @@ export interface DevSeedManifest {
     TASK_MANAGER_WORKTREE_ROOT: string;
     TASK_MANAGER_PREVIEW_ROOT: string;
     TASK_MANAGER_PREVIEW_RECONCILE: '0';
+    TASK_MANAGER_DEV_API_TOKEN: string;
+    TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173';
   };
   counts: {
     tasks: number;
@@ -530,7 +533,9 @@ export async function seedTaskMonkiDevelopmentData(
       TASK_MANAGER_REPO_PATH: paths.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: paths.previewRoot,
-      TASK_MANAGER_PREVIEW_RECONCILE: '0'
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      TASK_MANAGER_DEV_API_TOKEN: randomBytes(32).toString('hex'),
+      TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173'
     },
     counts: {
       tasks: snapshot.tasks.length,
@@ -550,6 +555,10 @@ export async function seedTaskMonkiDevelopmentData(
     encoding: 'utf8',
     mode: 0o600
   });
+  await Promise.all([
+    fs.chmod(paths.manifestPath, 0o600),
+    fs.chmod(paths.envFilePath, 0o600)
+  ]);
   return manifest;
 }
 

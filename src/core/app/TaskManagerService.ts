@@ -974,35 +974,37 @@ export class TaskManagerService {
   }
 
   async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
-    const task = await this.requireTask(input.taskId);
-    const snapshot = await this.store.snapshot();
-    const blockedReason = taskDeletionBlocker(task, snapshot);
-    if (blockedReason) {
-      throw new Error(blockedReason);
-    }
-
-    // Preview cleanup is part of deletion authority. The store keeps its
-    // resource ledger intact if any process or workspace identity is ambiguous.
-    await this.previews.stopTask(task.id);
-
-    let removedWorktree = false;
-    if (input.removeWorktree) {
-      const worktrees = snapshot.worktrees.filter((worktree) => worktree.taskId === task.id);
-      for (const worktree of worktrees) {
-        await this.worktrees.remove(worktree);
-        removedWorktree = true;
+    return this.withTaskAction(input.taskId, 'Task deletion', async () => {
+      const task = await this.requireTask(input.taskId);
+      const snapshot = await this.store.snapshot();
+      const blockedReason = taskDeletionBlocker(task, snapshot);
+      if (blockedReason) {
+        throw new Error(blockedReason);
       }
-    }
 
-    await this.store.deleteTask(task.id);
-    const result = { taskId: task.id, removedWorktree };
-    this.events.emit({
-      type: 'task.deleted',
-      taskId: task.id,
-      payload: result,
-      at: new Date().toISOString()
+      // Preview cleanup is part of deletion authority. The store keeps its
+      // resource ledger intact if any process or workspace identity is ambiguous.
+      await this.previews.stopTask(task.id);
+
+      let removedWorktree = false;
+      if (input.removeWorktree) {
+        const worktrees = snapshot.worktrees.filter((worktree) => worktree.taskId === task.id);
+        for (const worktree of worktrees) {
+          await this.worktrees.remove(worktree);
+          removedWorktree = true;
+        }
+      }
+
+      await this.store.deleteTask(task.id);
+      const result = { taskId: task.id, removedWorktree };
+      this.events.emit({
+        type: 'task.deleted',
+        taskId: task.id,
+        payload: result,
+        at: new Date().toISOString()
+      });
+      return result;
     });
-    return result;
   }
 
   readArtifact(input: ReadArtifactRequest): Promise<string> {

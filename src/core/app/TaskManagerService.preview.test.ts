@@ -7,7 +7,12 @@ import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSuppo
 
 const scenarios: TaskMonkiScenario[] = [];
 afterEach(async () => {
-  await Promise.allSettled(scenarios.splice(0).map((scenario) => scenario.service.shutdown()));
+  await Promise.allSettled(
+    scenarios.splice(0).map(async (scenario) => {
+      await scenario.service.shutdown().catch(() => undefined);
+      await fs.rm(scenario.rootDir, { recursive: true, force: true });
+    })
+  );
 });
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
@@ -126,6 +131,96 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
     expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(256 * 1024);
   });
 
+  it('rejects a wildcard listener and cleans the failed generation', async () => {
+    const scenario = await previewScenario('task-monki-preview-wildcard', false, 'wildcard');
+    const task = await prepareApprovedPreview(scenario);
+    await expect(scenario.service.startPreview({ taskId: task.id })).rejects.toThrow(
+      'non-loopback address'
+    );
+    const snapshot = await scenario.store.snapshot();
+    const generation = snapshot.previewGenerations.find((record) => record.taskId === task.id)!;
+    expect(generation.state).toBe('FAILED');
+    await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 20_000);
+
+  it('never overwrites an early service exit with READY', async () => {
+    const scenario = await previewScenario('task-monki-preview-early-exit', false, 'exit-after-ready');
+    const task = await prepareApprovedPreview(scenario);
+    await expect(scenario.service.startPreview({ taskId: task.id })).rejects.toThrow();
+    const generations = (await scenario.store.snapshot()).previewGenerations.filter(
+      (record) => record.taskId === task.id
+    );
+    expect(generations).toHaveLength(1);
+    expect(generations[0].state).not.toBe('READY');
+    await expect(fs.access(generations[0].workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 20_000);
+
+  it('serializes a post-READY service exit into FAILED cleanup and route detachment', async () => {
+    const scenario = await previewScenario('task-monki-preview-later-exit', false, 'exit-later');
+    const task = await prepareApprovedPreview(scenario);
+    const ready = await scenario.service.startPreview({ taskId: task.id });
+    expect(ready.state).toBe('READY');
+    const failed = await scenario.waitForSnapshot((snapshot) =>
+      snapshot.previewGenerations.some(
+        (generation) => generation.id === ready.id && generation.state === 'FAILED'
+      )
+    );
+    expect(failed.previewGenerations.find((generation) => generation.id === ready.id)?.state).toBe(
+      'FAILED'
+    );
+    await expect(requestRoute(ready.routes[0].gatewayPort, ready.routes[0].hostname, '/')).resolves.toMatchObject({
+      status: 503
+    });
+    await expect(fs.access(ready.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 20_000);
+
+  it('records terminal attempt and resource evidence when launcher startup fails', async () => {
+    const scenario = await previewScenario('task-monki-preview-launch-failure', false, 'missing-command');
+    const task = await prepareApprovedPreview(scenario);
+    await expect(scenario.service.startPreview({ taskId: task.id })).rejects.toThrow();
+    const snapshot = await scenario.store.snapshot();
+    const serviceAttempt = snapshot.previewNodeAttempts.find(
+      (attempt) => attempt.taskId === task.id && attempt.kind === 'SERVICE'
+    );
+    const serviceResource = snapshot.previewResources.find(
+      (resource) => resource.taskId === task.id && resource.logicalNodeId === 'web'
+    );
+    expect(serviceAttempt).toMatchObject({ state: 'FAILED' });
+    expect(serviceAttempt?.endedAt).toBeDefined();
+    expect(serviceResource?.state).toBe('FAILED');
+  }, 20_000);
+
+  it('cancels readiness immediately and completes verified cleanup on stop', async () => {
+    const scenario = await previewScenario('task-monki-preview-cancel-ready', false, 'never-ready');
+    const task = await prepareApprovedPreview(scenario);
+    const starting = scenario.service.startPreview({ taskId: task.id });
+    const rejectedStart = expect(starting).rejects.toThrow('canceled');
+    const waiting = await scenario.waitForSnapshot((snapshot) =>
+      snapshot.previewGenerations.some(
+        (generation) => generation.taskId === task.id && generation.state === 'WAITING_READY'
+      )
+    );
+    const generation = waiting.previewGenerations.find((record) => record.taskId === task.id)!;
+    const stopped = await scenario.service.stopPreview({ taskId: task.id, generationId: generation.id });
+    await rejectedStart;
+    expect(stopped.state).toBe('STOPPED');
+    await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 20_000);
+
+  it('serializes task deletion against source capture so no orphan records can be recreated', async () => {
+    const scenario = await previewScenario('task-monki-preview-delete-race');
+    const task = await prepareApprovedPreview(scenario);
+    const starting = scenario.service.startPreview({ taskId: task.id });
+    await expect(
+      scenario.service.deleteTask({ taskId: task.id, removeWorktree: false })
+    ).rejects.toThrow('Preview source capture is already running');
+    const ready = await starting;
+    const snapshot = await scenario.store.snapshot();
+    expect(snapshot.tasks.some((candidate) => candidate.id === task.id)).toBe(true);
+    expect(snapshot.previewGenerations.every((generation) => generation.taskId === task.id)).toBe(true);
+    await scenario.service.stopPreview({ taskId: task.id, generationId: ready.id });
+  }, 20_000);
+
   it('runs three task previews concurrently with distinct resources and stops all on graceful shutdown', async () => {
     const scenario = await previewScenario('task-monki-preview-concurrency');
     const tasks = await Promise.all([
@@ -159,7 +254,6 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
     for (const generation of generations) {
       await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
     }
-    scenarios.splice(scenarios.indexOf(scenario), 1);
   }, 25_000);
 
   it('blocks capture during agent work and cleans a verified preview before task deletion', async () => {
@@ -199,7 +293,15 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
   }, 20_000);
 });
 
-async function previewScenario(name: string, failingJob = false) {
+type ServiceMode =
+  | 'normal'
+  | 'wildcard'
+  | 'exit-after-ready'
+  | 'exit-later'
+  | 'missing-command'
+  | 'never-ready';
+
+async function previewScenario(name: string, failingJob = false, serviceMode: ServiceMode = 'normal') {
   const scenario = await createTaskMonkiScenario({ name, previewEnabled: true });
   scenarios.push(scenario);
   await fs.mkdir(path.join(scenario.repositoryPath, '.taskmonki'), { recursive: true });
@@ -214,10 +316,16 @@ async function previewScenario(name: string, failingJob = false) {
     path.join(scenario.repositoryPath, 'server.mjs'),
     `import http from 'node:http'; import fs from 'node:fs/promises';
 const body = await fs.readFile('untracked-preview.txt', 'utf8').catch(() => 'committed-content');
-http.createServer((request, response) => {
-  if (request.url === '/health/ready') { response.writeHead(204).end(); return; }
+const server = http.createServer((request, response) => {
+  if (request.url === '/health/ready') {
+    response.writeHead(${serviceMode === 'never-ready' ? '503' : '204'}).end();
+    ${serviceMode === 'exit-after-ready' ? 'server.close(() => process.exit(0));' : ''}
+    ${serviceMode === 'exit-later' ? 'setTimeout(() => server.close(() => process.exit(0)), 300);' : ''}
+    return;
+  }
   response.end(body);
-}).listen(Number(process.env.PORT), '127.0.0.1');\n`
+});
+server.listen(Number(process.env.PORT), '${serviceMode === 'wildcard' ? '0.0.0.0' : '127.0.0.1'}');\n`
   );
   await fs.writeFile(
     path.join(scenario.repositoryPath, '.taskmonki', 'preview.yaml'),
@@ -227,7 +335,7 @@ jobs:
     command: [node, scripts/prepare-preview.mjs]
 services:
   web:
-    command: [node, server.mjs]
+    command: [${serviceMode === 'missing-command' ? 'task-monki-command-does-not-exist' : 'node, server.mjs'}]
     needs: { prepare: succeeded }
     env: { PREVIEW_MODE: phase-one }
     ports: { http: { env: PORT } }
@@ -239,6 +347,19 @@ routes:
   await git(scenario.repositoryPath, ['add', '.']);
   await git(scenario.repositoryPath, ['commit', '-m', 'Add preview fixture']);
   return scenario;
+}
+
+async function prepareApprovedPreview(scenario: TaskMonkiScenario) {
+  const task = await scenario.createTask();
+  await scenario.service.prepareWorktree({ taskId: task.id });
+  const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+  if (resolved.status !== 'PLAN') throw new Error('Expected preview plan.');
+  await scenario.service.approvePreviewPlan({
+    taskId: task.id,
+    planId: resolved.plan.id,
+    executionDigest: resolved.plan.executionDigest
+  });
+  return task;
 }
 
 function requestRoute(port: number, hostname: string, requestPath: string) {

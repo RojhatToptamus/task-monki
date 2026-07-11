@@ -12,6 +12,7 @@ let target;
 let committed = false;
 let stopping = false;
 let terminalWritten = false;
+let finalizing;
 const logCounts = { stdout: 0, stderr: 0 };
 const logWrites = { stdout: Promise.resolve(), stderr: Promise.resolve() };
 const stopTimers = new Set();
@@ -60,15 +61,7 @@ async function commitLaunch() {
     process.send?.({ type: 'started', targetPid: target.pid });
   });
   target.once('close', async (exitCode, signal) => {
-    clearStopTimers();
-    await Promise.allSettled(Object.values(logWrites));
-    await writeTerminal({
-      state: stopping ? 'STOPPED' : 'EXITED',
-      exitCode,
-      signal
-    });
-    process.send?.({ type: 'exited', exitCode, signal, stopped: stopping });
-    process.exit(0);
+    await finalizeTarget(exitCode, signal);
   });
   target.once('error', async (error) => {
     clearStopTimers();
@@ -83,17 +76,74 @@ async function stopTarget() {
   if (stopping) return;
   stopping = true;
   clearTimeout(commitTimer);
-  if (!target || target.exitCode !== null || target.signalCode !== null) {
+  if (!target) {
     await writeTerminal({ state: committed ? 'STOPPED' : 'ABORTED' });
     process.exit(0);
     return;
   }
+  if (target.exitCode !== null || target.signalCode !== null) return;
   signalTarget('SIGINT');
   scheduleSignal('SIGTERM', 500);
   scheduleSignal('SIGKILL', 1_500);
   const forceExit = setTimeout(() => process.exit(3), 3_000);
   forceExit.unref();
   stopTimers.add(forceExit);
+}
+
+async function finalizeTarget(exitCode, signal) {
+  if (finalizing) return finalizing;
+  finalizing = (async () => {
+    clearStopTimers();
+    await Promise.allSettled(Object.values(logWrites));
+    const groupClean = await cleanupRemainingTargetGroup();
+    if (!groupClean) {
+      await writeTerminal({
+        state: 'FAILED',
+        exitCode,
+        signal,
+        error: 'Target process group remained alive after bounded cleanup.'
+      });
+      process.send?.({ type: 'failed', error: 'Target process group cleanup failed.' });
+      process.exit(1);
+      return;
+    }
+    await writeTerminal({
+      state: stopping ? 'STOPPED' : 'EXITED',
+      exitCode,
+      signal
+    });
+    process.send?.({ type: 'exited', exitCode, signal, stopped: stopping });
+    process.exit(0);
+  })();
+  return finalizing;
+}
+
+async function cleanupRemainingTargetGroup() {
+  if (process.platform === 'win32' || !target?.pid || !processGroupExists(target.pid)) return true;
+  signalTarget('SIGTERM');
+  if (await waitForGroupExit(target.pid, 750)) return true;
+  signalTarget('SIGKILL');
+  return waitForGroupExit(target.pid, 1_500);
+}
+
+function processGroupExists(groupId) {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+async function waitForGroupExit(groupId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processGroupExists(groupId)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !processGroupExists(groupId);
 }
 
 function scheduleSignal(signal, delay) {

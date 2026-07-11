@@ -320,6 +320,7 @@ export class FileTaskStore {
 
   async savePreviewPlan(plan: PreviewPlanRecord): Promise<PreviewPlanRecord> {
     await this.init();
+    this.assertPreviewPlanReferences(plan);
     const now = new Date().toISOString();
     this.state = {
       ...this.state,
@@ -357,6 +358,7 @@ export class FileTaskStore {
 
   async savePreviewApproval(approval: PreviewApprovalRecord): Promise<PreviewApprovalRecord> {
     await this.init();
+    this.assertPreviewApprovalReferences(approval);
     this.state = {
       ...this.state,
       previewApprovals: [
@@ -382,6 +384,7 @@ export class FileTaskStore {
     generation: PreviewGenerationRecord
   ): Promise<PreviewGenerationRecord> {
     await this.init();
+    this.assertPreviewGenerationReferences(generation);
     const exists = this.state.previewGenerations.some(
       (candidate) => candidate.id === generation.id
     );
@@ -413,6 +416,7 @@ export class FileTaskStore {
     attempt: PreviewNodeAttemptRecord
   ): Promise<PreviewNodeAttemptRecord> {
     await this.init();
+    this.assertPreviewChildReferences(attempt.taskId, attempt.generationId, 'attempt');
     this.state = {
       ...this.state,
       previewNodeAttempts: [
@@ -436,6 +440,7 @@ export class FileTaskStore {
 
   async savePreviewResource(resource: PreviewResourceRecord): Promise<PreviewResourceRecord> {
     await this.init();
+    this.assertPreviewChildReferences(resource.taskId, resource.generationId, 'resource');
     this.state = {
       ...this.state,
       previewResources: [
@@ -678,6 +683,15 @@ export class FileTaskStore {
         `Task has an active or unverified preview resource: ${activePreviewResource.id}. Stop or reconcile it before deletion.`
       );
     }
+    const nonterminalPreviewGeneration = this.state.previewGenerations.find(
+      (generation) =>
+        generation.taskId === taskId && !['STOPPED', 'FAILED'].includes(generation.state)
+    );
+    if (nonterminalPreviewGeneration) {
+      throw new Error(
+        `Task has an active or unverified preview generation: ${nonterminalPreviewGeneration.id}. Stop or reconcile it before deletion.`
+      );
+    }
 
     const runIds = new Set(
       this.state.runs.filter((run) => run.taskId === taskId).map((run) => run.id)
@@ -885,6 +899,85 @@ export class FileTaskStore {
 
     await this.persistQueued();
     return clone(task);
+  }
+
+  private assertPreviewPlanReferences(plan: PreviewPlanRecord): void {
+    const task = this.state.tasks.find((candidate) => candidate.id === plan.taskId);
+    const iteration = this.state.iterations.find(
+      (candidate) => candidate.id === plan.iterationId && candidate.taskId === plan.taskId
+    );
+    const worktree = this.state.worktrees.find(
+      (candidate) =>
+        candidate.id === plan.worktreeId &&
+        candidate.taskId === plan.taskId &&
+        candidate.iterationId === plan.iterationId
+    );
+    if (!task || !iteration || !worktree) {
+      throw new Error('Preview plan references a missing or mismatched task context.');
+    }
+  }
+
+  private assertPreviewApprovalReferences(approval: PreviewApprovalRecord): void {
+    const plan = this.state.previewPlans.find(
+      (candidate) =>
+        candidate.id === approval.planId &&
+        candidate.taskId === approval.taskId &&
+        candidate.executionDigest === approval.executionDigest
+    );
+    if (!plan || !this.state.tasks.some((task) => task.id === approval.taskId)) {
+      throw new Error('Preview approval references a missing or mismatched plan.');
+    }
+  }
+
+  private assertPreviewGenerationReferences(generation: PreviewGenerationRecord): void {
+    const existing = this.state.previewGenerations.find(
+      (candidate) => candidate.id === generation.id
+    );
+    const plan = this.state.previewPlans.find(
+      (candidate) =>
+        candidate.id === generation.planId &&
+        candidate.taskId === generation.taskId &&
+        candidate.iterationId === generation.iterationId &&
+        candidate.worktreeId === generation.worktreeId &&
+        candidate.executionDigest === generation.executionDigest
+    );
+    const approval = this.state.previewApprovals.find(
+      (candidate) =>
+        candidate.id === generation.approvalId &&
+        candidate.taskId === generation.taskId &&
+        candidate.planId === generation.planId &&
+        candidate.executionDigest === generation.executionDigest &&
+        (!candidate.invalidatedAt || Boolean(existing))
+    );
+    const authorityChanged =
+      existing &&
+      (existing.taskId !== generation.taskId ||
+        existing.iterationId !== generation.iterationId ||
+        existing.worktreeId !== generation.worktreeId ||
+        existing.planId !== generation.planId ||
+        existing.approvalId !== generation.approvalId ||
+        existing.executionDigest !== generation.executionDigest);
+    if (
+      !plan ||
+      !approval ||
+      authorityChanged ||
+      !this.state.tasks.some((task) => task.id === generation.taskId)
+    ) {
+      throw new Error('Preview generation references missing or mismatched task authority.');
+    }
+  }
+
+  private assertPreviewChildReferences(
+    taskId: string,
+    generationId: string,
+    kind: 'attempt' | 'resource'
+  ): void {
+    const generation = this.state.previewGenerations.find(
+      (candidate) => candidate.id === generationId && candidate.taskId === taskId
+    );
+    if (!generation || !this.state.tasks.some((task) => task.id === taskId)) {
+      throw new Error(`Preview ${kind} references a missing or mismatched generation.`);
+    }
   }
 
   async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {

@@ -63,6 +63,23 @@ describe('PreviewGateway', () => {
     expect(result.headers['x-upstream-only']).toBeUndefined();
   });
 
+  it('preserves stable authority and rewrites target-origin absolute redirects', async () => {
+    let upstreamHost: string | undefined;
+    const upstream = await fixture((request, response) => {
+      upstreamHost = request.headers.host;
+      const address = request.socket.localAddress;
+      const port = request.socket.localPort;
+      response.writeHead(302, { location: `http://${address}:${port}/signed-in?next=1` }).end();
+    });
+    const gateway = await startGateway();
+    const hostname = 'redirect.task-a.preview.localhost';
+    const authority = `${hostname}:${gateway.port}`;
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream });
+    const result = await requestWithHeaders(gateway.port, authority);
+    expect(upstreamHost).toBe(authority);
+    expect(result.headers.location).toBe(`http://${authority}/signed-in?next=1`);
+  });
+
   it('tunnels an HTTP upgrade and subsequent bytes', async () => {
     const server = http.createServer();
     server.on('upgrade', (_request, socket) => {
@@ -93,12 +110,19 @@ async function fixture(handler: http.RequestListener): Promise<number> {
 }
 
 function request(port: number, hostname: string): Promise<{ status: number; body: string }> {
+  return requestWithHeaders(port, hostname).then(({ status, body }) => ({ status, body }));
+}
+
+function requestWithHeaders(
+  port: number,
+  hostname: string
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, headers: { host: hostname } }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => (body += chunk));
-      res.once('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      res.once('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
     });
     req.once('error', reject);
     req.end();

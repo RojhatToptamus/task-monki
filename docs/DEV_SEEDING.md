@@ -26,11 +26,13 @@ npm run dev:renderer
 ```
 
 The development renderer uses Vite's same-origin `/api` proxy to the local
-control API on `127.0.0.1:3099`. Set `VITE_TASK_MANAGER_API_URL` only when a
-different explicit API origin is needed.
+control API on `127.0.0.1:3099`. The sourced environment gives the proxy a
+per-seed secret that is never exposed to renderer code. The control API also
+rejects browser requests whose `Origin` is not the configured renderer origin.
 
-`npm run dev:seed` resets only the seed-owned root and then prints the same
-environment variables written to `dev-api.env`:
+`npm run dev:seed` resets only the seed-owned root and prints the non-sensitive
+environment variables written to `dev-api.env`. The token is not printed, and
+both the seed manifest and environment file are forced to mode `0600`:
 
 - `TASK_MANAGER_STORE_DIR`
 - `TASK_MANAGER_APP_SETTINGS_PATH`
@@ -39,6 +41,8 @@ environment variables written to `dev-api.env`:
 - `TASK_MANAGER_PREVIEW_ROOT`
 - `TASK_MANAGER_PREVIEW_RECONCILE=0` (keeps synthetic preview UI states intact;
   normal product/dev runs reconcile by default)
+- `TASK_MANAGER_DEV_API_TOKEN` (random per-seed proxy credential)
+- `TASK_MANAGER_RENDERER_ORIGIN=http://127.0.0.1:5173`
 
 The default seed root is `.local/task-monki-dev-seed`, which is ignored by git.
 Reset safety is marker-based: non-empty directories without the Task Monki seed

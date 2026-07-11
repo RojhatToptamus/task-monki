@@ -142,7 +142,11 @@ export class PreviewGateway {
         response.writeHead(
           upstreamResponse.statusCode ?? 502,
           upstreamResponse.statusMessage,
-          stripHopByHopHeaders(upstreamResponse.headers)
+          rewriteResponseHeaders(
+            upstreamResponse.headers,
+            target,
+            request.headers.host
+          )
         );
         upstreamResponse.pipe(response);
       }
@@ -199,10 +203,38 @@ function forwardedHeaders(
 ): http.OutgoingHttpHeaders {
   return {
     ...stripHopByHopHeaders(source),
-    host: `${target.host}:${target.port}`,
+    host: source.host,
     'x-forwarded-host': source.host,
+    'x-forwarded-port': forwardedPort(source.host),
     'x-forwarded-proto': 'http'
   };
+}
+
+function rewriteResponseHeaders(
+  source: IncomingHttpHeaders,
+  target: PreviewGatewayTarget,
+  stableAuthority: string | undefined
+): http.OutgoingHttpHeaders {
+  const headers = stripHopByHopHeaders(source);
+  if (typeof headers.location !== 'string' || !stableAuthority) return headers;
+  try {
+    const location = new URL(headers.location);
+    if (location.hostname !== target.host || Number(location.port) !== target.port) return headers;
+    const stable = new URL(`http://${stableAuthority}`);
+    location.protocol = 'http:';
+    location.hostname = stable.hostname;
+    location.port = stable.port;
+    headers.location = location.toString();
+  } catch {
+    // Relative and non-URL Location values already remain on the stable route.
+  }
+  return headers;
+}
+
+function forwardedPort(authority: string | undefined): string | undefined {
+  if (!authority) return undefined;
+  const match = /:(\d+)$/.exec(authority);
+  return match?.[1] ?? '80';
 }
 
 function stripHopByHopHeaders(source: IncomingHttpHeaders): http.OutgoingHttpHeaders {

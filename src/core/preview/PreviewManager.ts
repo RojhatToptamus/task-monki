@@ -20,7 +20,7 @@ import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewRecipeLoader } from './PreviewRecipeLoader';
 import { PreviewReconciler } from './PreviewReconciler';
-import { PreviewSourcePreparer } from './PreviewSourcePreparer';
+import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService } from './runtime/PreviewOpenService';
 
@@ -41,6 +41,7 @@ export interface PreparedPreviewGeneration {
 export class PreviewManager {
   private readonly live = new Map<string, RunningPreviewGraph>();
   private readonly locks = new Map<string, Promise<unknown>>();
+  private readonly startups = new Map<string, AbortController>();
   private gatewayPort: number | undefined;
 
   constructor(
@@ -127,8 +128,9 @@ export class PreviewManager {
     };
     generation = await this.store.savePreviewGeneration(generation);
     generation = await this.saveGeneration({ ...generation, state: 'PREPARING_SOURCE' });
+    let prepared: Awaited<ReturnType<PreviewSourcePreparer['prepare']>> | undefined;
     try {
-      const prepared = await this.sourcePreparer.prepare({
+      prepared = await this.sourcePreparer.prepare({
         repositoryPath: input.context.worktree.worktreePath,
         taskId: generation.taskId,
         generationId: generation.id,
@@ -139,16 +141,12 @@ export class PreviewManager {
         observed.headSha !== sourceHeadSha ||
         observed.dirtyFingerprint !== sourceDirtyFingerprint
       ) {
-        await this.sourcePreparer.cleanupOwnedGeneration({
-          taskId: generation.taskId,
-          generationId: generation.id
-        });
         throw new Error('Git evidence changed while the preview source was being prepared.');
       }
       const manifest = await this.store.writeTextArtifact(
         generation.taskId,
         'preview-source-manifest',
-        `${JSON.stringify(prepared.manifest, null, 2)}\n`
+        serializePreviewSourceManifest(prepared.manifest)
       );
       generation = await this.saveGeneration({
         ...generation,
@@ -164,16 +162,32 @@ export class PreviewManager {
         markerDigest: prepared.markerDigest
       };
     } catch (error) {
+      let cleanupIncomplete = false;
+      if (prepared) {
+        await this.sourcePreparer
+          .cleanupOwnedGeneration({
+            taskId: generation.taskId,
+            generationId: generation.id
+          })
+          .catch(() => {
+            cleanupIncomplete = true;
+          });
+      }
       generation = await this.saveGeneration({
         ...generation,
-        state: 'FAILED',
-        failureReason: boundedError(error)
+        state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+        failureReason: boundedError(error),
+        cleanupReason: cleanupIncomplete
+          ? 'Source preparation failure cleanup could not verify the workspace.'
+          : undefined
       });
       throw error;
     }
   }
 
   execute(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
+    const controller = new AbortController();
+    this.startups.set(prepared.generation.id, controller);
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
       try {
@@ -184,14 +198,23 @@ export class PreviewManager {
           sourcePath: prepared.sourcePath,
           markerDigest: prepared.markerDigest,
           plan: prepared.plan.executionPlan,
+          signal: controller.signal,
           updateGenerationState: async (state) => {
             generation = await this.saveGeneration({ ...generation, state });
-          },
-          onUnexpectedServiceExit: async (reason) => {
-            await this.handleUnexpectedExit(generation.id, reason);
           }
         });
         this.live.set(generation.id, running);
+        void running.unexpectedExit
+          .then((reason) => {
+            if (!reason) return;
+            return this.withGenerationLock(generation.id, () =>
+              this.handleUnexpectedExit(generation.id, reason)
+            );
+          })
+          .catch(() => undefined);
+        if (!running.isRunning()) {
+          throw new Error('Preview service exited before gateway routes could be attached.');
+        }
         const routes = prepared.plan.executionPlan.routes.map((route) => {
           const targetPort = running.ports[route.port];
           const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
@@ -206,6 +229,9 @@ export class PreviewManager {
             state: 'ATTACHED' as const
           };
         });
+        if (!running.isRunning()) {
+          throw new Error('Preview service exited before READY could be committed.');
+        }
         generation = await this.saveGeneration({
           ...generation,
           state: 'READY',
@@ -217,10 +243,15 @@ export class PreviewManager {
         await this.cleanupFailedGeneration(generation, error);
         throw error;
       }
+    }).finally(() => {
+      if (this.startups.get(prepared.generation.id) === controller) {
+        this.startups.delete(prepared.generation.id);
+      }
     });
   }
 
   stop(generationId: string): Promise<PreviewGenerationRecord> {
+    this.startups.get(generationId)?.abort();
     return this.withGenerationLock(generationId, async () => {
       let generation = await this.requireGeneration(generationId);
       if (generation.state === 'STOPPED') return generation;
@@ -324,6 +355,7 @@ export class PreviewManager {
     error: unknown
   ): Promise<void> {
     const current = (await this.store.getPreviewGeneration(generation.id)) ?? generation;
+    this.live.delete(current.id);
     this.detachRoutes(current);
     let cleanupIncomplete = false;
     for (const resource of await this.store.getPreviewResources(current.id)) {

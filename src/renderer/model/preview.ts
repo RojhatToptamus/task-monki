@@ -7,6 +7,7 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
+import { PREVIEW_POSIX_INHERITED_ENV_KEYS } from '../../shared/preview';
 
 export type PreviewActionId = 'RESOLVE' | 'APPROVE' | 'START' | 'OPEN' | 'STOP';
 
@@ -25,6 +26,57 @@ export interface PreviewViewModel {
   generation?: PreviewGenerationRecord;
   latestAttempt?: PreviewNodeAttemptRecord;
   actions: PreviewActionModel[];
+}
+
+export interface PreviewPlanLine {
+  label: string;
+  value: string;
+}
+
+export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLine[] {
+  const lines: PreviewPlanLine[] = [
+    {
+      label: 'Built-in environment',
+      value: `${PREVIEW_POSIX_INHERITED_ENV_KEYS.join(', ')} when present; TASK_MONKI_PREVIEW="1"`
+    }
+  ];
+  for (const job of plan.executionPlan.jobs) {
+    lines.push({
+      label: `Job · ${job.id}`,
+      value: `${formatArgv(job.command)} · cwd=${JSON.stringify(job.cwd)}`
+    });
+  }
+  for (const service of plan.executionPlan.services) {
+    lines.push({
+      label: `Service · ${service.id}`,
+      value: `${formatArgv(service.command)} · cwd=${JSON.stringify(service.cwd)}`
+    });
+    for (const [key, value] of Object.entries(service.env)) {
+      lines.push({ label: `Literal env · ${service.id}`, value: `${key}=${JSON.stringify(value)}` });
+    }
+    for (const [portId, port] of Object.entries(service.ports)) {
+      lines.push({
+        label: `Generated port · ${service.id}.${portId}`,
+        value: `${port.env}=<allocated high TCP port>; listener must be owned by the service group on 127.0.0.1`
+      });
+    }
+    const readinessEnv = service.ports[service.ready.port].env;
+    lines.push({
+      label: `Readiness · ${service.id}`,
+      value: `HTTP 127.0.0.1:<${service.id}.${service.ready.port} via ${readinessEnv}>${service.ready.path} · absolute deadline ${service.ready.timeoutSeconds}s`
+    });
+  }
+  for (const route of plan.executionPlan.routes) {
+    lines.push({
+      label: `Route · ${route.id}`,
+      value: `${route.id} → ${route.service}.${route.port}${route.primary ? ' · primary' : ''}`
+    });
+  }
+  lines.push({
+    label: 'Cleanup',
+    value: 'Signal only the verified native process group; remove only the marker-owned generation workspace'
+  });
+  return lines;
 }
 
 export function buildPreviewViewModel(input: {
@@ -168,8 +220,12 @@ export function buildPreviewViewModel(input: {
     approval,
     generation,
     latestAttempt,
-    actions: []
+    actions: [{ id: 'STOP', label: 'Cancel and clean up', kind: 'secondary' }]
   };
+}
+
+function formatArgv(argv: string[]): string {
+  return argv.map((argument) => JSON.stringify(argument)).join(' ');
 }
 
 function humanize(value: string): string {

@@ -8,7 +8,11 @@ import type {
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
-import { buildPreviewViewModel, type PreviewActionId } from '../model/preview';
+import {
+  buildPreviewPlanSummary,
+  buildPreviewViewModel,
+  type PreviewActionId
+} from '../model/preview';
 import { StatusChip } from './StatusBadge';
 
 export function PreviewPanel(props: {
@@ -26,15 +30,15 @@ export function PreviewPanel(props: {
   onStop(taskId: string, generationId: string): Promise<void>;
   onReadLog(taskId: string, artifactId: string): Promise<string>;
 }) {
-  const [busy, setBusy] = useState<PreviewActionId>();
+  const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
   const [logs, setLogs] = useState<string>();
   const [loadingLogs, setLoadingLogs] = useState(false);
   const view = buildPreviewViewModel(props);
   const tone = view.tone === 'warning' ? 'warning' : view.tone === 'neutral' ? 'neutral' : view.tone;
 
   const act = async (action: PreviewActionId) => {
-    if (busy) return;
-    setBusy(action);
+    if (busy.has(action) || (busy.size > 0 && !(action === 'STOP' && busy.has('START')))) return;
+    setBusy((current) => new Set(current).add(action));
     try {
       if (action === 'RESOLVE') await props.onResolve(props.task.id);
       if (action === 'APPROVE' && view.plan) {
@@ -49,7 +53,11 @@ export function PreviewPanel(props: {
         await props.onStop(props.task.id, view.generation.id);
       }
     } finally {
-      setBusy(undefined);
+      setBusy((current) => {
+        const next = new Set(current);
+        next.delete(action);
+        return next;
+      });
     }
   };
 
@@ -86,10 +94,10 @@ export function PreviewPanel(props: {
             key={action.id}
             type="button"
             className={action.kind === 'primary' ? 'primary-button' : 'outline-button'}
-            disabled={Boolean(busy)}
+            disabled={busy.has(action.id) || (busy.size > 0 && !(action.id === 'STOP' && busy.has('START')))}
             onClick={() => void act(action.id)}
           >
-            {busy === action.id ? 'Working…' : action.label}
+            {busy.has(action.id) ? 'Working…' : action.label}
           </button>
         ))}
         {view.latestAttempt ? (
@@ -112,32 +120,14 @@ export function PreviewPanel(props: {
 }
 
 function PreviewPlanSummary({ plan, expanded }: { plan: PreviewPlanRecord; expanded: boolean }) {
-  const service = plan.executionPlan.services[0];
+  const lines = buildPreviewPlanSummary(plan);
   return (
     <details className="tm-preview__plan" open={expanded}>
       <summary>Execution plan</summary>
       <div className="tm-preview__planbody">
-        {plan.executionPlan.jobs.map((job) => (
-          <PlanLine key={job.id} label="Run once" value={`${job.command.join(' ')} · ${job.cwd}`} />
+        {lines.map((line, index) => (
+          <PlanLine key={`${line.label}-${index}`} label={line.label} value={line.value} />
         ))}
-        {service ? (
-          <>
-            <PlanLine label="Start" value={`${service.command.join(' ')} · ${service.cwd}`} />
-            <PlanLine
-              label="Environment"
-              value={[
-                ...Object.keys(service.env),
-                ...Object.values(service.ports).map((port) => `${port.env}=<dynamic loopback port>`)
-              ].join(', ') || 'Allowlisted base environment only'}
-            />
-            <PlanLine
-              label="Ready"
-              value={`HTTP ${service.ready.path} · ${service.ready.timeoutSeconds}s`}
-            />
-          </>
-        ) : null}
-        <PlanLine label="Route" value="Stable .preview.localhost URL after readiness" />
-        <PlanLine label="Cleanup" value="Verified process group and marker-owned workspace only" />
         {plan.warnings.map((warning) => (
           <p key={warning} className="tm-preview__warning">{warning}</p>
         ))}

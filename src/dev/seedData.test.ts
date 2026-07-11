@@ -62,8 +62,11 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
-      TASK_MANAGER_PREVIEW_RECONCILE: '0'
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173'
     });
+    expect(manifest.env.TASK_MANAGER_DEV_API_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+    expect((await fs.stat(manifest.envFilePath)).mode & 0o777).toBe(0o600);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
       DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)

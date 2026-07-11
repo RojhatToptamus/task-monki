@@ -11,7 +11,8 @@ import { FileTaskStore } from '../../storage/FileTaskStore';
 import {
   digestCommand,
   NativeLauncherHost,
-  type NativeLauncherReceipt
+  type NativeLauncherReceipt,
+  type NativeOwnedProcess
 } from './NativeLauncherHost';
 
 export interface NativeJobResult {
@@ -68,7 +69,9 @@ export class NativeJobRunner {
       updatedAt: now
     };
     resource = await this.store.savePreviewResource(resource);
-    const owned = await this.launcherHost.launch({
+    let owned: NativeOwnedProcess;
+    try {
+      owned = await this.launcherHost.launch({
       receiptPath,
       executable,
       argv,
@@ -101,8 +104,50 @@ export class NativeJobRunner {
           startedAt: new Date().toISOString()
         });
       }
-    });
-    const receipt = await owned.completion;
+      });
+    } catch (error) {
+      await Promise.allSettled([
+        this.store.syncArtifactByteCount(stdout.id),
+        this.store.syncArtifactByteCount(stderr.id)
+      ]);
+      const endedAt = new Date().toISOString();
+      attempt = await this.store.savePreviewNodeAttempt({
+        ...attempt,
+        state: 'FAILED',
+        startedAt: attempt.startedAt ?? now,
+        endedAt
+      });
+      resource = await this.store.savePreviewResource({
+        ...resource,
+        state: 'FAILED',
+        updatedAt: endedAt
+      });
+      throw error;
+    }
+    let receipt: NativeLauncherReceipt;
+    try {
+      receipt = await owned.completion;
+    } catch (error) {
+      await Promise.allSettled([
+        this.store.syncArtifactByteCount(stdout.id),
+        this.store.syncArtifactByteCount(stderr.id)
+      ]);
+      const endedAt = new Date().toISOString();
+      attempt = await this.store.savePreviewNodeAttempt({
+        ...attempt,
+        state: 'RECOVERY_REQUIRED',
+        startedAt: attempt.startedAt ?? now,
+        endedAt
+      });
+      resource = await this.store.savePreviewResource({
+        ...resource,
+        state: 'CLEANUP_INCOMPLETE',
+        native: owned.identity,
+        cleanupError: (error instanceof Error ? error.message : String(error)).slice(0, 512),
+        updatedAt: endedAt
+      });
+      throw error;
+    }
     await Promise.all([
       this.store.syncArtifactByteCount(stdout.id),
       this.store.syncArtifactByteCount(stderr.id)

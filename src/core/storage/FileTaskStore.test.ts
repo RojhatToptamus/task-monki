@@ -255,6 +255,19 @@ describe('FileTaskStore', () => {
       createdAt: now,
       updatedAt: now
     });
+    await store.savePreviewPlan({
+      ...plan,
+      id: 'plan-2',
+      recipeDigest: 'recipe-2',
+      executionDigest: 'execution-2',
+      createdAt: new Date(Date.parse(now) + 1).toISOString()
+    });
+    await expect(
+      store.savePreviewGeneration({ ...generation, state: 'PREPARING_SOURCE' })
+    ).resolves.toMatchObject({ state: 'PREPARING_SOURCE' });
+    await expect(
+      store.savePreviewGeneration({ ...generation, id: 'generation-2' })
+    ).rejects.toThrow('missing or mismatched task authority');
     const resource = await store.savePreviewResource({
       id: 'resource-1',
       taskId: task.id,
@@ -268,7 +281,17 @@ describe('FileTaskStore', () => {
 
     await expect(store.deleteTask(task.id)).rejects.toThrow('active or unverified preview resource');
     await store.savePreviewResource({ ...resource, state: 'STOPPED', updatedAt: new Date().toISOString() });
+    await store.savePreviewGeneration({
+      ...generation,
+      state: 'STOPPED',
+      stoppedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
     await store.deleteTask(task.id);
+
+    await expect(store.savePreviewGeneration(generation)).rejects.toThrow(
+      'missing or mismatched task authority'
+    );
 
     const snapshot = await new FileTaskStore(dir).snapshot();
     expect(snapshot.previewPlans).toEqual([]);

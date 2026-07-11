@@ -21,6 +21,13 @@ export interface RunningNativeService {
   owned: NativeOwnedProcess;
   stdoutArtifactId: string;
   stderrArtifactId: string;
+  completion: Promise<NativeServiceExit>;
+  isRunning(): boolean;
+}
+
+export interface NativeServiceExit {
+  receipt: NativeLauncherReceipt;
+  wasStopping: boolean;
 }
 
 export class NativeServiceRuntime {
@@ -40,7 +47,6 @@ export class NativeServiceRuntime {
     markerDigest: string;
     node: PreviewServicePlan;
     portValues: Record<string, number>;
-    onUnexpectedExit(receipt: NativeLauncherReceipt): Promise<void>;
   }): Promise<RunningNativeService> {
     const cwd = await resolvePreparedNodeCwd(input.sourcePath, input.node.cwd, input.node.id);
     const [executable, ...argv] = input.node.command;
@@ -82,7 +88,9 @@ export class NativeServiceRuntime {
       updatedAt: now
     };
     resource = await this.store.savePreviewResource(resource);
-    const owned = await this.launcherHost.launch({
+    let owned: NativeOwnedProcess;
+    try {
+      owned = await this.launcherHost.launch({
       receiptPath,
       executable,
       argv,
@@ -112,7 +120,26 @@ export class NativeServiceRuntime {
           startedAt: new Date().toISOString()
         });
       }
-    });
+      });
+    } catch (error) {
+      await Promise.allSettled([
+        this.store.syncArtifactByteCount(stdout.id),
+        this.store.syncArtifactByteCount(stderr.id)
+      ]);
+      const endedAt = new Date().toISOString();
+      attempt = await this.store.savePreviewNodeAttempt({
+        ...attempt,
+        state: 'FAILED',
+        startedAt: attempt.startedAt ?? now,
+        endedAt
+      });
+      resource = await this.store.savePreviewResource({
+        ...resource,
+        state: 'FAILED',
+        updatedAt: endedAt
+      });
+      throw error;
+    }
     resource = await this.store.savePreviewResource({
       ...resource,
       state: 'RUNNING',
@@ -120,7 +147,7 @@ export class NativeServiceRuntime {
       updatedAt: new Date().toISOString()
     });
     this.live.set(resource.id, owned);
-    void owned.completion.then(async (receipt) => {
+    const completion = owned.completion.then(async (receipt): Promise<NativeServiceExit> => {
       this.live.delete(resource.id);
       const wasStopping = this.stopping.delete(resource.id);
       await Promise.all([
@@ -139,9 +166,38 @@ export class NativeServiceRuntime {
         exitCode: receipt.exitCode,
         signal: receipt.signal as NodeJS.Signals | null | undefined
       });
-      if (!wasStopping) await input.onUnexpectedExit(receipt);
+      return { receipt, wasStopping };
+    }).catch(async (error: unknown) => {
+      this.live.delete(resource.id);
+      this.stopping.delete(resource.id);
+      const endedAt = new Date().toISOString();
+      await Promise.allSettled([
+        this.store.syncArtifactByteCount(stdout.id),
+        this.store.syncArtifactByteCount(stderr.id),
+        this.store.savePreviewResource({
+          ...resource,
+          state: 'CLEANUP_INCOMPLETE',
+          cleanupError: boundedError(error),
+          updatedAt: endedAt
+        }),
+        this.store.savePreviewNodeAttempt({
+          ...attempt,
+          state: 'RECOVERY_REQUIRED',
+          endedAt
+        })
+      ]);
+      throw error;
     });
-    return { attempt, resource, owned, stdoutArtifactId: stdout.id, stderrArtifactId: stderr.id };
+    void completion.catch(() => undefined);
+    return {
+      attempt,
+      resource,
+      owned,
+      stdoutArtifactId: stdout.id,
+      stderrArtifactId: stderr.id,
+      completion,
+      isRunning: () => this.live.has(resource.id)
+    };
   }
 
   async stop(resource: PreviewResourceRecord): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
@@ -173,4 +229,8 @@ export class NativeServiceRuntime {
     });
     return result;
   }
+}
+
+function boundedError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 512);
 }

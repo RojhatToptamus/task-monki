@@ -140,22 +140,32 @@ stop, and read a recorded log artifact.
 Phase 1 supports macOS native previews for one task repository, preparation
 jobs, and one routed web service. Task Monki:
 
-- parses only `.taskmonki/preview.yaml` with the restricted v1 schema;
+- reads only a bounded, regular `.taskmonki/preview.yaml` contained by the
+  verified worktree, then parses it with the restricted v1 schema;
 - records a normalized execution digest and task-scoped approval before any
-  command can run;
+  command can run; the approval surface enumerates every quoted argv, cwd,
+  inherited/literal/generated environment rule, readiness check, route mapping,
+  warning, and cleanup authority;
 - captures tracked plus non-ignored untracked source into
   `preview-runtime/<task>/<generation>/source` using a double-observed content
-  manifest, leaving the task worktree editable and unchanged;
+  manifest, with production entry/path/aggregate/manifest limits, leaving the
+  task worktree editable and unchanged;
 - persists generation/resource intent before launcher or filesystem effects;
 - starts every native node through the bundled Node-mode launcher handshake,
   recording its ownership token, PID, process-group ID, OS start identity,
-  command, and receipt before committing target spawn;
-- waits for direct loopback HTTP readiness before attaching a stable
-  `.preview.localhost` route through the main-process gateway;
+  command, and receipt before committing target spawn; the live launcher also
+  removes verified group descendants when the target leader exits;
+- waits for direct loopback HTTP response headers under an absolute,
+  cancelable deadline, then verifies that every allocated-port listener is
+  loopback-only and belongs to the recorded target process group before
+  attaching a stable `.preview.localhost` route through the main-process
+  gateway;
+- preserves the stable gateway authority upstream and rewrites absolute
+  target-origin redirects back to that authority;
 - stores compact preview records in schema 10 while keeping source manifests
   and bounded stdout/stderr in artifacts;
 - detaches routes first and stops/removes only exact verified processes and
-  marker-owned workspaces.
+  marker-owned workspaces; ambiguous cleanup remains `CLEANUP_INCOMPLETE`.
 
 Graceful app quit stops managed previews before the Codex provider. Restart
 reconciliation does not adopt Phase 1 native services: it stops exact verified

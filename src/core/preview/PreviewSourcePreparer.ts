@@ -21,6 +21,20 @@ export interface PreviewSourceManifest {
   digest: string;
 }
 
+export interface PreviewSourceLimits {
+  maxEntries: number;
+  maxPathBytes: number;
+  maxTotalSourceBytes: number;
+  maxManifestBytes: number;
+}
+
+export const DEFAULT_PREVIEW_SOURCE_LIMITS: PreviewSourceLimits = {
+  maxEntries: 100_000,
+  maxPathBytes: 4_096,
+  maxTotalSourceBytes: 2 * 1024 * 1024 * 1024,
+  maxManifestBytes: 32 * 1024 * 1024
+};
+
 interface PreviewWorkspaceMarker {
   version: 1;
   storeId: string;
@@ -48,7 +62,8 @@ export interface PreparedPreviewSource {
 export class PreviewSourcePreparer {
   constructor(
     private readonly previewRoot: string,
-    private readonly storeId: string
+    private readonly storeId: string,
+    private readonly limits: PreviewSourceLimits = DEFAULT_PREVIEW_SOURCE_LIMITS
   ) {}
 
   getGenerationPath(taskId: string, generationId: string): string {
@@ -92,7 +107,7 @@ export class PreviewSourcePreparer {
 
     try {
       await fs.mkdir(sourcePath, { mode: 0o700 });
-      const before = await capturePreviewSourceManifest(repositoryRoot);
+      const before = await capturePreviewSourceManifest(repositoryRoot, this.limits);
       if (before.headSha !== input.expectedHeadSha) {
         throw new Error('Git HEAD changed before preview source preparation began.');
       }
@@ -115,7 +130,7 @@ export class PreviewSourcePreparer {
         await input.afterEntryCopied?.(entry.path);
       }
 
-      const after = await capturePreviewSourceManifest(repositoryRoot);
+      const after = await capturePreviewSourceManifest(repositoryRoot, this.limits);
       if (after.digest !== before.digest) {
         throw new Error('Source changed while the preview generation was being prepared.');
       }
@@ -171,7 +186,8 @@ export class PreviewSourcePreparer {
 }
 
 export async function capturePreviewSourceManifest(
-  repositoryPath: string
+  repositoryPath: string,
+  limits: PreviewSourceLimits = DEFAULT_PREVIEW_SOURCE_LIMITS
 ): Promise<PreviewSourceManifest> {
   const root = await fs.realpath(path.resolve(repositoryPath));
   const [headSha, listed, staged] = await Promise.all([
@@ -181,11 +197,18 @@ export async function capturePreviewSourceManifest(
   ]);
   const gitModes = parseGitModes(staged);
   const includedPaths = listed.split('\0').filter(Boolean).sort();
+  if (includedPaths.length > limits.maxEntries) {
+    throw new Error(`Preview source exceeds the ${limits.maxEntries} entry limit.`);
+  }
   const included = new Set(includedPaths);
   const entries: PreviewSourceEntry[] = [];
+  let totalSourceBytes = 0;
 
   for (const relativePath of includedPaths) {
     validateRelativePath(relativePath);
+    if (Buffer.byteLength(relativePath) > limits.maxPathBytes) {
+      throw new Error(`Preview source path exceeds ${limits.maxPathBytes} bytes: ${relativePath}`);
+    }
     if (gitModes.get(relativePath) === '160000') {
       throw new Error(`Git submodules are unsupported in Phase 1: ${relativePath}`);
     }
@@ -230,6 +253,12 @@ export async function capturePreviewSourceManifest(
     if (!stat.isFile()) {
       throw new Error(`Unsupported source entry type: ${relativePath}`);
     }
+    totalSourceBytes += stat.size;
+    if (totalSourceBytes > limits.maxTotalSourceBytes) {
+      throw new Error(
+        `Preview source exceeds the ${limits.maxTotalSourceBytes} byte aggregate limit.`
+      );
+    }
     if (await isUnresolvedGitLfsPointer(absolutePath, stat.size)) {
       throw new Error(`Git LFS content is not materialized: ${relativePath}`);
     }
@@ -242,12 +271,25 @@ export async function capturePreviewSourceManifest(
     });
   }
 
-  return {
+  const manifest: PreviewSourceManifest = {
     version: 1,
     headSha,
     entries,
     digest: manifestDigest(headSha, entries)
   };
+  serializePreviewSourceManifest(manifest, limits.maxManifestBytes);
+  return manifest;
+}
+
+export function serializePreviewSourceManifest(
+  manifest: PreviewSourceManifest,
+  maxBytes = DEFAULT_PREVIEW_SOURCE_LIMITS.maxManifestBytes
+): string {
+  const serialized = `${JSON.stringify(manifest)}\n`;
+  if (Buffer.byteLength(serialized) > maxBytes) {
+    throw new Error(`Preview source manifest exceeds the ${maxBytes} byte limit.`);
+  }
+  return serialized;
 }
 
 function parseGitModes(value: string): Map<string, string> {

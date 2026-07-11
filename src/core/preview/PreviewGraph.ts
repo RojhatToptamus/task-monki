@@ -12,10 +12,13 @@ import {
   type RunningNativeService
 } from './runtime/NativeServiceRuntime';
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
+import type { PreviewListenerInspector } from './runtime/PreviewListenerInspector';
 
 export interface RunningPreviewGraph {
   service: RunningNativeService;
   ports: Record<string, number>;
+  unexpectedExit: Promise<string | undefined>;
+  isRunning(): boolean;
   stop(): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>;
 }
 
@@ -25,7 +28,8 @@ export class PreviewGraph {
     private readonly jobs: NativeJobRunner,
     private readonly services: NativeServiceRuntime,
     private readonly readiness: PreviewReadinessService,
-    private readonly ports: PreviewPortAllocator
+    private readonly ports: PreviewPortAllocator,
+    private readonly listeners: PreviewListenerInspector
   ) {}
 
   async start(input: {
@@ -36,7 +40,7 @@ export class PreviewGraph {
     markerDigest: string;
     plan: PreviewExecutionPlan;
     updateGenerationState(state: PreviewGenerationState): Promise<void>;
-    onUnexpectedServiceExit(reason: string): Promise<void>;
+    signal?: AbortSignal;
   }): Promise<RunningPreviewGraph> {
     const orderedJobs = topologicallyOrderJobs(input.plan);
     if (orderedJobs.length > 0) await input.updateGenerationState('RUNNING_JOBS');
@@ -64,13 +68,7 @@ export class PreviewGraph {
         sourcePath: input.sourcePath,
         markerDigest: input.markerDigest,
         node: service,
-        portValues,
-        onUnexpectedExit: async (receipt) => {
-          for (const port of Object.values(portValues)) this.ports.release(port);
-          await input.onUnexpectedServiceExit(
-            `Preview service ${service.id} exited with ${receipt.exitCode ?? receipt.signal ?? receipt.state}.`
-          );
-        }
+        portValues
       });
 
       let attempt = await this.store.savePreviewNodeAttempt({
@@ -79,11 +77,19 @@ export class PreviewGraph {
         readiness: { status: 'PENDING' }
       });
       await input.updateGenerationState('WAITING_READY');
-      const readiness = await this.readiness.waitForHttp({
+      const readinessOrExit = await Promise.race([
+        this.readiness.waitForHttp({
         port: portValues[service.ready.port],
         path: service.ready.path,
-        timeoutMs: service.ready.timeoutSeconds * 1_000
-      });
+        timeoutMs: service.ready.timeoutSeconds * 1_000,
+        signal: input.signal
+        }).then((readiness) => ({ type: 'readiness' as const, readiness })),
+        running.completion.then((exit) => ({ type: 'exit' as const, exit }))
+      ]);
+      if (readinessOrExit.type === 'exit') {
+        throw new Error(serviceExitReason(service.id, readinessOrExit.exit.receipt));
+      }
+      const readiness = readinessOrExit.readiness;
       if (readiness.status !== 'PASSED') {
         attempt = await this.store.savePreviewNodeAttempt({
           ...attempt,
@@ -94,6 +100,14 @@ export class PreviewGraph {
         await this.services.stop(running.resource);
         throw new PreviewReadinessFailure(service.id, readiness.lastError, attempt, running.resource);
       }
+      const processGroupId = running.resource.native?.target?.processGroupId;
+      if (!processGroupId) {
+        throw new Error(`Preview service ${service.id} has no verified target process group.`);
+      }
+      await this.listeners.assertOwnedLoopback(portValues[service.ready.port], processGroupId);
+      if (!running.isRunning()) {
+        throw new Error(`Preview service ${service.id} exited before readiness was committed.`);
+      }
       await this.store.savePreviewNodeAttempt({
         ...attempt,
         state: 'READY',
@@ -101,9 +115,20 @@ export class PreviewGraph {
       });
 
       let stopped = false;
+      const unexpectedExit = running.completion
+        .then(({ receipt, wasStopping }) => {
+          for (const port of Object.values(portValues)) this.ports.release(port);
+          return wasStopping ? undefined : serviceExitReason(service.id, receipt);
+        })
+        .catch((error: unknown) => {
+          for (const port of Object.values(portValues)) this.ports.release(port);
+          return `Preview service ${service.id} completion evidence failed: ${boundedError(error)}`;
+        });
       return {
         service: running,
         ports: portValues,
+        unexpectedExit,
+        isRunning: running.isRunning,
         stop: async () => {
           if (stopped) return 'ALREADY_EXITED';
           stopped = true;
@@ -117,6 +142,14 @@ export class PreviewGraph {
       throw error;
     }
   }
+}
+
+function serviceExitReason(serviceId: string, receipt: { exitCode?: number | null; signal?: string | null; state: string }): string {
+  return `Preview service ${serviceId} exited with ${receipt.exitCode ?? receipt.signal ?? receipt.state}.`;
+}
+
+function boundedError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 512);
 }
 
 export class PreviewReadinessFailure extends Error {

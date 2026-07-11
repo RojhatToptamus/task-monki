@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -15,6 +16,7 @@ import type {
   PreviewRoutePlan,
   PreviewServicePlan
 } from '../../shared/preview';
+import { isPathWithin } from './PreviewPaths';
 
 export const PREVIEW_RECIPE_PATH = '.taskmonki/preview.yaml' as const;
 export const MAX_PREVIEW_RECIPE_BYTES = 64 * 1024;
@@ -39,10 +41,11 @@ export type LoadedPreviewRecipe =
 
 export class PreviewRecipeLoader {
   async load(worktreePath: string): Promise<LoadedPreviewRecipe> {
+    const worktreeRoot = await fs.realpath(path.resolve(worktreePath));
     const recipePath = path.join(worktreePath, PREVIEW_RECIPE_PATH);
-    let source: string;
+    let recipeStat: Awaited<ReturnType<typeof fs.lstat>>;
     try {
-      source = await fs.readFile(recipePath, 'utf8');
+      recipeStat = await fs.lstat(recipePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return {
@@ -51,6 +54,38 @@ export class PreviewRecipeLoader {
         };
       }
       throw error;
+    }
+    if (recipeStat.isSymbolicLink() || !recipeStat.isFile()) {
+      throw new Error(`Preview recipe must be a regular file, not a symlink or special file.`);
+    }
+    const realRecipePath = await fs.realpath(recipePath);
+    if (!isPathWithin(worktreeRoot, realRecipePath)) {
+      throw new Error(`Preview recipe escapes the task worktree.`);
+    }
+    if (recipeStat.size > MAX_PREVIEW_RECIPE_BYTES) {
+      throw new Error(`Preview recipe exceeds ${MAX_PREVIEW_RECIPE_BYTES} bytes.`);
+    }
+
+    const handle = await fs.open(realRecipePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let source: string;
+    try {
+      const openedStat = await handle.stat();
+      if (!openedStat.isFile() || openedStat.size > MAX_PREVIEW_RECIPE_BYTES) {
+        throw new Error(`Preview recipe exceeds ${MAX_PREVIEW_RECIPE_BYTES} bytes or is not regular.`);
+      }
+      const bytes = Buffer.alloc(MAX_PREVIEW_RECIPE_BYTES + 1);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+      }
+      if (offset > MAX_PREVIEW_RECIPE_BYTES) {
+        throw new Error(`Preview recipe exceeds ${MAX_PREVIEW_RECIPE_BYTES} bytes.`);
+      }
+      source = bytes.subarray(0, offset).toString('utf8');
+    } finally {
+      await handle.close();
     }
     return {
       status: 'LOADED',

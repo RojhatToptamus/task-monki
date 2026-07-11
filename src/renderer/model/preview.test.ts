@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createInitialProjection, type Task } from '../../shared/contracts';
-import { buildPreviewViewModel } from './preview';
+import { createInitialProjection, type PreviewPlanRecord, type Task } from '../../shared/contracts';
+import { buildPreviewPlanSummary, buildPreviewViewModel } from './preview';
 
 const task: Task = {
   id: 'task-1',
@@ -55,12 +55,35 @@ describe('preview view model', () => {
     expect(view.status).toContain('stale');
     expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'STOP']);
   });
+
+  it('renders every approval authority without ambiguous argv or hidden literal values', () => {
+    const plan = testPlan();
+    plan.executionPlan.jobs = [
+      { id: 'prepare', cwd: 'apps/web app', command: ['node', 'script with spaces.mjs', 'line\nbreak'], needs: {} }
+    ];
+    plan.executionPlan.services = [{
+      id: 'web', cwd: '.', command: ['npm', 'run', 'dev server'], needs: {},
+      env: { PUBLIC_LABEL: 'hello world', MULTILINE: 'first\nsecond' },
+      ports: { http: { env: 'PORT' } },
+      ready: { type: 'http', port: 'http', path: '/health', timeoutSeconds: 17 }
+    }];
+    plan.executionPlan.routes = [{ id: 'app', service: 'web', port: 'http', primary: true }];
+    const summary = buildPreviewPlanSummary(plan);
+    const text = summary.map((line) => `${line.label}: ${line.value}`).join('\n');
+    expect(text).toContain('"script with spaces.mjs" "line\\nbreak"');
+    expect(text).toContain('PUBLIC_LABEL="hello world"');
+    expect(text).toContain('MULTILINE="first\\nsecond"');
+    expect(text).toContain('PORT=<allocated high TCP port>');
+    expect(text).toContain('TASK_MONKI_PREVIEW="1"');
+    expect(text).toContain('HTTP 127.0.0.1:<web.http via PORT>/health · absolute deadline 17s');
+    expect(text).toContain('Route · app: app → web.http · primary');
+  });
 });
 
 function uncheckedWorktree() {
   return { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryPath: '/repo', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT' as const, createdAt: task.createdAt, updatedAt: task.updatedAt };
 }
 
-function testPlan() {
+function testPlan(): PreviewPlanRecord {
   return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], services: [], routes: [] }, warnings: [], createdAt: task.createdAt };
 }

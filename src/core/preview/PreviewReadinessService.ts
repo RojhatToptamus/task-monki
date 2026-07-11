@@ -56,6 +56,7 @@ function probeHttp(input: {
   signal?: AbortSignal;
 }): Promise<number> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const request = http.get(
       {
         host: '127.0.0.1',
@@ -66,12 +67,22 @@ function probeHttp(input: {
       },
       (response) => {
         const statusCode = response.statusCode ?? 0;
-        response.resume();
-        response.once('end', () => resolve(statusCode));
+        finish(undefined, statusCode);
+        response.destroy();
       }
     );
-    request.setTimeout(input.timeoutMs, () => request.destroy(new Error('Readiness request timed out.')));
-    request.once('error', reject);
+    const timer = setTimeout(
+      () => request.destroy(new Error('Readiness request timed out.')),
+      input.timeoutMs
+    );
+    const finish = (error?: Error, statusCode?: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(statusCode ?? 0);
+    };
+    request.once('error', (error) => finish(error));
   });
 }
 

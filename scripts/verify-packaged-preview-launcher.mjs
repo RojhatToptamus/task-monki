@@ -72,6 +72,16 @@ try {
       2
     )
   );
+} catch (error) {
+  const [receipt, stdout, stderr] = await Promise.all([
+    readNativeLauncherReceipt(receiptPath).catch(() => undefined),
+    fs.readFile(stdoutPath, 'utf8').catch(() => ''),
+    fs.readFile(stderrPath, 'utf8').catch(() => '')
+  ]);
+  console.error(
+    JSON.stringify({ receipt, stdout, stderr, error: error instanceof Error ? error.message : String(error) })
+  );
+  throw error;
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

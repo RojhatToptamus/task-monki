@@ -14,6 +14,7 @@ import { NativeLauncherHost } from './runtime/NativeLauncherHost';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService, type PreviewUrlHost } from './runtime/PreviewOpenService';
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
+import { MacPreviewListenerInspector } from './runtime/PreviewListenerInspector';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
@@ -41,7 +42,8 @@ export function createPreviewManager(
     new NativeJobRunner(store, launcher),
     nativeRuntime,
     new PreviewReadinessService(),
-    new PreviewPortAllocator()
+    new PreviewPortAllocator(),
+    new MacPreviewListenerInspector()
   );
   return new PreviewManager(
     store,

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { parsePreviewRecipe, PreviewRecipeLoader } from './PreviewRecipeLoader';
 
 const RECIPE = `
@@ -31,10 +31,17 @@ routes:
     port: http
     primary: true
 `;
+const fixtureRoots: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    fixtureRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
+  );
+});
 
 describe('PreviewRecipeLoader', () => {
   it('loads only the explicit recipe and returns a typed missing result without execution', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-recipe-'));
+    fixtureRoots.push(root);
     const loader = new PreviewRecipeLoader();
     await expect(loader.load(root)).resolves.toEqual(
       expect.objectContaining({ status: 'MISSING' })
@@ -126,5 +133,37 @@ version: 1
     expect(() =>
       parsePreviewRecipe(`version: 1\njobs: !!js/function function () {}\nservices: {}\nroutes: {}`)
     ).toThrow();
+  });
+
+  it('rejects external symlinks, special entries, and oversized files before parsing', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-recipe-boundary-'));
+    fixtureRoots.push(root);
+    const recipeDir = path.join(root, '.taskmonki');
+    const outside = path.join(root, '..', `outside-${path.basename(root)}.yaml`);
+    await fs.mkdir(recipeDir);
+    await fs.writeFile(outside, RECIPE);
+    await fs.symlink(outside, path.join(recipeDir, 'preview.yaml'));
+    const loader = new PreviewRecipeLoader();
+    await expect(loader.load(root)).rejects.toThrow('regular file');
+
+    await fs.rm(path.join(recipeDir, 'preview.yaml'));
+    await fs.rmdir(recipeDir);
+    const externalDir = path.join(root, '..', `external-dir-${path.basename(root)}`);
+    await fs.mkdir(externalDir);
+    await fs.writeFile(path.join(externalDir, 'preview.yaml'), RECIPE);
+    await fs.symlink(externalDir, recipeDir);
+    await expect(loader.load(root)).rejects.toThrow('escapes the task worktree');
+
+    await fs.rm(recipeDir);
+    await fs.rm(externalDir, { recursive: true });
+    await fs.mkdir(recipeDir);
+    await fs.mkdir(path.join(recipeDir, 'preview.yaml'));
+    await expect(loader.load(root)).rejects.toThrow('regular file');
+
+    await fs.rm(path.join(recipeDir, 'preview.yaml'), { recursive: true });
+    await fs.writeFile(path.join(recipeDir, 'preview.yaml'), 'x'.repeat(65_537));
+    await expect(loader.load(root)).rejects.toThrow('exceeds 65536 bytes');
+    await fs.rm(outside, { force: true });
+    await fs.rm(root, { recursive: true, force: true });
   });
 });

@@ -1,5 +1,28 @@
 export type PreviewNodeKind = 'JOB' | 'SERVICE';
 
+export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'LOGNAME',
+  'PATH',
+  'SHELL',
+  'TEMP',
+  'TERM',
+  'TMP',
+  'TMPDIR',
+  'USER'
+] as const;
+
+export const PREVIEW_WINDOWS_INHERITED_ENV_KEYS = [
+  'APPDATA',
+  'LOCALAPPDATA',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'USERPROFILE',
+  'WINDIR'
+] as const;
+
 export type PreviewGenerationState =
   | 'CREATED'
   | 'PREPARING_SOURCE'

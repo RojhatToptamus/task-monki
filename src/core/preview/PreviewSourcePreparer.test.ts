@@ -1,12 +1,20 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { git } from '../git/gitCli';
 import {
   capturePreviewSourceManifest,
-  PreviewSourcePreparer
+  PreviewSourcePreparer,
+  serializePreviewSourceManifest
 } from './PreviewSourcePreparer';
+
+const fixtureRoots: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    fixtureRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
+  );
+});
 
 describe('PreviewSourcePreparer', () => {
   it('captures dirty Git states outside the worktree and excludes ignored files', async () => {
@@ -119,10 +127,33 @@ describe('PreviewSourcePreparer', () => {
     ]);
     await expect(capturePreviewSourceManifest(fixture.repo)).rejects.toThrow('submodules');
   });
+
+  it('enforces injectable entry, source-byte, and manifest-byte production bounds', async () => {
+    const fixture = await createRepositoryFixture();
+    const base = {
+      maxEntries: 100,
+      maxPathBytes: 4_096,
+      maxTotalSourceBytes: 1_000_000,
+      maxManifestBytes: 1_000_000
+    };
+    await expect(
+      capturePreviewSourceManifest(fixture.repo, { ...base, maxEntries: 1 })
+    ).rejects.toThrow('entry limit');
+    await expect(
+      capturePreviewSourceManifest(fixture.repo, { ...base, maxPathBytes: 1 })
+    ).rejects.toThrow('path exceeds');
+    await expect(
+      capturePreviewSourceManifest(fixture.repo, { ...base, maxTotalSourceBytes: 1 })
+    ).rejects.toThrow('aggregate limit');
+    const manifest = await capturePreviewSourceManifest(fixture.repo, base);
+    expect(() => serializePreviewSourceManifest(manifest, 10)).toThrow('manifest exceeds');
+    expect(serializePreviewSourceManifest(manifest)).not.toContain('\n  ');
+  });
 });
 
 async function createRepositoryFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-preview-source-'));
+  fixtureRoots.push(root);
   const repo = path.join(root, 'repo');
   const previewRoot = path.join(root, 'preview-runtime');
   await fs.mkdir(repo, { recursive: true });

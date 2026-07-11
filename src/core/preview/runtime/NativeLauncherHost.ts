@@ -124,7 +124,7 @@ export class NativeLauncherHost {
       launcher.send?.({ type: 'commit' });
       const started = await waitForMessage(launcher, 'started');
       const target = await this.inspector.inspect(started.targetPid).catch(async (error) => {
-        const receipt = await readReceipt(input.receiptPath);
+        const receipt = await completion;
         if (['EXITED', 'STOPPED', 'FAILED'].includes(receipt.state)) return undefined;
         throw error;
       });
@@ -189,7 +189,9 @@ export class NativeLauncherHost {
 
     if (!expected.target) return 'ALREADY_EXITED';
     const targetActual = await this.inspector.inspect(expected.target.pid).catch(() => undefined);
-    if (!targetActual) return 'ALREADY_EXITED';
+    if (!targetActual) {
+      return processGroupExists(expected.target.processGroupId) ? 'REFUSED' : 'ALREADY_EXITED';
+    }
     if (
       receipt.targetPid !== expected.target.pid ||
       receipt.targetProcessGroupId !== expected.target.processGroupId ||
@@ -198,7 +200,7 @@ export class NativeLauncherHost {
       return 'REFUSED';
     }
     signalGroup(expected.target.processGroupId, 'SIGTERM');
-    await waitUntilMissing(expected.target.pid, 4_000);
+    await waitUntilGroupMissing(expected.target.processGroupId, 4_000);
     return 'STOPPED';
   }
 
@@ -258,15 +260,18 @@ function waitForMessage(child: ChildProcess, type: string): Promise<Record<strin
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       finish(new Error(`Native launcher exited before ${type}: ${code ?? signal}`));
     };
+    const onError = (error: Error) => finish(error);
     function finish(error?: Error, value?: Record<string, any>) {
       clearTimeout(timer);
       child.off('message', onMessage);
       child.off('exit', onExit);
+      child.off('error', onError);
       if (error) reject(error);
       else resolve(value ?? {});
     }
     child.on('message', onMessage);
     child.once('exit', onExit);
+    child.once('error', onError);
   });
 }
 
@@ -326,4 +331,25 @@ async function waitUntilMissing(pid: number, timeoutMs: number): Promise<void> {
     }
   }
   throw new Error(`Process ${pid} did not exit within ${timeoutMs}ms.`);
+}
+
+function processGroupExists(groupId: number): boolean {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    if (code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+async function waitUntilGroupMissing(groupId: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processGroupExists(groupId)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Process group ${groupId} did not exit within ${timeoutMs}ms.`);
 }

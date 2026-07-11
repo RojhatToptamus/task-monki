@@ -37,6 +37,41 @@ describe('PreviewReadinessService', () => {
     expect(result.status).toBe('FAILED');
     expect(result.lastError?.length).toBeLessThanOrEqual(512);
   });
+
+  it('accepts response headers without waiting for a slow or unbounded body', async () => {
+    const port = await startServer((_request, response) => {
+      response.writeHead(200);
+      response.write('first');
+      const timer = setInterval(() => response.write('more'), 20);
+      response.once('close', () => clearInterval(timer));
+    });
+    const started = Date.now();
+    const result = await new PreviewReadinessService().waitForHttp({
+      port,
+      path: '/ready',
+      timeoutMs: 100,
+      requestTimeoutMs: 100
+    });
+    expect(result).toMatchObject({ status: 'PASSED', lastStatusCode: 200 });
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it('uses an absolute request deadline when response headers never arrive', async () => {
+    const port = await startServer((_request, response) => {
+      const timer = setInterval(() => response.socket?.write(''), 5);
+      response.once('close', () => clearInterval(timer));
+    });
+    const started = Date.now();
+    const result = await new PreviewReadinessService().waitForHttp({
+      port,
+      path: '/ready',
+      timeoutMs: 80,
+      requestTimeoutMs: 40,
+      intervalMs: 5
+    });
+    expect(result.status).toBe('FAILED');
+    expect(Date.now() - started).toBeLessThan(200);
+  });
 });
 
 function startServer(handler: http.RequestListener): Promise<number> {
