@@ -25,6 +25,7 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
+    "verify:packaged-preview": "node scripts/verify-packaged-preview-launcher.mjs",
     "dev:api": "npm run build:main && node dist-electron/dev/server.js",
     "dev:seed": "npm run build:main && node dist-electron/dev/seed.js --reset",
     "start": "npm run build && electron .",

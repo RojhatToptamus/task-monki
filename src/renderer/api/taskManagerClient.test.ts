@@ -138,6 +138,15 @@ describe('createBrowserTaskManagerApi settings', () => {
 describe('createBrowserTaskManagerApi preview contract', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('supports the renderer development server same-origin API proxy', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createBrowserTaskManagerApi('').resolvePreview({ taskId: 'task-1' });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/preview/resolve', expect.any(Object));
+  });
+
   it('uses typed preview operation endpoints rather than accepting an arbitrary URL', async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal(

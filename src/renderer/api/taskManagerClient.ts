@@ -51,7 +51,7 @@ import type {
   UpdateAppSettingsRequest
 } from '../../shared/contracts';
 
-const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
+const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? '';
 const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
 
 export const taskManagerApi: TaskManagerApi =

@@ -25,6 +25,10 @@ npm run dev:api
 npm run dev:renderer
 ```
 
+The development renderer uses Vite's same-origin `/api` proxy to the local
+control API on `127.0.0.1:3099`. Set `VITE_TASK_MANAGER_API_URL` only when a
+different explicit API origin is needed.
+
 `npm run dev:seed` resets only the seed-owned root and then prints the same
 environment variables written to `dev-api.env`:
 

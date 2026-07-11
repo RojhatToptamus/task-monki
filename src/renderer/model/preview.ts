@@ -122,7 +122,19 @@ export function buildPreviewViewModel(input: {
       actions: [{ id: 'START', label: 'Try again', kind: 'secondary' }]
     };
   }
-  if (generation.state === 'CLEANUP_INCOMPLETE' || generation.state === 'RECOVERY_REQUIRED') {
+  if (generation.state === 'RECOVERY_REQUIRED') {
+    return {
+      status: 'Recovery required',
+      tone: 'error',
+      summary: 'Task Monki needs to reconcile the recorded runtime before cleanup can be attempted safely.',
+      plan,
+      approval,
+      generation,
+      latestAttempt,
+      actions: [{ id: 'STOP', label: 'Retry cleanup', kind: 'secondary' }]
+    };
+  }
+  if (generation.state === 'CLEANUP_INCOMPLETE') {
     return {
       status: 'Cleanup incomplete',
       tone: 'error',

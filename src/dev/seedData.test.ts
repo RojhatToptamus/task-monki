@@ -98,7 +98,7 @@ describe('Task Monki development seed data', () => {
     expect(view('preview-failed').status).toBe('Failed');
     expect(view('preview-stale').status).toContain('stale');
     expect(view('preview-stopped').status).toBe('Stopped');
-    expect(view('preview-recovery-required').status).toBe('Cleanup incomplete');
+    expect(view('preview-recovery-required').status).toBe('Recovery required');
     expect(view('preview-cleanup-incomplete').status).toBe('Cleanup incomplete');
     expect(JSON.stringify(snapshot)).not.toContain('intentional seeded preview failure');
   });
