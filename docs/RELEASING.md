@@ -46,6 +46,40 @@ Build an unpacked app for the current platform:
 npm run dist:dir
 ```
 
+After building the full release targets for the current platform, verify their
+archive signatures, expected architectures/names, update metadata, minimum
+sizes, compressed archive integrity, and native package payloads:
+
+```sh
+npm run verify:release-artifacts
+```
+
+The release workflow runs this structural verifier on each native platform
+before generating checksums or uploading artifacts. This catches truncated or
+malformed installers even when the packaging command itself exits successfully.
+On macOS it asks `hdiutil` to verify each DMG. On Linux it asks `dpkg-deb` to
+inspect the Debian package and extracts the AppImage without FUSE. ZIP and NSIS
+payloads are tested with the pinned 7-Zip binary used by the build toolchain.
+
+Also execute the unpacked Electron binary for the current operating system and
+CPU architecture:
+
+```sh
+npm run verify:packaged-runtime
+```
+
+This runs Electron in its supported Node mode and checks the reported Electron
+version, operating system, and architecture. The release workflow runs the
+same smoke test on native macOS, Windows, and Linux runners after packaging and
+before generating checksums or uploading artifacts. It proves that each runner
+can execute the packaged runtime; the manual renderer and workflow smoke test
+below still verifies the application UI and end-to-end behavior.
+
+Normal pull-request and `main` CI also builds an unpacked native package and
+runs this smoke test on macOS, Windows, and Linux. Keep the full release
+artifact verifier in the tag workflow because normal CI does not build the
+installers and archives.
+
 On macOS, verify the unpacked bundle and confirm generic resources do not carry
 detached code-signature extended attributes. Also confirm the root bundle is
 ad-hoc signed without Hardened Runtime:

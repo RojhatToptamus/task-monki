@@ -304,7 +304,7 @@ describe('TaskManagerService settings', () => {
     expect(status.tools.codex).toMatchObject({
       source: 'auto',
       executable: 'codex',
-      resolvedPath: codex,
+      resolvedPath: await expectedDiscoveredPath(codex),
       status: 'ok',
       version: 'codex-cli 9.9.9'
     });
@@ -335,7 +335,7 @@ describe('TaskManagerService settings', () => {
 
       expect(status.tools.codex).toMatchObject({
         source: 'auto',
-        resolvedPath: staleCodex,
+        resolvedPath: await expectedDiscoveredPath(staleCodex),
         version: 'codex-cli 0.22.0'
       });
       expect(snapshot.agentServers[0]?.executable).toBe(compatibleCodex);
@@ -448,6 +448,10 @@ function restoreEnv(name: string, value: string | undefined): void {
   } else {
     process.env[name] = value;
   }
+}
+
+async function expectedDiscoveredPath(candidate: string): Promise<string> {
+  return process.platform === 'win32' ? fs.realpath(candidate) : candidate;
 }
 
 function withPath(...entries: string[]): string {

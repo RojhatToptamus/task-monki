@@ -22,7 +22,9 @@ describe('AttachmentFileStore', () => {
     expect(verified?.absolutePath).toBe(
       path.join(root, 'attachments', 'tasks', 'task-one', `${staged.id}.txt`)
     );
-    expect((await fs.stat(verified!.absolutePath)).mode & 0o777).toBe(0o400);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(verified!.absolutePath)).mode & 0o777).toBe(0o400);
+    }
 
     await store.finalizeDraftForTask(prepared);
     await expect(
@@ -70,7 +72,7 @@ describe('AttachmentFileStore', () => {
     await expect(fs.access(forkFile!.absolutePath)).resolves.toBeUndefined();
   });
 
-  it('rejects writable, replaced, and modified task files', async () => {
+  it.runIf(process.platform !== 'win32')('rejects writable task files', async () => {
     const root = await temporaryDirectory();
     const store = new AttachmentFileStore(root);
     const draft = await store.createDraft();

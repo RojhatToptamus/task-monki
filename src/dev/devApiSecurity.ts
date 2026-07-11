@@ -4,6 +4,12 @@ import fsPromises from 'node:fs/promises';
 import type http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  enforcePosixMode,
+  hasNoGroupOrOtherPosixAccess,
+  isOwnedByCurrentUser,
+  syncDirectoryIfSupported
+} from '../core/filesystem/secureFilesystem';
 
 export const DEV_API_TOKEN_HEADER = 'x-task-monki-dev-token';
 export const DEFAULT_DEV_API_PORT = 3099;
@@ -87,8 +93,8 @@ export function readDevApiToken(port: number): string | undefined {
         !stat.isFile() ||
         stat.size <= 0 ||
         stat.size > 256 ||
-        (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-        (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+        !hasNoGroupOrOtherPosixAccess(stat) ||
+        !isOwnedByCurrentUser(stat)
       ) {
         return undefined;
       }
@@ -139,11 +145,11 @@ export async function createDevApiTokenLease(port: number): Promise<DevApiTokenL
   try {
     await temporaryHandle.writeFile(`${token}\n`, 'utf8');
     await temporaryHandle.sync();
-    await temporaryHandle.chmod(0o600);
+    await enforcePosixMode(temporaryHandle, 0o600);
     await temporaryHandle.sync();
     await temporaryHandle.close();
     await fsPromises.rename(temporaryPath, tokenPath);
-    await syncPrivateDirectory(tokenDir);
+    await syncDirectoryIfSupported(tokenDir);
   } catch (error) {
     await temporaryHandle.close().catch(() => undefined);
     await fsPromises.rm(temporaryPath, { force: true }).catch(() => undefined);
@@ -157,7 +163,7 @@ export async function createDevApiTokenLease(port: number): Promise<DevApiTokenL
       try {
         if ((await readPrivateTokenFile(tokenPath)) === token) {
           await fsPromises.rm(tokenPath, { force: true });
-          await syncPrivateDirectory(tokenDir);
+          await syncDirectoryIfSupported(tokenDir);
         }
       } catch (error) {
         if (!isMissingFileError(error)) {
@@ -178,16 +184,16 @@ async function ensurePrivateTokenDirectory(tokenDir: string): Promise<void> {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+    !isOwnedByCurrentUser(stat)
   ) {
     throw new Error('Development API token directory failed its integrity check.');
   }
-  await setPrivateMode(tokenDir, 0o700);
+  await enforcePosixMode(tokenDir, 0o700);
   const secured = await fsPromises.lstat(tokenDir);
   if (
     !secured.isDirectory() ||
     secured.isSymbolicLink() ||
-    (process.platform !== 'win32' && (secured.mode & 0o077) !== 0)
+    !hasNoGroupOrOtherPosixAccess(secured)
   ) {
     throw new Error('Development API token directory is not private.');
   }
@@ -224,8 +230,8 @@ function assertPrivateTokenDirectorySync(tokenDir: string): void {
   if (
     !stat.isDirectory() ||
     stat.isSymbolicLink() ||
-    (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-    (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+    !hasNoGroupOrOtherPosixAccess(stat) ||
+    !isOwnedByCurrentUser(stat)
   ) {
     throw new Error('Development API token directory failed its integrity check.');
   }
@@ -242,36 +248,13 @@ async function readPrivateTokenFile(tokenPath: string): Promise<string | undefin
       !stat.isFile() ||
       stat.size <= 0 ||
       stat.size > 256 ||
-      (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+      !hasNoGroupOrOtherPosixAccess(stat) ||
+      !isOwnedByCurrentUser(stat)
     ) {
       return undefined;
     }
     const token = (await handle.readFile('utf8')).trim();
     return /^[A-Za-z0-9_-]{43}$/u.test(token) ? token : undefined;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function syncPrivateDirectory(directory: string): Promise<void> {
-  if (process.platform === 'win32') return;
-  const handle = await fsPromises.open(
-    directory,
-    fs.constants.O_RDONLY |
-      (fs.constants.O_DIRECTORY ?? 0) |
-      (fs.constants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    await handle.sync();
-  } catch (error) {
-    if (
-      !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(
-        (error as NodeJS.ErrnoException).code ?? ''
-      )
-    ) {
-      throw error;
-    }
   } finally {
     await handle.close();
   }
@@ -429,16 +412,6 @@ function tokensMatch(left: string, right: string): boolean {
   const leftBytes = Buffer.from(left);
   const rightBytes = Buffer.from(right);
   return leftBytes.byteLength === rightBytes.byteLength && timingSafeEqual(leftBytes, rightBytes);
-}
-
-async function setPrivateMode(targetPath: string, mode: number): Promise<void> {
-  try {
-    await fsPromises.chmod(targetPath, mode);
-  } catch (error) {
-    if (process.platform !== 'win32') {
-      throw error;
-    }
-  }
 }
 
 function isMissingFileError(error: unknown): boolean {

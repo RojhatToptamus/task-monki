@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
+import { enforcePosixMode } from '../../filesystem/secureFilesystem';
 
 interface JournalEntry {
   serverInstanceId: string;
@@ -77,7 +78,7 @@ export class AgentProtocolJournal {
     metadata?: Record<string, unknown>
   ): Promise<AgentProtocolMessageReference> {
     await fs.mkdir(this.journalDir, { recursive: true, mode: 0o700 });
-    await fs.chmod(this.journalDir, 0o700);
+    await enforcePosixMode(this.journalDir, 0o700);
 
     const filePath = this.pathFor(serverInstanceId);
     const previousSequence = this.sequences.has(serverInstanceId)
@@ -101,7 +102,8 @@ export class AgentProtocolJournal {
       const stat = await handle.stat();
       await handle.write(line, null, 'utf8');
       await handle.sync();
-      await fs.chmod(filePath, 0o600);
+      await enforcePosixMode(handle, 0o600);
+      await handle.sync();
       this.sequences.set(serverInstanceId, sequence);
       return {
         serverInstanceId,

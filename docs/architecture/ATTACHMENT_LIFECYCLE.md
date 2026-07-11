@@ -78,11 +78,23 @@ attachments/
 ```
 
 Directories are `0700`, staging manifests and task state are `0600`, and
-immutable attachment files are `0400` on POSIX. Names use opaque ids; original
-absolute paths are never stored. Durable records contain task id, attachment
-id, ordinal, display name, kind, media type, byte count, SHA-256, and creation
-time. The storage path is derived internally and is absent from snapshots,
-events, API responses, and submission evidence.
+immutable attachment files are `0400` on POSIX. Node does not provide equivalent
+owner/group/other mode enforcement on Windows, and Task Monki does not treat
+Windows `chmod` as an ACL boundary. Packaged Windows storage instead lives under
+the app's per-user data directory and inherits that managed root's Windows ACLs.
+This protects the normal per-user installation boundary but does not protect
+against another process running as the same OS user or against a user who has
+weakened the inherited ACLs. Names use opaque ids; original absolute paths are
+never stored. Durable records contain task id, attachment id, ordinal, display
+name, kind, media type, byte count, SHA-256, and creation time. The storage path
+is derived internally and is absent from snapshots, events, API responses, and
+submission evidence.
+
+File data is flushed before publication on every platform. Directory metadata
+is also synchronized on POSIX filesystems that support directory `fsync`.
+Node's directory-handle synchronization is unsupported on Windows, so Windows
+keeps the atomic temporary-write/link-or-rename publication boundary without
+claiming the additional POSIX directory-flush guarantee.
 
 Task creation verifies the staging directory and atomically renames it to the
 task id before publishing `store.json`. If publication fails before becoming
@@ -108,8 +120,13 @@ an orphan left by interrupted cleanup. Deletion is not secure erasure.
 
 Every implementation, follow-up, retry, recovery, and review reuses the same
 immutable task-owned files. Core reopens with no-follow semantics and verifies
-regular-file status, ownership, mode, byte count, and SHA-256 immediately before
-provider delivery. No run cache or second physical representation exists.
+managed-root containment, regular-file and non-symlink status, stable file
+identity, byte count, and SHA-256 immediately before provider delivery. It also
+verifies current-user ownership and the exact private mode on POSIX. Windows
+retains the path, regular-file/non-symlink checks exposed by Node, stable file
+identity, size, and hash checks while relying on the inherited per-user ACL
+boundary described above. No run cache or second physical representation
+exists.
 
 Images are sent as Codex `localImage`. Text-like files are listed by exact
 managed read-only path in a compact prompt manifest that labels their contents

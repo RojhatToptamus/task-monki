@@ -253,9 +253,9 @@ describe('FileTaskStore attachments', () => {
     });
     const run = await createRun(store, task, worktreePath, 'repair');
     const [delivery] = await store.prepareRunAttachments(run.id, task.id);
-    await fs.chmod(delivery.absolutePath, 0o600);
+    if (process.platform !== 'win32') await fs.chmod(delivery.absolutePath, 0o600);
     await fs.writeFile(delivery.absolutePath, 'tampered');
-    await fs.chmod(delivery.absolutePath, 0o400);
+    if (process.platform !== 'win32') await fs.chmod(delivery.absolutePath, 0o400);
 
     const restarted = createStore(dir);
     await expect(restarted.reconcileRunAttachments()).rejects.toMatchObject({
@@ -263,7 +263,7 @@ describe('FileTaskStore attachments', () => {
     });
   });
 
-  it('fails closed when a task-owned attachment is writable at restart', async () => {
+  it.runIf(process.platform !== 'win32')('fails closed when a task-owned attachment is writable at restart', async () => {
     const dir = await temporaryDirectory();
     const worktreePath = await temporaryDirectory();
     const store = createStore(dir);
@@ -393,7 +393,7 @@ async function createSchema10AttachmentFixture(): Promise<{
   await fs.mkdir(blobRoot, { mode: 0o700 });
   const blobPath = path.join(blobRoot, verified!.record.sha256);
   await fs.copyFile(verified!.absolutePath, blobPath);
-  await fs.chmod(blobPath, 0o400);
+  if (process.platform !== 'win32') await fs.chmod(blobPath, 0o400);
   await fs.rm(path.join(dir, 'attachments'), { recursive: true });
 
   const storePath = path.join(dir, 'store.json');

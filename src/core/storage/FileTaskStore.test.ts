@@ -13,6 +13,18 @@ import { FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
 describe('FileTaskStore', () => {
+  it.runIf(process.platform === 'win32')(
+    'accepts the existing managed artifact directory with different Windows casing',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-case-'));
+      await fs.mkdir(path.join(dir, 'Artifacts'));
+      const store = new FileTaskStore(dir);
+
+      await expect(store.snapshot()).resolves.toMatchObject({ artifacts: [] });
+      await store.close();
+    }
+  );
+
   it('surfaces a crash-persisted queued run for startup recovery', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-queued-recovery-'));
     const store = new FileTaskStore(dir);

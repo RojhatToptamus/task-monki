@@ -41,7 +41,10 @@ export function codexPermissionProfileConfig(input: {
   };
   for (const candidate of attachmentPaths) {
     const attachmentPath = requireAbsolute(candidate, 'attachment');
-    if (attachmentPath === worktreePath || isInside(attachmentPath, worktreePath)) {
+    if (
+      isSamePath(attachmentPath, worktreePath) ||
+      isInside(attachmentPath, worktreePath)
+    ) {
       throw new Error('Managed attachment paths must stay outside the task worktree.');
     }
     filesystem[attachmentPath] = 'read';
@@ -87,7 +90,7 @@ export function assertCodexPermissionProfileEvidence(input: {
   const roots = input.response.runtimeWorkspaceRoots.map((root) =>
     typeof root === 'string' ? path.resolve(root) : ''
   );
-  if (roots.length !== 1 || roots[0] !== expectedWorktree) {
+  if (roots.length !== 1 || !isSamePath(roots[0] ?? '', expectedWorktree)) {
     throw new Error('Codex reported unexpected runtime workspace roots.');
   }
 }
@@ -111,5 +114,18 @@ function requireAbsolute(candidate: string, label: string): string {
 
 function isInside(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
-  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function isSamePath(left: string, right: string): boolean {
+  return (
+    path.isAbsolute(left) &&
+    path.isAbsolute(right) &&
+    path.relative(left, right) === ''
+  );
 }

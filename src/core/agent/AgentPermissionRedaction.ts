@@ -16,27 +16,52 @@ export function redactExternalPermissionPaths(
   worktreePath: string
 ): AgentPermissionApprovalRequest {
   const worktree = path.resolve(worktreePath);
-  const references = new Map<string, string>();
+  const references = new Map<
+    string,
+    { reference: string; paths: Set<string>; parents: Set<string> }
+  >();
   const redact = (candidate: string): string => {
     if (isRedactedExternalPathReference(candidate)) return candidate;
     if (!path.isAbsolute(candidate)) return candidate;
     const resolved = path.resolve(candidate);
     if (isInsideOrEqual(resolved, worktree)) return resolved;
-    let reference = references.get(resolved);
-    if (!reference) {
-      reference = `${REDACTED_PATH}${references.size + 1}`;
-      references.set(resolved, reference);
+    const key = pathComparisonKey(resolved);
+    let entry = references.get(key);
+    if (!entry) {
+      entry = {
+        reference: `${REDACTED_PATH}${references.size + 1}`,
+        paths: new Set<string>(),
+        parents: new Set<string>()
+      };
+      references.set(key, entry);
     }
-    return reference;
+    for (const representation of [candidate, resolved]) {
+      entry.paths.add(representation);
+      const parent = path.dirname(representation);
+      if (
+        parent !== representation &&
+        parent !== path.parse(representation).root
+      ) {
+        entry.parents.add(parent);
+      }
+    }
+    return entry.reference;
   };
 
   const permissions = mapPermissionPaths(request.permissions, redact);
+  const cwd = redact(request.cwd);
   let reason = request.reason;
-  for (const [original, reference] of references) {
-    reason = reason?.split(original).join(reference);
-    reason = reason?.split(path.dirname(original)).join('[external path]');
+  for (const entry of references.values()) {
+    for (const representation of byDescendingLength(entry.paths)) {
+      reason = replacePathRepresentation(reason, representation, entry.reference);
+    }
   }
-  return { ...request, cwd: redact(request.cwd), reason, permissions };
+  for (const entry of references.values()) {
+    for (const parent of byDescendingLength(entry.parents)) {
+      reason = replacePathRepresentation(reason, parent, '[external path]');
+    }
+  }
+  return { ...request, cwd, reason, permissions };
 }
 
 function mapPermissionPaths(
@@ -76,5 +101,39 @@ function mapNestedStrings(value: unknown, mapPath: (candidate: string) => string
 
 function isInsideOrEqual(candidate: string, parent: string): boolean {
   const relative = path.relative(parent, candidate);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
+function pathComparisonKey(candidate: string): string {
+  return process.platform === 'win32'
+    ? candidate.toLocaleLowerCase('en-US')
+    : candidate;
+}
+
+function byDescendingLength(values: ReadonlySet<string>): string[] {
+  return [...values].sort((left, right) => right.length - left.length);
+}
+
+function replacePathRepresentation(
+  value: string | undefined,
+  representation: string,
+  replacement: string
+): string | undefined {
+  if (!value || !representation) return value;
+  if (process.platform !== 'win32') {
+    return value.split(representation).join(replacement);
+  }
+  return value.replace(
+    new RegExp(escapeRegExp(representation), 'giu'),
+    () => replacement
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

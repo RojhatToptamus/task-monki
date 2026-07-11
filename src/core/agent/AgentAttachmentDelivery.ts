@@ -7,6 +7,7 @@ import type {
   AttachmentSubmissionRecord,
   TaskAttachmentRecord
 } from '../../shared/attachments';
+import { posixModeMatches } from '../filesystem/secureFilesystem';
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -233,8 +234,9 @@ function validateAttachments(attachments: readonly AgentTurnAttachment[]): void 
 async function verifyAttachment(
   attachment: AgentTurnAttachment
 ): Promise<AgentTurnAttachment> {
+  let entry: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    const entry = await fs.lstat(attachment.path);
+    entry = await fs.lstat(attachment.path);
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw new AgentAttachmentDeliveryError(
         'ATTACHMENT_NOT_REGULAR',
@@ -271,7 +273,16 @@ async function verifyAttachment(
         `Attachment ${attachment.attachmentId} is not a regular file.`
       );
     }
-    if ((stat.mode & 0o222) !== 0) {
+    if (
+      stat.dev !== entry.dev ||
+      (stat.ino !== 0 && entry.ino !== 0 && stat.ino !== entry.ino)
+    ) {
+      throw new AgentAttachmentDeliveryError(
+        'ATTACHMENT_NOT_REGULAR',
+        `Attachment ${attachment.attachmentId} changed during verification.`
+      );
+    }
+    if (!posixModeMatches(stat, 0o400)) {
       throw new AgentAttachmentDeliveryError(
         'ATTACHMENT_NOT_READ_ONLY',
         `Attachment ${attachment.attachmentId} is not read-only.`

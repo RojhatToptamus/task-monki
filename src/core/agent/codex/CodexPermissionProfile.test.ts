@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   assertCodexPermissionProfileEvidence,
@@ -7,6 +8,8 @@ import {
 
 describe('Codex permission profile', () => {
   it('allows only the runtime minimum, exact worktree, and exact attachment files', () => {
+    const worktree = nativeAbsolute('worktrees', 'task-1');
+    const attachment = nativeAbsolute('cache', 'run-1', 'image.png');
     const config = codexPermissionProfileConfig({
       sessionId: 'session-1',
       settings: {
@@ -14,8 +17,8 @@ describe('Codex permission profile', () => {
         networkAccess: false,
         reasoningEffort: 'high'
       },
-      worktreePath: '/private/worktrees/task-1',
-      attachmentPaths: ['/private/cache/run-1/image.png']
+      worktreePath: worktree,
+      attachmentPaths: [attachment]
     });
 
     expect(config).toEqual({
@@ -25,8 +28,8 @@ describe('Codex permission profile', () => {
         'task_monki_session-1': {
           filesystem: {
             ':minimal': 'read',
-            '/private/worktrees/task-1': 'write',
-            '/private/cache/run-1/image.png': 'read'
+            [worktree]: 'write',
+            [attachment]: 'read'
           },
           network: { enabled: false }
         }
@@ -40,17 +43,18 @@ describe('Codex permission profile', () => {
   });
 
   it('keeps read-only worktrees read-only and preserves explicit network access', () => {
+    const worktree = nativeAbsolute('worktrees', 'task-2');
     const config = codexPermissionProfileConfig({
       sessionId: 'session-2',
       settings: { sandbox: 'READ_ONLY', networkAccess: true },
-      worktreePath: '/private/worktrees/task-2'
+      worktreePath: worktree
     }) as { permissions: Record<string, unknown> };
 
     expect(config.permissions).toEqual({
       'task_monki_session-2': {
         filesystem: {
           ':minimal': 'read',
-          '/private/worktrees/task-2': 'read'
+          [worktree]: 'read'
         },
         network: { enabled: true }
       }
@@ -58,19 +62,21 @@ describe('Codex permission profile', () => {
   });
 
   it('rejects Full access only for attachments and validates managed paths', () => {
+    const worktree = nativeAbsolute('worktrees', 'task-1');
+    const attachment = nativeAbsolute('attachments', 'file.txt');
     expect(() =>
       codexPermissionProfileConfig({
         sessionId: 'session-1',
         settings: { sandbox: 'DANGER_FULL_ACCESS' },
-        worktreePath: '/private/worktrees/task-1'
+        worktreePath: worktree
       })
     ).not.toThrow();
     expect(() =>
       codexPermissionProfileConfig({
         sessionId: 'session-1',
         settings: { sandbox: 'DANGER_FULL_ACCESS' },
-        worktreePath: '/private/worktrees/task-1',
-        attachmentPaths: ['/private/attachments/file.txt']
+        worktreePath: worktree,
+        attachmentPaths: [attachment]
       })
     ).toThrow('Attachments require');
     expect(() =>
@@ -84,8 +90,16 @@ describe('Codex permission profile', () => {
       codexPermissionProfileConfig({
         sessionId: 'session-1',
         settings: { sandbox: 'WORKSPACE_WRITE' },
-        worktreePath: '/private/worktrees/task-1',
-        attachmentPaths: ['/private/worktrees/task-1/file.txt']
+        worktreePath: worktree,
+        attachmentPaths: [path.join(worktree, 'file.txt')]
+      })
+    ).toThrow('outside the task worktree');
+    expect(() =>
+      codexPermissionProfileConfig({
+        sessionId: 'session-1',
+        settings: { sandbox: 'WORKSPACE_WRITE' },
+        worktreePath: worktree,
+        attachmentPaths: [path.join(worktree, '..data', 'file.txt')]
       })
     ).toThrow('outside the task worktree');
     expect(() => codexPermissionProfileId('bad/id')).toThrow('invalid session id');
@@ -95,24 +109,26 @@ describe('Codex permission profile', () => {
     const config = codexPermissionProfileConfig({
       sessionId: 'session-3',
       settings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
-      worktreePath: '/private/worktrees/task-3',
-      attachmentPaths: ['/private/attachments/file.txt']
+      worktreePath: nativeAbsolute('worktrees', 'task-3'),
+      attachmentPaths: [nativeAbsolute('attachments', 'file.txt')]
     }) as { permissions: Record<string, { network: { enabled: boolean } }> };
 
     expect(config.permissions['task_monki_session-3']?.network.enabled).toBe(false);
   });
 
   it('requires the exact active profile and sole runtime worktree root', () => {
+    const worktree = nativeAbsolute('worktrees', 'task-1');
+    const other = nativeAbsolute('other');
     expect(() =>
       assertCodexPermissionProfileEvidence({
         sessionId: 'session-1',
-        worktreePath: '/private/worktrees/task-1',
+        worktreePath: worktree,
         response: {
           activePermissionProfile: {
             id: 'task_monki_session-1',
             extends: null
           },
-          runtimeWorkspaceRoots: ['/private/worktrees/task-1']
+          runtimeWorkspaceRoots: [worktree]
         }
       })
     ).not.toThrow();
@@ -121,30 +137,76 @@ describe('Codex permission profile', () => {
       {},
       {
         activePermissionProfile: { id: ':workspace', extends: null },
-        runtimeWorkspaceRoots: ['/private/worktrees/task-1']
+        runtimeWorkspaceRoots: [worktree]
       },
       {
         activePermissionProfile: {
           id: 'task_monki_session-1',
           extends: ':workspace'
         },
-        runtimeWorkspaceRoots: ['/private/worktrees/task-1']
+        runtimeWorkspaceRoots: [worktree]
       },
       {
         activePermissionProfile: {
           id: 'task_monki_session-1',
           extends: null
         },
-        runtimeWorkspaceRoots: ['/private/worktrees/task-1', '/private/other']
+        runtimeWorkspaceRoots: [worktree, other]
       }
     ]) {
       expect(() =>
         assertCodexPermissionProfileEvidence({
           sessionId: 'session-1',
-          worktreePath: '/private/worktrees/task-1',
+          worktreePath: worktree,
           response
         })
       ).toThrow();
     }
+
+    expect(() =>
+      assertCodexPermissionProfileEvidence({
+        sessionId: 'session-1',
+        worktreePath: process.cwd(),
+        response: {
+          activePermissionProfile: {
+            id: 'task_monki_session-1',
+            extends: null
+          },
+          runtimeWorkspaceRoots: [null]
+        }
+      })
+    ).toThrow('unexpected runtime workspace roots');
   });
+
+  it.runIf(process.platform === 'win32')(
+    'compares runtime roots and exact worktree paths case-insensitively on Windows',
+    () => {
+      const worktree = nativeAbsolute('worktrees', 'task-case');
+      expect(() =>
+        assertCodexPermissionProfileEvidence({
+          sessionId: 'session-case',
+          worktreePath: worktree.toUpperCase(),
+          response: {
+            activePermissionProfile: {
+              id: 'task_monki_session-case',
+              extends: null
+            },
+            runtimeWorkspaceRoots: [worktree.toLowerCase()]
+          }
+        })
+      ).not.toThrow();
+      expect(() =>
+        codexPermissionProfileConfig({
+          sessionId: 'session-case',
+          settings: { sandbox: 'WORKSPACE_WRITE' },
+          worktreePath: worktree.toUpperCase(),
+          attachmentPaths: [worktree.toLowerCase()]
+        })
+      ).toThrow('outside the task worktree');
+    }
+  );
 });
+
+function nativeAbsolute(...segments: string[]): string {
+  return path.join(path.parse(process.cwd()).root, 'private', ...segments);
+}

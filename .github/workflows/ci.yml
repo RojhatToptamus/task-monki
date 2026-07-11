@@ -14,6 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: macOS
+            os: macos-latest
           - platform: Linux
             os: ubuntu-latest
           - platform: Windows
@@ -29,3 +31,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Build unpacked native package
+        run: npm exec electron-builder -- --dir
+      - name: Smoke test packaged runtime
+        run: npm run verify:packaged-runtime

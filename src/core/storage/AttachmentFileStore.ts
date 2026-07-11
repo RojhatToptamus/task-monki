@@ -15,6 +15,12 @@ import {
 } from '../../shared/attachments';
 import { admitAttachment } from './AttachmentAdmission';
 import {
+  enforcePosixMode,
+  isOwnedByCurrentUser,
+  posixModeMatches,
+  syncDirectoryIfSupported
+} from '../filesystem/secureFilesystem';
+import {
   AttachmentStoreError,
   attachmentIntegrityError,
   attachmentStorageError,
@@ -243,8 +249,8 @@ export class AttachmentFileStore {
         throw new AttachmentStoreError('ATTACHMENT_CONFLICT', 'Task attachment storage already exists.', 409);
       }
       await fs.rename(this.draftDirectory(draft.id), target);
-      await syncDirectory(this.stagingDir);
-      await syncDirectory(this.tasksDir);
+      await syncDirectoryIfSupported(this.stagingDir);
+      await syncDirectoryIfSupported(this.tasksDir);
       return { draft: publicDraft(draft), taskId, records };
     });
   }
@@ -264,8 +270,8 @@ export class AttachmentFileStore {
       const target = this.draftDirectory(receipt.draft.id);
       if (!(await exists(source)) || await exists(target)) return;
       await fs.rename(source, target);
-      await syncDirectory(this.tasksDir);
-      await syncDirectory(this.stagingDir);
+      await syncDirectoryIfSupported(this.tasksDir);
+      await syncDirectoryIfSupported(this.stagingDir);
     });
   }
 
@@ -295,7 +301,7 @@ export class AttachmentFileStore {
           await writeAtomic(this.taskFile(targetTaskId, record), bytes, 0o400, true);
           records.push(record);
         }
-        await syncDirectory(targetDirectory);
+        await syncDirectoryIfSupported(targetDirectory);
         return records;
       } catch (error) {
         await this.removeManagedDirectory(targetDirectory, false).catch(() => undefined);
@@ -500,7 +506,7 @@ export class AttachmentFileStore {
       }
     }
     await fs.rmdir(directory);
-    await syncDirectory(path.dirname(directory));
+    await syncDirectoryIfSupported(path.dirname(directory));
   }
   private async removeLegacyDirectory(directory: string): Promise<void> {
     if (!(await exists(directory))) return;
@@ -566,12 +572,12 @@ function validateDraft(value: unknown, id: string): DraftManifest {
 
 async function ensurePrivateDirectory(directory: string): Promise<void> {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  await fs.chmod(directory, 0o700);
+  await enforcePosixMode(directory, 0o700);
   await assertPrivateDirectory(directory);
 }
 async function assertPrivateDirectory(directory: string): Promise<void> {
   const stat = await fs.lstat(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) throw attachmentIntegrityError();
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !posixModeMatches(stat, 0o700)) throw attachmentIntegrityError();
   assertOwner(stat);
 }
 async function writeAtomic(target: string, bytes: Uint8Array, mode: number, createOnly: boolean): Promise<void> {
@@ -579,18 +585,22 @@ async function writeAtomic(target: string, bytes: Uint8Array, mode: number, crea
   await assertPrivateDirectory(directory);
   const temp = path.join(directory, `.tmp-${randomUUID()}`);
   const handle = await fs.open(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
-  try { await handle.writeFile(bytes); await handle.sync(); await handle.chmod(mode); } finally { await handle.close(); }
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await enforcePosixMode(handle, mode);
+    await handle.sync();
+  } finally { await handle.close(); }
   try {
     if (createOnly) await fs.link(temp, target); else await fs.rename(temp, target);
   } finally { await fs.unlink(temp).catch(() => undefined); }
-  if (createOnly) await fs.chmod(target, mode);
-  await syncDirectory(directory);
+  await syncDirectoryIfSupported(directory);
 }
 async function readRegularFile(filePath: string, maxBytes: number, mode: number): Promise<Buffer> {
   const before = await fs.lstat(filePath);
   if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes) throw attachmentIntegrityError();
   assertOwner(before);
-  if (process.platform !== 'win32' && (before.mode & 0o777) !== mode) throw attachmentIntegrityError();
+  if (!posixModeMatches(before, mode)) throw attachmentIntegrityError();
   const handle = await fs.open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
@@ -600,8 +610,8 @@ async function readRegularFile(filePath: string, maxBytes: number, mode: number)
 }
 async function unlinkManagedFile(filePath: string, mode: number): Promise<void> {
   const stat = await fs.lstat(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink() || (process.platform !== 'win32' && (stat.mode & 0o777) !== mode)) throw attachmentIntegrityError();
-  assertOwner(stat); await fs.unlink(filePath); await syncDirectory(path.dirname(filePath));
+  if (!stat.isFile() || stat.isSymbolicLink() || !posixModeMatches(stat, mode)) throw attachmentIntegrityError();
+  assertOwner(stat); await fs.unlink(filePath); await syncDirectoryIfSupported(path.dirname(filePath));
 }
 async function safeDirectoryEntries(directory: string) { await assertPrivateDirectory(directory); return fs.readdir(directory, { withFileTypes: true }); }
 async function directoryBytes(directory: string): Promise<number> {
@@ -615,8 +625,7 @@ async function directoryBytes(directory: string): Promise<number> {
   }
   return total;
 }
-async function syncDirectory(directory: string): Promise<void> { const handle = await fs.open(directory, fsConstants.O_RDONLY); try { await handle.sync(); } finally { await handle.close(); } }
-function assertOwner(stat: { uid: number }): void { if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw attachmentIntegrityError(); }
+function assertOwner(stat: { uid: number }): void { if (!isOwnedByCurrentUser(stat)) throw attachmentIntegrityError(); }
 function managedFileName(record: Pick<TaskAttachmentRecord, 'id' | 'displayName'>): string { assertSafeId(record.id); return `${record.id}${path.extname(record.displayName).toLocaleLowerCase('en-US')}`; }
 function publicDraft(draft: DraftManifest): AttachmentDraftSnapshot { const { schemaVersion: _version, ...snapshot } = draft; return structuredClone(snapshot); }
 function content(record: Pick<TaskAttachmentRecord, 'id' | 'displayName' | 'kind' | 'mediaType' | 'byteCount'>, bytes: Uint8Array): StoredAttachmentContent { return { attachmentId: record.id, displayName: record.displayName, kind: record.kind, mediaType: record.mediaType, byteCount: record.byteCount, bytes }; }
@@ -625,5 +634,8 @@ function assertSafeId(value: string): void { if (!SAFE_ID.test(value)) throw new
 function assertClientToken(value: string): void { if (!isAttachmentClientToken(value)) throw new AttachmentStoreError('ATTACHMENT_INVALID_REQUEST', 'Attachment retry token is invalid.', 400); }
 function notFound(): AttachmentStoreError { return new AttachmentStoreError('ATTACHMENT_NOT_FOUND', 'Attachment not found.', 404); }
 function draftNotFound(): AttachmentStoreError { return new AttachmentStoreError('ATTACHMENT_DRAFT_NOT_FOUND', 'Attachment draft not found.', 404); }
-function isInside(candidate: string, parent: string): boolean { const relative = path.relative(parent, candidate); return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative); }
+function isInside(candidate: string, parent: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
 async function exists(filePath: string): Promise<boolean> { try { await fs.lstat(filePath); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }

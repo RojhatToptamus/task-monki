@@ -148,7 +148,7 @@ describe('agent attachment delivery', () => {
     const filePath = path.join(directory, 'attachment.txt');
     const bytes = Buffer.from('verified attachment');
     await fs.writeFile(filePath, bytes, { mode: 0o400 });
-    await fs.chmod(filePath, 0o400);
+    await setReadOnlyOnPosix(filePath);
     const candidate = attachment({
       path: filePath,
       byteCount: bytes.byteLength,
@@ -157,18 +157,33 @@ describe('agent attachment delivery', () => {
 
     const [verified] = await verifyAgentTurnAttachments([candidate]);
     expect(verified?.verifiedAt).not.toBe(candidate.verifiedAt);
-
-    await fs.chmod(filePath, 0o600);
-    await expect(verifyAgentTurnAttachments([candidate])).rejects.toMatchObject({
-      code: 'ATTACHMENT_NOT_READ_ONLY'
-    });
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a managed attachment that becomes writable',
+    async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-delivery-'));
+      const filePath = path.join(directory, 'attachment.txt');
+      const bytes = Buffer.from('verified attachment');
+      await fs.writeFile(filePath, bytes, { mode: 0o400 });
+      await fs.chmod(filePath, 0o600);
+      const candidate = attachment({
+        path: filePath,
+        byteCount: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex')
+      });
+
+      await expect(verifyAgentTurnAttachments([candidate])).rejects.toMatchObject({
+        code: 'ATTACHMENT_NOT_READ_ONLY'
+      });
+    }
+  );
 
   it('fails closed when managed attachment bytes are missing or changed', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-delivery-'));
     const filePath = path.join(directory, 'attachment.txt');
     await fs.writeFile(filePath, 'changed', { mode: 0o400 });
-    await fs.chmod(filePath, 0o400);
+    await setReadOnlyOnPosix(filePath);
     const candidate = attachment({
       path: filePath,
       byteCount: 7,
@@ -190,7 +205,7 @@ describe('agent attachment delivery', () => {
     const linkPath = path.join(directory, 'attachment.txt');
     const bytes = Buffer.from('linked attachment');
     await fs.writeFile(targetPath, bytes, { mode: 0o400 });
-    await fs.chmod(targetPath, 0o400);
+    await setReadOnlyOnPosix(targetPath);
     await fs.symlink(targetPath, linkPath);
 
     await expect(
@@ -204,6 +219,10 @@ describe('agent attachment delivery', () => {
     ).rejects.toMatchObject({ code: 'ATTACHMENT_NOT_REGULAR' });
   });
 });
+
+async function setReadOnlyOnPosix(filePath: string): Promise<void> {
+  if (process.platform !== 'win32') await fs.chmod(filePath, 0o400);
+}
 
 function attachment(
   overrides: Partial<AgentTurnAttachment> = {}

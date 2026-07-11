@@ -108,14 +108,19 @@ export async function probeExecutable(input: {
   cwd: string;
   env: NodeJS.ProcessEnv;
 }): Promise<ExternalToolProbeResult> {
-  const resolvedPath = await resolveExecutablePath(input.executable, input.env);
+  let resolvedPath: string | null = null;
   try {
-    const { stdout, stderr } = await execFilePortable(input.executable, input.versionArgs, {
-      cwd: input.cwd,
-      env: input.env,
-      timeout: 10_000,
-      maxBuffer: 1024 * 1024
-    });
+    resolvedPath = await resolveExecutablePath(input.executable, input.env);
+    const { stdout, stderr } = await execFilePortable(
+      resolvedPath ?? input.executable,
+      input.versionArgs,
+      {
+        cwd: input.cwd,
+        env: input.env,
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024
+      }
+    );
     return {
       tool: input.tool,
       label: input.label,
@@ -218,7 +223,7 @@ async function resolveExecutablePath(
     for (const name of names) {
       const candidate = path.join(entry, name);
       if (await isExecutable(candidate)) {
-        return candidate;
+        return process.platform === 'win32' ? fs.realpath(candidate) : candidate;
       }
     }
   }

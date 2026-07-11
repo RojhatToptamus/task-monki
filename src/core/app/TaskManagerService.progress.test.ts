@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { buildRunProgressViewModel } from '../../renderer/model/runProgress';
@@ -55,7 +56,7 @@ describe('TaskManagerService progress harness', () => {
               type: 'read',
               command: "sed -n '1,2p' README.md",
               name: 'README.md',
-              path: `${scenario.repositoryPath}/README.md`
+              path: path.join(scenario.repositoryPath, 'README.md')
             }
           ],
           aggregatedOutput: '# Scenario\n',

@@ -52,6 +52,13 @@ import {
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
+import {
+  enforcePosixMode,
+  hasNoGroupOrOtherPosixAccess,
+  isOwnedByCurrentUser,
+  posixModeMatches,
+  syncDirectoryIfSupported
+} from '../filesystem/secureFilesystem';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
 import { createDomainEvent } from './domainEvent';
 import {
@@ -481,7 +488,7 @@ export class FileTaskStore {
       await fs.unlink(entryPath);
       removedOrphans += 1;
     }
-    if (removedOrphans > 0) await syncStoreDirectory(this.artifactsDir);
+    if (removedOrphans > 0) await syncDirectoryIfSupported(this.artifactsDir);
   }
 
   async snapshot(): Promise<TaskSnapshot> {
@@ -2701,13 +2708,13 @@ export class FileTaskStore {
       );
       await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
       await handle.sync();
-      await handle.chmod(0o600);
+      await enforcePosixMode(handle, 0o600);
       await handle.sync();
       await handle.close();
       handle = undefined;
       await fs.rename(tmpPath, this.storePath);
       published = true;
-      await syncStoreDirectory(this.baseDir);
+      await syncDirectoryIfSupported(this.baseDir);
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await fs.unlink(tmpPath).catch(() => undefined);
@@ -2733,8 +2740,8 @@ async function readPrivateStoreFile(storePath: string): Promise<string> {
       !stat.isFile() ||
       stat.size <= 0 ||
       stat.size > MAX_STORE_FILE_BYTES ||
-      (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+      !hasNoGroupOrOtherPosixAccess(stat) ||
+      !isOwnedByCurrentUser(stat)
     ) {
       throw new Error('Task store file failed its integrity check.');
     }
@@ -2775,30 +2782,6 @@ async function cleanupStoreTemporaryFiles(
   }
 }
 
-async function syncStoreDirectory(directory: string): Promise<void> {
-  if (process.platform === 'win32') return;
-  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  try {
-    handle = await fs.open(
-      directory,
-      fsConstants.O_RDONLY |
-        (fsConstants.O_DIRECTORY ?? 0) |
-        (fsConstants.O_NOFOLLOW ?? 0)
-    );
-    await handle.sync();
-  } catch (error) {
-    if (
-      !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(
-        (error as NodeJS.ErrnoException).code ?? ''
-      )
-    ) {
-      throw error;
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
 async function initializeArtifactDirectory(
   baseDir: string,
   artifactsDir: string
@@ -2830,7 +2813,7 @@ async function initializeArtifactDirectory(
       throw new Error('Task artifact directory changed during initialization.');
     }
     assertArtifactOwnedByCurrentUser(stat);
-    await handle.chmod(0o700);
+    await enforcePosixMode(handle, 0o700);
   } finally {
     await handle.close();
   }
@@ -2855,7 +2838,8 @@ async function inspectArtifactDirectory(
     fs.realpath(baseDir),
     fs.realpath(artifactsDir)
   ]);
-  if (artifactRealPath !== path.join(baseRealPath, path.basename(artifactsDir))) {
+  const expectedArtifactPath = path.join(baseRealPath, path.basename(artifactsDir));
+  if (!sameAbsolutePath(artifactRealPath, expectedArtifactPath)) {
     throw new Error('Task artifact directory escaped its managed root.');
   }
   return stat;
@@ -2921,8 +2905,8 @@ async function secureArtifactFile(filePath: string): Promise<void> {
       throw new Error('Stored task artifact changed during validation.');
     }
     assertArtifactOwnedByCurrentUser(stat);
-    if (artifactMode(stat) !== 0o600 && process.platform !== 'win32') {
-      await handle.chmod(0o600);
+    if (!posixModeMatches(stat, 0o600)) {
+      await enforcePosixMode(handle, 0o600);
       await handle.sync();
     }
     assertArtifactPrivateMode(await handle.stat(), 0o600);
@@ -2934,7 +2918,7 @@ async function secureArtifactFile(filePath: string): Promise<void> {
 function assertArtifactOwnedByCurrentUser(
   stat: Awaited<ReturnType<typeof fs.lstat>>
 ): void {
-  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+  if (!isOwnedByCurrentUser(stat)) {
     throw new Error('Task artifact entry is not owned by the current user.');
   }
 }
@@ -2943,15 +2927,17 @@ function assertArtifactPrivateMode(
   stat: Awaited<ReturnType<typeof fs.lstat>>,
   expected: number
 ): void {
-  if (process.platform !== 'win32' && artifactMode(stat) !== expected) {
+  if (!posixModeMatches(stat, expected)) {
     throw new Error('Task artifact entry has unsafe permissions.');
   }
 }
 
-function artifactMode(stat: Awaited<ReturnType<typeof fs.lstat>>): number {
-  return typeof stat.mode === 'bigint'
-    ? Number(stat.mode & BigInt(0o777))
-    : stat.mode & 0o777;
+function sameAbsolutePath(left: string, right: string): boolean {
+  return (
+    path.isAbsolute(left) &&
+    path.isAbsolute(right) &&
+    path.relative(left, right) === ''
+  );
 }
 
 function requireCurrentState(state: PersistedState): StoreState {
