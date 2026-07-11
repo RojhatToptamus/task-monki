@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { PreviewExecutionPlan } from '../../shared/contracts';
-import { PreviewGraph, reverseDependencyOrder, topologicallyOrderJobs } from './PreviewGraph';
+import { PreviewGraph, reverseDependencyOrder } from './PreviewGraph';
 
 describe('PreviewGraph', () => {
-  it('orders preparation jobs by declared success dependencies', () => {
+  it('runs preparation jobs after their declared success dependencies', async () => {
+    const starts: string[] = [];
     const plan: PreviewExecutionPlan = {
       version: 1,
       jobs: [
@@ -14,10 +15,20 @@ describe('PreviewGraph', () => {
       workers: [],
       routes: []
     };
-    expect(topologicallyOrderJobs(plan).map((job) => job.id)).toEqual(['install', 'build']);
+    const graph = new PreviewGraph(
+      {} as never,
+      { async run(input: { node: { id: string } }) { starts.push(input.node.id); } } as never,
+      {} as never, {} as never, {} as never, {} as never
+    );
+    const running = await graph.start({
+      taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, async updateGenerationState() {}
+    });
+    expect(starts).toEqual(['install', 'build']);
+    await running.stop();
   });
 
-  it('fails closed for a cycle even if a malformed plan bypasses recipe validation', () => {
+  it('fails closed for a cycle even if a malformed plan bypasses recipe validation', async () => {
     const plan: PreviewExecutionPlan = {
       version: 1,
       jobs: [
@@ -26,7 +37,13 @@ describe('PreviewGraph', () => {
       ],
       services: [], workers: [], routes: []
     };
-    expect(() => topologicallyOrderJobs(plan)).toThrow('cycle');
+    const graph = new PreviewGraph(
+      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never
+    );
+    await expect(graph.start({
+      taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, async updateGenerationState() {}
+    })).rejects.toThrow('cycle');
   });
 
   it('runs independent DAG nodes concurrently while capping native effects at four', async () => {
@@ -97,6 +114,33 @@ describe('PreviewGraph', () => {
       markerDigest: 'marker', plan, async updateGenerationState() {}
     })).rejects.toThrow('injected failure');
     expect(slowSettled).toBe(true);
+  });
+
+  it('does not launch queued native effects after a sibling fails', async () => {
+    const starts: string[] = [];
+    const graph = new PreviewGraph(
+      {} as never,
+      {
+        async run(input: { node: { id: string } }) {
+          starts.push(input.node.id);
+          if (input.node.id === 'a-fail') throw new Error('injected queued failure');
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      } as never,
+      {} as never, {} as never, {} as never, {} as never
+    );
+    const plan: PreviewExecutionPlan = {
+      version: 1,
+      jobs: ['a-fail', 'b-slow', 'c-slow', 'd-slow', 'e-queued', 'f-queued'].map((id) => ({
+        id, cwd: '.', command: ['node'], needs: {}
+      })),
+      services: [], workers: [], routes: []
+    };
+    await expect(graph.start({
+      taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, async updateGenerationState() {}
+    })).rejects.toThrow('queued failure');
+    expect(starts.sort()).toEqual(['a-fail', 'b-slow', 'c-slow', 'd-slow']);
   });
 
   it('computes reverse dependency shutdown with consumers before providers', () => {

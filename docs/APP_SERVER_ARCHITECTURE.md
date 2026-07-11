@@ -159,20 +159,22 @@ services, workers, and routes. Task Monki:
   command, and receipt before committing target spawn; the live launcher also
   removes verified group descendants when the target leader exits;
 - supports HTTP, TCP, and finite argv readiness plus periodic liveness probes;
-  port probes verify that every allocated-port listener is loopback-only and
-  belongs to the recorded target process group;
+  HTTP/TCP readiness ports and every routed target are verified as
+  loopback-only listeners owned by the recorded target process group;
 - resolves only typed, non-secret service and stable-route origins into node
   environments; arbitrary secret or environment import remains unsupported;
 - applies bounded restart policies per service or worker, and fails the
   generation only when a critical node exhausts its policy;
 - keeps the active generation routed while a candidate starts, atomically
-  switches every stable `.preview.localhost` hostname only after all required
-  nodes are ready, then stops the retired graph in reverse dependency order;
-  failed or canceled candidates do not detach the active generation;
+  replaces the complete set of stable `.preview.localhost` hostnames only
+  after all required nodes are ready, then stops the retired graph in reverse
+  dependency order; failed or canceled candidates do not detach the active
+  generation;
 - preserves the stable gateway authority upstream and rewrites absolute
   target-origin redirects back to that authority;
 - stores compact preview records in schema 11, retains at most 20 terminal
-  generations per task, and keeps each stdout/stderr artifact bounded;
+  generations per task and 20 completed argv probe attempts per live node,
+  and keeps each stdout/stderr artifact bounded;
 - tails only the selected artifact through bounded byte-range reads rather
   than refreshing the full task snapshot for each log update;
 - detaches routes first and stops/removes only exact verified processes and

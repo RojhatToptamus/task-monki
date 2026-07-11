@@ -22,6 +22,9 @@ export class PreviewReconciler {
       if (TERMINAL_GENERATIONS.includes(generation.state)) continue;
       await this.reconcileGeneration(generation);
     }
+    for (const taskId of new Set(generations.map((generation) => generation.taskId))) {
+      await this.store.prunePreviewHistory(taskId);
+    }
   }
 
   private async reconcileGeneration(generation: PreviewGenerationRecord): Promise<void> {

@@ -519,6 +519,65 @@ export class FileTaskStore {
     return removedIds.size;
   }
 
+  async prunePreviewProbeHistory(
+    generationId: string,
+    nodeId: string,
+    maxAttempts = 20
+  ): Promise<number> {
+    await this.init();
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 100) {
+      throw new Error('Preview probe retention must be between 1 and 100 attempts.');
+    }
+    const terminalAttempts = this.state.previewNodeAttempts
+      .filter(
+        (attempt) =>
+          attempt.generationId === generationId &&
+          attempt.nodeId === nodeId &&
+          attempt.kind === 'PROBE' &&
+          ['SUCCEEDED', 'FAILED', 'STOPPED'].includes(attempt.state)
+      )
+      .sort((a, b) => b.attempt - a.attempt);
+    const removedAttempts = terminalAttempts.slice(maxAttempts);
+    if (removedAttempts.length === 0) return 0;
+    const removedAttemptIds = new Set(removedAttempts.map((attempt) => attempt.id));
+    const artifactIds = new Set(
+      removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId])
+    );
+    const terminalResources = this.state.previewResources
+      .filter(
+        (resource) =>
+          resource.generationId === generationId &&
+          resource.logicalNodeId === nodeId &&
+          ['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const removedResourceIds = new Set(
+      terminalResources.slice(maxAttempts).map((resource) => resource.id)
+    );
+    const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
+    this.state = {
+      ...this.state,
+      previewNodeAttempts: this.state.previewNodeAttempts.filter(
+        (attempt) => !removedAttemptIds.has(attempt.id)
+      ),
+      previewResources: this.state.previewResources.filter(
+        (resource) => !removedResourceIds.has(resource.id)
+      ),
+      events: this.state.events.filter(
+        (event) => {
+          if (event.previewGenerationId !== generationId || !event.payload) return true;
+          const payload = event.payload as { nodeId?: unknown; resourceId?: unknown };
+          return payload.nodeId !== nodeId &&
+            (typeof payload.resourceId !== 'string' || !removedResourceIds.has(payload.resourceId));
+        }
+      ),
+      artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
+    };
+    await this.persistQueued();
+    await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
+    return removedAttempts.length;
+  }
+
   async savePreviewNodeAttempt(
     attempt: PreviewNodeAttemptRecord
   ): Promise<PreviewNodeAttemptRecord> {
@@ -2665,8 +2724,8 @@ export class FileTaskStore {
   ): Promise<{ chunk: string; nextOffset: number; endOfFile: boolean }> {
     await this.init();
     if (!Number.isInteger(offset) || offset < 0) throw new Error('Artifact offset must be a nonnegative integer.');
-    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
-      throw new Error('Artifact range must contain 1-65536 bytes.');
+    if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 64 * 1024) {
+      throw new Error('Artifact range must contain 4-65536 bytes.');
     }
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
     if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);

@@ -60,18 +60,11 @@ export class PreviewGateway {
     }
   }
 
-  setRoute(hostname: string, target: PreviewGatewayTarget): void {
-    const normalized = normalizeHostname(hostname);
-    if (!normalized.endsWith('.preview.localhost') || normalized.split('.').length < 4) {
-      throw new Error('Preview gateway routes must use a scoped .preview.localhost hostname.');
-    }
-    if (target.host !== '127.0.0.1' || !isValidPort(target.port)) {
-      throw new Error('Preview gateway targets must be valid IPv4 loopback ports.');
-    }
-    this.routes.set(normalized, target);
-  }
-
-  replaceRoutes(generationId: string, routes: Record<string, Omit<PreviewGatewayTarget, 'generationId'>>): void {
+  replaceRoutes(
+    generationId: string,
+    routes: Record<string, Omit<PreviewGatewayTarget, 'generationId'>>,
+    replacesGenerationId?: string
+  ): void {
     const replacements = Object.entries(routes).map(([hostname, target]) => {
       const normalized = normalizeHostname(hostname);
       validateRoute(normalized, target);
@@ -80,12 +73,8 @@ export class PreviewGateway {
     if (new Set(replacements.map(([hostname]) => hostname)).size !== replacements.length) {
       throw new Error('Preview gateway replacement contains duplicate hostnames.');
     }
+    if (replacesGenerationId) this.removeOwnedRoutes(replacesGenerationId);
     for (const [hostname, target] of replacements) this.routes.set(hostname, target);
-  }
-
-  removeRoute(hostname: string, generationId: string): void {
-    const normalized = normalizeHostname(hostname);
-    if (this.routes.get(normalized)?.generationId === generationId) this.routes.delete(normalized);
   }
 
   removeOwnedRoutes(generationId: string): void {

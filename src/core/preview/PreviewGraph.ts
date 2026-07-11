@@ -31,7 +31,6 @@ interface RunningLongNode {
 }
 
 export interface RunningPreviewGraph {
-  services: ReadonlyMap<string, RunningNativeService>;
   ports: Readonly<Record<string, Record<string, number>>>;
   unexpectedExit: Promise<string | undefined>;
   isRunning(): boolean;
@@ -92,14 +91,22 @@ export class PreviewGraph {
           const kind = input.plan.services.some((service) => service.id === node.id) ? 'SERVICE' : 'WORKER';
           const ports = await this.allocatePorts(node);
           allocatedPorts[node.id] = ports;
-          const current = await semaphore.run(() => this.services.start({
-            ...runtimeInput(startupInput),
-            node,
-            kind,
-            attempt: 1,
-            portValues: ports,
-            resolvedEnv: resolveEnvironment(node.env, allocatedPorts, input.routeOrigins ?? {})
-          }));
+          const current = await semaphore.run(async () => {
+            throwIfAborted(startupAbort.signal);
+            try {
+              return await this.services.start({
+                ...runtimeInput(startupInput),
+                node,
+                kind,
+                attempt: 1,
+                portValues: ports,
+                resolvedEnv: resolveEnvironment(node.env, allocatedPorts, input.routeOrigins ?? {})
+              });
+            } catch (error) {
+              startupAbort.abort();
+              throw error;
+            }
+          });
           const owner: RunningLongNode = {
             node,
             kind,
@@ -114,8 +121,19 @@ export class PreviewGraph {
           await this.waitUntilReady(startupInput, owner, semaphore, allocatedPorts);
           return;
         }
-        await semaphore.run(() => this.jobs.run({ ...runtimeInput(startupInput), node, signal: startupAbort.signal }));
-      })();
+        await semaphore.run(async () => {
+          throwIfAborted(startupAbort.signal);
+          try {
+            return await this.jobs.run({ ...runtimeInput(startupInput), node, signal: startupAbort.signal });
+          } catch (error) {
+            startupAbort.abort();
+            throw error;
+          }
+        });
+      })().catch((error) => {
+        startupAbort.abort();
+        throw error;
+      });
       promises.set(id, operation);
       return operation;
     };
@@ -124,6 +142,13 @@ export class PreviewGraph {
       await updatePhase('RUNNING_GRAPH');
       await Promise.all([...byId.keys()].sort().map(execute));
       throwIfAborted(startupAbort.signal);
+      await Promise.all(
+        [...running.values()].map((owner) =>
+          this.stabilizeBeforeCutover(startupInput, owner, semaphore, allocatedPorts)
+        )
+      );
+      throwIfAborted(startupAbort.signal);
+      await this.assertRoutedListeners(input.plan, running, allocatedPorts);
     } catch (error) {
       startupAbort.abort();
       await Promise.allSettled([...promises.values()]);
@@ -139,20 +164,30 @@ export class PreviewGraph {
       resolveUnexpected = resolve;
     });
     let graphStopping = false;
+    const lifecycleAbort = new AbortController();
+    const supervisions: Array<Promise<void>> = [];
     for (const owner of running.values()) {
-      void this.supervise(input, owner, semaphore, allocatedPorts).then((reason) => {
-        if (reason && !graphStopping && owner.node.critical) {
-          resolveUnexpected(reason);
-        }
-      }).catch((error: unknown) => {
-        if (!graphStopping) resolveUnexpected(`Preview ${owner.kind.toLowerCase()} ${owner.node.id} supervision failed: ${boundedError(error)}`);
-      });
+      supervisions.push(
+        this.supervise(
+          { ...input, signal: lifecycleAbort.signal },
+          owner,
+          semaphore,
+          allocatedPorts
+        )
+          .then((reason) => {
+            if (reason && !graphStopping && owner.node.critical) resolveUnexpected(reason);
+          })
+          .catch((error: unknown) => {
+            if (!graphStopping) {
+              resolveUnexpected(
+                `Preview ${owner.kind.toLowerCase()} ${owner.node.id} supervision failed: ${boundedError(error)}`
+              );
+            }
+          })
+      );
     }
 
     return {
-      services: new Map(
-        [...running.values()].filter((owner) => owner.kind === 'SERVICE').map((owner) => [owner.node.id, owner.current])
-      ),
       ports: allocatedPorts,
       unexpectedExit,
       isRunning: () =>
@@ -163,7 +198,10 @@ export class PreviewGraph {
         if (graphStopping) return 'ALREADY_EXITED';
         graphStopping = true;
         resolveUnexpected(undefined);
+        for (const owner of running.values()) owner.stopping = true;
+        lifecycleAbort.abort();
         const result = await this.stopNodes(running, reverseDependencyOrder(input.plan));
+        await Promise.allSettled(supervisions);
         for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
         return result;
       }
@@ -176,17 +214,19 @@ export class PreviewGraph {
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>
   ): Promise<string | undefined> {
+    const stopping = waitForAbort(input.signal);
     while (!owner.stopping) {
       const liveness = owner.node.liveness
         ? this.watchLiveness(input, owner, semaphore, allPorts)
         : new Promise<string>(() => undefined);
       const exit = await Promise.race([
         owner.current.completion.then((result) => ({ type: 'exit' as const, result })),
-        liveness.then((reason) => ({ type: 'liveness' as const, reason }))
+        liveness.then((reason) => ({ type: 'liveness' as const, reason })),
+        stopping.then(() => ({ type: 'stopping' as const }))
       ]);
       owner.livenessAbort?.abort();
       owner.livenessAbort = undefined;
-      if (owner.stopping) return undefined;
+      if (owner.stopping || exit.type === 'stopping') return undefined;
       let reason: string;
       let failed = true;
       if (exit.type === 'liveness') {
@@ -206,21 +246,74 @@ export class PreviewGraph {
       if (owner.stopping) return undefined;
       owner.attempt += 1;
       try {
-        owner.current = await semaphore.run(() => this.services.start({
-          ...runtimeInput(input),
-          node: owner.node,
-          kind: owner.kind,
-          attempt: owner.attempt,
-          portValues: owner.ports,
-          resolvedEnv: resolveEnvironment(owner.node.env, allPorts, input.routeOrigins ?? {})
-        }));
+        owner.current = await semaphore.run(() => {
+          if (owner.stopping) throw new Error('Preview node is stopping.');
+          return this.services.start({
+            ...runtimeInput(input),
+            node: owner.node,
+            kind: owner.kind,
+            attempt: owner.attempt,
+            portValues: owner.ports,
+            resolvedEnv: resolveEnvironment(owner.node.env, allPorts, input.routeOrigins ?? {})
+          });
+        });
+        if (owner.stopping) {
+          await this.services.stop(owner.current.resource);
+          return undefined;
+        }
         await this.waitUntilReady(input, owner, semaphore, allPorts);
       } catch (error) {
+        if (owner.stopping) {
+          await this.services.stop(owner.current.resource).catch(() => undefined);
+          return undefined;
+        }
         reason = `Preview ${owner.kind.toLowerCase()} ${owner.node.id} restart ${owner.attempt} failed: ${boundedError(error)}`;
         if (owner.attempt > restart.maxRestarts) return reason;
       }
     }
     return undefined;
+  }
+
+  private async stabilizeBeforeCutover(
+    input: Parameters<PreviewGraph['start']>[0],
+    owner: RunningLongNode,
+    semaphore: Semaphore,
+    allPorts: Record<string, Record<string, number>>
+  ): Promise<void> {
+    while (!owner.current.isRunning()) {
+      const exit = await owner.current.completion;
+      const failed = exit.receipt.state !== 'EXITED' || exit.receipt.exitCode !== 0;
+      let reason = nodeExitReason(owner, exit.receipt);
+      const restart = owner.node.restart;
+      const shouldRestart = restart.mode === 'always' || (restart.mode === 'on-failure' && failed);
+      if (!shouldRestart || owner.attempt > restart.maxRestarts) {
+        if (owner.node.critical) throw new Error(reason);
+        return;
+      }
+      if (restart.backoffMs > 0) await delay(restart.backoffMs, input.signal);
+      throwIfAborted(input.signal);
+      owner.attempt += 1;
+      try {
+        owner.current = await semaphore.run(() => {
+          throwIfAborted(input.signal);
+          return this.services.start({
+            ...runtimeInput(input),
+            node: owner.node,
+            kind: owner.kind,
+            attempt: owner.attempt,
+            portValues: owner.ports,
+            resolvedEnv: resolveEnvironment(owner.node.env, allPorts, input.routeOrigins ?? {})
+          });
+        });
+        await this.waitUntilReady(input, owner, semaphore, allPorts);
+      } catch (error) {
+        reason = `Preview ${owner.kind.toLowerCase()} ${owner.node.id} restart ${owner.attempt} failed: ${boundedError(error)}`;
+        if (owner.attempt > restart.maxRestarts) {
+          if (owner.node.critical) throw new Error(reason);
+          return;
+        }
+      }
+    }
   }
 
   private async watchLiveness(
@@ -297,23 +390,44 @@ export class PreviewGraph {
     }
     owner.probeAttempt += 1;
     try {
-      await semaphore.run(() => this.jobs.run({
-        ...runtimeInput(input),
-        node: { id: `${owner.node.id}-probe`, cwd: probe.cwd, command: probe.command, needs: {} },
-        kind: 'PROBE',
-        attempt: owner.probeAttempt,
-        timeoutMs: probe.timeoutSeconds * 1_000,
-        signal,
-        env: {
-          ...resolveEnvironment(owner.node.env, allPorts, input.routeOrigins ?? {}),
-          ...Object.fromEntries(
-            Object.entries(owner.node.ports).map(([portId, port]) => [port.env, String(owner.ports[portId])])
-          )
-        }
-      }));
+      await semaphore.run(() => {
+        throwIfAborted(signal);
+        return this.jobs.run({
+          ...runtimeInput(input),
+          node: { id: `${owner.node.id}-probe`, cwd: probe.cwd, command: probe.command, needs: {} },
+          kind: 'PROBE',
+          attempt: owner.probeAttempt,
+          timeoutMs: probe.timeoutSeconds * 1_000,
+          signal,
+          env: {
+            ...resolveEnvironment(owner.node.env, allPorts, input.routeOrigins ?? {}),
+            ...Object.fromEntries(
+              Object.entries(owner.node.ports).map(([portId, port]) => [port.env, String(owner.ports[portId])])
+            )
+          }
+        });
+      });
       return { status: 'PASSED', observedAt: new Date().toISOString() };
     } catch (error) {
       return { status: 'FAILED', lastError: boundedError(error), observedAt: new Date().toISOString() };
+    } finally {
+      await this.store.prunePreviewProbeHistory(input.generationId, `${owner.node.id}-probe`);
+    }
+  }
+
+  private async assertRoutedListeners(
+    plan: PreviewExecutionPlan,
+    running: Map<string, RunningLongNode>,
+    ports: Record<string, Record<string, number>>
+  ): Promise<void> {
+    for (const route of plan.routes) {
+      const owner = running.get(route.service);
+      const processGroupId = owner?.current.resource.native?.target?.processGroupId;
+      const port = ports[route.service]?.[route.port];
+      if (!owner || !owner.current.isRunning() || !processGroupId || !port) {
+        throw new Error(`Preview route ${route.id} has no running owned listener target.`);
+      }
+      await this.listeners.assertOwnedLoopback(port, processGroupId);
     }
   }
 
@@ -424,6 +538,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new Error('Preview operation canceled.'));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(finish, ms);
     const onAbort = () => finish(new Error('Preview operation canceled.'));
@@ -435,6 +550,12 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function waitForAbort(signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise<void>(() => undefined);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
 }
 
 function boundedError(error: unknown): string {
@@ -450,26 +571,6 @@ export class PreviewReadinessFailure extends Error {
   ) {
     super(`Preview node ${nodeId} did not become ready: ${reason ?? 'readiness timed out'}`);
   }
-}
-
-export function topologicallyOrderJobs(plan: PreviewExecutionPlan) {
-  const jobs = new Map(plan.jobs.map((job) => [job.id, job]));
-  const ordered: typeof plan.jobs = [];
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (id: string) => {
-    if (visited.has(id)) return;
-    if (visiting.has(id)) throw new Error(`Preview job graph contains a cycle at ${id}.`);
-    const job = jobs.get(id);
-    if (!job) throw new Error(`Preview job dependency is missing: ${id}.`);
-    visiting.add(id);
-    for (const dependencyId of Object.keys(job.needs).sort()) visit(dependencyId);
-    visiting.delete(id);
-    visited.add(id);
-    ordered.push(job);
-  };
-  for (const id of [...jobs.keys()].sort()) visit(id);
-  return ordered;
 }
 
 function assertGraphAcyclic(

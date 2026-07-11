@@ -24,7 +24,7 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
     const owned = await fixture.host.launch({
       ...fixture.input,
       executable: process.execPath,
-      argv: ['-e', `process.stdout.write('x'.repeat(4096)); process.stderr.write('error');`],
+      argv: ['-e', `process.stdout.write('x'.repeat(16 * 1024 * 1024)); process.stderr.write('error');`],
       maxLogBytes: 256,
       async persistPrepared(identity) {
         const receipt = await readNativeLauncherReceipt(identity.receiptPath);
@@ -40,6 +40,21 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
     expect(Buffer.byteLength(stdout)).toBeLessThanOrEqual(256);
     expect(stdout).toContain('preview log truncated');
     await expect(fs.readFile(fixture.stderrPath, 'utf8')).resolves.toBe('error');
+  });
+
+  it('fails the owned launch cleanly when bounded log capture cannot write', async () => {
+    const fixture = await createFixture();
+    const owned = await fixture.host.launch({
+      ...fixture.input,
+      stdoutPath: fixture.root,
+      executable: process.execPath,
+      argv: ['-e', `process.stdout.write('output'); setTimeout(() => {}, 1000);`],
+      async persistPrepared() {}
+    });
+    await expect(owned.completion).resolves.toMatchObject({
+      state: 'FAILED',
+      error: expect.stringContaining('Could not capture stdout')
+    });
   });
 
   it('accepts a successful target that exits before its process identity can be inspected', async () => {

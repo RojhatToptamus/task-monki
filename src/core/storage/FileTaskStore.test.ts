@@ -307,13 +307,14 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({ title: 'Logs', prompt: 'Tail safely', repositoryPath: dir });
     const artifact = await store.createPreviewArtifact(task.id, 'preview-stdout');
     await store.appendBoundedArtifact(artifact.id, 'a😀b');
-    const first = await store.readArtifactRange(artifact.id, 0, 2);
+    const first = await store.readArtifactRange(artifact.id, 0, 4);
     expect(first).toEqual({ chunk: 'a', nextOffset: 1, endOfFile: false });
     const second = await store.readArtifactRange(artifact.id, first.nextOffset, 4);
     expect(second).toEqual({ chunk: '😀', nextOffset: 5, endOfFile: false });
     await expect(store.readArtifactRange(artifact.id, second.nextOffset, 64)).resolves.toEqual({
       chunk: 'b', nextOffset: 6, endOfFile: true
     });
+    await expect(store.readArtifactRange(artifact.id, 1, 3)).rejects.toThrow('4-65536');
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -364,6 +365,66 @@ describe('FileTaskStore', () => {
     expect(snapshot.previewNodeAttempts).toHaveLength(2);
     await expect(fs.access(artifactPaths.get('generation-0')!)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(artifactPaths.get('generation-3')!)).resolves.toBeUndefined();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('bounds completed argv probe attempts and resources while a generation remains active', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-probe-prune-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Probe history', prompt: 'Bound it live', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/probe-history', worktreePath: dir, baseSha: 'base'
+    });
+    const now = Date.now();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      warnings: [], createdAt: new Date(now).toISOString()
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: new Date(now).toISOString()
+    });
+    const generation = await store.savePreviewGeneration({
+      id: 'generation', previewKey: 'task-probe', taskId: task.id, iterationId: iteration.id,
+      worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
+      executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY',
+      routingState: 'ACTIVE', freshness: 'CURRENT', routes: [],
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
+    });
+    const artifactPaths = new Map<number, string>();
+    for (let index = 1; index <= 25; index += 1) {
+      const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
+      const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
+      artifactPaths.set(index, stdout.path);
+      await store.savePreviewNodeAttempt({
+        id: `attempt-${index}`, taskId: task.id, generationId: generation.id,
+        nodeId: 'web-probe', kind: 'PROBE', attempt: index, commandDigest: 'probe',
+        state: 'SUCCEEDED', stdoutArtifactId: stdout.id, stderrArtifactId: stderr.id,
+        endedAt: new Date(now + index).toISOString()
+      });
+      await store.savePreviewResource({
+        id: `resource-${index}`, taskId: task.id, generationId: generation.id,
+        logicalNodeId: 'web-probe', adapterKind: 'NATIVE_PROCESS', state: 'EXITED',
+        ownershipMarkerDigest: 'marker', updatedAt: new Date(now + index).toISOString()
+      });
+    }
+
+    await expect(store.prunePreviewProbeHistory(generation.id, 'web-probe', 20)).resolves.toBe(5);
+    const snapshot = await store.snapshot();
+    expect(snapshot.previewNodeAttempts.filter((attempt) => attempt.nodeId === 'web-probe')).toHaveLength(20);
+    expect(snapshot.previewResources.filter((resource) => resource.logicalNodeId === 'web-probe')).toHaveLength(20);
+    expect(
+      snapshot.events.some(
+        (event) =>
+          event.previewGenerationId === generation.id &&
+          (event.payload as { nodeId?: string } | undefined)?.nodeId === 'web-probe'
+      )
+    ).toBe(false);
+    await expect(fs.access(artifactPaths.get(1)!)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(artifactPaths.get(25)!)).resolves.toBeUndefined();
     await fs.rm(dir, { recursive: true, force: true });
   });
 

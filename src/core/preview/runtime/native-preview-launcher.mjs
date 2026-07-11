@@ -13,6 +13,7 @@ let committed = false;
 let stopping = false;
 let terminalWritten = false;
 let finalizing;
+let logError;
 const logCounts = { stdout: 0, stderr: 0 };
 const logWrites = { stdout: Promise.resolve(), stderr: Promise.resolve() };
 const stopTimers = new Set();
@@ -54,8 +55,8 @@ async function commitLaunch() {
     detached: process.platform !== 'win32',
     windowsHide: true
   });
-  target.stdout?.on('data', (chunk) => void appendBounded('stdout', chunk));
-  target.stderr?.on('data', (chunk) => void appendBounded('stderr', chunk));
+  captureBoundedLog('stdout', target.stdout);
+  captureBoundedLog('stderr', target.stderr);
   target.once('spawn', async () => {
     await writeReceipt(baseReceipt('RUNNING'));
     process.send?.({ type: 'started', targetPid: target.pid });
@@ -66,8 +67,9 @@ async function commitLaunch() {
   target.once('error', async (error) => {
     clearStopTimers();
     await Promise.allSettled(Object.values(logWrites));
-    await writeTerminal({ state: 'FAILED', error: bounded(error.message) });
-    process.send?.({ type: 'failed', error: bounded(error.message) });
+    const reason = logError ?? bounded(error.message);
+    await writeTerminal({ state: 'FAILED', error: reason });
+    process.send?.({ type: 'failed', error: reason });
     process.exit(1);
   });
 }
@@ -95,6 +97,12 @@ async function finalizeTarget(exitCode, signal) {
   finalizing = (async () => {
     clearStopTimers();
     await Promise.allSettled(Object.values(logWrites));
+    if (logError) {
+      await writeTerminal({ state: 'FAILED', exitCode, signal, error: logError });
+      process.send?.({ type: 'failed', error: logError });
+      process.exit(1);
+      return;
+    }
     const groupClean = await cleanupRemainingTargetGroup();
     if (!groupClean) {
       await writeTerminal({
@@ -169,6 +177,28 @@ function clearStopTimers() {
 async function appendBounded(stream, chunk) {
   logWrites[stream] = logWrites[stream].then(() => appendBoundedNow(stream, chunk));
   return logWrites[stream];
+}
+
+function captureBoundedLog(stream, readable) {
+  if (!readable) return;
+  const onData = (chunk) => {
+    readable.pause();
+    void appendBounded(stream, chunk).then(
+      () => {
+        if (logCounts[stream] >= (Number(command.maxLogBytes) || 262_144)) {
+          readable.off('data', onData);
+        }
+        readable.resume();
+      },
+      (error) => {
+        logError = `Could not capture ${stream}: ${bounded(error?.message ?? error)}`;
+        readable.off('data', onData);
+        readable.resume();
+        void stopTarget();
+      }
+    );
+  };
+  readable.on('data', onData);
 }
 
 async function appendBoundedNow(stream, chunk) {

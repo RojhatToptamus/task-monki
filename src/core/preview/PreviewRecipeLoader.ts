@@ -220,7 +220,7 @@ function normalizeService(
   id: string
 ): PreviewServicePlan {
   const common = normalizeLongRunning(value, context, id, true);
-  const ready = normalizeProbe(value.ready, `${context}.ready`, common.ports, true);
+  const ready = normalizeProbe(value.ready, `${context}.ready`, common.ports);
   return { ...common, ready };
 }
 
@@ -232,7 +232,7 @@ function normalizeWorker(
   const common = normalizeLongRunning(value, context, id, false);
   return {
     ...common,
-    ready: value.ready === undefined ? undefined : normalizeProbe(value.ready, `${context}.ready`, common.ports, true)
+    ready: value.ready === undefined ? undefined : normalizeProbe(value.ready, `${context}.ready`, common.ports)
   };
 }
 
@@ -282,6 +282,7 @@ function normalizeLongRunning(
 
   const portsValue = optionalRecord(value.ports, `${context}.ports`);
   const ports: PreviewServicePlan['ports'] = {};
+  const portEnvironmentKeys = new Set<string>();
   for (const portId of Object.keys(portsValue).sort()) {
     assertId(portId, `${context}.ports`);
     const port = requiredRecord(portsValue[portId], `${context}.ports.${portId}`);
@@ -292,6 +293,10 @@ function normalizeLongRunning(
     if (normalizedEnv[port.env] !== undefined) {
       throw new Error(`${context}.ports.${portId}.env conflicts with a literal environment value.`);
     }
+    if (portEnvironmentKeys.has(port.env)) {
+      throw new Error(`${context}.ports.${portId}.env duplicates another generated port environment key.`);
+    }
+    portEnvironmentKeys.add(port.env);
     ports[portId] = { env: port.env };
   }
   if ((service && Object.keys(ports).length === 0) || Object.keys(ports).length > 16) {
@@ -316,10 +321,8 @@ function normalizeProbe(
   value: unknown,
   context: string,
   ports: PreviewServicePlan['ports'],
-  required: boolean,
   defaultTimeoutSeconds = 30
 ): PreviewReadinessPlan {
-  if (value === undefined && !required) throw new Error(`${context} is missing.`);
   const probe = requiredRecord(value, context);
   const timeoutSeconds = probe.timeoutSeconds ?? defaultTimeoutSeconds;
   if (!Number.isInteger(timeoutSeconds) || Number(timeoutSeconds) < 1 || Number(timeoutSeconds) > 300) {
@@ -375,7 +378,7 @@ function normalizeLiveness(
     throw new Error(`${context}.failureThreshold must be between 1 and 10.`);
   }
   return {
-    probe: normalizeProbe(probeValue, context, ports, true, 5),
+    probe: normalizeProbe(probeValue, context, ports, 5),
     intervalSeconds: Number(intervalSeconds),
     failureThreshold: Number(failureThreshold)
   };

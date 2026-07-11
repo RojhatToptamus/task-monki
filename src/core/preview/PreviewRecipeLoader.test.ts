@@ -87,8 +87,8 @@ version: 1
     [
       'route',
       RECIPE.replace('port: http\n    primary', 'port: other\n    primary').replace(
-        'ports:\n      http:',
-        'ports:\n      http:\n        env: PORT\n      other:'
+        'ports:\n      http:\n        env: PORT',
+        'ports:\n      http:\n        env: PORT\n      other:\n        env: OTHER_PORT'
       )
     ]
   ])('changes the execution digest for a capability-bearing %s edit', (_label, changed) => {
@@ -108,6 +108,17 @@ version: 1
     ['cwd escape', RECIPE.replace('command: [node, server.mjs]', 'cwd: ../outside\n    command: [node, server.mjs]')]
   ])('rejects unsafe or ambiguous input: %s', (_label, source) => {
     expect(() => parsePreviewRecipe(source)).toThrow();
+  });
+
+  it('rejects duplicate generated port environment keys', () => {
+    expect(() =>
+      parsePreviewRecipe(
+        RECIPE.replace(
+          'ports:\n      http:\n        env: PORT',
+          'ports:\n      http:\n        env: PORT\n      admin:\n        env: PORT'
+        )
+      )
+    ).toThrow('duplicates another generated port environment key');
   });
 
   it('rejects dependency cycles and accepts multiple Phase 2 services', () => {

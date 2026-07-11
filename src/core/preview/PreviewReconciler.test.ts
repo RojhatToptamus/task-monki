@@ -80,7 +80,8 @@ describe('PreviewReconciler graph coverage', () => {
       {
         async getPreviewGenerations() { return [generation]; },
         async getPreviewResources() { return resources; },
-        async savePreviewGeneration(value: PreviewGenerationRecord) { saved = value; return value; }
+        async savePreviewGeneration(value: PreviewGenerationRecord) { saved = value; return value; },
+        async prunePreviewHistory() { return 0; }
       } as never,
       { clearRoutes() {} } as never,
       { async stop(resource: { id: string }) { stopped.push(resource.id); return 'STOPPED' as const; } } as never,

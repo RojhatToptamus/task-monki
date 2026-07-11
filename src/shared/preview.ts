@@ -26,8 +26,6 @@ export const PREVIEW_WINDOWS_INHERITED_ENV_KEYS = [
 export type PreviewGenerationState =
   | 'CREATED'
   | 'PREPARING_SOURCE'
-  | 'RUNNING_JOBS'
-  | 'STARTING_SERVICES'
   | 'RUNNING_GRAPH'
   | 'WAITING_READY'
   | 'READY'

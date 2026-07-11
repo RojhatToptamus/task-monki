@@ -37,6 +37,7 @@ export interface PreparedPreviewGeneration {
   generationRoot: string;
   sourcePath: string;
   markerDigest: string;
+  controller: AbortController;
 }
 
 export class PreviewManager {
@@ -133,67 +134,75 @@ export class PreviewManager {
       updatedAt: now
     };
     generation = await this.store.savePreviewGeneration(generation);
-    generation = await this.saveGeneration({ ...generation, state: 'PREPARING_SOURCE' });
-    let prepared: Awaited<ReturnType<PreviewSourcePreparer['prepare']>> | undefined;
-    try {
-      prepared = await this.sourcePreparer.prepare({
-        repositoryPath: input.context.worktree.worktreePath,
-        taskId: generation.taskId,
-        generationId: generation.id,
-        expectedHeadSha: sourceHeadSha
-      });
-      const observed = await input.reobserveGit();
-      if (
-        observed.headSha !== sourceHeadSha ||
-        observed.dirtyFingerprint !== sourceDirtyFingerprint
-      ) {
-        throw new Error('Git evidence changed while the preview source was being prepared.');
+    const controller = new AbortController();
+    this.startups.set(generation.id, controller);
+    return this.withGenerationLock(generation.id, async () => {
+      generation = await this.saveGeneration({ ...generation, state: 'PREPARING_SOURCE' });
+      let prepared: Awaited<ReturnType<PreviewSourcePreparer['prepare']>> | undefined;
+      try {
+        prepared = await this.sourcePreparer.prepare({
+          repositoryPath: input.context.worktree.worktreePath,
+          taskId: generation.taskId,
+          generationId: generation.id,
+          expectedHeadSha: sourceHeadSha
+        });
+        throwIfStartupCanceled(controller.signal);
+        const observed = await input.reobserveGit();
+        throwIfStartupCanceled(controller.signal);
+        if (
+          observed.headSha !== sourceHeadSha ||
+          observed.dirtyFingerprint !== sourceDirtyFingerprint
+        ) {
+          throw new Error('Git evidence changed while the preview source was being prepared.');
+        }
+        const manifest = await this.store.writeTextArtifact(
+          generation.taskId,
+          'preview-source-manifest',
+          serializePreviewSourceManifest(prepared.manifest)
+        );
+        generation = await this.saveGeneration({
+          ...generation,
+          sourceManifestArtifactId: manifest.id,
+          sourceManifestDigest: prepared.manifest.digest,
+          workspacePath: prepared.generationRoot
+        });
+        return {
+          generation,
+          plan: resolved.plan,
+          generationRoot: prepared.generationRoot,
+          sourcePath: prepared.sourcePath,
+          markerDigest: prepared.markerDigest,
+          controller
+        };
+      } catch (error) {
+        let cleanupIncomplete = false;
+        if (prepared) {
+          await this.sourcePreparer
+            .cleanupOwnedGeneration({
+              taskId: generation.taskId,
+              generationId: generation.id
+            })
+            .catch(() => {
+              cleanupIncomplete = true;
+            });
+        }
+        generation = await this.saveGeneration({
+          ...generation,
+          state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+          failureReason: boundedError(error),
+          cleanupReason: cleanupIncomplete
+            ? 'Source preparation failure cleanup could not verify the workspace.'
+            : undefined
+        });
+        await this.store.prunePreviewHistory(generation.taskId);
+        if (this.startups.get(generation.id) === controller) this.startups.delete(generation.id);
+        throw error;
       }
-      const manifest = await this.store.writeTextArtifact(
-        generation.taskId,
-        'preview-source-manifest',
-        serializePreviewSourceManifest(prepared.manifest)
-      );
-      generation = await this.saveGeneration({
-        ...generation,
-        sourceManifestArtifactId: manifest.id,
-        sourceManifestDigest: prepared.manifest.digest,
-        workspacePath: prepared.generationRoot
-      });
-      return {
-        generation,
-        plan: resolved.plan,
-        generationRoot: prepared.generationRoot,
-        sourcePath: prepared.sourcePath,
-        markerDigest: prepared.markerDigest
-      };
-    } catch (error) {
-      let cleanupIncomplete = false;
-      if (prepared) {
-        await this.sourcePreparer
-          .cleanupOwnedGeneration({
-            taskId: generation.taskId,
-            generationId: generation.id
-          })
-          .catch(() => {
-            cleanupIncomplete = true;
-          });
-      }
-      generation = await this.saveGeneration({
-        ...generation,
-        state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
-        failureReason: boundedError(error),
-        cleanupReason: cleanupIncomplete
-          ? 'Source preparation failure cleanup could not verify the workspace.'
-          : undefined
-      });
-      throw error;
-    }
+    });
   }
 
   execute(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
-    const controller = new AbortController();
-    this.startups.set(prepared.generation.id, controller);
+    const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
       try {
@@ -259,7 +268,8 @@ export class PreviewManager {
           : undefined;
         this.gateway.replaceRoutes(
           generation.id,
-          Object.fromEntries(routes.map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }]))
+          Object.fromEntries(routes.map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }])),
+          replaced?.id
         );
         try {
           const cutover = await this.store.cutoverPreviewGenerations({
@@ -277,7 +287,7 @@ export class PreviewManager {
           this.emitGeneration(generation);
           if (cutover.replaced) this.emitGeneration(cutover.replaced);
         } catch (error) {
-          if (replaced) this.restoreRoutes(replaced);
+          if (replaced) this.restoreRoutes(replaced, generation.id);
           else this.gateway.removeOwnedRoutes(generation.id);
           throw error;
         }
@@ -398,13 +408,19 @@ export class PreviewManager {
     error: unknown
   ): Promise<void> {
     const current = (await this.store.getPreviewGeneration(generation.id)) ?? generation;
-    this.live.delete(current.id);
     this.detachRoutes(current);
     let cleanupIncomplete = false;
-    for (const resource of await this.store.getPreviewResources(current.id)) {
-      if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
-      if ((await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)) === 'REFUSED') {
-        cleanupIncomplete = true;
+    const live = this.live.get(current.id);
+    if (live) {
+      const result = await live.stop().catch(() => 'REFUSED' as const);
+      if (result === 'REFUSED') cleanupIncomplete = true;
+      this.live.delete(current.id);
+    } else {
+      for (const resource of await this.store.getPreviewResources(current.id)) {
+        if (['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)) continue;
+        if ((await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)) === 'REFUSED') {
+          cleanupIncomplete = true;
+        }
       }
     }
     if (!cleanupIncomplete) {
@@ -457,14 +473,15 @@ export class PreviewManager {
     this.gateway.removeOwnedRoutes(generation.id);
   }
 
-  private restoreRoutes(generation: PreviewGenerationRecord): void {
+  private restoreRoutes(generation: PreviewGenerationRecord, replacesGenerationId: string): void {
     this.gateway.replaceRoutes(
       generation.id,
       Object.fromEntries(
         generation.routes
           .filter((route) => route.state === 'ATTACHED')
           .map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }])
-      )
+      ),
+      replacesGenerationId
     );
   }
 
@@ -518,4 +535,11 @@ function stablePreviewKey(taskId: string): string {
 
 function boundedError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024);
+}
+
+function throwIfStartupCanceled(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  const error = new Error('Preview startup canceled.');
+  error.name = 'AbortError';
+  throw error;
 }
