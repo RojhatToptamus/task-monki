@@ -165,6 +165,9 @@ services, workers, and routes. Task Monki:
   environments; arbitrary secret or environment import remains unsupported;
 - applies bounded restart policies per service or worker, and fails the
   generation only when a critical node exhausts its policy;
+- aborts and joins graph-owned readiness, liveness, supervision, and restart
+  operations during shutdown before releasing generated ports; marker-owned
+  workspace cleanup begins only after graph stop settles;
 - keeps the active generation routed while a candidate starts, atomically
   replaces the complete set of stable `.preview.localhost` hostnames only
   after all required nodes are ready, then stops the retired graph in reverse

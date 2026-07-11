@@ -35,6 +35,25 @@ export interface PreviewPlanLine {
   value: string;
 }
 
+export function selectPreviewActionGeneration(
+  view: PreviewViewModel,
+  action: 'OPEN' | 'STOP'
+): PreviewGenerationRecord | undefined {
+  return action === 'OPEN'
+    ? view.activeGeneration ?? view.generation
+    : view.replacementGeneration ?? view.generation;
+}
+
+export function selectPreviewDiagnosticAttempts(
+  attempts: PreviewNodeAttemptRecord[],
+  view: PreviewViewModel
+): PreviewNodeAttemptRecord[] {
+  const generationId = view.latestAttempt?.generationId ?? view.generation?.id;
+  return generationId
+    ? attempts.filter((attempt) => attempt.generationId === generationId)
+    : [];
+}
+
 export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLine[] {
   const lines: PreviewPlanLine[] = [
     {

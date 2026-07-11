@@ -60,6 +60,37 @@ describeMac('PreviewReconciler macOS ownership integration', () => {
 });
 
 describe('PreviewReconciler graph coverage', () => {
+  it('prunes preview history once for every observed task, including terminal-only tasks', async () => {
+    const now = new Date().toISOString();
+    const generation = (id: string, taskId: string) => ({
+      id, taskId, state: 'STOPPED' as const, routingState: 'RETIRED' as const,
+      routes: [], createdAt: now, updatedAt: now
+    });
+    const pruned: string[] = [];
+    const reconciler = new PreviewReconciler(
+      {
+        async getPreviewGenerations() {
+          return [
+            generation('task-a-new', 'task-a'),
+            generation('task-a-old', 'task-a'),
+            generation('task-b', 'task-b')
+          ];
+        },
+        async prunePreviewHistory(taskId: string) {
+          pruned.push(taskId);
+          return 0;
+        }
+      } as never,
+      { clearRoutes() {} } as never,
+      {} as never,
+      {} as never
+    );
+
+    await reconciler.reconcile();
+
+    expect(pruned).toEqual(['task-a', 'task-b']);
+  });
+
   it('reconciles every persisted native node before declaring the generation stopped', async () => {
     const now = new Date().toISOString();
     const generation = {

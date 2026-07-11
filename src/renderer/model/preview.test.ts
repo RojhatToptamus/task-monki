@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection, type PreviewPlanRecord, type Task } from '../../shared/contracts';
-import { buildPreviewPlanSummary, buildPreviewViewModel } from './preview';
+import {
+  buildPreviewPlanSummary,
+  buildPreviewViewModel,
+  selectPreviewActionGeneration,
+  selectPreviewDiagnosticAttempts
+} from './preview';
 
 const task: Task = {
   id: 'task-1',
@@ -75,14 +80,35 @@ describe('preview view model', () => {
       attempt: 1, commandDigest: 'command', state: 'FAILED' as const,
       stdoutArtifactId: 'stdout', stderrArtifactId: 'stderr', endedAt: failed.updatedAt
     };
+    const activeAttempt = {
+      ...failedAttempt,
+      id: 'active-attempt',
+      generationId: active.id,
+      state: 'SUCCEEDED' as const
+    };
+    const earlierFailedAttempt = {
+      ...failedAttempt,
+      id: 'earlier-failed-attempt',
+      nodeId: 'api',
+      endedAt: task.updatedAt
+    };
     const preserved = buildPreviewViewModel({
       task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
-      generations: [failed, active], attempts: [failedAttempt]
+      generations: [failed, active], attempts: [activeAttempt, earlierFailedAttempt, failedAttempt]
     });
     expect(preserved.status).toBe('Running');
     expect(preserved.generation?.id).toBe(active.id);
     expect(preserved.summary).toContain('candidate failed');
     expect(preserved.latestAttempt?.id).toBe(failedAttempt.id);
+    expect(preserved.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
+    expect(selectPreviewActionGeneration(preserved, 'OPEN')?.id).toBe(active.id);
+    expect(selectPreviewActionGeneration(preserved, 'STOP')?.id).toBe(active.id);
+    expect(
+      selectPreviewDiagnosticAttempts(
+        [activeAttempt, earlierFailedAttempt, failedAttempt],
+        preserved
+      )
+    ).toEqual([earlierFailedAttempt, failedAttempt]);
   });
 
   it('keeps current preview controls visible while a changed plan awaits approval or replacement', () => {

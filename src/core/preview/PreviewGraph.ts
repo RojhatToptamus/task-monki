@@ -28,6 +28,7 @@ interface RunningLongNode {
   stopping: boolean;
   forcedFailure?: string;
   livenessAbort?: AbortController;
+  livenessOperation?: Promise<string | undefined>;
 }
 
 export interface RunningPreviewGraph {
@@ -164,6 +165,7 @@ export class PreviewGraph {
       resolveUnexpected = resolve;
     });
     let graphStopping = false;
+    let stopOperation: Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> | undefined;
     const lifecycleAbort = new AbortController();
     const supervisions: Array<Promise<void>> = [];
     for (const owner of running.values()) {
@@ -194,16 +196,26 @@ export class PreviewGraph {
         [...running.values()]
           .filter((owner) => owner.node.critical)
           .every((owner) => owner.current.isRunning()),
-      stop: async () => {
-        if (graphStopping) return 'ALREADY_EXITED';
+      stop: () => {
+        if (stopOperation) {
+          return stopOperation.then(() => 'ALREADY_EXITED' as const);
+        }
         graphStopping = true;
         resolveUnexpected(undefined);
-        for (const owner of running.values()) owner.stopping = true;
-        lifecycleAbort.abort();
-        const result = await this.stopNodes(running, reverseDependencyOrder(input.plan));
-        await Promise.allSettled(supervisions);
-        for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
-        return result;
+        stopOperation = (async () => {
+          const activeLiveness: Array<Promise<string | undefined>> = [];
+          for (const owner of running.values()) {
+            owner.stopping = true;
+            owner.livenessAbort?.abort();
+            if (owner.livenessOperation) activeLiveness.push(owner.livenessOperation);
+          }
+          lifecycleAbort.abort();
+          const result = await this.stopNodes(running, reverseDependencyOrder(input.plan));
+          await Promise.allSettled([...supervisions, ...activeLiveness]);
+          for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
+          return result;
+        })();
+        return stopOperation;
       }
     };
   }
@@ -218,18 +230,33 @@ export class PreviewGraph {
     while (!owner.stopping) {
       const liveness = owner.node.liveness
         ? this.watchLiveness(input, owner, semaphore, allPorts)
-        : new Promise<string>(() => undefined);
-      const exit = await Promise.race([
-        owner.current.completion.then((result) => ({ type: 'exit' as const, result })),
-        liveness.then((reason) => ({ type: 'liveness' as const, reason })),
-        stopping.then(() => ({ type: 'stopping' as const }))
-      ]);
-      owner.livenessAbort?.abort();
-      owner.livenessAbort = undefined;
+        : undefined;
+      owner.livenessOperation = liveness;
+      let exit:
+        | { type: 'exit'; result: Awaited<RunningNativeService['completion']> }
+        | { type: 'liveness'; reason: string | undefined }
+        | { type: 'stopping' };
+      try {
+        exit = await Promise.race([
+          owner.current.completion.then((result) => ({ type: 'exit' as const, result })),
+          ...(liveness
+            ? [liveness.then((reason) => ({ type: 'liveness' as const, reason }))]
+            : []),
+          stopping.then(() => ({ type: 'stopping' as const }))
+        ]);
+        if (exit.type !== 'liveness') owner.livenessAbort?.abort();
+        if (liveness) await liveness;
+      } finally {
+        owner.livenessAbort?.abort();
+        if (liveness) await Promise.allSettled([liveness]);
+        if (owner.livenessOperation === liveness) owner.livenessOperation = undefined;
+        owner.livenessAbort = undefined;
+      }
       if (owner.stopping || exit.type === 'stopping') return undefined;
       let reason: string;
       let failed = true;
       if (exit.type === 'liveness') {
+        if (!exit.reason) return undefined;
         reason = exit.reason;
         owner.forcedFailure = reason;
         await this.services.stop(owner.current.resource);
@@ -321,22 +348,28 @@ export class PreviewGraph {
     owner: RunningLongNode,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>
-  ): Promise<string> {
+  ): Promise<string | undefined> {
     const live = owner.node.liveness;
-    if (!live) return new Promise<string>(() => undefined);
+    if (!live) return undefined;
     const controller = new AbortController();
     owner.livenessAbort = controller;
     let failures = 0;
     while (!owner.stopping && !controller.signal.aborted) {
-      await delay(live.intervalSeconds * 1_000, controller.signal);
+      try {
+        await delay(live.intervalSeconds * 1_000, controller.signal);
+      } catch (error) {
+        if (owner.stopping || controller.signal.aborted) return undefined;
+        throw error;
+      }
       const result = await this.runProbe(input, owner, live.probe, semaphore, allPorts, controller.signal);
+      if (owner.stopping || controller.signal.aborted) return undefined;
       if (result.status === 'PASSED') failures = 0;
       else failures += 1;
       if (failures >= live.failureThreshold) {
         return `Preview ${owner.kind.toLowerCase()} ${owner.node.id} failed liveness ${failures} consecutive times: ${result.lastError ?? 'probe failed'}.`;
       }
     }
-    return new Promise<string>(() => undefined);
+    return undefined;
   }
 
   private async waitUntilReady(
@@ -354,11 +387,36 @@ export class PreviewGraph {
       state: 'WAITING_READY',
       readiness: { status: 'PENDING' }
     });
-    const readinessOrExit = await Promise.race([
-      this.runProbe(input, owner, owner.node.ready, semaphore, allPorts, input.signal).then((readiness) => ({ type: 'readiness' as const, readiness })),
-      owner.current.completion.then((exit) => ({ type: 'exit' as const, exit }))
-    ]);
-    if (readinessOrExit.type === 'exit') throw new Error(nodeExitReason(owner, readinessOrExit.exit.receipt));
+    const probeAbort = new AbortController();
+    const abortProbe = () => probeAbort.abort();
+    if (input.signal?.aborted) probeAbort.abort();
+    else input.signal?.addEventListener('abort', abortProbe, { once: true });
+    const readinessOperation = this.runProbe(
+      input,
+      owner,
+      owner.node.ready,
+      semaphore,
+      allPorts,
+      probeAbort.signal
+    );
+    let readinessOrExit:
+      | { type: 'readiness'; readiness: PreviewReadinessResult }
+      | { type: 'exit'; exit: Awaited<RunningNativeService['completion']> };
+    try {
+      readinessOrExit = await Promise.race([
+        readinessOperation.then((readiness) => ({ type: 'readiness' as const, readiness })),
+        owner.current.completion.then((exit) => ({ type: 'exit' as const, exit }))
+      ]);
+      if (readinessOrExit.type === 'exit') {
+        probeAbort.abort();
+        await Promise.allSettled([readinessOperation]);
+      }
+    } finally {
+      input.signal?.removeEventListener('abort', abortProbe);
+    }
+    if (readinessOrExit.type === 'exit') {
+      throw new Error(nodeExitReason(owner, readinessOrExit.exit.receipt));
+    }
     const readiness = readinessOrExit.readiness;
     if (readiness.status !== 'PASSED') {
       attempt = await this.store.savePreviewNodeAttempt({ ...attempt, state: 'FAILED', endedAt: new Date().toISOString(), readiness });

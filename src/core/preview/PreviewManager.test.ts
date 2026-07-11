@@ -187,4 +187,84 @@ routes:
     expect((await store.getPreviewGeneration(generation.id))?.state).toBe('STOPPED');
     await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('caps failed source-preparation generations through the shared history policy', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-manager-prepare-retention-'));
+    fixtureRoots.push(root);
+    const worktreePath = path.join(root, 'worktree');
+    await fs.mkdir(path.join(worktreePath, '.taskmonki'), { recursive: true });
+    await fs.writeFile(
+      path.join(worktreePath, '.taskmonki', 'preview.yaml'),
+      `version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready }
+routes:
+  app: { service: web, port: http, primary: true }
+`
+    );
+    const store = new FileTaskStore(path.join(root, 'store'));
+    const task = await store.createTask({
+      title: 'Prepare retention', prompt: 'Test', repositoryPath: worktreePath
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/prepare-retention', worktreePath, baseSha: 'head'
+    });
+    const manager = new PreviewManager(
+      store,
+      new AppEventBus(),
+      new PreviewRecipeLoader(),
+      new PreviewPlanResolver(),
+      new PreviewApprovalPolicy(store),
+      {
+        getGenerationPath(taskId: string, generationId: string) {
+          return path.join(root, 'preview', taskId, generationId);
+        },
+        async prepare() {
+          throw new Error('Injected source preparation failure.');
+        }
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never
+    );
+    const context = { task, iteration, worktree };
+    const resolved = await manager.resolve(context);
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await manager.approve({
+      taskId: task.id,
+      planId: resolved.plan.id,
+      executionDigest: resolved.plan.executionDigest
+    });
+    const gitSnapshot = {
+      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
+    } as GitSnapshotRecord;
+
+    const observedGenerationIds: string[] = [];
+    const knownGenerationIds = new Set<string>();
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      await expect(
+        manager.prepare({ context, gitSnapshot, async reobserveGit() { return gitSnapshot; } })
+      ).rejects.toThrow('Injected source preparation failure.');
+      const created = (await store.getPreviewGenerations(task.id)).find(
+        (generation) => !knownGenerationIds.has(generation.id)
+      );
+      if (!created) throw new Error('Expected a newly failed generation.');
+      observedGenerationIds.push(created.id);
+      knownGenerationIds.add(created.id);
+    }
+
+    const generations = await store.getPreviewGenerations(task.id);
+    expect(generations).toHaveLength(20);
+    expect(generations.every((generation) => generation.state === 'FAILED')).toBe(true);
+    expect(new Set(generations.map((generation) => generation.id))).toEqual(
+      new Set(observedGenerationIds.slice(-20))
+    );
+    expect(generations.some((generation) => generation.id === observedGenerationIds[0])).toBe(false);
+  });
 });

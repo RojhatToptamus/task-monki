@@ -11,6 +11,8 @@ import type {
 import {
   buildPreviewPlanSummary,
   buildPreviewViewModel,
+  selectPreviewActionGeneration,
+  selectPreviewDiagnosticAttempts,
   type PreviewActionId
 } from '../model/preview';
 import { StatusChip } from './StatusBadge';
@@ -45,12 +47,12 @@ export function PreviewPanel(props: {
         await props.onApprove(props.task.id, view.plan.id, view.plan.executionDigest);
       }
       if (action === 'START') await props.onStart(props.task.id);
-      const openGeneration = view.activeGeneration ?? view.generation;
+      const openGeneration = selectPreviewActionGeneration(view, 'OPEN');
       if (action === 'OPEN' && openGeneration) {
         const route = openGeneration.routes.find((candidate) => candidate.state === 'ATTACHED');
         if (route) await props.onOpen(props.task.id, openGeneration.id, route.id);
       }
-      const stopGeneration = view.replacementGeneration ?? view.generation;
+      const stopGeneration = selectPreviewActionGeneration(view, 'STOP');
       if (action === 'STOP' && stopGeneration) {
         await props.onStop(props.task.id, stopGeneration.id);
       }
@@ -66,6 +68,7 @@ export function PreviewPanel(props: {
   const selectedAttempt = props.attempts.find(
     (attempt) => attempt.id === (selectedAttemptId ?? view.latestAttempt?.id)
   );
+  const diagnosticAttempts = selectPreviewDiagnosticAttempts(props.attempts, view);
   const selectedArtifactId = selectedAttempt
     ? selectedStream === 'stdout'
       ? selectedAttempt.stdoutArtifactId
@@ -154,13 +157,7 @@ export function PreviewPanel(props: {
               value={selectedAttempt?.id ?? ''}
               onChange={(event) => setSelectedAttemptId(event.target.value)}
             >
-              {props.attempts
-                .filter(
-                  (attempt) =>
-                    attempt.generationId ===
-                    (view.latestAttempt?.generationId ?? view.generation?.id)
-                )
-                .map((attempt) => (
+              {diagnosticAttempts.map((attempt) => (
                   <option key={attempt.id} value={attempt.id}>{attempt.nodeId} · attempt {attempt.attempt} · {attempt.state}</option>
                 ))}
             </select>

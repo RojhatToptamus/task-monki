@@ -170,4 +170,128 @@ describe('PreviewGraph', () => {
     expect(order.indexOf('indexer')).toBeLessThan(order.indexOf('api'));
     expect(order.indexOf('api')).toBeLessThan(order.indexOf('install'));
   });
+
+  it('keeps stop and port release pending until an active argv liveness probe settles', async () => {
+    let resolveCompletion!: (value: {
+      receipt: { state: 'EXITED'; exitCode: number; signal: null };
+      wasStopping: boolean;
+    }) => void;
+    const completion = new Promise<{
+      receipt: { state: 'EXITED'; exitCode: number; signal: null };
+      wasStopping: boolean;
+    }>((resolve) => { resolveCompletion = resolve; });
+    let running = true;
+    let markProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => { markProbeStarted = resolve; });
+    let markProbeCanceled!: () => void;
+    const probeCanceled = new Promise<void>((resolve) => { markProbeCanceled = resolve; });
+    let releaseProbe!: () => void;
+    const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    let probeSettled = false;
+    let stopResolved = false;
+    let duplicateStopResolved = false;
+    let stopCalls = 0;
+    const releasedPorts: number[] = [];
+    const plan: PreviewExecutionPlan = {
+      version: 1,
+      jobs: [],
+      services: [{
+        id: 'web', cwd: '.', command: ['node', 'server.mjs'], needs: {}, env: {},
+        ports: { http: { env: 'PORT' } },
+        ready: { type: 'argv', cwd: '.', command: ['node', 'ready.mjs'], timeoutSeconds: 5 },
+        critical: true,
+        restart: { mode: 'never', maxRestarts: 0, backoffMs: 0 },
+        liveness: {
+          probe: { type: 'argv', cwd: '.', command: ['node', 'health.mjs'], timeoutSeconds: 5 },
+          intervalSeconds: 0,
+          failureThreshold: 1
+        }
+      }],
+      workers: [],
+      routes: []
+    };
+    const graph = new PreviewGraph(
+      {
+        async savePreviewNodeAttempt(value: unknown) { return value; },
+        async prunePreviewProbeHistory() { return 0; }
+      } as never,
+      {
+        async run(input: { kind?: string; attempt?: number; signal?: AbortSignal }) {
+          if (input.kind !== 'PROBE') return;
+          if (input.attempt === 1) return;
+          markProbeStarted();
+          await new Promise<void>((resolve) => {
+            if (input.signal?.aborted) resolve();
+            else input.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          markProbeCanceled();
+          await probeGate;
+          probeSettled = true;
+          throw new Error('probe canceled');
+        }
+      } as never,
+      {
+        async start() {
+          return {
+            attempt: { id: 'attempt' },
+            resource: { id: 'resource' },
+            owned: {},
+            stdoutArtifactId: 'stdout',
+            stderrArtifactId: 'stderr',
+            completion,
+            isRunning: () => running
+          };
+        },
+        async stop() {
+          stopCalls += 1;
+          running = false;
+          resolveCompletion({
+            receipt: { state: 'EXITED', exitCode: 0, signal: null },
+            wasStopping: true
+          });
+          return 'STOPPED' as const;
+        }
+      } as never,
+      {} as never,
+      {
+        async allocate() { return 41_001; },
+        release(port: number) { releasedPorts.push(port); }
+      } as never,
+      {} as never
+    );
+    const active = await graph.start({
+      taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, async updateGenerationState() {}
+    });
+    await probeStarted;
+
+    const stopping = active.stop().then((result) => {
+      stopResolved = true;
+      return result;
+    });
+    const duplicateStop = active.stop().then((result) => {
+      duplicateStopResolved = true;
+      return result;
+    });
+    await probeCanceled;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeProbeSettlement = {
+      stopResolved,
+      duplicateStopResolved,
+      releasedPorts: [...releasedPorts]
+    };
+    releaseProbe();
+
+    await expect(stopping).resolves.toBe('STOPPED');
+    await expect(duplicateStop).resolves.toBe('ALREADY_EXITED');
+    expect(beforeProbeSettlement).toEqual({
+      stopResolved: false,
+      duplicateStopResolved: false,
+      releasedPorts: []
+    });
+    expect(probeSettled).toBe(true);
+    expect(stopCalls).toBe(1);
+    expect(running).toBe(false);
+    expect(releasedPorts).toEqual([41_001]);
+  });
 });

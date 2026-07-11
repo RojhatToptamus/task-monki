@@ -24,24 +24,34 @@ describe('PreviewGateway', () => {
   it('replaces multiple routes as one owned set and refuses stale-owner cleanup', async () => {
     const oldTarget = await fixture((_request, response) => response.end('old'));
     const newApp = await fixture((_request, response) => response.end('new-app'));
+    const candidateOnlyTarget = await fixture((_request, response) => response.end('candidate-only'));
     const gateway = await startGateway();
     const app = 'app.task-owned.preview.localhost';
     const api = 'api.task-owned.preview.localhost';
+    const metrics = 'metrics.task-owned.preview.localhost';
     gateway.instance.replaceRoutes('old-generation', {
       [app]: { host: '127.0.0.1', port: oldTarget },
       [api]: { host: '127.0.0.1', port: oldTarget }
     });
     gateway.instance.replaceRoutes(
       'new-generation',
-      { [app]: { host: '127.0.0.1', port: newApp } },
+      {
+        [app]: { host: '127.0.0.1', port: newApp },
+        [metrics]: { host: '127.0.0.1', port: candidateOnlyTarget }
+      },
       'old-generation'
     );
-    gateway.instance.removeOwnedRoutes('old-generation');
     await expect(request(gateway.port, app)).resolves.toMatchObject({ body: 'new-app' });
     await expect(request(gateway.port, api)).resolves.toMatchObject({
       status: 503,
       body: 'Preview route is unavailable.'
     });
+    await expect(request(gateway.port, metrics)).resolves.toMatchObject({ body: 'candidate-only' });
+
+    gateway.instance.removeOwnedRoutes('old-generation');
+    await expect(request(gateway.port, app)).resolves.toMatchObject({ body: 'new-app' });
+    await expect(request(gateway.port, metrics)).resolves.toMatchObject({ body: 'candidate-only' });
+
     gateway.instance.replaceRoutes(
       'old-generation',
       {
@@ -52,6 +62,10 @@ describe('PreviewGateway', () => {
     );
     await expect(request(gateway.port, app)).resolves.toMatchObject({ body: 'old' });
     await expect(request(gateway.port, api)).resolves.toMatchObject({ body: 'old' });
+    await expect(request(gateway.port, metrics)).resolves.toMatchObject({
+      status: 503,
+      body: 'Preview route is unavailable.'
+    });
   });
 
   it('relocates a colliding preferred gateway port and returns bounded route/upstream errors', async () => {
