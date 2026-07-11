@@ -162,7 +162,7 @@ describe('createBrowserTaskManagerApi preview contract', () => {
     await api.startPreview({ taskId: 'task-1' });
     await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
     await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
-    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1' });
+    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65536 });
 
     expect(calls.map((call) => call.url)).toEqual([
       'http://127.0.0.1:3099/api/preview/resolve',

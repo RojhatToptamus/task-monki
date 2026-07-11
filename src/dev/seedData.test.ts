@@ -81,7 +81,7 @@ describe('Task Monki development seed data', () => {
     }
   });
 
-  it('seeds every Phase 1 preview UI state without embedding runtime logs in the snapshot', () => {
+  it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
     const view = (slug: string) => {
       const task = taskForScenario(manifest, snapshot, slug);
       return buildPreviewViewModel({
@@ -98,6 +98,9 @@ describe('Task Monki development seed data', () => {
     expect(view('preview-approval-required').status).toBe('Approval required');
     expect(view('preview-preparing').status).toBe('Preparing source');
     expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-replacing').status).toBe('Replacing');
+    expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-replacement-failed').summary).toContain('Candidate web service exited');
     expect(view('preview-failed').status).toBe('Failed');
     expect(view('preview-stale').status).toContain('stale');
     expect(view('preview-stopped').status).toBe('Stopped');

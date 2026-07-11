@@ -11,10 +11,14 @@ import {
   type Node
 } from 'yaml';
 import type {
+  PreviewEnvironmentValue,
   PreviewExecutionPlan,
   PreviewJobPlan,
+  PreviewLivenessPlan,
+  PreviewReadinessPlan,
   PreviewRoutePlan,
-  PreviewServicePlan
+  PreviewServicePlan,
+  PreviewWorkerPlan
 } from '../../shared/preview';
 import { isPathWithin } from './PreviewPaths';
 
@@ -26,6 +30,8 @@ const MAX_ARGUMENT_BYTES = 2_048;
 const MAX_ENV_ENTRIES = 64;
 const MAX_ENV_VALUE_BYTES = 8_192;
 const MAX_ROUTES = 16;
+const MAX_TOTAL_PORTS = 64;
+const MAX_RESTARTS = 8;
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,47}$/;
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
@@ -125,19 +131,27 @@ export function parsePreviewRecipe(source: string): ParsedPreviewRecipe {
 }
 
 function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecutionPlan {
-  assertKeys(recipe, ['version', 'jobs', 'services', 'routes'], 'recipe');
+  assertKeys(recipe, ['version', 'jobs', 'services', 'workers', 'routes'], 'recipe');
   if (recipe.version !== 1) {
     throw new Error('Preview recipe version must be 1.');
   }
 
   const jobs = normalizeNodeMap(recipe.jobs, 'jobs', normalizeJob);
   const services = normalizeNodeMap(recipe.services, 'services', normalizeService);
+  const workers = normalizeNodeMap(recipe.workers, 'workers', normalizeWorker);
   const routes = normalizeNodeMap(recipe.routes, 'routes', normalizeRoute);
-  if (jobs.length + services.length > MAX_NODES) {
+  if (jobs.length + services.length + workers.length > MAX_NODES) {
     throw new Error(`Preview recipe exceeds ${MAX_NODES} executable nodes.`);
   }
-  if (services.length !== 1) {
-    throw new Error('Phase 1 requires exactly one service.');
+  const totalPorts = [...services, ...workers].reduce(
+    (count, node) => count + Object.keys(node.ports).length,
+    0
+  );
+  if (totalPorts > MAX_TOTAL_PORTS) {
+    throw new Error(`Preview recipe exceeds ${MAX_TOTAL_PORTS} allocated ports.`);
+  }
+  if (services.length === 0) {
+    throw new Error('Preview recipe requires at least one service.');
   }
   if (routes.length === 0 || routes.length > MAX_ROUTES) {
     throw new Error(`Preview recipe must contain 1-${MAX_ROUTES} routes.`);
@@ -148,6 +162,12 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
 
   const jobById = new Map(jobs.map((job) => [job.id, job]));
   const serviceById = new Map(services.map((service) => [service.id, service]));
+  const workerById = new Map(workers.map((worker) => [worker.id, worker]));
+  const routeById = new Map(routes.map((route) => [route.id, route]));
+  const allIds = new Set([...jobById.keys(), ...serviceById.keys(), ...workerById.keys()]);
+  if (allIds.size !== jobs.length + services.length + workers.length) {
+    throw new Error('Preview job, service, and worker identifiers must be unique.');
+  }
   for (const job of jobs) {
     for (const [dependencyId, condition] of Object.entries(job.needs)) {
       if (!jobById.has(dependencyId) || condition !== 'succeeded') {
@@ -155,28 +175,32 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
       }
     }
   }
-  for (const service of services) {
-    for (const [dependencyId, condition] of Object.entries(service.needs)) {
+  for (const node of [...services, ...workers]) {
+    for (const [dependencyId, condition] of Object.entries(node.needs)) {
       if (
         (condition === 'succeeded' && !jobById.has(dependencyId)) ||
-        (condition === 'ready' && !serviceById.has(dependencyId))
+        (condition === 'ready' && !serviceById.has(dependencyId) && !workerById.has(dependencyId))
       ) {
-        throw new Error(`Service ${service.id} needs unknown ${condition} node ${dependencyId}.`);
+        throw new Error(`${node.id} needs unknown ${condition} node ${dependencyId}.`);
       }
     }
+    validateEnvironmentReferences(node, serviceById, routeById);
   }
   for (const route of routes) {
     const service = serviceById.get(route.service);
     if (!service) {
       throw new Error(`Route ${route.id} references unknown service ${route.service}.`);
     }
+    if (!service.critical) {
+      throw new Error(`Route ${route.id} must reference a critical service.`);
+    }
     if (!service.ports[route.port]) {
       throw new Error(`Route ${route.id} references unknown port ${route.port}.`);
     }
   }
-  assertAcyclic([...jobs, ...services]);
+  assertAcyclic([...jobs, ...services, ...workers]);
 
-  return { version: 1, jobs, services, routes };
+  return { version: 1, jobs, services, workers, routes };
 }
 
 function normalizeJob(value: Record<string, unknown>, context: string, id: string): PreviewJobPlan {
@@ -195,25 +219,68 @@ function normalizeService(
   context: string,
   id: string
 ): PreviewServicePlan {
-  assertKeys(value, ['label', 'cwd', 'command', 'needs', 'env', 'ports', 'ready'], context);
+  const common = normalizeLongRunning(value, context, id, true);
+  const ready = normalizeProbe(value.ready, `${context}.ready`, common.ports, true);
+  return { ...common, ready };
+}
+
+function normalizeWorker(
+  value: Record<string, unknown>,
+  context: string,
+  id: string
+): PreviewWorkerPlan {
+  const common = normalizeLongRunning(value, context, id, false);
+  return {
+    ...common,
+    ready: value.ready === undefined ? undefined : normalizeProbe(value.ready, `${context}.ready`, common.ports, true)
+  };
+}
+
+function normalizeLongRunning(
+  value: Record<string, unknown>,
+  context: string,
+  id: string,
+  service: boolean
+): Omit<PreviewServicePlan, 'ready'> {
+  assertKeys(
+    value,
+    ['label', 'cwd', 'command', 'needs', 'env', 'ports', 'ready', 'critical', 'restart', 'liveness'],
+    context
+  );
   const env = optionalRecord(value.env, `${context}.env`);
   if (Object.keys(env).length > MAX_ENV_ENTRIES) {
     throw new Error(`${context}.env has too many entries.`);
   }
-  const normalizedEnv: Record<string, string> = {};
+  const normalizedEnv: Record<string, PreviewEnvironmentValue> = {};
   for (const key of Object.keys(env).sort()) {
     const envValue = env[key];
-    if (
-      !ENV_KEY_PATTERN.test(key) ||
-      typeof envValue !== 'string' ||
-      Buffer.byteLength(envValue) > MAX_ENV_VALUE_BYTES
-    ) {
-      throw new Error(`${context}.env must contain bounded string environment values.`);
+    if (!ENV_KEY_PATTERN.test(key)) throw new Error(`${context}.env contains an invalid key.`);
+    if (typeof envValue === 'string') {
+      if (Buffer.byteLength(envValue) > MAX_ENV_VALUE_BYTES) {
+        throw new Error(`${context}.env must contain bounded environment values.`);
+      }
+      normalizedEnv[key] = envValue;
+      continue;
     }
-    normalizedEnv[key] = envValue;
+    const reference = requiredRecord(envValue, `${context}.env.${key}`);
+    if (reference.type === 'service-origin') {
+      assertKeys(reference, ['type', 'service', 'port'], `${context}.env.${key}`);
+      if (typeof reference.service !== 'string' || typeof reference.port !== 'string') {
+        throw new Error(`${context}.env.${key} has an invalid service-origin reference.`);
+      }
+      normalizedEnv[key] = { type: 'service-origin', service: reference.service, port: reference.port };
+    } else if (reference.type === 'route-origin') {
+      assertKeys(reference, ['type', 'route'], `${context}.env.${key}`);
+      if (typeof reference.route !== 'string') {
+        throw new Error(`${context}.env.${key} has an invalid route-origin reference.`);
+      }
+      normalizedEnv[key] = { type: 'route-origin', route: reference.route };
+    } else {
+      throw new Error(`${context}.env.${key} must be a literal or typed origin reference.`);
+    }
   }
 
-  const portsValue = requiredRecord(value.ports, `${context}.ports`);
+  const portsValue = optionalRecord(value.ports, `${context}.ports`);
   const ports: PreviewServicePlan['ports'] = {};
   for (const portId of Object.keys(portsValue).sort()) {
     assertId(portId, `${context}.ports`);
@@ -227,33 +294,8 @@ function normalizeService(
     }
     ports[portId] = { env: port.env };
   }
-  if (Object.keys(ports).length === 0 || Object.keys(ports).length > 16) {
-    throw new Error(`${context}.ports must contain 1-16 entries.`);
-  }
-
-  const ready = requiredRecord(value.ready, `${context}.ready`);
-  assertKeys(ready, ['type', 'port', 'path', 'timeoutSeconds'], `${context}.ready`);
-  if (ready.type !== 'http') {
-    throw new Error(`${context}.ready.type must be http.`);
-  }
-  if (typeof ready.port !== 'string' || !ports[ready.port]) {
-    throw new Error(`${context}.ready.port must name a declared port.`);
-  }
-  if (
-    typeof ready.path !== 'string' ||
-    !ready.path.startsWith('/') ||
-    ready.path.startsWith('//') ||
-    /[\r\n]/.test(ready.path)
-  ) {
-    throw new Error(`${context}.ready.path must be a safe absolute URL path.`);
-  }
-  const timeoutSeconds = ready.timeoutSeconds ?? 30;
-  if (
-    !Number.isInteger(timeoutSeconds) ||
-    Number(timeoutSeconds) < 1 ||
-    Number(timeoutSeconds) > 300
-  ) {
-    throw new Error(`${context}.ready.timeoutSeconds must be between 1 and 300.`);
+  if ((service && Object.keys(ports).length === 0) || Object.keys(ports).length > 16) {
+    throw new Error(`${context}.ports must contain ${service ? '1-' : '0-'}16 entries.`);
   }
 
   return {
@@ -264,13 +306,141 @@ function normalizeService(
     needs: normalizeNeeds(value.needs, context, ['succeeded', 'ready']),
     env: normalizedEnv,
     ports,
-    ready: {
-      type: 'http',
-      port: ready.port,
-      path: ready.path,
-      timeoutSeconds: Number(timeoutSeconds)
-    }
+    critical: normalizeBoolean(value.critical, service, `${context}.critical`),
+    restart: normalizeRestart(value.restart, `${context}.restart`),
+    liveness: normalizeLiveness(value.liveness, `${context}.liveness`, ports)
   };
+}
+
+function normalizeProbe(
+  value: unknown,
+  context: string,
+  ports: PreviewServicePlan['ports'],
+  required: boolean,
+  defaultTimeoutSeconds = 30
+): PreviewReadinessPlan {
+  if (value === undefined && !required) throw new Error(`${context} is missing.`);
+  const probe = requiredRecord(value, context);
+  const timeoutSeconds = probe.timeoutSeconds ?? defaultTimeoutSeconds;
+  if (!Number.isInteger(timeoutSeconds) || Number(timeoutSeconds) < 1 || Number(timeoutSeconds) > 300) {
+    throw new Error(`${context}.timeoutSeconds must be between 1 and 300.`);
+  }
+  if (probe.type === 'http') {
+    assertKeys(probe, ['type', 'port', 'path', 'timeoutSeconds'], context);
+    assertProbePort(probe.port, ports, context);
+    if (
+      typeof probe.path !== 'string' ||
+      !probe.path.startsWith('/') ||
+      probe.path.startsWith('//') ||
+      /[\r\n]/.test(probe.path)
+    ) {
+      throw new Error(`${context}.path must be a safe absolute URL path.`);
+    }
+    return {
+      type: 'http',
+      port: probe.port as string,
+      path: probe.path,
+      timeoutSeconds: Number(timeoutSeconds)
+    };
+  }
+  if (probe.type === 'tcp') {
+    assertKeys(probe, ['type', 'port', 'timeoutSeconds'], context);
+    assertProbePort(probe.port, ports, context);
+    return { type: 'tcp', port: probe.port as string, timeoutSeconds: Number(timeoutSeconds) };
+  }
+  if (probe.type === 'argv') {
+    assertKeys(probe, ['type', 'cwd', 'command', 'timeoutSeconds'], context);
+    return {
+      type: 'argv',
+      cwd: normalizeCwd(probe.cwd, context),
+      command: normalizeCommand(probe.command, context),
+      timeoutSeconds: Number(timeoutSeconds)
+    };
+  }
+  throw new Error(`${context}.type must be http, tcp, or argv.`);
+}
+
+function normalizeLiveness(
+  value: unknown,
+  context: string,
+  ports: PreviewServicePlan['ports']
+): PreviewLivenessPlan | undefined {
+  if (value === undefined) return undefined;
+  const live = requiredRecord(value, context);
+  const { intervalSeconds = 10, failureThreshold = 3, ...probeValue } = live;
+  if (!Number.isInteger(intervalSeconds) || Number(intervalSeconds) < 1 || Number(intervalSeconds) > 300) {
+    throw new Error(`${context}.intervalSeconds must be between 1 and 300.`);
+  }
+  if (!Number.isInteger(failureThreshold) || Number(failureThreshold) < 1 || Number(failureThreshold) > 10) {
+    throw new Error(`${context}.failureThreshold must be between 1 and 10.`);
+  }
+  return {
+    probe: normalizeProbe(probeValue, context, ports, true, 5),
+    intervalSeconds: Number(intervalSeconds),
+    failureThreshold: Number(failureThreshold)
+  };
+}
+
+function normalizeRestart(
+  value: unknown,
+  context: string
+): NonNullable<PreviewServicePlan['restart']> {
+  if (value === undefined) return { mode: 'never', maxRestarts: 0, backoffMs: 250 };
+  const restart = requiredRecord(value, context);
+  assertKeys(restart, ['mode', 'maxRestarts', 'backoffMs'], context);
+  if (!['never', 'on-failure', 'always'].includes(String(restart.mode))) {
+    throw new Error(`${context}.mode must be never, on-failure, or always.`);
+  }
+  const mode = restart.mode as NonNullable<PreviewServicePlan['restart']>['mode'];
+  const maxRestarts = restart.maxRestarts ?? (mode === 'never' ? 0 : 3);
+  const backoffMs = restart.backoffMs ?? 250;
+  if (!Number.isInteger(maxRestarts) || Number(maxRestarts) < 0 || Number(maxRestarts) > MAX_RESTARTS) {
+    throw new Error(`${context}.maxRestarts must be between 0 and ${MAX_RESTARTS}.`);
+  }
+  if (mode === 'never' && Number(maxRestarts) !== 0) {
+    throw new Error(`${context}.maxRestarts must be 0 when restart mode is never.`);
+  }
+  if (!Number.isInteger(backoffMs) || Number(backoffMs) < 0 || Number(backoffMs) > 30_000) {
+    throw new Error(`${context}.backoffMs must be between 0 and 30000.`);
+  }
+  return { mode, maxRestarts: Number(maxRestarts), backoffMs: Number(backoffMs) };
+}
+
+function normalizeBoolean(value: unknown, defaultValue: boolean, context: string): boolean {
+  if (value === undefined) return defaultValue;
+  if (typeof value !== 'boolean') throw new Error(`${context} must be a boolean.`);
+  return value;
+}
+
+function assertProbePort(
+  value: unknown,
+  ports: PreviewServicePlan['ports'],
+  context: string
+): asserts value is string {
+  if (typeof value !== 'string' || !ports[value]) {
+    throw new Error(`${context}.port must name a declared port.`);
+  }
+}
+
+function validateEnvironmentReferences(
+  node: PreviewServicePlan | PreviewWorkerPlan,
+  services: Map<string, PreviewServicePlan>,
+  routes: Map<string, PreviewRoutePlan>
+): void {
+  for (const [key, value] of Object.entries(node.env)) {
+    if (typeof value === 'string') continue;
+    if (value.type === 'service-origin') {
+      const service = services.get(value.service);
+      if (!service || !service.ports[value.port]) {
+        throw new Error(`${node.id}.env.${key} references an unknown service origin.`);
+      }
+      if (value.service === node.id || node.needs[value.service] !== 'ready') {
+        throw new Error(`${node.id}.env.${key} requires an explicit ready dependency on ${value.service}.`);
+      }
+    } else if (!routes.has(value.route)) {
+      throw new Error(`${node.id}.env.${key} references an unknown route origin.`);
+    }
+  }
 }
 
 function normalizeRoute(
@@ -376,6 +546,7 @@ function executionAuthority(plan: PreviewExecutionPlan): unknown {
     version: plan.version,
     jobs: plan.jobs.map(({ label: _label, ...job }) => job),
     services: plan.services.map(({ label: _label, ...service }) => service),
+    workers: plan.workers.map(({ label: _label, ...worker }) => worker),
     routes: plan.routes
   };
 }

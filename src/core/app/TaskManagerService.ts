@@ -46,6 +46,7 @@ import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   ReadPreviewLogRequest,
+  ReadPreviewLogResult,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
@@ -684,7 +685,7 @@ export class TaskManagerService {
   async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
     if (process.platform !== 'darwin') {
-      throw new Error('Phase 1 native previews are supported on macOS only.');
+      throw new Error('Native previews are supported on macOS only.');
     }
     const prepared = await this.withTaskAction(input.taskId, 'Preview source capture', async () => {
       const context = await this.requirePreviewContext(input.taskId);
@@ -693,10 +694,11 @@ export class TaskManagerService {
       const activeGeneration = currentSnapshot.previewGenerations.find(
         (generation) =>
           generation.taskId === input.taskId &&
+          generation.routingState !== 'ACTIVE' &&
           !['STOPPED', 'FAILED', 'CLEANUP_INCOMPLETE'].includes(generation.state)
       );
       if (activeGeneration) {
-        throw new Error('Stop the current task preview before starting another Phase 1 generation.');
+        throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
       }
       const gitSnapshot = await this.refreshEvidence({ taskId: input.taskId });
       if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
@@ -725,7 +727,7 @@ export class TaskManagerService {
     return this.previews.open(input);
   }
 
-  readPreviewLog(input: ReadPreviewLogRequest): Promise<string> {
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
     this.assertPreviewEnabled();
     return this.previews.readLog(input);
   }

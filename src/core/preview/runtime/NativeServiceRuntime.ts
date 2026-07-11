@@ -3,7 +3,8 @@ import path from 'node:path';
 import type {
   PreviewNodeAttemptRecord,
   PreviewResourceRecord,
-  PreviewServicePlan
+  PreviewServicePlan,
+  PreviewWorkerPlan
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
@@ -45,8 +46,11 @@ export class NativeServiceRuntime {
     generationRoot: string;
     sourcePath: string;
     markerDigest: string;
-    node: PreviewServicePlan;
+    node: PreviewServicePlan | PreviewWorkerPlan;
     portValues: Record<string, number>;
+    resolvedEnv?: Record<string, string>;
+    kind?: 'SERVICE' | 'WORKER';
+    attempt?: number;
   }): Promise<RunningNativeService> {
     const cwd = await resolvePreparedNodeCwd(input.sourcePath, input.node.cwd, input.node.id);
     const [executable, ...argv] = input.node.command;
@@ -62,15 +66,18 @@ export class NativeServiceRuntime {
       taskId: input.taskId,
       generationId: input.generationId,
       nodeId: input.node.id,
-      kind: 'SERVICE',
-      attempt: 1,
+      kind: input.kind ?? 'SERVICE',
+      attempt: input.attempt ?? 1,
       commandDigest,
       state: 'INTENDED',
       stdoutArtifactId: stdout.id,
       stderrArtifactId: stderr.id
     };
     attempt = await this.store.savePreviewNodeAttempt(attempt);
-    const targetPort = input.portValues[input.node.ready.port];
+    const targetPort =
+      !input.node.ready || input.node.ready.type === 'argv'
+        ? Object.values(input.portValues)[0]
+        : input.portValues[input.node.ready.port];
     const resourceId = randomUUID();
     const receiptPath = path.join(input.generationRoot, 'runtime', `${resourceId}.json`);
     let resource: PreviewResourceRecord = {
@@ -95,7 +102,10 @@ export class NativeServiceRuntime {
       executable,
       argv,
       cwd,
-      env: buildPreviewEnvironment({ recipe: input.node.env, generated: generatedEnv }),
+      env: buildPreviewEnvironment({
+        recipe: input.resolvedEnv ?? literalEnvironment(input.node.env),
+        generated: generatedEnv
+      }),
       stdoutPath: stdout.path,
       stderrPath: stderr.path,
       persistPrepared: async (identity) => {
@@ -229,6 +239,19 @@ export class NativeServiceRuntime {
     });
     return result;
   }
+}
+
+function literalEnvironment(
+  env: PreviewServicePlan['env'] | PreviewWorkerPlan['env']
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== 'string') {
+      throw new Error(`Preview environment reference ${key} was not resolved before launch.`);
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 function boundedError(error: unknown): string {

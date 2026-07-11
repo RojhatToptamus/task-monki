@@ -51,7 +51,7 @@ async function seedGeneration(store: FileTaskStore, url = 'http://app.task-a.pre
   const plan = await store.savePreviewPlan({
     id: 'plan-1', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
     recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
     warnings: [], createdAt: '2026-01-01T00:00:00.000Z'
   });
   const approval = await store.savePreviewApproval({
@@ -62,7 +62,7 @@ async function seedGeneration(store: FileTaskStore, url = 'http://app.task-a.pre
     id: 'generation-1', previewKey: 'task-a', taskId: task.id, iterationId: iteration.id,
     worktreeId: worktree.id, planId: plan.id, approvalId: approval.id, executionDigest: 'digest',
     sourceGitSnapshotId: 'git-1', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
-    workspacePath: '/preview', state: 'READY', freshness: 'CURRENT',
+    workspacePath: '/preview', state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
     routes: [{ id: 'app', hostname: url.includes('example.com') ? 'example.com' : 'app.task-a.preview.localhost', url, gatewayPort: url.includes('example.com') ? 443 : 31234, targetHost: '127.0.0.1', targetPort: 41000, state: 'ATTACHED' }],
     createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z'
   });

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 
@@ -17,7 +18,7 @@ afterEach(async () => {
 
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
-describeMac('TaskManagerService Phase 1 preview scenario', () => {
+describeMac('TaskManagerService native preview scenarios', () => {
   it('runs resolve → approve → dirty capture → job → ready → stale → stop without touching the worktree', async () => {
     const scenario = await previewScenario('task-monki-preview-service');
     const task = await scenario.createTask({ title: 'Preview vertical slice' });
@@ -107,6 +108,197 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
     expect((await scenario.store.snapshot()).previewResources).toEqual([]);
   });
 
+  it('cuts over a ready replacement atomically and preserves the active generation when the next candidate fails', async () => {
+    const scenario = await previewScenario('task-monki-preview-replacement');
+    const task = await scenario.createTask({ title: 'Atomic replacement' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'version-one');
+    const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id,
+      planId: resolved.plan.id,
+      executionDigest: resolved.plan.executionDigest
+    });
+    const first = await scenario.service.startPreview({ taskId: task.id });
+    const route = first.routes[0];
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'version-one' });
+
+    await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), 'version-two');
+    const second = await scenario.service.startPreview({ taskId: task.id });
+    expect(second).toMatchObject({ routingState: 'ACTIVE', replacesGenerationId: first.id });
+    expect(second.routes[0].hostname).toBe(route.hostname);
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'version-two' });
+    expect(await scenario.store.getPreviewGeneration(first.id)).toMatchObject({
+      state: 'STOPPED', routingState: 'RETIRED', freshness: 'STALE'
+    });
+    expect(second.freshness).toBe('CURRENT');
+
+    await fs.writeFile(path.join(worktree.worktreePath, 'server.mjs'), 'throw new Error("candidate failed");\n');
+    await expect(scenario.service.startPreview({ taskId: task.id })).rejects.toThrow();
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({
+      status: 200,
+      body: 'version-two'
+    });
+    expect(await scenario.store.getPreviewGeneration(second.id)).toMatchObject({
+      state: 'READY', routingState: 'ACTIVE'
+    });
+    const generations = await scenario.store.getPreviewGenerations(task.id);
+    expect(generations.filter((generation) => generation.routingState === 'ACTIVE')).toHaveLength(1);
+
+    await fs.writeFile(path.join(worktree.worktreePath, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((request, response) => {
+  if (request.url === '/health/ready') response.writeHead(503).end();
+  else response.end('candidate-never-ready');
+}).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    const starting = scenario.service.startPreview({ taskId: task.id });
+    const waiting = await scenario.waitForSnapshot((snapshot) =>
+      snapshot.previewGenerations.some(
+        (generation) => generation.taskId === task.id && generation.routingState === 'CANDIDATE' && generation.state === 'WAITING_READY'
+      )
+    );
+    const candidate = waiting.previewGenerations.find(
+      (generation) => generation.taskId === task.id && generation.routingState === 'CANDIDATE' && generation.state === 'WAITING_READY'
+    )!;
+    const rejected = expect(starting).rejects.toThrow('canceled');
+    await scenario.service.stopPreview({ taskId: task.id, generationId: candidate.id });
+    await rejected;
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'version-two' });
+  }, 30_000);
+
+  it('runs a shared install, multiple services, typed origins, TCP and argv probes, routes, and a bounded worker restart', async () => {
+    const scenario = await previewScenario('task-monki-preview-phase-two');
+    const task = await scenario.createTask({ title: 'Phase 2 native graph' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'scripts', 'install.mjs'), `
+import fs from 'node:fs/promises';
+const path = 'install-count.txt';
+const count = Number(await fs.readFile(path, 'utf8').catch(() => '0')) + 1;
+await fs.writeFile(path, String(count));
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, 'api.mjs'), `
+import http from 'node:http';
+http.createServer((_request, response) => response.end('api')).listen(Number(process.env.API_PORT), '127.0.0.1');
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, 'web.mjs'), `
+import http from 'node:http';
+http.createServer((_request, response) => response.end(process.env.API_ORIGIN + '|' + process.env.PUBLIC_ORIGIN)).listen(Number(process.env.WEB_PORT), '127.0.0.1');
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, 'scripts', 'check-web.mjs'), `
+import http from 'node:http';
+const request = http.get({ host: '127.0.0.1', port: Number(process.env.WEB_PORT), path: '/' }, (response) => {
+  response.resume(); response.once('end', () => process.exit(response.statusCode === 200 ? 0 : 1));
+});
+request.once('error', () => process.exit(1));
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), `
+import fs from 'node:fs/promises';
+const path = 'worker-attempt.txt';
+const count = Number(await fs.readFile(path, 'utf8').catch(() => '0')) + 1;
+await fs.writeFile(path, String(count));
+if (count === 1) setTimeout(() => process.exit(7), 150);
+else setInterval(() => {}, 1000);
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
+version: 1
+jobs:
+  install:
+    command: [node, scripts/install.mjs]
+services:
+  api:
+    command: [node, api.mjs]
+    needs: { install: succeeded }
+    ports: { http: { env: API_PORT } }
+    ready: { type: tcp, port: http, timeoutSeconds: 5 }
+  web:
+    command: [node, web.mjs]
+    needs: { install: succeeded, api: ready }
+    env:
+      API_ORIGIN: { type: service-origin, service: api, port: http }
+      PUBLIC_ORIGIN: { type: route-origin, route: app }
+    ports: { http: { env: WEB_PORT } }
+    ready: { type: argv, command: [node, scripts/check-web.mjs], timeoutSeconds: 5 }
+workers:
+  indexer:
+    command: [node, worker.mjs]
+    needs: { api: ready }
+    env: { API_ORIGIN: { type: service-origin, service: api, port: http } }
+    critical: false
+    restart: { mode: on-failure, maxRestarts: 1, backoffMs: 25 }
+routes:
+  api: { service: api, port: http, primary: false }
+  app: { service: web, port: http, primary: true }
+`);
+    const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+    });
+    const generation = await scenario.service.startPreview({ taskId: task.id });
+    expect(generation.routes).toHaveLength(2);
+    const app = generation.routes.find((route) => route.id === 'app')!;
+    const api = generation.routes.find((route) => route.id === 'api')!;
+    await expect(requestRoute(api.gatewayPort, api.hostname, '/')).resolves.toMatchObject({ body: 'api' });
+    await expect(requestRoute(app.gatewayPort, app.hostname, '/')).resolves.toMatchObject({
+      body: `http://127.0.0.1:${api.targetPort}|http://${app.hostname}:${app.gatewayPort}`
+    });
+    await scenario.waitForSnapshot((snapshot) =>
+      snapshot.previewNodeAttempts.some(
+        (attempt) => attempt.generationId === generation.id && attempt.nodeId === 'indexer' && attempt.attempt === 2 && attempt.state === 'READY'
+      )
+    );
+    expect(await fs.readFile(path.join(generation.workspacePath, 'source', 'install-count.txt'), 'utf8')).toBe('1');
+    const attempts = await scenario.store.getPreviewNodeAttempts(generation.id);
+    expect(attempts.filter((attempt) => attempt.nodeId === 'install')).toHaveLength(1);
+    expect(attempts.some((attempt) => attempt.kind === 'PROBE' && attempt.state === 'SUCCEEDED')).toBe(true);
+    expect(attempts.filter((attempt) => attempt.nodeId === 'indexer').map((attempt) => attempt.attempt).sort()).toEqual([1, 2]);
+  }, 30_000);
+
+  it('fails and cleans an active generation when a critical worker exhausts liveness policy', async () => {
+    const scenario = await previewScenario('task-monki-preview-critical-worker');
+    const task = await scenario.createTask({ title: 'Critical worker liveness' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), 'setInterval(() => {}, 1000);\n');
+    await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
+version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /health/ready, timeoutSeconds: 5 }
+workers:
+  guard:
+    command: [node, worker.mjs]
+    needs: { web: ready }
+    critical: true
+    restart: { mode: never, maxRestarts: 0 }
+    liveness:
+      type: argv
+      command: [node, -e, process.exit(1)]
+      timeoutSeconds: 2
+      intervalSeconds: 1
+      failureThreshold: 1
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+    const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+    });
+    const ready = await scenario.service.startPreview({ taskId: task.id });
+    const failed = await scenario.waitForSnapshot((snapshot) =>
+      snapshot.previewGenerations.some(
+        (generation) => generation.id === ready.id && generation.state === 'FAILED'
+      )
+    );
+    expect(failed.previewGenerations.find((generation) => generation.id === ready.id)?.failureReason).toContain('liveness');
+    await expect(requestRoute(ready.routes[0].gatewayPort, ready.routes[0].hostname, '/')).resolves.toMatchObject({ status: 503 });
+    await expect(fs.access(ready.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 25_000);
+
   it('records bounded job failure evidence and blocks service start', async () => {
     const scenario = await previewScenario('task-monki-preview-job-failure', true);
     const task = await scenario.createTask();
@@ -125,10 +317,12 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
     expect(snapshot.previewNodeAttempts.some((attempt) => attempt.kind === 'SERVICE')).toBe(false);
     const stderr = await scenario.service.readPreviewLog({
       taskId: task.id,
-      artifactId: job!.stderrArtifactId
+      artifactId: job!.stderrArtifactId,
+      offset: 0,
+      maxBytes: 64 * 1024
     });
-    expect(stderr).toContain('intentional job failure');
-    expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(256 * 1024);
+    expect(stderr.chunk).toContain('intentional job failure');
+    expect(Buffer.byteLength(stderr.chunk)).toBeLessThanOrEqual(64 * 1024);
   });
 
   it('rejects a wildcard listener and cleans the failed generation', async () => {
@@ -255,6 +449,37 @@ describeMac('TaskManagerService Phase 1 preview scenario', () => {
       await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
     }
   }, 25_000);
+
+  it('keeps one active graph and stable routes through a bounded eight-cycle replacement stress run', async () => {
+    const scenario = await previewScenario('task-monki-preview-replacement-stress');
+    const task = await scenario.createTask({ title: 'Replacement stress' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+    });
+    let stableHostname: string | undefined;
+    let latest: PreviewGenerationRecord | undefined;
+    for (let index = 0; index < 8; index += 1) {
+      await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), `cycle-${index}`);
+      latest = await scenario.service.startPreview({ taskId: task.id });
+      stableHostname ??= latest.routes[0].hostname;
+      expect(latest.routes[0].hostname).toBe(stableHostname);
+      await expect(requestRoute(latest.routes[0].gatewayPort, stableHostname, '/')).resolves.toMatchObject({
+        body: `cycle-${index}`
+      });
+    }
+    const snapshot = await scenario.store.snapshot();
+    const generations = snapshot.previewGenerations.filter((generation) => generation.taskId === task.id);
+    expect(generations.filter((generation) => generation.state === 'READY' && generation.routingState === 'ACTIVE')).toHaveLength(1);
+    expect(generations.filter((generation) => generation.state === 'STOPPED' && generation.routingState === 'RETIRED')).toHaveLength(7);
+    const liveResources = snapshot.previewResources.filter(
+      (resource) => resource.taskId === task.id && resource.state === 'RUNNING'
+    );
+    expect(liveResources).toHaveLength(1);
+    await scenario.service.stopPreview({ taskId: task.id, generationId: latest!.id });
+  }, 60_000);
 
   it('blocks capture during agent work and cleans a verified preview before task deletion', async () => {
     const scenario = await previewScenario('task-monki-preview-delete');

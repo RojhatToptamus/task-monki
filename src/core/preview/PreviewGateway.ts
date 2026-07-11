@@ -6,6 +6,7 @@ import type { Duplex } from 'node:stream';
 export interface PreviewGatewayTarget {
   host: '127.0.0.1';
   port: number;
+  generationId: string;
 }
 
 export interface PreviewGatewayListenResult {
@@ -70,8 +71,27 @@ export class PreviewGateway {
     this.routes.set(normalized, target);
   }
 
-  removeRoute(hostname: string): void {
-    this.routes.delete(normalizeHostname(hostname));
+  replaceRoutes(generationId: string, routes: Record<string, Omit<PreviewGatewayTarget, 'generationId'>>): void {
+    const replacements = Object.entries(routes).map(([hostname, target]) => {
+      const normalized = normalizeHostname(hostname);
+      validateRoute(normalized, target);
+      return [normalized, { ...target, generationId }] as const;
+    });
+    if (new Set(replacements.map(([hostname]) => hostname)).size !== replacements.length) {
+      throw new Error('Preview gateway replacement contains duplicate hostnames.');
+    }
+    for (const [hostname, target] of replacements) this.routes.set(hostname, target);
+  }
+
+  removeRoute(hostname: string, generationId: string): void {
+    const normalized = normalizeHostname(hostname);
+    if (this.routes.get(normalized)?.generationId === generationId) this.routes.delete(normalized);
+  }
+
+  removeOwnedRoutes(generationId: string): void {
+    for (const [hostname, target] of this.routes) {
+      if (target.generationId === generationId) this.routes.delete(hostname);
+    }
   }
 
   clearRoutes(): void {
@@ -195,6 +215,15 @@ export class PreviewGateway {
 
 function normalizeHostname(value: string): string {
   return value.trim().toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
+}
+
+function validateRoute(hostname: string, target: Pick<PreviewGatewayTarget, 'host' | 'port'>): void {
+  if (!hostname.endsWith('.preview.localhost') || hostname.split('.').length < 4) {
+    throw new Error('Preview gateway routes must use a scoped .preview.localhost hostname.');
+  }
+  if (target.host !== '127.0.0.1' || !isValidPort(target.port)) {
+    throw new Error('Preview gateway targets must be valid IPv4 loopback ports.');
+  }
 }
 
 function forwardedHeaders(

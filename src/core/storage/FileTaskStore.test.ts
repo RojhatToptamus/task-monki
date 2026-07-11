@@ -185,7 +185,7 @@ describe('FileTaskStore', () => {
     );
 
     const migrated = await new FileTaskStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(10);
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(migrated.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
     expect(migrated.iterations).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: iteration.id })])
@@ -224,7 +224,7 @@ describe('FileTaskStore', () => {
       recipeVersion: 1,
       recipeDigest: 'recipe',
       executionDigest: 'execution',
-      executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+      executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
       warnings: [],
       createdAt: now
     });
@@ -250,6 +250,7 @@ describe('FileTaskStore', () => {
       sourceDirtyFingerprint: 'dirty',
       workspacePath: path.join(dir, 'preview-runtime', 'generation-1'),
       state: 'CREATED',
+      routingState: 'CANDIDATE',
       freshness: 'CURRENT',
       routes: [],
       createdAt: now,
@@ -298,6 +299,116 @@ describe('FileTaskStore', () => {
     expect(snapshot.previewApprovals).toEqual([]);
     expect(snapshot.previewGenerations).toEqual([]);
     expect(snapshot.previewResources).toEqual([]);
+  });
+
+  it('reads bounded artifact ranges without splitting UTF-8 code points', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-artifact-range-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Logs', prompt: 'Tail safely', repositoryPath: dir });
+    const artifact = await store.createPreviewArtifact(task.id, 'preview-stdout');
+    await store.appendBoundedArtifact(artifact.id, 'a😀b');
+    const first = await store.readArtifactRange(artifact.id, 0, 2);
+    expect(first).toEqual({ chunk: 'a', nextOffset: 1, endOfFile: false });
+    const second = await store.readArtifactRange(artifact.id, first.nextOffset, 4);
+    expect(second).toEqual({ chunk: '😀', nextOffset: 5, endOfFile: false });
+    await expect(store.readArtifactRange(artifact.id, second.nextOffset, 64)).resolves.toEqual({
+      chunk: 'b', nextOffset: 6, endOfFile: true
+    });
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('bounds terminal preview history and removes its child evidence and files', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-prune-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'History', prompt: 'Bound it', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/history', worktreePath: dir, baseSha: 'base'
+    });
+    const now = Date.now();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      warnings: [], createdAt: new Date(now).toISOString()
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: new Date(now).toISOString()
+    });
+    const artifactPaths = new Map<string, string>();
+    for (let index = 0; index < 4; index += 1) {
+      const timestamp = new Date(now + index).toISOString();
+      const generationId = `generation-${index}`;
+      await store.savePreviewGeneration({
+        id: generationId, previewKey: 'task-history', taskId: task.id, iterationId: iteration.id,
+        worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
+        executionDigest: plan.executionDigest, sourceGitSnapshotId: `git-${index}`,
+        sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: `/preview/${index}`,
+        state: 'STOPPED', routingState: 'RETIRED', freshness: 'CURRENT', routes: [],
+        createdAt: timestamp, updatedAt: timestamp, stoppedAt: timestamp
+      });
+      const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
+      const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
+      artifactPaths.set(generationId, stdout.path);
+      await store.savePreviewNodeAttempt({
+        id: `attempt-${index}`, taskId: task.id, generationId, nodeId: 'web', kind: 'SERVICE',
+        attempt: 1, commandDigest: 'command', state: 'STOPPED',
+        stdoutArtifactId: stdout.id, stderrArtifactId: stderr.id
+      });
+    }
+    await expect(store.prunePreviewHistory(task.id, 2)).resolves.toBe(2);
+    const snapshot = await store.snapshot();
+    expect(snapshot.previewGenerations.map((generation) => generation.id).sort()).toEqual([
+      'generation-2', 'generation-3'
+    ]);
+    expect(snapshot.previewNodeAttempts).toHaveLength(2);
+    await expect(fs.access(artifactPaths.get('generation-0')!)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(artifactPaths.get('generation-3')!)).resolves.toBeUndefined();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('rolls back both in-memory generation roles when atomic cutover persistence fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-cutover-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Cutover', prompt: 'Stay atomic', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/cutover', worktreePath: dir, baseSha: 'base'
+    });
+    const now = new Date().toISOString();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      warnings: [], createdAt: now
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: now
+    });
+    const authority = {
+      previewKey: 'task-cutover', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      planId: plan.id, approvalId: approval.id, executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      freshness: 'CURRENT' as const, routes: [], createdAt: now, updatedAt: now
+    };
+    const active = await store.savePreviewGeneration({
+      ...authority, id: 'active', workspacePath: '/active', state: 'READY', routingState: 'ACTIVE'
+    });
+    const candidate = await store.savePreviewGeneration({
+      ...authority, id: 'candidate', workspacePath: '/candidate', state: 'WAITING_READY',
+      routingState: 'CANDIDATE', replacesGenerationId: active.id
+    });
+    const mutable = store as unknown as { persistQueued(): Promise<void> };
+    const persistQueued = mutable.persistQueued.bind(store);
+    mutable.persistQueued = async () => { throw new Error('injected persistence failure'); };
+    await expect(store.cutoverPreviewGenerations({
+      candidate: { ...candidate, state: 'READY', routingState: 'ACTIVE' },
+      replaced: { ...active, routingState: 'RETIRED' }
+    })).rejects.toThrow('persistence failure');
+    mutable.persistQueued = persistQueued;
+    expect(await store.getPreviewGeneration(active.id)).toMatchObject({ routingState: 'ACTIVE' });
+    expect(await store.getPreviewGeneration(candidate.id)).toMatchObject({ routingState: 'CANDIDATE' });
+    await fs.rm(dir, { recursive: true, force: true });
   });
 
   it('links forked alternative tasks to their source task and run', async () => {

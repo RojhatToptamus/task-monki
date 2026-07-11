@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
   PreviewResourceRecord,
+  ReadPreviewLogResult,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -28,11 +29,13 @@ export function PreviewPanel(props: {
   onStart(taskId: string): Promise<void>;
   onOpen(taskId: string, generationId: string, routeId: string): Promise<void>;
   onStop(taskId: string, generationId: string): Promise<void>;
-  onReadLog(taskId: string, artifactId: string): Promise<string>;
+  onReadLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<ReadPreviewLogResult>;
 }) {
   const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
   const [logs, setLogs] = useState<string>();
   const [loadingLogs, setLoadingLogs] = useState(false);
+  const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
+  const [selectedStream, setSelectedStream] = useState<'stdout' | 'stderr'>('stdout');
   const view = buildPreviewViewModel(props);
   const tone = view.tone === 'warning' ? 'warning' : view.tone === 'neutral' ? 'neutral' : view.tone;
 
@@ -45,12 +48,14 @@ export function PreviewPanel(props: {
         await props.onApprove(props.task.id, view.plan.id, view.plan.executionDigest);
       }
       if (action === 'START') await props.onStart(props.task.id);
-      if (action === 'OPEN' && view.generation) {
-        const route = view.generation.routes.find((candidate) => candidate.state === 'ATTACHED');
-        if (route) await props.onOpen(props.task.id, view.generation.id, route.id);
+      const openGeneration = view.activeGeneration ?? view.generation;
+      if (action === 'OPEN' && openGeneration) {
+        const route = openGeneration.routes.find((candidate) => candidate.state === 'ATTACHED');
+        if (route) await props.onOpen(props.task.id, openGeneration.id, route.id);
       }
-      if (action === 'STOP' && view.generation) {
-        await props.onStop(props.task.id, view.generation.id);
+      const stopGeneration = view.replacementGeneration ?? view.generation;
+      if (action === 'STOP' && stopGeneration) {
+        await props.onStop(props.task.id, stopGeneration.id);
       }
     } finally {
       setBusy((current) => {
@@ -61,18 +66,56 @@ export function PreviewPanel(props: {
     }
   };
 
+  const selectedAttempt = props.attempts.find(
+    (attempt) => attempt.id === (selectedAttemptId ?? view.latestAttempt?.id)
+  );
+  const selectedArtifactId = selectedAttempt
+    ? selectedStream === 'stdout'
+      ? selectedAttempt.stdoutArtifactId
+      : selectedAttempt.stderrArtifactId
+    : undefined;
+  const selectedAttemptTerminal = selectedAttempt
+    ? ['SUCCEEDED', 'FAILED', 'STOPPED', 'RECOVERY_REQUIRED'].includes(selectedAttempt.state)
+    : true;
+  const selectedAttemptTerminalRef = useRef(selectedAttemptTerminal);
+  selectedAttemptTerminalRef.current = selectedAttemptTerminal;
+
+  useEffect(() => {
+    if (logs === undefined || !selectedArtifactId) return;
+    let canceled = false;
+    let offset = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setLogs('');
+    const poll = async () => {
+      let continuePolling = true;
+      try {
+        const result = await props.onReadLog(props.task.id, selectedArtifactId, offset, 64 * 1024);
+        if (canceled) return;
+        offset = result.nextOffset;
+        if (result.chunk) setLogs((current) => `${current ?? ''}${result.chunk}`);
+        if (result.endOfFile && selectedAttemptTerminalRef.current) continuePolling = false;
+      } catch {
+        continuePolling = false;
+      } finally {
+        if (!canceled && continuePolling) timer = setTimeout(() => void poll(), 750);
+      }
+    };
+    void poll();
+    return () => {
+      canceled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // The selected artifact owns this polling lifecycle; callback identity is intentionally irrelevant.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedArtifactId, logs === undefined, props.task.id]);
+
   const readLogs = async () => {
     if (!view.latestAttempt || loadingLogs) return;
     setLoadingLogs(true);
     try {
-      const [stdout, stderr] = await Promise.all([
-        props.onReadLog(props.task.id, view.latestAttempt.stdoutArtifactId),
-        props.onReadLog(props.task.id, view.latestAttempt.stderrArtifactId)
-      ]);
-      setLogs([
-        stdout ? `stdout\n${stdout}` : '',
-        stderr ? `stderr\n${stderr}` : ''
-      ].filter(Boolean).join('\n\n') || 'No output was recorded for this node.');
+      setSelectedAttemptId(view.latestAttempt.id);
+      setSelectedStream('stdout');
+      setLogs('');
     } finally {
       setLoadingLogs(false);
     }
@@ -113,7 +156,27 @@ export function PreviewPanel(props: {
       </div>
 
       {logs !== undefined ? (
-        <pre className="tm-preview__logs" aria-label="Preview logs">{logs}</pre>
+        <div className="tm-preview__logviewer">
+          <div className="tm-preview__logcontrols">
+            <select
+              aria-label="Preview node attempt"
+              value={selectedAttempt?.id ?? ''}
+              onChange={(event) => setSelectedAttemptId(event.target.value)}
+            >
+              {props.attempts
+                .filter((attempt) => attempt.generationId === view.generation?.id)
+                .map((attempt) => (
+                  <option key={attempt.id} value={attempt.id}>{attempt.nodeId} · attempt {attempt.attempt} · {attempt.state}</option>
+                ))}
+            </select>
+            <select aria-label="Preview log stream" value={selectedStream} onChange={(event) => setSelectedStream(event.target.value as 'stdout' | 'stderr')}>
+              <option value="stdout">stdout</option>
+              <option value="stderr">stderr</option>
+            </select>
+            <button type="button" className="tm-preview__logs-button" onClick={() => setLogs(undefined)}>Close logs</button>
+          </div>
+          <pre className="tm-preview__logs" aria-label="Preview logs">{logs || 'No output recorded yet.'}</pre>
+        </div>
       ) : null}
     </section>
   );

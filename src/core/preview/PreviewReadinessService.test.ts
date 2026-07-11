@@ -1,8 +1,9 @@
 import http from 'node:http';
+import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PreviewReadinessService } from './PreviewReadinessService';
 
-const servers: http.Server[] = [];
+const servers: net.Server[] = [];
 afterEach(async () => {
   await Promise.allSettled(
     servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))
@@ -36,6 +37,22 @@ describe('PreviewReadinessService', () => {
     });
     expect(result.status).toBe('FAILED');
     expect(result.lastError?.length).toBeLessThanOrEqual(512);
+  });
+
+  it('observes TCP readiness directly on IPv4 loopback', async () => {
+    const server = net.createServer((socket) => socket.end());
+    servers.push(server);
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') reject(new Error('No server address.'));
+        else resolve(address.port);
+      });
+    });
+    await expect(new PreviewReadinessService().waitForTcp({ port, timeoutMs: 500 })).resolves.toMatchObject({
+      status: 'PASSED'
+    });
   });
 
   it('accepts response headers without waiting for a slow or unbounded body', async () => {

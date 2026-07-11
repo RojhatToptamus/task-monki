@@ -7,6 +7,7 @@ import type {
   PreviewGenerationRecord,
   PreviewPlanRecord,
   ReadPreviewLogRequest,
+  ReadPreviewLogResult,
   ResolvePreviewResult,
   Task,
   TaskIteration,
@@ -107,6 +108,9 @@ export class PreviewManager {
     }
     const id = randomUUID();
     const now = new Date().toISOString();
+    const replaced = (await this.store.getPreviewGenerations(input.context.task.id)).find(
+      (candidate) => candidate.routingState === 'ACTIVE' && candidate.state === 'READY'
+    );
     let generation: PreviewGenerationRecord = {
       id,
       previewKey: stablePreviewKey(input.context.task.id),
@@ -121,6 +125,8 @@ export class PreviewManager {
       sourceDirtyFingerprint,
       workspacePath: this.sourcePreparer.getGenerationPath(input.context.task.id, id),
       state: 'CREATED',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: replaced?.id,
       freshness: 'CURRENT',
       routes: [],
       createdAt: now,
@@ -198,6 +204,12 @@ export class PreviewManager {
           sourcePath: prepared.sourcePath,
           markerDigest: prepared.markerDigest,
           plan: prepared.plan.executionPlan,
+          routeOrigins: Object.fromEntries(
+            prepared.plan.executionPlan.routes.map((route) => {
+              const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
+              return [route.id, `http://${hostname}:${this.requireGatewayPort()}`];
+            })
+          ),
           signal: controller.signal,
           updateGenerationState: async (state) => {
             generation = await this.saveGeneration({ ...generation, state });
@@ -216,9 +228,9 @@ export class PreviewManager {
           throw new Error('Preview service exited before gateway routes could be attached.');
         }
         const routes = prepared.plan.executionPlan.routes.map((route) => {
-          const targetPort = running.ports[route.port];
+          const targetPort = running.ports[route.service]?.[route.port];
+          if (!targetPort) throw new Error(`Preview route ${route.id} target port is unavailable.`);
           const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
-          this.gateway.setRoute(hostname, { host: '127.0.0.1', port: targetPort });
           return {
             id: route.id,
             hostname,
@@ -232,12 +244,44 @@ export class PreviewManager {
         if (!running.isRunning()) {
           throw new Error('Preview service exited before READY could be committed.');
         }
-        generation = await this.saveGeneration({
+        const cutoverAt = new Date().toISOString();
+        const candidate: PreviewGenerationRecord = {
           ...generation,
           state: 'READY',
+          routingState: 'ACTIVE' as const,
           routes,
-          readyAt: new Date().toISOString()
-        });
+          readyAt: cutoverAt,
+          cutoverAt,
+          updatedAt: cutoverAt
+        };
+        const replaced = generation.replacesGenerationId
+          ? await this.store.getPreviewGeneration(generation.replacesGenerationId)
+          : undefined;
+        this.gateway.replaceRoutes(
+          generation.id,
+          Object.fromEntries(routes.map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }]))
+        );
+        try {
+          const cutover = await this.store.cutoverPreviewGenerations({
+            candidate,
+            replaced: replaced
+              ? {
+                  ...replaced,
+                  routingState: 'RETIRED',
+                  routes: replaced.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+                  updatedAt: cutoverAt
+                }
+              : undefined
+          });
+          generation = cutover.candidate;
+          this.emitGeneration(generation);
+          if (cutover.replaced) this.emitGeneration(cutover.replaced);
+        } catch (error) {
+          if (replaced) this.restoreRoutes(replaced);
+          else this.gateway.removeOwnedRoutes(generation.id);
+          throw error;
+        }
+        if (replaced) await this.stop(replaced.id).catch(() => undefined);
         return generation;
       } catch (error) {
         await this.cleanupFailedGeneration(generation, error);
@@ -283,12 +327,14 @@ export class PreviewManager {
       generation = await this.saveGeneration({
         ...generation,
         routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+        routingState: 'RETIRED',
         state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'STOPPED',
         cleanupReason: cleanupIncomplete
           ? 'One or more preview resources could not be verified for cleanup.'
           : 'Stopped by Task Monki.',
         stoppedAt: cleanupIncomplete ? undefined : new Date().toISOString()
       });
+      await this.store.prunePreviewHistory(generation.taskId);
       return generation;
     });
   }
@@ -297,14 +343,11 @@ export class PreviewManager {
     return this.opener.open(input);
   }
 
-  async readLog(input: ReadPreviewLogRequest): Promise<string> {
-    const attempts = (await this.store.snapshot()).previewNodeAttempts.filter(
-      (attempt) =>
-        attempt.taskId === input.taskId &&
-        (attempt.stdoutArtifactId === input.artifactId || attempt.stderrArtifactId === input.artifactId)
-    );
-    if (attempts.length === 0) throw new Error('Preview log artifact is not owned by this task.');
-    return this.store.readArtifact(input.artifactId);
+  async readLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
+    if (!(await this.store.isPreviewLogArtifactOwned(input.taskId, input.artifactId))) {
+      throw new Error('Preview log artifact is not owned by this task.');
+    }
+    return this.store.readArtifactRange(input.artifactId, input.offset, input.maxBytes);
   }
 
   async observeGitSnapshot(snapshot: GitSnapshotRecord): Promise<void> {
@@ -378,44 +421,69 @@ export class PreviewManager {
       failureReason: boundedError(error),
       cleanupReason: cleanupIncomplete ? 'Failure cleanup could not verify every resource.' : undefined
     });
+    await this.store.prunePreviewHistory(current.taskId);
   }
 
   private async handleUnexpectedExit(generationId: string, reason: string): Promise<void> {
     const generation = await this.store.getPreviewGeneration(generationId);
     if (!generation || ['STOPPING', 'STOPPED'].includes(generation.state)) return;
-    this.live.delete(generation.id);
     this.detachRoutes(generation);
     let cleanupIncomplete = false;
-    await this.sourcePreparer
-      .cleanupOwnedGeneration({ taskId: generation.taskId, generationId: generation.id })
-      .catch(() => {
-        cleanupIncomplete = true;
-      });
+    const live = this.live.get(generation.id);
+    if (live) {
+      const result = await live.stop().catch(() => 'REFUSED' as const);
+      if (result === 'REFUSED') cleanupIncomplete = true;
+      this.live.delete(generation.id);
+    }
+    if (!cleanupIncomplete) {
+      await this.sourcePreparer
+        .cleanupOwnedGeneration({ taskId: generation.taskId, generationId: generation.id })
+        .catch(() => {
+          cleanupIncomplete = true;
+        });
+    }
     await this.saveGeneration({
       ...generation,
       routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+      routingState: generation.routingState === 'ACTIVE' ? 'RETIRED' : generation.routingState,
       state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
       failureReason: reason,
       cleanupReason: cleanupIncomplete ? 'Service exit cleanup could not verify the workspace.' : undefined
     });
+    await this.store.prunePreviewHistory(generation.taskId);
   }
 
   private detachRoutes(generation: PreviewGenerationRecord): void {
-    for (const route of generation.routes) this.gateway.removeRoute(route.hostname);
+    this.gateway.removeOwnedRoutes(generation.id);
+  }
+
+  private restoreRoutes(generation: PreviewGenerationRecord): void {
+    this.gateway.replaceRoutes(
+      generation.id,
+      Object.fromEntries(
+        generation.routes
+          .filter((route) => route.state === 'ATTACHED')
+          .map((route) => [route.hostname, { host: route.targetHost, port: route.targetPort }])
+      )
+    );
+  }
+
+  private emitGeneration(stored: PreviewGenerationRecord): void {
+    this.events.emit({
+      type: 'preview.updated',
+      taskId: stored.taskId,
+      iterationId: stored.iterationId,
+      worktreeId: stored.worktreeId,
+      previewGenerationId: stored.id,
+      payload: stored,
+      at: stored.updatedAt
+    });
   }
 
   private saveGeneration(generation: PreviewGenerationRecord): Promise<PreviewGenerationRecord> {
     const updated = { ...generation, updatedAt: new Date().toISOString() };
     return this.store.savePreviewGeneration(updated).then((stored) => {
-      this.events.emit({
-        type: 'preview.updated',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        worktreeId: stored.worktreeId,
-        previewGenerationId: stored.id,
-        payload: stored,
-        at: stored.updatedAt
-      });
+      this.emitGeneration(stored);
       return stored;
     });
   }

@@ -164,7 +164,7 @@ interface TaskDetailProps {
   onStartPreview(taskId: string): Promise<void>;
   onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
   onStopPreview(taskId: string, generationId: string): Promise<void>;
-  onReadPreviewLog(taskId: string, artifactId: string): Promise<string>;
+  onReadPreviewLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<import('../../shared/contracts').ReadPreviewLogResult>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;

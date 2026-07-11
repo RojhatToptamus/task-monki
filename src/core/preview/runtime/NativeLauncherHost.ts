@@ -49,7 +49,7 @@ export interface ProcessIdentityInspector {
 export class MacProcessIdentityInspector implements ProcessIdentityInspector {
   async inspect(pid: number): Promise<PreviewProcessIdentity> {
     if (process.platform !== 'darwin') {
-      throw new Error('Phase 1 native process ownership is supported on macOS only.');
+      throw new Error('Native preview process ownership is supported on macOS only.');
     }
     const { stdout } = await execFilePortable(
       '/bin/ps',

@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewGateway } from './PreviewGateway';
@@ -58,6 +59,39 @@ describeMac('PreviewReconciler macOS ownership integration', () => {
   });
 });
 
+describe('PreviewReconciler graph coverage', () => {
+  it('reconciles every persisted native node before declaring the generation stopped', async () => {
+    const now = new Date().toISOString();
+    const generation = {
+      id: 'generation', previewKey: 'task-restart', taskId: 'task', iterationId: 'iteration',
+      worktreeId: 'worktree', planId: 'plan', approvalId: 'approval', executionDigest: 'digest',
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      workspacePath: '/preview', state: 'READY' as const, routingState: 'ACTIVE' as const,
+      freshness: 'CURRENT' as const, routes: [], createdAt: now, updatedAt: now
+    };
+    const resources = ['api', 'web', 'worker'].map((logicalNodeId) => ({
+      id: `resource-${logicalNodeId}`, taskId: 'task', generationId: generation.id, logicalNodeId,
+      adapterKind: 'NATIVE_PROCESS' as const, state: 'RUNNING' as const,
+      ownershipMarkerDigest: 'marker', updatedAt: now
+    }));
+    const stopped: string[] = [];
+    let saved: PreviewGenerationRecord | undefined;
+    const reconciler = new PreviewReconciler(
+      {
+        async getPreviewGenerations() { return [generation]; },
+        async getPreviewResources() { return resources; },
+        async savePreviewGeneration(value: PreviewGenerationRecord) { saved = value; return value; }
+      } as never,
+      { clearRoutes() {} } as never,
+      { async stop(resource: { id: string }) { stopped.push(resource.id); return 'STOPPED' as const; } } as never,
+      { async cleanupOwnedGeneration() {} } as never
+    );
+    await reconciler.reconcile();
+    expect(stopped).toEqual(resources.map((resource) => resource.id));
+    expect(saved).toMatchObject({ state: 'STOPPED', routingState: 'RETIRED' });
+  });
+});
+
 async function runningGeneration() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-reconcile-'));
   const repo = path.join(root, 'repo');
@@ -84,7 +118,7 @@ async function runningGeneration() {
   const plan = await store.savePreviewPlan({
     id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
     recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
     warnings: [], createdAt: now
   });
   const approval = await store.savePreviewApproval({
@@ -95,7 +129,7 @@ async function runningGeneration() {
     id: generationId, previewKey: 'task-reconcile', taskId: task.id, iterationId: iteration.id,
     worktreeId: worktree.id, planId: plan.id, approvalId: approval.id, executionDigest: 'digest',
     sourceGitSnapshotId: 'git', sourceHeadSha: head, sourceDirtyFingerprint: 'dirty',
-    workspacePath: prepared.generationRoot, state: 'READY', freshness: 'CURRENT',
+    workspacePath: prepared.generationRoot, state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
     routes: [{ id: 'app', hostname: 'app.task-reconcile.preview.localhost', url: 'http://app.task-reconcile.preview.localhost:31234/', gatewayPort: 31234, targetHost: '127.0.0.1', targetPort: 41234, state: 'ATTACHED' }],
     createdAt: now, updatedAt: now
   });

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
   PreviewJobPlan,
+  PreviewNodeKind,
   PreviewNodeAttemptRecord,
   PreviewResourceRecord
 } from '../../../shared/contracts';
@@ -34,6 +35,11 @@ export class NativeJobRunner {
     sourcePath: string;
     markerDigest: string;
     node: PreviewJobPlan;
+    kind?: Extract<PreviewNodeKind, 'JOB' | 'PROBE'>;
+    attempt?: number;
+    env?: Record<string, string>;
+    timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<NativeJobResult> {
     const cwd = await resolvePreparedNodeCwd(input.sourcePath, input.node.cwd, input.node.id);
     const [executable, ...argv] = input.node.command;
@@ -46,8 +52,8 @@ export class NativeJobRunner {
       taskId: input.taskId,
       generationId: input.generationId,
       nodeId: input.node.id,
-      kind: 'JOB',
-      attempt: 1,
+      kind: input.kind ?? 'JOB',
+      attempt: input.attempt ?? 1,
       commandDigest,
       state: 'INTENDED',
       stdoutArtifactId: stdout.id,
@@ -76,7 +82,7 @@ export class NativeJobRunner {
       executable,
       argv,
       cwd,
-      env: buildPreviewEnvironment({}),
+      env: buildPreviewEnvironment({ recipe: input.env }),
       stdoutPath: stdout.path,
       stderrPath: stderr.path,
       persistPrepared: async (identity) => {
@@ -125,7 +131,23 @@ export class NativeJobRunner {
       throw error;
     }
     let receipt: NativeLauncherReceipt;
+    let timedOut = false;
+    let canceled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const onAbort = () => {
+      canceled = true;
+      void owned.stop().catch(() => undefined);
+    };
     try {
+      if (input.signal?.aborted) onAbort();
+      else input.signal?.addEventListener('abort', onAbort, { once: true });
+      if (input.timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          void owned.stop().catch(() => undefined);
+        }, input.timeoutMs);
+        timeout.unref();
+      }
       receipt = await owned.completion;
     } catch (error) {
       await Promise.allSettled([
@@ -147,15 +169,18 @@ export class NativeJobRunner {
         updatedAt: endedAt
       });
       throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      input.signal?.removeEventListener('abort', onAbort);
     }
     await Promise.all([
       this.store.syncArtifactByteCount(stdout.id),
       this.store.syncArtifactByteCount(stderr.id)
     ]);
-    const succeeded = receipt.state === 'EXITED' && receipt.exitCode === 0;
+    const succeeded = !timedOut && !canceled && receipt.state === 'EXITED' && receipt.exitCode === 0;
     attempt = await this.store.savePreviewNodeAttempt({
       ...attempt,
-      state: succeeded ? 'SUCCEEDED' : 'FAILED',
+      state: succeeded ? 'SUCCEEDED' : canceled ? 'STOPPED' : 'FAILED',
       startedAt: attempt.startedAt ?? now,
       endedAt: new Date().toISOString(),
       exitCode: receipt.exitCode,
@@ -163,11 +188,19 @@ export class NativeJobRunner {
     });
     resource = await this.store.savePreviewResource({
       ...resource,
-      state: succeeded ? 'EXITED' : 'FAILED',
+      state: succeeded ? 'EXITED' : canceled ? 'STOPPED' : 'FAILED',
       native: owned.identity,
       updatedAt: new Date().toISOString()
     });
     if (!succeeded) {
+      if (canceled) {
+        const error = new Error(`Preview node ${input.node.id} was canceled.`);
+        error.name = 'AbortError';
+        throw error;
+      }
+      if (timedOut) {
+        throw new Error(`Preview probe ${input.node.id} timed out after ${input.timeoutMs}ms.`);
+      }
       throw new PreviewJobFailure(input.node.id, receipt, attempt, resource);
     }
     return { attempt, resource, receipt };

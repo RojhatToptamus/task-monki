@@ -210,7 +210,7 @@ export async function capturePreviewSourceManifest(
       throw new Error(`Preview source path exceeds ${limits.maxPathBytes} bytes: ${relativePath}`);
     }
     if (gitModes.get(relativePath) === '160000') {
-      throw new Error(`Git submodules are unsupported in Phase 1: ${relativePath}`);
+      throw new Error(`Git submodules are unsupported by native previews: ${relativePath}`);
     }
     const absolutePath = path.join(root, relativePath);
     assertPathWithin(root, absolutePath, 'Source path');
@@ -232,7 +232,7 @@ export async function capturePreviewSourceManifest(
     if (stat.isSymbolicLink()) {
       const target = await fs.readlink(absolutePath);
       if (path.isAbsolute(target)) {
-        throw new Error(`Absolute symlinks are unsupported in Phase 1: ${relativePath}`);
+        throw new Error(`Absolute symlinks are unsupported by native previews: ${relativePath}`);
       }
       const resolvedTarget = path.resolve(path.dirname(absolutePath), target);
       assertPathWithin(root, resolvedTarget, 'Symlink target');

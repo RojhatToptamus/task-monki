@@ -309,6 +309,15 @@ export class FileTaskStore {
     );
   }
 
+  async isPreviewLogArtifactOwned(taskId: string, artifactId: string): Promise<boolean> {
+    await this.init();
+    return this.state.previewNodeAttempts.some(
+      (attempt) =>
+        attempt.taskId === taskId &&
+        (attempt.stdoutArtifactId === artifactId || attempt.stderrArtifactId === artifactId)
+    );
+  }
+
   async getPreviewResources(generationId?: string): Promise<PreviewResourceRecord[]> {
     await this.init();
     return clone(
@@ -410,6 +419,104 @@ export class FileTaskStore {
     );
     await this.persistQueued();
     return clone(generation);
+  }
+
+  async cutoverPreviewGenerations(input: {
+    candidate: PreviewGenerationRecord;
+    replaced?: PreviewGenerationRecord;
+  }): Promise<{ candidate: PreviewGenerationRecord; replaced?: PreviewGenerationRecord }> {
+    await this.init();
+    this.assertPreviewGenerationReferences(input.candidate);
+    if (input.replaced) this.assertPreviewGenerationReferences(input.replaced);
+    const storedCandidate = this.state.previewGenerations.find(
+      (generation) => generation.id === input.candidate.id
+    );
+    const storedActive = this.state.previewGenerations.filter(
+      (generation) =>
+        generation.taskId === input.candidate.taskId &&
+        generation.routingState === 'ACTIVE' &&
+        generation.state === 'READY'
+    );
+    if (
+      storedCandidate?.routingState !== 'CANDIDATE' ||
+      input.candidate.routingState !== 'ACTIVE' ||
+      input.candidate.replacesGenerationId !== input.replaced?.id ||
+      storedActive.some((generation) => generation.id !== input.replaced?.id) ||
+      (input.replaced &&
+        (storedActive.length !== 1 ||
+          input.replaced.taskId !== input.candidate.taskId ||
+          input.replaced.routingState !== 'RETIRED'))
+    ) {
+      throw new Error('Preview cutover requires one active candidate and an optional retired generation for the same task.');
+    }
+    const updates = new Map(
+      [input.candidate, input.replaced].filter(Boolean).map((generation) => [generation!.id, generation!])
+    );
+    const previousState = this.state;
+    try {
+      this.state = {
+        ...this.state,
+        previewGenerations: [
+          input.candidate,
+          ...(input.replaced ? [input.replaced] : []),
+          ...this.state.previewGenerations.filter((generation) => !updates.has(generation.id))
+        ]
+      };
+      for (const generation of updates.values()) {
+        await this.appendEvent(
+          createDomainEvent({
+            type: 'PREVIEW_GENERATION_UPDATED',
+            taskId: generation.taskId,
+            iterationId: generation.iterationId,
+            worktreeId: generation.worktreeId,
+            previewPlanId: generation.planId,
+            previewGenerationId: generation.id,
+            source: 'preview',
+            payload: {
+              state: generation.state,
+              freshness: generation.freshness,
+              routingState: generation.routingState
+            }
+          }),
+          false
+        );
+      }
+      await this.persistQueued();
+    } catch (error) {
+      this.state = previousState;
+      throw error;
+    }
+    return clone(input);
+  }
+
+  async prunePreviewHistory(taskId: string, maxTerminalGenerations = 20): Promise<number> {
+    await this.init();
+    if (!Number.isInteger(maxTerminalGenerations) || maxTerminalGenerations < 1 || maxTerminalGenerations > 100) {
+      throw new Error('Preview history retention must be between 1 and 100 generations.');
+    }
+    const terminal = this.state.previewGenerations
+      .filter((generation) => generation.taskId === taskId && ['STOPPED', 'FAILED'].includes(generation.state))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const removedIds = new Set(terminal.slice(maxTerminalGenerations).map((generation) => generation.id));
+    if (removedIds.size === 0) return 0;
+    const removedAttempts = this.state.previewNodeAttempts.filter((attempt) => removedIds.has(attempt.generationId));
+    const removedGenerations = this.state.previewGenerations.filter((generation) => removedIds.has(generation.id));
+    const artifactIds = new Set([
+      ...removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId]),
+      ...removedGenerations.flatMap((generation) => generation.sourceManifestArtifactId ? [generation.sourceManifestArtifactId] : [])
+    ]);
+    const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
+    this.state = {
+      ...this.state,
+      previewGenerations: this.state.previewGenerations.filter((generation) => !removedIds.has(generation.id)),
+      previewNodeAttempts: this.state.previewNodeAttempts.filter((attempt) => !removedIds.has(attempt.generationId)),
+      previewResources: this.state.previewResources.filter((resource) => !removedIds.has(resource.generationId)),
+      events: this.state.events.filter((event) => !event.previewGenerationId || !removedIds.has(event.previewGenerationId)),
+      artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
+    };
+    await this.persistQueued();
+    await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
+    return removedIds.size;
   }
 
   async savePreviewNodeAttempt(
@@ -2551,6 +2658,39 @@ export class FileTaskStore {
     }
   }
 
+  async readArtifactRange(
+    artifactId: string,
+    offset: number,
+    maxBytes: number
+  ): Promise<{ chunk: string; nextOffset: number; endOfFile: boolean }> {
+    await this.init();
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('Artifact offset must be a nonnegative integer.');
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
+      throw new Error('Artifact range must contain 1-65536 bytes.');
+    }
+    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
+    const handle = await fs.open(artifact.path, 'r').catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!handle) return { chunk: '', nextOffset: offset, endOfFile: true };
+    try {
+      const stat = await handle.stat();
+      if (offset >= stat.size) return { chunk: '', nextOffset: stat.size, endOfFile: true };
+      const buffer = Buffer.alloc(Math.min(maxBytes, stat.size - offset));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+      const safeBytes = utf8SafePrefixLength(buffer.subarray(0, bytesRead), offset + bytesRead >= stat.size);
+      return {
+        chunk: buffer.subarray(0, safeBytes).toString('utf8'),
+        nextOffset: offset + safeBytes,
+        endOfFile: offset + safeBytes >= stat.size
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
   async getArtifactPath(artifactId: string): Promise<string> {
     await this.init();
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
@@ -2641,6 +2781,19 @@ function requireCurrentState(state: PersistedState): StoreState {
     }
   }
   return state as StoreState;
+}
+
+function utf8SafePrefixLength(buffer: Buffer, endOfFile: boolean): number {
+  if (endOfFile || buffer.length === 0) return buffer.length;
+  let start = buffer.length - 1;
+  while (start > 0 && (buffer[start] & 0xc0) === 0x80) start -= 1;
+  const lead = buffer[start];
+  const expected =
+    (lead & 0x80) === 0 ? 1 :
+    (lead & 0xe0) === 0xc0 ? 2 :
+    (lead & 0xf0) === 0xe0 ? 3 :
+    (lead & 0xf8) === 0xf0 ? 4 : 1;
+  return buffer.length - start < expected ? start : buffer.length;
 }
 
 function migratePersistedState(state: PersistedState): {

@@ -18,11 +18,22 @@ export class PreviewPlanResolver {
     const worktreeRoot = await canonicalProspectivePath(input.worktree.worktreePath);
     for (const node of [
       ...input.parsed.executionPlan.jobs,
-      ...input.parsed.executionPlan.services
+      ...input.parsed.executionPlan.services,
+      ...input.parsed.executionPlan.workers
     ]) {
       const cwd = await canonicalProspectivePath(path.join(worktreeRoot, node.cwd));
       if (!isPathWithin(worktreeRoot, cwd)) {
         throw new Error(`Preview node ${node.id} cwd escapes the task worktree.`);
+      }
+      for (const probe of [
+        'ready' in node ? node.ready : undefined,
+        'liveness' in node ? node.liveness?.probe : undefined
+      ]) {
+        if (probe?.type !== 'argv') continue;
+        const probeCwd = await canonicalProspectivePath(path.join(worktreeRoot, probe.cwd));
+        if (!isPathWithin(worktreeRoot, probeCwd)) {
+          throw new Error(`Preview probe for ${node.id} escapes the task worktree.`);
+        }
       }
     }
 
@@ -38,8 +49,8 @@ export class PreviewPlanResolver {
       executionPlan: input.parsed.executionPlan,
       warnings: [
         'Native preview commands run as your local user and are not sandboxed.',
-        'Commands may access the network; Task Monki does not enforce a no-network mode in Phase 1.',
-        'Environment values in this recipe are repository-visible literals; secret inputs are unsupported.'
+        'Commands may access the network; Task Monki does not enforce a no-network mode.',
+        'Environment values are repository-visible literals or generated non-secret origins; secret inputs are unsupported.'
       ],
       createdAt: input.now ?? new Date().toISOString()
     };

@@ -20,7 +20,7 @@ export class MacPreviewListenerInspector implements PreviewListenerInspector {
 
   async assertOwnedLoopback(port: number, processGroupId: number): Promise<void> {
     if (process.platform !== 'darwin') {
-      throw new Error('Phase 1 listener ownership inspection is supported on macOS only.');
+      throw new Error('Native preview listener ownership inspection is supported on macOS only.');
     }
     let stdout: string;
     try {

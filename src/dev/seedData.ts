@@ -388,6 +388,8 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('preview-approval-required', 'preview', 'Preview approval required', 'A resolved native plan awaits explicit approval.', ['preview:APPROVAL_REQUIRED']),
   scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
   scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
+  scenario('preview-replacing', 'preview', 'Preview replacing', 'The active preview stays routed while a candidate waits for readiness.', ['preview:REPLACING']),
+  scenario('preview-replacement-failed', 'preview', 'Preview replacement failed', 'A failed candidate leaves the active preview available.', ['preview:READY', 'replacement:FAILED']),
   scenario('preview-failed', 'preview', 'Preview failed', 'A preview job failed with retained bounded logs.', ['preview:FAILED']),
   scenario('preview-stale', 'preview', 'Preview stale', 'A ready preview serves captured source older than current Git evidence.', ['preview:READY', 'freshness:STALE']),
   scenario('preview-stopped', 'preview', 'Preview stopped', 'Owned runtime state was removed while compact evidence remains.', ['preview:STOPPED']),
@@ -735,6 +737,8 @@ async function seedScenario(
     case 'preview-approval-required':
     case 'preview-preparing':
     case 'preview-ready':
+    case 'preview-replacing':
+    case 'preview-replacement-failed':
     case 'preview-failed':
     case 'preview-stale':
     case 'preview-stopped':
@@ -860,14 +864,17 @@ async function createPreviewScenario(
           needs: { prepare: 'succeeded' },
           env: { NODE_ENV: 'development' },
           ports: { http: { env: 'PORT' } },
-          ready: { type: 'http', port: 'http', path: '/health/ready', timeoutSeconds: 30 }
+          ready: { type: 'http', port: 'http', path: '/health/ready', timeoutSeconds: 30 },
+          critical: true,
+          restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
         }
       ],
+      workers: [],
       routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
     },
     warnings: [
       'Native preview commands run as your local user and are not sandboxed.',
-      'Commands may access the network; Task Monki does not enforce a no-network mode in Phase 1.'
+      'Commands may access the network; Task Monki does not enforce a no-network mode.'
     ],
     createdAt: now
   });
@@ -904,6 +911,7 @@ async function createPreviewScenario(
     sourceManifestDigest: 'seed-manifest',
     workspacePath: path.join(ctx.previewRoot, state.task.id, generationId),
     state: generationState,
+    routingState: generationState === 'READY' ? 'ACTIVE' : 'CANDIDATE',
     freshness: definition.slug === 'preview-stale' ? 'STALE' : 'CURRENT',
     routes: routeAttached
       ? [
@@ -978,12 +986,48 @@ async function createPreviewScenario(
     cleanupError:
       generationState === 'CLEANUP_INCOMPLETE' ? 'Seeded unverified ownership identity.' : undefined
   });
+  if (['preview-replacing', 'preview-replacement-failed'].includes(definition.slug)) {
+    const failed = definition.slug === 'preview-replacement-failed';
+    const candidateAt = new Date(Date.parse(now) + 1).toISOString();
+    const candidateId = `${generationId}-candidate`;
+    await ctx.store.savePreviewGeneration({
+      ...generation,
+      id: candidateId,
+      workspacePath: path.join(ctx.previewRoot, state.task.id, candidateId),
+      state: failed ? 'FAILED' : 'WAITING_READY',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: generation.id,
+      routes: [],
+      failureReason: failed ? 'Candidate web service exited before readiness.' : undefined,
+      createdAt: candidateAt,
+      updatedAt: candidateAt,
+      readyAt: undefined
+    });
+    const candidateStdout = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stdout');
+    const candidateStderr = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stderr');
+    if (failed) await ctx.store.appendBoundedArtifact(candidateStderr.id, 'candidate readiness failed\n');
+    await ctx.store.savePreviewNodeAttempt({
+      id: `seed-attempt-${definition.slug}-candidate`, taskId: state.task.id,
+      generationId: candidateId, nodeId: 'web', kind: 'SERVICE', attempt: 1,
+      commandDigest: 'seed-candidate-command', state: failed ? 'FAILED' : 'WAITING_READY',
+      stdoutArtifactId: candidateStdout.id, stderrArtifactId: candidateStderr.id,
+      startedAt: candidateAt, endedAt: failed ? candidateAt : undefined,
+      readiness: { status: failed ? 'FAILED' : 'PENDING', lastError: failed ? 'Service exited.' : undefined }
+    });
+    await ctx.store.savePreviewResource({
+      id: `seed-resource-${definition.slug}-candidate`, taskId: state.task.id,
+      generationId: candidateId, logicalNodeId: 'web', adapterKind: 'NATIVE_PROCESS',
+      state: failed ? 'FAILED' : 'RUNNING', ownershipMarkerDigest: 'seed-marker',
+      receiptPath: path.join(ctx.previewRoot, state.task.id, candidateId, 'runtime', 'seed.json'),
+      targetHost: '127.0.0.1', targetPort: 42000 + ctx.scenarios.length, updatedAt: candidateAt
+    });
+  }
   return state;
 }
 
 function previewStateForSeed(slug: string): PreviewGenerationState {
   if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
-  if (slug === 'preview-ready' || slug === 'preview-stale') return 'READY';
+  if (['preview-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed'].includes(slug)) return 'READY';
   if (slug === 'preview-failed') return 'FAILED';
   if (slug === 'preview-stopped') return 'STOPPED';
   if (slug === 'preview-recovery-required') return 'RECOVERY_REQUIRED';

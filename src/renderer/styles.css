@@ -6149,10 +6149,32 @@ textarea:focus-visible {
   text-underline-offset: 2px;
 }
 
+.tm-preview__logviewer {
+  margin-top: 14px;
+}
+
+.tm-preview__logcontrols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.tm-preview__logcontrols select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface2);
+  color: var(--text-soft);
+  font: 11px var(--font-mono);
+}
+
 .tm-preview__logs {
   max-height: 220px;
   overflow: auto;
-  margin: 14px 0 0;
+  margin: 8px 0 0;
   padding: 10px;
   border-radius: 8px;
   background: var(--surface2);

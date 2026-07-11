@@ -15,10 +15,30 @@ describe('PreviewGateway', () => {
     const second = await fixture((_request, response) => response.end('second'));
     const gateway = await startGateway();
     const hostname = 'app.task-a.preview.localhost';
-    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: first });
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: first, generationId: 'first' });
     await expect(request(gateway.port, hostname)).resolves.toMatchObject({ status: 200, body: 'first' });
-    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: second });
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: second, generationId: 'second' });
     await expect(request(gateway.port, hostname)).resolves.toMatchObject({ status: 200, body: 'second' });
+  });
+
+  it('replaces multiple routes as one owned set and refuses stale-owner cleanup', async () => {
+    const oldTarget = await fixture((_request, response) => response.end('old'));
+    const newApp = await fixture((_request, response) => response.end('new-app'));
+    const newApi = await fixture((_request, response) => response.end('new-api'));
+    const gateway = await startGateway();
+    const app = 'app.task-owned.preview.localhost';
+    const api = 'api.task-owned.preview.localhost';
+    gateway.instance.replaceRoutes('old-generation', {
+      [app]: { host: '127.0.0.1', port: oldTarget },
+      [api]: { host: '127.0.0.1', port: oldTarget }
+    });
+    gateway.instance.replaceRoutes('new-generation', {
+      [app]: { host: '127.0.0.1', port: newApp },
+      [api]: { host: '127.0.0.1', port: newApi }
+    });
+    gateway.instance.removeOwnedRoutes('old-generation');
+    await expect(request(gateway.port, app)).resolves.toMatchObject({ body: 'new-app' });
+    await expect(request(gateway.port, api)).resolves.toMatchObject({ body: 'new-api' });
   });
 
   it('relocates a colliding preferred gateway port and returns bounded route/upstream errors', async () => {
@@ -34,7 +54,7 @@ describe('PreviewGateway', () => {
       body: 'Preview route is unavailable.'
     });
     const unused = await reserveAndRelease();
-    instance.setRoute(hostname, { host: '127.0.0.1', port: unused });
+    instance.setRoute(hostname, { host: '127.0.0.1', port: unused, generationId: 'missing' });
     const failed = await request(listening.port, hostname);
     expect(failed).toEqual({ status: 502, body: 'Preview target is unavailable.' });
   });
@@ -53,7 +73,7 @@ describe('PreviewGateway', () => {
     });
     const gateway = await startGateway();
     const hostname = 'events.task-a.preview.localhost';
-    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream });
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream, generationId: 'events' });
     const result = await stream(gateway.port, hostname, {
       connection: 'x-remove-me',
       'x-remove-me': 'remove-me'
@@ -74,7 +94,7 @@ describe('PreviewGateway', () => {
     const gateway = await startGateway();
     const hostname = 'redirect.task-a.preview.localhost';
     const authority = `${hostname}:${gateway.port}`;
-    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream });
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream, generationId: 'redirect' });
     const result = await requestWithHeaders(gateway.port, authority);
     expect(upstreamHost).toBe(authority);
     expect(result.headers.location).toBe(`http://${authority}/signed-in?next=1`);
@@ -90,7 +110,7 @@ describe('PreviewGateway', () => {
     closers.push(() => closeServer(server));
     const gateway = await startGateway();
     const hostname = 'socket.task-a.preview.localhost';
-    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream });
+    gateway.instance.setRoute(hostname, { host: '127.0.0.1', port: upstream, generationId: 'socket' });
     await expect(rawUpgrade(gateway.port, hostname)).resolves.toContain('echo:ping');
   });
 });

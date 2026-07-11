@@ -25,6 +25,7 @@ import type {
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReadPreviewLogRequest,
+  ReadPreviewLogResult,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
@@ -34,7 +35,7 @@ import type {
 export * from './agent';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 10 as const;
+export const TASK_STORE_SCHEMA_VERSION = 11 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -1002,7 +1003,7 @@ export interface TaskManagerApi {
   startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
   stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
-  readPreviewLog(input: ReadPreviewLogRequest): Promise<string>;
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

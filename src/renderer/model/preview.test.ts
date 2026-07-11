@@ -33,7 +33,7 @@ describe('preview view model', () => {
       id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1',
       recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,
       recipeDigest: 'recipe', executionDigest: 'execution',
-      executionPlan: { version: 1 as const, jobs: [], services: [], routes: [] },
+      executionPlan: { version: 1 as const, jobs: [], services: [], workers: [], routes: [] },
       warnings: [], createdAt: task.createdAt
     };
     const approvalRequired = buildPreviewViewModel({
@@ -49,11 +49,34 @@ describe('preview view model', () => {
       worktree: uncheckedWorktree(),
       plans: [plan],
       approvals: [{ id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest, scope: 'TASK', approvedAt: task.createdAt }],
-      generations: [{ id: 'generation', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: 'approval', executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY', freshness: 'STALE', routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt }],
+      generations: [{ id: 'generation', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: 'approval', executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY', routingState: 'ACTIVE', freshness: 'STALE', routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt }],
       attempts: [], resources: []
     });
     expect(view.status).toContain('stale');
-    expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'STOP']);
+    expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
+  });
+
+  it('keeps the active preview actionable while a candidate is replacing it or has failed', () => {
+    const plan = testPlan();
+    const approval = { id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest, scope: 'TASK' as const, approvedAt: task.createdAt };
+    const active = { id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id, executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: '/active', state: 'READY' as const, routingState: 'ACTIVE' as const, freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt };
+    const candidate = { ...active, id: 'candidate', workspacePath: '/candidate', state: 'WAITING_READY' as const, routingState: 'CANDIDATE' as const, replacesGenerationId: active.id, updatedAt: new Date(Date.parse(task.updatedAt) + 1).toISOString() };
+    const replacing = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [candidate, active], attempts: [], resources: []
+    });
+    expect(replacing.status).toBe('Replacing');
+    expect(replacing.activeGeneration?.id).toBe(active.id);
+    expect(replacing.actions.map((action) => action.label)).toEqual(['Open current', 'Cancel replacement']);
+
+    const failed = { ...candidate, state: 'FAILED' as const, failureReason: 'candidate failed' };
+    const preserved = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [failed, active], attempts: [], resources: []
+    });
+    expect(preserved.status).toBe('Running');
+    expect(preserved.generation?.id).toBe(active.id);
+    expect(preserved.summary).toContain('candidate failed');
   });
 
   it('renders every approval authority without ambiguous argv or hidden literal values', () => {
@@ -65,7 +88,9 @@ describe('preview view model', () => {
       id: 'web', cwd: '.', command: ['npm', 'run', 'dev server'], needs: {},
       env: { PUBLIC_LABEL: 'hello world', MULTILINE: 'first\nsecond' },
       ports: { http: { env: 'PORT' } },
-      ready: { type: 'http', port: 'http', path: '/health', timeoutSeconds: 17 }
+      ready: { type: 'http', port: 'http', path: '/health', timeoutSeconds: 17 },
+      critical: true,
+      restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
     }];
     plan.executionPlan.routes = [{ id: 'app', service: 'web', port: 'http', primary: true }];
     const summary = buildPreviewPlanSummary(plan);
@@ -85,5 +110,5 @@ function uncheckedWorktree() {
 }
 
 function testPlan(): PreviewPlanRecord {
-  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], services: [], routes: [] }, warnings: [], createdAt: task.createdAt };
+  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], services: [], workers: [], routes: [] }, warnings: [], createdAt: task.createdAt };
 }

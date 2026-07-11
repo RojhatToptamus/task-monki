@@ -614,9 +614,9 @@ export function App() {
     }
   };
 
-  const readPreviewLog = async (taskId: string, artifactId: string) => {
+  const readPreviewLog = async (taskId: string, artifactId: string, offset: number, maxBytes: number) => {
     try {
-      return await taskManagerApi.readPreviewLog({ taskId, artifactId });
+      return await taskManagerApi.readPreviewLog({ taskId, artifactId, offset, maxBytes });
     } catch (caught) {
       reportActionError(caught, 'Could not read preview logs.');
       throw caught;

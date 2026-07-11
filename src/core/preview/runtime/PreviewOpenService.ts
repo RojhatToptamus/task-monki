@@ -13,7 +13,12 @@ export class PreviewOpenService {
 
   async open(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
     const generation = await this.store.getPreviewGeneration(input.generationId);
-    if (!generation || generation.taskId !== input.taskId || generation.state !== 'READY') {
+    if (
+      !generation ||
+      generation.taskId !== input.taskId ||
+      generation.state !== 'READY' ||
+      generation.routingState !== 'ACTIVE'
+    ) {
       throw new Error('Only a recorded ready preview generation can be opened.');
     }
     const route = generation.routes.find(

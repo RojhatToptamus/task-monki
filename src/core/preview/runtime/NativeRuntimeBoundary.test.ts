@@ -58,7 +58,9 @@ describe('native runtime launcher boundary evidence', () => {
             node: {
               id: 'web', cwd: '.', command: ['node', 'server.mjs'], needs: {}, env: {},
               ports: { http: { env: 'PORT' } },
-              ready: { type: 'http', port: 'http', path: '/ready', timeoutSeconds: 5 }
+              ready: { type: 'http', port: 'http', path: '/ready', timeoutSeconds: 5 },
+              critical: true,
+              restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
             },
             portValues: { http: 41234 }
           })
@@ -88,7 +90,7 @@ async function runtimeFixture() {
   const plan = await store.savePreviewPlan({
     id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
     recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-    executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], routes: [] },
+    executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
     warnings: [], createdAt: now
   });
   const approval = await store.savePreviewApproval({
@@ -99,7 +101,7 @@ async function runtimeFixture() {
     id: 'generation', previewKey: 'task-boundary', taskId: task.id, iterationId: iteration.id,
     worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
     executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
-    sourceDirtyFingerprint: 'dirty', workspacePath: path.dirname(sourcePath), state: 'CREATED',
+    sourceDirtyFingerprint: 'dirty', workspacePath: path.dirname(sourcePath), state: 'CREATED', routingState: 'CANDIDATE',
     freshness: 'CURRENT', routes: [], createdAt: now, updatedAt: now
   });
   return {

@@ -110,7 +110,7 @@ version: 1
     expect(() => parsePreviewRecipe(source)).toThrow();
   });
 
-  it('rejects dependency cycles and multiple long-running services in Phase 1', () => {
+  it('rejects dependency cycles and accepts multiple Phase 2 services', () => {
     expect(() =>
       parsePreviewRecipe(
         RECIPE.replace(
@@ -119,11 +119,77 @@ version: 1
         )
       )
     ).toThrow('cycle');
-    expect(() =>
-      parsePreviewRecipe(
-        RECIPE.replace('services:\n  web:', 'services:\n  api:\n    command: [node, api.mjs]\n    ports: { http: { env: API_PORT } }\n    ready: { type: http, port: http, path: /ready }\n  web:')
-      )
-    ).toThrow('exactly one service');
+    const parsed = parsePreviewRecipe(
+      RECIPE.replace('services:\n  web:', 'services:\n  api:\n    command: [node, api.mjs]\n    ports: { http: { env: API_PORT } }\n    ready: { type: tcp, port: http }\n  web:')
+    );
+    expect(parsed.executionPlan.services.map((service) => service.id)).toEqual(['api', 'web']);
+  });
+
+  it('normalizes workers, typed origins, probes, criticality, and bounded restarts', () => {
+    const parsed = parsePreviewRecipe(`
+version: 1
+jobs:
+  install:
+    cwd: packages
+    command: [npm, install, --ignore-scripts]
+services:
+  api:
+    cwd: apps/api
+    command: [node, server.mjs]
+    needs: { install: succeeded }
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http, timeoutSeconds: 12 }
+    restart: { mode: on-failure, maxRestarts: 2, backoffMs: 50 }
+  web:
+    cwd: apps/web
+    command: [node, server.mjs]
+    needs: { install: succeeded, api: ready }
+    env:
+      API_ORIGIN: { type: service-origin, service: api, port: http }
+      PUBLIC_ORIGIN: { type: route-origin, route: app }
+    ports: { http: { env: PORT } }
+    ready: { type: argv, cwd: apps/web, command: [node, check-ready.mjs] }
+workers:
+  indexer:
+    command: [node, worker.mjs]
+    needs: { api: ready }
+    env:
+      API_ORIGIN: { type: service-origin, service: api, port: http }
+    ready: { type: argv, command: [node, worker-ready.mjs], timeoutSeconds: 8 }
+    liveness:
+      type: argv
+      command: [node, worker-live.mjs]
+      timeoutSeconds: 2
+      intervalSeconds: 5
+      failureThreshold: 2
+    critical: true
+    restart: { mode: always, maxRestarts: 4 }
+routes:
+  api: { service: api, port: http, primary: false }
+  app: { service: web, port: http, primary: true }
+`);
+    expect(parsed.executionPlan.jobs[0]?.cwd).toBe('packages');
+    expect(parsed.executionPlan.services[0]?.ready).toEqual({
+      type: 'tcp', port: 'http', timeoutSeconds: 12
+    });
+    expect(parsed.executionPlan.services[1]?.env.API_ORIGIN).toEqual({
+      type: 'service-origin', service: 'api', port: 'http'
+    });
+    expect(parsed.executionPlan.workers?.[0]).toEqual(expect.objectContaining({
+      id: 'indexer', critical: true,
+      restart: { mode: 'always', maxRestarts: 4, backoffMs: 250 },
+      liveness: expect.objectContaining({ intervalSeconds: 5, failureThreshold: 2 })
+    }));
+  });
+
+  it.each([
+    ['unbounded restarts', 'restart: { mode: always, maxRestarts: 9 }'],
+    ['never with restarts', 'restart: { mode: never, maxRestarts: 1 }'],
+    ['unknown service origin', 'env: { API: { type: service-origin, service: missing, port: http } }'],
+    ['implicit service dependency', 'env: { API: { type: service-origin, service: web, port: http } }']
+  ])('rejects unsafe Phase 2 policy: %s', (_label, field) => {
+    const source = RECIPE.replace('    env:\n      NODE_ENV: development', `    ${field}`);
+    expect(() => parsePreviewRecipe(source)).toThrow();
   });
 
   it('rejects oversized input and executable YAML tags before conversion', () => {
@@ -133,6 +199,23 @@ version: 1
     expect(() =>
       parsePreviewRecipe(`version: 1\njobs: !!js/function function () {}\nservices: {}\nroutes: {}`)
     ).toThrow();
+  });
+
+  it('caps executable graph size at 32 nodes', () => {
+    const jobs = Array.from({ length: 32 }, (_, index) => `  job-${index}: { command: [node, -e, process.exit(0)] }`).join('\n');
+    expect(() => parsePreviewRecipe(`${RECIPE}\n`)).not.toThrow();
+    expect(() => parsePreviewRecipe(`
+version: 1
+jobs:
+${jobs}
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`)).toThrow('exceeds 32');
   });
 
   it('rejects external symlinks, special entries, and oversized files before parsing', async () => {

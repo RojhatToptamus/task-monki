@@ -45,6 +45,7 @@ export class PreviewReconciler {
     await this.store.savePreviewGeneration({
       ...generation,
       routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+      routingState: 'RETIRED',
       state:
         cleanupIncomplete ? 'CLEANUP_INCOMPLETE'
         : generation.state === 'FAILED' ? 'FAILED'

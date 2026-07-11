@@ -1,4 +1,4 @@
-export type PreviewNodeKind = 'JOB' | 'SERVICE';
+export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'PROBE';
 
 export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
   'HOME',
@@ -28,6 +28,7 @@ export type PreviewGenerationState =
   | 'PREPARING_SOURCE'
   | 'RUNNING_JOBS'
   | 'STARTING_SERVICES'
+  | 'RUNNING_GRAPH'
   | 'WAITING_READY'
   | 'READY'
   | 'STOPPING'
@@ -63,6 +64,18 @@ export interface PreviewPortPlan {
   env: string;
 }
 
+export type PreviewEnvironmentValue =
+  | string
+  | {
+      type: 'service-origin';
+      service: string;
+      port: string;
+    }
+  | {
+      type: 'route-origin';
+      route: string;
+    };
+
 export interface PreviewHttpReadinessPlan {
   type: 'http';
   port: string;
@@ -70,13 +83,51 @@ export interface PreviewHttpReadinessPlan {
   timeoutSeconds: number;
 }
 
-export interface PreviewServicePlan extends PreviewCommandPlan {
+export interface PreviewTcpReadinessPlan {
+  type: 'tcp';
+  port: string;
+  timeoutSeconds: number;
+}
+
+export interface PreviewArgvReadinessPlan extends PreviewCommandPlan {
+  type: 'argv';
+  timeoutSeconds: number;
+}
+
+export type PreviewReadinessPlan =
+  | PreviewHttpReadinessPlan
+  | PreviewTcpReadinessPlan
+  | PreviewArgvReadinessPlan;
+
+export interface PreviewLivenessPlan {
+  probe: PreviewReadinessPlan;
+  intervalSeconds: number;
+  failureThreshold: number;
+}
+
+export interface PreviewRestartPlan {
+  mode: 'never' | 'on-failure' | 'always';
+  maxRestarts: number;
+  backoffMs: number;
+}
+
+export interface PreviewLongRunningPlan extends PreviewCommandPlan {
   id: string;
   label?: string;
   needs: Record<string, 'succeeded' | 'ready'>;
-  env: Record<string, string>;
+  env: Record<string, PreviewEnvironmentValue>;
   ports: Record<string, PreviewPortPlan>;
-  ready: PreviewHttpReadinessPlan;
+  critical: boolean;
+  restart: PreviewRestartPlan;
+  liveness?: PreviewLivenessPlan;
+}
+
+export interface PreviewServicePlan extends PreviewLongRunningPlan {
+  ready: PreviewReadinessPlan;
+}
+
+export interface PreviewWorkerPlan extends PreviewLongRunningPlan {
+  ready?: PreviewReadinessPlan;
 }
 
 export interface PreviewRoutePlan {
@@ -90,6 +141,7 @@ export interface PreviewExecutionPlan {
   version: 1;
   jobs: PreviewJobPlan[];
   services: PreviewServicePlan[];
+  workers: PreviewWorkerPlan[];
   routes: PreviewRoutePlan[];
 }
 
@@ -144,6 +196,8 @@ export interface PreviewGenerationRecord {
   sourceManifestDigest?: string;
   workspacePath: string;
   state: PreviewGenerationState;
+  routingState: 'CANDIDATE' | 'ACTIVE' | 'RETIRED';
+  replacesGenerationId?: string;
   freshness: 'CURRENT' | 'STALE' | 'UNKNOWN';
   routes: PreviewRouteRecord[];
   failureReason?: string;
@@ -151,6 +205,7 @@ export interface PreviewGenerationRecord {
   createdAt: string;
   updatedAt: string;
   readyAt?: string;
+  cutoverAt?: string;
   stoppedAt?: string;
 }
 
@@ -242,6 +297,14 @@ export interface OpenPreviewRequest {
 export interface ReadPreviewLogRequest {
   taskId: string;
   artifactId: string;
+  offset: number;
+  maxBytes: number;
+}
+
+export interface ReadPreviewLogResult {
+  chunk: string;
+  nextOffset: number;
+  endOfFile: boolean;
 }
 
 export interface OpenPreviewResult {
