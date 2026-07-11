@@ -132,7 +132,7 @@ async function verifyLinuxArtifacts(releaseDir, version, nativeValidation) {
   await assertPackageSize(appImagePath);
   await assertElfMachine(appImagePath, 0x3e);
   const appImageStat = await fs.stat(appImagePath);
-  if ((appImageStat.mode & 0o111) === 0) {
+  if (process.platform !== 'win32' && (appImageStat.mode & 0o111) === 0) {
     throw new Error(`${appImage} is not executable.`);
   }
   await assertPackageSize(debPath);

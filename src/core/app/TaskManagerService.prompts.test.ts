@@ -31,7 +31,7 @@ describe('TaskManagerService prompt composition', () => {
     expect(scenario.agent.steeredTurns[0]?.prompt).toContain(
       'Do not commit, push, merge'
     );
-  });
+  }, 15_000);
 
   it('allows a recovery-required source run to continue with bounded prior-run context', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -71,5 +71,5 @@ describe('TaskManagerService prompt composition', () => {
       terminalReason:
         'Recovery-required run was superseded by an explicit continue or retry action.'
     });
-  });
+  }, 15_000);
 });

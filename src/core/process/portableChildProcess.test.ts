@@ -26,6 +26,7 @@ describe('prepareProcessCommand', () => {
         'C:\\Users\\Runner Admin\\AppData\\Local\\Temp\\fake-codex.cmd',
         ['app-server', '--listen', 'stdio://'],
         'win32',
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
         { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }
       )
     ).toEqual({
@@ -76,6 +77,22 @@ describe('prepareProcessCommand', () => {
       ],
       windowsVerbatimArguments: true
     });
+  });
+
+  it('adds a second escaping pass only for batch launchers that forward through %*', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki cmd shim '));
+    const executable = path.join(directory, 'forwarding.cmd');
+    await fs.writeFile(executable, '@echo off\r\nnode tool.cjs %*\r\n', 'utf8');
+
+    expect(
+      prepareProcessCommand(
+        executable,
+        ['space arg', 'a&b'],
+        'win32',
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }
+      ).argv.at(-1)
+    ).toContain('^^^"space^^^ arg^^^" ^^^"a^^^&b^^^"');
   });
 
   it.runIf(process.platform === 'win32')(

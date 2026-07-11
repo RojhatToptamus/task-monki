@@ -1,6 +1,9 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { spawnPortable } from './portableChildProcess';
+import {
+  spawnPortable,
+  terminatePortableProcessTree
+} from './portableChildProcess';
 
 export interface ProcessSpec {
   executable: string;
@@ -76,26 +79,30 @@ async function cancelProcess(child: ChildProcessWithoutNullStreams): Promise<voi
     return;
   }
 
-  signalChild(child, 'SIGINT');
+  await signalChild(child, 'SIGINT');
   if (await waitForExit(child, 3000)) {
     return;
   }
 
-  signalChild(child, 'SIGTERM');
+  await signalChild(child, 'SIGTERM');
   if (await waitForExit(child, 3000)) {
     return;
   }
 
-  signalChild(child, 'SIGKILL');
+  await signalChild(child, 'SIGKILL');
+  await waitForExit(child, 3000);
 }
 
-function signalChild(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+async function signalChild(
+  child: ChildProcessWithoutNullStreams,
+  signal: NodeJS.Signals
+): Promise<void> {
   try {
     if (process.platform !== 'win32' && child.pid) {
       process.kill(-child.pid, signal);
       return;
     }
-    child.kill(signal);
+    await terminatePortableProcessTree(child, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
       throw error;

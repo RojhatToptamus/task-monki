@@ -4,7 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { execFilePortable, spawnPortable } from '../../process/portableChildProcess';
+import {
+  execFilePortable,
+  spawnPortable,
+  terminatePortableProcessTree
+} from '../../process/portableChildProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
@@ -477,9 +481,9 @@ async function probeJsonRpcCapabilities(
     reader.close();
     child.stdin.destroy();
     if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
+      await terminatePortableProcessTree(child, 'SIGTERM');
       if (!(await waitForClose(child, 1_000))) {
-        child.kill('SIGKILL');
+        await terminatePortableProcessTree(child, 'SIGKILL');
       }
     }
     await fs.rm(codexHome, { recursive: true, force: true });

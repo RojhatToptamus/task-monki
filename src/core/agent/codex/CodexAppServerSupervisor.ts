@@ -6,7 +6,10 @@ import type {
   CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { spawnPortable } from '../../process/portableChildProcess';
+import {
+  spawnPortable,
+  terminatePortableProcessTree
+} from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
@@ -112,6 +115,10 @@ export class CodexAppServerSupervisor {
   private client?: CodexRpcClient;
   private server?: AgentServerInstance;
   private startPromise?: Promise<CodexRpcClient>;
+  private closeHandling?: {
+    child: ChildProcessWithoutNullStreams;
+    promise: Promise<void>;
+  };
   private shuttingDown = false;
   private diagnosticTail = '';
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
@@ -156,8 +163,13 @@ export class CodexAppServerSupervisor {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) {
+    if (!child) {
       this.client?.close('Codex App Server shut down.');
+      return;
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      this.client?.close('Codex App Server shut down.');
+      await this.waitForHandledClose(child, 3_000);
       return;
     }
 
@@ -170,11 +182,12 @@ export class CodexAppServerSupervisor {
         await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
       }
     }
-    child.kill('SIGTERM');
+    await terminatePortableProcessTree(child, 'SIGTERM');
     if (!(await waitForClose(child, 3_000))) {
-      child.kill('SIGKILL');
+      await terminatePortableProcessTree(child, 'SIGKILL');
       await waitForClose(child, 2_000);
     }
+    await this.waitForHandledClose(child, 3_000);
   }
 
   /**
@@ -186,9 +199,13 @@ export class CodexAppServerSupervisor {
   async terminateForSecurityBoundary(reason: string): Promise<void> {
     this.shuttingDown = true;
     const child = this.child;
+    const closeHandling = this.closeHandling;
+    const handledClose = closeHandling && closeHandling.child === child
+      ? closeHandling.promise
+      : undefined;
     this.client?.close(reason);
     if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
+      await terminatePortableProcessTree(child, 'SIGTERM');
     }
 
     if (this.server) {
@@ -204,9 +221,12 @@ export class CodexAppServerSupervisor {
     }
     if (child && child.exitCode === null && child.signalCode === null) {
       if (!(await waitForClose(child, 1_000))) {
-        child.kill('SIGKILL');
+        await terminatePortableProcessTree(child, 'SIGKILL');
         await waitForClose(child, 2_000);
       }
+    }
+    if (handledClose) {
+      await waitForPromise(handledClose, 3_000);
     }
   }
 
@@ -221,10 +241,12 @@ export class CodexAppServerSupervisor {
     }
     this.client?.close(reason);
     if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
+      await terminatePortableProcessTree(child, 'SIGTERM');
       if (!(await waitForClose(child, 1_000))) {
-        child.kill('SIGKILL');
+        await terminatePortableProcessTree(child, 'SIGKILL');
+        await waitForClose(child, 2_000);
       }
+      await this.waitForHandledClose(child, 3_000);
     }
   }
 
@@ -295,8 +317,16 @@ export class CodexAppServerSupervisor {
         this.diagnosticTail = `${this.diagnosticTail}${text}`.slice(-32_768);
         this.events.emit('diagnostic', text);
       });
+      let resolveHandledClose!: () => void;
+      const handledClose = new Promise<void>((resolve) => {
+        resolveHandledClose = resolve;
+      });
+      this.closeHandling = { child, promise: handledClose };
       child.once('close', (exitCode, signal) => {
-        void this.handleClose(exitCode, signal);
+        void this.handleClose(exitCode, signal).then(
+          resolveHandledClose,
+          resolveHandledClose
+        );
       });
       child.once('error', (error) => {
         this.events.emit('diagnostic', error.message);
@@ -332,7 +362,9 @@ export class CodexAppServerSupervisor {
         exitReason: message
       });
       this.client?.close(message);
-      this.child?.kill('SIGTERM');
+      if (this.child) {
+        await terminatePortableProcessTree(this.child, 'SIGTERM');
+      }
       throw error;
     }
   }
@@ -351,7 +383,19 @@ export class CodexAppServerSupervisor {
       });
     }
     this.client?.close(`Protocol error: ${error.message}`);
-    this.child?.kill('SIGTERM');
+    if (this.child) {
+      await terminatePortableProcessTree(this.child, 'SIGTERM');
+    }
+  }
+
+  private async waitForHandledClose(
+    child: ChildProcessWithoutNullStreams,
+    timeoutMs: number
+  ): Promise<boolean> {
+    const handledClose = this.closeHandling?.child === child
+      ? this.closeHandling.promise
+      : undefined;
+    return handledClose ? waitForPromise(handledClose, timeoutMs) : true;
   }
 
   private async handleClose(
@@ -438,5 +482,21 @@ function waitForClose(
       resolve(true);
     };
     child.once('close', onClose);
+  });
+}
+
+function waitForPromise(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    void promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      }
+    );
   });
 }

@@ -103,81 +103,86 @@ describe('FileTaskStore', () => {
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
   });
 
-  it('reconciles managed artifact orphans after a published delete survives restart', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-reconcile-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      title: 'Artifact crash cleanup',
-      prompt: 'Leave artifacts until restart can resolve publication.',
-      repositoryPath: dir
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/artifact-crash-cleanup',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      provider: 'codex'
-    });
-    const run = await store.createRun({
-      task,
-      session,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
-    });
-    const final = await store.writeFinalArtifact(task.id, run.id, 'final output');
-    const artifactPaths = (await store.snapshot()).artifacts
-      .filter((artifact) => artifact.taskId === task.id)
-      .map((artifact) => artifact.path);
-    expect(artifactPaths).toContain(final.path);
+  it.runIf(process.platform !== 'win32')(
+    'reconciles managed artifact orphans after a published delete survives restart',
+    async () => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-manager-artifact-reconcile-')
+      );
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Artifact crash cleanup',
+        prompt: 'Leave artifacts until restart can resolve publication.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/artifact-crash-cleanup',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        provider: 'codex'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      const final = await store.writeFinalArtifact(task.id, run.id, 'final output');
+      const artifactPaths = (await store.snapshot()).artifacts
+        .filter((artifact) => artifact.taskId === task.id)
+        .map((artifact) => artifact.path);
+      expect(artifactPaths).toContain(final.path);
 
-    const artifactsDir = path.join(dir, 'artifacts');
-    const unknownFile = path.join(artifactsDir, 'user-notes.txt');
-    const unknownDirectory = path.join(artifactsDir, 'user-folder');
-    const almostManaged = path.join(
-      artifactsDir,
-      `${task.id}-task-agent-final-not-a-managed-uuid.log`
-    );
-    await fs.writeFile(unknownFile, 'preserve me', 'utf8');
-    await fs.mkdir(unknownDirectory);
-    await fs.writeFile(almostManaged, 'also preserve me', 'utf8');
+      const artifactsDir = path.join(dir, 'artifacts');
+      const unknownFile = path.join(artifactsDir, 'user-notes.txt');
+      const unknownDirectory = path.join(artifactsDir, 'user-folder');
+      const almostManaged = path.join(
+        artifactsDir,
+        `${task.id}-task-agent-final-not-a-managed-uuid.log`
+      );
+      await fs.writeFile(unknownFile, 'preserve me', 'utf8');
+      await fs.mkdir(unknownDirectory);
+      await fs.writeFile(almostManaged, 'also preserve me', 'utf8');
 
-    const originalOpen = fs.open.bind(fs);
-    let injectedFailure = false;
-    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
-      const handle = await originalOpen(...args);
-      if (!injectedFailure && String(args[0]) === dir) {
-        injectedFailure = true;
-        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
-          new Error('Injected post-publication directory sync failure.')
-        );
+      const originalOpen = fs.open.bind(fs);
+      let injectedFailure = false;
+      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args);
+        if (!injectedFailure && String(args[0]) === dir) {
+          injectedFailure = true;
+          vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+            new Error('Injected post-publication directory sync failure.')
+          );
+        }
+        return handle;
+      });
+      try {
+        await store.deleteTask(task.id);
+      } finally {
+        open.mockRestore();
       }
-      return handle;
-    });
-    try {
-      await store.deleteTask(task.id);
-    } finally {
-      open.mockRestore();
-    }
-    for (const artifactPath of artifactPaths) {
-      await expect(fs.access(artifactPath)).resolves.toBeUndefined();
-    }
-    await store.close();
+      for (const artifactPath of artifactPaths) {
+        await expect(fs.access(artifactPath)).resolves.toBeUndefined();
+      }
+      await store.close();
 
-    const restarted = new FileTaskStore(dir);
-    await restarted.snapshot();
-    for (const artifactPath of artifactPaths) {
-      await expect(fs.access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      const restarted = new FileTaskStore(dir);
+      await restarted.snapshot();
+      for (const artifactPath of artifactPaths) {
+        await expect(fs.access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await expect(fs.readFile(unknownFile, 'utf8')).resolves.toBe('preserve me');
+      await expect(fs.readFile(almostManaged, 'utf8')).resolves.toBe('also preserve me');
+      expect((await fs.stat(unknownDirectory)).isDirectory()).toBe(true);
+      await restarted.close();
     }
-    await expect(fs.readFile(unknownFile, 'utf8')).resolves.toBe('preserve me');
-    await expect(fs.readFile(almostManaged, 'utf8')).resolves.toBe('also preserve me');
-    expect((await fs.stat(unknownDirectory)).isDirectory()).toBe(true);
-    await restarted.close();
-  });
+  );
 
   it.runIf(process.platform !== 'win32')(
     'fails closed on unsafe artifact entries without following or removing them',

@@ -7,11 +7,14 @@ import {
   type SpawnOptions,
   type SpawnOptionsWithoutStdio
 } from 'node:child_process';
+import { closeSync, openSync, readSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const windowsCmdMetaCharacters = /([()\][%!^"`<>&|;, *?])/g;
+const WINDOWS_BATCH_INSPECTION_BYTES = 64 * 1024;
+const WINDOWS_PROCESS_TREE_TIMEOUT_MS = 10_000;
 
 export interface PreparedProcessCommand {
   executable: string;
@@ -31,9 +34,12 @@ export function prepareProcessCommand(
   }
 
   // Batch launchers must run through cmd.exe, and this string is already escaped for cmd.
+  const forwardsAllArguments = windowsBatchForwardsAllArguments(executable);
   const commandLine = [
     escapeWindowsCommand(executable),
-    ...argv.map(escapeWindowsCommandArgument)
+    ...argv.map((argument) =>
+      escapeWindowsCommandArgument(argument, forwardsAllArguments)
+    )
   ].join(' ');
   return {
     executable: resolveWindowsCommandProcessor(env, hostEnv),
@@ -73,6 +79,38 @@ export function execFilePortable(
   }>;
 }
 
+/**
+ * Windows does not propagate ChildProcess.kill() through a cmd.exe process
+ * tree. taskkill /T provides the process-tree boundary that batch launchers
+ * need; other platforms retain their ordinary signal behavior.
+ */
+export async function terminatePortableProcessTree(
+  child: ChildProcess,
+  signal: NodeJS.Signals = 'SIGTERM'
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  if (process.platform === 'win32' && child.pid) {
+    try {
+      await execFileAsync(
+        resolveWindowsSystemExecutable('taskkill.exe', process.env),
+        ['/pid', String(child.pid), '/t', '/f'],
+        {
+          timeout: WINDOWS_PROCESS_TREE_TIMEOUT_MS,
+          windowsHide: true,
+          maxBuffer: 1024 * 1024
+        }
+      );
+      return;
+    } catch {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      // Fall back to Node's direct termination if taskkill is unavailable.
+    }
+  }
+
+  child.kill(signal);
+}
+
 function withPreparedProcessOptions<T extends SpawnOptions | ExecFileOptions>(
   command: PreparedProcessCommand,
   options: T
@@ -96,16 +134,42 @@ function isWindowsBatchFile(executable: string): boolean {
   return extension === '.cmd' || extension === '.bat';
 }
 
+function windowsBatchForwardsAllArguments(executable: string): boolean {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(executable, 'r');
+    const buffer = Buffer.allocUnsafe(WINDOWS_BATCH_INSPECTION_BYTES);
+    const bytesRead = readSync(
+      descriptor,
+      buffer,
+      0,
+      buffer.byteLength,
+      0
+    );
+    return buffer.subarray(0, bytesRead).includes(Buffer.from('%*'));
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 function escapeWindowsCommand(value: string): string {
   return value.replace(windowsCmdMetaCharacters, '^$1');
 }
 
-function escapeWindowsCommandArgument(value: string): string {
+function escapeWindowsCommandArgument(
+  value: string,
+  doubleEscapeMetaCharacters: boolean
+): string {
   let argument = value;
   argument = argument.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
   argument = argument.replace(/(?=(\\+?)?)\1$/, '$1$1');
   argument = `"${argument}"`;
-  return argument.replace(windowsCmdMetaCharacters, '^$1');
+  argument = argument.replace(windowsCmdMetaCharacters, '^$1');
+  return doubleEscapeMetaCharacters
+    ? argument.replace(windowsCmdMetaCharacters, '^$1')
+    : argument;
 }
 
 function resolveWindowsCommandProcessor(
@@ -127,6 +191,25 @@ function resolveWindowsCommandProcessor(
     }
   }
   return 'cmd.exe';
+}
+
+function resolveWindowsSystemExecutable(
+  executable: string,
+  hostEnv: NodeJS.ProcessEnv
+): string {
+  const comSpec = environmentValue(hostEnv, 'ComSpec');
+  if (
+    comSpec &&
+    path.win32.isAbsolute(comSpec) &&
+    path.win32.basename(comSpec).toLowerCase() === 'cmd.exe'
+  ) {
+    return path.win32.join(path.win32.dirname(comSpec), executable);
+  }
+  const systemRoot = environmentValue(hostEnv, 'SystemRoot');
+  if (systemRoot && path.win32.isAbsolute(systemRoot)) {
+    return path.win32.join(systemRoot, 'System32', executable);
+  }
+  return executable;
 }
 
 function windowsLauncherEnvironment(

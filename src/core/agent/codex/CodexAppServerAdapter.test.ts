@@ -197,10 +197,8 @@ describe('CodexAppServerAdapter', () => {
     const outbound = readOutboundMessages(finalJournal);
     expect(finalJournal).not.toContain(imageBytes.toString('utf8'));
     expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
-    // The raw protocol journal is the explicit debug-only exception to the
-    // path-free durable-record rule because Codex receives managed paths.
-    expect(finalJournal).toContain(canonicalImagePath);
-    expect(finalJournal).toContain(canonicalTextPath);
+    // The parsed raw protocol journal is the explicit debug-only exception to
+    // the path-free durable-record rule because Codex receives managed paths.
     expect(outbound.find((message) => message.method === 'thread/start')?.params)
       .toMatchObject({
         approvalPolicy: 'on-request',
@@ -232,11 +230,9 @@ describe('CodexAppServerAdapter', () => {
       input?: Array<{ type?: string; text?: string; path?: string }>;
     } | undefined)?.input;
     const deliveryImagePath = turnInput?.find((item) => item.type === 'localImage')?.path;
-    const manifestPaths = [
-      ...(turnInput?.find((item) => item.type === 'text')?.text ?? '').matchAll(
-        /"readOnlyPath":"([^"]+)"/gu
-      )
-    ].map((match) => match[1]);
+    const manifestPaths = readAttachmentManifestPaths(
+      turnInput?.find((item) => item.type === 'text')?.text
+    );
     const deliveryTextPath = manifestPaths.find((candidate) => candidate !== deliveryImagePath);
     expect(deliveryImagePath).toBe(canonicalImagePath);
     expect(deliveryTextPath).toBe(canonicalTextPath);
@@ -247,7 +243,7 @@ describe('CodexAppServerAdapter', () => {
       }),
       { type: 'localImage', path: deliveryImagePath }
     ]);
-    expect(turnInput?.[0]?.text).toContain(`"readOnlyPath":"${deliveryTextPath}"`);
+    expect(manifestPaths).toContain(canonicalTextPath);
     await expect(fs.access(deliveryImagePath!)).resolves.toBeUndefined();
     await expect(fs.access(deliveryTextPath!)).resolves.toBeUndefined();
 
@@ -309,7 +305,7 @@ describe('CodexAppServerAdapter', () => {
     const manifest = (
       turnStart?.params as { input?: Array<{ type?: string; text?: string }> } | undefined
     )?.input?.find((item) => item.type === 'text')?.text;
-    const deliveryPath = manifest?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    const deliveryPath = readAttachmentManifestPaths(manifest)[0];
     expect(deliveryPath).toContain(`${path.sep}attachments${path.sep}tasks${path.sep}`);
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
 
@@ -779,7 +775,9 @@ describe('CodexAppServerAdapter', () => {
     const reviewInstructions = (
       reviewFork?.params as { developerInstructions?: string } | undefined
     )?.developerInstructions;
-    expect(reviewInstructions).toContain(canonicalReviewAttachmentPath);
+    expect(readAttachmentManifestPaths(reviewInstructions)).toContain(
+      canonicalReviewAttachmentPath
+    );
     const reviewStart = messages.find((message) => message.method === 'review/start');
     expect(
       (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
@@ -861,20 +859,38 @@ describe('CodexAppServerAdapter', () => {
     const executable = await writeFakeCodexExecutable(dir, 'unsafe-live-settings');
     const store = new FileTaskStore(path.join(dir, 'store'));
     const updateAgentSession = store.updateAgentSession.bind(store);
+    const updateAgentServer = store.updateAgentServer.bind(store);
     let releaseUnsafeObservation!: () => void;
     let markUnsafeObservationBlocked!: () => void;
+    let releaseTerminalServerPersistence!: () => void;
+    let markTerminalServerPersistenceBlocked!: () => void;
+    let unsafeObservationReached = false;
     const unsafeObservationRelease = new Promise<void>((resolve) => {
       releaseUnsafeObservation = resolve;
     });
     const unsafeObservationBlocked = new Promise<void>((resolve) => {
       markUnsafeObservationBlocked = resolve;
     });
+    const terminalServerPersistenceRelease = new Promise<void>((resolve) => {
+      releaseTerminalServerPersistence = resolve;
+    });
+    const terminalServerPersistenceBlocked = new Promise<void>((resolve) => {
+      markTerminalServerPersistenceBlocked = resolve;
+    });
     vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
       if (patch.observedSettings?.sandbox === 'DANGER_FULL_ACCESS') {
+        unsafeObservationReached = true;
         markUnsafeObservationBlocked();
         await unsafeObservationRelease;
       }
       return updateAgentSession(sessionId, patch);
+    });
+    vi.spyOn(store, 'updateAgentServer').mockImplementation(async (serverId, patch) => {
+      if (patch.status === 'EXITED' || patch.status === 'FAILED') {
+        markTerminalServerPersistenceBlocked();
+        await terminalServerPersistenceRelease;
+      }
+      return updateAgentServer(serverId, patch);
     });
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
@@ -903,15 +919,18 @@ describe('CodexAppServerAdapter', () => {
       settings: safeSettings
     });
 
+    await terminalServerPersistenceBlocked;
+    expect(unsafeObservationReached).toBe(false);
+    await expect(adapter.listModels()).rejects.toThrow(
+      'Live session observed settings is unsafe'
+    );
+    releaseTerminalServerPersistence();
     await unsafeObservationBlocked;
     const beforePersistenceRelease = await store.snapshot();
     expect(beforePersistenceRelease.agentServers.at(-1)?.status).toBe('EXITED');
     expect(beforePersistenceRelease.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
       status: 'RUNNING'
     });
-    await expect(adapter.listModels()).rejects.toThrow(
-      'Live session observed settings is unsafe'
-    );
     releaseUnsafeObservation();
 
     const failed = await waitForRunStatus(store, run.id, 'FAILED');
@@ -1111,7 +1130,7 @@ describe('CodexAppServerAdapter', () => {
     const instructions = (
       reviewFork?.params as { developerInstructions?: string } | undefined
     )?.developerInstructions;
-    const deliveryPath = instructions?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    const deliveryPath = readAttachmentManifestPaths(instructions)[0];
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
@@ -1206,7 +1225,7 @@ describe('CodexAppServerAdapter', () => {
     const instructions = (
       reviewFork?.params as { developerInstructions?: string } | undefined
     )?.developerInstructions;
-    const deliveryPath = instructions?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    const deliveryPath = readAttachmentManifestPaths(instructions)[0];
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
@@ -1634,6 +1653,17 @@ function readOutboundMessages(
     .map((line) => JSON.parse(line) as { direction: string; raw: string })
     .filter((entry) => entry.direction === 'OUTBOUND')
     .map((entry) => JSON.parse(entry.raw) as { method?: string; params?: unknown });
+}
+
+function readAttachmentManifestPaths(manifest: string | undefined): string[] {
+  if (!manifest) return [];
+  const prefix = 'Attachment metadata: ';
+  return manifest
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => JSON.parse(line.slice(prefix.length)) as { readOnlyPath?: unknown })
+    .map((metadata) => metadata.readOnlyPath)
+    .filter((value): value is string => typeof value === 'string');
 }
 
 async function writeFakeCodexExecutable(
