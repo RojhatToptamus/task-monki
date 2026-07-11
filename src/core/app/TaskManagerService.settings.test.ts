@@ -28,13 +28,16 @@ describe('TaskManagerService settings', () => {
     delete process.env.TASK_MANAGER_GIT_PATH;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-settings-'));
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version service-test');
+    const fakeCodex = await writeOutputExecutable(dir, 'fake-codex', 'codex-cli test');
+    const fakeGh = await writeOutputExecutable(dir, 'fake-gh', 'gh version test');
     const service = new TaskManagerService(
       new FileTaskStore(path.join(dir, 'store')),
       dir,
       undefined,
       {
         appSettingsStore: new MemoryAppSettingsStore(),
-        codexPath: 'codex-not-used'
+        codexPath: fakeCodex,
+        ghPath: fakeGh
       }
     );
 
