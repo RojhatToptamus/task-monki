@@ -1,4 +1,4 @@
-export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'PROBE';
+export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'RESOURCE' | 'PROBE';
 
 export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
   'HOME',
@@ -55,7 +55,10 @@ export interface PreviewCommandPlan {
 export interface PreviewJobPlan extends PreviewCommandPlan {
   id: string;
   label?: string;
-  needs: Record<string, 'succeeded'>;
+  role: 'generic' | 'migration' | 'seed';
+  retrySafe: boolean;
+  needs: Record<string, 'succeeded' | 'ready'>;
+  env: Record<string, PreviewEnvironmentValue>;
 }
 
 export interface PreviewPortPlan {
@@ -72,6 +75,19 @@ export type PreviewEnvironmentValue =
   | {
       type: 'route-origin';
       route: string;
+    }
+  | {
+      type: 'postgres-url';
+      resource: string;
+    }
+  | {
+      type: 'redis-url';
+      resource: string;
+    }
+  | {
+      type: 'resource-origin';
+      resource: string;
+      port: string;
     };
 
 export interface PreviewHttpReadinessPlan {
@@ -135,12 +151,65 @@ export interface PreviewRoutePlan {
   primary: boolean;
 }
 
+export interface PreviewOciResourceLimits {
+  cpus?: number;
+  memoryMb?: number;
+  diskMb?: number;
+  pids?: number;
+}
+
+export interface PreviewOciPortPlan {
+  containerPort: number;
+  protocol: 'tcp';
+}
+
+interface PreviewOciResourcePlanBase {
+  id: string;
+  label?: string;
+  image: string;
+  scope: 'generation' | 'preview';
+  limits: PreviewOciResourceLimits;
+}
+
+export interface PreviewPostgresResourcePlan extends PreviewOciResourcePlanBase {
+  type: 'postgres';
+  database: string;
+}
+
+export interface PreviewRedisResourcePlan extends PreviewOciResourcePlanBase {
+  type: 'redis';
+}
+
+export interface PreviewGenericOciResourcePlan extends PreviewOciResourcePlanBase {
+  type: 'oci';
+  command?: string[];
+  env: Record<string, string>;
+  ports: Record<string, PreviewOciPortPlan>;
+  ready: PreviewHttpReadinessPlan | PreviewTcpReadinessPlan;
+  dataMount?: string;
+}
+
+export type PreviewOciResourcePlan =
+  | PreviewPostgresResourcePlan
+  | PreviewRedisResourcePlan
+  | PreviewGenericOciResourcePlan;
+
+export interface PreviewScenarioPlan {
+  id: string;
+  label?: string;
+  jobs: string[];
+  resources: string[];
+}
+
 export interface PreviewExecutionPlan {
   version: 1;
   jobs: PreviewJobPlan[];
+  resources: PreviewOciResourcePlan[];
   services: PreviewServicePlan[];
   workers: PreviewWorkerPlan[];
   routes: PreviewRoutePlan[];
+  scenarios: PreviewScenarioPlan[];
+  selectedScenarioId: string;
 }
 
 export interface PreviewPlanRecord {
@@ -153,6 +222,7 @@ export interface PreviewPlanRecord {
   recipeDigest: string;
   executionDigest: string;
   executionPlan: PreviewExecutionPlan;
+  ociCapability?: PreviewOciEngineCapability;
   warnings: string[];
   createdAt: string;
 }

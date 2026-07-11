@@ -2,7 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { parsePreviewRecipe, PreviewRecipeLoader } from './PreviewRecipeLoader';
+import {
+  parsePreviewRecipe,
+  PreviewRecipeLoader,
+  selectPreviewScenario
+} from './PreviewRecipeLoader';
 
 const RECIPE = `
 version: 1
@@ -203,6 +207,93 @@ routes:
     expect(() => parsePreviewRecipe(source)).toThrow();
   });
 
+  it('normalizes typed OCI data, migration ordering, scenarios, limits, and URL references', () => {
+    const parsed = parsePreviewRecipe(PHASE_THREE_RECIPE);
+
+    expect(parsed.executionPlan.resources).toEqual([
+      expect.objectContaining({
+        id: 'cache', type: 'redis', image: 'redis:7-alpine', scope: 'generation'
+      }),
+      expect.objectContaining({
+        id: 'database', type: 'postgres', database: 'preview_app',
+        limits: { cpus: 1, memoryMb: 512, diskMb: 2048, pids: 256 }
+      })
+    ]);
+    expect(parsed.executionPlan.jobs).toEqual([
+      expect.objectContaining({
+        id: 'migrate', role: 'migration', retrySafe: false,
+        needs: { database: 'ready' },
+        env: { DATABASE_URL: { type: 'postgres-url', resource: 'database' } }
+      }),
+      expect.objectContaining({
+        id: 'seed', role: 'seed', retrySafe: true,
+        needs: { migrate: 'succeeded' }
+      })
+    ]);
+    expect(parsed.executionPlan.selectedScenarioId).toBe('review');
+    expect(parsed.executionPlan.scenarios).toEqual([
+      { id: 'empty', jobs: ['migrate'], resources: ['cache', 'database'] },
+      { id: 'review', jobs: ['migrate', 'seed'], resources: ['cache', 'database'] }
+    ]);
+    expect(parsed.executionPlan.services[0].env).toMatchObject({
+      DATABASE_URL: { type: 'postgres-url', resource: 'database' },
+      REDIS_URL: { type: 'redis-url', resource: 'cache' }
+    });
+
+    const empty = selectPreviewScenario(parsed, 'empty');
+    expect(empty.executionPlan.selectedScenarioId).toBe('empty');
+    expect(empty.executionDigest).not.toBe(parsed.executionDigest);
+    expect(() => selectPreviewScenario(parsed, 'missing')).toThrow('does not exist');
+  });
+
+  it('normalizes a constrained generic OCI resource without host authority', () => {
+    const parsed = parsePreviewRecipe(PHASE_THREE_RECIPE.replace(
+      'resources:\n  cache:',
+      `resources:
+  mail:
+    type: oci
+    image: axllent/mailpit:v1.27
+    command: [/mailpit]
+    env: { MP_MAX_MESSAGES: "100" }
+    ports: { smtp: { containerPort: 1025 }, http: { containerPort: 8025 } }
+    ready: { type: http, port: http, path: /livez }
+    dataMount: /data
+    limits: { memoryMb: 128, pids: 64 }
+  cache:`
+    ).replace(
+      'resources: [cache, database]',
+      'resources: [cache, database, mail]'
+    ));
+
+    expect(parsed.executionPlan.resources.find((resource) => resource.id === 'mail')).toEqual({
+      id: 'mail',
+      type: 'oci',
+      image: 'axllent/mailpit:v1.27',
+      scope: 'generation',
+      limits: { memoryMb: 128, pids: 64 },
+      command: ['/mailpit'],
+      env: { MP_MAX_MESSAGES: '100' },
+      ports: {
+        http: { containerPort: 8025, protocol: 'tcp' },
+        smtp: { containerPort: 1025, protocol: 'tcp' }
+      },
+      ready: { type: 'http', port: 'http', path: '/livez', timeoutSeconds: 30 },
+      dataMount: '/data'
+    });
+  });
+
+  it.each([
+    ['migration retry declaration', PHASE_THREE_RECIPE.replace('    retrySafe: false\n', '')],
+    ['resource dependency', PHASE_THREE_RECIPE.replace('    needs: { database: ready }\n', '')],
+    ['typed URL mismatch', PHASE_THREE_RECIPE.replace('type: postgres-url, resource: database', 'type: redis-url, resource: database')],
+    ['seed ordering', PHASE_THREE_RECIPE.replace('    needs: { migrate: succeeded }\n', '')],
+    ['scenario resource closure', PHASE_THREE_RECIPE.replace('resources: [cache, database]', 'resources: [cache]')],
+    ['host mount escape hatch', PHASE_THREE_RECIPE.replace('    database: preview_app', '    database: preview_app\n    hostPath: /tmp/data')],
+    ['unbounded memory', PHASE_THREE_RECIPE.replace('memoryMb: 512', 'memoryMb: 999999')]
+  ])('rejects unsafe Phase 3 authority: %s', (_label, source) => {
+    expect(() => parsePreviewRecipe(source)).toThrow();
+  });
+
   it('rejects oversized input and executable YAML tags before conversion', () => {
     expect(() => parsePreviewRecipe(`${RECIPE}\n#${'x'.repeat(70_000)}`)).toThrow(
       'exceeds 65536 bytes'
@@ -261,3 +352,46 @@ routes:
     await fs.rm(root, { recursive: true, force: true });
   });
 });
+
+const PHASE_THREE_RECIPE = `
+version: 1
+resources:
+  cache:
+    type: redis
+  database:
+    type: postgres
+    database: preview_app
+    limits: { cpus: 1, memoryMb: 512, diskMb: 2048, pids: 256 }
+jobs:
+  migrate:
+    role: migration
+    retrySafe: false
+    command: [node, scripts/migrate.mjs]
+    needs: { database: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+  seed:
+    role: seed
+    retrySafe: true
+    command: [node, scripts/seed.mjs]
+    needs: { migrate: succeeded }
+services:
+  web:
+    command: [node, server.mjs]
+    needs: { migrate: succeeded, database: ready, cache: ready }
+    env:
+      DATABASE_URL: { type: postgres-url, resource: database }
+      REDIS_URL: { type: redis-url, resource: cache }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready }
+routes:
+  app: { service: web, port: http, primary: true }
+scenarios:
+  empty:
+    jobs: [migrate]
+    resources: [cache, database]
+  review:
+    jobs: [migrate, seed]
+    resources: [cache, database]
+defaultScenario: review
+`;

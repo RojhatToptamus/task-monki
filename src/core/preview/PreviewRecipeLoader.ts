@@ -13,10 +13,14 @@ import {
 import type {
   PreviewEnvironmentValue,
   PreviewExecutionPlan,
+  PreviewGenericOciResourcePlan,
   PreviewJobPlan,
   PreviewLivenessPlan,
+  PreviewOciResourceLimits,
+  PreviewOciResourcePlan,
   PreviewReadinessPlan,
   PreviewRoutePlan,
+  PreviewScenarioPlan,
   PreviewServicePlan,
   PreviewWorkerPlan
 } from '../../shared/preview';
@@ -25,6 +29,8 @@ import { isPathWithin } from './PreviewPaths';
 export const PREVIEW_RECIPE_PATH = '.taskmonki/preview.yaml' as const;
 export const MAX_PREVIEW_RECIPE_BYTES = 64 * 1024;
 const MAX_NODES = 32;
+const MAX_RESOURCES = 16;
+const MAX_SCENARIOS = 16;
 const MAX_COMMAND_ARGS = 64;
 const MAX_ARGUMENT_BYTES = 2_048;
 const MAX_ENV_ENTRIES = 64;
@@ -34,6 +40,7 @@ const MAX_TOTAL_PORTS = 64;
 const MAX_RESTARTS = 8;
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,47}$/;
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
+const DATABASE_NAME_PATTERN = /^[a-z][a-z0-9_]{0,62}$/;
 
 export interface ParsedPreviewRecipe {
   recipeDigest: string;
@@ -130,18 +137,41 @@ export function parsePreviewRecipe(source: string): ParsedPreviewRecipe {
   };
 }
 
+export function selectPreviewScenario(
+  parsed: ParsedPreviewRecipe,
+  scenarioId: string
+): ParsedPreviewRecipe {
+  if (!parsed.executionPlan.scenarios.some((scenario) => scenario.id === scenarioId)) {
+    throw new Error(`Preview scenario does not exist: ${scenarioId}.`);
+  }
+  const executionPlan = { ...parsed.executionPlan, selectedScenarioId: scenarioId };
+  return {
+    ...parsed,
+    executionDigest: sha256(canonicalJson(executionAuthority(executionPlan))),
+    executionPlan
+  };
+}
+
 function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecutionPlan {
-  assertKeys(recipe, ['version', 'jobs', 'services', 'workers', 'routes'], 'recipe');
+  assertKeys(
+    recipe,
+    ['version', 'jobs', 'resources', 'services', 'workers', 'routes', 'scenarios', 'defaultScenario'],
+    'recipe'
+  );
   if (recipe.version !== 1) {
     throw new Error('Preview recipe version must be 1.');
   }
 
   const jobs = normalizeNodeMap(recipe.jobs, 'jobs', normalizeJob);
+  const resources = normalizeNodeMap(recipe.resources, 'resources', normalizeResource);
   const services = normalizeNodeMap(recipe.services, 'services', normalizeService);
   const workers = normalizeNodeMap(recipe.workers, 'workers', normalizeWorker);
   const routes = normalizeNodeMap(recipe.routes, 'routes', normalizeRoute);
-  if (jobs.length + services.length + workers.length > MAX_NODES) {
+  if (jobs.length + services.length + workers.length + resources.length > MAX_NODES) {
     throw new Error(`Preview recipe exceeds ${MAX_NODES} executable nodes.`);
+  }
+  if (resources.length > MAX_RESOURCES) {
+    throw new Error(`Preview recipe exceeds ${MAX_RESOURCES} OCI resources.`);
   }
   const totalPorts = [...services, ...workers].reduce(
     (count, node) => count + Object.keys(node.ports).length,
@@ -161,30 +191,43 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
   }
 
   const jobById = new Map(jobs.map((job) => [job.id, job]));
+  const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
   const serviceById = new Map(services.map((service) => [service.id, service]));
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   const routeById = new Map(routes.map((route) => [route.id, route]));
-  const allIds = new Set([...jobById.keys(), ...serviceById.keys(), ...workerById.keys()]);
-  if (allIds.size !== jobs.length + services.length + workers.length) {
-    throw new Error('Preview job, service, and worker identifiers must be unique.');
+  const allIds = new Set([
+    ...jobById.keys(),
+    ...resourceById.keys(),
+    ...serviceById.keys(),
+    ...workerById.keys()
+  ]);
+  if (allIds.size !== jobs.length + resources.length + services.length + workers.length) {
+    throw new Error('Preview job, resource, service, and worker identifiers must be unique.');
   }
   for (const job of jobs) {
     for (const [dependencyId, condition] of Object.entries(job.needs)) {
-      if (!jobById.has(dependencyId) || condition !== 'succeeded') {
-        throw new Error(`Job ${job.id} needs unknown or unsupported job ${dependencyId}.`);
+      if (
+        (condition === 'succeeded' && !jobById.has(dependencyId)) ||
+        (condition === 'ready' && !resourceById.has(dependencyId))
+      ) {
+        throw new Error(`Job ${job.id} needs an unknown or unsupported ${condition} node ${dependencyId}.`);
       }
     }
+    validateEnvironmentReferences(job, serviceById, routeById, resourceById);
   }
   for (const node of [...services, ...workers]) {
     for (const [dependencyId, condition] of Object.entries(node.needs)) {
       if (
         (condition === 'succeeded' && !jobById.has(dependencyId)) ||
-        (condition === 'ready' && !serviceById.has(dependencyId) && !workerById.has(dependencyId))
+        (condition === 'ready' &&
+          !serviceById.has(dependencyId) &&
+          !workerById.has(dependencyId) &&
+          !resourceById.has(dependencyId))
       ) {
         throw new Error(`${node.id} needs unknown ${condition} node ${dependencyId}.`);
       }
     }
-    validateEnvironmentReferences(node, serviceById, routeById);
+    validateEnvironmentReferences(node, serviceById, routeById, resourceById);
   }
   for (const route of routes) {
     const service = serviceById.get(route.service);
@@ -198,20 +241,240 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
       throw new Error(`Route ${route.id} references unknown port ${route.port}.`);
     }
   }
-  assertAcyclic([...jobs, ...services, ...workers]);
+  const scenarios = normalizeScenarios(recipe.scenarios, jobs, resources);
+  const selectedScenarioId = normalizeSelectedScenario(
+    recipe.defaultScenario,
+    scenarios,
+    recipe.scenarios !== undefined
+  );
+  validateScenarioGraph(selectedScenarioId, scenarios, jobs, resources, services, workers);
+  assertAcyclic([
+    ...jobs,
+    ...resources.map((resource) => ({ id: resource.id, needs: {} })),
+    ...services,
+    ...workers
+  ]);
 
-  return { version: 1, jobs, services, workers, routes };
+  return {
+    version: 1,
+    jobs,
+    resources,
+    services,
+    workers,
+    routes,
+    scenarios,
+    selectedScenarioId
+  };
 }
 
 function normalizeJob(value: Record<string, unknown>, context: string, id: string): PreviewJobPlan {
-  assertKeys(value, ['label', 'cwd', 'command', 'needs'], context);
+  assertKeys(value, ['label', 'cwd', 'command', 'needs', 'env', 'role', 'retrySafe'], context);
+  const role = value.role ?? 'generic';
+  if (!['generic', 'migration', 'seed'].includes(String(role))) {
+    throw new Error(`${context}.role must be generic, migration, or seed.`);
+  }
+  if (role !== 'generic' && typeof value.retrySafe !== 'boolean') {
+    throw new Error(`${context}.retrySafe must be declared for migration and seed jobs.`);
+  }
   return {
     id,
     label: optionalLabel(value.label, context),
     cwd: normalizeCwd(value.cwd, context),
     command: normalizeCommand(value.command, context),
-    needs: normalizeNeeds(value.needs, context, ['succeeded']) as Record<string, 'succeeded'>
+    role: role as PreviewJobPlan['role'],
+    retrySafe: value.retrySafe === true,
+    needs: normalizeNeeds(value.needs, context, ['succeeded', 'ready']),
+    env: normalizeEnvironment(value.env, `${context}.env`)
   };
+}
+
+function normalizeEnvironment(value: unknown, context: string): Record<string, PreviewEnvironmentValue> {
+  const env = optionalRecord(value, context);
+  if (Object.keys(env).length > MAX_ENV_ENTRIES) {
+    throw new Error(`${context} has too many entries.`);
+  }
+  const normalized: Record<string, PreviewEnvironmentValue> = {};
+  for (const key of Object.keys(env).sort()) {
+    const envValue = env[key];
+    if (!ENV_KEY_PATTERN.test(key)) throw new Error(`${context} contains an invalid key.`);
+    if (typeof envValue === 'string') {
+      if (Buffer.byteLength(envValue) > MAX_ENV_VALUE_BYTES) {
+        throw new Error(`${context} must contain bounded environment values.`);
+      }
+      normalized[key] = envValue;
+      continue;
+    }
+    const reference = requiredRecord(envValue, `${context}.${key}`);
+    if (reference.type === 'service-origin') {
+      assertKeys(reference, ['type', 'service', 'port'], `${context}.${key}`);
+      if (typeof reference.service !== 'string' || typeof reference.port !== 'string') {
+        throw new Error(`${context}.${key} has an invalid service-origin reference.`);
+      }
+      normalized[key] = { type: 'service-origin', service: reference.service, port: reference.port };
+    } else if (reference.type === 'route-origin') {
+      assertKeys(reference, ['type', 'route'], `${context}.${key}`);
+      if (typeof reference.route !== 'string') {
+        throw new Error(`${context}.${key} has an invalid route-origin reference.`);
+      }
+      normalized[key] = { type: 'route-origin', route: reference.route };
+    } else if (reference.type === 'postgres-url' || reference.type === 'redis-url') {
+      assertKeys(reference, ['type', 'resource'], `${context}.${key}`);
+      if (typeof reference.resource !== 'string') {
+        throw new Error(`${context}.${key} has an invalid ${reference.type} reference.`);
+      }
+      normalized[key] = { type: reference.type, resource: reference.resource };
+    } else if (reference.type === 'resource-origin') {
+      assertKeys(reference, ['type', 'resource', 'port'], `${context}.${key}`);
+      if (typeof reference.resource !== 'string' || typeof reference.port !== 'string') {
+        throw new Error(`${context}.${key} has an invalid resource-origin reference.`);
+      }
+      normalized[key] = {
+        type: 'resource-origin',
+        resource: reference.resource,
+        port: reference.port
+      };
+    } else {
+      throw new Error(`${context}.${key} must be a literal or supported typed reference.`);
+    }
+  }
+  return normalized;
+}
+
+function normalizeResource(
+  value: Record<string, unknown>,
+  context: string,
+  id: string
+): PreviewOciResourcePlan {
+  const type = value.type;
+  if (!['postgres', 'redis', 'oci'].includes(String(type))) {
+    throw new Error(`${context}.type must be postgres, redis, or oci.`);
+  }
+  const common = {
+    id,
+    label: optionalLabel(value.label, context),
+    image: normalizeImage(value.image, type as PreviewOciResourcePlan['type'], context),
+    scope: normalizeResourceScope(value.scope, context),
+    limits: normalizeResourceLimits(value.limits, context)
+  };
+  if (type === 'postgres') {
+    assertKeys(value, ['type', 'label', 'image', 'scope', 'limits', 'database'], context);
+    const database = value.database ?? 'app';
+    if (typeof database !== 'string' || !DATABASE_NAME_PATTERN.test(database)) {
+      throw new Error(`${context}.database must be a safe PostgreSQL database identifier.`);
+    }
+    return { ...common, type: 'postgres', database };
+  }
+  if (type === 'redis') {
+    assertKeys(value, ['type', 'label', 'image', 'scope', 'limits'], context);
+    return { ...common, type: 'redis' };
+  }
+
+  assertKeys(
+    value,
+    ['type', 'label', 'image', 'scope', 'limits', 'command', 'env', 'ports', 'ready', 'dataMount'],
+    context
+  );
+  const portsValue = requiredRecord(value.ports, `${context}.ports`);
+  const ports: PreviewGenericOciResourcePlan['ports'] = {};
+  for (const portId of Object.keys(portsValue).sort()) {
+    assertId(portId, `${context}.ports`);
+    const port = requiredRecord(portsValue[portId], `${context}.ports.${portId}`);
+    assertKeys(port, ['containerPort', 'protocol'], `${context}.ports.${portId}`);
+    if (
+      !Number.isInteger(port.containerPort) ||
+      Number(port.containerPort) < 1 ||
+      Number(port.containerPort) > 65_535
+    ) {
+      throw new Error(`${context}.ports.${portId}.containerPort is invalid.`);
+    }
+    if (port.protocol !== undefined && port.protocol !== 'tcp') {
+      throw new Error(`${context}.ports.${portId}.protocol must be tcp.`);
+    }
+    ports[portId] = { containerPort: Number(port.containerPort), protocol: 'tcp' };
+  }
+  if (Object.keys(ports).length < 1 || Object.keys(ports).length > 16) {
+    throw new Error(`${context}.ports must contain 1-16 entries.`);
+  }
+  const literalEnv = normalizeEnvironment(value.env, `${context}.env`);
+  if (Object.values(literalEnv).some((envValue) => typeof envValue !== 'string')) {
+    throw new Error(`${context}.env supports repository-visible literal strings only.`);
+  }
+  const ready = normalizeProbe(value.ready, `${context}.ready`, ports);
+  if (ready.type === 'argv') {
+    throw new Error(`${context}.ready supports http or tcp only.`);
+  }
+  return {
+    ...common,
+    type: 'oci',
+    command: value.command === undefined ? undefined : normalizeCommand(value.command, context),
+    env: literalEnv as Record<string, string>,
+    ports,
+    ready,
+    dataMount: normalizeContainerMount(value.dataMount, context)
+  };
+}
+
+function normalizeImage(
+  value: unknown,
+  type: PreviewOciResourcePlan['type'],
+  context: string
+): string {
+  const image = value ?? (type === 'postgres' ? 'postgres:17-alpine' : type === 'redis' ? 'redis:7-alpine' : undefined);
+  if (
+    typeof image !== 'string' ||
+    !image ||
+    Buffer.byteLength(image) > 512 ||
+    /[\s\0]/.test(image) ||
+    image.startsWith('-')
+  ) {
+    throw new Error(`${context}.image must be a bounded OCI image reference.`);
+  }
+  return image;
+}
+
+function normalizeResourceScope(value: unknown, context: string): 'generation' | 'preview' {
+  if (value === undefined || value === 'generation') return 'generation';
+  if (value === 'preview') return 'preview';
+  throw new Error(`${context}.scope must be generation or preview.`);
+}
+
+function normalizeResourceLimits(value: unknown, context: string): PreviewOciResourceLimits {
+  const limits = optionalRecord(value, `${context}.limits`);
+  assertKeys(limits, ['cpus', 'memoryMb', 'diskMb', 'pids'], `${context}.limits`);
+  const normalized: PreviewOciResourceLimits = {};
+  if (limits.cpus !== undefined) {
+    if (typeof limits.cpus !== 'number' || !Number.isFinite(limits.cpus) || limits.cpus < 0.1 || limits.cpus > 16) {
+      throw new Error(`${context}.limits.cpus must be between 0.1 and 16.`);
+    }
+    normalized.cpus = limits.cpus;
+  }
+  for (const [key, minimum, maximum] of [
+    ['memoryMb', 64, 65_536],
+    ['diskMb', 64, 1_048_576],
+    ['pids', 16, 32_768]
+  ] as const) {
+    const candidate = limits[key];
+    if (candidate === undefined) continue;
+    if (!Number.isInteger(candidate) || Number(candidate) < minimum || Number(candidate) > maximum) {
+      throw new Error(`${context}.limits.${key} must be between ${minimum} and ${maximum}.`);
+    }
+    normalized[key] = Number(candidate);
+  }
+  return normalized;
+}
+
+function normalizeContainerMount(value: unknown, context: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'string' ||
+    !value.startsWith('/') ||
+    value.includes('\0') ||
+    value.split('/').includes('..') ||
+    Buffer.byteLength(value) > 512
+  ) {
+    throw new Error(`${context}.dataMount must be a safe absolute container path.`);
+  }
+  return value;
 }
 
 function normalizeService(
@@ -247,38 +510,7 @@ function normalizeLongRunning(
     ['label', 'cwd', 'command', 'needs', 'env', 'ports', 'ready', 'critical', 'restart', 'liveness'],
     context
   );
-  const env = optionalRecord(value.env, `${context}.env`);
-  if (Object.keys(env).length > MAX_ENV_ENTRIES) {
-    throw new Error(`${context}.env has too many entries.`);
-  }
-  const normalizedEnv: Record<string, PreviewEnvironmentValue> = {};
-  for (const key of Object.keys(env).sort()) {
-    const envValue = env[key];
-    if (!ENV_KEY_PATTERN.test(key)) throw new Error(`${context}.env contains an invalid key.`);
-    if (typeof envValue === 'string') {
-      if (Buffer.byteLength(envValue) > MAX_ENV_VALUE_BYTES) {
-        throw new Error(`${context}.env must contain bounded environment values.`);
-      }
-      normalizedEnv[key] = envValue;
-      continue;
-    }
-    const reference = requiredRecord(envValue, `${context}.env.${key}`);
-    if (reference.type === 'service-origin') {
-      assertKeys(reference, ['type', 'service', 'port'], `${context}.env.${key}`);
-      if (typeof reference.service !== 'string' || typeof reference.port !== 'string') {
-        throw new Error(`${context}.env.${key} has an invalid service-origin reference.`);
-      }
-      normalizedEnv[key] = { type: 'service-origin', service: reference.service, port: reference.port };
-    } else if (reference.type === 'route-origin') {
-      assertKeys(reference, ['type', 'route'], `${context}.env.${key}`);
-      if (typeof reference.route !== 'string') {
-        throw new Error(`${context}.env.${key} has an invalid route-origin reference.`);
-      }
-      normalizedEnv[key] = { type: 'route-origin', route: reference.route };
-    } else {
-      throw new Error(`${context}.env.${key} must be a literal or typed origin reference.`);
-    }
-  }
+  const normalizedEnv = normalizeEnvironment(value.env, `${context}.env`);
 
   const portsValue = optionalRecord(value.ports, `${context}.ports`);
   const ports: PreviewServicePlan['ports'] = {};
@@ -320,7 +552,7 @@ function normalizeLongRunning(
 function normalizeProbe(
   value: unknown,
   context: string,
-  ports: PreviewServicePlan['ports'],
+  ports: Record<string, unknown>,
   defaultTimeoutSeconds = 30
 ): PreviewReadinessPlan {
   const probe = requiredRecord(value, context);
@@ -417,7 +649,7 @@ function normalizeBoolean(value: unknown, defaultValue: boolean, context: string
 
 function assertProbePort(
   value: unknown,
-  ports: PreviewServicePlan['ports'],
+  ports: Record<string, unknown>,
   context: string
 ): asserts value is string {
   if (typeof value !== 'string' || !ports[value]) {
@@ -426,9 +658,10 @@ function assertProbePort(
 }
 
 function validateEnvironmentReferences(
-  node: PreviewServicePlan | PreviewWorkerPlan,
+  node: PreviewJobPlan | PreviewServicePlan | PreviewWorkerPlan,
   services: Map<string, PreviewServicePlan>,
-  routes: Map<string, PreviewRoutePlan>
+  routes: Map<string, PreviewRoutePlan>,
+  resources: Map<string, PreviewOciResourcePlan>
 ): void {
   for (const [key, value] of Object.entries(node.env)) {
     if (typeof value === 'string') continue;
@@ -440,10 +673,160 @@ function validateEnvironmentReferences(
       if (value.service === node.id || node.needs[value.service] !== 'ready') {
         throw new Error(`${node.id}.env.${key} requires an explicit ready dependency on ${value.service}.`);
       }
-    } else if (!routes.has(value.route)) {
-      throw new Error(`${node.id}.env.${key} references an unknown route origin.`);
+    } else if (value.type === 'route-origin') {
+      if (!routes.has(value.route)) {
+        throw new Error(`${node.id}.env.${key} references an unknown route origin.`);
+      }
+    } else {
+      const resource = resources.get(value.resource);
+      if (!resource) {
+        throw new Error(`${node.id}.env.${key} references an unknown OCI resource.`);
+      }
+      if (node.needs[value.resource] !== 'ready') {
+        throw new Error(`${node.id}.env.${key} requires an explicit ready dependency on ${value.resource}.`);
+      }
+      if (value.type === 'postgres-url' && resource.type !== 'postgres') {
+        throw new Error(`${node.id}.env.${key} requires a PostgreSQL resource.`);
+      }
+      if (value.type === 'redis-url' && resource.type !== 'redis') {
+        throw new Error(`${node.id}.env.${key} requires a Redis resource.`);
+      }
+      if (
+        value.type === 'resource-origin' &&
+        (resource.type !== 'oci' || !resource.ports[value.port])
+      ) {
+        throw new Error(`${node.id}.env.${key} references an unknown generic OCI port.`);
+      }
     }
   }
+}
+
+function normalizeScenarios(
+  value: unknown,
+  jobs: PreviewJobPlan[],
+  resources: PreviewOciResourcePlan[]
+): PreviewScenarioPlan[] {
+  if (value === undefined) {
+    return [{
+      id: 'default',
+      jobs: jobs.filter((job) => job.role !== 'generic').map((job) => job.id),
+      resources: resources.map((resource) => resource.id)
+    }];
+  }
+  const scenarios = normalizeNodeMap(value, 'scenarios', (scenario, context, id) => {
+    assertKeys(scenario, ['label', 'jobs', 'resources'], context);
+    return {
+      id,
+      label: optionalLabel(scenario.label, context),
+      jobs: normalizeIdList(scenario.jobs, `${context}.jobs`),
+      resources: normalizeIdList(scenario.resources, `${context}.resources`)
+    };
+  });
+  if (scenarios.length < 1 || scenarios.length > MAX_SCENARIOS) {
+    throw new Error(`Preview recipe must contain 1-${MAX_SCENARIOS} scenarios.`);
+  }
+  const jobById = new Map(jobs.map((job) => [job.id, job]));
+  const resourceIds = new Set(resources.map((resource) => resource.id));
+  for (const scenario of scenarios) {
+    for (const jobId of scenario.jobs) {
+      const job = jobById.get(jobId);
+      if (!job || job.role === 'generic') {
+        throw new Error(`Scenario ${scenario.id} may select only declared migration or seed jobs.`);
+      }
+    }
+    for (const resourceId of scenario.resources) {
+      if (!resourceIds.has(resourceId)) {
+        throw new Error(`Scenario ${scenario.id} references unknown resource ${resourceId}.`);
+      }
+    }
+  }
+  const selectedJobs = new Set(scenarios.flatMap((scenario) => scenario.jobs));
+  for (const job of jobs) {
+    if (job.role !== 'generic' && !selectedJobs.has(job.id)) {
+      throw new Error(`Job ${job.id} must belong to at least one scenario.`);
+    }
+  }
+  return scenarios;
+}
+
+function normalizeSelectedScenario(
+  value: unknown,
+  scenarios: PreviewScenarioPlan[],
+  explicitScenarios: boolean
+): string {
+  if (value === undefined) {
+    if (explicitScenarios && scenarios.length > 1) {
+      throw new Error('Preview recipe with multiple scenarios requires defaultScenario.');
+    }
+    return scenarios[0].id;
+  }
+  if (typeof value !== 'string' || !scenarios.some((scenario) => scenario.id === value)) {
+    throw new Error('Preview recipe defaultScenario must name a declared scenario.');
+  }
+  return value;
+}
+
+function validateScenarioGraph(
+  _selectedScenarioId: string,
+  scenarios: PreviewScenarioPlan[],
+  jobs: PreviewJobPlan[],
+  resources: PreviewOciResourcePlan[],
+  services: PreviewServicePlan[],
+  workers: PreviewWorkerPlan[]
+): void {
+  const jobById = new Map(jobs.map((job) => [job.id, job]));
+  const resourceIds = new Set(resources.map((resource) => resource.id));
+  for (const scenario of scenarios) {
+    const activeJobs = new Set([
+      ...jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+      ...scenario.jobs
+    ]);
+    const activeResources = new Set(scenario.resources);
+    for (const jobId of activeJobs) {
+      const job = jobById.get(jobId)!;
+      for (const [dependencyId, condition] of Object.entries(job.needs)) {
+        if (condition === 'succeeded' && !activeJobs.has(dependencyId)) {
+          throw new Error(`Scenario ${scenario.id} omits job dependency ${dependencyId} required by ${job.id}.`);
+        }
+        if (condition === 'ready' && !activeResources.has(dependencyId)) {
+          throw new Error(`Scenario ${scenario.id} omits resource ${dependencyId} required by ${job.id}.`);
+        }
+      }
+      if (
+        job.role === 'seed' &&
+        !Object.entries(job.needs).some(
+          ([dependencyId, condition]) =>
+            condition === 'succeeded' && jobById.get(dependencyId)?.role === 'migration'
+        )
+      ) {
+        throw new Error(`Seed job ${job.id} must depend on a migration job succeeding.`);
+      }
+    }
+    for (const node of [...services, ...workers]) {
+      for (const [dependencyId, condition] of Object.entries(node.needs)) {
+        if (condition === 'succeeded' && !activeJobs.has(dependencyId)) {
+          throw new Error(`Scenario ${scenario.id} omits job ${dependencyId} required by ${node.id}.`);
+        }
+        if (condition === 'ready' && resourceIds.has(dependencyId) && !activeResources.has(dependencyId)) {
+          throw new Error(`Scenario ${scenario.id} omits resource ${dependencyId} required by ${node.id}.`);
+        }
+      }
+    }
+  }
+}
+
+function normalizeIdList(value: unknown, context: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_NODES) {
+    throw new Error(`${context} must be a bounded list of identifiers.`);
+  }
+  const ids = value.map((candidate) => {
+    if (typeof candidate !== 'string') throw new Error(`${context} must contain identifiers.`);
+    assertId(candidate, context);
+    return candidate;
+  });
+  if (new Set(ids).size !== ids.length) throw new Error(`${context} contains duplicate identifiers.`);
+  return ids.sort();
 }
 
 function normalizeRoute(
@@ -545,9 +928,22 @@ function assertAcyclic(nodes: Array<{ id: string; needs: Record<string, unknown>
 }
 
 function executionAuthority(plan: PreviewExecutionPlan): unknown {
+  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
+  if (!scenario) throw new Error(`Selected preview scenario is missing: ${plan.selectedScenarioId}.`);
+  const activeJobs = new Set([
+    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+    ...scenario.jobs
+  ]);
+  const activeResources = new Set(scenario.resources);
   return {
     version: plan.version,
-    jobs: plan.jobs.map(({ label: _label, ...job }) => job),
+    selectedScenarioId: plan.selectedScenarioId,
+    jobs: plan.jobs
+      .filter((job) => activeJobs.has(job.id))
+      .map(({ label: _label, ...job }) => job),
+    resources: plan.resources
+      .filter((resource) => activeResources.has(resource.id))
+      .map(({ label: _label, ...resource }) => resource),
     services: plan.services.map(({ label: _label, ...service }) => service),
     workers: plan.workers.map(({ label: _label, ...worker }) => worker),
     routes: plan.routes

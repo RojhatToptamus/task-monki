@@ -51,7 +51,10 @@ async function seedGeneration(store: FileTaskStore, url = 'http://app.task-a.pre
   const plan = await store.savePreviewPlan({
     id: 'plan-1', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
     recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-    executionDigest: 'digest', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+    executionDigest: 'digest', executionPlan: {
+      version: 1, jobs: [], resources: [], services: [], workers: [], routes: [],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+    },
     warnings: [], createdAt: '2026-01-01T00:00:00.000Z'
   });
   const approval = await store.savePreviewApproval({

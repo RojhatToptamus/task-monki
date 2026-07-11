@@ -125,6 +125,9 @@ export class TaskManagerService {
       previewLauncherPath?: string;
       previewLauncherExecPath?: string;
       previewLauncherEnv?: NodeJS.ProcessEnv;
+      previewOciExecutablePath?: string;
+      previewOciContextName?: string;
+      previewOciEnv?: NodeJS.ProcessEnv;
       previewOpenHost?: PreviewUrlHost;
       previewEnabled?: boolean;
       previewReconcile?: boolean;
@@ -156,6 +159,11 @@ export class TaskManagerService {
           path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
         launcherExecPath: options.previewLauncherExecPath,
         launcherEnv: options.previewLauncherEnv,
+        ociExecutablePath:
+          options.previewOciExecutablePath ?? process.env.TASK_MANAGER_OCI_BIN,
+        ociContextName:
+          options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
+        ociEnv: options.previewOciEnv,
         openHost: options.previewOpenHost
       });
     this.codexAdapter = new CodexAppServerAdapter(store, events, {

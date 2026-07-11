@@ -224,7 +224,7 @@ describe('FileTaskStore', () => {
       recipeVersion: 1,
       recipeDigest: 'recipe',
       executionDigest: 'execution',
-      executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [],
       createdAt: now
     });
@@ -329,7 +329,7 @@ describe('FileTaskStore', () => {
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
       recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: new Date(now).toISOString()
     });
     const approval = await store.savePreviewApproval({
@@ -379,7 +379,7 @@ describe('FileTaskStore', () => {
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
       recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: new Date(now).toISOString()
     });
     const approval = await store.savePreviewApproval({
@@ -439,7 +439,7 @@ describe('FileTaskStore', () => {
     const plan = await store.savePreviewPlan({
       id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
       recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
-      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], services: [], workers: [], routes: [] },
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
       warnings: [], createdAt: now
     });
     const approval = await store.savePreviewApproval({

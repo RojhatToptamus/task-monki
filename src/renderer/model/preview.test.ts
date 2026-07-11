@@ -38,7 +38,10 @@ describe('preview view model', () => {
       id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1',
       recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,
       recipeDigest: 'recipe', executionDigest: 'execution',
-      executionPlan: { version: 1 as const, jobs: [], services: [], workers: [], routes: [] },
+      executionPlan: {
+        version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+      },
       warnings: [], createdAt: task.createdAt
     };
     const approvalRequired = buildPreviewViewModel({
@@ -148,7 +151,11 @@ describe('preview view model', () => {
   it('renders every approval authority without ambiguous argv or hidden literal values', () => {
     const plan = testPlan();
     plan.executionPlan.jobs = [
-      { id: 'prepare', cwd: 'apps/web app', command: ['node', 'script with spaces.mjs', 'line\nbreak'], needs: {} }
+      {
+        id: 'prepare', cwd: 'apps/web app',
+        command: ['node', 'script with spaces.mjs', 'line\nbreak'], needs: {}, env: {},
+        role: 'generic', retrySafe: false
+      }
     ];
     plan.executionPlan.services = [{
       id: 'web', cwd: '.', command: ['npm', 'run', 'dev server'], needs: {},
@@ -176,5 +183,5 @@ function uncheckedWorktree() {
 }
 
 function testPlan(): PreviewPlanRecord {
-  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], services: [], workers: [], routes: [] }, warnings: [], createdAt: task.createdAt };
+  return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' }, warnings: [], createdAt: task.createdAt };
 }

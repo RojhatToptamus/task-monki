@@ -61,15 +61,85 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
       value: `${PREVIEW_POSIX_INHERITED_ENV_KEYS.join(', ')} when present; TASK_MONKI_PREVIEW="1"`
     }
   ];
+  const scenario = plan.executionPlan.scenarios.find(
+    (candidate) => candidate.id === plan.executionPlan.selectedScenarioId
+  );
+  if (scenario) {
+    lines.push({
+      label: 'Scenario',
+      value: `${scenario.label ?? scenario.id} · jobs=${scenario.jobs.join(', ') || 'none'} · resources=${scenario.resources.join(', ') || 'none'}`
+    });
+  }
+  for (const resource of plan.executionPlan.resources) {
+    const type = resource.type === 'postgres'
+      ? 'PostgreSQL'
+      : resource.type === 'redis'
+        ? 'Redis'
+        : 'Generic OCI';
+    lines.push({
+      label: `Resource · ${resource.id}`,
+      value: `${type} · image=${JSON.stringify(resource.image)} · scope=${resource.scope}`
+    });
+    const limits = [
+      resource.limits.cpus === undefined ? undefined : `cpus=${resource.limits.cpus}`,
+      resource.limits.memoryMb === undefined ? undefined : `memory=${resource.limits.memoryMb}MB`,
+      resource.limits.diskMb === undefined ? undefined : `disk=${resource.limits.diskMb}MB advisory`,
+      resource.limits.pids === undefined ? undefined : `pids=${resource.limits.pids}`
+    ].filter(Boolean);
+    lines.push({
+      label: `Limits · ${resource.id}`,
+      value: limits.join(' · ') || 'No explicit CPU, memory, disk, or PID limit'
+    });
+    if (resource.type === 'postgres') {
+      lines.push({
+        label: `Generated access · ${resource.id}`,
+        value: `database=${JSON.stringify(resource.database)} · unique local port, user, and password per owned data resource`
+      });
+    } else if (resource.type === 'redis') {
+      lines.push({
+        label: `Generated access · ${resource.id}`,
+        value: 'unique local port and password per owned data resource'
+      });
+    } else {
+      if (resource.command) {
+        lines.push({ label: `Container command · ${resource.id}`, value: formatArgv(resource.command) });
+      }
+      for (const [key, value] of Object.entries(resource.env)) {
+        lines.push({ label: `Literal env · ${resource.id}`, value: `${key}=${JSON.stringify(value)}` });
+      }
+      for (const [portId, port] of Object.entries(resource.ports)) {
+        lines.push({
+          label: `Published port · ${resource.id}.${portId}`,
+          value: `127.0.0.1:<dynamic> → ${port.containerPort}/${port.protocol}`
+        });
+      }
+      lines.push({
+        label: `Readiness · ${resource.id}`,
+        value: `${resource.ready.type.toUpperCase()} 127.0.0.1:<dynamic ${resource.id}.${resource.ready.port}>${resource.ready.type === 'http' ? resource.ready.path : ''} · absolute deadline ${resource.ready.timeoutSeconds}s`
+      });
+      if (resource.dataMount) {
+        lines.push({
+          label: `Owned volume · ${resource.id}`,
+          value: `new labeled volume mounted at ${JSON.stringify(resource.dataMount)}`
+        });
+      }
+    }
+  }
   for (const job of plan.executionPlan.jobs) {
     lines.push({
       label: `Job · ${job.id}`,
-      value: `${formatArgv(job.command)} · cwd=${JSON.stringify(job.cwd)}`
+      value: `${formatArgv(job.command)} · cwd=${JSON.stringify(job.cwd)} · role=${job.role} · retry-safe=${job.retrySafe}`
     });
     if (Object.keys(job.needs).length > 0) {
       lines.push({
         label: `Dependencies · ${job.id}`,
         value: Object.entries(job.needs).map(([id, condition]) => `${id}:${condition}`).join(', ')
+      });
+    }
+    for (const [key, value] of Object.entries(job.env)) {
+      lines.push({
+        label: `${typeof value === 'string' ? 'Literal' : 'Reference'} env · ${job.id}`,
+        value: `${key}=${typeof value === 'string' ? JSON.stringify(value) : formatEnvironmentReference(value)}`
       });
     }
   }
@@ -87,7 +157,9 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
   }
   lines.push({
     label: 'Cleanup',
-    value: 'Signal only the verified native process group; remove only the marker-owned generation workspace'
+    value: plan.executionPlan.resources.length > 0
+      ? 'Remove only exact engine-bound container, network, and volume identities with matching Task Monki labels; signal only verified native process groups; remove only the marker-owned generation workspace'
+      : 'Signal only the verified native process group; remove only the marker-owned generation workspace'
   });
   return lines;
 }
@@ -133,9 +205,10 @@ function appendLongNodeSummary(
 }
 
 function formatEnvironmentReference(value: Exclude<import('../../shared/preview').PreviewEnvironmentValue, string>): string {
-  return value.type === 'route-origin'
-    ? `<route-origin:${value.route}>`
-    : `<service-origin:${value.service}.${value.port}>`;
+  if (value.type === 'route-origin') return `<route-origin:${value.route}>`;
+  if (value.type === 'service-origin') return `<service-origin:${value.service}.${value.port}>`;
+  if (value.type === 'resource-origin') return `<resource-origin:${value.resource}.${value.port}>`;
+  return `<${value.type}:${value.resource}>`;
 }
 
 function formatProbe(

@@ -857,9 +857,13 @@ async function createPreviewScenario(
           label: 'Prepare application',
           cwd: '.',
           command: ['node', 'scripts/prepare-preview.mjs'],
-          needs: {}
+          needs: {},
+          env: {},
+          role: 'generic',
+          retrySafe: false
         }
       ],
+      resources: [],
       services: [
         {
           id: 'web',
@@ -875,7 +879,9 @@ async function createPreviewScenario(
         }
       ],
       workers: [],
-      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
+      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: 'default'
     },
     warnings: [
       'Native preview commands run as your local user and are not sandboxed.',

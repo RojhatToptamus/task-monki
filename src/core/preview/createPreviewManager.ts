@@ -15,12 +15,16 @@ import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService, type PreviewUrlHost } from './runtime/PreviewOpenService';
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
 import { MacPreviewListenerInspector } from './runtime/PreviewListenerInspector';
+import { OciEngineAdapter } from './runtime/OciEngineAdapter';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
   launcherPath: string;
   launcherExecPath?: string;
   launcherEnv?: NodeJS.ProcessEnv;
+  ociExecutablePath?: string;
+  ociContextName?: string;
+  ociEnv?: NodeJS.ProcessEnv;
   openHost?: PreviewUrlHost;
 }
 
@@ -36,6 +40,11 @@ export function createPreviewManager(
     options.launcherEnv
   );
   const nativeRuntime = new NativeServiceRuntime(store, launcher);
+  const ociEngine = new OciEngineAdapter({
+    executable: options.ociExecutablePath,
+    contextName: options.ociContextName,
+    env: options.ociEnv
+  });
   const gateway = new PreviewGateway();
   const graph = new PreviewGraph(
     store,
@@ -49,7 +58,7 @@ export function createPreviewManager(
     store,
     events,
     new PreviewRecipeLoader(),
-    new PreviewPlanResolver(),
+    new PreviewPlanResolver(ociEngine),
     new PreviewApprovalPolicy(store),
     source,
     graph,

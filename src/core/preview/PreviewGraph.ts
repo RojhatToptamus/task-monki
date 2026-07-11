@@ -59,6 +59,9 @@ export class PreviewGraph {
     updateGenerationState(state: PreviewGenerationState): Promise<void>;
     signal?: AbortSignal;
   }): Promise<RunningPreviewGraph> {
+    if (input.plan.resources.length > 0) {
+      throw new Error('OCI preview resources are not connected to the graph runtime.');
+    }
     const longNodes = [...input.plan.services, ...input.plan.workers];
     const allNodes = [...input.plan.jobs, ...longNodes];
     const byId = new Map(allNodes.map((node) => [node.id, node]));
@@ -88,7 +91,7 @@ export class PreviewGraph {
       const operation = (async () => {
         await Promise.all(Object.keys(node.needs).sort().map(execute));
         throwIfAborted(startupAbort.signal);
-        if ('env' in node) {
+        if ('ports' in node) {
           const kind = input.plan.services.some((service) => service.id === node.id) ? 'SERVICE' : 'WORKER';
           const ports = await this.allocatePorts(node);
           allocatedPorts[node.id] = ports;
@@ -125,7 +128,12 @@ export class PreviewGraph {
         await semaphore.run(async () => {
           throwIfAborted(startupAbort.signal);
           try {
-            return await this.jobs.run({ ...runtimeInput(startupInput), node, signal: startupAbort.signal });
+            return await this.jobs.run({
+              ...runtimeInput(startupInput),
+              node,
+              signal: startupAbort.signal,
+              env: resolveEnvironment(node.env, allocatedPorts, input.routeOrigins ?? {})
+            });
           } catch (error) {
             startupAbort.abort();
             throw error;
@@ -452,7 +460,15 @@ export class PreviewGraph {
         throwIfAborted(signal);
         return this.jobs.run({
           ...runtimeInput(input),
-          node: { id: `${owner.node.id}-probe`, cwd: probe.cwd, command: probe.command, needs: {} },
+          node: {
+            id: `${owner.node.id}-probe`,
+            cwd: probe.cwd,
+            command: probe.command,
+            needs: {},
+            env: {},
+            role: 'generic',
+            retrySafe: false
+          },
           kind: 'PROBE',
           attempt: owner.probeAttempt,
           timeoutMs: probe.timeoutSeconds * 1_000,
@@ -559,10 +575,12 @@ function resolveEnvironment(
       const origin = routeOrigins[value.route];
       if (!origin) throw new Error(`Preview route origin ${value.route} is unavailable.`);
       result[key] = origin;
-    } else {
+    } else if (value.type === 'service-origin') {
       const port = allPorts[value.service]?.[value.port];
       if (!port) throw new Error(`Preview service origin ${value.service}.${value.port} is unavailable.`);
       result[key] = `http://127.0.0.1:${port}`;
+    } else {
+      throw new Error(`Preview OCI environment reference ${value.resource} is unavailable.`);
     }
   }
   return result;

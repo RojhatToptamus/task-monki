@@ -28,7 +28,10 @@ function testPlan(id: string, executionDigest: string, taskId: string, iteration
     id, taskId, iterationId, worktreeId,
     recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,
     recipeDigest: `recipe-${id}`, executionDigest,
-    executionPlan: { version: 1 as const, jobs: [], services: [], workers: [], routes: [] },
+    executionPlan: {
+      version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+    },
     warnings: [], createdAt: new Date().toISOString()
   };
 }

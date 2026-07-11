@@ -1,20 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { PreviewExecutionPlan } from '../../shared/contracts';
+import type { PreviewExecutionPlan, PreviewJobPlan } from '../../shared/contracts';
 import { PreviewGraph, reverseDependencyOrder } from './PreviewGraph';
 
 describe('PreviewGraph', () => {
   it('runs preparation jobs after their declared success dependencies', async () => {
     const starts: string[] = [];
-    const plan: PreviewExecutionPlan = {
-      version: 1,
+    const plan = graphPlan({
       jobs: [
-        { id: 'build', cwd: '.', command: ['node', 'build.mjs'], needs: { install: 'succeeded' } },
-        { id: 'install', cwd: '.', command: ['node', 'install.mjs'], needs: {} }
+        job('build', ['node', 'build.mjs'], { install: 'succeeded' }),
+        job('install', ['node', 'install.mjs'])
       ],
-      services: [],
-      workers: [],
-      routes: []
-    };
+      services: [], workers: [], routes: []
+    });
     const graph = new PreviewGraph(
       {} as never,
       { async run(input: { node: { id: string } }) { starts.push(input.node.id); } } as never,
@@ -29,14 +26,13 @@ describe('PreviewGraph', () => {
   });
 
   it('fails closed for a cycle even if a malformed plan bypasses recipe validation', async () => {
-    const plan: PreviewExecutionPlan = {
-      version: 1,
+    const plan = graphPlan({
       jobs: [
-        { id: 'a', cwd: '.', command: ['node'], needs: { b: 'succeeded' } },
-        { id: 'b', cwd: '.', command: ['node'], needs: { a: 'succeeded' } }
+        job('a', ['node'], { b: 'succeeded' }),
+        job('b', ['node'], { a: 'succeeded' })
       ],
       services: [], workers: [], routes: []
-    };
+    });
     const graph = new PreviewGraph(
       {} as never, {} as never, {} as never, {} as never, {} as never, {} as never
     );
@@ -67,18 +63,12 @@ describe('PreviewGraph', () => {
       {} as never,
       {} as never
     );
-    const plan: PreviewExecutionPlan = {
-      version: 1,
-      jobs: Array.from({ length: 8 }, (_, index) => ({
-        id: `job-${index}`,
-        cwd: '.',
-        command: ['node'],
-        needs: {}
-      })),
+    const plan = graphPlan({
+      jobs: Array.from({ length: 8 }, (_, index) => job(`job-${index}`, ['node'])),
       services: [],
       workers: [],
       routes: []
-    };
+    });
     const running = await graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, async updateGenerationState() {}
@@ -101,14 +91,13 @@ describe('PreviewGraph', () => {
       } as never,
       {} as never, {} as never, {} as never, {} as never
     );
-    const plan: PreviewExecutionPlan = {
-      version: 1,
+    const plan = graphPlan({
       jobs: [
-        { id: 'fail', cwd: '.', command: ['node'], needs: {} },
-        { id: 'slow', cwd: '.', command: ['node'], needs: {} }
+        job('fail', ['node']),
+        job('slow', ['node'])
       ],
       services: [], workers: [], routes: []
-    };
+    });
     await expect(graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, async updateGenerationState() {}
@@ -129,13 +118,12 @@ describe('PreviewGraph', () => {
       } as never,
       {} as never, {} as never, {} as never, {} as never
     );
-    const plan: PreviewExecutionPlan = {
-      version: 1,
-      jobs: ['a-fail', 'b-slow', 'c-slow', 'd-slow', 'e-queued', 'f-queued'].map((id) => ({
-        id, cwd: '.', command: ['node'], needs: {}
-      })),
+    const plan = graphPlan({
+      jobs: ['a-fail', 'b-slow', 'c-slow', 'd-slow', 'e-queued', 'f-queued'].map(
+        (id) => job(id, ['node'])
+      ),
       services: [], workers: [], routes: []
-    };
+    });
     await expect(graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, async updateGenerationState() {}
@@ -144,9 +132,8 @@ describe('PreviewGraph', () => {
   });
 
   it('computes reverse dependency shutdown with consumers before providers', () => {
-    const plan: PreviewExecutionPlan = {
-      version: 1,
-      jobs: [{ id: 'install', cwd: '.', command: ['npm', 'install'], needs: {} }],
+    const plan = graphPlan({
+      jobs: [job('install', ['npm', 'install'])],
       services: [
         {
           id: 'api', cwd: '.', command: ['node', 'api'], needs: { install: 'succeeded' }, env: {},
@@ -164,7 +151,7 @@ describe('PreviewGraph', () => {
         critical: false, restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
       }],
       routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
-    };
+    });
     const order = reverseDependencyOrder(plan);
     expect(order.indexOf('web')).toBeLessThan(order.indexOf('api'));
     expect(order.indexOf('indexer')).toBeLessThan(order.indexOf('api'));
@@ -192,8 +179,7 @@ describe('PreviewGraph', () => {
     let duplicateStopResolved = false;
     let stopCalls = 0;
     const releasedPorts: number[] = [];
-    const plan: PreviewExecutionPlan = {
-      version: 1,
+    const plan = graphPlan({
       jobs: [],
       services: [{
         id: 'web', cwd: '.', command: ['node', 'server.mjs'], needs: {}, env: {},
@@ -209,7 +195,7 @@ describe('PreviewGraph', () => {
       }],
       workers: [],
       routes: []
-    };
+    });
     const graph = new PreviewGraph(
       {
         async savePreviewNodeAttempt(value: unknown) { return value; },
@@ -295,3 +281,31 @@ describe('PreviewGraph', () => {
     expect(releasedPorts).toEqual([41_001]);
   });
 });
+
+function graphPlan(
+  input: Pick<PreviewExecutionPlan, 'jobs' | 'services' | 'workers' | 'routes'>
+): PreviewExecutionPlan {
+  return {
+    version: 1,
+    ...input,
+    resources: [],
+    scenarios: [{ id: 'default', jobs: [], resources: [] }],
+    selectedScenarioId: 'default'
+  };
+}
+
+function job(
+  id: string,
+  command: string[],
+  needs: PreviewJobPlan['needs'] = {}
+): PreviewJobPlan {
+  return {
+    id,
+    cwd: '.',
+    command,
+    needs,
+    env: {},
+    role: 'generic',
+    retrySafe: false
+  };
+}
