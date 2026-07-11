@@ -634,7 +634,8 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     agentSubagentObservations: [],
     interactionRequests: [],
     events: [],
-    artifacts: []
+    artifacts: [],
+    attachments: []
   };
 }
 

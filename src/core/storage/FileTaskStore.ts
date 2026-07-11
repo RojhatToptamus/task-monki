@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -33,6 +34,11 @@ import type {
   RunRecord,
   StatusProjection,
   Task,
+  TaskAttachmentRecord,
+  AttachmentContent,
+  AttachmentDraftSnapshot,
+  StageAttachmentBytesInput,
+  StagedAttachmentRecord,
   TaskIteration,
   TaskSnapshot,
   WorktreeRecord
@@ -42,6 +48,7 @@ import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
+  isTaskCreationToken,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
@@ -51,6 +58,13 @@ import {
   codexReviewStatusFromResult,
   parseCodexReviewResult
 } from '../review/CodexReviewContract';
+import {
+  AttachmentFileStore,
+  AttachmentStoreError,
+  validateTaskAttachmentRecords,
+  type PreparedAttachmentDraft,
+  type VerifiedTaskAttachment
+} from './AttachmentFileStore';
 
 export interface CreateAgentSessionInput {
   task: Task;
@@ -178,6 +192,23 @@ const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
   'MERGED_AND_VERIFIED',
   'MANUAL'
 ];
+const MAX_STORE_FILE_BYTES = 256 * 1024 * 1024;
+const ARTIFACT_KINDS: readonly ArtifactKind[] = [
+  'agent-prompt',
+  'agent-output',
+  'agent-diagnostics',
+  'agent-final',
+  'diff',
+  'git-snapshot',
+  'pr-body'
+];
+const UUID_FILE_SEGMENT =
+  '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const UUID_FILE_SEGMENT_PATTERN = new RegExp(`^${UUID_FILE_SEGMENT}$`, 'u');
+const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
+  `^${UUID_FILE_SEGMENT}-(?:task|${UUID_FILE_SEGMENT})-(?:${ARTIFACT_KINDS.join('|')})-${UUID_FILE_SEGMENT}\\.log$`,
+  'u'
+);
 
 function normalizeCreateTaskCompletionPolicy(
   value: CreateTaskRequest['completionPolicy']
@@ -191,23 +222,155 @@ function normalizeCreateTaskCompletionPolicy(
   throw new Error(`Invalid completion policy: ${String(value)}`);
 }
 
+interface TaskCreationMetadata {
+  token: string;
+  fingerprint: string;
+}
+
+function taskCreationMetadata(
+  input: CreateTaskRequest
+): TaskCreationMetadata | undefined {
+  if (input.creationToken === undefined) {
+    return undefined;
+  }
+  if (!isTaskCreationToken(input.creationToken)) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Task creation retry token is invalid.',
+      400
+    );
+  }
+
+  let canonicalRequest: string | undefined;
+  try {
+    canonicalRequest = stableJsonStringify({
+      title: input.title.trim(),
+      prompt: input.prompt.trim(),
+      repositoryPath: input.repositoryPath.trim(),
+      completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
+      agentSettings: input.agentSettings ?? {},
+      attachmentDraftId: input.attachmentDraftId ?? null
+    });
+  } catch {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Task creation request cannot be used for a safe retry.',
+      400
+    );
+  }
+  if (!canonicalRequest) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Task creation request cannot be used for a safe retry.',
+      400
+    );
+  }
+
+  return {
+    token: input.creationToken,
+    fingerprint: createHash('sha256').update(canonicalRequest).digest('hex')
+  };
+}
+
+/** Deterministic JSON encoding with normal JSON omission/null semantics. */
+function stableJsonStringify(
+  value: unknown,
+  ancestors: Set<object> = new Set()
+): string | undefined {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  }
+  if (
+    value === undefined ||
+    typeof value === 'function' ||
+    typeof value === 'symbol'
+  ) {
+    return undefined;
+  }
+  if (typeof value === 'bigint') {
+    throw new TypeError('BigInt is not valid JSON.');
+  }
+  if (ancestors.has(value)) {
+    throw new TypeError('Circular data is not valid JSON.');
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return `[${value
+        .map((entry) => stableJsonStringify(entry, ancestors) ?? 'null')
+        .join(',')}]`;
+    }
+    const fields: string[] = [];
+    for (const key of Object.keys(value).sort()) {
+      const encoded = stableJsonStringify(
+        (value as Record<string, unknown>)[key],
+        ancestors
+      );
+      if (encoded !== undefined) {
+        fields.push(`${JSON.stringify(key)}:${encoded}`);
+      }
+    }
+    return `{${fields.join(',')}}`;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function isCanonicalStoreTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
 type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
   schemaVersion?: unknown;
   testRuns?: unknown;
 };
 
+export type TaskCreationRequestErrorCode =
+  | 'TASK_CREATION_INVALID_REQUEST'
+  | 'TASK_CREATION_CONFLICT';
+
+export class TaskCreationRequestError extends Error {
+  readonly name = 'TaskCreationRequestError';
+
+  constructor(
+    readonly code: TaskCreationRequestErrorCode,
+    message: string,
+    readonly httpStatus: 400 | 409
+  ) {
+    super(message);
+  }
+}
+
+class StorePublishedError extends Error {
+  readonly name = 'StorePublishedError';
+
+  constructor(readonly cause: unknown) {
+    super('Task store snapshot was published but its directory sync did not complete.');
+  }
+}
+
 export class FileTaskStore {
   private readonly storePath: string;
   private readonly artifactsDir: string;
   private readonly protocolJournal: AgentProtocolJournal;
+  private readonly attachmentFiles: AttachmentFileStore;
   private state: StoreState = createEmptyState();
   private loaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
+  private taskCreationQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly baseDir: string) {
     this.storePath = path.join(baseDir, 'store.json');
     this.artifactsDir = path.join(baseDir, 'artifacts');
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
+    this.attachmentFiles = new AttachmentFileStore(baseDir);
   }
 
   async init(): Promise<void> {
@@ -215,30 +378,238 @@ export class FileTaskStore {
       return;
     }
 
-    await fs.mkdir(this.artifactsDir, { recursive: true });
-
+    await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
+    const baseEntry = await fs.lstat(this.baseDir);
+    if (!baseEntry.isDirectory() || baseEntry.isSymbolicLink()) {
+      throw new Error('Task store root failed its directory integrity check.');
+    }
+    await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
+    await this.attachmentFiles.init();
+    await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
     try {
-      const raw = await fs.readFile(this.storePath, 'utf8');
-      const migrated = migratePersistedState(JSON.parse(raw) as PersistedState);
+      const raw = await readPrivateStoreFile(this.storePath);
+      const persisted = JSON.parse(raw) as PersistedState;
+      const migrated = migratePersistedState(persisted);
       const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
       this.state = normalized.state;
-      if (migrated.changed || normalized.changed) {
+      const attachments = await this.attachmentFiles.migrateLegacyRecords(
+        this.state.attachments
+      );
+      const attachmentsMigrated = attachments.some(
+        (attachment, index) =>
+          attachment.storageKey !== this.state.attachments[index]?.storageKey
+      );
+      if (attachmentsMigrated) {
+        this.state = { ...this.state, attachments };
+      }
+      await this.attachmentFiles.reconcile(this.state.attachments);
+      await this.reconcileArtifacts();
+      if (migrated.changed || normalized.changed || attachmentsMigrated) {
         await this.persist();
+      }
+      if (
+        persisted.schemaVersion === 10 ||
+        persisted.schemaVersion === TASK_STORE_SCHEMA_VERSION
+      ) {
+        await this.attachmentFiles.cleanupLegacyStorage();
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
       }
       this.state = createEmptyState();
+      await this.attachmentFiles.reconcile(this.state.attachments);
+      await this.reconcileArtifacts();
       await this.persist();
     }
-
     this.loaded = true;
+  }
+
+  async close(): Promise<void> {
+    try {
+      await this.taskCreationQueue.catch(() => undefined);
+      await this.writeQueue.catch(() => undefined);
+    } finally {
+      this.loaded = false;
+    }
+  }
+
+  private async reconcileArtifacts(): Promise<void> {
+    await assertArtifactDirectory(this.baseDir, this.artifactsDir);
+    const taskIds = new Set(this.state.tasks.map((task) => task.id));
+    const runsById = new Map(this.state.runs.map((run) => [run.id, run]));
+    const artifactIds = new Set<string>();
+    const expectedByName = new Map<string, ArtifactRecord>();
+    for (const artifact of this.state.artifacts) {
+      const fileName = validateArtifactRecord(
+        artifact,
+        this.artifactsDir,
+        taskIds,
+        runsById
+      );
+      if (artifactIds.has(artifact.id) || expectedByName.has(fileName)) {
+        throw new Error('Task artifact records contain duplicate managed identifiers.');
+      }
+      artifactIds.add(artifact.id);
+      expectedByName.set(fileName, artifact);
+    }
+
+    let removedOrphans = 0;
+    for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
+      const entryPath = path.join(this.artifactsDir, entry.name);
+      const stat = await fs.lstat(entryPath);
+      if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
+        throw new Error('Task artifact directory contains an unsafe entry.');
+      }
+      const expected = expectedByName.get(entry.name);
+      if (expected) {
+        if (!stat.isFile()) {
+          throw new Error('Stored task artifact path is not a regular file.');
+        }
+        await secureArtifactFile(entryPath);
+        continue;
+      }
+      if (!MANAGED_ARTIFACT_FILE_PATTERN.test(entry.name)) {
+        // Unknown regular files and directories are not Task Monki records and
+        // are intentionally left untouched.
+        continue;
+      }
+      if (!stat.isFile()) {
+        throw new Error('Orphan task artifact path is not a regular file.');
+      }
+      assertArtifactOwnedByCurrentUser(stat);
+      await fs.unlink(entryPath);
+      removedOrphans += 1;
+    }
+    if (removedOrphans > 0) await syncStoreDirectory(this.artifactsDir);
   }
 
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return clone(this.state);
+  }
+
+  async createAttachmentDraft(): Promise<AttachmentDraftSnapshot> {
+    await this.init();
+    return this.attachmentFiles.createDraft();
+  }
+
+  async stageTaskAttachment(input: StageAttachmentBytesInput): Promise<StagedAttachmentRecord> {
+    await this.init();
+    return this.attachmentFiles.stageBytes(input);
+  }
+
+  async listAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
+    await this.init();
+    return this.attachmentFiles.listDraft(draftId);
+  }
+
+  async discardAttachmentDraft(draftId: string): Promise<void> {
+    await this.init();
+    return this.attachmentFiles.discardDraft(draftId);
+  }
+
+  async getTaskAttachments(taskId: string): Promise<TaskAttachmentRecord[]> {
+    await this.init();
+    return clone(
+      this.state.attachments
+        .filter((attachment) => attachment.taskId === taskId)
+        .sort((left, right) => left.ordinal - right.ordinal)
+    );
+  }
+
+  async verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
+    const records = await this.getTaskAttachments(taskId);
+    return records.length === 0 ? [] : this.attachmentFiles.verifyTask(taskId, records);
+  }
+
+  /** Returns verified immutable task-owned files for provider delivery. */
+  async prepareRunAttachments(
+    runId: string,
+    taskId: string
+  ): Promise<VerifiedTaskAttachment[]> {
+    const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
+    const attachments = await this.verifyTaskAttachments(taskId);
+    assertAttachmentsOutsideWorktree(attachments, worktreePath);
+    return attachments;
+  }
+
+  /** Revalidates task-owned files immediately before provider submission. */
+  async verifyRunAttachments(
+    runId: string,
+    taskId: string
+  ): Promise<VerifiedTaskAttachment[]> {
+    const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
+    const attachments = await this.verifyTaskAttachments(taskId);
+    assertAttachmentsOutsideWorktree(attachments, worktreePath);
+    return attachments;
+  }
+
+  /**
+   * Crash recovery verifies attachments for active runs without creating a
+   * second filesystem representation.
+   */
+  async reconcileRunAttachments(): Promise<{
+    preparedRunIds: string[];
+    failedRunIds: string[];
+  }> {
+    await this.init();
+    const activeRuns = this.state.runs.filter((run) =>
+      [
+        'QUEUED',
+        'STARTING',
+        'RUNNING',
+        'AWAITING_APPROVAL',
+        'AWAITING_USER_INPUT',
+        'INTERRUPTING',
+        'RECOVERY_REQUIRED'
+      ].includes(run.status)
+    );
+    const preparedRunIds: string[] = [];
+    const failedRunIds: string[] = [];
+    for (const run of activeRuns) {
+      try {
+        await this.prepareRunAttachments(run.id, run.taskId);
+        preparedRunIds.push(run.id);
+      } catch {
+        failedRunIds.push(run.id);
+      }
+    }
+    return { preparedRunIds, failedRunIds };
+  }
+
+  private async requireRunAttachmentWorktree(
+    runId: string,
+    taskId: string
+  ): Promise<string> {
+    await this.init();
+    const run = this.state.runs.find((candidate) => candidate.id === runId);
+    if (!run || run.taskId !== taskId) {
+      throw new Error('Run attachments do not belong to the selected task and run.');
+    }
+    const worktree = this.state.worktrees.find(
+      (candidate) => candidate.id === run.worktreeId && candidate.taskId === taskId
+    );
+    if (!worktree) {
+      throw new Error('Run attachments do not have an authoritative worktree.');
+    }
+    return worktree.worktreePath;
+  }
+
+  async readTaskAttachment(attachmentId: string): Promise<AttachmentContent> {
+    await this.init();
+    const record = this.state.attachments.find((attachment) => attachment.id === attachmentId);
+    if (!record) {
+      throw new AttachmentStoreError('ATTACHMENT_NOT_FOUND', 'Attachment not found.', 404);
+    }
+    const stored = await this.attachmentFiles.readTask(record);
+    return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
+  }
+
+  async readDraftAttachment(draftId: string, attachmentId: string): Promise<AttachmentContent> {
+    await this.init();
+    const stored = await this.attachmentFiles.readDraft(draftId, attachmentId);
+    return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
@@ -292,6 +663,7 @@ export class FileTaskStore {
         | 'endedAt'
         | 'finalArtifactId'
         | 'finalMessage'
+        | 'attachmentSubmissions'
       >
     >
   ): Promise<RunRecord> {
@@ -372,12 +744,19 @@ export class FileTaskStore {
     );
   }
 
-  async getRunsRequiringRecovery(): Promise<RunRecord[]> {
+  async getRunsRequiringRecovery(options: {
+    includeQueued?: boolean;
+  } = {}): Promise<RunRecord[]> {
     await this.init();
+    const statuses: RunRecord['status'][] = [
+      'RECOVERY_REQUIRED',
+      'RUNNING',
+      'STARTING',
+      'INTERRUPTING'
+    ];
+    if (options.includeQueued) statuses.push('QUEUED');
     return clone(
-      this.state.runs.filter((run) =>
-        ['RECOVERY_REQUIRED', 'RUNNING', 'STARTING', 'INTERRUPTING'].includes(run.status)
-      )
+      this.state.runs.filter((run) => statuses.includes(run.status))
     );
   }
 
@@ -440,14 +819,27 @@ export class FileTaskStore {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
-    return this.createTaskRecord(input, 'ui');
+    return this.enqueueTaskCreation(() => this.createTaskRecord(input, 'ui'));
   }
 
   async createForkedAlternativeTask(input: CreateForkedAlternativeTaskInput): Promise<Task> {
-    return this.createTaskRecord(input, 'ui', {
-      sourceTaskId: input.sourceTaskId,
-      sourceRunId: input.sourceRunId
-    });
+    return this.enqueueTaskCreation(() =>
+      this.createTaskRecord(input, 'ui', {
+        sourceTaskId: input.sourceTaskId,
+        sourceRunId: input.sourceRunId
+      })
+    );
+  }
+
+  /**
+   * Resolves an acknowledged create before callers touch a possibly-consumed
+   * attachment draft. A token reused with different normalized input is a
+   * conflict, never permission to return the first task.
+   */
+  async resolveTaskCreationRetry(input: CreateTaskRequest): Promise<Task | undefined> {
+    await this.init();
+    await this.taskCreationQueue.catch(() => undefined);
+    return clone(this.resolveTaskCreationRetryFromState(input));
   }
 
   async deleteTask(taskId: string): Promise<void> {
@@ -478,9 +870,12 @@ export class FileTaskStore {
     );
     const artifactIds = new Set(artifactsToDelete.map((artifact) => artifact.id));
     const now = new Date().toISOString();
+    const previousState = this.state;
+    let publishedWithoutDirectorySync = false;
 
-    this.state = {
-      ...this.state,
+    try {
+      this.state = {
+        ...this.state,
       tasks: this.state.tasks
         .filter((candidate) => candidate.id !== taskId)
         .map((candidate) => removeTaskLink(candidate, taskId, now)),
@@ -544,11 +939,28 @@ export class FileTaskStore {
             worktreeIds
           })
       ),
-      artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
-    };
+        artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id)),
+        attachments: this.state.attachments.filter(
+          (attachment) => attachment.taskId !== taskId
+        )
+      };
 
-    await this.persistQueued();
-    await Promise.all(artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path)));
+      await this.persistQueued();
+    } catch (error) {
+      if (error instanceof StorePublishedError) {
+        publishedWithoutDirectorySync = true;
+      } else {
+        this.state = previousState;
+        throw error;
+      }
+    }
+    // Blobs are immutable and shared by metadata reference. Once deletion is
+    // durable, unreferenced objects can be collected without a trash/restore
+    // transaction; startup reconciliation retries any failed cleanup.
+    await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
+    if (!publishedWithoutDirectorySync) {
+      await Promise.all(artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path)));
+    }
   }
 
   private async createTaskRecord(
@@ -557,6 +969,13 @@ export class FileTaskStore {
     fork?: { sourceTaskId: string; sourceRunId: string }
   ): Promise<Task> {
     await this.init();
+
+    if (!fork) {
+      const existing = this.resolveTaskCreationRetryFromState(input);
+      if (existing) {
+        return clone(existing);
+      }
+    }
 
     const now = new Date().toISOString();
     const sourceTask = fork
@@ -571,11 +990,14 @@ export class FileTaskStore {
     if (fork && (!sourceTask || !sourceRun)) {
       throw new Error('Fork source task or run was not found.');
     }
+    const creationMetadata = fork ? undefined : taskCreationMetadata(input);
     const task: Task = {
       id: randomUUID(),
       title: input.title.trim(),
       prompt: input.prompt.trim(),
       repositoryPath: input.repositoryPath.trim(),
+      creationToken: creationMetadata?.token,
+      creationRequestFingerprint: creationMetadata?.fingerprint,
       workflowPhase: 'READY',
       resolution: 'NONE',
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
@@ -599,58 +1021,138 @@ export class FileTaskStore {
       throw new Error('Repository path is required.');
     }
 
-    this.state = {
-      ...this.state,
-      tasks: [
-        task,
-        ...this.state.tasks.map((existing) =>
-          fork && existing.id === fork.sourceTaskId
-            ? {
-                ...existing,
-                forkedAlternativeTaskIds: uniqueIds([
-                  ...(existing.forkedAlternativeTaskIds ?? []),
-                  task.id
-                ]),
-                updatedAt: now
-              }
-            : existing
-        )
-      ]
-    };
+    if (fork && input.attachmentDraftId) {
+      throw new Error('Forked alternatives inherit source attachments and cannot adopt a draft.');
+    }
 
-    this.state = applyEventToState(
-      this.state,
-      createDomainEvent({
-        type: 'TASK_CREATED',
-        taskId: task.id,
-        source,
-        payload: {
-          title: task.title,
-          repositoryPath: task.repositoryPath,
-          forkedFromTaskId: task.forkedFromTaskId,
-          forkedFromRunId: task.forkedFromRunId
-        }
-      })
-    );
+    const previousState = this.state;
+    let preparedDraft: PreparedAttachmentDraft | undefined;
+    let attachmentRecords: TaskAttachmentRecord[] = [];
+    let publishedWithoutDirectorySync = false;
+    try {
+      if (fork) {
+        attachmentRecords = await this.attachmentFiles.copyTaskAttachments(
+          fork.sourceTaskId,
+          task.id,
+          this.state.attachments.filter((attachment) => attachment.taskId === fork.sourceTaskId)
+        );
+      } else if (input.attachmentDraftId) {
+        preparedDraft = await this.attachmentFiles.prepareDraftForTask(
+          input.attachmentDraftId,
+          task.id
+        );
+        attachmentRecords = preparedDraft.records;
+      }
 
-    if (fork) {
+      this.state = {
+        ...this.state,
+        tasks: [
+          task,
+          ...this.state.tasks.map((existing) =>
+            fork && existing.id === fork.sourceTaskId
+              ? {
+                  ...existing,
+                  forkedAlternativeTaskIds: uniqueIds([
+                    ...(existing.forkedAlternativeTaskIds ?? []),
+                    task.id
+                  ]),
+                  updatedAt: now
+                }
+              : existing
+          )
+        ],
+        attachments: [...attachmentRecords, ...this.state.attachments]
+      };
+
       this.state = applyEventToState(
         this.state,
         createDomainEvent({
-          type: 'TASK_ALTERNATIVE_CREATED',
-          taskId: fork.sourceTaskId,
-          runId: fork.sourceRunId,
+          type: 'TASK_CREATED',
+          taskId: task.id,
           source,
           payload: {
-            alternativeTaskId: task.id,
-            alternativeTitle: task.title
+            title: task.title,
+            repositoryPath: task.repositoryPath,
+            forkedFromTaskId: task.forkedFromTaskId,
+            forkedFromRunId: task.forkedFromRunId,
+            attachmentIds: attachmentRecords.map((attachment) => attachment.id)
           }
         })
       );
-    }
 
-    await this.persistQueued();
+      if (fork) {
+        this.state = applyEventToState(
+          this.state,
+          createDomainEvent({
+            type: 'TASK_ALTERNATIVE_CREATED',
+            taskId: fork.sourceTaskId,
+            runId: fork.sourceRunId,
+            source,
+            payload: {
+              alternativeTaskId: task.id,
+              alternativeTitle: task.title
+            }
+          })
+        );
+      }
+
+      await this.persistQueued();
+    } catch (error) {
+      if (error instanceof StorePublishedError) {
+        // The snapshot is already visible. Keep the draft until a later
+        // startup can compare it with the durable attachment records.
+        publishedWithoutDirectorySync = true;
+      } else {
+        this.state = previousState;
+        if (preparedDraft) {
+          await this.attachmentFiles.rollbackDraftForTask(preparedDraft).catch(
+            () => undefined
+          );
+        } else if (fork && attachmentRecords.length > 0) {
+          await this.attachmentFiles.discardTaskFiles(task.id).catch(() => undefined);
+        }
+        throw error;
+      }
+    }
+    if (!publishedWithoutDirectorySync) {
+      if (preparedDraft) {
+        await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(() => undefined);
+      } else if (attachmentRecords.length > 0) {
+        await this.attachmentFiles.syncTaskRecords(this.state.attachments).catch(
+          () => undefined
+        );
+      }
+    }
     return clone(task);
+  }
+
+  private resolveTaskCreationRetryFromState(
+    input: CreateTaskRequest
+  ): Task | undefined {
+    const metadata = taskCreationMetadata(input);
+    if (!metadata) {
+      return undefined;
+    }
+    const existing = this.state.tasks.find(
+      (candidate) => candidate.creationToken === metadata.token
+    );
+    if (!existing) {
+      return undefined;
+    }
+    if (existing.creationRequestFingerprint !== metadata.fingerprint) {
+      throw new TaskCreationRequestError(
+        'TASK_CREATION_CONFLICT',
+        'This task creation retry token was already used for a different request.',
+        409
+      );
+    }
+    return existing;
+  }
+
+  private async enqueueTaskCreation<T>(operation: () => Promise<T>): Promise<T> {
+    const queued = this.taskCreationQueue.catch(() => undefined).then(operation);
+    this.taskCreationQueue = queued.catch(() => undefined);
+    return queued;
   }
 
   async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
@@ -2062,8 +2564,8 @@ export class FileTaskStore {
       throw new Error(`Artifact not found: ${artifactId}`);
     }
 
-    await fs.mkdir(path.dirname(artifact.path), { recursive: true });
-    await fs.appendFile(artifact.path, chunk, 'utf8');
+    await fs.mkdir(path.dirname(artifact.path), { recursive: true, mode: 0o700 });
+    await fs.appendFile(artifact.path, chunk, { encoding: 'utf8', mode: 0o600 });
 
     const byteCount = Buffer.byteLength(chunk);
     const updatedAt = new Date().toISOString();
@@ -2081,7 +2583,7 @@ export class FileTaskStore {
     await this.init();
 
     const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
-    await fs.writeFile(artifact.path, content, 'utf8');
+    await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
 
     const hash = createHash('sha256').update(content).digest('hex');
     const stored: ArtifactRecord = {
@@ -2114,7 +2616,7 @@ export class FileTaskStore {
     await this.init();
 
     const artifact = await this.createArtifactRecord(taskId, kind);
-    await fs.writeFile(artifact.path, content, 'utf8');
+    await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
 
     const stored: ArtifactRecord = {
       ...artifact,
@@ -2185,14 +2687,271 @@ export class FileTaskStore {
 
   private async persist(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true });
-    const tmpPath = `${this.storePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.state, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.chmod(tmpPath, 0o600);
-    await fs.rename(tmpPath, this.storePath);
+    const tmpPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    let published = false;
+    try {
+      handle = await fs.open(
+        tmpPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        0o600
+      );
+      await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
+      await handle.sync();
+      await handle.chmod(0o600);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fs.rename(tmpPath, this.storePath);
+      published = true;
+      await syncStoreDirectory(this.baseDir);
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await fs.unlink(tmpPath).catch(() => undefined);
+      if (published) throw new StorePublishedError(error);
+      throw error;
+    }
   }
+}
+
+async function readPrivateStoreFile(storePath: string): Promise<string> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      storePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch (error) {
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.size <= 0 ||
+      stat.size > MAX_STORE_FILE_BYTES ||
+      (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+    ) {
+      throw new Error('Task store file failed its integrity check.');
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength !== stat.size) {
+      throw new Error('Task store file changed while it was being read.');
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function cleanupStoreTemporaryFiles(
+  baseDir: string,
+  storePath: string
+): Promise<void> {
+  const storeName = path.basename(storePath);
+  for (const entry of await fs.readdir(baseDir, { withFileTypes: true })) {
+    if (
+      entry.name !== `${storeName}.tmp` &&
+      !(entry.name.startsWith(`${storeName}.`) && entry.name.endsWith('.tmp'))
+    ) {
+      continue;
+    }
+    const temporaryPath = path.join(baseDir, entry.name);
+    const stat = await fs.lstat(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!stat) continue;
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      throw new Error('Task store temporary path failed its integrity check.');
+    }
+    await fs.unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+}
+
+async function syncStoreDirectory(directory: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(
+      directory,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_DIRECTORY ?? 0) |
+        (fsConstants.O_NOFOLLOW ?? 0)
+    );
+    await handle.sync();
+  } catch (error) {
+    if (
+      !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF'].includes(
+        (error as NodeJS.ErrnoException).code ?? ''
+      )
+    ) {
+      throw error;
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function initializeArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<void> {
+  try {
+    await fs.mkdir(artifactsDir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  const before = await inspectArtifactDirectory(baseDir, artifactsDir);
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      artifactsDir,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_DIRECTORY ?? 0) |
+        (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Task artifact directory failed its integrity check.');
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isDirectory() ||
+      stat.dev !== before.dev ||
+      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino)
+    ) {
+      throw new Error('Task artifact directory changed during initialization.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    await handle.chmod(0o700);
+  } finally {
+    await handle.close();
+  }
+  await assertArtifactDirectory(baseDir, artifactsDir);
+}
+
+async function assertArtifactDirectory(baseDir: string, artifactsDir: string): Promise<void> {
+  const stat = await inspectArtifactDirectory(baseDir, artifactsDir);
+  assertArtifactPrivateMode(stat, 0o700);
+}
+
+async function inspectArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<Awaited<ReturnType<typeof fs.lstat>>> {
+  const stat = await fs.lstat(artifactsDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('Task artifact directory failed its integrity check.');
+  }
+  assertArtifactOwnedByCurrentUser(stat);
+  const [baseRealPath, artifactRealPath] = await Promise.all([
+    fs.realpath(baseDir),
+    fs.realpath(artifactsDir)
+  ]);
+  if (artifactRealPath !== path.join(baseRealPath, path.basename(artifactsDir))) {
+    throw new Error('Task artifact directory escaped its managed root.');
+  }
+  return stat;
+}
+
+function validateArtifactRecord(
+  artifact: ArtifactRecord,
+  artifactsDir: string,
+  taskIds: ReadonlySet<string>,
+  runsById: ReadonlyMap<string, RunRecord>
+): string {
+  const run = artifact.runId === undefined ? undefined : runsById.get(artifact.runId);
+  if (
+    !artifact ||
+    typeof artifact !== 'object' ||
+    !UUID_FILE_SEGMENT_PATTERN.test(artifact.id) ||
+    !UUID_FILE_SEGMENT_PATTERN.test(artifact.taskId) ||
+    (artifact.runId !== undefined && !UUID_FILE_SEGMENT_PATTERN.test(artifact.runId)) ||
+    !ARTIFACT_KINDS.includes(artifact.kind) ||
+    !Number.isSafeInteger(artifact.byteCount) ||
+    artifact.byteCount < 0 ||
+    !isCanonicalStoreTimestamp(artifact.createdAt) ||
+    !isCanonicalStoreTimestamp(artifact.updatedAt) ||
+    artifact.updatedAt < artifact.createdAt ||
+    !taskIds.has(artifact.taskId) ||
+    (artifact.runId !== undefined && (!run || run.taskId !== artifact.taskId))
+  ) {
+    throw new Error('Task artifact record failed its integrity check.');
+  }
+  const ownerId = artifact.runId ?? 'task';
+  const fileName = `${artifact.taskId}-${ownerId}-${artifact.kind}-${artifact.id}.log`;
+  if (
+    !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
+    artifact.path !== path.join(artifactsDir, fileName)
+  ) {
+    throw new Error('Task artifact path failed its managed-path integrity check.');
+  }
+  return fileName;
+}
+
+async function secureArtifactFile(filePath: string): Promise<void> {
+  const before = await fs.lstat(filePath);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error('Stored task artifact is not a regular file.');
+  }
+  assertArtifactOwnedByCurrentUser(before);
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Stored task artifact could not be opened safely.');
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.dev !== before.dev ||
+      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino)
+    ) {
+      throw new Error('Stored task artifact changed during validation.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    if (artifactMode(stat) !== 0o600 && process.platform !== 'win32') {
+      await handle.chmod(0o600);
+      await handle.sync();
+    }
+    assertArtifactPrivateMode(await handle.stat(), 0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+function assertArtifactOwnedByCurrentUser(
+  stat: Awaited<ReturnType<typeof fs.lstat>>
+): void {
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error('Task artifact entry is not owned by the current user.');
+  }
+}
+
+function assertArtifactPrivateMode(
+  stat: Awaited<ReturnType<typeof fs.lstat>>,
+  expected: number
+): void {
+  if (process.platform !== 'win32' && artifactMode(stat) !== expected) {
+    throw new Error('Task artifact entry has unsafe permissions.');
+  }
+}
+
+function artifactMode(stat: Awaited<ReturnType<typeof fs.lstat>>): number {
+  return typeof stat.mode === 'bigint'
+    ? Number(stat.mode & BigInt(0o777))
+    : stat.mode & 0o777;
 }
 
 function requireCurrentState(state: PersistedState): StoreState {
@@ -2224,20 +2983,96 @@ function requireCurrentState(state: PersistedState): StoreState {
     'agentSubagentObservations',
     'interactionRequests',
     'events',
-    'artifacts'
+    'artifacts',
+    'attachments'
   ];
   for (const key of requiredCollections) {
     if (!Array.isArray(state[key])) {
       throw new Error(`Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${key} is missing.`);
     }
   }
-  return state as StoreState;
+  const current = state as StoreState;
+  validatePersistedTaskCreationMetadata(current);
+  validatePersistedAttachments(current);
+  return current;
+}
+
+function validatePersistedTaskCreationMetadata(state: StoreState): void {
+  const tokens = new Set<string>();
+  for (const task of state.tasks) {
+    const token = task.creationToken;
+    const fingerprint = task.creationRequestFingerprint;
+    const hasToken = token !== undefined;
+    const hasFingerprint = fingerprint !== undefined;
+    if (!hasToken && !hasFingerprint) {
+      continue;
+    }
+    if (
+      !hasToken ||
+      !hasFingerprint ||
+      !isTaskCreationToken(token) ||
+      typeof fingerprint !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(fingerprint) ||
+      tokens.has(token) ||
+      task.forkedFromTaskId !== undefined ||
+      task.forkedFromRunId !== undefined
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: tasks contains invalid creation retry metadata.`
+      );
+    }
+    tokens.add(token);
+  }
+}
+
+function validatePersistedAttachments(state: StoreState): void {
+  const taskIds = new Set(state.tasks.map((task) => task.id));
+  const attachmentIds = new Set<string>();
+  const byTask = new Map<string, TaskAttachmentRecord[]>();
+  for (const attachment of state.attachments) {
+    if (!taskIds.has(attachment.taskId) || attachmentIds.has(attachment.id)) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: attachments contains an invalid record.`
+      );
+    }
+    attachmentIds.add(attachment.id);
+    byTask.set(attachment.taskId, [
+      ...(byTask.get(attachment.taskId) ?? []),
+      attachment
+    ]);
+  }
+  for (const [taskId, attachments] of byTask) {
+    try {
+      validateTaskAttachmentRecords(attachments, taskId);
+    } catch {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: attachments contains an invalid record.`
+      );
+    }
+  }
 }
 
 function migratePersistedState(state: PersistedState): {
   state: PersistedState;
   changed: boolean;
 } {
+  if (state.schemaVersion === 10) {
+    return {
+      state: { ...state, schemaVersion: TASK_STORE_SCHEMA_VERSION },
+      changed: true
+    };
+  }
+  if (state.schemaVersion === 9) {
+    return {
+      state: {
+        ...state,
+        schemaVersion: TASK_STORE_SCHEMA_VERSION,
+        attachments: []
+      },
+      changed: true
+    };
+  }
+
   if (state.schemaVersion !== 8) {
     return { state, changed: false };
   }
@@ -2247,7 +3082,8 @@ function migratePersistedState(state: PersistedState): {
   return {
     state: {
       ...currentState,
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
+      schemaVersion: TASK_STORE_SCHEMA_VERSION,
+      attachments: []
     },
     changed: true
   };
@@ -2555,6 +3391,10 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function exactArrayBuffer(value: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(value).buffer;
+}
+
 function uniqueIds(values: string[]): string[] {
   return [...new Set(values)];
 }
@@ -2649,4 +3489,22 @@ function validateAgentItemTransition(current: AgentItemStatus, next: AgentItemSt
 
 function isInteractionTerminal(status: InteractionRequestStatus): boolean {
   return !['PENDING', 'RESPONDING'].includes(status);
+}
+
+function assertAttachmentsOutsideWorktree(
+  attachments: readonly VerifiedTaskAttachment[],
+  worktreePath: string
+): void {
+  const worktree = path.resolve(worktreePath);
+  for (const attachment of attachments) {
+    const candidate = path.resolve(attachment.absolutePath);
+    const relative = path.relative(worktree, candidate);
+    if (relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..')) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_STORAGE_ERROR',
+        'Managed attachments must stay outside the task worktree.',
+        409
+      );
+    }
+  }
 }

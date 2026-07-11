@@ -25,6 +25,14 @@ npm run dev:api
 npm run dev:renderer
 ```
 
+The browser renderer uses the Vite same-origin `/api` proxy. `dev:api` writes a
+short-lived private proxy token outside the repository, and Vite reads it on
+each request, so restart the API without copying credentials into the browser
+or an environment file. Use the printed `127.0.0.1` renderer URL; other origins
+are rejected. If the default ports must change, export the same
+`TASK_MANAGER_API_PORT` and `TASK_MANAGER_RENDERER_PORT` values in both
+terminals.
+
 `npm run dev:seed` resets only the seed-owned root and then prints the same
 environment variables written to `dev-api.env`:
 

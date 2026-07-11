@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-07-02
+Date: 2026-07-10
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -33,6 +33,41 @@ optional because it only affects PR delivery.
 
 New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
+
+The new-task attachment flow accepts a bounded set of PNG,
+JPEG, and still WebP images plus UTF-8 text, data, configuration, and source-code
+files. Picked, pasted, and dropped files are copied into an app-managed local
+task directory only when Create is pressed; Task Monki never stores their
+original paths or places them in the repository worktree. The composer uses
+Chromium's native decoder to re-encode images before submission so embedded
+metadata is not copied. PDFs, Office files, video, audio,
+archives, databases, and arbitrary binaries are not supported: the current
+Codex App Server protocol has no generic file or PDF turn input, and Task Monki
+does not yet provide a separately secured extraction pipeline.
+
+Provider delivery uses a complete thread-local Codex permission profile. It
+grants the runtime minimum, the exact worktree, and exact verified current-run
+task attachment files. Runtime probing and every session lifecycle path require
+active-profile and workspace-root evidence. Multi-agent and memories are
+disabled by the profile. Attachment runs also force network off and require
+web search, MCP servers, and apps to be disabled. Full access remains available
+for attachment-free tasks but is rejected when attachments are present.
+
+Files stay renderer-local during editing and cross the trusted boundary in one
+bounded batch. A successful task create atomically adopts that batch as one
+private immutable task directory. The composer reuses one task-creation token
+across retries: if the response is lost after a
+durable create, the same request resolves to the already-created task instead
+of failing on the consumed draft or creating a duplicate. Changing the request
+while reusing that token is a conflict. Only an ambiguous response preserves
+the staged batch for an unchanged retry; ordinary failure or cancel discards it. Task
+detail shows durable attachment metadata; Debug can show path-free evidence
+that the verified bytes were submitted with a provider turn, but never presents
+that as proof that the model read or used the file. See
+`docs/architecture/ATTACHMENT_LIFECYCLE.md` for limits, delivery, portability,
+cleanup, and privacy semantics.
+
+Task Monki attachment runs require read-only or managed workspace access.
 
 Task records remain bound to the repository path they were created with. Runs,
 worktrees, Git evidence, GitHub delivery, and provider sessions continue
@@ -240,7 +275,12 @@ records, interaction requests, Git snapshots, GitHub delivery
 snapshots, pull request/check/review/merge evidence, and worktree records. It
 also removes links in other tasks that point at the deleted task. Deleting a
 source task never deletes fork alternatives; deleting a fork alternative never
-deletes its source task or sibling alternatives.
+deletes its source task or sibling alternatives. If task deletion publishes its
+store snapshot but parent-directory synchronization is ambiguous, managed
+artifact files are retained until startup reconciles them against durable
+artifact records. Reconciliation deletes only unreferenced files matching the
+strict Task Monki artifact filename contract; unknown files and directories are
+left untouched, while symbolic links and special entries fail closed.
 
 Local worktree removal is explicit and separate from task deletion. It is never
 enabled by default, and Task Monki blocks removal when the worktree has

@@ -1,4 +1,10 @@
-import { useEffect, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent
+} from 'react';
 import type {
   AgentExecutionSettings,
   AgentModel,
@@ -7,10 +13,26 @@ import type {
   RefinePromptResponse
 } from '../../shared/contracts';
 import {
+  ATTACHMENT_FILE_INPUT_ACCEPT,
+  type AttachmentDraftSnapshot,
+  type ClipboardAttachmentImage,
+  type DiscardTaskAttachmentDraftRequest,
+  type StageTaskAttachmentBatchRequest
+} from '../../shared/attachments';
+import {
   AGENT_PERMISSION_MODE_OPTIONS,
   settingsForPermissionMode,
   type SelectableAgentPermissionMode
 } from '../model/agentPermissions';
+import {
+  formatAttachmentBytes
+} from '../model/taskAttachmentDraft';
+import {
+  getOrCreateTaskCreationToken,
+  taskCreationNeedsUnchangedRetry,
+  type AttachmentComposerItem
+} from '../model/taskAttachmentComposer';
+import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
   defaultRepositoryPath: string;
@@ -18,8 +40,12 @@ interface NewTaskPanelProps {
   preflight?: AgentPreflight;
   defaultAgentSettings?: AgentExecutionSettings;
   disabled?: boolean;
+  attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
   onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
+  onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
+  onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onClose(): void;
 }
 
@@ -29,8 +55,12 @@ export function NewTaskPanel({
   preflight,
   defaultAgentSettings,
   disabled,
+  attachmentsEnabled = true,
   onCreate,
   onRefinePrompt,
+  onStageAttachmentBatch,
+  onDiscardAttachmentDraft,
+  onReadClipboardImage,
   onClose
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
@@ -38,14 +68,21 @@ export function NewTaskPanel({
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [permissionMode, setPermissionMode] =
-    useState<SelectableAgentPermissionMode>('ASK_FOR_APPROVAL');
+    useState<SelectableAgentPermissionMode>('SANDBOXED');
   const [networkAccess, setNetworkAccess] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
-  // Refinement is a proposal, not a silent overwrite (audit §05). While running,
-  // `isRefining` dims the textarea. On completion `proposal` holds the refined
-  // text for Accept/Revert. After acceptance `restorable` keeps the pre-refine
-  // prompt so "Restore original" can undo it — one stored string buys trust.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
+  const panelRef = useRef<HTMLFormElement>(null);
+  const previouslyFocusedElementRef = useRef<HTMLElement | null>(
+    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+  );
+  const submittingRef = useRef(false);
+  const taskCreationTokenRef = useRef<string | undefined>(undefined);
+  // Refinement remains a reversible proposal instead of overwriting user input.
   const [proposal, setProposal] = useState<{ prompt: string; titleSuggestion: string }>();
   const [restorable, setRestorable] = useState<string>();
 
@@ -67,8 +104,8 @@ export function NewTaskPanel({
 
   const selectedModel = models.find((candidate) => candidate.model === model);
   const repositoryPath = defaultRepositoryPath.trim();
+  const sandboxedSelected = permissionMode === 'SANDBOXED';
   const fullAccessSelected = permissionMode === 'FULL_ACCESS';
-  const effectiveNetworkAccess = fullAccessSelected || networkAccess;
   const reasoningEfforts = [
     ...new Set(
       [
@@ -79,40 +116,151 @@ export function NewTaskPanel({
     )
   ];
 
+  const composerLocked = Boolean(disabled) || isSubmitting || creationOutcomeUnknown;
+  const attachments = useTaskAttachments({
+    enabled: attachmentsEnabled,
+    blocked: composerLocked || fullAccessSelected,
+    model: selectedModel,
+    onStageBatch: onStageAttachmentBatch,
+    onDiscard: (draftId) => onDiscardAttachmentDraft({ draftId }),
+    onReadClipboardImage
+  });
+  const {
+    items: attachmentItems,
+    activeItems: activeAttachmentItems,
+    byteCount: attachmentByteCount,
+    busy: attachmentsBusy,
+    hasErrors: attachmentsHaveErrors,
+    isDragging: isDraggingFiles,
+    isReadingClipboardImage,
+    overflowError: attachmentOverflowError,
+    modelError: attachmentModelError,
+    interactionBlocked: attachmentInteractionBlocked,
+    inputRef: attachmentInputRef,
+    closedRef: panelClosedRef,
+    selectFiles: selectAttachmentFiles,
+    paste: pasteAttachments,
+    dragEnter: enterAttachmentDrag,
+    dragOver: continueAttachmentDrag,
+    dragLeave: leaveAttachmentDrag,
+    drop: dropAttachments,
+    remove: removeAttachment,
+    close: closeAttachments
+  } = attachments;
+  const attachmentsRestrictNetwork = activeAttachmentItems.length > 0;
+  const effectiveNetworkAccess =
+    !attachmentsRestrictNetwork &&
+    (fullAccessSelected || (!sandboxedSelected && networkAccess));
+  const selectedModelRejectsImages = Boolean(attachmentModelError);
+
+  useEffect(
+    () => () => {
+      const previouslyFocusedElement = previouslyFocusedElementRef.current;
+      queueMicrotask(() => {
+        if (panelClosedRef.current && previouslyFocusedElement?.isConnected) {
+          previouslyFocusedElement.focus();
+        }
+      });
+    },
+    [panelClosedRef]
+  );
+
+  const closePanel = useCallback(() => {
+    if (panelClosedRef.current || submittingRef.current) return;
+    closeAttachments();
+    onClose();
+  }, [closeAttachments, onClose, panelClosedRef]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        onClose();
+        closePanel();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button, input, textarea, select, summary, [tabindex]'
+        )
+      ).filter(
+        (element) =>
+          !element.hasAttribute('disabled') &&
+          element.tabIndex >= 0 &&
+          element.getAttribute('aria-hidden') !== 'true' &&
+          element.offsetParent !== null
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!panel.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [closePanel]);
 
-  const submit = async (event: React.FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) {
+      return;
+    }
     setError(undefined);
     if (!repositoryPath) {
       setError('Select a repository before creating a task.');
       return;
     }
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    let creationNeedsUnchangedRetry = false;
     try {
+      const attachmentDraftId = await attachments.prepareForCreate();
       const permissionSettings = settingsForPermissionMode(permissionMode, {
-        networkAccess
+        networkAccess: effectiveNetworkAccess
       });
-      await onCreate({
-        title,
-        prompt,
-        repositoryPath,
-        agentSettings: {
-          model: model || undefined,
-          modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
-          reasoningEffort: reasoningEffort || undefined,
-          ...permissionSettings
+      try {
+        await onCreate({
+          title,
+          prompt,
+          repositoryPath,
+          creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
+          attachmentDraftId,
+          agentSettings: {
+            model: model || undefined,
+            modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
+            reasoningEffort: reasoningEffort || undefined,
+            ...permissionSettings
+          }
+        });
+      } catch (caught) {
+        creationNeedsUnchangedRetry = taskCreationNeedsUnchangedRetry(caught);
+        await attachments.markCreateFailed(creationNeedsUnchangedRetry);
+        if (creationNeedsUnchangedRetry) {
+          setCreationOutcomeUnknown(true);
         }
-      });
+        throw caught;
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not create task.');
+      const detail = caught instanceof Error ? caught.message : 'Could not create task.';
+      setError(
+        creationNeedsUnchangedRetry
+          ? `Task creation could not be confirmed. Retry unchanged to recover safely, or close and check the task list before starting over. ${detail}`
+          : detail
+      );
+    } finally {
+      submittingRef.current = false;
+      if (!panelClosedRef.current) {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -156,9 +304,28 @@ export function NewTaskPanel({
     setRestorable(undefined);
   };
 
+  const createDisabled =
+    Boolean(disabled) ||
+    isSubmitting ||
+    isRefining ||
+    !title.trim() ||
+    !prompt.trim() ||
+    !repositoryPath ||
+    attachmentsBusy ||
+    attachmentsHaveErrors ||
+    selectedModelRejectsImages;
+
   return (
-    <div className="slideover" onClick={onClose}>
+    <div
+      className="slideover"
+      onClick={closePanel}
+      onDragEnter={enterAttachmentDrag}
+      onDragOver={continueAttachmentDrag}
+      onDragLeave={leaveAttachmentDrag}
+      onDrop={dropAttachments}
+    >
       <form
+        ref={panelRef}
         className="slideover__panel"
         onClick={(event) => event.stopPropagation()}
         onSubmit={submit}
@@ -174,9 +341,10 @@ export function NewTaskPanel({
             type="button"
             className="slideover__close"
             aria-label="Close"
-            onClick={onClose}
+            disabled={isSubmitting}
+            onClick={closePanel}
           >
-            <span aria-hidden="true">×</span>
+            <CloseIcon />
           </button>
         </header>
 
@@ -188,7 +356,7 @@ export function NewTaskPanel({
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 placeholder="Short imperative summary"
-                disabled={disabled}
+                disabled={composerLocked}
                 autoFocus
               />
             </label>
@@ -203,7 +371,7 @@ export function NewTaskPanel({
                     <button
                       className="field__restore"
                       type="button"
-                      disabled={disabled || isRefining}
+                      disabled={composerLocked || isRefining}
                       onClick={restoreOriginal}
                     >
                       Restore original
@@ -212,26 +380,122 @@ export function NewTaskPanel({
                   <button
                     className="field__refine"
                     type="button"
-                    disabled={disabled || isRefining || !prompt.trim() || !repositoryPath || Boolean(proposal)}
+                    disabled={
+                      composerLocked ||
+                      isRefining ||
+                      !prompt.trim() ||
+                      !repositoryPath ||
+                      Boolean(proposal)
+                    }
                     aria-busy={isRefining}
                     onClick={() => void refine()}
                   >
                     <SparkleIcon />
-                    <span className={isRefining ? 'field__refine-label tm-shimmer-text' : 'field__refine-label'}>
+                    <span
+                      className={
+                        isRefining
+                          ? 'field__refine-label tm-shimmer-text'
+                          : 'field__refine-label'
+                      }
+                    >
                       {isRefining ? 'Refining' : 'Refine'}
                     </span>
                   </button>
                 </span>
               </span>
-              <div className={`field__prompt-shell ${isRefining ? 'field__prompt-shell--running' : ''}`}>
+              <div
+                className={`field__prompt-shell ${
+                  isRefining ? 'field__prompt-shell--running' : ''
+                } ${isDraggingFiles ? 'field__prompt-shell--dragging' : ''}`}
+              >
                 <textarea
                   id="task-description"
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
-                  placeholder="Describe the implementation request, constraints, and expected verification."
-                  disabled={disabled || isRefining}
+                  onPaste={pasteAttachments}
+                  placeholder={
+                    'Describe the implementation request, constraints, and expected verification.'
+                  }
+                  disabled={composerLocked || isRefining}
                 />
+                {attachmentItems.length > 0 ? (
+                  <ul className="task-attachments" aria-label="Task attachments">
+                    {attachmentItems.map((item) => (
+                      <AttachmentChip
+                        key={item.clientId}
+                        item={item}
+                        disabled={composerLocked}
+                        onRemove={() => void removeAttachment(item.clientId)}
+                      />
+                    ))}
+                  </ul>
+                ) : null}
+                <div className="field__prompt-toolbar">
+                  <input
+                    ref={attachmentInputRef}
+                    className="task-attachment-input"
+                    type="file"
+                    multiple
+                    accept={ATTACHMENT_FILE_INPUT_ACCEPT}
+                    disabled={attachmentInteractionBlocked}
+                    tabIndex={-1}
+                    aria-hidden="true"
+                    onChange={selectAttachmentFiles}
+                  />
+                  <button
+                    type="button"
+                    className="task-attachment-add"
+                    disabled={attachmentInteractionBlocked}
+                    title={
+                      fullAccessSelected
+                        ? 'Choose a managed permission mode to attach files.'
+                        : attachmentsEnabled
+                          ? 'Stored locally and shared read-only with Codex for this task.'
+                          : 'Attachments require file-read isolation between tasks.'
+                    }
+                    onClick={() => attachmentInputRef.current?.click()}
+                  >
+                    <PaperclipIcon />
+                    <span>Add files</span>
+                  </button>
+                  <span className="task-attachment-hint">
+                    {fullAccessSelected
+                      ? 'Unavailable with Full access'
+                      : !attachmentsEnabled
+                      ? 'Unavailable in this build'
+                      : isReadingClipboardImage
+                      ? 'Reading clipboard image…'
+                      : activeAttachmentItems.length > 0
+                      ? `${activeAttachmentItems.length} ${
+                          activeAttachmentItems.length === 1 ? 'file' : 'files'
+                        } · ${formatAttachmentBytes(attachmentByteCount)}`
+                      : 'Paste or drop files'}
+                  </span>
+                </div>
+                {attachmentsEnabled && isDraggingFiles ? (
+                  <div className="task-attachment-drop" aria-hidden="true">
+                    <PaperclipIcon />
+                    <span>Drop to attach</span>
+                  </div>
+                ) : null}
               </div>
+              {attachmentOverflowError ? (
+                <p
+                  className="task-attachment-message task-attachment-message--error"
+                  role="alert"
+                >
+                  {attachmentOverflowError}
+                </p>
+              ) : null}
+              {selectedModelRejectsImages ? (
+                <p
+                  className="task-attachment-message task-attachment-message--error"
+                  role="alert"
+                >
+                  <span aria-hidden="true" />
+                  {attachmentModelError}
+                </p>
+              ) : null}
               {proposal ? (
                 <RefinementProposal
                   refined={proposal.prompt}
@@ -242,112 +506,131 @@ export function NewTaskPanel({
             </div>
           </section>
 
-          <section className="newtask-section" aria-label="Run configuration">
-            <div className="newtask-section__heading">
-              <span>Run configuration</span>
-              <i aria-hidden="true" />
-            </div>
+          <details className="newtask-settings">
+            <summary>
+              <span className="newtask-settings__title">Run configuration</span>
+              <span className="newtask-settings__summary">
+                {selectedModel?.displayName ?? 'Default model'}
+                {reasoningEffort ? ` · ${formatEffortLabel(reasoningEffort)}` : ''}
+              </span>
+              <ChevronIcon />
+            </summary>
 
-            <div className="field-grid field-grid--two">
-              <label className="field">
-                <span className="field__label">
-                  Codex model
-                </span>
-                <select
-                  value={model}
-                  onChange={(event) => {
-                    const nextModel = models.find(
-                      (candidate) => candidate.model === event.target.value
-                    );
-                    setModel(event.target.value);
-                    setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-                  }}
-                  disabled={disabled || models.length === 0}
-                >
-                  {models
-                    .filter((candidate) => !candidate.hidden || candidate.model === model)
-                    .map((candidate) => (
-                      <option key={candidate.id} value={candidate.model}>
-                        {candidate.displayName}
-                      </option>
+            <div className="newtask-settings__content">
+              <div className="field-grid field-grid--two">
+                <label className="field">
+                  <span className="field__label">Codex model</span>
+                  <select
+                    value={model}
+                    onChange={(event) => {
+                      const nextModel = models.find(
+                        (candidate) => candidate.model === event.target.value
+                      );
+                      setModel(event.target.value);
+                      setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                    }}
+                    disabled={composerLocked || models.length === 0}
+                  >
+                    {models
+                      .filter((candidate) => !candidate.hidden || candidate.model === model)
+                      .map((candidate) => (
+                        <option key={candidate.id} value={candidate.model}>
+                          {candidate.displayName}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <div className="field">
+                  <span className="field__label">Reasoning effort</span>
+                  <div className="segmented-effort" role="group" aria-label="Reasoning effort">
+                    {reasoningEfforts.map((effort) => (
+                      <button
+                        key={effort}
+                        type="button"
+                        className={`segmented-effort__button ${
+                          effort === reasoningEffort ? 'segmented-effort__button--active' : ''
+                        }`}
+                        disabled={composerLocked || !selectedModel}
+                        aria-pressed={effort === reasoningEffort}
+                        onClick={() => setReasoningEffort(effort)}
+                      >
+                        {formatEffortLabel(effort)}
+                      </button>
                     ))}
-                </select>
-              </label>
-              <div className="field">
-                <span className="field__label">
-                  Reasoning effort
-                </span>
-                <div className="segmented-effort" role="group" aria-label="Reasoning effort">
-                  {reasoningEfforts.map((effort) => (
-                    <button
-                      key={effort}
-                      type="button"
-                      className={`segmented-effort__button ${
-                        effort === reasoningEffort ? 'segmented-effort__button--active' : ''
-                      }`}
-                      disabled={disabled || !selectedModel}
-                      onClick={() => setReasoningEffort(effort)}
-                    >
-                      {formatEffortLabel(effort)}
-                    </button>
-                  ))}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="field-grid">
-              <label className="field">
-                <span className="field__label">
-                  Permission mode
-                  <HelpTooltip>
-                    Applies to this task's implementation runs.
-                  </HelpTooltip>
-                </span>
-                <select
-                  value={permissionMode}
-                  onChange={(event) =>
-                    setPermissionMode(event.target.value as SelectableAgentPermissionMode)
-                  }
-                  disabled={disabled}
-                >
-                  {AGENT_PERMISSION_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-
-            <div className="network-toggle">
-              <div className="network-toggle__copy">
-                <span className="network-toggle__title">
-                  Network access
-                </span>
-                <span className="network-toggle__state">
-                  {fullAccessSelected
-                    ? 'Enabled by full access.'
-                    : effectiveNetworkAccess
-                      ? 'Enabled - commands may use the network during this task.'
-                      : 'Disabled - network use stays outside the task boundary.'}
-                </span>
+              <div className="field-grid">
+                <label className="field">
+                  <span className="field__label">
+                    Permission mode
+                    <HelpTooltip>Applies to this task's implementation runs.</HelpTooltip>
+                  </span>
+                  <select
+                    value={permissionMode}
+                    onChange={(event) =>
+                      setPermissionMode(event.target.value as SelectableAgentPermissionMode)
+                    }
+                    disabled={composerLocked}
+                  >
+                    {AGENT_PERMISSION_MODE_OPTIONS.map((option) => (
+                      <option
+                        key={option.value}
+                        value={option.value}
+                        disabled={
+                          option.value === 'FULL_ACCESS' && activeAttachmentItems.length > 0
+                        }
+                      >
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
-              <button
-                type="button"
-                className={`network-toggle__switch ${
-                  effectiveNetworkAccess ? 'network-toggle__switch--on' : ''
-                }`}
-                role="switch"
-                aria-checked={effectiveNetworkAccess}
-                disabled={disabled || fullAccessSelected}
-                onClick={() => setNetworkAccess((current) => !current)}
-              >
-                <span />
-              </button>
-            </div>
-          </section>
 
-          {error ? <p className="form-error">{error}</p> : null}
+              <div className="network-toggle">
+                <div className="network-toggle__copy">
+                  <span className="network-toggle__title" id="task-network-access-label">
+                    Network access
+                  </span>
+                  <span className="network-toggle__state">
+                    {attachmentsRestrictNetwork
+                      ? 'Disabled while attachments are included.'
+                      : sandboxedSelected
+                        ? 'Disabled by Sandboxed mode.'
+                      : effectiveNetworkAccess
+                        ? 'Enabled - commands may use the network during this task.'
+                        : 'Disabled - network use stays outside the task boundary.'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`network-toggle__switch ${
+                    effectiveNetworkAccess ? 'network-toggle__switch--on' : ''
+                  }`}
+                  role="switch"
+                  aria-labelledby="task-network-access-label"
+                  aria-checked={effectiveNetworkAccess}
+                  disabled={
+                    composerLocked ||
+                    sandboxedSelected ||
+                    fullAccessSelected ||
+                    attachmentsRestrictNetwork
+                  }
+                  onClick={() => setNetworkAccess((current) => !current)}
+                >
+                  <span />
+                </button>
+              </div>
+            </div>
+          </details>
+
+          {error ? (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          ) : null}
           {!preflight?.ready ? (
             <p className="form-error">
               {preflight?.problems.join(' ') ||
@@ -363,15 +646,25 @@ export function NewTaskPanel({
 
         <footer className="slideover__footer">
           <div className="slideover__footer-actions">
-            <button type="button" className="outline-button" onClick={onClose}>
-              Cancel
+            <button
+              type="button"
+              className="outline-button"
+              disabled={isSubmitting}
+              onClick={closePanel}
+            >
+              {creationOutcomeUnknown ? 'Close' : 'Cancel'}
             </button>
             <button
               className="primary-button"
               type="submit"
-              disabled={disabled || !title.trim() || !prompt.trim() || !repositoryPath}
+              disabled={createDisabled}
+              aria-busy={isSubmitting}
             >
-              Create task
+              {isSubmitting
+                ? 'Creating…'
+                : creationOutcomeUnknown
+                  ? 'Retry creation'
+                  : 'Create task'}
             </button>
           </div>
         </footer>
@@ -380,20 +673,9 @@ export function NewTaskPanel({
   );
 }
 
-function HelpTooltip({
-  children,
-  align = 'left',
-  position = 'below'
-}: {
-  children: string;
-  align?: 'left' | 'right';
-  position?: 'above' | 'below';
-}) {
+function HelpTooltip({ children }: { children: string }) {
   return (
-    <span
-      className={`info-tip info-tip--${align} info-tip--${position}`}
-      onClick={(event) => event.preventDefault()}
-    >
+    <span className="info-tip" onClick={(event) => event.preventDefault()}>
       <button type="button" className="info-tip__button" aria-label="More info">
         <InfoIcon />
       </button>
@@ -426,6 +708,129 @@ function SparkleIcon() {
   );
 }
 
+function PaperclipIcon() {
+  return (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none">
+      <path
+        d="m9.5 12.5 5.7-5.7a3.2 3.2 0 0 1 4.5 4.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.1-8.1"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none">
+      <path
+        d="m7 7 10 10M17 7 7 17"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none">
+      <path
+        d="m8 10 4 4 4-4"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function AttachmentChip({
+  item,
+  disabled,
+  onRemove
+}: {
+  item: AttachmentComposerItem;
+  disabled: boolean;
+  onRemove(): void;
+}) {
+  return (
+    <li
+      className={`task-attachment ${
+        item.status === 'error' || item.error ? 'task-attachment--error' : ''
+      }`}
+    >
+      <span className="task-attachment__preview" aria-hidden="true">
+        {item.previewUrl ? (
+          <img src={item.previewUrl} alt="" loading="lazy" decoding="async" />
+        ) : item.kind === 'image' ? (
+          <ImageFileIcon />
+        ) : (
+          <TextFileIcon />
+        )}
+      </span>
+      <span className="task-attachment__body">
+        <span className="task-attachment__name" title={item.file.name}>
+          {item.file.name}
+        </span>
+        <span
+          className="task-attachment__meta"
+          role={item.error ? 'alert' : undefined}
+          aria-live={item.error ? 'assertive' : undefined}
+          aria-atomic={item.error ? 'true' : undefined}
+        >
+          {item.status === 'error'
+            ? item.error
+            : formatAttachmentBytes(item.file.size)}
+        </span>
+      </span>
+      <button
+        type="button"
+        className="task-attachment__remove"
+        aria-label={`Remove ${item.file.name}`}
+        disabled={disabled}
+        onClick={onRemove}
+      >
+        <CloseIcon />
+      </button>
+    </li>
+  );
+}
+
+function ImageFileIcon() {
+  return (
+    <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none">
+      <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="9" cy="10" r="1.4" fill="currentColor" />
+      <path
+        d="m6.5 17 4-4 2.5 2 2-2 2.5 4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TextFileIcon() {
+  return (
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M7 3.8h6l4 4V20H7zM13 4v4h4M9.5 12h5M9.5 15h5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function formatEffortLabel(effort: string): string {
   if (effort.toLowerCase() === 'xhigh') {
     return 'X-high';
@@ -433,11 +838,6 @@ function formatEffortLabel(effort: string): string {
   return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
-/**
- * The refined description shown as a proposal (audit §05): the AI's rewrite is
- * previewed with Accept / Revert instead of silently replacing the user's text,
- * because AI editing user input is the one place trust demands ceremony.
- */
 function RefinementProposal({
   refined,
   onAccept,

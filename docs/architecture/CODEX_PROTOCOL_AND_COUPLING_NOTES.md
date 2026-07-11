@@ -1,9 +1,9 @@
 # Codex Protocol And Coupling Notes
 
-Date: 2026-06-25
+Date: 2026-07-11
 
-This is the current protocol boundary note. Older phase-by-phase investigation
-logs were removed because they repeated stale implementation status.
+This document defines the current Codex protocol boundary and compatibility
+policy.
 
 ## Protocol baseline
 

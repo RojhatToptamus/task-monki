@@ -49,6 +49,7 @@ export interface CodexAppServerSupervisorOptions {
   requestTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
+  failClosedMcpDiscovery?: boolean;
 }
 
 export interface CodexAppServerLaunchConfig {
@@ -89,12 +90,14 @@ export async function resolveCodexAppServerArgv(input: {
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
   launch?: CodexAppServerLaunch;
+  failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
   const configOverrides = await resolveCodexExternalToolConfigOverrides({
     executable: input.executable,
     cwd: input.cwd,
     environment: input.environment,
-    settings: input.toolSettings
+    settings: input.toolSettings,
+    failClosedMcpDiscovery: input.failClosedMcpDiscovery
   });
   return codexAppServerArgvWithLaunch(
     input.launch?.argv ?? ['app-server', '--stdio'],
@@ -174,6 +177,39 @@ export class CodexAppServerSupervisor {
     }
   }
 
+  /**
+   * Security-boundary failures must stop the child before waiting on storage.
+   * The ordinary graceful shutdown records STOPPING first, which is the right
+   * lifecycle order for normal exits but leaves a permissions violation live
+   * while that write is pending.
+   */
+  async terminateForSecurityBoundary(reason: string): Promise<void> {
+    this.shuttingDown = true;
+    const child = this.child;
+    this.client?.close(reason);
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+    }
+
+    if (this.server) {
+      const stored = await this.store.getAgentServer(this.server.id).catch(() => undefined);
+      if (stored) {
+        this.server = stored;
+      }
+      if (!['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
+        await this.store
+          .updateAgentServer(this.server.id, { status: 'STOPPING', exitReason: reason })
+          .catch(() => undefined);
+      }
+    }
+    if (child && child.exitCode === null && child.signalCode === null) {
+      if (!(await waitForClose(child, 1_000))) {
+        child.kill('SIGKILL');
+        await waitForClose(child, 2_000);
+      }
+    }
+  }
+
   async terminateUnresponsive(reason: string): Promise<void> {
     const child = this.child;
     if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
@@ -209,6 +245,7 @@ export class CodexAppServerSupervisor {
       cwd: this.options.cwd,
       environment: this.options.environment,
       toolSettings: this.options.toolSettings,
+      failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
       launch: runtime.compatibility.launch
     });
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { browserDevSettingsViolations } from '../../core/agent/BrowserDevAgentBoundary';
 import {
   formatAgentNetworkAccess,
   formatAgentPermissionMode,
@@ -8,6 +9,16 @@ import {
 
 describe('agent permission settings', () => {
   it('maps the Codex-style permission presets to execution settings', () => {
+    const sandboxed = settingsForPermissionMode('SANDBOXED', {
+      networkAccess: true
+    });
+    expect(sandboxed).toEqual({
+      sandbox: 'WORKSPACE_WRITE',
+      networkAccess: false,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    });
+    expect(browserDevSettingsViolations(sandboxed)).toEqual([]);
     expect(
       settingsForPermissionMode('ASK_FOR_APPROVAL', { networkAccess: true })
     ).toEqual({
@@ -30,9 +41,7 @@ describe('agent permission settings', () => {
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review'
     });
-    expect(
-      settingsForPermissionMode('FULL_ACCESS', { networkAccess: false })
-    ).toEqual({
+    expect(settingsForPermissionMode('FULL_ACCESS')).toEqual({
       sandbox: 'DANGER_FULL_ACCESS',
       networkAccess: true,
       approvalPolicy: 'never',
@@ -41,6 +50,22 @@ describe('agent permission settings', () => {
   });
 
   it('detects task-specific approval reviewer modes without creating run states', () => {
+    expect(
+      inferAgentPermissionMode({
+        sandbox: 'READ_ONLY',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('SANDBOXED');
+    expect(
+      formatAgentPermissionMode({
+        sandbox: 'WORKSPACE_WRITE',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('Sandboxed');
     expect(
       inferAgentPermissionMode({
         sandbox: 'WORKSPACE_WRITE',

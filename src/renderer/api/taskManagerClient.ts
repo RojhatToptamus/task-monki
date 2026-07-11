@@ -40,9 +40,38 @@ import type {
   TestExternalToolRequest,
   UpdateAppSettingsRequest
 } from '../../shared/contracts';
+import type {
+  AttachmentContent,
+  AttachmentDraftSnapshot,
+  DiscardTaskAttachmentDraftRequest,
+  ReadTaskAttachmentRequest,
+  StageTaskAttachmentBatchRequest,
+} from '../../shared/attachments';
 
-const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? 'http://127.0.0.1:3099';
+const apiBase = '';
 const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
+
+interface StructuredApiError {
+  error: {
+    code?: string;
+    message?: string;
+    retryable?: boolean;
+    requestId?: string;
+  };
+}
+
+export class TaskManagerApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly retryable = false,
+    readonly requestId?: string
+  ) {
+    super(message);
+    this.name = 'TaskManagerApiError';
+  }
+}
 
 export const taskManagerApi: TaskManagerApi =
   (typeof window === 'undefined' ? undefined : window.taskManager) ??
@@ -123,6 +152,20 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
+    stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
+      post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {
+        attachments: input.attachments.map((attachment) => ({
+          clientToken: attachment.clientToken,
+          displayName: attachment.displayName,
+          declaredMediaType: attachment.declaredMediaType,
+          bytesBase64: arrayBufferToBase64(attachment.bytes)
+        }))
+      }),
+    discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
+      post<void>(baseUrl, '/api/attachments/drafts/discard', input),
+    readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
+      readAttachment(baseUrl, input),
+    readClipboardImage: async () => undefined,
     createTask: (input: CreateTaskRequest) => post<Task>(baseUrl, '/api/tasks', input),
     refinePrompt: (input: RefinePromptRequest) =>
       post<RefinePromptResponse>(baseUrl, '/api/prompt/refine', input),
@@ -175,6 +218,61 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   };
 }
 
+function arrayBufferToBase64(bytes: ArrayBuffer): string {
+  const view = new Uint8Array(bytes);
+  let binary = '';
+  const chunkSize = 32 * 1024;
+  for (let offset = 0; offset < view.length; offset += chunkSize) {
+    binary += String.fromCharCode(...view.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function readAttachment(
+  baseUrl: string,
+  input: ReadTaskAttachmentRequest
+): Promise<AttachmentContent> {
+  const query = new URLSearchParams({ attachmentId: input.attachmentId });
+  const response = await fetch(`${baseUrl}/api/attachments/content?${query.toString()}`);
+  if (!response.ok) {
+    return readResponse<never>(response);
+  }
+  const displayName = decodeAttachmentHeader(
+    response.headers.get('x-task-monki-attachment-name'),
+    'Attachment metadata is missing from the server response.'
+  );
+  const attachmentId = response.headers.get('x-task-monki-attachment-id');
+  const kind = response.headers.get('x-task-monki-attachment-kind');
+  if (!attachmentId || (kind !== 'image' && kind !== 'text')) {
+    throw new TaskManagerApiError(
+      'Attachment metadata is missing from the server response.',
+      response.status
+    );
+  }
+  const bytes = await response.arrayBuffer();
+  return {
+    attachmentId,
+    displayName,
+    kind,
+    mediaType: response.headers.get('x-task-monki-attachment-media-type') ??
+      response.headers.get('content-type') ??
+      'application/octet-stream',
+    byteCount: bytes.byteLength,
+    bytes
+  };
+}
+
+function decodeAttachmentHeader(value: string | null, missingMessage: string): string {
+  if (!value) {
+    throw new TaskManagerApiError(missingMessage, 200);
+  }
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new TaskManagerApiError('Attachment metadata is invalid.', 200);
+  }
+}
+
 async function get<T>(baseUrl: string, path: string): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`);
   return readResponse<T>(response);
@@ -190,13 +288,47 @@ async function post<T>(baseUrl: string, path: string, body: unknown): Promise<T>
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T | { error?: string };
+  let body: T | { error?: string } | StructuredApiError | undefined;
+  try {
+    body = (await response.json()) as T | { error?: string } | StructuredApiError;
+  } catch {
+    if (!response.ok) {
+      throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
+    }
+    throw new TaskManagerApiError('The server returned an invalid response.', response.status);
+  }
   if (!response.ok) {
-    throw new Error(
-      typeof body === 'object' && body && 'error' in body && body.error
+    const structured = structuredError(body);
+    if (structured) {
+      throw new TaskManagerApiError(
+        structured.message ?? `HTTP ${response.status}`,
+        response.status,
+        structured.code,
+        structured.retryable ?? false,
+        structured.requestId
+      );
+    }
+    const legacyMessage =
+      typeof body === 'object' &&
+      body !== null &&
+      'error' in body &&
+      typeof body.error === 'string'
         ? body.error
-        : `HTTP ${response.status}`
+        : undefined;
+    throw new TaskManagerApiError(
+      legacyMessage ?? `HTTP ${response.status}`,
+      response.status
     );
   }
   return body as T;
+}
+
+function structuredError(body: unknown): StructuredApiError['error'] | undefined {
+  if (!body || typeof body !== 'object' || !('error' in body)) {
+    return undefined;
+  }
+  const error = (body as { error?: unknown }).error;
+  return error && typeof error === 'object'
+    ? (error as StructuredApiError['error'])
+    : undefined;
 }

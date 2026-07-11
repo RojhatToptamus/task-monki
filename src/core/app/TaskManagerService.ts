@@ -39,9 +39,17 @@ import type {
   InspectOpenTargetRequest,
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
-  OpenTargetActionResult
+  OpenTargetActionResult,
+  AttachmentContent,
+  AttachmentDraftSnapshot,
+  DiscardTaskAttachmentDraftRequest,
+  ReadTaskAttachmentRequest,
+  StageTaskAttachmentBatchRequest,
 } from '../../shared/contracts';
 import {
+  ATTACHMENT_MAX_COUNT,
+  ATTACHMENT_MAX_TOTAL_BYTES,
+  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
@@ -75,6 +83,12 @@ import {
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
+import {
+  assertAttachmentSandboxSupportsDelivery,
+  AgentAttachmentDeliveryError,
+  assertModelSupportsAttachments
+} from '../agent/AgentAttachmentDelivery';
+import { AttachmentStoreError } from '../storage/AttachmentFileStore';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -86,7 +100,10 @@ export class TaskManagerService {
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
+  private readonly browserDevAgentBoundary: boolean;
   private readonly taskActionLocks = new Map<string, string>();
+  private readonly activeAttachmentDrafts = new Set<string>();
+  private readonly agentProviderStartupDisabledReason?: string;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private codexExecutable: string | undefined;
 
@@ -103,9 +120,14 @@ export class TaskManagerService {
       appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
       openTargetHost?: OpenTargetHost;
+      allowAgentNetworkAccess?: boolean;
+      agentProviderStartupDisabledReason?: string;
     } = {}
   ) {
     const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
+    this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
+    this.agentProviderStartupDisabledReason =
+      options.agentProviderStartupDisabledReason;
     this.events = events;
     this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
     this.externalToolResolver = new ExternalToolResolver({
@@ -120,12 +142,18 @@ export class TaskManagerService {
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
-      toolSettings: this.appSettings.codexExternalTools
+      toolSettings: this.appSettings.codexExternalTools,
+      failClosedMcpDiscovery: this.browserDevAgentBoundary,
+      enforceBrowserDevBoundary: this.browserDevAgentBoundary
     });
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ?? this.codexAdapter
+      options.agentProviderAdapter ?? this.codexAdapter,
+      {
+        allowNetworkAccess: options.allowAgentNetworkAccess,
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
+      }
     );
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
@@ -142,9 +170,12 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
-    this.appSettings = await this.appSettingsStore.get();
+    this.appSettings = await this.loadBoundarySafeAppSettings();
     await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
     await this.agents.initialize();
+    if (this.agentProviderStartupDisabledReason) {
+      return;
+    }
     const snapshot = await this.store.snapshot();
     const recoveryTaskIds = new Set(
       snapshot.runs
@@ -163,14 +194,32 @@ export class TaskManagerService {
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.appSettingsStore.get();
+    this.appSettings = await this.loadBoundarySafeAppSettings();
     return structuredClone(this.appSettings);
   }
 
   async updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.appSettingsStore.update(input);
+    if (
+      this.browserDevAgentBoundary &&
+      input.codexExternalTools &&
+      !codexExternalToolsAreDisabled({
+        ...(await this.appSettingsStore.get()).codexExternalTools,
+        ...input.codexExternalTools
+      })
+    ) {
+      throw new Error(
+        'Codex web search, MCP servers, and apps are disabled in the browser development server because external tool processes are outside its loopback security boundary. Use the Electron app to enable them.'
+      );
+    }
+    const safeInput: UpdateAppSettingsRequest = this.browserDevAgentBoundary
+      ? {
+          ...input,
+          codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
+        }
+      : input;
+    this.appSettings = await this.appSettingsStore.update(safeInput);
     const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
@@ -240,17 +289,131 @@ export class TaskManagerService {
     return this.store.snapshot();
   }
 
+  async stageTaskAttachmentBatch(
+    input: StageTaskAttachmentBatchRequest
+  ): Promise<AttachmentDraftSnapshot> {
+    const attachments = input?.attachments;
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_INVALID_REQUEST',
+        'At least one attachment is required.',
+        400
+      );
+    }
+    if (attachments.length > ATTACHMENT_MAX_COUNT) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_LIMIT_EXCEEDED',
+        `A task can have at most ${ATTACHMENT_MAX_COUNT} attachments.`,
+        413
+      );
+    }
+    let totalBytes = 0;
+    for (const attachment of attachments) {
+      if (!(attachment?.bytes instanceof ArrayBuffer)) {
+        throw new AttachmentStoreError(
+          'ATTACHMENT_INVALID_REQUEST',
+          'Attachment bytes are required.',
+          400
+        );
+      }
+      totalBytes += attachment.bytes.byteLength;
+      if (totalBytes > ATTACHMENT_MAX_TOTAL_BYTES) {
+        throw new AttachmentStoreError(
+          'ATTACHMENT_TOTAL_TOO_LARGE',
+          'Attachments exceed the per-task size limit.',
+          413
+        );
+      }
+    }
+
+    const draft = await this.store.createAttachmentDraft();
+    try {
+      for (const attachment of attachments) {
+        await this.store.stageTaskAttachment({
+          draftId: draft.id,
+          clientToken: attachment.clientToken,
+          displayName: attachment.displayName,
+          declaredMediaType: attachment.declaredMediaType,
+          bytes: new Uint8Array(attachment.bytes.slice(0))
+        });
+      }
+      return this.store.listAttachmentDraft(draft.id);
+    } catch (error) {
+      await this.store.discardAttachmentDraft(draft.id).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  discardTaskAttachmentDraft(
+    input: DiscardTaskAttachmentDraftRequest
+  ): Promise<void> {
+    return this.withAttachmentDraft(input.draftId, () =>
+      this.store.discardAttachmentDraft(input.draftId)
+    );
+  }
+
+  readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent> {
+    return this.store.readTaskAttachment(input.attachmentId);
+  }
+
   async createTask(input: CreateTaskRequest): Promise<Task> {
-    return this.store.createTask(input);
+    const acknowledgedTask = await this.store.resolveTaskCreationRetry(input);
+    if (acknowledgedTask) {
+      return acknowledgedTask;
+    }
+    if (!input.attachmentDraftId) {
+      return this.store.createTask(input);
+    }
+    return this.withAttachmentDraft(input.attachmentDraftId, async () => {
+      // The first request may complete between the initial lookup and entry to
+      // this critical section. Resolve it before reading a draft that successful
+      // task creation has intentionally consumed.
+      const acknowledgedInsideLock = await this.store.resolveTaskCreationRetry(input);
+      if (acknowledgedInsideLock) {
+        return acknowledgedInsideLock;
+      }
+      const draft = await this.store.listAttachmentDraft(input.attachmentDraftId!);
+      if (input.agentSettings?.networkAccess === true) {
+        throw new Error('Network access must be disabled for tasks with attachments.');
+      }
+      if (!codexExternalToolsAreDisabled(this.appSettings.codexExternalTools)) {
+        throw new Error(
+          'Disable Codex web search, MCP servers, and apps before creating a task with attachments.'
+        );
+      }
+      assertAttachmentSandboxSupportsDelivery(
+        input.agentSettings ?? {},
+        draft.attachments
+      );
+      if (draft.attachments.some((attachment) => attachment.kind === 'image')) {
+        const provider = await this.agents.getProviderState();
+        const requestedModel = input.agentSettings?.model;
+        const model =
+          provider.models.find((candidate) => candidate.model === requestedModel) ??
+          provider.models.find((candidate) => candidate.id === requestedModel) ??
+          provider.models.find((candidate) => candidate.isDefault) ??
+          provider.models[0];
+        if (!model) {
+          throw new AgentAttachmentDeliveryError(
+            'MODEL_DOES_NOT_SUPPORT_IMAGES',
+            'Codex must report an image-capable model before this task can be created with images.'
+          );
+        }
+        assertModelSupportsAttachments(model, draft.attachments);
+      }
+      return this.store.createTask(input);
+    });
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
+    await this.assertAttachmentProviderBoundaryAvailable();
     const refined = await this.promptRefiner.refine(
       input.repositoryPath,
       input.input,
       input.model,
       this.codexExecutable,
-      this.appSettings.codexExternalTools
+      this.appSettings.codexExternalTools,
+      this.browserDevAgentBoundary
     );
     this.events.emit({
       type: 'prompt.refined',
@@ -318,6 +481,7 @@ export class TaskManagerService {
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent run', async () => {
+      await this.assertAttachmentProviderBoundaryAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
@@ -337,6 +501,7 @@ export class TaskManagerService {
     mode?: AgentRunMode;
     settings?: AgentExecutionSettings;
   }): Promise<RunRecord> {
+    await this.assertAttachmentProviderBoundaryAvailable();
     const { task, worktree } = input;
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
@@ -385,6 +550,7 @@ export class TaskManagerService {
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
+      await this.assertAttachmentProviderBoundaryAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -403,6 +569,7 @@ export class TaskManagerService {
         instruction: input.instruction,
         kind: 'continuation'
       });
+      await this.agents.resolveRecoveryRunForReplacement(run.id);
       return this.agents.startTurn({
         task,
         iteration,
@@ -420,6 +587,7 @@ export class TaskManagerService {
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent retry', async () => {
+      await this.assertAttachmentProviderBoundaryAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -430,6 +598,7 @@ export class TaskManagerService {
         exceptRunId: run.id
       });
       if (input.strategy === 'FORK') {
+        await this.agents.resolveRecoveryRunForReplacement(run.id);
         return this.startForkedAlternative({
           sourceTaskId: task.id,
           sourceRun: run,
@@ -447,6 +616,7 @@ export class TaskManagerService {
         instruction: input.instruction,
         kind: 'retry'
       });
+      await this.agents.resolveRecoveryRunForReplacement(run.id);
       return this.agents.startTurn({
         task,
         iteration,
@@ -534,6 +704,19 @@ export class TaskManagerService {
     return status;
   }
 
+  private async loadBoundarySafeAppSettings(): Promise<TaskManagerAppSettings> {
+    const stored = await this.appSettingsStore.get();
+    if (
+      !this.browserDevAgentBoundary ||
+      codexExternalToolsAreDisabled(stored.codexExternalTools)
+    ) {
+      return stored;
+    }
+    return this.appSettingsStore.update({
+      codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
+    });
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
@@ -541,6 +724,7 @@ export class TaskManagerService {
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Codex review', async () => {
+      await this.assertAttachmentProviderBoundaryAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
@@ -581,6 +765,7 @@ export class TaskManagerService {
   }
 
   async syncAgentGoal(input: SyncAgentGoalRequest) {
+    await this.assertAttachmentProviderBoundaryAvailable();
     const task = await this.requireTask(input.taskId);
     return this.agents.syncGoal(task, input.sessionId);
   }
@@ -589,8 +774,18 @@ export class TaskManagerService {
     return this.agents.respondToInteraction(input);
   }
 
-  shutdown(): Promise<void> {
-    return this.agents.shutdown();
+  async shutdown(): Promise<void> {
+    try {
+      await this.agents.shutdown();
+    } finally {
+      await this.store.close();
+    }
+  }
+
+  private async assertAttachmentProviderBoundaryAvailable(): Promise<void> {
+    if (this.agentProviderStartupDisabledReason) {
+      throw new Error(this.agentProviderStartupDisabledReason);
+    }
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
@@ -836,31 +1031,35 @@ export class TaskManagerService {
   }
 
   async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
-    const task = await this.requireTask(input.taskId);
-    const snapshot = await this.store.snapshot();
-    const blockedReason = taskDeletionBlocker(task, snapshot);
-    if (blockedReason) {
-      throw new Error(blockedReason);
-    }
-
-    let removedWorktree = false;
-    if (input.removeWorktree) {
-      const worktrees = snapshot.worktrees.filter((worktree) => worktree.taskId === task.id);
-      for (const worktree of worktrees) {
-        await this.worktrees.remove(worktree);
-        removedWorktree = true;
+    return this.withTaskAction(input.taskId, 'Task deletion', async () => {
+      const task = await this.requireTask(input.taskId);
+      const snapshot = await this.store.snapshot();
+      const blockedReason = taskDeletionBlocker(task, snapshot);
+      if (blockedReason) {
+        throw new Error(blockedReason);
       }
-    }
 
-    await this.store.deleteTask(task.id);
-    const result = { taskId: task.id, removedWorktree };
-    this.events.emit({
-      type: 'task.deleted',
-      taskId: task.id,
-      payload: result,
-      at: new Date().toISOString()
+      let removedWorktree = false;
+      if (input.removeWorktree) {
+        const worktrees = snapshot.worktrees.filter(
+          (worktree) => worktree.taskId === task.id
+        );
+        for (const worktree of worktrees) {
+          await this.worktrees.remove(worktree);
+          removedWorktree = true;
+        }
+      }
+
+      await this.store.deleteTask(task.id);
+      const result = { taskId: task.id, removedWorktree };
+      this.events.emit({
+        type: 'task.deleted',
+        taskId: task.id,
+        payload: result,
+        at: new Date().toISOString()
+      });
+      return result;
     });
-    return result;
   }
 
   readArtifact(input: ReadArtifactRequest): Promise<string> {
@@ -1013,6 +1212,25 @@ export class TaskManagerService {
     }
   }
 
+  private async withAttachmentDraft<T>(
+    draftId: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    if (this.activeAttachmentDrafts.has(draftId)) {
+      throw new AttachmentStoreError(
+        'ATTACHMENT_CONFLICT',
+        'Another operation is already updating this attachment draft.',
+        409
+      );
+    }
+    this.activeAttachmentDrafts.add(draftId);
+    try {
+      return await action();
+    } finally {
+      this.activeAttachmentDrafts.delete(draftId);
+    }
+  }
+
   private assertNoActiveTaskRun(
     snapshot: TaskSnapshot,
     taskId: string,
@@ -1115,6 +1333,16 @@ function affectsCodexRuntimeSettings(input: UpdateAppSettingsRequest): boolean {
   return Boolean(
     input.codexExternalTools ||
       (input.externalExecutables && 'codexExecutablePath' in input.externalExecutables)
+  );
+}
+
+function codexExternalToolsAreDisabled(
+  settings: TaskManagerAppSettings['codexExternalTools']
+): boolean {
+  return (
+    settings.webSearchMode === 'disabled' &&
+    settings.mcpServers === 'disabled' &&
+    settings.apps === 'disabled'
   );
 }
 

@@ -5,17 +5,22 @@ import {
 } from '../../shared/contracts';
 
 export type AgentPermissionMode =
+  | 'SANDBOXED'
   | 'ASK_FOR_APPROVAL'
   | 'APPROVE_FOR_ME'
   | 'FULL_ACCESS'
   | 'CUSTOM';
 
-export type SelectableAgentPermissionMode = Exclude<AgentPermissionMode, 'CUSTOM'>;
+export type SelectableAgentPermissionMode = Exclude<
+  AgentPermissionMode,
+  'CUSTOM'
+>;
 
 export const AGENT_PERMISSION_MODE_OPTIONS: Array<{
   value: SelectableAgentPermissionMode;
   label: string;
 }> = [
+  { value: 'SANDBOXED', label: 'Sandboxed' },
   { value: 'ASK_FOR_APPROVAL', label: 'Ask for approval' },
   { value: 'APPROVE_FOR_ME', label: 'Approve for me' },
   { value: 'FULL_ACCESS', label: 'Full access' }
@@ -32,8 +37,18 @@ export function settingsForPermissionMode(
   mode: SelectableAgentPermissionMode,
   options: { networkAccess?: boolean } = {}
 ): AgentPermissionSettings {
-  const networkAccess = mode === 'FULL_ACCESS' ? true : (options.networkAccess ?? false);
+  const networkAccess =
+    mode === 'SANDBOXED'
+        ? false
+        : (options.networkAccess ?? false);
   switch (mode) {
+    case 'SANDBOXED':
+      return {
+        sandbox: 'WORKSPACE_WRITE',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      };
     case 'APPROVE_FOR_ME':
       return {
         sandbox: 'WORKSPACE_WRITE',
@@ -41,18 +56,18 @@ export function settingsForPermissionMode(
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       };
-    case 'FULL_ACCESS':
-      return {
-        sandbox: 'DANGER_FULL_ACCESS',
-        networkAccess,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      };
     case 'ASK_FOR_APPROVAL':
       return {
         sandbox: 'WORKSPACE_WRITE',
         networkAccess,
         approvalPolicy: 'on-request',
+        approvalsReviewer: 'user'
+      };
+    case 'FULL_ACCESS':
+      return {
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'never',
         approvalsReviewer: 'user'
       };
   }
@@ -69,6 +84,14 @@ export function inferAgentPermissionMode(
 
   if (sandbox === 'DANGER_FULL_ACCESS' && approvalPolicy === 'never') {
     return 'FULL_ACCESS';
+  }
+  if (
+    (sandbox === 'WORKSPACE_WRITE' || sandbox === 'READ_ONLY') &&
+    settings.networkAccess !== true &&
+    approvalPolicy === 'never' &&
+    approvalsReviewer === 'user'
+  ) {
+    return 'SANDBOXED';
   }
   if (
     sandbox === 'WORKSPACE_WRITE' &&
@@ -91,6 +114,8 @@ export function formatAgentPermissionMode(
   settings: AgentExecutionSettings
 ): string {
   switch (inferAgentPermissionMode(settings)) {
+    case 'SANDBOXED':
+      return 'Sandboxed';
     case 'ASK_FOR_APPROVAL':
       return 'Ask for approval';
     case 'APPROVE_FOR_ME':

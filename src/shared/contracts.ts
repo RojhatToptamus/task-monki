@@ -15,10 +15,29 @@ import type {
   AgentUsageSnapshotRecord,
   InteractionRequestRecord
 } from './agent';
+import type {
+  AttachmentContent,
+  AttachmentSubmissionRecord,
+  AttachmentDraftSnapshot,
+  ClipboardAttachmentImage,
+  DiscardTaskAttachmentDraftRequest,
+  ReadTaskAttachmentRequest,
+  StageTaskAttachmentBatchRequest,
+  StagedAttachmentRecord,
+  TaskAttachmentRecord
+} from './attachments';
 
 export * from './agent';
+export * from './attachments';
 
-export const TASK_STORE_SCHEMA_VERSION = 9 as const;
+export const TASK_STORE_SCHEMA_VERSION = 11 as const;
+
+const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
+
+/** Opaque renderer-generated idempotency key for task creation retries. */
+export function isTaskCreationToken(value: unknown): value is string {
+  return typeof value === 'string' && TASK_CREATION_TOKEN.test(value);
+}
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -366,6 +385,13 @@ export interface Task {
   title: string;
   prompt: string;
   repositoryPath: string;
+  /**
+   * Present only for tasks created through an idempotent client request.
+   * Older tasks and internally-created alternatives intentionally omit it.
+   */
+  creationToken?: string;
+  /** SHA-256 of the normalized request paired with `creationToken`. */
+  creationRequestFingerprint?: string;
   workflowPhase: WorkflowPhase;
   resolution: Resolution;
   completionPolicy: CompletionPolicy;
@@ -478,6 +504,7 @@ export interface RunRecord {
   eventCount: number;
   lastEventType?: string;
   finalMessage?: string;
+  attachmentSubmissions?: AttachmentSubmissionRecord[];
 }
 
 export interface GitHubRepositoryRecord {
@@ -651,14 +678,18 @@ export interface TaskSnapshot {
   interactionRequests: InteractionRequestRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
+  attachments: TaskAttachmentRecord[];
 }
 
 export interface CreateTaskRequest {
   title: string;
   prompt: string;
   repositoryPath: string;
+  /** Stable across retries of one logical create action. */
+  creationToken?: string;
   completionPolicy?: CompletionPolicy;
   agentSettings?: AgentExecutionSettings;
+  attachmentDraftId?: string;
 }
 
 export interface StartRunRequest {
@@ -940,6 +971,10 @@ export interface TaskManagerApi {
   ): Promise<OpenTargetActionResult>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
+  stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
+  readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;
+  readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;

@@ -11,6 +11,7 @@ import type {
   AgentInteractionDecision,
   InteractionRequestRecord
 } from '../../shared/agent';
+import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
 
 export interface CreateAgentSession {
   localSessionId: string;
@@ -32,6 +33,7 @@ export interface StartAgentTurn {
   mode: AgentRunMode;
   prompt: string;
   authoritativeGoal: string;
+  attachments?: AgentTurnAttachment[];
   settings?: AgentExecutionSettings;
 }
 
@@ -63,6 +65,7 @@ export interface StartAgentReview {
   sourceSession: AgentSessionRef;
   reviewSessionId: string;
   target: AgentReviewTarget;
+  attachments?: AgentTurnAttachment[];
 }
 
 export interface SyncAgentGoal {

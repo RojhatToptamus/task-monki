@@ -1,15 +1,16 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AgentOrchestrator } from '../AgentOrchestrator';
+import { AgentMutationAmbiguousError } from '../AgentProviderAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
 
-const APP_SERVER_INTEGRATION_TIMEOUT_MS = 10_000;
+const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', () => {
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
@@ -22,13 +23,14 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
 
     const provider = await orchestrator.getProviderState();
-    expect(provider.preflight.ready).toBe(true);
+    expect(provider.preflight.ready, JSON.stringify(provider.preflight.problems)).toBe(true);
     expect(provider.models[0]?.model).toBe('fake-model');
     expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
     const initializedServer = (await store.snapshot()).agentServers[0];
@@ -70,15 +72,31 @@ describe('CodexAppServerAdapter', () => {
       'modelProvider/capabilities/read'
     );
 
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const imageBytes = onePixelPng();
+    const textBytes = Buffer.from('{"reproduction":true}\n');
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      displayName: 'screen.png',
+      bytes: imageBytes
+    });
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      displayName: 'reproduction.json',
+      bytes: textBytes
+    });
     const task = await store.createTask({
       title: 'App Server turn',
       prompt: 'Finish the fake task.',
-      repositoryPath: dir,
+      repositoryPath: repositoryDir,
+      attachmentDraftId: draft.id,
       agentSettings: {
         model: 'fake-model',
         reasoningEffort: 'high',
         sandbox: 'WORKSPACE_WRITE',
-        networkAccess: true,
+        networkAccess: false,
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       }
@@ -86,9 +104,16 @@ describe('CodexAppServerAdapter', () => {
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
       branchName: 'codex/fake-app-server',
-      worktreePath: dir,
+      worktreePath: repositoryDir,
       baseSha: 'base'
     });
+    const verifiedAttachments = await store.verifyTaskAttachments(task.id);
+    const canonicalImagePath = verifiedAttachments.find(
+      (attachment) => attachment.record.kind === 'image'
+    )!.absolutePath;
+    const canonicalTextPath = verifiedAttachments.find(
+      (attachment) => attachment.record.kind === 'text'
+    )!.absolutePath;
     const terminal = new Promise<void>((resolve) => {
       events.on((event) => {
         if (event.type === 'run.terminal') {
@@ -114,7 +139,7 @@ describe('CodexAppServerAdapter', () => {
         candidate.agentGoalSnapshots.length > 0 &&
         candidate.agentSettingsObservations.some(
           (record) =>
-            record.settings.networkAccess === true &&
+            record.settings.networkAccess === false &&
             record.settings.approvalsReviewer === 'auto_review'
         ),
       'provider observations'
@@ -123,6 +148,21 @@ describe('CodexAppServerAdapter', () => {
     expect(completed?.status).toBe('COMPLETED');
     expect(completed?.providerTurnId).toBe('turn-1');
     expect(completed?.finalMessage).toBe('Fake task completed.');
+    expect(completed?.attachmentSubmissions).toEqual([
+      expect.objectContaining({
+        kind: 'image',
+        submittedAs: 'localImage',
+        providerTurnId: 'turn-1',
+        submittedAt: expect.any(String)
+      }),
+      expect.objectContaining({
+        kind: 'text',
+        submittedAs: 'prompt-file-reference',
+        providerTurnId: 'turn-1',
+        submittedAt: expect.any(String)
+      })
+    ]);
+    expect(completed?.attachmentSubmissions?.[0]).not.toHaveProperty('path');
     expect(snapshot.agentSessions[0]?.providerSessionId).toBe('thread-1');
     expect(snapshot.agentItems.map((item) => item.type)).toContain('AGENT_MESSAGE');
     expect(snapshot.agentItems.map((item) => item.type)).toContain('REASONING_SUMMARY');
@@ -142,7 +182,7 @@ describe('CodexAppServerAdapter', () => {
       snapshot.agentSettingsObservations.some(
         (record) =>
           record.source === 'THREAD_SETTINGS_NOTIFICATION' &&
-          record.settings.networkAccess === true &&
+          record.settings.networkAccess === false &&
           record.settings.approvalsReviewer === 'auto_review'
       )
     ).toBe(true);
@@ -155,22 +195,126 @@ describe('CodexAppServerAdapter', () => {
       'utf8'
     );
     const outbound = readOutboundMessages(finalJournal);
+    expect(finalJournal).not.toContain(imageBytes.toString('utf8'));
+    expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
+    // The raw protocol journal is the explicit debug-only exception to the
+    // path-free durable-record rule because Codex receives managed paths.
+    expect(finalJournal).toContain(canonicalImagePath);
+    expect(finalJournal).toContain(canonicalTextPath);
     expect(outbound.find((message) => message.method === 'thread/start')?.params)
       .toMatchObject({
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       });
-    expect(outbound.find((message) => message.method === 'turn/start')?.params)
-      .toMatchObject({
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review',
-        sandboxPolicy: {
-          type: 'workspaceWrite',
-          networkAccess: true
-        }
-      });
+    const turnStart = outbound.find((message) => message.method === 'turn/start');
+    expect(turnStart?.params).toMatchObject({
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review'
+    });
+    expect(turnStart?.params).not.toHaveProperty('sandboxPolicy');
+    const profileResume = outbound
+      .filter((message) => message.method === 'thread/resume')
+      .at(-1);
+    const profileConfig = (profileResume?.params as { config?: unknown } | undefined)?.config as {
+      default_permissions?: string;
+      permissions?: Record<string, {
+        filesystem?: Record<string, string>;
+        network?: { enabled?: boolean };
+      }>;
+    } | undefined;
+    const profile = profileConfig?.default_permissions
+      ? profileConfig.permissions?.[profileConfig.default_permissions]
+      : undefined;
+    expect(profileConfig?.default_permissions).toMatch(/^task_monki_/u);
+    expect(profile?.filesystem?.[repositoryDir]).toBe('write');
+    expect(profile?.network?.enabled).toBe(false);
+    const turnInput = (turnStart?.params as {
+      input?: Array<{ type?: string; text?: string; path?: string }>;
+    } | undefined)?.input;
+    const deliveryImagePath = turnInput?.find((item) => item.type === 'localImage')?.path;
+    const manifestPaths = [
+      ...(turnInput?.find((item) => item.type === 'text')?.text ?? '').matchAll(
+        /"readOnlyPath":"([^"]+)"/gu
+      )
+    ].map((match) => match[1]);
+    const deliveryTextPath = manifestPaths.find((candidate) => candidate !== deliveryImagePath);
+    expect(deliveryImagePath).toBe(canonicalImagePath);
+    expect(deliveryTextPath).toBe(canonicalTextPath);
+    expect(turnInput).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('Task Monki attachment manifest:')
+      }),
+      { type: 'localImage', path: deliveryImagePath }
+    ]);
+    expect(turnInput?.[0]?.text).toContain(`"readOnlyPath":"${deliveryTextPath}"`);
+    await expect(fs.access(deliveryImagePath!)).resolves.toBeUndefined();
+    await expect(fs.access(deliveryTextPath!)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('retains run attachments when persistence fails after Codex acknowledges turn/start', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-post-ack-persistence-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'ack-only');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      withTextAttachment: true
+    });
+    const updateRun = store.updateRun.bind(store);
+    let rejectedAcknowledgement = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (
+        !rejectedAcknowledgement &&
+        patch.status === 'RUNNING' &&
+        patch.attachmentSubmissions !== undefined
+      ) {
+        rejectedAcknowledgement = true;
+        throw new Error('injected persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const run = snapshot.runs.find((candidate) => candidate.taskId === task.id);
+    expect(run?.status).toBe('RECOVERY_REQUIRED');
+    const server = snapshot.agentServers[0]!;
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const turnStart = readOutboundMessages(journal).find(
+      (message) => message.method === 'turn/start'
+    );
+    const manifest = (
+      turnStart?.params as { input?: Array<{ type?: string; text?: string }> } | undefined
+    )?.input?.find((item) => item.type === 'text')?.text;
+    const deliveryPath = manifest?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    expect(deliveryPath).toContain(`${path.sep}attachments${path.sep}tasks${path.sep}`);
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+
+    await orchestrator.shutdown();
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('submits one typed approval response and waits for server resolution', async () => {
@@ -182,9 +326,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const terminal = waitForAppEvent(events, 'run.terminal');
@@ -253,6 +398,71 @@ describe('CodexAppServerAdapter', () => {
     await orchestrator.shutdown();
   });
 
+  it('redacts and declines redundant attachment path permission requests', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-permission-ref-'));
+    const executable = await writeFakeCodexExecutable(dir, 'permission');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      withTextAttachment: true
+    });
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const [delivery] = await store.verifyRunAttachments(run.id, task.id);
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const permissionRequest = interaction.request as {
+      permissions: { fileSystem?: { read?: string[] } };
+    };
+
+    expect(interaction.type).toBe('PERMISSION_APPROVAL');
+    expect(JSON.stringify(interaction)).not.toContain(delivery!.absolutePath);
+    expect(permissionRequest.permissions.fileSystem?.read?.[0]).toMatch(
+      /^task-monki-external-path:/u
+    );
+    expect(interaction.allowedActions).toEqual(['DECLINE']);
+
+    await orchestrator.respondToInteraction({
+      taskId: task.id,
+      runId: run.id,
+      interactionRequestId: interaction.id,
+      decision: {
+        interactionType: 'PERMISSION_APPROVAL',
+        action: 'DECLINE'
+      }
+    });
+    await terminal;
+
+    const resolved = await store.getInteractionRequest(interaction.id);
+    expect(JSON.stringify(resolved)).not.toContain(delivery!.absolutePath);
+    const server = (await store.snapshot()).agentServers[0];
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const response = journal
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { raw: string })
+      .map((entry) => JSON.parse(entry.raw) as { id?: string | number; result?: unknown })
+      .find((message) => message.id === 61 && message.result);
+    expect(JSON.stringify(response?.result)).not.toContain(delivery!.absolutePath);
+
+    await orchestrator.shutdown();
+  });
+
   it('aborts pending approvals when the owning App Server exits', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-loss-'));
     const executable = await writeFakeCodexExecutable(dir, 'exit');
@@ -262,9 +472,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
 
@@ -304,9 +515,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -343,9 +555,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const parentRun = await orchestrator.startTurn({
@@ -435,9 +648,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const sourceTerminal = waitForAppEvent(events, 'run.terminal');
@@ -497,11 +711,16 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
-    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      withTextAttachment: true
+    });
+    const canonicalReviewAttachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
+      .absolutePath;
     const sourceTerminal = waitForAppEvent(events, 'run.terminal');
     const sourceRun = await orchestrator.startTurn({
       task,
@@ -534,6 +753,14 @@ describe('CodexAppServerAdapter', () => {
     );
     expect(reviewSession?.requestedSettings.reasoningEffort).toBe('low');
     expect(reviewObservation?.settings.reasoningEffort).toBe('low');
+    expect((await store.getRun(reviewRun.id))?.attachmentSubmissions).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        submittedAs: 'prompt-file-reference',
+        providerTurnId: expect.any(String),
+        submittedAt: expect.any(String)
+      })
+    ]);
 
     const server = snapshot.agentServers[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
@@ -549,6 +776,10 @@ describe('CodexAppServerAdapter', () => {
         }
       )?.config?.model_reasoning_effort
     ).toBe('low');
+    const reviewInstructions = (
+      reviewFork?.params as { developerInstructions?: string } | undefined
+    )?.developerInstructions;
+    expect(reviewInstructions).toContain(canonicalReviewAttachmentPath);
     const reviewStart = messages.find((message) => message.method === 'review/start');
     expect(
       (reviewStart?.params as { threadId?: string; delivery?: string } | undefined)
@@ -562,6 +793,425 @@ describe('CodexAppServerAdapter', () => {
     await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
     await orchestrator.shutdown();
   });
+
+  it('blocks review/start when a browser-dev review fork reports unsafe settings', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-boundary-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'unsafe-review-fork');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      enforceBrowserDevBoundary: true
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      allowNetworkAccess: false
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const safeSettings = {
+      ...task.agentSettings,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user' as const
+    };
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: safeSettings
+    });
+    await sourceTerminal;
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun: (await store.getRun(sourceRun.id))!,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: safeSettings
+      })
+    ).rejects.toThrow('Review fork observed settings is unsafe');
+
+    const snapshot = await store.snapshot();
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const methods = readOutboundMethods(journal);
+    expect(methods).toContain('thread/fork');
+    expect(methods).not.toContain('review/start');
+    expect(snapshot.runs.find((run) => run.mode === 'REVIEW')).toMatchObject({
+      status: 'FAILED'
+    });
+    await orchestrator.shutdown();
+  });
+
+  it('stops Codex and ignores buffered commands after unsafe live settings are observed', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-live-settings-boundary-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'unsafe-live-settings');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const updateAgentSession = store.updateAgentSession.bind(store);
+    let releaseUnsafeObservation!: () => void;
+    let markUnsafeObservationBlocked!: () => void;
+    const unsafeObservationRelease = new Promise<void>((resolve) => {
+      releaseUnsafeObservation = resolve;
+    });
+    const unsafeObservationBlocked = new Promise<void>((resolve) => {
+      markUnsafeObservationBlocked = resolve;
+    });
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
+      if (patch.observedSettings?.sandbox === 'DANGER_FULL_ACCESS') {
+        markUnsafeObservationBlocked();
+        await unsafeObservationRelease;
+      }
+      return updateAgentSession(sessionId, patch);
+    });
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      enforceBrowserDevBoundary: true
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      allowNetworkAccess: false
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const safeSettings = {
+      ...task.agentSettings,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user' as const
+    };
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: safeSettings
+    });
+
+    await unsafeObservationBlocked;
+    const beforePersistenceRelease = await store.snapshot();
+    expect(beforePersistenceRelease.agentServers.at(-1)?.status).toBe('EXITED');
+    expect(beforePersistenceRelease.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+      status: 'RUNNING'
+    });
+    await expect(adapter.listModels()).rejects.toThrow(
+      'Live session observed settings is unsafe'
+    );
+    releaseUnsafeObservation();
+
+    const failed = await waitForRunStatus(store, run.id, 'FAILED');
+    const snapshot = await store.snapshot();
+    expect(failed.terminalReason).toContain('Live session observed settings is unsafe');
+    expect(
+      snapshot.events.find(
+        (event) =>
+          event.runId === run.id &&
+          event.type === 'AGENT_RUN_FAILED' &&
+          JSON.stringify(event.payload).includes('BROWSER_DEV_LIVE_SETTINGS')
+      )
+    ).toBeTruthy();
+    expect(snapshot.agentItems).toEqual([]);
+    expect(snapshot.interactionRequests).toEqual([]);
+    expect(snapshot.agentServers.at(-1)?.status).toBe('EXITED');
+    await expect(adapter.listModels()).rejects.toThrow(
+      'Live session observed settings is unsafe'
+    );
+
+    await orchestrator.shutdown();
+  });
+
+  it('terminates Codex when live settings remove the attested permission profile', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-live-profile-boundary-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'profile-drift');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+
+    const failed = await waitForRunStatus(store, run.id, 'FAILED');
+    expect(failed.terminalReason).toContain(
+      'changed or removed the Task Monki permission profile'
+    );
+    expect(
+      (await store.snapshot()).events.some(
+        (event) =>
+          event.runId === run.id &&
+          event.type === 'AGENT_RUN_FAILED' &&
+          JSON.stringify(event.payload).includes('CODEX_PERMISSION_PROFILE')
+      )
+    ).toBe(true);
+    await expect(adapter.listModels()).rejects.toThrow(
+      'changed or removed the Task Monki permission profile'
+    );
+    await orchestrator.shutdown();
+  });
+
+  it('stops initialization before persisting an unsafe recovery resume response', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-recovery-response-boundary-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'unsafe-recovery-resume');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const safeSettings = {
+      ...task.agentSettings,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user' as const
+    };
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex',
+      requestedSettings: safeSettings
+    });
+    await store.updateAgentSession(session.id, {
+      providerSessionId: 'thread-1',
+      providerSessionTreeId: 'session-tree-1',
+      status: 'ACTIVE'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: safeSettings
+    });
+    await store.updateRun(run.id, {
+      providerTurnId: 'turn-1',
+      status: 'RUNNING'
+    });
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      enforceBrowserDevBoundary: true
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      allowNetworkAccess: false
+    });
+
+    await expect(orchestrator.initialize()).rejects.toThrow(
+      'Recovery resume observed settings is unsafe'
+    );
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.agentServers.at(-1)?.status).toBe('EXITED');
+    expect(snapshot.agentSessions.find((candidate) => candidate.id === session.id))
+      .not.toHaveProperty('observedSettings');
+    await expect(adapter.listModels()).rejects.toThrow(
+      'Recovery resume observed settings is unsafe'
+    );
+  });
+
+  it('retains review attachments when persistence fails after review/start acknowledgement', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-post-ack-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-no-active'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      withTextAttachment: true
+    });
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+
+    const updateRun = store.updateRun.bind(store);
+    let rejectedAcknowledgement = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (
+        !rejectedAcknowledgement &&
+        patch.status === 'RUNNING' &&
+        patch.attachmentSubmissions !== undefined
+      ) {
+        rejectedAcknowledgement = true;
+        throw new Error('injected review persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: { ...task.agentSettings, reasoningEffort: 'low' }
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const reviewRun = snapshot.runs.find((candidate) => candidate.mode === 'REVIEW');
+    expect(reviewRun?.status).toBe('RECOVERY_REQUIRED');
+    const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
+    const reviewFork = readOutboundMessages(journal)
+      .filter((message) => message.method === 'thread/fork')
+      .find((message) =>
+        Boolean(
+          (message.params as { developerInstructions?: string } | undefined)
+            ?.developerInstructions
+        )
+      );
+    const instructions = (
+      reviewFork?.params as { developerInstructions?: string } | undefined
+    )?.developerInstructions;
+    const deliveryPath = instructions?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+
+    await orchestrator.shutdown();
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('retains the acknowledged review fork when its observation cannot be persisted', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-fork-post-ack-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-no-active'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      withTextAttachment: true
+    });
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+
+    const recordObservation = store.recordAgentSettingsObservation.bind(store);
+    let rejectedForkObservation = false;
+    vi.spyOn(store, 'recordAgentSettingsObservation').mockImplementation(
+      async (record) => {
+        if (
+          !rejectedForkObservation &&
+          record.source === 'THREAD_FORK_RESPONSE'
+        ) {
+          rejectedForkObservation = true;
+          throw new Error('injected fork observation persistence failure');
+        }
+        return recordObservation(record);
+      }
+    );
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: { ...task.agentSettings, reasoningEffort: 'low' }
+      })
+    ).rejects.toMatchObject({
+      operation: 'thread/fork'
+    });
+
+    const snapshot = await store.snapshot();
+    const reviewRun = snapshot.runs.find((candidate) => candidate.mode === 'REVIEW');
+    const reviewSession = snapshot.agentSessions.find(
+      (candidate) => candidate.id === reviewRun?.sessionId
+    );
+    expect(reviewRun?.status).toBe('RECOVERY_REQUIRED');
+    expect(reviewSession).toMatchObject({
+      providerSessionId: 'thread-review',
+      providerSessionTreeId: 'session-tree-1',
+      materialized: true
+    });
+
+    const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
+    const messages = readOutboundMessages(journal);
+    const reviewFork = messages
+      .filter((message) => message.method === 'thread/fork')
+      .find((message) =>
+        Boolean(
+          (message.params as { developerInstructions?: string } | undefined)
+            ?.developerInstructions
+        )
+      );
+    expect(reviewFork).toBeDefined();
+    expect(messages.some((message) => message.method === 'review/start')).toBe(false);
+    const instructions = (
+      reviewFork?.params as { developerInstructions?: string } | undefined
+    )?.developerInstructions;
+    const deliveryPath = instructions?.match(/"readOnlyPath":"([^"]+)"/u)?.[1];
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+
+    await orchestrator.shutdown();
+    await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('recovers when stopping a detached review with a stale provider turn id', async () => {
     const dir = await fs.mkdtemp(
@@ -577,9 +1227,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const sourceTerminal = waitForAppEvent(events, 'run.terminal');
@@ -641,7 +1292,8 @@ describe('CodexAppServerAdapter', () => {
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 40
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const sourceTerminal = waitForAppEvent(events, 'run.terminal');
@@ -691,9 +1343,10 @@ describe('CodexAppServerAdapter', () => {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
-      restartDelaysMs: []
+      restartDelaysMs: [],
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const sourceTerminal = waitForAppEvent(events, 'run.terminal');
@@ -752,7 +1405,8 @@ describe('CodexAppServerAdapter', () => {
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 200
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -793,7 +1447,8 @@ describe('CodexAppServerAdapter', () => {
       interruptRequestTimeoutMs: 40,
       interruptCompletionTimeoutMs: 40
     });
-    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {
+    });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
     const run = await orchestrator.startTurn({
@@ -818,11 +1473,28 @@ describe('CodexAppServerAdapter', () => {
   });
 });
 
-async function createTaskContext(store: FileTaskStore, dir: string) {
+async function createTaskContext(
+  store: FileTaskStore,
+  dir: string,
+  options: { withTextAttachment?: boolean } = {}
+) {
+  const repositoryDir = path.join(dir, 'repository');
+  await fs.mkdir(repositoryDir, { recursive: true });
+  let attachmentDraftId: string | undefined;
+  if (options.withTextAttachment) {
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      displayName: 'review-context.json',
+      bytes: Buffer.from('{"review":true}\n')
+    });
+    attachmentDraftId = draft.id;
+  }
   const task = await store.createTask({
     title: 'Approval turn',
     prompt: 'Finish the fake task.',
-    repositoryPath: dir,
+    repositoryPath: repositoryDir,
+    attachmentDraftId,
     agentSettings: {
       model: 'fake-model',
       reasoningEffort: 'high',
@@ -834,7 +1506,7 @@ async function createTaskContext(store: FileTaskStore, dir: string) {
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,
     branchName: 'codex/fake-approval',
-    worktreePath: dir,
+    worktreePath: repositoryDir,
     baseSha: 'base'
   });
   return { task, iteration, worktree };
@@ -859,7 +1531,7 @@ async function waitForInteraction(
 async function waitForRunStatus(
   store: FileTaskStore,
   runId: string,
-  status: 'COMPLETED' | 'INTERRUPTED'
+  status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED'
 ) {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const run = await store.getRun(runId);
@@ -923,6 +1595,13 @@ async function waitForAgentItem(
   );
 }
 
+function onePixelPng(): Buffer {
+  return Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64'
+  );
+}
+
 function waitForAppEvent(events: AppEventBus, type: 'run.terminal'): Promise<void> {
   return new Promise((resolve) => {
     events.on((event) => {
@@ -967,10 +1646,16 @@ async function writeFakeCodexExecutable(
 function fakeCodexScript(
   mode:
     | 'normal'
+    | 'ack-only'
     | 'approval'
+    | 'permission'
     | 'exit'
     | 'clear'
     | 'subagent'
+    | 'unsafe-review-fork'
+    | 'unsafe-live-settings'
+    | 'profile-drift'
+    | 'unsafe-recovery-resume'
     | 'review-turn-start-mismatch'
     | 'review-interrupt-mismatch'
     | 'review-interrupt-ambiguous-no-terminal'
@@ -1000,7 +1685,7 @@ const reviewMode = mode === 'review-turn-start-mismatch' || mode === 'review-int
 const reviewInterruptTimeoutMode = mode === 'review-interrupt-ambiguous-no-terminal';
 const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
-const approvalMode = mode === 'approval' || mode === 'exit' || mode === 'clear' || mode === 'subagent';
+const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent';
 const reviewResponseTurnId = 'review-response-turn';
 const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
@@ -1062,7 +1747,12 @@ const reviewThread = () => ({
   preview: 'Review current changes.',
   source: { subAgent: 'review' }
 });
+let currentProfileId = ':workspace';
+let currentProfileNetworkAccess = false;
 const threadResponse = (request = {}) => {
+  currentProfileId = request.config?.default_permissions ?? currentProfileId;
+  currentProfileNetworkAccess =
+    request.config?.permissions?.[currentProfileId]?.network?.enabled === true;
   const configuredEffort =
     request.config && typeof request.config.model_reasoning_effort === 'string'
       ? request.config.model_reasoning_effort
@@ -1072,7 +1762,12 @@ const threadResponse = (request = {}) => {
   model: 'fake-model',
   modelProvider: 'openai',
   serviceTier: null,
-  cwd: process.cwd(),
+  cwd: request.cwd ?? process.cwd(),
+  runtimeWorkspaceRoots: [request.cwd ?? process.cwd()],
+  activePermissionProfile: {
+    id: currentProfileId,
+    extends: null
+  },
   instructionSources: [],
   approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
   approvalsReviewer: request.approvalsReviewer ?? 'user',
@@ -1080,8 +1775,8 @@ const threadResponse = (request = {}) => {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
     networkAccess: false,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false
+    excludeTmpdirEnvVar: true,
+    excludeSlashTmp: true
   },
   reasoningEffort: configuredEffort
   };
@@ -1113,6 +1808,16 @@ rl.on('line', (line) => {
           exitCode: 0,
           durationMs: 10
         }
+      } });
+      send({ method: 'turn/completed', params: {
+        threadId: 'thread-1',
+        turn: turn('completed')
+      } });
+    }
+    if (mode === 'permission' && message.id === 61) {
+      send({ method: 'serverRequest/resolved', params: {
+        threadId: 'thread-1',
+        requestId: 61
       } });
       send({ method: 'turn/completed', params: {
         threadId: 'thread-1',
@@ -1222,7 +1927,7 @@ rl.on('line', (line) => {
             { reasoningEffort: 'high', description: 'High' }
           ],
           defaultReasoningEffort: 'high',
-          inputModalities: ['text'],
+          inputModalities: ['text', 'image'],
           supportsPersonality: false,
           additionalSpeedTiers: [],
           serviceTiers: [],
@@ -1236,13 +1941,25 @@ rl.on('line', (line) => {
       send({ id: message.id, result: threadResponse(message.params) });
       break;
     case 'thread/resume':
-      send({ id: message.id, result: { ...threadResponse(message.params), thread: thread([turn('completed')]) } });
+      {
+        const response = { ...threadResponse(message.params), thread: thread([turn('completed')]) };
+        if (mode === 'unsafe-recovery-resume') {
+          response.sandbox = { type: 'dangerFullAccess' };
+        }
+        send({ id: message.id, result: response });
+      }
       break;
     case 'thread/read':
       send({ id: message.id, result: { thread: thread([turn('completed')]) } });
       break;
     case 'thread/fork':
-      send({ id: message.id, result: { ...threadResponse(message.params), thread: reviewThread() } });
+      {
+        const response = { ...threadResponse(message.params), thread: reviewThread() };
+        if (mode === 'unsafe-review-fork') {
+          response.sandbox = { type: 'dangerFullAccess' };
+        }
+        send({ id: message.id, result: response });
+      }
       break;
     case 'thread/goal/set': {
       const goal = {
@@ -1309,6 +2026,7 @@ rl.on('line', (line) => {
       break;
     case 'turn/start':
       send({ id: message.id, result: { turn: turn('inProgress') } });
+      if (mode === 'ack-only') return;
       setTimeout(() => {
         send({ method: 'turn/started', params: { threadId: 'thread-1', turn: turn('inProgress') } });
         send({ method: 'thread/settings/updated', params: {
@@ -1317,14 +2035,19 @@ rl.on('line', (line) => {
             cwd: message.params.cwd ?? process.cwd(),
             approvalPolicy: message.params.approvalPolicy ?? 'on-request',
             approvalsReviewer: message.params.approvalsReviewer ?? 'user',
-            sandboxPolicy: message.params.sandboxPolicy ?? {
-              type: 'workspaceWrite',
-              writableRoots: [process.cwd()],
-              networkAccess: false,
-              excludeTmpdirEnvVar: false,
-              excludeSlashTmp: false
+            sandboxPolicy: mode === 'unsafe-live-settings'
+              ? { type: 'dangerFullAccess' }
+              : message.params.sandboxPolicy ?? {
+                  type: 'workspaceWrite',
+                  writableRoots: [process.cwd()],
+                  networkAccess: currentProfileNetworkAccess,
+                  excludeTmpdirEnvVar: true,
+                  excludeSlashTmp: true
+                },
+            activePermissionProfile: {
+              id: mode === 'profile-drift' ? ':workspace' : currentProfileId,
+              extends: null
             },
-            activePermissionProfile: null,
             model: message.params.model ?? 'fake-model',
             modelProvider: 'openai',
             serviceTier: message.params.serviceTier ?? null,
@@ -1334,6 +2057,37 @@ rl.on('line', (line) => {
             personality: message.params.personality ?? null
           }
         } });
+        if (mode === 'unsafe-live-settings') {
+          send({ method: 'item/started', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            startedAtMs: Date.now(),
+            item: {
+              type: 'commandExecution',
+              id: 'unsafe-command',
+              command: 'curl http://127.0.0.1:3099',
+              cwd: process.cwd(),
+              processId: null,
+              source: 'agent',
+              status: 'inProgress',
+              commandActions: [],
+              aggregatedOutput: null,
+              exitCode: null,
+              durationMs: null
+            }
+          } });
+          send({ method: 'item/commandExecution/requestApproval', id: 88, params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'unsafe-command',
+            startedAtMs: Date.now(),
+            reason: 'Use the newly unsafe settings',
+            command: 'curl http://127.0.0.1:3099',
+            cwd: process.cwd(),
+            commandActions: []
+          } });
+          return;
+        }
         if (interruptMode) {
           return;
         }
@@ -1371,7 +2125,7 @@ rl.on('line', (line) => {
               type: 'commandExecution',
               id: 'child-command',
               command: 'npm test',
-              cwd: process.cwd(),
+              cwd: message.params.cwd,
               processId: null,
               source: 'agent',
               status: 'inProgress',
@@ -1388,8 +2142,31 @@ rl.on('line', (line) => {
             startedAtMs: Date.now(),
             reason: 'Verify the delegated test analysis',
             command: 'npm test',
-            cwd: process.cwd(),
+            cwd: message.params.cwd,
             commandActions: []
+          } });
+          return;
+        }
+        if (mode === 'permission') {
+          const inputText = message.params.input.find((item) => item.type === 'text').text;
+          const manifestLine = inputText.split('\\n').find((line) => line.startsWith('Attachment metadata: '));
+          const metadata = JSON.parse(manifestLine.slice('Attachment metadata: '.length));
+          send({ method: 'item/permissions/requestApproval', id: 61, params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'permission-1',
+            environmentId: null,
+            startedAtMs: Date.now(),
+            cwd: message.params.cwd,
+            reason: 'Read ' + metadata.readOnlyPath,
+            permissions: {
+              network: null,
+              fileSystem: {
+                read: [metadata.readOnlyPath],
+                write: null,
+                entries: [{ path: { type: 'path', path: metadata.readOnlyPath }, access: 'read' }]
+              }
+            }
           } });
           return;
         }
@@ -1402,7 +2179,7 @@ rl.on('line', (line) => {
               type: 'commandExecution',
               id: 'command-1',
               command: 'npm test',
-              cwd: process.cwd(),
+              cwd: message.params.cwd,
               processId: null,
               source: 'agent',
               status: 'inProgress',
@@ -1419,7 +2196,7 @@ rl.on('line', (line) => {
             startedAtMs: Date.now(),
             reason: 'Run repository tests',
             command: 'npm test',
-            cwd: process.cwd(),
+            cwd: message.params.cwd,
             commandActions: []
           } });
           if (mode === 'exit') {

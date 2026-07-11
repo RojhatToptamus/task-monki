@@ -26,6 +26,7 @@ export interface PromptRefinementRunRequest {
   model?: string;
   codexExecutable?: string;
   toolSettings?: CodexExternalToolSettings;
+  failClosedMcpDiscovery?: boolean;
 }
 
 export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Promise<string>;
@@ -38,7 +39,8 @@ export class PromptRefinementService {
     input: string,
     model?: string,
     codexExecutable?: string,
-    toolSettings?: CodexExternalToolSettings
+    toolSettings?: CodexExternalToolSettings,
+    failClosedMcpDiscovery = false
   ): Promise<RefinePromptResponse> {
     const trimmed = input.trim();
     if (!trimmed) {
@@ -51,7 +53,8 @@ export class PromptRefinementService {
         instruction: buildPromptRefinementInstruction(trimmed),
         model,
         codexExecutable,
-        toolSettings
+        toolSettings,
+        failClosedMcpDiscovery
       });
       const refined = parseModelRefinement(modelOutput);
       return {
@@ -107,7 +110,8 @@ async function runCodexRefinement({
   instruction,
   model,
   codexExecutable,
-  toolSettings
+  toolSettings,
+  failClosedMcpDiscovery
 }: PromptRefinementRunRequest): Promise<string> {
   const executable = codexExecutable ?? 'codex';
   const command = buildRefinementCommand(
@@ -116,7 +120,8 @@ async function runCodexRefinement({
     await resolveCodexExternalToolConfigOverrides({
       executable,
       cwd: repositoryPath,
-      settings: toolSettings
+      settings: toolSettings,
+      failClosedMcpDiscovery
     }),
     executable
   );

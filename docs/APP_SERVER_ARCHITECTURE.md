@@ -1,8 +1,9 @@
 # Codex App Server Architecture
 
-Date: 2026-07-02
+Date: 2026-07-11
 
-This document describes the current architecture, not an old migration plan.
+This document describes the current runtime architecture and responsibility
+boundaries.
 
 ## Goal
 
@@ -55,7 +56,10 @@ Reasons:
 
 - `Task`
   - User intent, workflow phase, current implementation-side run, worktree,
-    projections, and evidence pointers.
+    projections, and evidence pointers. Composer-created tasks may also retain
+    an opaque creation token and normalized-request fingerprint so a lost create
+    response resolves to the same durable task rather than consuming its draft
+    twice.
 - `RunRecord`
   - One implementation, follow-up, retry, review, or provider-origin child run.
     Fork alternatives are represented as a new `Task` with its own
@@ -69,6 +73,14 @@ Reasons:
   - Append-only raw protocol messages for debugging and reconstruction.
 - `StatusProjection`
   - Compact UI-facing state derived from Task Monki domain events.
+- `TaskAttachmentRecord`
+  - Path-free durable metadata for one app-managed task input. Immutable
+    task-owned files live outside Git worktrees and are reverified before
+    provider delivery.
+- `RunRecord.attachmentSubmissions`
+  - Path-free evidence recorded only after `turn/start` succeeds. It identifies
+    the verified bytes and submission mode, but does not assert that the model
+    read or used them.
 
 ## Provider adapter responsibilities
 
@@ -83,7 +95,13 @@ The adapter must:
   not inherit unrelated user/plugin tool processes;
 - allow explicit settings opt-in for cached or live Codex web search, all
   configured Codex MCP servers, and Codex apps/connectors when a task needs
-  those external tools;
+  those external tools in packaged Electron. Browser development forces all
+  three modes off, rejects enable attempts, and aborts before App Server launch
+  unless every enabled MCP entry can be discovered and explicitly disabled;
+- validate settings reported by thread start/resume/fork responses before
+  persistence or a subsequent turn/review operation. In browser development,
+  an unsafe response or live settings notification latches the adapter closed
+  and stops the process before any storage wait;
 - avoid copying MCP environment values into stored App Server argv records when
   building those runtime config overrides;
 - opt out of high-volume provider delta notifications that Task Monki does not
@@ -95,14 +113,66 @@ The adapter must:
 - correlate provider thread IDs, turn IDs, item IDs, and request IDs;
 - materialize useful provider events into Task Monki records;
 - keep raw protocol traffic in the journal;
-- recover or locally reconcile when provider delivery is ambiguous.
+- recover or locally reconcile when provider delivery is ambiguous;
+- resolve attachment records only from Task Monki storage, reverify their
+  immutable task-owned files, use native `localImage` inputs when appropriate,
+  and persist path-free submission
+  evidence on the run without claiming model consumption.
 
 The adapter must not:
 
 - decide Task Monki workflow phase by trusting provider text;
 - treat provider debug state as local evidence;
 - let detached review runs replace the implementation run;
-- expose experimental protocol features without explicit capability gates.
+- expose experimental protocol features without explicit capability gates;
+- accept renderer-supplied or canonical task-store file paths, or claim generic
+  App Server file or PDF support that the live protocol does not provide.
+
+The complete attachment storage, delivery, cleanup, and security contract is in
+`docs/architecture/ATTACHMENT_LIFECYCLE.md`.
+
+## Attachment protocol boundary
+
+The generated Codex protocol currently exposes `text`, `image`, `localImage`,
+  `skill`, and `mention` user inputs. It does not expose a generic file or PDF
+turn input. Task Monki therefore sends supported images through `localImage`
+after reverifying the immutable task-owned file. It provides supported
+text-like files through an untrusted-data prompt manifest containing the exact
+read-only managed path. Task-owned files remain outside Git worktrees and are
+reused across runs and reviews. PDFs, Office files, video, audio, archives,
+databases, and arbitrary binaries remain unsupported because they require a
+separately secured extraction or tool boundary.
+
+The adapter supplies a complete, collision-resistant permission profile through
+the existing thread-local config layer. It grants `:minimal`, the exact
+worktree, and exact verified task attachment files. Multi-agent V1/V2
+and memories are disabled in the same config. Runtime discovery proves this
+surface with a disposable ephemeral thread before selecting a Codex binary.
+
+Thread create, resume, fork, each ordinary turn, recovery, and the explicit
+fork-plus-inline review path all require the returned active profile and sole
+runtime workspace root before provider input. Live settings drift terminates
+the provider and fails active runs. Attachment reads therefore need no separate
+permission escalation or path expansion flow.
+
+Full access remains available for attachment-free tasks but is rejected when
+attachments are present. Attachment tasks also force network off and require
+Codex web search, MCP servers, and apps to be disabled because filesystem rules
+do not confine same-user external tools.
+
+Codex serializes a submitted `localImage` into an image data URL in its
+model-facing conversation history. Opaque delivery paths can still occur in
+the outbound request, provider telemetry, and raw protocol journal, so Task
+Monki makes no complete-erasure claim. Normal task snapshots, interaction
+requests, approval decisions, and submission evidence remain path-free.
+External provider permission paths are redacted and declined. The Debug view
+shows the path-free submission record, not proof of model consumption.
+
+Private managed storage, atomic synchronized writes, startup reconciliation,
+the HTTP/Vite token boundary, Electron sender guards, and
+transport resource limits are Task Monki responsibilities, not provider
+capabilities. They are defined in the attachment lifecycle document rather
+than inferred from Codex events.
 
 ## Turn modes
 
@@ -207,15 +277,21 @@ Codex protocol detail:
 
 Provider delivery can be ambiguous. The app must handle:
 
+- a provider mutation that is acknowledged before Task Monki can durably save
+  the provider session, turn identity, or attachment submission evidence;
 - stale provider turn IDs;
 - `no active turn to interrupt`;
 - App Server exit during interrupt or review;
 - late protocol errors after a server already reached a terminal state;
 - missing terminal events after interruption.
 
-Recovery must prefer a truthful local state over an endlessly running UI. If the
-provider cannot confirm a terminal event, record the ambiguity and reconcile
-locally when the evidence proves the run is no longer active.
+Recovery must prefer a truthful local state over an endlessly running UI. An
+acknowledged mutation followed by local persistence failure is not safe to
+replay as a new mutation: keep the run in recovery-required state for
+reconciliation. Attachments remain immutable task-owned inputs and are reused
+after reconciliation; there is no disposable run-specific attachment copy. If
+the provider cannot confirm a terminal event, record the ambiguity and
+reconcile locally when the evidence proves the run is no longer active.
 
 ## Verification
 

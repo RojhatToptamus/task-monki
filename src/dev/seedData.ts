@@ -74,6 +74,7 @@ export interface DevSeedManifest {
     TASK_MANAGER_APP_SETTINGS_PATH: string;
     TASK_MANAGER_REPO_PATH: string;
     TASK_MANAGER_WORKTREE_ROOT: string;
+    TASK_MANAGER_DEV_SEED_MODE: '1';
   };
   counts: {
     tasks: number;
@@ -100,7 +101,7 @@ const DEFAULT_AGENT_SETTINGS: AgentExecutionSettings = {
   reasoningEffort: 'low',
   sandbox: 'WORKSPACE_WRITE',
   networkAccess: false,
-  approvalPolicy: 'on-request',
+  approvalPolicy: 'never',
   approvalsReviewer: 'user'
 };
 
@@ -512,7 +513,8 @@ export async function seedTaskMonkiDevelopmentData(
       TASK_MANAGER_STORE_DIR: paths.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: paths.appSettingsPath,
       TASK_MANAGER_REPO_PATH: paths.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot
+      TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
+      TASK_MANAGER_DEV_SEED_MODE: '1'
     },
     counts: {
       tasks: snapshot.tasks.length,

@@ -1,7 +1,10 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { AgentProviderAdapter } from '../core/agent/AgentProviderAdapter';
+import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
+import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -59,7 +62,8 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_STORE_DIR: manifest.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot
+      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+      TASK_MANAGER_DEV_SEED_MODE: '1'
     });
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
@@ -292,6 +296,76 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
+  it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
+    const store = new FileTaskStore(manifest.storeDir);
+    const before = await store.snapshot();
+    const initialize = vi.fn(async () => undefined);
+    const adapter = {
+      initialize,
+      capabilities: vi.fn(async () => codexCapabilities()),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as AgentProviderAdapter;
+    const disabledReason =
+      'Codex is disabled while deterministic development seed scenarios are loaded.';
+    const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
+      appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
+      agentProviderAdapter: adapter,
+      allowAgentNetworkAccess: false,
+      agentProviderStartupDisabledReason: disabledReason,
+      codexPath: path.join(rootDir, 'missing-codex')
+    });
+
+    await service.init();
+    try {
+      const after = await store.snapshot();
+      expect(initialize).not.toHaveBeenCalled();
+      await expect(service.getAgentProviderState()).resolves.toMatchObject({
+        preflight: { ready: false, problems: [disabledReason] },
+        models: []
+      });
+      expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
+      expect({
+        tasks: after.tasks.length,
+        runs: after.runs.length,
+        worktrees: after.worktrees.length,
+        events: after.events.length
+      }).toEqual({
+        tasks: manifest.counts.tasks,
+        runs: manifest.counts.runs,
+        worktrees: manifest.counts.worktrees,
+        events: manifest.counts.events
+      });
+      for (const run of after.runs) {
+        expect(run.requestedSettings).toMatchObject({
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        });
+      }
+
+      const readyTask = taskForScenario(manifest, after, 'board-ready');
+      await expect(service.startRun({ taskId: readyTask.id })).rejects.toThrow(
+        disabledReason
+      );
+      const runningTask = taskForScenario(manifest, after, 'agent-running');
+      await expect(
+        service.cancelRun({ runId: runningTask.currentRunId! })
+      ).rejects.toThrow(disabledReason);
+      await expect(
+        service.refinePrompt({
+          repositoryPath: manifest.repositoryPath,
+          input: 'Do not start Codex from fixture mode.'
+        })
+      ).rejects.toThrow(disabledReason);
+      expect(seedLifecycleSnapshot(await store.snapshot())).toEqual(
+        seedLifecycleSnapshot(before)
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   it('refuses to reset non-seed-owned non-empty directories', async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-safety-'));
     try {
@@ -305,6 +379,42 @@ describe('Task Monki development seed data', () => {
     }
   });
 });
+
+function seedLifecycleSnapshot(snapshot: TaskSnapshot) {
+  return {
+    tasks: snapshot.tasks.map((task) => ({
+      id: task.id,
+      currentRunId: task.currentRunId,
+      projection: task.projection
+    })),
+    runs: snapshot.runs.map((run) => ({
+      id: run.id,
+      status: run.status,
+      recoveryState: run.recoveryState,
+      terminalReason: run.terminalReason
+    })),
+    sessions: snapshot.agentSessions.map((session) => ({
+      id: session.id,
+      status: session.status,
+      requestedSettings: session.requestedSettings,
+      observedSettings: session.observedSettings
+    })),
+    interactions: snapshot.interactionRequests.map((interaction) => ({
+      id: interaction.id,
+      status: interaction.status,
+      resolution: interaction.resolution
+    })),
+    counts: {
+      tasks: snapshot.tasks.length,
+      runs: snapshot.runs.length,
+      worktrees: snapshot.worktrees.length,
+      events: snapshot.events.length,
+      sessions: snapshot.agentSessions.length,
+      interactions: snapshot.interactionRequests.length,
+      servers: snapshot.agentServers.length
+    }
+  };
+}
 
 function taskForScenario(manifest: DevSeedManifest, snapshot: TaskSnapshot, slug: string): Task {
   const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug);

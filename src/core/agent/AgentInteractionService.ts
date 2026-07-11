@@ -46,7 +46,12 @@ export class AgentInteractionService {
       throw new Error('Interaction request no longer matches its provider run.');
     }
 
-    validateInteractionDecision(interaction, input.decision, session, run);
+    validateInteractionDecision(
+      interaction,
+      input.decision,
+      session,
+      run
+    );
 
     const responding = await this.store.transitionInteractionRequest(
       interaction.id,

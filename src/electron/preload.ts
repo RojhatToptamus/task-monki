@@ -28,6 +28,16 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import {
+  ATTACHMENT_MAX_IMAGE_BYTES,
+  type DiscardTaskAttachmentDraftRequest,
+  type ReadTaskAttachmentRequest,
+  type StageTaskAttachmentBatchRequest,
+} from '../shared/attachments';
+import {
+  AttachmentIpcOperationGate,
+  assertAttachmentIpcBatch,
+} from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
 
 function getWindowChromePlatform(): WindowChromePlatform {
@@ -42,6 +52,8 @@ function getWindowChromePlatform(): WindowChromePlatform {
   }
   return 'other';
 }
+
+const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
   getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
@@ -59,6 +71,22 @@ const api: TaskManagerApi = {
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),
+  stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
+    const byteCount = assertAttachmentIpcBatch(input);
+    return attachmentIpcClientGate.run(byteCount, () =>
+      ipcRenderer.invoke('attachment:stage-batch', input)
+    );
+  },
+  discardTaskAttachmentDraft: (input: DiscardTaskAttachmentDraftRequest) =>
+    ipcRenderer.invoke('attachment:draft:discard', input),
+  readTaskAttachment: (input: ReadTaskAttachmentRequest) =>
+    attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
+      ipcRenderer.invoke('attachment:read', input)
+    ),
+  readClipboardImage: () =>
+    attachmentIpcClientGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
+      ipcRenderer.invoke('attachment:clipboard:readImage')
+    ),
   createTask: (input: CreateTaskRequest) => ipcRenderer.invoke('task:create', input),
   refinePrompt: (input: RefinePromptRequest) => ipcRenderer.invoke('prompt:refine', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => ipcRenderer.invoke('worktree:prepare', input),

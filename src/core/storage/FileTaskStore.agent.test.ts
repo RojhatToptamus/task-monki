@@ -193,7 +193,10 @@ describe('FileTaskStore agent persistence', () => {
   it('rejects old store formats instead of maintaining compatibility code', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-old-store-'));
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, 'store.json'), JSON.stringify({ tasks: [] }), 'utf8');
+    await fs.writeFile(path.join(dir, 'store.json'), JSON.stringify({ tasks: [] }), {
+      encoding: 'utf8',
+      mode: 0o600
+    });
 
     await expect(new FileTaskStore(dir).init()).rejects.toThrow(
       'migrations are intentionally not supported'

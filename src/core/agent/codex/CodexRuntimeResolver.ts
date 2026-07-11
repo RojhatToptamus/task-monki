@@ -240,6 +240,15 @@ export async function probeCodexRuntime(
         detail: `Codex App Server is missing required methods: ${capabilityResult.missingMethods.join(', ')}.`
       };
     }
+    if (capabilityResult.incompatible) {
+      return {
+        candidate,
+        compatible: false,
+        version,
+        launch,
+        detail: capabilityResult.detail
+      };
+    }
   }
 
   return {
@@ -320,6 +329,7 @@ async function probeJsonRpcCapabilities(
       ok: false;
       detail: string;
       missingMethods?: TaskMonkiCodexAppServerMethod[];
+      incompatible?: boolean;
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
@@ -421,11 +431,23 @@ async function probeJsonRpcCapabilities(
     notify('initialized', {});
 
     const missingMethods: TaskMonkiCodexAppServerMethod[] = [];
+    let permissionProfileProblem: string | undefined;
     await Promise.all(
       TASK_MONKI_REQUIRED_CODEX_APP_SERVER_METHODS.map(async (method) => {
-        const response = await request(method, capabilityProbeParams(method));
-        if (response.error && isMethodNotFound(response.error)) {
-          missingMethods.push(method);
+        const response = await request(
+          method,
+          capabilityProbeParams(method, options.cwd)
+        );
+        if (response.error) {
+          if (isMethodNotFound(response.error)) {
+            missingMethods.push(method);
+          } else if (method === 'thread/start') {
+            permissionProfileProblem = `Codex permission-profile probe failed: ${
+              response.error.message ?? 'unknown error'
+            }`;
+          }
+        } else if (method === 'thread/start') {
+          permissionProfileProblem = permissionProfileProbeProblem(response.result, options.cwd);
         }
       })
     );
@@ -436,6 +458,13 @@ async function probeJsonRpcCapabilities(
         ok: false,
         detail: `Missing methods: ${missingMethods.join(', ')}.`,
         missingMethods
+      };
+    }
+    if (permissionProfileProblem) {
+      return {
+        ok: false,
+        detail: permissionProfileProblem,
+        incompatible: true
       };
     }
     return { ok: true };
@@ -458,7 +487,8 @@ async function probeJsonRpcCapabilities(
 }
 
 function capabilityProbeParams(
-  method: TaskMonkiCodexAppServerMethod
+  method: TaskMonkiCodexAppServerMethod,
+  cwd: string
 ): Record<string, unknown> {
   switch (method) {
     case 'account/read':
@@ -467,7 +497,21 @@ function capabilityProbeParams(
       return { cursor: null, limit: 1, includeHidden: false };
     case 'thread/start':
       return {
-        model: '__task_monki_capability_probe_invalid_model__',
+        cwd,
+        config: {
+          default_permissions: 'task_monki_capability_probe',
+          permissions: {
+            task_monki_capability_probe: {
+              filesystem: { ':minimal': 'read', [cwd]: 'read' },
+              network: { enabled: false }
+            }
+          },
+          features: {
+            multi_agent: false,
+            multi_agent_v2: false,
+            memories: false
+          }
+        },
         ephemeral: true
       };
     case 'thread/resume':
@@ -498,6 +542,30 @@ function capabilityProbeParams(
         delivery: 'inline'
       };
   }
+}
+
+function permissionProfileProbeProblem(result: unknown, cwd: string): string | undefined {
+  if (!result || typeof result !== 'object') {
+    return 'Codex did not return permission-profile evidence for the compatibility probe.';
+  }
+  const response = result as {
+    activePermissionProfile?: { id?: unknown; extends?: unknown } | null;
+    runtimeWorkspaceRoots?: unknown;
+  };
+  if (
+    response.activePermissionProfile?.id !== 'task_monki_capability_probe' ||
+    response.activePermissionProfile.extends != null
+  ) {
+    return 'Codex did not activate the requested Task Monki permission profile.';
+  }
+  if (
+    !Array.isArray(response.runtimeWorkspaceRoots) ||
+    response.runtimeWorkspaceRoots.length !== 1 ||
+    response.runtimeWorkspaceRoots[0] !== cwd
+  ) {
+    return 'Codex did not attest the requested Task Monki runtime workspace root.';
+  }
+  return undefined;
 }
 
 function isMethodNotFound(error: { code?: number; message?: string }): boolean {

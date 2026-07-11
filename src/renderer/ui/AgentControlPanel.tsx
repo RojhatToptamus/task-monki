@@ -126,6 +126,18 @@ export function AgentControlPanel({
       ) : null}
 
       <div className="agent-controls__actions">
+        {run.status === 'RECOVERY_REQUIRED' ? (
+          <div className="agent-controls__button-row">
+            <button
+              type="button"
+              className="outline-button outline-button--danger"
+              disabled={submitting}
+              onClick={() => void onInterrupt(run.id)}
+            >
+              Abandon recovery
+            </button>
+          </div>
+        ) : null}
         {isRunning ? (
           <div className="agent-controls__button-row">
             <button

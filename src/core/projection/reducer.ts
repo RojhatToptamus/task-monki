@@ -42,7 +42,8 @@ export function createEmptyState(): StoreState {
     agentSubagentObservations: [],
     interactionRequests: [],
     events: [],
-    artifacts: []
+    artifacts: [],
+    attachments: []
   };
 }
 
@@ -70,7 +71,8 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     agentSubagentObservations: [...state.agentSubagentObservations],
     interactionRequests: [...state.interactionRequests],
     events: [...state.events, event],
-    artifacts: [...state.artifacts]
+    artifacts: [...state.artifacts],
+    attachments: [...state.attachments]
   };
 
   const taskIndex = next.tasks.findIndex((task) => task.id === event.taskId);
@@ -185,6 +187,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
       return {
         ...run,
         status: 'COMPLETED',
+        recoveryState: 'NONE',
         endedAt: event.receivedAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason: getString(event.payload, 'terminalReason') ?? run.terminalReason
@@ -193,6 +196,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
       return {
         ...run,
         status: 'FAILED',
+        recoveryState: 'NONE',
         endedAt: event.receivedAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason:
@@ -204,6 +208,7 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
       return {
         ...run,
         status: 'INTERRUPTED',
+        recoveryState: 'NONE',
         endedAt: event.receivedAt,
         finalArtifactId: getString(event.payload, 'finalArtifactId') ?? run.finalArtifactId,
         terminalReason:

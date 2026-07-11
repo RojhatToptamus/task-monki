@@ -1,12 +1,12 @@
 # Releasing Task Monki
 
-Date: 2026-07-08
+Date: 2026-07-11
 
-Task Monki's MVP release channel uses unsigned artifacts attached to draft
-GitHub Releases. Trusted Developer ID code signing, notarization,
-package-manager publishing, and automatic updates are intentionally out of
-scope for this phase. macOS app bundles are ad-hoc signed only to preserve
-bundle integrity before DMG/ZIP packaging.
+Task Monki's current release channel uses unsigned artifacts attached to draft
+GitHub Releases. It does not use trusted Developer ID code signing,
+notarization, package-manager publishing, or automatic updates. macOS app
+bundles are ad-hoc signed only to preserve bundle integrity before DMG/ZIP
+packaging.
 
 ## Release Artifacts
 
@@ -80,9 +80,9 @@ signed as standalone code. The release build intentionally fails if those files
 receive detached `com.apple.cs.*` extended attributes again.
 
 The unsigned alpha macOS configuration also disables Hardened Runtime. Hardened
-Runtime is part of the future Developer ID signed and notarized path; combined
-with ad-hoc signing it can leave macOS-launched Electron builds stuck before
-helper processes start.
+Runtime belongs to a Developer ID signed and notarized release configuration;
+combined with ad-hoc signing it can leave macOS-launched Electron builds stuck
+before helper processes start.
 
 Smoke test only against a throwaway local Git repository:
 
@@ -191,18 +191,3 @@ Dock icon with no renderer window until the quarantine attribute is removed.
 Keep the platform artifact names clear and leave generated `.blockmap` and
 `latest-*.yml` assets attached for this alpha. They are normal electron-builder
 metadata, but they should not be presented as primary downloads in the notes.
-
-## Future Signed Release Work
-
-Add signing in a separate change from the unsigned MVP:
-
-- macOS: Developer ID Application certificate, hardened runtime, notarization,
-  stapling, and signing validation.
-- Windows: code-signing certificate or trusted signing service, plus timestamped
-  signatures.
-- CI: add signing secrets and set `forceCodeSigning: true` only after signed
-  builds are required.
-
-Automatic updates should also be a separate change. Use a prompted update flow,
-not forced restarts, because Task Monki can have active Codex App Server runs,
-Git operations, GitHub delivery operations, and local worktrees.

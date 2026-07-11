@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-02
+Date: 2026-07-11
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -34,6 +34,11 @@ behavior and architecture, not private roadmap sequencing.
      boundaries.
 2. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
+3. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+   - Current restricted attachment formats (and explicitly unsupported generic
+     files/PDFs), composer normalization, durable storage and retry rules,
+     Codex delivery, HTTP/Electron trust boundaries, resource limits,
+     portability, cleanup, and deletion semantics.
 
 ### User And Maintainer Docs
 
@@ -45,11 +50,13 @@ behavior and architecture, not private roadmap sequencing.
 
 ### Interface Design
 
-1. `docs/DESIGN_SPEC.md`
-   - Current interface principles, CSS token usage, component rules, status
-     semantics, screen patterns, and content guidelines.
-2. `docs/WINDOW_CHROME.md`
-   - Native Electron window chrome expectations for macOS, Windows, and Linux.
+1. Root `DESIGN.md`
+   - Current interface principles, CSS-token rules, component guidance, status
+     semantics, accessibility expectations, and UI review checklist.
+
+Window behavior is implemented in `src/electron/main.ts`,
+`src/electron/windowChrome.ts`, and `src/renderer/styles.css`. There is no
+separate window-chrome design document.
 
 For agent-specific working instructions, start at root `AGENTS.md`.
 

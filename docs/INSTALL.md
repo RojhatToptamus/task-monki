@@ -1,6 +1,6 @@
 # Installing Task Monki
 
-Date: 2026-07-08
+Date: 2026-07-11
 
 Task Monki is distributed through GitHub Releases as unsigned desktop builds.
 macOS app bundles are ad-hoc signed only to preserve bundle integrity; they are
@@ -12,7 +12,8 @@ updater. To update, download and install the newer release from GitHub.
 Install these before using Task Monki:
 
 - Git
-- Codex CLI 0.141.0 or newer, installed and authenticated
+- Codex CLI, installed and authenticated; Task Monki probes the runtime for the
+  App Server capabilities it uses
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features
 
@@ -86,7 +87,7 @@ Only install releases from the project's GitHub Releases page. Check
 
 ## Updating
 
-MVP updates are manual:
+Updates are manual:
 
 1. Open the latest GitHub Release.
 2. Download the artifact for your platform.

@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
   AgentSessionRecord,
@@ -109,6 +112,143 @@ describe('Agent interaction policy', () => {
     ).toThrow('subset');
   });
 
+  it('allows only an explicitly authorized exact read path and never parent reads or writes', () => {
+    const attachmentPath = '/tmp/task-monki/attachments/task-1/file.txt';
+    const readPolicy = buildInteractionPolicy({
+      type: 'PERMISSION_APPROVAL',
+      request: {
+        startedAtMs: 1,
+        cwd: '/tmp/worktree',
+        permissions: { fileSystem: { read: [attachmentPath] } }
+      },
+      session: sessionFixture(),
+      run: runFixture(),
+      additionalReadOnlyPaths: [attachmentPath]
+    });
+    expect(readPolicy.allowedActions).toContain('GRANT_TURN');
+    expect(readPolicy.warnings).toEqual([]);
+    const interaction = interactionFixture({
+      type: 'PERMISSION_APPROVAL',
+      request: {
+        startedAtMs: 1,
+        cwd: '/tmp/worktree',
+        permissions: { fileSystem: { read: [attachmentPath] } }
+      },
+      allowedActions: readPolicy.allowedActions
+    });
+    const grant = {
+      interactionType: 'PERMISSION_APPROVAL' as const,
+      action: 'GRANT_TURN' as const,
+      permissions: { fileSystem: { read: [attachmentPath] } }
+    };
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        grant,
+        sessionFixture(),
+        runFixture(),
+        [attachmentPath]
+      )
+    ).not.toThrow();
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        grant,
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('outside the task worktree');
+
+    const parentRead = buildInteractionPolicy({
+      type: 'PERMISSION_APPROVAL',
+      request: {
+        startedAtMs: 1,
+        cwd: '/tmp/worktree',
+        permissions: {
+          fileSystem: { read: ['/tmp/task-monki/attachments/task-1'] }
+        }
+      },
+      session: sessionFixture(),
+      run: runFixture(),
+      additionalReadOnlyPaths: [attachmentPath]
+    });
+    expect(parentRead.allowedActions).toEqual(['DECLINE']);
+
+    const writePolicy = buildInteractionPolicy({
+      type: 'PERMISSION_APPROVAL',
+      request: {
+        startedAtMs: 1,
+        cwd: '/tmp/worktree',
+        permissions: { fileSystem: { write: [attachmentPath] } }
+      },
+      session: sessionFixture(),
+      run: runFixture(),
+      additionalReadOnlyPaths: [attachmentPath]
+    });
+    expect(writePolicy.allowedActions).toEqual(['DECLINE']);
+    expect(writePolicy.warnings.join(' ')).toContain('write permission');
+
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlink alias even when it resolves to an allowed run attachment',
+    async () => {
+      const delivery = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-policy-delivery-')
+      );
+      const aliases = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-policy-alias-')
+      );
+      const attachmentPath = path.join(delivery, 'attachment.txt');
+      const aliasPath = path.join(aliases, 'retargetable.txt');
+      await fs.writeFile(attachmentPath, 'untrusted input');
+      await fs.symlink(attachmentPath, aliasPath);
+
+      const policy = buildInteractionPolicy({
+        type: 'PERMISSION_APPROVAL',
+        request: {
+          startedAtMs: 1,
+          cwd: '/tmp/worktree',
+          permissions: { fileSystem: { read: [aliasPath] } }
+        },
+        session: sessionFixture(),
+        run: runFixture(),
+        additionalReadOnlyPaths: [attachmentPath]
+      });
+
+      expect(policy.allowedActions).toEqual(['DECLINE']);
+      expect(policy.warnings.join(' ')).toContain('outside the task worktree');
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a missing write target below a worktree symlink that escapes the worktree',
+    async () => {
+      const worktree = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-policy-worktree-')
+      );
+      const outside = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-policy-outside-')
+      );
+      await fs.symlink(outside, path.join(worktree, 'escape'), 'dir');
+      const escapedTarget = path.join(worktree, 'escape', 'not-created-yet.txt');
+
+      const policy = buildInteractionPolicy({
+        type: 'PERMISSION_APPROVAL',
+        request: {
+          startedAtMs: 1,
+          cwd: worktree,
+          permissions: { fileSystem: { write: [escapedTarget] } }
+        },
+        session: sessionFixture({ worktreePath: worktree }),
+        run: runFixture()
+      });
+
+      expect(policy.allowedActions).toEqual(['DECLINE']);
+      expect(policy.warnings.join(' ')).toContain('outside the task worktree');
+    }
+  );
+
   it('validates accepted MCP form content against the provider schema', () => {
     const interaction = interactionFixture({
       type: 'MCP_ELICITATION',
@@ -142,7 +282,9 @@ describe('Agent interaction policy', () => {
   });
 });
 
-function sessionFixture(): AgentSessionRecord {
+function sessionFixture(
+  overrides: Partial<AgentSessionRecord> = {}
+): AgentSessionRecord {
   return {
     id: 'session-1',
     taskId: 'task-1',
@@ -161,7 +303,8 @@ function sessionFixture(): AgentSessionRecord {
     },
     ownership: 'TASK_MONKI',
     createdAt: '2026-06-22T00:00:00.000Z',
-    updatedAt: '2026-06-22T00:00:00.000Z'
+    updatedAt: '2026-06-22T00:00:00.000Z',
+    ...overrides
   };
 }
 

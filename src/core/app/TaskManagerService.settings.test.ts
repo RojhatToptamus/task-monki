@@ -111,6 +111,82 @@ describe('TaskManagerService settings', () => {
     } finally {
       await service.shutdown();
     }
+  }, 20_000);
+
+  it('forces Codex external tools off and rejects enabling them in browser development', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-browser-tools-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const settingsStore = new MemoryAppSettingsStore({
+      codexExternalTools: {
+        webSearchMode: 'live',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: settingsStore,
+      worktreeRoot: path.join(dir, 'worktrees'),
+      allowAgentNetworkAccess: false
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAppSettings()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+      const snapshot = await waitForAgentServerSnapshot(store);
+      expect(snapshot.agentServers[0]?.argv).toEqual([
+        'app-server',
+        '--stdio',
+        '-c',
+        'features.apps=false',
+        '-c',
+        'web_search="disabled"',
+        '-c',
+        'mcp_servers.docs={enabled=false, command="docs-mcp"}'
+      ]);
+      await expect(
+        service.updateAppSettings({
+          codexExternalTools: { apps: 'enabled' }
+        })
+      ).rejects.toThrow('disabled in the browser development server');
+      expect((await settingsStore.get()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('aborts browser-dev startup when MCP disable discovery cannot be proven', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-browser-mcp-fail-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9',
+      mcpList: 'fail'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees'),
+      allowAgentNetworkAccess: false
+    });
+
+    await expect(service.init()).rejects.toThrow(
+      'MCP configuration could not be completely inspected and disabled'
+    );
+    expect((await store.snapshot()).agentServers).toHaveLength(0);
+    await service.shutdown();
   });
 
   it('defers provider restart while a run requires recovery', async () => {
@@ -397,6 +473,7 @@ async function writeFakeCodex(
   options: {
     version?: string;
     appServer?: 'stdio' | 'none';
+    mcpList?: 'valid' | 'fail' | 'malformed';
   } = {}
 ): Promise<string> {
   return writeNodeExecutable(directory, name, fakeCodexScript(options));
@@ -404,13 +481,16 @@ async function writeFakeCodex(
 
 function fakeCodexScript({
   version = '0.141.0',
-  appServer = 'stdio'
+  appServer = 'stdio',
+  mcpList = 'valid'
 }: {
   version?: string;
   appServer?: 'stdio' | 'none';
+  mcpList?: 'valid' | 'fail' | 'malformed';
 }): string {
   return `#!/usr/bin/env node
 const appServer = ${JSON.stringify(appServer)};
+const mcpList = ${JSON.stringify(mcpList)};
 
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli ${version}\\n');
@@ -418,6 +498,14 @@ if (process.argv.includes('--version')) {
 }
 
 if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.includes('--json')) {
+  if (mcpList === 'fail') {
+    process.stderr.write('mcp discovery failed\\n');
+    process.exit(2);
+  }
+  if (mcpList === 'malformed') {
+    process.stdout.write('{"unexpected":true}\\n');
+    process.exit(0);
+  }
   process.stdout.write('[{"name":"docs","enabled":true,"transport":{"type":"stdio","command":"docs-mcp"}}]\\n');
   process.exit(0);
 }
@@ -485,6 +573,14 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
+      send({ id: message.id, result: {
+        activePermissionProfile: {
+          id: message.params.config.default_permissions,
+          extends: null
+        },
+        runtimeWorkspaceRoots: [message.params.cwd]
+      } });
+      break;
     case 'thread/resume':
     case 'thread/fork':
     case 'thread/read':
