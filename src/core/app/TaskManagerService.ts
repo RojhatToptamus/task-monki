@@ -651,14 +651,12 @@ export class TaskManagerService {
   }
 
   async shutdown(): Promise<void> {
-    let previewError: unknown;
-    try {
-      await this.previews.shutdown();
-    } catch (error) {
-      previewError = error;
-    }
-    await this.agents.shutdown();
-    if (previewError) throw previewError;
+    const [agentResult, previewResult] = await Promise.allSettled([
+      this.agents.shutdown(),
+      this.previews.shutdown()
+    ]);
+    if (agentResult.status === 'rejected') throw agentResult.reason;
+    if (previewResult.status === 'rejected') throw previewResult.reason;
   }
 
   async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {

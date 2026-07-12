@@ -9,6 +9,7 @@ import type {
   AgentProviderCapabilities,
   AgentGoalSnapshotRecord,
   AgentReviewTarget,
+  AgentServerInstance,
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
@@ -154,12 +155,34 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   };
   private restartAttempt = 0;
   private restartTimer?: NodeJS.Timeout;
+  private restartWork?: Promise<void>;
+  private runtimeLossWork?: Promise<void>;
+  private shutdownWork?: Promise<void>;
   private inboundQueue: Promise<void> = Promise.resolve();
   private readonly interruptRequestTimeoutMs: number;
   private readonly interruptCompletionTimeoutMs: number;
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
   private runtimeConfigRestartPending = false;
+  private shuttingDown = false;
+  private supervisorExitListenerAttached = false;
+  private readonly handleSupervisorExit = (
+    server: AgentServerInstance,
+    unexpected: boolean
+  ): void => {
+    if (!unexpected || this.shuttingDown) return;
+    const previous = this.runtimeLossWork ?? Promise.resolve();
+    const work = previous
+      .then(() => this.handleRuntimeLoss(server.id))
+      .then(() => {
+        if (!this.shuttingDown) this.scheduleRestart();
+      })
+      .catch(() => undefined);
+    this.runtimeLossWork = work;
+    void work.then(() => {
+      if (this.runtimeLossWork === work) this.runtimeLossWork = undefined;
+    });
+  };
 
   constructor(
     private readonly store: FileTaskStore,
@@ -173,17 +196,15 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       ...options,
       appVersion: options.appVersion ?? '0.1.0'
     });
-    this.supervisor.events.on('exit', (server, unexpected) => {
-      if (unexpected) {
-        void this.handleRuntimeLoss(server.id).then(() => this.scheduleRestart());
-      }
-    });
+    this.attachSupervisorExitListener();
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) {
       return;
     }
+    this.shuttingDown = false;
+    this.attachSupervisorExitListener();
     this.initialized = true;
     await this.recoverPersistedRuntimeLosses();
     await this.ensureClient();
@@ -798,6 +819,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   shutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.shuttingDown = true;
+    this.detachSupervisorExitListener();
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -806,7 +830,17 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       clearTimeout(timer);
     }
     this.interruptTimers.clear();
-    return this.supervisor.shutdown();
+    const work = this.completeShutdown();
+    this.shutdownWork = work;
+    void work.then(
+      () => {
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      },
+      () => {
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      }
+    );
+    return work;
   }
 
   async updateRuntimeConfig(input: {
@@ -859,7 +893,13 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private async ensureClient(): Promise<CodexRpcClient> {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
     const client = await this.supervisor.start();
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
     if (client !== this.boundClient) {
       this.bindClient(client);
     }
@@ -2017,21 +2057,57 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private scheduleRestart(): void {
-    if (this.restartTimer || this.restartAttempt >= this.restartDelaysMs.length) {
+    if (
+      this.shuttingDown ||
+      this.restartTimer ||
+      this.restartWork ||
+      this.restartAttempt >= this.restartDelaysMs.length
+    ) {
       return;
     }
     const delay = this.restartDelaysMs[this.restartAttempt++];
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
-      void this.ensureClient()
-        .then(() => this.refreshPreflight(true))
-        .then(() => this.reconcile())
+      if (this.shuttingDown) return;
+      let retry = false;
+      const work = this.ensureClient()
+        .then(() => this.shuttingDown ? undefined : this.refreshPreflight(true))
+        .then(() => this.shuttingDown ? undefined : this.reconcile())
         .then(() => {
-          this.restartAttempt = 0;
+          if (!this.shuttingDown) this.restartAttempt = 0;
         })
-        .catch(() => this.scheduleRestart());
+        .catch(() => {
+          retry = true;
+        });
+      this.restartWork = work;
+      void work.then(() => {
+        if (this.restartWork === work) this.restartWork = undefined;
+        if (retry && !this.shuttingDown) this.scheduleRestart();
+      });
     }, delay);
     this.restartTimer.unref();
+  }
+
+  private attachSupervisorExitListener(): void {
+    if (this.supervisorExitListenerAttached) return;
+    this.supervisor.events.on('exit', this.handleSupervisorExit);
+    this.supervisorExitListenerAttached = true;
+  }
+
+  private detachSupervisorExitListener(): void {
+    if (!this.supervisorExitListenerAttached) return;
+    this.supervisor.events.off('exit', this.handleSupervisorExit);
+    this.supervisorExitListenerAttached = false;
+  }
+
+  private async completeShutdown(): Promise<void> {
+    await Promise.all([
+      this.runtimeLossWork ?? Promise.resolve(),
+      this.restartWork ?? Promise.resolve()
+    ]);
+    await this.supervisor.shutdown();
+    this.boundClient = undefined;
+    this.restartAttempt = 0;
   }
 
   private async recordReconciliation(

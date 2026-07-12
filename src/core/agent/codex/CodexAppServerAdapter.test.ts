@@ -295,6 +295,80 @@ describe('CodexAppServerAdapter', () => {
     await orchestrator.shutdown();
   });
 
+  it('joins exit-triggered restart scheduling when shutdown begins', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-shutdown-restart-race-'));
+    const executable = await writeFakeCodexExecutable(dir, 'exit');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [5]
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await waitForInteraction(store, 'PENDING');
+
+    const originalSnapshot = store.snapshot.bind(store);
+    let releaseRuntimeLoss!: () => void;
+    const runtimeLossGate = new Promise<void>((resolve) => { releaseRuntimeLoss = resolve; });
+    let markRuntimeLossStarted!: () => void;
+    const runtimeLossStarted = new Promise<void>((resolve) => { markRuntimeLossStarted = resolve; });
+    let gateNextSnapshot = true;
+    store.snapshot = async () => {
+      if (gateNextSnapshot) {
+        gateNextSnapshot = false;
+        markRuntimeLossStarted();
+        await runtimeLossGate;
+      }
+      return originalSnapshot();
+    };
+
+    try {
+      await runtimeLossStarted;
+      let shutdownSettled = false;
+      const shutdown = adapter.shutdown().then(() => { shutdownSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const joinedPendingRuntimeLoss = !shutdownSettled;
+      releaseRuntimeLoss();
+      await shutdown;
+      await new Promise((resolve) => setTimeout(resolve, 75));
+
+      const internals = adapter as unknown as {
+        restartTimer?: NodeJS.Timeout;
+        restartWork?: Promise<void>;
+        runtimeLossWork?: Promise<void>;
+        supervisor: {
+          child?: unknown;
+          currentClient?: unknown;
+          events: { listenerCount(event: string): number };
+        };
+      };
+      expect(joinedPendingRuntimeLoss).toBe(true);
+      expect((await originalSnapshot()).agentServers).toHaveLength(1);
+      expect(internals.restartTimer).toBeUndefined();
+      expect(internals.restartWork).toBeUndefined();
+      expect(internals.runtimeLossWork).toBeUndefined();
+      expect(internals.supervisor.child).toBeUndefined();
+      expect(internals.supervisor.currentClient).toBeUndefined();
+      expect(internals.supervisor.events.listenerCount('exit')).toBe(0);
+    } finally {
+      store.snapshot = originalSnapshot;
+      releaseRuntimeLoss();
+      await adapter.shutdown();
+    }
+  });
+
   it('marks a request stale when App Server clears it before a response', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-stale-'));
     const executable = await writeFakeCodexExecutable(dir, 'clear');
