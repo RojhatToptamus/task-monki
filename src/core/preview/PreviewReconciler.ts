@@ -35,11 +35,11 @@ export class PreviewReconciler {
     for (const resource of resources) {
       if (resource.state === 'STOPPED') continue;
       if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
-      const result = resource.adapterKind === 'NATIVE_PROCESS'
-        ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
-        : this.ociRuntime
-          ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
-          : 'REFUSED';
+      if (resource.adapterKind !== 'NATIVE_PROCESS') {
+        cleanupIncomplete = true;
+        continue;
+      }
+      const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
       if (result === 'REFUSED') cleanupIncomplete = true;
     }
     if (!cleanupIncomplete) {

@@ -196,8 +196,21 @@ describe('FileTaskStore', () => {
     expect(migrated.previewPlans).toEqual([]);
     expect(migrated.previewApprovals).toEqual([]);
     expect(migrated.previewGenerations).toEqual([]);
+    expect(migrated.previewManagedEnvironments).toEqual([]);
+    expect(migrated.previewManagedResources).toEqual([]);
+    expect(migrated.previewGenerationAttachments).toEqual([]);
     expect(migrated.previewNodeAttempts).toEqual([]);
     expect(migrated.previewResources).toEqual([]);
+  });
+
+  it('rejects the disposable schema 12 Phase 3 prototype instead of migrating its ownership model', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema12-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({ title: 'Prototype', prompt: 'Reject it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    await fs.writeFile(storePath, `${JSON.stringify({ ...persisted, schemaVersion: 12 }, null, 2)}\n`);
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow('Unsupported Task Monki store schema 12');
   });
 
   it('persists preview records and refuses task deletion while ownership is unresolved', async () => {
@@ -336,6 +349,28 @@ describe('FileTaskStore', () => {
       id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
       scope: 'TASK', approvedAt: new Date(now).toISOString()
     });
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const environment = await store.savePreviewManagedEnvironment({
+      id: 'environment', previewKey: 'task-history', taskId: task.id, state: 'READY', engine,
+      network: { engine, objectId: 'network', objectName: 'network', labelsDigest: 'network-labels' },
+      ownershipMarkerDigest: 'environment-marker', createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString()
+    });
+    const managedResource = await store.savePreviewManagedResource({
+      id: 'managed-database', taskId: task.id, environmentId: environment.id,
+      logicalResourceId: 'database', type: 'postgres', state: 'READY', planDigest: 'resource-plan',
+      ownershipMarkerDigest: 'resource-marker', imageReference: 'postgres:17-alpine', imageId: 'image',
+      container: { engine, objectId: 'container', objectName: 'container', labelsDigest: 'container-labels' },
+      volume: { engine, objectId: 'volume', objectName: 'volume', labelsDigest: 'volume-labels' },
+      binding: {
+        id: 'binding', digest: 'binding-digest', host: '127.0.0.1', ports: { postgres: 41000 },
+        username: 'safe_user', database: 'app'
+      },
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
+    });
     const artifactPaths = new Map<string, string>();
     for (let index = 0; index < 4; index += 1) {
       const timestamp = new Date(now + index).toISOString();
@@ -348,6 +383,11 @@ describe('FileTaskStore', () => {
         state: 'STOPPED', routingState: 'RETIRED', freshness: 'CURRENT', routes: [],
         createdAt: timestamp, updatedAt: timestamp, stoppedAt: timestamp
       });
+      await store.savePreviewGenerationAttachments([{
+        id: `attachment-${index}`, taskId: task.id, generationId,
+        managedResourceId: managedResource.id, logicalResourceId: managedResource.logicalResourceId,
+        bindingId: managedResource.binding!.id, attachedAt: timestamp
+      }]);
       const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
       const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
       artifactPaths.set(generationId, stdout.path);
@@ -363,6 +403,12 @@ describe('FileTaskStore', () => {
       'generation-2', 'generation-3'
     ]);
     expect(snapshot.previewNodeAttempts).toHaveLength(2);
+    expect(snapshot.previewManagedEnvironments).toEqual([environment]);
+    expect(snapshot.previewManagedResources).toEqual([managedResource]);
+    expect(snapshot.previewGenerationAttachments.map((attachment) => attachment.generationId).sort()).toEqual([
+      'generation-2', 'generation-3'
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain('postgresql://');
     await expect(fs.access(artifactPaths.get('generation-0')!)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.access(artifactPaths.get('generation-3')!)).resolves.toBeUndefined();
     await fs.rm(dir, { recursive: true, force: true });

@@ -76,6 +76,9 @@ const emptySnapshot: TaskSnapshot = {
   previewPlans: [],
   previewApprovals: [],
   previewGenerations: [],
+  previewManagedEnvironments: [],
+  previewManagedResources: [],
+  previewGenerationAttachments: [],
   previewNodeAttempts: [],
   previewResources: [],
   events: [],
@@ -409,6 +412,12 @@ export function App() {
   const selectedPreviewGenerations = selectedTask
     ? snapshot.previewGenerations.filter((record) => record.taskId === selectedTask.id)
     : [];
+  const selectedPreviewGenerationAttachments = selectedTask
+    ? snapshot.previewGenerationAttachments.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewManagedResources = selectedTask
+    ? snapshot.previewManagedResources.filter((record) => record.taskId === selectedTask.id)
+    : [];
   const selectedPreviewNodeAttempts = selectedTask
     ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
     : [];
@@ -613,6 +622,23 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not reset preview data safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const retryPreviewSetup = async (
+    taskId: string,
+    generationId: string,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.retryPreviewSetup({ taskId, generationId, scenarioId });
+      notify('Preview setup completed.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not retry preview setup safely.');
       await refresh();
       throw caught;
     }
@@ -1109,6 +1135,8 @@ export function App() {
             previewPlans={selectedPreviewPlans}
             previewApprovals={selectedPreviewApprovals}
             previewGenerations={selectedPreviewGenerations}
+            previewGenerationAttachments={selectedPreviewGenerationAttachments}
+            previewManagedResources={selectedPreviewManagedResources}
             previewNodeAttempts={selectedPreviewNodeAttempts}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
@@ -1129,6 +1157,7 @@ export function App() {
             onOpenPreview={openPreview}
             onStopPreview={stopPreview}
             onResetPreviewData={resetPreviewData}
+            onRetryPreviewSetup={retryPreviewSetup}
             onReadPreviewLog={readPreviewLog}
             onTransition={transitionTask}
             onArchive={archiveTask}

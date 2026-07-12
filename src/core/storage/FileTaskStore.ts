@@ -31,6 +31,9 @@ import type {
   PullRequestSnapshotRecord,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewNativeResourceRecord,
   PreviewOciResourceRecord,
@@ -304,6 +307,31 @@ export class FileTaskStore {
     );
   }
 
+  async getPreviewManagedEnvironment(taskId: string): Promise<PreviewManagedEnvironmentRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewManagedEnvironments.find((environment) => environment.taskId === taskId));
+  }
+
+  async getPreviewManagedEnvironments(): Promise<PreviewManagedEnvironmentRecord[]> {
+    await this.init();
+    return clone(this.state.previewManagedEnvironments);
+  }
+
+  async getPreviewManagedResource(resourceId: string): Promise<PreviewManagedResourceRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewManagedResources.find((resource) => resource.id === resourceId));
+  }
+
+  async getPreviewManagedResources(taskId?: string): Promise<PreviewManagedResourceRecord[]> {
+    await this.init();
+    return clone(this.state.previewManagedResources.filter((resource) => !taskId || resource.taskId === taskId));
+  }
+
+  async getPreviewGenerationAttachments(generationId?: string): Promise<PreviewGenerationAttachmentRecord[]> {
+    await this.init();
+    return clone(this.state.previewGenerationAttachments.filter((attachment) => !generationId || attachment.generationId === generationId));
+  }
+
   async getPreviewNodeAttempts(generationId: string): Promise<PreviewNodeAttemptRecord[]> {
     await this.init();
     return clone(
@@ -423,6 +451,91 @@ export class FileTaskStore {
     return clone(generation);
   }
 
+  async savePreviewManagedEnvironment(
+    environment: PreviewManagedEnvironmentRecord
+  ): Promise<PreviewManagedEnvironmentRecord> {
+    await this.init();
+    if (!this.state.tasks.some((task) => task.id === environment.taskId)) {
+      throw new Error('Preview managed environment references a missing task.');
+    }
+    const sameTask = this.state.previewManagedEnvironments.find(
+      (candidate) => candidate.taskId === environment.taskId && candidate.id !== environment.id
+    );
+    if (sameTask && sameTask.state !== 'STOPPED') {
+      throw new Error('A task preview may have only one managed environment.');
+    }
+    this.state = {
+      ...this.state,
+      previewManagedEnvironments: [
+        environment,
+        ...this.state.previewManagedEnvironments.filter((candidate) => candidate.id !== environment.id)
+      ]
+    };
+    await this.persistQueued();
+    return clone(environment);
+  }
+
+  async savePreviewManagedResource(
+    resource: PreviewManagedResourceRecord
+  ): Promise<PreviewManagedResourceRecord> {
+    await this.init();
+    const environment = this.state.previewManagedEnvironments.find(
+      (candidate) => candidate.id === resource.environmentId && candidate.taskId === resource.taskId
+    );
+    if (!environment) throw new Error('Preview managed resource references a missing environment.');
+    const duplicate = this.state.previewManagedResources.find(
+      (candidate) =>
+        candidate.environmentId === resource.environmentId &&
+        candidate.logicalResourceId === resource.logicalResourceId &&
+        candidate.id !== resource.id &&
+        candidate.state !== 'STOPPED'
+    );
+    if (duplicate) throw new Error(`Managed resource ${resource.logicalResourceId} already exists.`);
+    this.state = {
+      ...this.state,
+      previewManagedResources: [
+        resource,
+        ...this.state.previewManagedResources.filter((candidate) => candidate.id !== resource.id)
+      ]
+    };
+    await this.persistQueued();
+    return clone(resource);
+  }
+
+  async savePreviewGenerationAttachments(
+    attachments: PreviewGenerationAttachmentRecord[]
+  ): Promise<PreviewGenerationAttachmentRecord[]> {
+    await this.init();
+    for (const attachment of attachments) {
+      const generation = this.state.previewGenerations.find(
+        (candidate) => candidate.id === attachment.generationId && candidate.taskId === attachment.taskId
+      );
+      const resource = this.state.previewManagedResources.find(
+        (candidate) =>
+          candidate.id === attachment.managedResourceId &&
+          candidate.taskId === attachment.taskId &&
+          candidate.logicalResourceId === attachment.logicalResourceId &&
+          candidate.binding?.id === attachment.bindingId
+      );
+      if (!generation || !resource) {
+        throw new Error('Preview generation attachment references missing authority.');
+      }
+    }
+    const ids = new Set(attachments.map((attachment) => attachment.id));
+    const generationIds = new Set(attachments.map((attachment) => attachment.generationId));
+    this.state = {
+      ...this.state,
+      previewGenerationAttachments: [
+        ...attachments,
+        ...this.state.previewGenerationAttachments.filter(
+          (candidate) => !ids.has(candidate.id) && !generationIds.has(candidate.generationId)
+        )
+      ]
+    };
+    await this.persistQueued();
+    return clone(attachments);
+  }
+
   async cutoverPreviewGenerations(input: {
     candidate: PreviewGenerationRecord;
     replaced?: PreviewGenerationRecord;
@@ -513,6 +626,9 @@ export class FileTaskStore {
       previewGenerations: this.state.previewGenerations.filter((generation) => !removedIds.has(generation.id)),
       previewNodeAttempts: this.state.previewNodeAttempts.filter((attempt) => !removedIds.has(attempt.generationId)),
       previewResources: this.state.previewResources.filter((resource) => !removedIds.has(resource.generationId)),
+      previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
+        (attachment) => !removedIds.has(attachment.generationId)
+      ),
       events: this.state.events.filter((event) => !event.previewGenerationId || !removedIds.has(event.previewGenerationId)),
       artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
     };
@@ -853,6 +969,15 @@ export class FileTaskStore {
         `Task has an active or unverified preview resource: ${activePreviewResource.id}. Stop or reconcile it before deletion.`
       );
     }
+    const activeManagedEnvironment = this.state.previewManagedEnvironments.find(
+      (environment) => environment.taskId === taskId && environment.state !== 'STOPPED'
+    );
+    const activeManagedResource = this.state.previewManagedResources.find(
+      (resource) => resource.taskId === taskId && resource.state !== 'STOPPED'
+    );
+    if (activeManagedEnvironment || activeManagedResource) {
+      throw new Error('Task has an active or unverified managed preview environment. Stop or reconcile it before deletion.');
+    }
     const nonterminalPreviewGeneration = this.state.previewGenerations.find(
       (generation) =>
         generation.taskId === taskId && !['STOPPED', 'FAILED'].includes(generation.state)
@@ -946,6 +1071,15 @@ export class FileTaskStore {
         (record) => record.taskId !== taskId
       ),
       previewGenerations: this.state.previewGenerations.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewManagedEnvironments: this.state.previewManagedEnvironments.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewManagedResources: this.state.previewManagedResources.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
         (record) => record.taskId !== taskId
       ),
       previewNodeAttempts: this.state.previewNodeAttempts.filter(
@@ -2833,6 +2967,9 @@ function requireCurrentState(state: PersistedState): StoreState {
     'previewPlans',
     'previewApprovals',
     'previewGenerations',
+    'previewManagedEnvironments',
+    'previewManagedResources',
+    'previewGenerationAttachments',
     'previewNodeAttempts',
     'previewResources',
     'events',
@@ -2879,6 +3016,9 @@ function migratePersistedState(state: PersistedState): {
       previewPlans: [],
       previewApprovals: [],
       previewGenerations: [],
+      previewManagedEnvironments: [],
+      previewManagedResources: [],
+      previewGenerationAttachments: [],
       previewNodeAttempts: [],
       previewResources: [],
       schemaVersion: TASK_STORE_SCHEMA_VERSION

@@ -888,12 +888,12 @@ async function createPreviewScenario(
       resources: ociReady ? [
         {
           id: 'database', label: 'PostgreSQL', type: 'postgres' as const,
-          image: 'postgres:17-alpine', database: 'app', scope: 'preview' as const,
+          image: 'postgres:17-alpine', database: 'app',
           limits: { cpus: 1, memoryMb: 256, diskMb: 1024, pids: 128 }
         },
         {
           id: 'cache', label: 'Redis', type: 'redis' as const,
-          image: 'redis:7-alpine', scope: 'generation' as const,
+          image: 'redis:7-alpine',
           limits: { cpus: 0.5, memoryMb: 128, diskMb: 256, pids: 64 }
         }
       ] : [],

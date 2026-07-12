@@ -274,6 +274,10 @@ async function route(request: http.IncomingMessage, response: http.ServerRespons
       sendJson(response, 200, await service.resetPreviewData((await readJson(request)) as never));
       return;
     }
+    if (request.method === 'POST' && url.pathname === '/api/preview/retry-setup') {
+      sendJson(response, 200, await service.retryPreviewSetup((await readJson(request)) as never));
+      return;
+    }
 
     if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
       sendJson(response, 200, await service.transitionTask((await readJson(request)) as never));

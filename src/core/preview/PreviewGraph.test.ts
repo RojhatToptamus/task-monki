@@ -19,18 +19,18 @@ describe('PreviewGraph', () => {
     );
     const running = await graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     });
     expect(starts).toEqual(['install', 'build']);
     await running.stop();
   });
 
-  it('starts selected OCI resources before migration and seed jobs and resolves generated URLs', async () => {
+  it('runs initial setup against preview-owned bindings and reports setup completion before application start', async () => {
     const starts: string[] = [];
     const jobEnvironments: Record<string, Record<string, string>> = {};
     const plan = graphPlan({
       resources: [{
-        id: 'cache', type: 'redis', image: 'redis:7-alpine', scope: 'generation', limits: {}
+        id: 'cache', type: 'redis', image: 'redis:7-alpine', limits: {}
       }],
       jobs: [
         {
@@ -55,26 +55,53 @@ describe('PreviewGraph', () => {
           jobEnvironments[input.node.id] = input.env;
         }
       } as never,
-      {} as never, {} as never, {} as never, {} as never,
-      {
-        async startGeneration() {
-          return {
-            async startResource(resource: { id: string }) {
-              starts.push(resource.id);
-              return { ports: { redis: 41234 }, redisUrl: 'redis://:generated@127.0.0.1:41234/0' };
-            },
-            async stop() { return 'STOPPED' as const; }
-          };
-        }
-      } as never
+      {} as never, {} as never, {} as never, {} as never
     );
     const running = await graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, ociEngineIdentity: {} as never,
+      markerDigest: 'marker', plan, runSetup: true,
+      resourceBindings: {
+        cache: { ports: { redis: 41234 }, redisUrl: 'redis://:generated@127.0.0.1:41234/0' }
+      },
+      async onSetupComplete() { starts.push('setup-complete'); },
       async updateGenerationState() {}
     });
-    expect(starts).toEqual(['cache', 'migrate', 'seed']);
+    expect(starts).toEqual(['migrate', 'seed', 'setup-complete']);
     expect(jobEnvironments.migrate.REDIS_URL).toBe('redis://:generated@127.0.0.1:41234/0');
+    await running.stop();
+  });
+
+  it('treats selected setup jobs as already satisfied during ordinary replacement', async () => {
+    const events: string[] = [];
+    const fixture = longRunningFixture(events);
+    const plan = replacementPlan('safe');
+    plan.workers = [];
+    plan.resources = [{ id: 'cache', type: 'redis', image: 'redis:7-alpine', limits: {} }];
+    plan.jobs = [{
+      ...job('setup', ['node', 'setup.mjs'], { cache: 'ready' }),
+      role: 'migration', retrySafe: true
+    }];
+    plan.services[0].needs = { cache: 'ready', setup: 'succeeded' };
+    plan.scenarios = [{ id: 'full', jobs: ['setup'], resources: ['cache'] }];
+    plan.selectedScenarioId = 'full';
+    const graph = new PreviewGraph(
+      fixture.store as never,
+      fixture.jobs as never,
+      fixture.services as never,
+      fixture.readiness as never,
+      fixture.ports as never,
+      fixture.listeners as never
+    );
+
+    const running = await graph.start({
+      taskId: 'task', generationId: 'replacement', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, runSetup: false,
+      resourceBindings: { cache: { ports: { redis: 41_234 }, redisUrl: 'redis://stable' } },
+      async updateGenerationState() {}
+    });
+
+    expect(events).toContain('start:web');
+    expect(events).not.toContain('job:setup');
     await running.stop();
   });
 
@@ -91,7 +118,7 @@ describe('PreviewGraph', () => {
     );
     await expect(graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     })).rejects.toThrow('cycle');
   });
 
@@ -124,7 +151,7 @@ describe('PreviewGraph', () => {
     });
     const running = await graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     });
     expect(starts).toHaveLength(8);
     expect(maximum).toBe(4);
@@ -153,7 +180,7 @@ describe('PreviewGraph', () => {
     });
     await expect(graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     })).rejects.toThrow('injected failure');
     expect(slowSettled).toBe(true);
   });
@@ -179,7 +206,7 @@ describe('PreviewGraph', () => {
     });
     await expect(graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     })).rejects.toThrow('queued failure');
     expect(starts.sort()).toEqual(['a-fail', 'b-slow', 'c-slow', 'd-slow']);
   });
@@ -201,7 +228,8 @@ describe('PreviewGraph', () => {
       ],
       workers: [{
         id: 'indexer', cwd: '.', command: ['node', 'worker'], needs: { api: 'ready' }, env: {}, ports: {},
-        critical: false, restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
+        ready: { type: 'argv', cwd: '.', command: ['node', 'worker-ready'], timeoutSeconds: 5 },
+        overlap: 'exclusive', critical: false, restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
       }],
       routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
     });
@@ -300,7 +328,7 @@ describe('PreviewGraph', () => {
     );
     const active = await graph.start({
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
-      markerDigest: 'marker', plan, async updateGenerationState() {}
+      markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {}
     });
     await probeStarted;
 
@@ -333,7 +361,146 @@ describe('PreviewGraph', () => {
     expect(running).toBe(false);
     expect(releasedPorts).toEqual([41_001]);
   });
+
+  it('starts routed services before exclusive handoff and restores the old exclusive worker with bounded readiness', async () => {
+    const events: string[] = [];
+    const fixture = longRunningFixture(events);
+    const graph = new PreviewGraph(
+      fixture.store as never,
+      fixture.jobs as never,
+      fixture.services as never,
+      fixture.readiness as never,
+      fixture.ports as never,
+      fixture.listeners as never
+    );
+    const plan = replacementPlan('exclusive');
+    const running = await graph.start({
+      taskId: 'task', generationId: 'old', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan, runSetup: false,
+      async beforeExclusiveStart() { events.push('handoff-boundary'); },
+      async updateGenerationState() {}
+    });
+
+    expect(events.indexOf('start:web')).toBeLessThan(events.indexOf('handoff-boundary'));
+    expect(events.indexOf('handoff-boundary')).toBeLessThan(events.indexOf('start:consumer'));
+    await expect(running.stopExclusive()).resolves.toBe('STOPPED');
+    await expect(running.restoreExclusive()).resolves.toBe(true);
+    expect(events.filter((event) => event === 'start:consumer')).toHaveLength(2);
+    expect(fixture.readinessDeadlines).toEqual([5_000, 5_000, 5_000]);
+    await running.stop();
+  });
+
+  it('allows an approval-bound safe worker to overlap without invoking exclusive handoff', async () => {
+    const events: string[] = [];
+    const fixture = longRunningFixture(events);
+    const graph = new PreviewGraph(
+      fixture.store as never,
+      fixture.jobs as never,
+      fixture.services as never,
+      fixture.readiness as never,
+      fixture.ports as never,
+      fixture.listeners as never
+    );
+    let handoff = false;
+    const running = await graph.start({
+      taskId: 'task', generationId: 'candidate', generationRoot: '/tmp', sourcePath: '/tmp',
+      markerDigest: 'marker', plan: replacementPlan('safe'), runSetup: false,
+      async beforeExclusiveStart() { handoff = true; },
+      async updateGenerationState() {}
+    });
+    expect(events).toEqual(expect.arrayContaining(['start:web', 'start:consumer']));
+    expect(handoff).toBe(false);
+    await expect(running.stopExclusive()).resolves.toBe('ALREADY_EXITED');
+    await running.stop();
+  });
 });
+
+function replacementPlan(overlap: 'exclusive' | 'safe'): PreviewExecutionPlan {
+  return graphPlan({
+    jobs: [],
+    services: [{
+      id: 'web', cwd: '.', command: ['node', 'web'], needs: {}, env: {},
+      ports: { http: { env: 'PORT' } },
+      ready: { type: 'tcp', port: 'http', timeoutSeconds: 5 },
+      critical: true, restart: { mode: 'never', maxRestarts: 0, backoffMs: 0 }
+    }],
+    workers: [{
+      id: 'consumer', cwd: '.', command: ['node', 'worker'], needs: {}, env: {}, ports: {},
+      ready: { type: 'argv', cwd: '.', command: ['node', 'worker-ready'], timeoutSeconds: 5 },
+      overlap, critical: true, restart: { mode: 'never', maxRestarts: 0, backoffMs: 0 }
+    }],
+    routes: [{ id: 'app', service: 'web', port: 'http', primary: true }]
+  });
+}
+
+function longRunningFixture(events: string[]) {
+  let port = 41_000;
+  let sequence = 0;
+  const processes = new Map<string, {
+    running: boolean;
+    resolve(value: { receipt: { state: 'EXITED'; exitCode: number; signal: null }; wasStopping: boolean }): void;
+  }>();
+  const readinessDeadlines: number[] = [];
+  return {
+    readinessDeadlines,
+    store: {
+      async savePreviewNodeAttempt<T>(attempt: T) { return attempt; },
+      async prunePreviewProbeHistory() { return 0; }
+    },
+    jobs: {
+      async run(input: { kind?: string; timeoutMs?: number; node: { id: string } }) {
+        if (input.kind !== 'PROBE') events.push(`job:${input.node.id}`);
+        if (input.kind === 'PROBE' && input.timeoutMs) readinessDeadlines.push(input.timeoutMs);
+      }
+    },
+    services: {
+      async start(input: { node: { id: string }; attempt: number }) {
+        events.push(`start:${input.node.id}`);
+        const id = `${input.node.id}-${input.attempt}-${++sequence}`;
+        let resolve!: (value: {
+          receipt: { state: 'EXITED'; exitCode: number; signal: null };
+          wasStopping: boolean;
+        }) => void;
+        const completion = new Promise<{
+          receipt: { state: 'EXITED'; exitCode: number; signal: null };
+          wasStopping: boolean;
+        }>((done) => { resolve = done; });
+        processes.set(id, { running: true, resolve });
+        return {
+          attempt: { id: `attempt-${id}` },
+          resource: {
+            id,
+            native: { target: { processGroupId: sequence } }
+          },
+          completion,
+          isRunning: () => processes.get(id)?.running === true
+        };
+      },
+      async stop(resource: { id: string }) {
+        const process = processes.get(resource.id);
+        if (!process?.running) return 'ALREADY_EXITED' as const;
+        events.push(`stop:${resource.id.split('-')[0]}`);
+        process.running = false;
+        process.resolve({
+          receipt: { state: 'EXITED', exitCode: 0, signal: null },
+          wasStopping: true
+        });
+        return 'STOPPED' as const;
+      }
+    },
+    readiness: {
+      async waitForTcp(input: { timeoutMs: number }) {
+        readinessDeadlines.push(input.timeoutMs);
+        return { status: 'PASSED' as const, observedAt: new Date().toISOString() };
+      }
+    },
+    ports: {
+      async allocate() { return ++port; },
+      release() {}
+    },
+    listeners: { async assertOwnedLoopback() {} }
+  };
+}
 
 function graphPlan(
   input: Pick<PreviewExecutionPlan, 'jobs' | 'services' | 'workers' | 'routes'> &

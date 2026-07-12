@@ -154,16 +154,26 @@ services, workers, routes, and managed OCI resources. Task Monki:
 - probes a Docker-compatible engine through one explicit context, binds approval
   and every OCI record to its context/endpoint/engine identity, and treats an
   engine retarget as an ownership mismatch;
-- supports typed PostgreSQL and Redis plus a constrained generic OCI resource;
-  each generation receives a labeled network, exact container/volume IDs,
-  generated credentials, and dynamic loopback-only published ports;
+- supports typed preview-owned PostgreSQL and Redis; one preview environment
+  owns the selected engine identity and shared labeled network, while each
+  managed-resource record owns its exact container and volume;
+- keeps generated database/cache credentials only in a main-process runtime
+  credential host, delivers container secrets through runtime-mounted files,
+  redacts credential values from native logs, and stores only safe binding
+  identity, ports, username/database metadata, and digests;
 - passes generated database/cache URLs only to nodes with explicit ready
   dependencies, runs selected migration/seed scenarios in dependency order,
-  and never automatically retries a migration whose completion is ambiguous;
-- keeps generation data isolated by default, can retain an explicitly
-  preview-scoped volume across generation replacement, and implements reset by
-  retaining non-target data, deleting only the exact selected owned volume,
-  then running a newly approved generation of the selected scenario;
+  never automatically retries setup, and permits explicit setup retry only
+  after current-plan/approval/exact-authority preflight when every selected
+  setup job declares `retrySafe: true`; ambiguous completion remains blocked;
+- attaches application generations to managed resources without giving those
+  attachments cleanup authority; normal generation replacement reuses exact
+  resource/container/volume/port/credential identities and runs no migration
+  or seed;
+- treats routed services as overlap-safe during candidate readiness while
+  workers are exclusive by default; an exclusive worker stops before candidate
+  activation and failed activation restores and reverifies the old worker
+  within its declared readiness deadline unless `overlap: safe` was approved;
 - schedules the declared dependency DAG with at most four concurrent native
   effects, so a shared monorepo install runs once while independent branches
   can progress in parallel;
@@ -188,20 +198,27 @@ services, workers, routes, and managed OCI resources. Task Monki:
   generation;
 - preserves the stable gateway authority upstream and rewrites absolute
   target-origin redirects back to that authority;
-- stores compact preview records in schema 12, retains at most 20 terminal
+- stores compact preview records in schema 13, retains at most 20 terminal
   generations per task and 20 completed argv probe attempts per live node,
-  and keeps each stdout/stderr artifact bounded;
+  keeps live preview-environment and managed-resource authority outside
+  generation pruning, and keeps each stdout/stderr artifact bounded;
 - tails only the selected artifact through bounded byte-range reads rather
   than refreshing the full task snapshot for each log update;
-- detaches routes first and stops/removes only exact verified processes,
-  engine-bound labeled OCI IDs, and marker-owned workspaces; ambiguous cleanup
-  remains `CLEANUP_INCOMPLETE`.
+- makes Reset destructive only after current-plan/approval and exact-authority
+  preflight, stops the complete application, preserves unrelated managed
+  resources, and replaces only the selected resource;
+- labels Stop Preview **Stop Preview & Delete Data**, then detaches routes and
+  stops/removes only exact verified processes, engine-bound labeled containers,
+  volumes, the environment-owned network, and marker-owned workspaces;
+  ambiguous cleanup remains `CLEANUP_INCOMPLETE` and is retryable.
 
 Graceful app quit stops managed previews before the Codex provider. Restart
-reconciliation does not adopt native services or workers: it stops every exact
-verified native or OCI owner and records `CLEANUP_INCOMPLETE` for ambiguous
-identities without signaling or deleting them. Preview events do not update
-`Task.workflowPhase` or the agent projection.
+reconciliation does not adopt native services, workers, or managed OCI
+resources: it stops every exact verified owner and records
+`CLEANUP_INCOMPLETE` for ambiguous identities without broad deletion. Required
+managed-resource death fails and detaches the complete active application but
+preserves its volume until explicit Reset or destructive Stop. Preview events
+do not update `Task.workflowPhase` or the agent projection.
 
 ## Settings
 

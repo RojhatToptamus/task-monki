@@ -4,8 +4,6 @@ import type {
   PreviewGenerationState,
   PreviewLongRunningPlan,
   PreviewNodeAttemptRecord,
-  PreviewOciEngineIdentity,
-  PreviewOciResourcePlan,
   PreviewReadinessPlan,
   PreviewResourceRecord,
   PreviewServicePlan,
@@ -17,11 +15,7 @@ import { NativeJobRunner } from './runtime/NativeJobRunner';
 import { NativeServiceRuntime, type RunningNativeService } from './runtime/NativeServiceRuntime';
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
 import type { PreviewListenerInspector } from './runtime/PreviewListenerInspector';
-import {
-  OciResourceRuntime,
-  type OciResourceBinding,
-  type RunningOciGeneration
-} from './runtime/OciResourceRuntime';
+import type { OciResourceBinding } from './runtime/OciResourceRuntime';
 
 const MAX_PARALLEL_NATIVE_EFFECTS = 4;
 
@@ -33,6 +27,7 @@ interface RunningLongNode {
   attempt: number;
   probeAttempt: number;
   stopping: boolean;
+  handedOff?: boolean;
   forcedFailure?: string;
   livenessAbort?: AbortController;
   livenessOperation?: Promise<string | undefined>;
@@ -42,6 +37,8 @@ export interface RunningPreviewGraph {
   ports: Readonly<Record<string, Record<string, number>>>;
   unexpectedExit: Promise<string | undefined>;
   isRunning(): boolean;
+  stopExclusive(): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>;
+  restoreExclusive(): Promise<boolean>;
   stop(): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>;
 }
 
@@ -52,8 +49,7 @@ export class PreviewGraph {
     private readonly services: NativeServiceRuntime,
     private readonly readiness: PreviewReadinessService,
     private readonly ports: PreviewPortAllocator,
-    private readonly listeners: PreviewListenerInspector,
-    private readonly oci?: OciResourceRuntime
+    private readonly listeners: PreviewListenerInspector
   ) {}
 
   async start(input: {
@@ -63,8 +59,12 @@ export class PreviewGraph {
     sourcePath: string;
     markerDigest: string;
     plan: PreviewExecutionPlan;
+    resourceBindings?: Record<string, OciResourceBinding>;
+    redactions?: string[];
+    runSetup: boolean;
+    onSetupComplete?(): Promise<void>;
+    beforeExclusiveStart?(): Promise<void>;
     routeOrigins?: Record<string, string>;
-    ociEngineIdentity?: PreviewOciEngineIdentity;
     updateGenerationState(state: PreviewGenerationState): Promise<void>;
     signal?: AbortSignal;
   }): Promise<RunningPreviewGraph> {
@@ -74,30 +74,19 @@ export class PreviewGraph {
     if (!scenario) throw new Error(`Selected preview scenario is missing: ${input.plan.selectedScenarioId}.`);
     const activeJobIds = new Set([
       ...input.plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
-      ...scenario.jobs
+      ...(input.runSetup ? scenario.jobs : [])
     ]);
+    const satisfiedSetupJobIds = new Set(input.runSetup ? [] : scenario.jobs);
     const activeResourceIds = new Set(scenario.resources);
     const jobs = input.plan.jobs.filter((job) => activeJobIds.has(job.id));
     const resources = input.plan.resources.filter((resource) => activeResourceIds.has(resource.id));
-    let ociGeneration: RunningOciGeneration | undefined;
-    if (resources.length > 0) {
-      if (!this.oci || !input.ociEngineIdentity) {
-        throw new Error('The approved OCI engine is unavailable for preview execution.');
-      }
-      ociGeneration = await this.oci.startGeneration({
-        taskId: input.taskId,
-        generationId: input.generationId,
-        markerDigest: input.markerDigest,
-        expectedEngine: input.ociEngineIdentity
-      });
-    }
     const longNodes = [...input.plan.services, ...input.plan.workers];
     const resourceNodes = resources.map((resource) => ({ ...resource, needs: {} as Record<string, never> }));
     const allNodes = [...jobs, ...resourceNodes, ...longNodes];
     const byId = new Map(allNodes.map((node) => [node.id, node]));
     const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
     if (byId.size !== allNodes.length) throw new Error('Preview graph node identifiers are not unique.');
-    assertGraphAcyclic(byId);
+    assertGraphAcyclic(byId, satisfiedSetupJobIds);
     const semaphore = new Semaphore(MAX_PARALLEL_NATIVE_EFFECTS);
     const startupAbort = new AbortController();
     const onInputAbort = () => startupAbort.abort();
@@ -106,7 +95,7 @@ export class PreviewGraph {
     const startupInput = { ...input, signal: startupAbort.signal };
     const running = new Map<string, RunningLongNode>();
     const allocatedPorts: Record<string, Record<string, number>> = {};
-    const resourceBindings: Record<string, OciResourceBinding> = {};
+    const resourceBindings: Record<string, OciResourceBinding> = { ...(input.resourceBindings ?? {}) };
     const promises = new Map<string, Promise<void>>();
     let phase: PreviewGenerationState | undefined;
 
@@ -121,11 +110,18 @@ export class PreviewGraph {
       const node = byId.get(id);
       if (!node) return Promise.reject(new Error(`Preview dependency is missing: ${id}.`));
       const operation = (async () => {
-        await Promise.all(Object.keys(node.needs).sort().map(execute));
+        const dependencies = Object.keys(node.needs).sort().filter((dependencyId) => {
+          if (byId.has(dependencyId)) return true;
+          if (satisfiedSetupJobIds.has(dependencyId)) return false;
+          throw new Error(`Preview dependency is missing: ${dependencyId}.`);
+        });
+        await Promise.all(dependencies.map(execute));
         throwIfAborted(startupAbort.signal);
         const resource = resourceById.get(node.id);
         if (resource) {
-          resourceBindings[node.id] = await ociGeneration!.startResource(resource, startupAbort.signal);
+          if (!resourceBindings[node.id]) {
+            throw new Error(`Managed resource binding ${node.id} is unavailable.`);
+          }
           return;
         }
         if ('critical' in node) {
@@ -187,9 +183,20 @@ export class PreviewGraph {
       return operation;
     };
 
+    const setupJobs = jobs.filter((job) => job.role !== 'generic');
+    const exclusiveWorkers = input.plan.workers.filter((worker) => worker.overlap === 'exclusive');
+    const prerequisiteNodes = [...resources, ...jobs];
+    const overlappingLongNodes = longNodes.filter(
+      (node) => !exclusiveWorkers.some((worker) => worker.id === node.id)
+    );
     try {
       await updatePhase('RUNNING_GRAPH');
-      await Promise.all([...byId.keys()].sort().map(execute));
+      await Promise.all(prerequisiteNodes.map((node) => node.id).sort().map(execute));
+      if (input.runSetup) {
+        await Promise.all(setupJobs.map((job) => execute(job.id)));
+        await input.onSetupComplete?.();
+      }
+      await Promise.all(overlappingLongNodes.map((node) => node.id).sort().map(execute));
       throwIfAborted(startupAbort.signal);
       await Promise.all(
         [...running.values()].map((owner) =>
@@ -198,11 +205,20 @@ export class PreviewGraph {
       );
       throwIfAborted(startupAbort.signal);
       await this.assertRoutedListeners(input.plan, running, allocatedPorts);
+      if (exclusiveWorkers.length > 0) {
+        await input.beforeExclusiveStart?.();
+        await Promise.all(exclusiveWorkers.map((worker) => execute(worker.id)));
+        await Promise.all(
+          exclusiveWorkers
+            .map((worker) => running.get(worker.id))
+            .filter((owner): owner is RunningLongNode => Boolean(owner))
+            .map((owner) => this.stabilizeBeforeCutover(startupInput, owner, semaphore, allocatedPorts, resourceBindings))
+        );
+      }
     } catch (error) {
       startupAbort.abort();
       await Promise.allSettled([...promises.values()]);
       await this.stopNodes(running, reverseDependencyOrder(input.plan));
-      await ociGeneration?.stop();
       for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
       input.signal?.removeEventListener('abort', onInputAbort);
       throw error;
@@ -239,6 +255,66 @@ export class PreviewGraph {
       );
     }
 
+    const stopExclusive = async (): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> => {
+      const owners = [...running.values()].filter(
+        (owner) => owner.kind === 'WORKER' && 'overlap' in owner.node && owner.node.overlap === 'exclusive'
+      );
+      let result: 'STOPPED' | 'ALREADY_EXITED' | 'REFUSED' = owners.length ? 'STOPPED' : 'ALREADY_EXITED';
+      for (const owner of owners) {
+        if (owner.handedOff) continue;
+        owner.handedOff = true;
+        owner.stopping = true;
+        owner.livenessAbort?.abort();
+        const stopped = await this.services.stop(owner.current.resource).catch(() => 'REFUSED' as const);
+        if (stopped === 'REFUSED') result = 'REFUSED';
+        await owner.current.completion.catch(() => undefined);
+      }
+      return result;
+    };
+
+    const restoreExclusive = async (): Promise<boolean> => {
+      const owners = [...running.values()].filter((owner) => owner.handedOff);
+      try {
+        for (const owner of owners) {
+          owner.attempt += 1;
+          owner.stopping = false;
+          owner.current = await semaphore.run(() => this.services.start({
+            ...runtimeInput(input),
+            node: owner.node,
+            kind: owner.kind,
+            attempt: owner.attempt,
+            portValues: owner.ports,
+            resolvedEnv: resolveEnvironment(
+              owner.node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+            )
+          }));
+          await this.waitUntilReady(input, owner, semaphore, allocatedPorts, resourceBindings);
+          owner.handedOff = false;
+          supervisions.push(
+            this.supervise(
+              { ...input, signal: lifecycleAbort.signal },
+              owner,
+              semaphore,
+              allocatedPorts,
+              resourceBindings
+            ).then((reason) => {
+              if (reason && !graphStopping && owner.node.critical) resolveUnexpected(reason);
+            }).catch((error: unknown) => {
+              if (!graphStopping) resolveUnexpected(
+                `Preview ${owner.kind.toLowerCase()} ${owner.node.id} supervision failed: ${boundedError(error)}`
+              );
+            })
+          );
+        }
+        await this.assertRoutedListeners(input.plan, running, allocatedPorts);
+        return [...running.values()]
+          .filter((owner) => owner.node.critical)
+          .every((owner) => owner.current.isRunning() && !owner.handedOff);
+      } catch {
+        return false;
+      }
+    };
+
     return {
       ports: allocatedPorts,
       unexpectedExit,
@@ -246,6 +322,8 @@ export class PreviewGraph {
         [...running.values()]
           .filter((owner) => owner.node.critical)
           .every((owner) => owner.current.isRunning()),
+      stopExclusive,
+      restoreExclusive,
       stop: () => {
         if (stopOperation) {
           return stopOperation.then(() => 'ALREADY_EXITED' as const);
@@ -261,10 +339,9 @@ export class PreviewGraph {
           }
           lifecycleAbort.abort();
           const result = await this.stopNodes(running, reverseDependencyOrder(input.plan));
-          const ociResult = await ociGeneration?.stop();
           await Promise.allSettled([...supervisions, ...activeLiveness]);
           for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
-          return result === 'REFUSED' || ociResult === 'REFUSED' ? 'REFUSED' : result;
+          return result;
         })();
         return stopOperation;
       }
@@ -616,7 +693,8 @@ function runtimeInput(input: Parameters<PreviewGraph['start']>[0]) {
     generationId: input.generationId,
     generationRoot: input.generationRoot,
     sourcePath: input.sourcePath,
-    markerDigest: input.markerDigest
+    markerDigest: input.markerDigest,
+    redactions: input.redactions
   };
 }
 
@@ -646,10 +724,6 @@ function resolveEnvironment(
       } else if (value.type === 'redis-url') {
         if (!binding.redisUrl) throw new Error(`Preview Redis URL ${value.resource} is unavailable.`);
         result[key] = binding.redisUrl;
-      } else {
-        const port = binding.ports[value.port];
-        if (!port) throw new Error(`Preview OCI origin ${value.resource}.${value.port} is unavailable.`);
-        result[key] = `http://127.0.0.1:${port}`;
       }
     }
   }
@@ -725,12 +799,14 @@ export class PreviewReadinessFailure extends Error {
 }
 
 function assertGraphAcyclic(
-  nodes: Map<string, { id: string; needs: Record<string, unknown> }>
+  nodes: Map<string, { id: string; needs: Record<string, unknown> }>,
+  satisfiedExternalNodes: ReadonlySet<string> = new Set()
 ): void {
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string) => {
     if (visited.has(id)) return;
+    if (satisfiedExternalNodes.has(id)) return;
     if (visiting.has(id)) throw new Error(`Preview dependency graph contains a cycle at ${id}.`);
     const node = nodes.get(id);
     if (!node) throw new Error(`Preview dependency is missing: ${id}.`);

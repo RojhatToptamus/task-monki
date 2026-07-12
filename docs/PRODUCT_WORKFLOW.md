@@ -73,13 +73,27 @@ The log viewer selects one node attempt and one stream at a time. It tails that
 artifact through bounded range reads while open and stops polling when closed;
 normal task snapshot refreshes are not a log transport.
 
-Recipes may declare managed PostgreSQL, Redis, or constrained generic OCI
-resources. Migration and seed jobs belong to explicit scenarios; choosing a
-different scenario changes the execution digest and requires approval. Reset
-data is an explicit destructive action on one recorded owned volume: Task Monki
-retains other data volumes, replaces the selected resource with a new identity,
-and reruns only the approved scenario. Attached dependencies and user secrets
-are not part of this phase.
+Recipes may declare preview-owned PostgreSQL and Redis resources. Migration and
+seed jobs belong to explicit scenarios; choosing a different scenario changes
+the execution digest and requires approval. Managed resource identities,
+containers, volumes, ports, and generated credentials remain stable while
+application generations are replaced, and ordinary replacement does not rerun
+migrations or seeds. Workers are exclusive across replacement unless
+`overlap: safe` is explicitly approved.
+
+An observed setup failure may expose **Retry setup** only when every selected
+migration and seed job declares `retrySafe: true`. Retry revalidates the current
+plan, approval, engine, and exact managed-resource authority, then reuses the
+same resource identity and data. Ambiguous completion and non-retry-safe setup
+remain blocked from automatic or user-triggered replay.
+
+Reset data is an explicit destructive action. Task Monki revalidates the
+current plan and approval before mutation, detaches routes, stops the complete
+application, replaces only the selected managed resource, runs the approved
+setup scenario, and starts a fresh application generation. Stop Preview is
+labeled **Stop Preview & Delete Data** because it removes the application,
+managed containers, volumes, network, and data. Attached dependencies, generic
+OCI resources, and user-supplied secrets are not part of this phase.
 
 ## Activity Timeline
 

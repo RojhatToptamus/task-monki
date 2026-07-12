@@ -212,7 +212,7 @@ routes:
 
     expect(parsed.executionPlan.resources).toEqual([
       expect.objectContaining({
-        id: 'cache', type: 'redis', image: 'redis:7-alpine', scope: 'generation'
+        id: 'cache', type: 'redis', image: 'redis:7-alpine'
       }),
       expect.objectContaining({
         id: 'database', type: 'postgres', database: 'preview_app',
@@ -246,8 +246,8 @@ routes:
     expect(() => selectPreviewScenario(parsed, 'missing')).toThrow('does not exist');
   });
 
-  it('normalizes a constrained generic OCI resource without host authority', () => {
-    const parsed = parsePreviewRecipe(PHASE_THREE_RECIPE.replace(
+  it('rejects generic OCI until PostgreSQL and Redis prove the shared lifecycle', () => {
+    const source = PHASE_THREE_RECIPE.replace(
       'resources:\n  cache:',
       `resources:
   mail:
@@ -263,23 +263,33 @@ routes:
     ).replace(
       'resources: [cache, database]',
       'resources: [cache, database, mail]'
-    ));
+    );
+    expect(() => parsePreviewRecipe(source)).toThrow('postgres or redis');
+  });
 
-    expect(parsed.executionPlan.resources.find((resource) => resource.id === 'mail')).toEqual({
-      id: 'mail',
-      type: 'oci',
-      image: 'axllent/mailpit:v1.27',
-      scope: 'generation',
-      limits: { memoryMb: 128, pids: 64 },
-      command: ['/mailpit'],
-      env: { MP_MAX_MESSAGES: '100' },
-      ports: {
-        http: { containerPort: 8025, protocol: 'tcp' },
-        smtp: { containerPort: 1025, protocol: 'tcp' }
-      },
-      ready: { type: 'http', port: 'http', path: '/livez', timeoutSeconds: 30 },
-      dataMount: '/data'
-    });
+  it('binds explicit safe worker overlap into the execution digest', () => {
+    const exclusive = parsePreviewRecipe(RECIPE.replace(
+      'routes:\n  app:',
+      `workers:
+  consumer:
+    command: [node, worker.mjs]
+    ready: { type: argv, command: [node, worker-ready.mjs], timeoutSeconds: 5 }
+routes:
+  app:`
+    ));
+    const safe = parsePreviewRecipe(RECIPE.replace(
+      'routes:\n  app:',
+      `workers:
+  consumer:
+    command: [node, worker.mjs]
+    ready: { type: argv, command: [node, worker-ready.mjs], timeoutSeconds: 5 }
+    overlap: safe
+routes:
+  app:`
+    ));
+    expect(exclusive.executionPlan.workers[0].overlap).toBe('exclusive');
+    expect(safe.executionPlan.workers[0].overlap).toBe('safe');
+    expect(safe.executionDigest).not.toBe(exclusive.executionDigest);
   });
 
   it.each([

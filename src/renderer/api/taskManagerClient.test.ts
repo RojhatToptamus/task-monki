@@ -166,6 +166,9 @@ describe('createBrowserTaskManagerApi preview contract', () => {
     await api.resetPreviewData({
       taskId: 'task-1', generationId: 'generation-1', resourceId: 'database', scenarioId: 'full'
     });
+    await api.retryPreviewSetup({
+      taskId: 'task-1', generationId: 'generation-1', scenarioId: 'full'
+    });
 
     expect(calls.map((call) => call.url)).toEqual([
       'http://127.0.0.1:3099/api/preview/resolve',
@@ -174,7 +177,8 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       'http://127.0.0.1:3099/api/preview/open',
       'http://127.0.0.1:3099/api/preview/stop',
       'http://127.0.0.1:3099/api/preview/log/read',
-      'http://127.0.0.1:3099/api/preview/reset-data'
+      'http://127.0.0.1:3099/api/preview/reset-data',
+      'http://127.0.0.1:3099/api/preview/retry-setup'
     ]);
     expect(calls[3]?.body).toEqual({
       taskId: 'task-1',

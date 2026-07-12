@@ -40,12 +40,14 @@ export interface PreparedPreviewGeneration {
   sourcePath: string;
   markerDigest: string;
   controller: AbortController;
+  setupRetryResourceIds?: string[];
 }
 
 export class PreviewManager {
   private readonly live = new Map<string, RunningPreviewGraph>();
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly startups = new Map<string, AbortController>();
+  private readonly resourceHealthStops = new Map<string, () => void>();
   private gatewayPort: number | undefined;
 
   constructor(
@@ -104,7 +106,7 @@ export class PreviewManager {
     context: PreviewTaskContext;
     gitSnapshot: GitSnapshotRecord;
     reobserveGit(): Promise<GitSnapshotRecord>;
-  }, scenarioId?: string): Promise<PreparedPreviewGeneration> {
+  }, scenarioId?: string, setupRetryResourceIds?: string[]): Promise<PreparedPreviewGeneration> {
     const resolved = await this.resolve(input.context, scenarioId);
     if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
     const approval = await this.approvalPolicy.requireMatching(resolved.plan);
@@ -178,7 +180,8 @@ export class PreviewManager {
           generationRoot: prepared.generationRoot,
           sourcePath: prepared.sourcePath,
           markerDigest: prepared.markerDigest,
-          controller
+          controller,
+          setupRetryResourceIds
         };
       } catch (error) {
         let cleanupIncomplete = false;
@@ -211,7 +214,44 @@ export class PreviewManager {
     const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
+      let createdResourceIds: string[] = [];
+      let setupCompleted = false;
+      let oldExclusiveHandedOff = false;
       try {
+        const scenario = prepared.plan.executionPlan.scenarios.find(
+          (candidate) => candidate.id === prepared.plan.executionPlan.selectedScenarioId
+        );
+        if (!scenario) throw new Error('Selected preview scenario is missing.');
+        const activeResourceIds = new Set(scenario.resources);
+        const resourcePlans = prepared.plan.executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
+        const managed = resourcePlans.length > 0
+          ? await this.requireOciRuntime().ensureManagedPreview({
+              taskId: generation.taskId,
+              previewKey: generation.previewKey,
+              markerDigest: generation.previewKey,
+              expectedEngine: this.requireOciEngine(prepared.plan),
+              resources: resourcePlans,
+              retrySetupResourceIds: prepared.setupRetryResourceIds,
+              signal: controller.signal
+            })
+          : undefined;
+        createdResourceIds = managed?.createdResourceIds ?? [];
+        if (managed) {
+          await this.store.savePreviewGenerationAttachments(
+            managed.resources.map((resource) => ({
+              id: randomUUID(),
+              taskId: generation.taskId,
+              generationId: generation.id,
+              managedResourceId: resource.id,
+              logicalResourceId: resource.logicalResourceId,
+              bindingId: resource.binding!.id,
+              attachedAt: new Date().toISOString()
+            }))
+          );
+        }
+        const replacedGraph = generation.replacesGenerationId
+          ? this.live.get(generation.replacesGenerationId)
+          : undefined;
         const running = await this.graph.start({
           taskId: generation.taskId,
           generationId: generation.id,
@@ -219,13 +259,28 @@ export class PreviewManager {
           sourcePath: prepared.sourcePath,
           markerDigest: prepared.markerDigest,
           plan: prepared.plan.executionPlan,
+          resourceBindings: managed?.bindings,
+          redactions: managed ? this.requireOciRuntime().redactionValues() : [],
+          runSetup: createdResourceIds.length > 0,
+          onSetupComplete: async () => {
+            await this.requireOciRuntime().markSetupReady(createdResourceIds);
+            setupCompleted = true;
+          },
+          beforeExclusiveStart: replacedGraph
+            ? async () => {
+                const stopped = await replacedGraph.stopExclusive();
+                if (stopped === 'REFUSED') {
+                  throw new Error('Old exclusive preview nodes could not be stopped safely.');
+                }
+                oldExclusiveHandedOff = stopped === 'STOPPED';
+              }
+            : undefined,
           routeOrigins: Object.fromEntries(
             prepared.plan.executionPlan.routes.map((route) => {
               const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
               return [route.id, `http://${hostname}:${this.requireGatewayPort()}`];
             })
           ),
-          ociEngineIdentity: prepared.plan.ociCapability?.identity,
           signal: controller.signal,
           updateGenerationState: async (state) => {
             generation = await this.saveGeneration({ ...generation, state });
@@ -298,9 +353,26 @@ export class PreviewManager {
           else this.gateway.removeOwnedRoutes(generation.id);
           throw error;
         }
-        if (replaced) await this.stop(replaced.id).catch(() => undefined);
+        if (replaced) await this.stopApplicationGeneration(replaced.id).catch(() => undefined);
+        this.startResourceHealthWatch(generation.taskId);
         return generation;
       } catch (error) {
+        if (createdResourceIds.length > 0 && !setupCompleted) {
+          const ambiguous =
+            error instanceof PreviewJobCompletionAmbiguousError && !error.retrySafe;
+          await this.requireOciRuntime().markSetupFailure(createdResourceIds, {
+            ambiguous,
+            reason: boundedError(error)
+          });
+        }
+        if (oldExclusiveHandedOff && generation.replacesGenerationId) {
+          const oldGraph = this.live.get(generation.replacesGenerationId);
+          const restored = await oldGraph?.restoreExclusive() ?? false;
+          if (!restored) await this.failAndDetachGeneration(
+            generation.replacesGenerationId,
+            'The previous preview could not restore and reverify its exclusive nodes within their declared readiness deadline.'
+          );
+        }
         await this.cleanupFailedGeneration(generation, error);
         throw error;
       }
@@ -311,7 +383,30 @@ export class PreviewManager {
     });
   }
 
-  stop(generationId: string): Promise<PreviewGenerationRecord> {
+  async stop(generationId: string): Promise<PreviewGenerationRecord> {
+    const generation = await this.requireGeneration(generationId);
+    const cancelingCandidate =
+      generation.routingState === 'CANDIDATE' && Boolean(generation.replacesGenerationId);
+    if (cancelingCandidate) return this.stopApplicationGeneration(generationId);
+
+    this.resourceHealthStops.get(generation.taskId)?.();
+    let stopped = await this.stopApplicationGeneration(generationId);
+    for (const candidate of await this.store.getPreviewGenerations(generation.taskId)) {
+      if (candidate.id === generationId || ['STOPPED', 'FAILED'].includes(candidate.state)) continue;
+      const result = await this.stopApplicationGeneration(candidate.id);
+      if (result.state === 'CLEANUP_INCOMPLETE') stopped = result;
+    }
+    if (this.ociRuntime && await this.ociRuntime.cleanupTaskResources(generation.taskId) === 'REFUSED') {
+      stopped = await this.saveGeneration({
+        ...stopped,
+        state: 'CLEANUP_INCOMPLETE',
+        cleanupReason: 'Managed preview environment cleanup is incomplete.'
+      });
+    }
+    return stopped;
+  }
+
+  private stopApplicationGeneration(generationId: string): Promise<PreviewGenerationRecord> {
     this.startups.get(generationId)?.abort();
     return this.withGenerationLock(generationId, async () => {
       let generation = await this.requireGeneration(generationId);
@@ -328,11 +423,11 @@ export class PreviewManager {
         for (const resource of await this.store.getPreviewResources(generation.id)) {
           if (resource.state === 'STOPPED') continue;
           if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
-          const result = resource.adapterKind === 'NATIVE_PROCESS'
-            ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
-            : this.ociRuntime
-              ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
-              : 'REFUSED';
+          if (resource.adapterKind !== 'NATIVE_PROCESS') {
+            cleanupIncomplete = true;
+            continue;
+          }
+          const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
           if (result === 'REFUSED') cleanupIncomplete = true;
         }
       }
@@ -386,14 +481,15 @@ export class PreviewManager {
   }
 
   async stopTask(taskId: string): Promise<void> {
+    this.resourceHealthStops.get(taskId)?.();
     for (const generation of await this.store.getPreviewGenerations(taskId)) {
       if (generation.state === 'STOPPED') continue;
-      const stopped = await this.stop(generation.id);
+      const stopped = await this.stopApplicationGeneration(generation.id);
       if (stopped.state === 'CLEANUP_INCOMPLETE') {
         throw new Error('Task preview cleanup is incomplete; task deletion was refused.');
       }
     }
-    if (await this.ociRuntime?.cleanupTaskResources(taskId) === 'REFUSED') {
+    if (this.ociRuntime && await this.ociRuntime.cleanupTaskResources(taskId) === 'REFUSED') {
       throw new Error('Task preview OCI cleanup is incomplete; task deletion was refused.');
     }
   }
@@ -403,47 +499,91 @@ export class PreviewManager {
     generationId: string;
     resourceId: string;
     scenarioId: string;
+    context: PreviewTaskContext;
   }): Promise<void> {
-    if (!this.ociRuntime) throw new Error('OCI preview resources are unavailable.');
     const generation = await this.requireGeneration(input.generationId);
     if (generation.taskId !== input.taskId) {
       throw new Error('Preview generation was not found for this task.');
     }
-    const plan = await this.store.getPreviewPlan(generation.planId);
-    if (!plan || plan.executionPlan.selectedScenarioId !== input.scenarioId) {
-      throw new Error('Preview reset scenario does not match the approved generation.');
+    if (generation.routingState !== 'ACTIVE' || generation.state !== 'READY') {
+      throw new Error('Reset requires the complete active preview application.');
     }
+    const resolved = await this.resolve(input.context, input.scenarioId);
+    if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
+    await this.approvalPolicy.requireMatching(resolved.plan);
+    const plan = resolved.plan;
     const scenario = plan.executionPlan.scenarios.find((candidate) => candidate.id === input.scenarioId);
     const resource = plan.executionPlan.resources.find((candidate) => candidate.id === input.resourceId);
     if (!scenario?.resources.includes(input.resourceId) || !resource) {
       throw new Error('Preview reset resource is not part of the approved scenario.');
     }
-    if (resource.type === 'oci' && !resource.dataMount) {
-      throw new Error('Preview resource has no owned data volume to reset.');
+    const authority = await this.requireOciRuntime().verifyManagedPreview({
+      taskId: input.taskId,
+      expectedEngine: this.requireOciEngine(plan),
+      resources: plan.executionPlan.resources.filter((candidate) => scenario.resources.includes(candidate.id))
+    });
+    const target = authority.resources.find((candidate) => candidate.logicalResourceId === input.resourceId);
+    if (!target) throw new Error(`Managed reset resource ${input.resourceId} is unavailable.`);
+
+    this.resourceHealthStops.get(input.taskId)?.();
+    const stoppedApplication = await this.stopApplicationGeneration(generation.id);
+    if (stoppedApplication.state === 'CLEANUP_INCOMPLETE') {
+      throw new Error('Preview application cleanup is incomplete; managed data was not changed.');
     }
-    if (!['STOPPED', 'FAILED'].includes(generation.state)) {
-      await this.ociRuntime.prepareDataReset(generation.id);
-      await this.stop(generation.id);
-    }
-    const reset = await this.ociRuntime.resetDataResource(input.taskId, input.resourceId);
+    const reset = await this.requireOciRuntime().stopManagedResource(target.id);
     if (reset === 'REFUSED') {
       throw new Error(`Preview data reset could not verify ${input.resourceId} ownership.`);
     }
   }
 
+  async authorizeSetupRetry(input: {
+    taskId: string;
+    generationId: string;
+    scenarioId: string;
+    context: PreviewTaskContext;
+  }): Promise<string[]> {
+    const generation = await this.requireGeneration(input.generationId);
+    if (generation.taskId !== input.taskId || generation.state !== 'FAILED') {
+      throw new Error('Retry Setup requires a failed preview generation for this task.');
+    }
+    const resolved = await this.resolve(input.context, input.scenarioId);
+    if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
+    await this.approvalPolicy.requireMatching(resolved.plan);
+    const scenario = resolved.plan.executionPlan.scenarios.find(
+      (candidate) => candidate.id === input.scenarioId
+    );
+    if (!scenario) throw new Error('Retry Setup scenario is unavailable.');
+    const setupJobs = resolved.plan.executionPlan.jobs.filter((job) => scenario.jobs.includes(job.id));
+    if (setupJobs.length === 0 || setupJobs.some((job) => !job.retrySafe)) {
+      throw new Error('Retry Setup requires every selected migration and seed job to declare retrySafe: true.');
+    }
+    const authority = await this.requireOciRuntime().verifyManagedPreview({
+      taskId: input.taskId,
+      expectedEngine: this.requireOciEngine(resolved.plan),
+      resources: resolved.plan.executionPlan.resources.filter((resource) => scenario.resources.includes(resource.id)),
+      allowSetupFailed: true
+    });
+    const retryIds = authority.resources
+      .filter((resource) => resource.state === 'SETUP_FAILED')
+      .map((resource) => resource.id);
+    if (retryIds.length === 0) throw new Error('No retry-safe failed setup is available.');
+    return retryIds;
+  }
+
   async shutdown(): Promise<void> {
     const failures: string[] = [];
+    for (const stop of this.resourceHealthStops.values()) stop();
     for (const generation of await this.store.getPreviewGenerations()) {
       if (!['STOPPED', 'FAILED'].includes(generation.state)) {
         try {
-          const stopped = await this.stop(generation.id);
+          const stopped = await this.stopApplicationGeneration(generation.id);
           if (stopped.state === 'CLEANUP_INCOMPLETE') failures.push(stopped.id);
         } catch {
           failures.push(generation.id);
         }
       }
     }
-    if (await this.ociRuntime?.cleanupTaskResources() === 'REFUSED') {
+    if (this.ociRuntime && await this.ociRuntime.cleanupTaskResources() === 'REFUSED') {
       failures.push('preview-scoped-oci-resources');
     }
     await this.gateway.close();
@@ -459,9 +599,9 @@ export class PreviewManager {
     error: unknown
   ): Promise<void> {
     const current = (await this.store.getPreviewGeneration(generation.id)) ?? generation;
-    const nonRetryableMigrationAmbiguity =
+    const nonRetryableSetupAmbiguity =
       error instanceof PreviewJobCompletionAmbiguousError &&
-      error.role === 'migration' &&
+      error.role !== 'generic' &&
       !error.retrySafe;
     this.detachRoutes(current);
     let cleanupIncomplete = false;
@@ -474,11 +614,11 @@ export class PreviewManager {
       for (const resource of await this.store.getPreviewResources(current.id)) {
         if (resource.state === 'STOPPED') continue;
         if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
-        const result = resource.adapterKind === 'NATIVE_PROCESS'
-          ? await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const)
-          : this.ociRuntime
-            ? await this.ociRuntime.stop(resource).catch(() => 'REFUSED' as const)
-            : 'REFUSED';
+        if (resource.adapterKind !== 'NATIVE_PROCESS') {
+          cleanupIncomplete = true;
+          continue;
+        }
+        const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
         if (result === 'REFUSED') {
           cleanupIncomplete = true;
         }
@@ -496,7 +636,7 @@ export class PreviewManager {
       routes: current.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
       state: cleanupIncomplete
         ? 'CLEANUP_INCOMPLETE'
-        : nonRetryableMigrationAmbiguity
+        : nonRetryableSetupAmbiguity
           ? 'RECOVERY_REQUIRED'
           : 'FAILED',
       failureReason: boundedError(error),
@@ -532,6 +672,63 @@ export class PreviewManager {
       cleanupReason: cleanupIncomplete ? 'Service exit cleanup could not verify the workspace.' : undefined
     });
     await this.store.prunePreviewHistory(generation.taskId);
+  }
+
+  private startResourceHealthWatch(taskId: string): void {
+    this.resourceHealthStops.get(taskId)?.();
+    if (!this.ociRuntime) return;
+    const stop = this.ociRuntime.watchRequiredResources(taskId, async (_resource, reason) => {
+      const active = (await this.store.getPreviewGenerations(taskId)).find(
+        (generation) => generation.routingState === 'ACTIVE' && generation.state === 'READY'
+      );
+      if (active) await this.failAndDetachGeneration(active.id, reason);
+    });
+    this.resourceHealthStops.set(taskId, stop);
+  }
+
+  private async failAndDetachGeneration(generationId: string, reason: string): Promise<void> {
+    await this.withGenerationLock(generationId, async () => {
+      const generation = await this.requireGeneration(generationId);
+      if (['FAILED', 'STOPPED', 'STOPPING'].includes(generation.state)) return;
+      this.detachRoutes(generation);
+      let cleanupIncomplete = false;
+      const live = this.live.get(generation.id);
+      if (live) {
+        if (await live.stop().catch(() => 'REFUSED' as const) === 'REFUSED') cleanupIncomplete = true;
+        this.live.delete(generation.id);
+      }
+      if (!cleanupIncomplete) {
+        await this.sourcePreparer.cleanupOwnedGeneration({
+          taskId: generation.taskId,
+          generationId: generation.id
+        }).catch(() => {
+          cleanupIncomplete = true;
+        });
+      }
+      await this.saveGeneration({
+        ...generation,
+        routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+        routingState: 'RETIRED',
+        state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+        failureReason: boundedError(reason),
+        cleanupReason: cleanupIncomplete
+          ? 'Application cleanup after managed-resource failure is incomplete.'
+          : undefined
+      });
+    });
+  }
+
+  private requireOciRuntime(): OciResourceRuntime {
+    if (!this.ociRuntime) throw new Error('OCI preview resources are unavailable.');
+    return this.ociRuntime;
+  }
+
+  private requireOciEngine(plan: PreviewPlanRecord) {
+    const identity = plan.ociCapability?.status === 'READY'
+      ? plan.ociCapability.identity
+      : undefined;
+    if (!identity) throw new Error('The approved OCI engine is unavailable for preview execution.');
+    return identity;
   }
 
   private detachRoutes(generation: PreviewGenerationRecord): void {

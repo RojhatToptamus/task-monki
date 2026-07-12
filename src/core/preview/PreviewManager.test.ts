@@ -268,3 +268,107 @@ routes:
     expect(generations.some((generation) => generation.id === observedGenerationIds[0])).toBe(false);
   });
 });
+
+describe('PreviewManager managed reset preflight', () => {
+  it('leaves the active application and data untouched until the current recipe and approval pass', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-manager-reset-'));
+    fixtureRoots.push(root);
+    const worktreePath = path.join(root, 'worktree');
+    await fs.mkdir(path.join(worktreePath, '.taskmonki'), { recursive: true });
+    const recipePath = path.join(worktreePath, '.taskmonki', 'preview.yaml');
+    const recipe = (command: string) => `version: 1
+resources:
+  database: { type: postgres, database: app }
+services:
+  web:
+    command: [node, ${command}]
+    needs: { database: ready }
+    env: { DATABASE_URL: { type: postgres-url, resource: database } }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /ready }
+routes:
+  app: { service: web, port: http, primary: true }
+`;
+    await fs.writeFile(recipePath, recipe('server-a.mjs'));
+    const store = new FileTaskStore(path.join(root, 'store'));
+    const task = await store.createTask({ title: 'Reset', prompt: 'Reset data', repositoryPath: worktreePath });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/reset', worktreePath, baseSha: 'head'
+    });
+    const events: string[] = [];
+    const identity = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const oci = {
+      async verifyManagedPreview() {
+        events.push('authority-verified');
+        return { resources: [{ id: 'managed-database', logicalResourceId: 'database' }] };
+      },
+      async stopManagedResource(id: string) {
+        events.push(`resource-stopped:${id}`);
+        return 'STOPPED' as const;
+      }
+    };
+    const manager = new PreviewManager(
+      store,
+      new AppEventBus(),
+      new PreviewRecipeLoader(),
+      new PreviewPlanResolver({
+        async probe() {
+          return {
+            status: 'READY' as const, contextName: identity.contextName, identity,
+            supportsMemoryLimit: true, supportsCpuLimit: true, supportsPidsLimit: true
+          };
+        }
+      } as never),
+      new PreviewApprovalPolicy(store),
+      {
+        async cleanupOwnedGeneration() { events.push('application-stopped'); }
+      } as never,
+      {} as never,
+      { removeOwnedRoutes() {} } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      oci as never
+    );
+    const context = { task, iteration, worktree };
+    const initial = await manager.resolve(context);
+    if (initial.status !== 'PLAN') throw new Error('Expected initial plan.');
+    const approval = await manager.approve({
+      taskId: task.id, planId: initial.plan.id, executionDigest: initial.plan.executionDigest
+    });
+    const now = new Date().toISOString();
+    const generation = await store.savePreviewGeneration({
+      id: 'active-generation', previewKey: 'task-reset', taskId: task.id,
+      iterationId: iteration.id, worktreeId: worktree.id, planId: initial.plan.id,
+      approvalId: approval.id, executionDigest: initial.plan.executionDigest,
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      workspacePath: '/preview/reset', state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
+      routes: [], createdAt: now, updatedAt: now
+    });
+
+    await fs.writeFile(recipePath, recipe('server-b.mjs'));
+    await expect(manager.resetData({
+      taskId: task.id, generationId: generation.id, resourceId: 'database',
+      scenarioId: 'default', context
+    })).rejects.toThrow('approval');
+    expect(events).toEqual([]);
+    expect(await store.getPreviewGeneration(generation.id)).toMatchObject({ state: 'READY' });
+
+    const current = await manager.resolve(context);
+    if (current.status !== 'PLAN') throw new Error('Expected current plan.');
+    await manager.approve({
+      taskId: task.id, planId: current.plan.id, executionDigest: current.plan.executionDigest
+    });
+    await manager.resetData({
+      taskId: task.id, generationId: generation.id, resourceId: 'database',
+      scenarioId: 'default', context
+    });
+    expect(events).toEqual([
+      'authority-verified', 'application-stopped', 'resource-stopped:managed-database'
+    ]);
+    expect(await store.getPreviewGeneration(generation.id)).toMatchObject({ state: 'STOPPED' });
+  });
+});

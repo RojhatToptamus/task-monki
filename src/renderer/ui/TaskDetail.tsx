@@ -29,6 +29,8 @@ import type {
   PullRequestSnapshotRecord,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
   ReviewRollupRecord,
@@ -140,6 +142,8 @@ interface TaskDetailProps {
   previewPlans: PreviewPlanRecord[];
   previewApprovals: PreviewApprovalRecord[];
   previewGenerations: PreviewGenerationRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
   previewNodeAttempts: PreviewNodeAttemptRecord[];
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
@@ -163,6 +167,7 @@ interface TaskDetailProps {
   onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
   onStopPreview(taskId: string, generationId: string): Promise<void>;
   onResetPreviewData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
+  onRetryPreviewSetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
   onReadPreviewLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<import('../../shared/contracts').ReadPreviewLogResult>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
@@ -895,6 +900,8 @@ export function TaskDetail(props: TaskDetailProps) {
                 plans={props.previewPlans}
                 approvals={props.previewApprovals}
                 generations={props.previewGenerations}
+                generationAttachments={props.previewGenerationAttachments}
+                managedResources={props.previewManagedResources}
                 attempts={props.previewNodeAttempts}
                 onResolve={props.onResolvePreview}
                 onApprove={props.onApprovePreview}
@@ -902,6 +909,7 @@ export function TaskDetail(props: TaskDetailProps) {
                 onOpen={props.onOpenPreview}
                 onStop={props.onStopPreview}
                 onResetData={props.onResetPreviewData}
+                onRetrySetup={props.onRetryPreviewSetup}
                 onReadLog={props.onReadPreviewLog}
               />
 

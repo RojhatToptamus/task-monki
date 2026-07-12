@@ -38,6 +38,7 @@ export interface NativeLaunchInput {
   stdoutPath: string;
   stderrPath: string;
   maxLogBytes?: number;
+  redactions?: string[];
   persistPrepared(identity: PreviewNativeProcessIdentity): Promise<void>;
   persistStarted?(identity: PreviewNativeProcessIdentity): Promise<void>;
 }
@@ -100,6 +101,7 @@ export class NativeLauncherHost {
           stdoutPath: input.stdoutPath,
           stderrPath: input.stderrPath,
           maxLogBytes: input.maxLogBytes ?? 256 * 1024,
+          redactions: input.redactions ?? [],
           digest: commandDigest
         })
       }

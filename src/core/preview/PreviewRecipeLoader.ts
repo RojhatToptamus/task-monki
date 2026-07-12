@@ -13,7 +13,6 @@ import {
 import type {
   PreviewEnvironmentValue,
   PreviewExecutionPlan,
-  PreviewGenericOciResourcePlan,
   PreviewJobPlan,
   PreviewLivenessPlan,
   PreviewOciResourceLimits,
@@ -229,6 +228,20 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     }
     validateEnvironmentReferences(node, serviceById, routeById, resourceById);
   }
+  for (const service of services) {
+    for (const dependencyId of Object.keys(service.needs)) {
+      if (workerById.has(dependencyId)) {
+        throw new Error(`Service ${service.id} cannot depend on worker ${dependencyId}; routed readiness must precede exclusive handoff.`);
+      }
+    }
+  }
+  for (const worker of workers.filter((candidate) => candidate.overlap === 'safe')) {
+    for (const dependencyId of Object.keys(worker.needs)) {
+      if (workerById.get(dependencyId)?.overlap === 'exclusive') {
+        throw new Error(`Safe-overlap worker ${worker.id} cannot depend on exclusive worker ${dependencyId}.`);
+      }
+    }
+  }
   for (const route of routes) {
     const service = serviceById.get(route.service);
     if (!service) {
@@ -323,16 +336,6 @@ function normalizeEnvironment(value: unknown, context: string): Record<string, P
         throw new Error(`${context}.${key} has an invalid ${reference.type} reference.`);
       }
       normalized[key] = { type: reference.type, resource: reference.resource };
-    } else if (reference.type === 'resource-origin') {
-      assertKeys(reference, ['type', 'resource', 'port'], `${context}.${key}`);
-      if (typeof reference.resource !== 'string' || typeof reference.port !== 'string') {
-        throw new Error(`${context}.${key} has an invalid resource-origin reference.`);
-      }
-      normalized[key] = {
-        type: 'resource-origin',
-        resource: reference.resource,
-        port: reference.port
-      };
     } else {
       throw new Error(`${context}.${key} must be a literal or supported typed reference.`);
     }
@@ -346,18 +349,17 @@ function normalizeResource(
   id: string
 ): PreviewOciResourcePlan {
   const type = value.type;
-  if (!['postgres', 'redis', 'oci'].includes(String(type))) {
-    throw new Error(`${context}.type must be postgres, redis, or oci.`);
+  if (!['postgres', 'redis'].includes(String(type))) {
+    throw new Error(`${context}.type must be postgres or redis in this phase.`);
   }
   const common = {
     id,
     label: optionalLabel(value.label, context),
     image: normalizeImage(value.image, type as PreviewOciResourcePlan['type'], context),
-    scope: normalizeResourceScope(value.scope, context),
     limits: normalizeResourceLimits(value.limits, context)
   };
   if (type === 'postgres') {
-    assertKeys(value, ['type', 'label', 'image', 'scope', 'limits', 'database'], context);
+    assertKeys(value, ['type', 'label', 'image', 'limits', 'database'], context);
     const database = value.database ?? 'app';
     if (typeof database !== 'string' || !DATABASE_NAME_PATTERN.test(database)) {
       throw new Error(`${context}.database must be a safe PostgreSQL database identifier.`);
@@ -365,53 +367,10 @@ function normalizeResource(
     return { ...common, type: 'postgres', database };
   }
   if (type === 'redis') {
-    assertKeys(value, ['type', 'label', 'image', 'scope', 'limits'], context);
+    assertKeys(value, ['type', 'label', 'image', 'limits'], context);
     return { ...common, type: 'redis' };
   }
-
-  assertKeys(
-    value,
-    ['type', 'label', 'image', 'scope', 'limits', 'command', 'env', 'ports', 'ready', 'dataMount'],
-    context
-  );
-  const portsValue = requiredRecord(value.ports, `${context}.ports`);
-  const ports: PreviewGenericOciResourcePlan['ports'] = {};
-  for (const portId of Object.keys(portsValue).sort()) {
-    assertId(portId, `${context}.ports`);
-    const port = requiredRecord(portsValue[portId], `${context}.ports.${portId}`);
-    assertKeys(port, ['containerPort', 'protocol'], `${context}.ports.${portId}`);
-    if (
-      !Number.isInteger(port.containerPort) ||
-      Number(port.containerPort) < 1 ||
-      Number(port.containerPort) > 65_535
-    ) {
-      throw new Error(`${context}.ports.${portId}.containerPort is invalid.`);
-    }
-    if (port.protocol !== undefined && port.protocol !== 'tcp') {
-      throw new Error(`${context}.ports.${portId}.protocol must be tcp.`);
-    }
-    ports[portId] = { containerPort: Number(port.containerPort), protocol: 'tcp' };
-  }
-  if (Object.keys(ports).length < 1 || Object.keys(ports).length > 16) {
-    throw new Error(`${context}.ports must contain 1-16 entries.`);
-  }
-  const literalEnv = normalizeEnvironment(value.env, `${context}.env`);
-  if (Object.values(literalEnv).some((envValue) => typeof envValue !== 'string')) {
-    throw new Error(`${context}.env supports repository-visible literal strings only.`);
-  }
-  const ready = normalizeProbe(value.ready, `${context}.ready`, ports);
-  if (ready.type === 'argv') {
-    throw new Error(`${context}.ready supports http or tcp only.`);
-  }
-  return {
-    ...common,
-    type: 'oci',
-    command: value.command === undefined ? undefined : normalizeCommand(value.command, context),
-    env: literalEnv as Record<string, string>,
-    ports,
-    ready,
-    dataMount: normalizeContainerMount(value.dataMount, context)
-  };
+  throw new Error(`${context}.type is unsupported.`);
 }
 
 function normalizeImage(
@@ -430,12 +389,6 @@ function normalizeImage(
     throw new Error(`${context}.image must be a bounded OCI image reference.`);
   }
   return image;
-}
-
-function normalizeResourceScope(value: unknown, context: string): 'generation' | 'preview' {
-  if (value === undefined || value === 'generation') return 'generation';
-  if (value === 'preview') return 'preview';
-  throw new Error(`${context}.scope must be generation or preview.`);
 }
 
 function normalizeResourceLimits(value: unknown, context: string): PreviewOciResourceLimits {
@@ -463,20 +416,6 @@ function normalizeResourceLimits(value: unknown, context: string): PreviewOciRes
   return normalized;
 }
 
-function normalizeContainerMount(value: unknown, context: string): string | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== 'string' ||
-    !value.startsWith('/') ||
-    value.includes('\0') ||
-    value.split('/').includes('..') ||
-    Buffer.byteLength(value) > 512
-  ) {
-    throw new Error(`${context}.dataMount must be a safe absolute container path.`);
-  }
-  return value;
-}
-
 function normalizeService(
   value: Record<string, unknown>,
   context: string,
@@ -495,7 +434,8 @@ function normalizeWorker(
   const common = normalizeLongRunning(value, context, id, false);
   return {
     ...common,
-    ready: value.ready === undefined ? undefined : normalizeProbe(value.ready, `${context}.ready`, common.ports)
+    ready: normalizeProbe(value.ready, `${context}.ready`, common.ports),
+    overlap: normalizeOverlap(value.overlap, `${context}.overlap`)
   };
 }
 
@@ -507,7 +447,10 @@ function normalizeLongRunning(
 ): Omit<PreviewServicePlan, 'ready'> {
   assertKeys(
     value,
-    ['label', 'cwd', 'command', 'needs', 'env', 'ports', 'ready', 'critical', 'restart', 'liveness'],
+    [
+      'label', 'cwd', 'command', 'needs', 'env', 'ports', 'ready', 'critical', 'restart', 'liveness',
+      ...(service ? [] : ['overlap'])
+    ],
     context
   );
   const normalizedEnv = normalizeEnvironment(value.env, `${context}.env`);
@@ -547,6 +490,12 @@ function normalizeLongRunning(
     restart: normalizeRestart(value.restart, `${context}.restart`),
     liveness: normalizeLiveness(value.liveness, `${context}.liveness`, ports)
   };
+}
+
+function normalizeOverlap(value: unknown, context: string): 'exclusive' | 'safe' {
+  if (value === undefined) return 'exclusive';
+  if (value !== 'safe') throw new Error(`${context} must be safe when declared.`);
+  return 'safe';
 }
 
 function normalizeProbe(
@@ -690,12 +639,6 @@ function validateEnvironmentReferences(
       }
       if (value.type === 'redis-url' && resource.type !== 'redis') {
         throw new Error(`${node.id}.env.${key} requires a Redis resource.`);
-      }
-      if (
-        value.type === 'resource-origin' &&
-        (resource.type !== 'oci' || !resource.ports[value.port])
-      ) {
-        throw new Error(`${node.id}.env.${key} references an unknown generic OCI port.`);
       }
     }
   }

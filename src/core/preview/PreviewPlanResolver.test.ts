@@ -35,6 +35,17 @@ describe('PreviewPlanResolver', () => {
     expect(first.warnings.join('\n')).toContain('mutable image reference');
     expect(first.warnings.join('\n')).toContain('disk size is advisory');
   });
+
+  it.each([
+    ['CPU', '{ cpus: 1 }', { cpu: false, memory: true, pids: true }],
+    ['memory', '{ memoryMb: 256 }', { cpu: true, memory: false, pids: true }],
+    ['PID', '{ pids: 64 }', { cpu: true, memory: true, pids: false }]
+  ] as const)('rejects requested %s enforcement before approval when unsupported', async (name, limits, support) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-plan-limits-'));
+    const worktreePath = path.join(root, 'worktree');
+    await fs.mkdir(worktreePath);
+    await expect(resolveOci(worktreePath, 'engine', support, limits)).rejects.toThrow(name);
+  });
 });
 
 function resolve(worktreePath: string, cwd: string) {
@@ -57,16 +68,21 @@ routes:
   });
 }
 
-function resolveOci(worktreePath: string, engineId: string) {
+function resolveOci(
+  worktreePath: string,
+  engineId: string,
+  support: { cpu: boolean; memory: boolean; pids: boolean } = { cpu: true, memory: true, pids: true },
+  limits = '{ cpus: 1, memoryMb: 256, diskMb: 1024 }'
+) {
   const now = '2026-01-01T00:00:00.000Z';
   const resolver = new PreviewPlanResolver({
     async probe() {
       return {
         status: 'READY' as const,
         contextName: 'desktop-linux',
-        supportsMemoryLimit: true,
-        supportsCpuLimit: true,
-        supportsPidsLimit: true,
+        supportsMemoryLimit: support.memory,
+        supportsCpuLimit: support.cpu,
+        supportsPidsLimit: support.pids,
         identity: {
           contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId,
           serverVersion: '28.0.4', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
@@ -82,7 +98,7 @@ function resolveOci(worktreePath: string, engineId: string) {
 resources:
   database:
     type: postgres
-    limits: { cpus: 1, memoryMb: 256, diskMb: 1024 }
+    limits: ${limits}
 services:
   web:
     command: [node, server.mjs]

@@ -21,12 +21,16 @@ import type {
   OpenPreviewResult,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
@@ -36,7 +40,7 @@ import type {
 export * from './agent';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 12 as const;
+export const TASK_STORE_SCHEMA_VERSION = 13 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -683,6 +687,9 @@ export interface TaskSnapshot {
   previewPlans: PreviewPlanRecord[];
   previewApprovals: PreviewApprovalRecord[];
   previewGenerations: PreviewGenerationRecord[];
+  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
   previewNodeAttempts: PreviewNodeAttemptRecord[];
   previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
@@ -1006,6 +1013,7 @@ export interface TaskManagerApi {
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
   readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
   resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord>;
+  retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

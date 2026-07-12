@@ -83,11 +83,6 @@ export type PreviewEnvironmentValue =
   | {
       type: 'redis-url';
       resource: string;
-    }
-  | {
-      type: 'resource-origin';
-      resource: string;
-      port: string;
     };
 
 export interface PreviewHttpReadinessPlan {
@@ -141,7 +136,8 @@ export interface PreviewServicePlan extends PreviewLongRunningPlan {
 }
 
 export interface PreviewWorkerPlan extends PreviewLongRunningPlan {
-  ready?: PreviewReadinessPlan;
+  ready: PreviewReadinessPlan;
+  overlap: 'exclusive' | 'safe';
 }
 
 export interface PreviewRoutePlan {
@@ -158,16 +154,10 @@ export interface PreviewOciResourceLimits {
   pids?: number;
 }
 
-export interface PreviewOciPortPlan {
-  containerPort: number;
-  protocol: 'tcp';
-}
-
 interface PreviewOciResourcePlanBase {
   id: string;
   label?: string;
   image: string;
-  scope: 'generation' | 'preview';
   limits: PreviewOciResourceLimits;
 }
 
@@ -180,19 +170,9 @@ export interface PreviewRedisResourcePlan extends PreviewOciResourcePlanBase {
   type: 'redis';
 }
 
-export interface PreviewGenericOciResourcePlan extends PreviewOciResourcePlanBase {
-  type: 'oci';
-  command?: string[];
-  env: Record<string, string>;
-  ports: Record<string, PreviewOciPortPlan>;
-  ready: PreviewHttpReadinessPlan | PreviewTcpReadinessPlan;
-  dataMount?: string;
-}
-
 export type PreviewOciResourcePlan =
   | PreviewPostgresResourcePlan
-  | PreviewRedisResourcePlan
-  | PreviewGenericOciResourcePlan;
+  | PreviewRedisResourcePlan;
 
 export interface PreviewScenarioPlan {
   id: string;
@@ -332,9 +312,86 @@ export interface PreviewOciObjectIdentity {
   labelsDigest: string;
   imageReference?: string;
   imageId?: string;
-  scope?: 'generation' | 'preview';
-  retainedForReset?: boolean;
   publishedPorts?: PreviewOciPublishedPort[];
+}
+
+export type PreviewManagedEnvironmentState =
+  | 'INTENDED'
+  | 'STARTING'
+  | 'READY'
+  | 'STOPPING'
+  | 'STOPPED'
+  | 'CLEANUP_INCOMPLETE';
+
+export interface PreviewManagedEnvironmentRecord {
+  id: string;
+  previewKey: string;
+  taskId: string;
+  state: PreviewManagedEnvironmentState;
+  engine: PreviewOciEngineIdentity;
+  network: PreviewOciObjectIdentity;
+  ownershipMarkerDigest: string;
+  cleanupAttemptedAt?: string;
+  cleanupError?: string;
+  createdAt: string;
+  updatedAt: string;
+  stoppedAt?: string;
+}
+
+export type PreviewManagedResourceState =
+  | 'INTENDED'
+  | 'STARTING'
+  | 'SETTING_UP'
+  | 'READY'
+  | 'SETUP_FAILED'
+  | 'RECOVERY_REQUIRED'
+  | 'FAILED'
+  | 'STOPPING'
+  | 'STOPPED'
+  | 'CLEANUP_INCOMPLETE';
+
+export interface PreviewManagedResourceBindingRecord {
+  id: string;
+  digest: string;
+  host: '127.0.0.1';
+  ports: Record<string, number>;
+  username?: string;
+  database?: string;
+}
+
+export interface PreviewManagedResourceRecord {
+  id: string;
+  taskId: string;
+  environmentId: string;
+  logicalResourceId: string;
+  type: 'postgres' | 'redis';
+  state: PreviewManagedResourceState;
+  planDigest: string;
+  ownershipMarkerDigest: string;
+  imageReference: string;
+  imageId?: string;
+  container: PreviewOciObjectIdentity;
+  volume: PreviewOciObjectIdentity;
+  binding?: PreviewManagedResourceBindingRecord;
+  creationAttemptedAt?: string;
+  setupAttemptedAt?: string;
+  readyAt?: string;
+  failureReason?: string;
+  cleanupAttemptedAt?: string;
+  cleanupError?: string;
+  createdAt: string;
+  updatedAt: string;
+  stoppedAt?: string;
+}
+
+export interface PreviewGenerationAttachmentRecord {
+  id: string;
+  taskId: string;
+  generationId: string;
+  managedResourceId: string;
+  logicalResourceId: string;
+  bindingId: string;
+  attachedAt: string;
 }
 
 interface PreviewResourceRecordBase {
@@ -419,6 +476,12 @@ export interface ResetPreviewDataRequest {
   taskId: string;
   generationId: string;
   resourceId: string;
+  scenarioId: string;
+}
+
+export interface RetryPreviewSetupRequest {
+  taskId: string;
+  generationId: string;
   scenarioId: string;
 }
 

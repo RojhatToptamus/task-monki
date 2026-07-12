@@ -16,6 +16,11 @@ let finalizing;
 let logError;
 const logCounts = { stdout: 0, stderr: 0 };
 const logWrites = { stdout: Promise.resolve(), stderr: Promise.resolve() };
+const logCarry = { stdout: '', stderr: '' };
+const redactions = Array.isArray(command.redactions)
+  ? [...new Set(command.redactions.filter((value) => typeof value === 'string' && value.length > 0))]
+      .sort((left, right) => right.length - left.length)
+  : [];
 const stopTimers = new Set();
 
 await writeReceipt({
@@ -174,8 +179,8 @@ function clearStopTimers() {
   stopTimers.clear();
 }
 
-async function appendBounded(stream, chunk) {
-  logWrites[stream] = logWrites[stream].then(() => appendBoundedNow(stream, chunk));
+async function appendBounded(stream, chunk, final = false) {
+  logWrites[stream] = logWrites[stream].then(() => appendBoundedNow(stream, chunk, final));
   return logWrites[stream];
 }
 
@@ -199,14 +204,19 @@ function captureBoundedLog(stream, readable) {
     );
   };
   readable.on('data', onData);
+  readable.once('end', () => {
+    void appendBounded(stream, Buffer.alloc(0), true).catch((error) => {
+      logError ??= `Could not finalize ${stream}: ${bounded(error?.message ?? error)}`;
+    });
+  });
 }
 
-async function appendBoundedNow(stream, chunk) {
+async function appendBoundedNow(stream, chunk, final) {
   const outputPath = stream === 'stdout' ? command.stdoutPath : command.stderrPath;
   if (!outputPath) return;
   const maxBytes = Number(command.maxLogBytes) || 262_144;
   if (logCounts[stream] >= maxBytes) return;
-  const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const input = redactLogChunk(stream, chunk, final);
   const remaining = maxBytes - logCounts[stream];
   const marker = Buffer.from('\n[Task Monki preview log truncated]\n');
   const truncated = input.length > remaining;
@@ -218,6 +228,27 @@ async function appendBoundedNow(stream, chunk) {
     : input;
   logCounts[stream] += output.length;
   await fs.appendFile(outputPath, output, { mode: 0o600 });
+}
+
+function redactLogChunk(stream, chunk, final) {
+  if (redactions.length === 0) return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const combined = logCarry[stream] + (Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+  let carryLength = 0;
+  if (!final) {
+    for (const secret of redactions) {
+      for (let length = Math.min(secret.length - 1, combined.length); length > carryLength; length -= 1) {
+        if (combined.endsWith(secret.slice(0, length))) {
+          carryLength = length;
+          break;
+        }
+      }
+    }
+  }
+  const ready = carryLength > 0 ? combined.slice(0, -carryLength) : combined;
+  logCarry[stream] = carryLength > 0 ? combined.slice(-carryLength) : '';
+  let redacted = ready;
+  for (const secret of redactions) redacted = redacted.split(secret).join('[REDACTED]');
+  return Buffer.from(redacted);
 }
 
 function baseReceipt(state) {

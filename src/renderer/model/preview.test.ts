@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createInitialProjection, type PreviewPlanRecord, type Task } from '../../shared/contracts';
+import {
+  createInitialProjection,
+  type PreviewManagedResourceRecord,
+  type PreviewPlanRecord,
+  type Task
+} from '../../shared/contracts';
 import {
   buildPreviewPlanSummary,
   buildPreviewViewModel,
@@ -148,6 +153,42 @@ describe('preview view model', () => {
     expect(approved.actions.find((action) => action.id === 'START')?.label).toBe('Replace');
   });
 
+  it('offers setup retry only when failed managed setup jobs explicitly declare retry safety', () => {
+    const plan = testPlan();
+    plan.executionPlan.jobs = [{
+      id: 'migrate', cwd: '.', command: ['npm', 'run', 'migrate'], needs: {}, env: {},
+      role: 'migration', retrySafe: true
+    }];
+    plan.executionPlan.scenarios[0].jobs = ['migrate'];
+    const approval = {
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK' as const, approvedAt: task.createdAt
+    };
+    const failed = {
+      id: 'failed', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
+      worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id,
+      executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty', workspacePath: '/failed', state: 'FAILED' as const,
+      routingState: 'RETIRED' as const, freshness: 'CURRENT' as const, routes: [],
+      failureReason: 'migration failed', createdAt: task.createdAt, updatedAt: task.updatedAt
+    };
+    const input = {
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [failed], attempts: [], managedResources: [setupFailedResource()],
+      generationAttachments: [{
+        id: 'attachment-1', taskId: task.id, generationId: failed.id,
+        managedResourceId: 'resource-1', logicalResourceId: 'database',
+        bindingId: 'binding-1', attachedAt: task.createdAt
+      }]
+    };
+
+    expect(buildPreviewViewModel(input).actions).toEqual([
+      { id: 'RETRY_SETUP', label: 'Retry setup', kind: 'primary' }
+    ]);
+    plan.executionPlan.jobs[0].retrySafe = false;
+    expect(buildPreviewViewModel(input).actions[0]?.id).toBe('START');
+  });
+
   it('renders every approval authority without ambiguous argv or hidden literal values', () => {
     const plan = testPlan();
     plan.executionPlan.jobs = [
@@ -184,4 +225,19 @@ function uncheckedWorktree() {
 
 function testPlan(): PreviewPlanRecord {
   return { id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1', recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const, recipeDigest: 'recipe', executionDigest: 'execution', executionPlan: { version: 1 as const, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' }, warnings: [], createdAt: task.createdAt };
+}
+
+function setupFailedResource(): PreviewManagedResourceRecord {
+  const engine = {
+    contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+    serverVersion: '28', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
+  };
+  return {
+    id: 'resource-1', taskId: task.id, environmentId: 'environment-1', logicalResourceId: 'database',
+    type: 'postgres', state: 'SETUP_FAILED', planDigest: 'plan', ownershipMarkerDigest: 'marker',
+    imageReference: 'postgres:17-alpine',
+    container: { engine, objectId: 'container-1', objectName: 'container', labelsDigest: 'labels' },
+    volume: { engine, objectId: 'volume-1', objectName: 'volume', labelsDigest: 'labels' },
+    createdAt: task.createdAt, updatedAt: task.updatedAt
+  };
 }

@@ -42,6 +42,30 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
     await expect(fs.readFile(fixture.stderrPath, 'utf8')).resolves.toBe('error');
   });
 
+  it('redacts runtime credentials from logs even when a secret crosses output chunks', async () => {
+    const fixture = await createFixture();
+    const password = 'credential-that-must-never-be-persisted';
+    const url = `redis://:${password}@127.0.0.1:41000/0`;
+    const owned = await fixture.host.launch({
+      ...fixture.input,
+      env: { ...fixture.input.env, PREVIEW_PASSWORD: password, PREVIEW_URL: url },
+      executable: process.execPath,
+      argv: ['-e', [
+        'const value = process.env.PREVIEW_PASSWORD;',
+        'process.stdout.write(value.slice(0, 12));',
+        'setTimeout(() => { process.stdout.write(value.slice(12) + "\\n" + process.env.PREVIEW_URL); }, 10);'
+      ].join(' ')],
+      redactions: [url, password, encodeURIComponent(password)],
+      async persistPrepared() {}
+    });
+    await expect(owned.completion).resolves.toMatchObject({ state: 'EXITED', exitCode: 0 });
+    const output = await fs.readFile(fixture.stdoutPath, 'utf8');
+    expect(output).not.toContain(password);
+    expect(output).not.toContain(url);
+    expect(output).toBe('[REDACTED]\n[REDACTED]');
+    expect(JSON.stringify(await readNativeLauncherReceipt(fixture.receiptPath))).not.toContain(password);
+  });
+
   it('fails the owned launch cleanly when bounded log capture cannot write', async () => {
     const fixture = await createFixture();
     const owned = await fixture.host.launch({

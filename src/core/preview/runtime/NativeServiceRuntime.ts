@@ -51,6 +51,7 @@ export class NativeServiceRuntime {
     resolvedEnv?: Record<string, string>;
     kind?: 'SERVICE' | 'WORKER';
     attempt?: number;
+    redactions?: string[];
   }): Promise<RunningNativeService> {
     const cwd = await resolvePreparedNodeCwd(input.sourcePath, input.node.cwd, input.node.id);
     const [executable, ...argv] = input.node.command;
@@ -108,6 +109,7 @@ export class NativeServiceRuntime {
       }),
       stdoutPath: stdout.path,
       stderrPath: stderr.path,
+      redactions: input.redactions,
       persistPrepared: async (identity) => {
         resource = await this.store.savePreviewResource({
           ...resource,

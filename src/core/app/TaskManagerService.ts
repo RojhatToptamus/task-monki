@@ -48,6 +48,7 @@ import type {
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
@@ -692,6 +693,13 @@ export class TaskManagerService {
   }
 
   async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(input);
+  }
+
+  private async startPreviewWithSetup(
+    input: StartPreviewRequest,
+    setupRetry?: RetryPreviewSetupRequest
+  ): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
     if (process.platform !== 'darwin') {
       throw new Error('Native previews are supported on macOS only.');
@@ -709,6 +717,9 @@ export class TaskManagerService {
       if (activeGeneration) {
         throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
       }
+      const setupRetryResourceIds = setupRetry
+        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
+        : undefined;
       const gitSnapshot = await this.refreshEvidence({ taskId: input.taskId });
       if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
         throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
@@ -717,7 +728,7 @@ export class TaskManagerService {
         context,
         gitSnapshot,
         reobserveGit: () => this.refreshEvidence({ taskId: input.taskId })
-      }, input.scenarioId);
+      }, input.scenarioId, setupRetryResourceIds);
     });
     return this.previews.execute(prepared);
   }
@@ -733,8 +744,16 @@ export class TaskManagerService {
 
   async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
-    await this.previews.resetData(input);
+    const context = await this.requirePreviewContext(input.taskId);
+    await this.previews.resetData({ ...input, context });
     return this.startPreview({ taskId: input.taskId, scenarioId: input.scenarioId });
+  }
+
+  async retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      input
+    );
   }
 
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {

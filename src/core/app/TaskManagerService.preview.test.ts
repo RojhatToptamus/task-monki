@@ -169,6 +169,74 @@ http.createServer((request, response) => {
     await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'version-two' });
   }, 30_000);
 
+  it('hands off an exclusive worker without overlap and restores the old graph after candidate activation fails', async () => {
+    const scenario = await previewScenario('task-monki-preview-exclusive-handoff');
+    const task = await scenario.createTask({ title: 'Exclusive worker handoff' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const lockPath = path.join(scenario.repositoryPath, 'exclusive-worker.lock');
+    const overlapPath = path.join(scenario.repositoryPath, 'exclusive-worker-overlap');
+    await fs.writeFile(path.join(worktree.worktreePath, 'server.mjs'), `
+import http from 'node:http';
+http.createServer((_request, response) => response.end('active')).listen(Number(process.env.PORT), '127.0.0.1');
+`);
+    await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), `
+import fs from 'node:fs';
+if (fs.existsSync(process.env.WORKER_LOCK)) fs.writeFileSync(process.env.OVERLAP_PATH, 'overlap');
+fs.writeFileSync(process.env.WORKER_LOCK, String(process.pid));
+const cleanup = () => { try { fs.unlinkSync(process.env.WORKER_LOCK); } catch {} process.exit(0); };
+process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup);
+setInterval(() => {}, 1000);
+`);
+    await fs.writeFile(
+      path.join(worktree.worktreePath, 'worker-ready.mjs'),
+      'setTimeout(() => process.exit(0), 250);\n'
+    );
+    await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
+version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: / }
+workers:
+  consumer:
+    command: [node, worker.mjs]
+    needs: { web: ready }
+    env:
+      WORKER_LOCK: ${JSON.stringify(lockPath)}
+      OVERLAP_PATH: ${JSON.stringify(overlapPath)}
+    ready: { type: argv, command: [node, worker-ready.mjs], timeoutSeconds: 2 }
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+    const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+    if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+    });
+    const active = await scenario.service.startPreview({ taskId: task.id });
+    const route = active.routes[0];
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'active' });
+
+    await fs.writeFile(path.join(worktree.worktreePath, 'worker.mjs'), `
+import fs from 'node:fs';
+if (fs.existsSync(process.env.WORKER_LOCK)) fs.writeFileSync(process.env.OVERLAP_PATH, 'overlap');
+process.exit(7);
+`);
+    await expect(scenario.service.startPreview({ taskId: task.id })).rejects.toThrow();
+
+    expect(await scenario.store.getPreviewGeneration(active.id)).toMatchObject({
+      state: 'READY', routingState: 'ACTIVE'
+    });
+    await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({ body: 'active' });
+    await expect(fs.access(overlapPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const attempts = await scenario.store.getPreviewNodeAttempts(active.id);
+    expect(attempts.some(
+      (attempt) => attempt.nodeId === 'consumer' && attempt.attempt === 2 && attempt.state === 'READY'
+    )).toBe(true);
+    await scenario.service.stopPreview({ taskId: task.id, generationId: active.id });
+  }, 30_000);
+
   it('runs a shared install, multiple services, typed origins, TCP and argv probes, routes, and a bounded worker restart', async () => {
     const scenario = await previewScenario('task-monki-preview-phase-two');
     const task = await scenario.createTask({ title: 'Phase 2 native graph' });
@@ -224,6 +292,7 @@ services:
 workers:
   indexer:
     command: [node, worker.mjs]
+    ready: { type: argv, command: [node, -e, process.exit(0)], timeoutSeconds: 5 }
     needs: { api: ready }
     env: { API_ORIGIN: { type: service-origin, service: api, port: http } }
     critical: true
@@ -241,7 +310,7 @@ routes:
     const attemptsAtCutover = await scenario.store.getPreviewNodeAttempts(generation.id);
     expect(
       attemptsAtCutover.some(
-        (attempt) => attempt.nodeId === 'indexer' && attempt.attempt === 2 && attempt.state === 'READY'
+        (attempt) => attempt.nodeId === 'indexer' && attempt.attempt === 1 && attempt.state === 'READY'
       )
     ).toBe(true);
     expect(generation.routes).toHaveLength(2);
@@ -309,6 +378,7 @@ services:
 workers:
   observer:
     command: [node, worker.mjs]
+    ready: { type: argv, command: [node, -e, process.exit(0)], timeoutSeconds: 5 }
     critical: false
     liveness:
       type: argv
@@ -391,6 +461,7 @@ services:
 workers:
   guard:
     command: [node, worker.mjs]
+    ready: { type: argv, command: [node, -e, process.exit(0)], timeoutSeconds: 5 }
     needs: { web: ready }
     critical: true
     restart: { mode: never, maxRestarts: 0 }
@@ -736,6 +807,7 @@ services:
 workers:
   worker:
     command: [node, worker.mjs]
+    ready: { type: argv, command: [node, -e, process.exit(0)], timeoutSeconds: 5 }
     needs: { seed: succeeded, database: ready, cache: ready }
     env:
       DATABASE_URL: { type: postgres-url, resource: database }

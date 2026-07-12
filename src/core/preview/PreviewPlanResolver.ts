@@ -44,7 +44,12 @@ export class PreviewPlanResolver {
       }
     }
 
-    const hasOciResources = input.parsed.executionPlan.resources.length > 0;
+    const selectedScenario = input.parsed.executionPlan.scenarios.find(
+      (scenario) => scenario.id === input.parsed.executionPlan.selectedScenarioId
+    );
+    const activeResourceIds = new Set(selectedScenario?.resources ?? []);
+    const activeResources = input.parsed.executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
+    const hasOciResources = activeResources.length > 0;
     const ociCapability: PreviewOciEngineCapability | undefined = hasOciResources
       ? await this.ociEngine?.probe() ?? {
           status: 'ENGINE_MISSING',
@@ -54,6 +59,7 @@ export class PreviewPlanResolver {
           reason: 'No Docker-compatible OCI engine adapter is configured.'
         }
       : undefined;
+    assertRequestedLimitsSupported(activeResources, ociCapability);
     return {
       id: randomUUID(),
       taskId: input.task.id,
@@ -71,10 +77,28 @@ export class PreviewPlanResolver {
         'Native preview commands run as your local user and are not sandboxed.',
         'Commands may access the network; Task Monki does not enforce a no-network mode.',
         'Environment values are repository-visible literals or generated non-secret origins; secret inputs are unsupported.',
-        ...ociWarnings(input.parsed.executionPlan.resources, ociCapability)
+        ...ociWarnings(activeResources, ociCapability)
       ],
       createdAt: input.now ?? new Date().toISOString()
     };
+  }
+}
+
+function assertRequestedLimitsSupported(
+  resources: import('../../shared/contracts').PreviewOciResourcePlan[],
+  capability: PreviewOciEngineCapability | undefined
+): void {
+  if (resources.length === 0 || capability?.status !== 'READY') return;
+  for (const resource of resources) {
+    if (resource.limits.cpus !== undefined && !capability.supportsCpuLimit) {
+      throw new Error(`OCI resource ${resource.id} requests CPU enforcement that the selected engine cannot provide.`);
+    }
+    if (resource.limits.memoryMb !== undefined && !capability.supportsMemoryLimit) {
+      throw new Error(`OCI resource ${resource.id} requests memory enforcement that the selected engine cannot provide.`);
+    }
+    if (resource.limits.pids !== undefined && !capability.supportsPidsLimit) {
+      throw new Error(`OCI resource ${resource.id} requests PID enforcement that the selected engine cannot provide.`);
+    }
   }
 }
 

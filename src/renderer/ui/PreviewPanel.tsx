@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   PreviewApprovalRecord,
+  PreviewGenerationAttachmentRecord,
   PreviewGenerationRecord,
+  PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
   ReadPreviewLogResult,
@@ -23,13 +25,16 @@ export function PreviewPanel(props: {
   plans: PreviewPlanRecord[];
   approvals: PreviewApprovalRecord[];
   generations: PreviewGenerationRecord[];
+  generationAttachments: PreviewGenerationAttachmentRecord[];
   attempts: PreviewNodeAttemptRecord[];
+  managedResources: PreviewManagedResourceRecord[];
   onResolve(taskId: string, scenarioId?: string): Promise<void>;
   onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
   onStart(taskId: string, scenarioId?: string): Promise<void>;
   onOpen(taskId: string, generationId: string, routeId: string): Promise<void>;
   onStop(taskId: string, generationId: string): Promise<void>;
   onResetData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
+  onRetrySetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
   onReadLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<ReadPreviewLogResult>;
 }) {
   const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
@@ -51,6 +56,13 @@ export function PreviewPanel(props: {
       if (action === 'START') {
         await props.onStart(props.task.id, view.plan?.executionPlan.selectedScenarioId);
       }
+      if (action === 'RETRY_SETUP' && view.generation && view.plan) {
+        await props.onRetrySetup(
+          props.task.id,
+          view.generation.id,
+          view.plan.executionPlan.selectedScenarioId
+        );
+      }
       const openGeneration = selectPreviewActionGeneration(view, 'OPEN');
       if (action === 'OPEN' && openGeneration) {
         const route = openGeneration.routes.find((candidate) => candidate.state === 'ATTACHED');
@@ -58,6 +70,8 @@ export function PreviewPanel(props: {
       }
       const stopGeneration = selectPreviewActionGeneration(view, 'STOP');
       if (action === 'STOP' && stopGeneration) {
+        const destructive = view.actions.find((candidate) => candidate.id === 'STOP')?.label.includes('Delete Data');
+        if (destructive && !window.confirm('Stop this preview and permanently delete its managed PostgreSQL/Redis data?')) return;
         await props.onStop(props.task.id, stopGeneration.id);
       }
     } finally {
@@ -124,7 +138,9 @@ export function PreviewPanel(props: {
     const generation = view.activeGeneration ?? view.generation;
     const scenarioId = view.plan?.executionPlan.selectedScenarioId;
     if (!generation || !scenarioId || resetBusy) return;
-    if (!window.confirm(`Reset owned preview data for ${resourceId} and rerun scenario ${scenarioId}?`)) return;
+    if (!window.confirm(
+      `Reset ${resourceId}? This stops the complete preview, permanently deletes this resource's data, and cannot restore it if recreation or setup fails.`
+    )) return;
     setResetBusy(resourceId);
     try {
       await props.onResetData(props.task.id, generation.id, resourceId, scenarioId);
@@ -180,7 +196,6 @@ export function PreviewPanel(props: {
           </button>
         ) : null}
         {(view.activeGeneration ?? view.generation)?.state === 'READY' && view.plan ? view.plan.executionPlan.resources
-          .filter((resource) => resource.type !== 'oci' || resource.dataMount)
           .map((resource) => (
             <button
               key={`reset-${resource.id}`}

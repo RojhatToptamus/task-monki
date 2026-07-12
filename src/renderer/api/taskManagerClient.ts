@@ -27,6 +27,7 @@ import type {
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
   RepositoryPreflight,
@@ -179,6 +180,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<ReadPreviewLogResult>(baseUrl, '/api/preview/log/read', input),
     resetPreviewData: (input: ResetPreviewDataRequest) =>
       post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
+    retryPreviewSetup: (input: RetryPreviewSetupRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/retry-setup', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

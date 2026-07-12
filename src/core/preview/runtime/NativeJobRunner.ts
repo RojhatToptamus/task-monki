@@ -40,6 +40,7 @@ export class NativeJobRunner {
     env?: Record<string, string>;
     timeoutMs?: number;
     signal?: AbortSignal;
+    redactions?: string[];
   }): Promise<NativeJobResult> {
     const cwd = await resolvePreparedNodeCwd(input.sourcePath, input.node.cwd, input.node.id);
     const [executable, ...argv] = input.node.command;
@@ -85,6 +86,7 @@ export class NativeJobRunner {
       env: buildPreviewEnvironment({ recipe: input.env }),
       stdoutPath: stdout.path,
       stderrPath: stderr.path,
+      redactions: input.redactions,
       persistPrepared: async (identity) => {
         resource = await this.store.savePreviewResource({
           ...resource,

@@ -1,6 +1,8 @@
 import type {
   PreviewApprovalRecord,
+  PreviewGenerationAttachmentRecord,
   PreviewGenerationRecord,
+  PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
   Task,
@@ -9,7 +11,7 @@ import type {
 import { PREVIEW_POSIX_INHERITED_ENV_KEYS } from '../../shared/preview';
 import type { PreviewLongRunningPlan, PreviewReadinessPlan } from '../../shared/preview';
 
-export type PreviewActionId = 'RESOLVE' | 'APPROVE' | 'START' | 'OPEN' | 'STOP';
+export type PreviewActionId = 'RESOLVE' | 'APPROVE' | 'START' | 'OPEN' | 'STOP' | 'RETRY_SETUP';
 
 export interface PreviewActionModel {
   id: PreviewActionId;
@@ -71,14 +73,13 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
     });
   }
   for (const resource of plan.executionPlan.resources) {
+    const active = scenario?.resources.includes(resource.id) ?? false;
     const type = resource.type === 'postgres'
       ? 'PostgreSQL'
-      : resource.type === 'redis'
-        ? 'Redis'
-        : 'Generic OCI';
+      : 'Redis';
     lines.push({
-      label: `Resource · ${resource.id}`,
-      value: `${type} · image=${JSON.stringify(resource.image)} · scope=${resource.scope}`
+      label: `${active ? 'Resource' : 'Inactive resource'} · ${resource.id}`,
+      value: `${type} · image=${JSON.stringify(resource.image)} · preview-owned stable lifecycle`
     });
     const limits = [
       resource.limits.cpus === undefined ? undefined : `cpus=${resource.limits.cpus}`,
@@ -100,34 +101,12 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
         label: `Generated access · ${resource.id}`,
         value: 'unique local port and password per owned data resource'
       });
-    } else {
-      if (resource.command) {
-        lines.push({ label: `Container command · ${resource.id}`, value: formatArgv(resource.command) });
-      }
-      for (const [key, value] of Object.entries(resource.env)) {
-        lines.push({ label: `Literal env · ${resource.id}`, value: `${key}=${JSON.stringify(value)}` });
-      }
-      for (const [portId, port] of Object.entries(resource.ports)) {
-        lines.push({
-          label: `Published port · ${resource.id}.${portId}`,
-          value: `127.0.0.1:<dynamic> → ${port.containerPort}/${port.protocol}`
-        });
-      }
-      lines.push({
-        label: `Readiness · ${resource.id}`,
-        value: `${resource.ready.type.toUpperCase()} 127.0.0.1:<dynamic ${resource.id}.${resource.ready.port}>${resource.ready.type === 'http' ? resource.ready.path : ''} · absolute deadline ${resource.ready.timeoutSeconds}s`
-      });
-      if (resource.dataMount) {
-        lines.push({
-          label: `Owned volume · ${resource.id}`,
-          value: `new labeled volume mounted at ${JSON.stringify(resource.dataMount)}`
-        });
-      }
     }
   }
   for (const job of plan.executionPlan.jobs) {
+    const active = job.role === 'generic' || (scenario?.jobs.includes(job.id) ?? false);
     lines.push({
-      label: `Job · ${job.id}`,
+      label: `${active ? 'Job' : 'Inactive job'} · ${job.id}`,
       value: `${formatArgv(job.command)} · cwd=${JSON.stringify(job.cwd)} · role=${job.role} · retry-safe=${job.retrySafe}`
     });
     if (Object.keys(job.needs).length > 0) {
@@ -158,7 +137,7 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
   lines.push({
     label: 'Cleanup',
     value: plan.executionPlan.resources.length > 0
-      ? 'Remove only exact engine-bound container, network, and volume identities with matching Task Monki labels; signal only verified native process groups; remove only the marker-owned generation workspace'
+      ? 'Stop Preview deletes exact preview-owned containers, volumes, network, and data; application-generation cleanup never owns managed resources'
       : 'Signal only the verified native process group; remove only the marker-owned generation workspace'
   });
   return lines;
@@ -173,6 +152,15 @@ function appendLongNodeSummary(
     label: `${kind} · ${node.id}`,
     value: `${formatArgv(node.command)} · cwd=${JSON.stringify(node.cwd)}`
   });
+  if (kind === 'Worker') {
+    const worker = node as import('../../shared/preview').PreviewWorkerPlan;
+    lines.push({
+      label: `Overlap · ${node.id}`,
+      value: worker.overlap === 'safe'
+        ? 'safe · old and candidate instances may overlap (approval-bound)'
+        : 'exclusive · old instance stops before candidate activation; bounded readiness required'
+    });
+  }
   if (Object.keys(node.needs).length > 0) {
     lines.push({
       label: `Dependencies · ${node.id}`,
@@ -207,7 +195,6 @@ function appendLongNodeSummary(
 function formatEnvironmentReference(value: Exclude<import('../../shared/preview').PreviewEnvironmentValue, string>): string {
   if (value.type === 'route-origin') return `<route-origin:${value.route}>`;
   if (value.type === 'service-origin') return `<service-origin:${value.service}.${value.port}>`;
-  if (value.type === 'resource-origin') return `<resource-origin:${value.resource}.${value.port}>`;
   return `<${value.type}:${value.resource}>`;
 }
 
@@ -230,6 +217,8 @@ export function buildPreviewViewModel(input: {
   plans: PreviewPlanRecord[];
   approvals: PreviewApprovalRecord[];
   generations: PreviewGenerationRecord[];
+  generationAttachments?: PreviewGenerationAttachmentRecord[];
+  managedResources?: PreviewManagedResourceRecord[];
   attempts: PreviewNodeAttemptRecord[];
 }): PreviewViewModel {
   if (!input.worktree || input.worktree.status !== 'PRESENT') {
@@ -297,7 +286,7 @@ export function buildPreviewViewModel(input: {
           ? [
               { id: 'OPEN' as const, label: 'Open current', kind: 'primary' as const },
               { id: 'APPROVE' as const, label: 'Approve plan', kind: 'secondary' as const },
-              { id: 'STOP' as const, label: 'Stop current', kind: 'secondary' as const }
+              { id: 'STOP' as const, label: 'Stop Preview & Delete Data', kind: 'secondary' as const }
             ]
           : [{ id: 'APPROVE' as const, label: 'Approve plan', kind: 'primary' as const }])
       ]
@@ -320,7 +309,7 @@ export function buildPreviewViewModel(input: {
         ? [
             { id: 'OPEN', label: 'Open current', kind: 'primary' },
             { id: 'START', label: 'Replace', kind: 'secondary' },
-            { id: 'STOP', label: 'Stop current', kind: 'secondary' }
+            { id: 'STOP', label: 'Stop Preview & Delete Data', kind: 'secondary' }
           ]
         : [{ id: 'START', label: 'Start preview', kind: 'primary' }]
     };
@@ -360,11 +349,26 @@ export function buildPreviewViewModel(input: {
       actions: [
         { id: 'OPEN', label: 'Open preview', kind: 'primary' },
         { id: 'START', label: 'Replace', kind: 'secondary' },
-        { id: 'STOP', label: 'Stop', kind: 'secondary' }
+        { id: 'STOP', label: 'Stop Preview & Delete Data', kind: 'secondary' }
       ]
     };
   }
   if (generation.state === 'FAILED') {
+    const scenario = plan.executionPlan.scenarios.find(
+      (candidate) => candidate.id === plan.executionPlan.selectedScenarioId
+    );
+    const setupJobs = plan.executionPlan.jobs.filter((job) => scenario?.jobs.includes(job.id));
+    const attachedResourceIds = new Set(
+      input.generationAttachments
+        ?.filter((attachment) => attachment.generationId === generation.id)
+        .map((attachment) => attachment.managedResourceId) ?? []
+    );
+    const canRetrySetup =
+      input.managedResources?.some(
+        (resource) => attachedResourceIds.has(resource.id) && resource.state === 'SETUP_FAILED'
+      ) === true &&
+      setupJobs.length > 0 &&
+      setupJobs.every((job) => job.retrySafe);
     return {
       status: 'Failed',
       tone: 'error',
@@ -373,7 +377,9 @@ export function buildPreviewViewModel(input: {
       approval,
       generation,
       latestAttempt,
-      actions: [{ id: 'START', label: 'Try again', kind: 'secondary' }]
+      actions: canRetrySetup
+        ? [{ id: 'RETRY_SETUP', label: 'Retry setup', kind: 'primary' }]
+        : [{ id: 'START', label: 'Try again', kind: 'secondary' }]
     };
   }
   if (generation.state === 'RECOVERY_REQUIRED') {
@@ -406,7 +412,7 @@ export function buildPreviewViewModel(input: {
     return {
       status: 'Stopped',
       tone: 'neutral',
-      summary: 'Runtime files are removed; compact manifest and log evidence is retained.',
+      summary: 'Runtime files and preview-managed data were deleted; compact manifest and log evidence is retained.',
       plan,
       approval,
       generation,

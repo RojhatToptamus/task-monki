@@ -1,42 +1,49 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
   PreviewOciEngineIdentity,
   PreviewOciObjectIdentity,
-  PreviewOciResourcePlan,
-  PreviewOciResourceRecord,
-  PreviewOciPublishedPort
+  PreviewOciPublishedPort,
+  PreviewOciResourcePlan
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { PreviewReadinessService } from '../PreviewReadinessService';
 import { OciEngineAdapter, OciEngineError } from './OciEngineAdapter';
 import {
   asRecord,
+  bindingDigest,
   boundedError,
-  buildBinding,
-  cleanupRank,
+  createObjectIdentity,
   delay,
   digestLabels,
-  expectedLabels,
-  generatedCredentials,
+  digestResourcePlan,
+  environmentLabels,
+  expectedEnvironmentLabels,
+  expectedManagedResourceLabels,
   isArchitectureMismatch,
   labelArgs,
   limitArgs,
-  objectCliType,
+  managedResourceLabels,
   objectName,
-  ownershipLabels,
   readLabels,
   resourceCommand,
-  resourceLiteralEnv,
   resourcePorts,
   resourceVolumeMount,
   sameLabels,
   throwIfAborted,
-  type OciAdapterKind
+  type OciObjectKind
 } from './OciResourceRuntimeSupport';
+import {
+  PreviewCredentialHost,
+  type HostedResourceCredential,
+  type RuntimeManagedResourceBinding
+} from './PreviewCredentialHost';
 
 const PULL_TIMEOUT_MS = 5 * 60_000;
 const MUTATION_TIMEOUT_MS = 60_000;
 const MAX_DISCOVERED_OBJECTS = 2;
+const RESOURCE_HEALTH_INTERVAL_MS = 1_000;
 
 export type OciRuntimeErrorCode =
   | 'ENGINE_MISSING'
@@ -47,6 +54,8 @@ export type OciRuntimeErrorCode =
   | 'IMAGE_ARCHITECTURE_MISMATCH'
   | 'CREATE_FAILED'
   | 'UNHEALTHY_CONTAINER'
+  | 'SETUP_FAILED'
+  | 'RECOVERY_REQUIRED'
   | 'CLEANUP_FAILED';
 
 export class OciRuntimeError extends Error {
@@ -55,307 +64,617 @@ export class OciRuntimeError extends Error {
   }
 }
 
-export interface OciResourceBinding {
-  ports: Record<string, number>;
-  postgresUrl?: string;
-  redisUrl?: string;
-}
+export type OciResourceBinding = RuntimeManagedResourceBinding;
 
-export interface RunningOciGeneration {
-  startResource(resource: PreviewOciResourcePlan, signal?: AbortSignal): Promise<OciResourceBinding>;
-  stop(): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>;
+export interface ManagedPreviewRuntime {
+  environment: PreviewManagedEnvironmentRecord;
+  resources: PreviewManagedResourceRecord[];
+  bindings: Record<string, OciResourceBinding>;
+  createdResourceIds: string[];
 }
 
 export interface OciResourceRuntimeHooks {
   afterMutation?(operation: 'network-create' | 'volume-create' | 'container-create'): Promise<void> | void;
 }
 
-interface GenerationContext {
-  taskId: string;
-  generationId: string;
-  markerDigest: string;
-  engine: PreviewOciEngineIdentity;
-  network: PreviewOciResourceRecord;
-  adoptedGenerationVolumes: PreviewOciResourceRecord[];
-}
-
 export class OciResourceRuntime {
+  private readonly healthStops = new Map<string, () => void>();
+
   constructor(
     private readonly store: FileTaskStore,
     private readonly engine: OciEngineAdapter,
     private readonly readiness: PreviewReadinessService,
+    private readonly credentials: PreviewCredentialHost,
     private readonly hooks: OciResourceRuntimeHooks = {}
   ) {}
 
-  async startGeneration(input: {
+  redactionValues(): string[] {
+    return this.credentials.redactionValues();
+  }
+
+  async ensureManagedPreview(input: {
     taskId: string;
-    generationId: string;
+    previewKey: string;
     markerDigest: string;
     expectedEngine: PreviewOciEngineIdentity;
-  }): Promise<RunningOciGeneration> {
-    const capability = await this.requireEngine(input.expectedEngine);
-    const context: GenerationContext = {
-      ...input,
-      engine: capability.identity,
-      adoptedGenerationVolumes: [],
-      network: await this.createObject({
-        ...input,
-        engine: capability.identity,
-        logicalNodeId: '__network',
-        kind: 'OCI_NETWORK',
-        operation: 'network-create',
-        createArgs: (name, labels) => ['network', 'create', ...labelArgs(labels), name]
-      })
-    };
-    let stopOperation: Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> | undefined;
-    return {
-      startResource: (resource, signal) => this.startResource(context, resource, signal),
-      stop: () => stopOperation ??= this.stopGenerationContext(context)
-    };
-  }
-
-  async stopGeneration(generationId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    const resources = await this.store.getPreviewResources(generationId);
-    let result: 'STOPPED' | 'ALREADY_EXITED' | 'REFUSED' = resources.length === 0 ? 'ALREADY_EXITED' : 'STOPPED';
-    const ordered = [...resources].sort((left, right) => cleanupRank(left) - cleanupRank(right));
-    for (const resource of ordered) {
-      if (resource.adapterKind === 'NATIVE_PROCESS' || resource.state === 'STOPPED') continue;
-      if (
-        resource.adapterKind === 'OCI_VOLUME' &&
-        (resource.oci.scope === 'preview' || resource.oci.retainedForReset)
-      ) continue;
-      const stopped = await this.stop(resource).catch(() => 'REFUSED' as const);
-      if (stopped === 'REFUSED') result = 'REFUSED';
-    }
-    return result;
-  }
-
-  async cleanupTaskResources(taskId?: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    const resources = (await this.store.getPreviewResources())
-      .filter((resource): resource is PreviewOciResourceRecord =>
-        resource.adapterKind !== 'NATIVE_PROCESS' &&
-        (!taskId || resource.taskId === taskId) &&
-        resource.state !== 'STOPPED'
-      )
-      .sort((left, right) => cleanupRank(left) - cleanupRank(right));
-    let result: 'STOPPED' | 'ALREADY_EXITED' | 'REFUSED' = resources.length ? 'STOPPED' : 'ALREADY_EXITED';
-    for (const resource of resources) {
-      if (await this.stop(resource) === 'REFUSED') result = 'REFUSED';
-    }
-    return result;
-  }
-
-  async resetDataResource(
-    taskId: string,
-    logicalNodeId: string
-  ): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    const resources = (await this.store.getPreviewResources())
-      .filter((resource): resource is PreviewOciResourceRecord =>
-        resource.adapterKind === 'OCI_VOLUME' &&
-        resource.taskId === taskId &&
-        resource.logicalNodeId === logicalNodeId &&
-        resource.state !== 'STOPPED'
+    resources: PreviewOciResourcePlan[];
+    retrySetupResourceIds?: string[];
+    signal?: AbortSignal;
+  }): Promise<ManagedPreviewRuntime> {
+    const environment = await this.ensureEnvironment(input);
+    const bindings: Record<string, OciResourceBinding> = {};
+    const records: PreviewManagedResourceRecord[] = [];
+    const createdResourceIds: string[] = [];
+    for (const plan of input.resources) {
+      throwIfAborted(input.signal);
+      const existing = (await this.store.getPreviewManagedResources(input.taskId)).find(
+        (candidate) =>
+          candidate.environmentId === environment.id &&
+          candidate.logicalResourceId === plan.id &&
+          candidate.state !== 'STOPPED'
       );
-    if (resources.length > 1) {
-      throw new Error(`Preview data ownership is ambiguous for ${logicalNodeId}.`);
+      if (existing) {
+        if (existing.planDigest !== digestResourcePlan(plan) || existing.type !== plan.type) {
+          throw new Error(`Managed resource ${plan.id} differs from the approved stable preview resource; reset it explicitly.`);
+        }
+        const retryingSetup =
+          existing.state === 'SETUP_FAILED' && input.retrySetupResourceIds?.includes(existing.id);
+        if (existing.state !== 'READY' && !retryingSetup) {
+          throw new Error(`Managed resource ${plan.id} is ${existing.state.toLowerCase().replace(/_/g, ' ')} and is not reusable.`);
+        }
+        await this.verifyManagedResource(existing);
+        bindings[plan.id] = this.credentials.requireBinding(existing.id);
+        const reusable = retryingSetup
+          ? await this.store.savePreviewManagedResource({
+              ...existing,
+              state: 'SETTING_UP',
+              setupAttemptedAt: new Date().toISOString(),
+              failureReason: undefined,
+              updatedAt: new Date().toISOString()
+            })
+          : existing;
+        records.push(reusable);
+        if (retryingSetup) createdResourceIds.push(existing.id);
+        continue;
+      }
+      const created = await this.createManagedResource(environment, plan, input.markerDigest, input.signal);
+      bindings[plan.id] = this.credentials.requireBinding(created.id);
+      records.push(created);
+      createdResourceIds.push(created.id);
     }
-    return resources[0] ? this.stop(resources[0]) : 'ALREADY_EXITED';
+    return { environment, resources: records, bindings, createdResourceIds };
   }
 
-  async prepareDataReset(generationId: string): Promise<void> {
-    for (const resource of await this.store.getPreviewResources(generationId)) {
-      if (
-        resource.adapterKind !== 'OCI_VOLUME' ||
-        resource.state === 'STOPPED'
-      ) continue;
-      await this.store.savePreviewResource({
+  async verifyManagedPreview(input: {
+    taskId: string;
+    expectedEngine: PreviewOciEngineIdentity;
+    resources: PreviewOciResourcePlan[];
+    allowSetupFailed?: boolean;
+  }): Promise<{ environment: PreviewManagedEnvironmentRecord; resources: PreviewManagedResourceRecord[] }> {
+    const environment = await this.store.getPreviewManagedEnvironment(input.taskId);
+    if (!environment || environment.state !== 'READY') {
+      throw new Error('Managed preview environment is not ready.');
+    }
+    await this.requireEngine(input.expectedEngine);
+    if (
+      environment.engine.contextName !== input.expectedEngine.contextName ||
+      environment.engine.endpointDigest !== input.expectedEngine.endpointDigest ||
+      environment.engine.engineId !== input.expectedEngine.engineId
+    ) {
+      throw new OciRuntimeError('ENGINE_IDENTITY_MISMATCH', 'The approved OCI engine no longer owns this preview environment.');
+    }
+    await this.assertObject('network', environment.network, expectedEnvironmentLabels(
+      this.store.getStoreIdentity(), environment
+    ));
+    const records: PreviewManagedResourceRecord[] = [];
+    for (const plan of input.resources) {
+      const resource = (await this.store.getPreviewManagedResources(input.taskId)).find(
+        (candidate) =>
+          candidate.environmentId === environment.id &&
+          candidate.logicalResourceId === plan.id &&
+          (candidate.state === 'READY' || (input.allowSetupFailed && candidate.state === 'SETUP_FAILED'))
+      );
+      if (!resource || resource.planDigest !== digestResourcePlan(plan)) {
+        throw new Error(`Managed resource ${plan.id} does not match the current approved plan.`);
+      }
+      this.credentials.requireBinding(resource.id);
+      await this.verifyManagedResource(resource);
+      records.push(resource);
+    }
+    return { environment, resources: records };
+  }
+
+  async markSetupReady(resourceIds: string[]): Promise<void> {
+    for (const resourceId of resourceIds) {
+      const resource = await this.requireManagedResource(resourceId);
+      if (resource.state !== 'SETTING_UP') continue;
+      await this.store.savePreviewManagedResource({
         ...resource,
-        oci: { ...resource.oci, retainedForReset: true },
+        state: 'READY',
+        readyAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
     }
   }
 
-  private async stopGenerationContext(
-    context: GenerationContext
-  ): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    let result = await this.stopGeneration(context.generationId);
-    for (const volume of context.adoptedGenerationVolumes) {
-      const stopped = await this.stop(volume).catch(() => 'REFUSED' as const);
-      if (stopped === 'REFUSED') result = 'REFUSED';
-      else if (result === 'ALREADY_EXITED') result = 'STOPPED';
+  async markSetupFailure(
+    resourceIds: string[],
+    input: { ambiguous: boolean; reason: string }
+  ): Promise<void> {
+    for (const resourceId of resourceIds) {
+      const resource = await this.requireManagedResource(resourceId);
+      if (!['SETTING_UP', 'STARTING'].includes(resource.state)) continue;
+      await this.store.savePreviewManagedResource({
+        ...resource,
+        state: input.ambiguous ? 'RECOVERY_REQUIRED' : 'SETUP_FAILED',
+        failureReason: this.credentials.redact(input.reason).slice(0, 512),
+        updatedAt: new Date().toISOString()
+      });
     }
-    return result;
   }
 
-  async stop(resource: PreviewOciResourceRecord): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    const now = new Date().toISOString();
-    try {
-      await this.requireEngine(resource.oci.engine);
-      const objectId = resource.oci.objectId ?? await this.discoverExactObject(resource);
-      if (!objectId) {
-        await this.store.savePreviewResource({
-          ...resource,
-          state: 'STOPPED',
-          cleanupAttemptedAt: now,
-          updatedAt: now
+  watchRequiredResources(
+    taskId: string,
+    onFailure: (resource: PreviewManagedResourceRecord, reason: string) => Promise<void>
+  ): () => void {
+    this.healthStops.get(taskId)?.();
+    let stopped = false;
+    let checking = false;
+    const timer = setInterval(() => {
+      if (stopped || checking) return;
+      checking = true;
+      void this.checkRequiredResources(taskId)
+        .then(async (failure) => {
+          if (!failure || stopped) return;
+          stopped = true;
+          clearInterval(timer);
+          this.healthStops.delete(taskId);
+          await onFailure(failure.resource, failure.reason);
+        })
+        .finally(() => {
+          checking = false;
         });
-        return 'ALREADY_EXITED';
-      }
-      await this.assertExactOwnership(resource, objectId);
-      await this.removeObject(resource.adapterKind, objectId, resource.oci.engine.contextName);
-      await this.store.savePreviewResource({
+    }, RESOURCE_HEALTH_INTERVAL_MS);
+    timer.unref?.();
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      if (this.healthStops.get(taskId) === stop) this.healthStops.delete(taskId);
+    };
+    this.healthStops.set(taskId, stop);
+    return stop;
+  }
+
+  async stopManagedResource(resourceId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+    let resource = await this.requireManagedResource(resourceId);
+    if (resource.state === 'STOPPED') return 'ALREADY_EXITED';
+    const now = new Date().toISOString();
+    resource = await this.store.savePreviewManagedResource({
+      ...resource,
+      state: 'STOPPING',
+      cleanupAttemptedAt: now,
+      updatedAt: now
+    });
+    try {
+      await this.requireEngine(resource.container.engine);
+      await this.removeOwnedObject('container', resource.container, expectedManagedResourceLabels(
+        this.store.getStoreIdentity(), resource, 'container'
+      ));
+      await this.removeOwnedObject('volume', resource.volume, expectedManagedResourceLabels(
+        this.store.getStoreIdentity(), resource, 'volume'
+      ));
+      await this.credentials.delete(resource.id);
+      await this.store.savePreviewManagedResource({
         ...resource,
         state: 'STOPPED',
-        oci: { ...resource.oci, objectId },
-        cleanupAttemptedAt: now,
         cleanupError: undefined,
-        updatedAt: now
+        updatedAt: new Date().toISOString(),
+        stoppedAt: new Date().toISOString()
       });
       return 'STOPPED';
     } catch (error) {
-      await this.store.savePreviewResource({
+      await this.store.savePreviewManagedResource({
         ...resource,
         state: 'CLEANUP_INCOMPLETE',
-        cleanupAttemptedAt: now,
-        cleanupError: boundedError(error),
-        updatedAt: now
+        cleanupError: this.credentials.redact(boundedError(error)),
+        updatedAt: new Date().toISOString()
       });
       return 'REFUSED';
     }
   }
 
-  private async startResource(
-    context: GenerationContext,
-    resource: PreviewOciResourcePlan,
-    signal?: AbortSignal
-  ): Promise<OciResourceBinding> {
-    throwIfAborted(signal);
-    const credentials = generatedCredentials(resource);
-    const volume = resourceVolumeMount(resource)
-      ? await this.findReusableVolume(context, resource) ?? (resource.scope === 'preview'
-        ? await this.createObject({
-            ...context,
-            logicalNodeId: resource.id,
-            kind: 'OCI_VOLUME',
-            scope: 'preview',
-            operation: 'volume-create',
-            createArgs: (name, labels) => ['volume', 'create', ...labelArgs(labels), name]
-          })
-        : await this.createObject({
-          ...context,
-          logicalNodeId: resource.id,
-          kind: 'OCI_VOLUME',
-          scope: 'generation',
-          operation: 'volume-create',
-          createArgs: (name, labels) => ['volume', 'create', ...labelArgs(labels), name]
-        }))
-      : undefined;
-    throwIfAborted(signal);
-    const contextArgs = ['--context', context.engine.contextName];
-    let imageId = await this.inspectLocalImage(contextArgs, resource.image);
-    if (!imageId) {
-      try {
-        await this.engine.run(
-          [...contextArgs, 'pull', resource.image],
-          this.engine.environment(),
-          { timeoutMs: PULL_TIMEOUT_MS }
-        );
-      } catch (error) {
-        if (isArchitectureMismatch(error)) {
-          throw new OciRuntimeError(
-            'IMAGE_ARCHITECTURE_MISMATCH',
-            `OCI image architecture is incompatible for ${resource.id}: ${boundedError(error)}`,
-            { cause: error }
-          );
-        }
-        throw new OciRuntimeError(
-          'IMAGE_PULL_FAILED',
-          `OCI image pull failed for ${resource.id}: ${boundedError(error)}`,
-          { cause: error }
-        );
-      }
-      imageId = await this.inspectLocalImage(contextArgs, resource.image);
-    }
-    if (!imageId) throw new OciRuntimeError('IMAGE_PULL_FAILED', `OCI image ${resource.image} has no image ID.`);
-
-    const ports = resourcePorts(resource);
-    const env = this.engine.environment({
-      ...credentials.environment,
-      ...resourceLiteralEnv(resource)
-    });
-    let container: PreviewOciResourceRecord;
-    try {
-      container = await this.createObject({
-        ...context,
-        logicalNodeId: resource.id,
-        kind: 'OCI_CONTAINER',
-        scope: 'generation',
-        operation: 'container-create',
-        imageReference: resource.image,
-        imageId,
-        createArgs: (name, labels) => [
-          'container', 'create', '--name', name,
-          ...labelArgs(labels),
-          '--network', context.network.oci.objectId!,
-          ...limitArgs(resource),
-          ...Object.keys({ ...credentials.environment, ...resourceLiteralEnv(resource) })
-            .sort().flatMap((key) => ['--env', key]),
-          ...Object.values(ports).flatMap((port) => [
-            '--publish', `127.0.0.1::${port.containerPort}/${port.protocol}`
-          ]),
-          ...(volume ? ['--mount', `type=volume,src=${volume.oci.objectId},dst=${resourceVolumeMount(resource)}`] : []),
-          imageId,
-          ...resourceCommand(resource)
-        ],
-        env
-      });
-      await this.engine.run([...contextArgs, 'container', 'start', container.oci.objectId!]);
-    } catch (error) {
-      if (error instanceof OciRuntimeError) throw error;
-      if (isArchitectureMismatch(error)) {
-        throw new OciRuntimeError(
-          'IMAGE_ARCHITECTURE_MISMATCH',
-          `OCI image architecture is incompatible for ${resource.id}: ${boundedError(error)}`,
-          { cause: error }
-        );
-      }
-      throw new OciRuntimeError(
-        'CREATE_FAILED',
-        `OCI container creation failed for ${resource.id}: ${boundedError(error)}`,
-        { cause: error }
-      );
-    }
-
-    const publishedPorts = await this.waitForPublishedPorts(
-      container,
-      Object.keys(ports).length,
-      signal
+  async stopManagedEnvironment(environmentId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+    let environment = (await this.store.getPreviewManagedEnvironments()).find(
+      (candidate) => candidate.id === environmentId
     );
-    container = await this.store.savePreviewResource({
-      ...container,
-      state: 'RUNNING',
-      oci: { ...container.oci, publishedPorts },
-      targetHost: '127.0.0.1',
-      targetPort: publishedPorts[0]?.hostPort,
-      updatedAt: new Date().toISOString()
+    if (!environment) throw new Error(`Managed preview environment not found: ${environmentId}`);
+    if (environment.state === 'STOPPED') return 'ALREADY_EXITED';
+    const liveResource = (await this.store.getPreviewManagedResources(environment.taskId)).find(
+      (resource) => resource.environmentId === environmentId && resource.state !== 'STOPPED'
+    );
+    if (liveResource) return 'REFUSED';
+    const now = new Date().toISOString();
+    environment = await this.store.savePreviewManagedEnvironment({
+      ...environment,
+      state: 'STOPPING',
+      cleanupAttemptedAt: now,
+      updatedAt: now
     });
-    const binding = buildBinding(resource, credentials, ports, publishedPorts);
     try {
-      await this.waitUntilReady(resource, binding, container, credentials.environment, signal);
+      await this.requireEngine(environment.engine);
+      await this.removeOwnedObject('network', environment.network, expectedEnvironmentLabels(
+        this.store.getStoreIdentity(), environment
+      ));
+      await this.store.savePreviewManagedEnvironment({
+        ...environment,
+        state: 'STOPPED',
+        cleanupError: undefined,
+        updatedAt: new Date().toISOString(),
+        stoppedAt: new Date().toISOString()
+      });
+      return 'STOPPED';
     } catch (error) {
-      await this.store.savePreviewResource({
-        ...container,
-        state: 'FAILED',
+      await this.store.savePreviewManagedEnvironment({
+        ...environment,
+        state: 'CLEANUP_INCOMPLETE',
+        cleanupError: this.credentials.redact(boundedError(error)),
         updatedAt: new Date().toISOString()
       });
-      throw new OciRuntimeError(
-        'UNHEALTHY_CONTAINER',
-        `OCI resource ${resource.id} did not become healthy: ${boundedError(error)}`,
-        { cause: error }
-      );
+      return 'REFUSED';
     }
-    return binding;
+  }
+
+  async cleanupTaskResources(taskId?: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+    if (taskId) this.healthStops.get(taskId)?.();
+    else for (const stop of this.healthStops.values()) stop();
+    let changed = false;
+    let refused = false;
+    const resources = (await this.store.getPreviewManagedResources(taskId)).filter(
+      (resource) => resource.state !== 'STOPPED'
+    );
+    for (const resource of resources) {
+      changed = true;
+      if (await this.stopManagedResource(resource.id) === 'REFUSED') refused = true;
+    }
+    const environments = (await this.store.getPreviewManagedEnvironments()).filter(
+      (environment) => (!taskId || environment.taskId === taskId) && environment.state !== 'STOPPED'
+    );
+    for (const environment of environments) {
+      changed = true;
+      if (await this.stopManagedEnvironment(environment.id) === 'REFUSED') refused = true;
+    }
+    return refused ? 'REFUSED' : changed ? 'STOPPED' : 'ALREADY_EXITED';
+  }
+
+  async replaceManagedResource(input: {
+    taskId: string;
+    logicalResourceId: string;
+    plan: PreviewOciResourcePlan;
+    markerDigest: string;
+    signal?: AbortSignal;
+  }): Promise<{ resource: PreviewManagedResourceRecord; binding: OciResourceBinding }> {
+    const environment = await this.store.getPreviewManagedEnvironment(input.taskId);
+    if (!environment || environment.state !== 'READY') {
+      throw new Error('Managed preview environment is not ready for resource reset.');
+    }
+    const current = (await this.store.getPreviewManagedResources(input.taskId)).find(
+      (resource) => resource.logicalResourceId === input.logicalResourceId && resource.state !== 'STOPPED'
+    );
+    if (!current) throw new Error(`Managed resource ${input.logicalResourceId} was not found.`);
+    if (await this.stopManagedResource(current.id) === 'REFUSED') {
+      throw new OciRuntimeError('CLEANUP_FAILED', `Managed resource ${input.logicalResourceId} cleanup is incomplete.`);
+    }
+    const resource = await this.createManagedResource(environment, input.plan, input.markerDigest, input.signal);
+    return { resource, binding: this.credentials.requireBinding(resource.id) };
+  }
+
+  private async ensureEnvironment(input: {
+    taskId: string;
+    previewKey: string;
+    markerDigest: string;
+    expectedEngine: PreviewOciEngineIdentity;
+  }): Promise<PreviewManagedEnvironmentRecord> {
+    const existing = await this.store.getPreviewManagedEnvironment(input.taskId);
+    if (existing && existing.state !== 'STOPPED') {
+      if (existing.state !== 'READY') {
+        throw new Error(`Managed preview environment is ${existing.state.toLowerCase().replace(/_/g, ' ')}.`);
+      }
+      await this.requireEngine(existing.engine);
+      await this.assertObject('network', existing.network, expectedEnvironmentLabels(
+        this.store.getStoreIdentity(), existing
+      ));
+      return existing;
+    }
+    const capability = await this.requireEngine(input.expectedEngine);
+    const id = randomUUID();
+    const labels = environmentLabels(this.store.getStoreIdentity(), {
+      taskId: input.taskId,
+      environmentId: id,
+      markerDigest: input.markerDigest
+    });
+    const network = createObjectIdentity({
+      engine: capability.identity,
+      objectName: objectName('network', id, input.previewKey),
+      labels
+    });
+    const now = new Date().toISOString();
+    let environment = await this.store.savePreviewManagedEnvironment({
+      id,
+      previewKey: input.previewKey,
+      taskId: input.taskId,
+      state: 'INTENDED',
+      engine: capability.identity,
+      network,
+      ownershipMarkerDigest: input.markerDigest,
+      createdAt: now,
+      updatedAt: now
+    });
+    try {
+      environment = await this.store.savePreviewManagedEnvironment({
+        ...environment,
+        state: 'STARTING',
+        updatedAt: new Date().toISOString()
+      });
+      const result = await this.engine.run([
+        '--context', capability.identity.contextName,
+        'network', 'create', ...labelArgs(labels), network.objectName
+      ], this.engine.environment(), { timeoutMs: MUTATION_TIMEOUT_MS });
+      await this.hooks.afterMutation?.('network-create');
+      const objectId = result.stdout.trim();
+      if (!objectId) throw new Error('Network creation returned no object identity.');
+      const createdNetwork = { ...network, objectId };
+      await this.assertObject('network', createdNetwork, labels);
+      return this.store.savePreviewManagedEnvironment({
+        ...environment,
+        state: 'READY',
+        network: createdNetwork,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      await this.store.savePreviewManagedEnvironment({
+        ...environment,
+        state: 'CLEANUP_INCOMPLETE',
+        cleanupError: this.credentials.redact(boundedError(error)),
+        updatedAt: new Date().toISOString()
+      });
+      throw error;
+    }
+  }
+
+  private async createManagedResource(
+    environment: PreviewManagedEnvironmentRecord,
+    plan: PreviewOciResourcePlan,
+    markerDigest: string,
+    signal?: AbortSignal
+  ): Promise<PreviewManagedResourceRecord> {
+    throwIfAborted(signal);
+    const id = randomUUID();
+    const containerLabels = managedResourceLabels(this.store.getStoreIdentity(), {
+      taskId: environment.taskId,
+      environmentId: environment.id,
+      managedResourceId: id,
+      logicalResourceId: plan.id,
+      markerDigest,
+      kind: 'container'
+    });
+    const volumeLabels = managedResourceLabels(this.store.getStoreIdentity(), {
+      taskId: environment.taskId,
+      environmentId: environment.id,
+      managedResourceId: id,
+      logicalResourceId: plan.id,
+      markerDigest,
+      kind: 'volume'
+    });
+    const container = createObjectIdentity({
+      engine: environment.engine,
+      objectName: objectName('container', id, plan.id),
+      labels: containerLabels,
+      imageReference: plan.image
+    });
+    const volume = createObjectIdentity({
+      engine: environment.engine,
+      objectName: objectName('volume', id, plan.id),
+      labels: volumeLabels
+    });
+    const now = new Date().toISOString();
+    let record = await this.store.savePreviewManagedResource({
+      id,
+      taskId: environment.taskId,
+      environmentId: environment.id,
+      logicalResourceId: plan.id,
+      type: plan.type,
+      state: 'INTENDED',
+      planDigest: digestResourcePlan(plan),
+      ownershipMarkerDigest: markerDigest,
+      imageReference: plan.image,
+      container,
+      volume,
+      creationAttemptedAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
+    const credential = await this.credentials.create(id, plan);
+    try {
+      record = await this.store.savePreviewManagedResource({
+        ...record,
+        state: 'STARTING',
+        updatedAt: new Date().toISOString()
+      });
+      const volumeResult = await this.engine.run([
+        '--context', environment.engine.contextName,
+        'volume', 'create', ...labelArgs(volumeLabels), volume.objectName
+      ], this.engine.environment(), { timeoutMs: MUTATION_TIMEOUT_MS });
+      await this.hooks.afterMutation?.('volume-create');
+      const volumeId = volumeResult.stdout.trim();
+      if (!volumeId) throw new Error('Volume creation returned no object identity.');
+      const createdVolume = { ...volume, objectId: volumeId };
+      await this.assertObject('volume', createdVolume, volumeLabels);
+      record = await this.store.savePreviewManagedResource({
+        ...record,
+        volume: createdVolume,
+        updatedAt: new Date().toISOString()
+      });
+
+      const imageId = await this.requireImage(environment.engine, plan);
+      const createdContainer = await this.createContainer(
+        environment, record, plan, credential, imageId, containerLabels
+      );
+      record = await this.store.savePreviewManagedResource({
+        ...record,
+        container: createdContainer,
+        imageId,
+        updatedAt: new Date().toISOString()
+      });
+      const publishedPorts = await this.waitForPublishedPorts(createdContainer, Object.keys(resourcePorts(plan)).length, signal);
+      const ports = this.mapPublishedPorts(plan, publishedPorts);
+      const binding = this.credentials.bind(id, plan, ports);
+      const bindingId = randomUUID();
+      record = await this.store.savePreviewManagedResource({
+        ...record,
+        state: 'SETTING_UP',
+        container: { ...createdContainer, publishedPorts },
+        binding: {
+          id: bindingId,
+          digest: bindingDigest({
+            id: bindingId,
+            type: plan.type,
+            host: '127.0.0.1',
+            ports,
+            username: credential.username,
+            database: plan.type === 'postgres' ? plan.database : undefined
+          }),
+          host: '127.0.0.1',
+          ports,
+          username: credential.username,
+          database: plan.type === 'postgres' ? plan.database : undefined
+        },
+        setupAttemptedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      await this.waitUntilAuthenticated(plan, record, credential, binding, signal);
+      return record;
+    } catch (error) {
+      const message = this.credentials.redact(boundedError(error));
+      await this.store.savePreviewManagedResource({
+        ...record,
+        state: 'FAILED',
+        failureReason: message,
+        updatedAt: new Date().toISOString()
+      });
+      if (error instanceof OciRuntimeError) throw error;
+      throw new OciRuntimeError('CREATE_FAILED', `Managed resource ${plan.id} creation failed: ${message}`, { cause: error });
+    }
+  }
+
+  private async createContainer(
+    environment: PreviewManagedEnvironmentRecord,
+    record: PreviewManagedResourceRecord,
+    plan: PreviewOciResourcePlan,
+    credential: HostedResourceCredential,
+    imageId: string,
+    labels: Record<string, string>
+  ): Promise<PreviewOciObjectIdentity> {
+    const ports = resourcePorts(plan);
+    const env = this.engine.environment(credential.containerEnvironment);
+    const result = await this.engine.run([
+      '--context', environment.engine.contextName,
+      'container', 'create', '--name', record.container.objectName,
+      ...labelArgs(labels),
+      '--network', environment.network.objectId!,
+      ...limitArgs(plan),
+      ...Object.keys(credential.containerEnvironment).sort().flatMap((key) => ['--env', key]),
+      ...credential.secretMounts.flatMap((mount) => [
+        '--mount', `type=bind,src=${mount.sourcePath},dst=${mount.targetPath},readonly`
+      ]),
+      ...Object.values(ports).flatMap((port) => [
+        '--publish', `127.0.0.1::${port.containerPort}/${port.protocol}`
+      ]),
+      '--mount', `type=volume,src=${record.volume.objectId},dst=${resourceVolumeMount(plan)}`,
+      imageId,
+      ...resourceCommand(plan)
+    ], env, { timeoutMs: MUTATION_TIMEOUT_MS });
+    await this.hooks.afterMutation?.('container-create');
+    const objectId = result.stdout.trim();
+    if (!objectId) throw new Error('Container creation returned no object identity.');
+    const container = { ...record.container, objectId, imageId };
+    await this.assertObject('container', container, labels);
+    await this.engine.run([
+      '--context', environment.engine.contextName, 'container', 'start', objectId
+    ], this.engine.environment(), { timeoutMs: MUTATION_TIMEOUT_MS });
+    return container;
+  }
+
+  private async waitUntilAuthenticated(
+    plan: PreviewOciResourcePlan,
+    record: PreviewManagedResourceRecord,
+    credential: HostedResourceCredential,
+    binding: OciResourceBinding,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const portId = plan.type === 'postgres' ? 'postgres' : 'redis';
+    const readiness = await this.readiness.waitForTcp({
+      port: binding.ports[portId],
+      timeoutMs: 60_000,
+      signal
+    });
+    if (readiness.status !== 'PASSED') {
+      throw new OciRuntimeError('UNHEALTHY_CONTAINER', `Managed resource ${plan.id} did not open its loopback port.`);
+    }
+    const env: Record<string, string> = plan.type === 'postgres'
+      ? { PGPASSWORD: credential.password }
+      : { REDIS_PASSWORD: credential.password };
+    const command = plan.type === 'postgres'
+      ? ['psql', '-v', 'ON_ERROR_STOP=1', '-U', credential.username!, '-d', plan.database, '-c', 'SELECT 1']
+      : ['sh', '-c', 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -qx PONG'];
+    await this.retryExec(record, env, command, 60, signal);
+  }
+
+  private async retryExec(
+    resource: PreviewManagedResourceRecord,
+    env: Record<string, string>,
+    command: string[],
+    timeoutSeconds: number,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (Date.now() < deadline) {
+      throwIfAborted(signal);
+      try {
+        await this.engine.run([
+          '--context', resource.container.engine.contextName,
+          'container', 'exec',
+          ...Object.keys(env).sort().flatMap((key) => ['--env', key]),
+          resource.container.objectId!,
+          ...command
+        ], this.engine.environment(env));
+        return;
+      } catch {
+        await delay(250, signal);
+      }
+    }
+    throw new OciRuntimeError('UNHEALTHY_CONTAINER', `Managed resource ${resource.logicalResourceId} failed authenticated readiness.`);
+  }
+
+  private async requireImage(
+    engine: PreviewOciEngineIdentity,
+    plan: PreviewOciResourcePlan
+  ): Promise<string> {
+    const contextArgs = ['--context', engine.contextName];
+    let imageId = await this.inspectLocalImage(contextArgs, plan.image);
+    if (!imageId) {
+      try {
+        await this.engine.run([...contextArgs, 'pull', plan.image], this.engine.environment(), { timeoutMs: PULL_TIMEOUT_MS });
+      } catch (error) {
+        if (isArchitectureMismatch(error)) {
+          throw new OciRuntimeError('IMAGE_ARCHITECTURE_MISMATCH', `OCI image architecture is incompatible for ${plan.id}.`);
+        }
+        throw new OciRuntimeError('IMAGE_PULL_FAILED', `OCI image pull failed for ${plan.id}.`);
+      }
+      imageId = await this.inspectLocalImage(contextArgs, plan.image);
+    }
+    if (!imageId) throw new OciRuntimeError('IMAGE_PULL_FAILED', `OCI image ${plan.image} has no image ID.`);
+    return imageId;
   }
 
   private async inspectLocalImage(contextArgs: string[], image: string): Promise<string | undefined> {
@@ -368,155 +687,72 @@ export class OciResourceRuntime {
     }
   }
 
-  private async waitUntilReady(
-    resource: PreviewOciResourcePlan,
-    binding: OciResourceBinding,
-    container: PreviewOciResourceRecord,
-    credentials: Record<string, string>,
-    signal?: AbortSignal
-  ): Promise<void> {
-    const timeoutSeconds = resource.type === 'oci' ? resource.ready.timeoutSeconds : 60;
-    const portId = resource.type === 'oci' ? resource.ready.port : resource.type === 'postgres' ? 'postgres' : 'redis';
-    const port = binding.ports[portId];
-    const readiness = resource.type === 'oci' && resource.ready.type === 'http'
-      ? await this.readiness.waitForHttp({
-          port,
-          path: resource.ready.path,
-          timeoutMs: timeoutSeconds * 1_000,
-          signal
-        })
-      : await this.readiness.waitForTcp({ port, timeoutMs: timeoutSeconds * 1_000, signal });
-    if (readiness.status !== 'PASSED') throw new Error(readiness.lastError ?? 'readiness timed out');
-    if (resource.type === 'postgres') {
-      await this.retryExec(container, credentials, [
-        'pg_isready', '-U', credentials.POSTGRES_USER, '-d', resource.database
-      ], timeoutSeconds, signal);
-    } else if (resource.type === 'redis') {
-      await this.retryExec(container, credentials, [
-        'sh', '-c', 'redis-cli -a "$REDIS_PASSWORD" ping | grep -qx PONG'
-      ], timeoutSeconds, signal);
-    }
+  private async verifyManagedResource(resource: PreviewManagedResourceRecord): Promise<void> {
+    await this.requireEngine(resource.container.engine);
+    await this.assertObject('container', resource.container, expectedManagedResourceLabels(
+      this.store.getStoreIdentity(), resource, 'container'
+    ));
+    await this.assertObject('volume', resource.volume, expectedManagedResourceLabels(
+      this.store.getStoreIdentity(), resource, 'volume'
+    ));
+    const inspection = await this.inspect('container', resource.container.objectId!, resource.container.engine.contextName);
+    const state = asRecord(inspection.State, 'container state');
+    if (state.Running !== true) throw new Error(`Managed resource ${resource.logicalResourceId} is not running.`);
   }
 
-  private async retryExec(
-    container: PreviewOciResourceRecord,
-    env: Record<string, string>,
-    command: string[],
-    timeoutSeconds: number,
-    signal?: AbortSignal
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutSeconds * 1_000;
-    let lastError = 'container probe failed';
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
+  private async checkRequiredResources(
+    taskId: string
+  ): Promise<{ resource: PreviewManagedResourceRecord; reason: string } | undefined> {
+    for (const resource of await this.store.getPreviewManagedResources(taskId)) {
+      if (resource.state !== 'READY') continue;
       try {
-        await this.engine.run([
-          '--context', container.oci.engine.contextName,
-          'container', 'exec',
-          ...Object.keys(env).sort().flatMap((key) => ['--env', key]),
-          container.oci.objectId!,
-          ...command
-        ], this.engine.environment(env));
-        return;
-      } catch (error) {
-        lastError = boundedError(error);
-        await delay(250, signal);
-      }
-    }
-    throw new Error(lastError);
-  }
-
-  private async createObject(input: {
-    taskId: string;
-    generationId: string;
-    markerDigest: string;
-    engine: PreviewOciEngineIdentity;
-    logicalNodeId: string;
-    kind: OciAdapterKind;
-    scope?: 'generation' | 'preview';
-    operation: 'network-create' | 'volume-create' | 'container-create';
-    imageReference?: string;
-    imageId?: string;
-    env?: NodeJS.ProcessEnv;
-    createArgs(name: string, labels: Record<string, string>): string[];
-  }): Promise<PreviewOciResourceRecord> {
-    const id = randomUUID();
-    const name = objectName(input.kind, input.generationId, input.logicalNodeId, id);
-    const labels = ownershipLabels(this.store.getStoreIdentity(), input, id);
-    const now = new Date().toISOString();
-    let record: PreviewOciResourceRecord = {
-      id,
-      taskId: input.taskId,
-      generationId: input.generationId,
-      logicalNodeId: input.logicalNodeId,
-      adapterKind: input.kind,
-      state: 'INTENDED',
-      ownershipMarkerDigest: input.markerDigest,
-      creationAttemptedAt: now,
-      updatedAt: now,
-      oci: {
-        engine: input.engine,
-        objectName: name,
-        labelsDigest: digestLabels(labels),
-        imageReference: input.imageReference,
-        imageId: input.imageId,
-        scope: input.scope
-      }
-    };
-    record = await this.store.savePreviewResource(record);
-    const result = await this.engine.run(
-      ['--context', input.engine.contextName, ...input.createArgs(name, labels)],
-      input.env ?? this.engine.environment(),
-      { timeoutMs: MUTATION_TIMEOUT_MS }
-    );
-    await this.hooks.afterMutation?.(input.operation);
-    const objectId = result.stdout.trim();
-    if (!objectId) throw new Error(`${input.operation} returned no object identity.`);
-    await this.assertExactOwnership(record, objectId);
-    return this.store.savePreviewResource({
-      ...record,
-      state: input.kind === 'OCI_CONTAINER' ? 'PREPARED' : 'RUNNING',
-      oci: { ...record.oci, objectId },
-      updatedAt: new Date().toISOString()
-    });
-  }
-
-  private async findReusableVolume(
-    context: GenerationContext,
-    resource: PreviewOciResourcePlan
-  ): Promise<PreviewOciResourceRecord | undefined> {
-    const candidates = (await this.store.getPreviewResources())
-      .filter((candidate): candidate is PreviewOciResourceRecord =>
-        candidate.taskId === context.taskId &&
-        candidate.logicalNodeId === resource.id &&
-        candidate.adapterKind === 'OCI_VOLUME' &&
-        (candidate.oci.scope === 'preview' || candidate.oci.retainedForReset === true) &&
-        !['STOPPED', 'CLEANUP_INCOMPLETE'].includes(candidate.state)
-      );
-    if (candidates.length > 1) {
-      throw new Error(`Preview-scoped volume ownership is ambiguous for ${resource.id}.`);
-    }
-    const candidate = candidates[0];
-    if (!candidate) return undefined;
-    await this.requireEngine(candidate.oci.engine);
-    const objectId = candidate.oci.objectId ?? await this.discoverExactObject(candidate);
-    if (!objectId) return undefined;
-    await this.assertExactOwnership(candidate, objectId);
-    const adopted = await this.store.savePreviewResource({
-          ...candidate,
-          oci: { ...candidate.oci, objectId, retainedForReset: false },
+        await this.verifyManagedResource(resource);
+      } catch {
+        const failed = await this.store.savePreviewManagedResource({
+          ...resource,
+          state: 'FAILED',
+          failureReason: `Managed resource ${resource.logicalResourceId} lost verified runtime ownership or health.`,
           updatedAt: new Date().toISOString()
         });
-    if (resource.scope === 'generation' && adopted.generationId !== context.generationId) {
-      context.adoptedGenerationVolumes.push(adopted);
+        return { resource: failed, reason: failed.failureReason! };
+      }
     }
-    return adopted;
+    return undefined;
   }
 
-  private async inspectPublishedPorts(
-    container: PreviewOciResourceRecord
+  private mapPublishedPorts(
+    plan: PreviewOciResourcePlan,
+    published: PreviewOciPublishedPort[]
+  ): Record<string, number> {
+    const ports: Record<string, number> = {};
+    for (const [portId, expected] of Object.entries(resourcePorts(plan))) {
+      const match = published.find(
+        (candidate) => candidate.containerPort === expected.containerPort && candidate.protocol === expected.protocol
+      );
+      if (!match) throw new Error(`Managed resource ${plan.id} did not publish ${portId} on loopback.`);
+      ports[portId] = match.hostPort;
+    }
+    return ports;
+  }
+
+  private async waitForPublishedPorts(
+    container: PreviewOciObjectIdentity,
+    expectedCount: number,
+    signal?: AbortSignal
   ): Promise<PreviewOciPublishedPort[]> {
-    const inspection = await this.inspect(container.adapterKind, container.oci.objectId!, container.oci.engine.contextName);
+    const deadline = Date.now() + 5_000;
+    let published: PreviewOciPublishedPort[] = [];
+    while (Date.now() < deadline) {
+      throwIfAborted(signal);
+      published = await this.inspectPublishedPorts(container);
+      if (published.length === expectedCount) return published;
+      await delay(50, signal);
+    }
+    return published;
+  }
+
+  private async inspectPublishedPorts(container: PreviewOciObjectIdentity): Promise<PreviewOciPublishedPort[]> {
+    const inspection = await this.inspect('container', container.objectId!, container.engine.contextName);
     const settings = asRecord(inspection.NetworkSettings, 'container NetworkSettings');
     const ports = asRecord(settings.Ports, 'container published ports');
     const result: PreviewOciPublishedPort[] = [];
@@ -541,78 +777,97 @@ export class OciResourceRuntime {
     return result.sort((left, right) => left.containerPort - right.containerPort);
   }
 
-  private async waitForPublishedPorts(
-    container: PreviewOciResourceRecord,
-    expectedCount: number,
-    signal?: AbortSignal
-  ): Promise<PreviewOciPublishedPort[]> {
-    const deadline = Date.now() + 5_000;
-    let published: PreviewOciPublishedPort[] = [];
-    while (Date.now() < deadline) {
-      throwIfAborted(signal);
-      published = await this.inspectPublishedPorts(container);
-      if (published.length === expectedCount) return published;
-      await delay(50, signal);
+  private async removeOwnedObject(
+    kind: OciObjectKind,
+    identity: PreviewOciObjectIdentity,
+    expectedLabels: Record<string, string>
+  ): Promise<void> {
+    let objectId = identity.objectId;
+    if (objectId) {
+      const inspection = await this.inspect(kind, objectId, identity.engine.contextName).catch(() => undefined);
+      if (inspection) {
+        this.assertObjectInspection(kind, objectId, identity, expectedLabels, inspection);
+      } else {
+        objectId = await this.discoverExactObject(kind, identity, expectedLabels);
+      }
+    } else {
+      objectId = await this.discoverExactObject(kind, identity, expectedLabels);
     }
-    return published;
-  }
-
-  private async discoverExactObject(resource: PreviewOciResourceRecord): Promise<string | undefined> {
-    const type = objectCliType(resource.adapterKind);
-    const labels = expectedLabels(this.store.getStoreIdentity(), resource);
-    const argv = [
-      '--context', resource.oci.engine.contextName,
-      type, 'ls', ...(type === 'container' ? ['--all'] : []),
-      ...Object.entries(labels).sort().flatMap(([key, value]) => ['--filter', `label=${key}=${value}`]),
-      '--format', '{{.ID}}'
-    ];
-    const ids = (await this.engine.run(argv)).stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-    if (ids.length >= MAX_DISCOVERED_OBJECTS) {
-      throw new Error(`OCI ownership discovery was ambiguous for resource ${resource.id}.`);
-    }
-    if (ids.length === 0) return undefined;
-    await this.assertExactOwnership(resource, ids[0]);
-    return ids[0];
-  }
-
-  private async assertExactOwnership(resource: PreviewOciResourceRecord, objectId: string): Promise<void> {
-    const inspection = await this.inspect(resource.adapterKind, objectId, resource.oci.engine.contextName);
-    const actualId = String(inspection.Id ?? inspection.ID ?? inspection.Name ?? '');
-    const actualName = String(inspection.Name ?? '').replace(/^\//, '');
-    const labels = readLabels(inspection, resource.adapterKind);
-    if (
-      !actualId.startsWith(objectId) ||
-      actualName !== resource.oci.objectName ||
-      digestLabels(labels) !== resource.oci.labelsDigest ||
-      !sameLabels(labels, expectedLabels(this.store.getStoreIdentity(), resource))
-    ) {
-      throw new Error(`OCI ${objectCliType(resource.adapterKind)} identity or ownership labels do not match.`);
-    }
-  }
-
-  private async inspect(kind: OciAdapterKind, objectId: string, contextName: string): Promise<Record<string, unknown>> {
-    const result = await this.engine.run([
-      '--context', contextName, objectCliType(kind), 'inspect', objectId
-    ]);
-    const parsed = JSON.parse(result.stdout) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error('OCI inspection returned an invalid result.');
-    return asRecord(parsed[0], 'OCI inspection');
-  }
-
-  private async removeObject(kind: OciAdapterKind, objectId: string, contextName: string): Promise<void> {
-    const type = objectCliType(kind);
-    const args = type === 'container'
-      ? [type, 'rm', '--force', objectId]
-      : [type, 'rm', objectId];
+    if (!objectId) return;
+    await this.assertObject(kind, { ...identity, objectId }, expectedLabels);
+    const args = kind === 'container'
+      ? ['container', 'rm', '--force', objectId]
+      : [kind, 'rm', objectId];
     try {
       await this.engine.run(
-        ['--context', contextName, ...args],
+        ['--context', identity.engine.contextName, ...args],
         this.engine.environment(),
         { timeoutMs: MUTATION_TIMEOUT_MS }
       );
     } catch (error) {
-      throw new OciRuntimeError('CLEANUP_FAILED', `OCI ${type} cleanup failed: ${boundedError(error)}`, { cause: error });
+      throw new OciRuntimeError('CLEANUP_FAILED', `OCI ${kind} cleanup failed: ${boundedError(error)}`, { cause: error });
     }
+  }
+
+  private async discoverExactObject(
+    kind: OciObjectKind,
+    identity: PreviewOciObjectIdentity,
+    labels: Record<string, string>
+  ): Promise<string | undefined> {
+    const argv = [
+      '--context', identity.engine.contextName,
+      kind, 'ls', ...(kind === 'container' ? ['--all'] : []),
+      ...Object.entries(labels).sort().flatMap(([key, value]) => ['--filter', `label=${key}=${value}`]),
+      '--format', '{{.ID}}'
+    ];
+    const ids = (await this.engine.run(argv)).stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    if (ids.length >= MAX_DISCOVERED_OBJECTS) throw new Error(`OCI ${kind} ownership discovery is ambiguous.`);
+    return ids[0];
+  }
+
+  private async assertObject(
+    kind: OciObjectKind,
+    identity: PreviewOciObjectIdentity,
+    expectedLabels: Record<string, string>
+  ): Promise<void> {
+    const objectId = identity.objectId ?? await this.discoverExactObject(kind, identity, expectedLabels);
+    if (!objectId) throw new Error(`Owned OCI ${kind} is missing.`);
+    const inspection = await this.inspect(kind, objectId, identity.engine.contextName);
+    this.assertObjectInspection(kind, objectId, identity, expectedLabels, inspection);
+  }
+
+  private assertObjectInspection(
+    kind: OciObjectKind,
+    objectId: string,
+    identity: PreviewOciObjectIdentity,
+    expectedLabels: Record<string, string>,
+    inspection: Record<string, unknown>
+  ): void {
+    const actualId = String(inspection.Id ?? inspection.ID ?? inspection.Name ?? '');
+    const actualName = String(inspection.Name ?? '').replace(/^\//, '');
+    const actualLabels = readLabels(inspection, kind);
+    if (
+      !actualId.startsWith(objectId) ||
+      actualName !== identity.objectName ||
+      identity.labelsDigest !== digestLabels(expectedLabels) ||
+      !sameLabels(actualLabels, expectedLabels)
+    ) {
+      throw new Error(`OCI ${kind} identity or Task Monki ownership labels do not match.`);
+    }
+  }
+
+  private async inspect(kind: OciObjectKind, objectId: string, contextName: string): Promise<Record<string, unknown>> {
+    const parsed = JSON.parse((await this.engine.run([
+      '--context', contextName, kind, 'inspect', objectId
+    ])).stdout) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error('OCI inspection returned an invalid result.');
+    return asRecord(parsed[0], 'OCI inspection');
+  }
+
+  private async requireManagedResource(id: string): Promise<PreviewManagedResourceRecord> {
+    const resource = await this.store.getPreviewManagedResource(id);
+    if (!resource) throw new Error(`Managed preview resource not found: ${id}`);
+    return resource;
   }
 
   private async requireEngine(expected: PreviewOciEngineIdentity) {

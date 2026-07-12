@@ -123,6 +123,24 @@ describe('PreviewReconciler graph coverage', () => {
     expect(stopped).toEqual(resources.map((resource) => resource.id));
     expect(saved).toMatchObject({ state: 'STOPPED', routingState: 'RETIRED' });
   });
+
+  it('cleans the preview-owned OCI environment after application reconciliation without adoption', async () => {
+    const calls: string[] = [];
+    const reconciler = new PreviewReconciler(
+      {
+        async getPreviewGenerations() { return []; },
+        async prunePreviewHistory() { return 0; }
+      } as never,
+      { clearRoutes() { calls.push('routes-cleared'); } } as never,
+      {} as never,
+      {} as never,
+      {
+        async cleanupTaskResources() { calls.push('managed-environment-cleaned'); return 'STOPPED' as const; }
+      } as never
+    );
+    await reconciler.reconcile();
+    expect(calls).toEqual(['routes-cleared', 'managed-environment-cleaned']);
+  });
 });
 
 async function runningGeneration() {
