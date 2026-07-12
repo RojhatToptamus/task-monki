@@ -60,7 +60,6 @@ export class PreviewGraph {
     markerDigest: string;
     plan: PreviewExecutionPlan;
     resourceBindings?: Record<string, RuntimeManagedResourceBinding>;
-    redactions?: string[];
     runSetup: boolean;
     onSetupComplete?(): Promise<void>;
     beforeExclusiveStart?(): Promise<void>;
@@ -131,15 +130,17 @@ export class PreviewGraph {
           const current = await semaphore.run(async () => {
             throwIfAborted(startupAbort.signal);
             try {
+              const resolved = resolveEnvironment(
+                node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+              );
               return await this.services.start({
                 ...runtimeInput(startupInput),
                 node,
                 kind,
                 attempt: 1,
                 portValues: ports,
-                resolvedEnv: resolveEnvironment(
-                  node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
-                )
+                resolvedEnv: resolved.values,
+                redactions: resolved.redactions
               });
             } catch (error) {
               startupAbort.abort();
@@ -164,11 +165,15 @@ export class PreviewGraph {
         await semaphore.run(async () => {
           throwIfAborted(startupAbort.signal);
           try {
+            const resolved = resolveEnvironment(
+              node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+            );
             return await this.jobs.run({
               ...runtimeInput(startupInput),
               node,
               signal: startupAbort.signal,
-              env: resolveEnvironment(node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings)
+              env: resolved.values,
+              redactions: resolved.redactions
             });
           } catch (error) {
             startupAbort.abort();
@@ -284,7 +289,7 @@ export class PreviewGraph {
             kind: owner.kind,
             attempt: owner.attempt,
             portValues: owner.ports,
-            resolvedEnv: resolveEnvironment(
+            ...resolvedRuntimeEnvironment(
               owner.node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
             )
           }));
@@ -410,7 +415,7 @@ export class PreviewGraph {
             kind: owner.kind,
             attempt: owner.attempt,
             portValues: owner.ports,
-            resolvedEnv: resolveEnvironment(
+            ...resolvedRuntimeEnvironment(
               owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
             )
           });
@@ -461,7 +466,7 @@ export class PreviewGraph {
             kind: owner.kind,
             attempt: owner.attempt,
             portValues: owner.ports,
-            resolvedEnv: resolveEnvironment(
+            ...resolvedRuntimeEnvironment(
               owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
             )
           });
@@ -590,6 +595,9 @@ export class PreviewGraph {
     try {
       await semaphore.run(() => {
         throwIfAborted(signal);
+        const resolved = resolveEnvironment(
+          owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
+        );
         return this.jobs.run({
           ...runtimeInput(input),
           node: {
@@ -606,13 +614,12 @@ export class PreviewGraph {
           timeoutMs: probe.timeoutSeconds * 1_000,
           signal,
           env: {
-            ...resolveEnvironment(
-              owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
-            ),
+            ...resolved.values,
             ...Object.fromEntries(
               Object.entries(owner.node.ports).map(([portId, port]) => [port.env, String(owner.ports[portId])])
             )
-          }
+          },
+          redactions: resolved.redactions
         });
       });
       return { status: 'PASSED', observedAt: new Date().toISOString() };
@@ -693,9 +700,18 @@ function runtimeInput(input: Parameters<PreviewGraph['start']>[0]) {
     generationId: input.generationId,
     generationRoot: input.generationRoot,
     sourcePath: input.sourcePath,
-    markerDigest: input.markerDigest,
-    redactions: input.redactions
+    markerDigest: input.markerDigest
   };
+}
+
+function resolvedRuntimeEnvironment(
+  env: Record<string, PreviewEnvironmentValue>,
+  allPorts: Record<string, Record<string, number>>,
+  routeOrigins: Record<string, string>,
+  resourceBindings: Record<string, RuntimeManagedResourceBinding>
+): { resolvedEnv: Record<string, string>; redactions: string[] } {
+  const resolved = resolveEnvironment(env, allPorts, routeOrigins, resourceBindings);
+  return { resolvedEnv: resolved.values, redactions: resolved.redactions };
 }
 
 function resolveEnvironment(
@@ -703,8 +719,9 @@ function resolveEnvironment(
   allPorts: Record<string, Record<string, number>>,
   routeOrigins: Record<string, string>,
   resourceBindings: Record<string, RuntimeManagedResourceBinding>
-): Record<string, string> {
+): { values: Record<string, string>; redactions: string[] } {
   const result: Record<string, string> = {};
+  const redactions = new Set<string>();
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === 'string') result[key] = value;
     else if (value.type === 'route-origin') {
@@ -725,9 +742,23 @@ function resolveEnvironment(
         if (!binding.redisUrl) throw new Error(`Preview Redis URL ${value.resource} is unavailable.`);
         result[key] = binding.redisUrl;
       }
+      addUrlRedactions(redactions, result[key]);
     }
   }
-  return result;
+  return {
+    values: result,
+    redactions: [...redactions].sort((left, right) => right.length - left.length)
+  };
+}
+
+function addUrlRedactions(redactions: Set<string>, value: string): void {
+  redactions.add(value);
+  const url = new URL(value);
+  for (const component of [url.username, url.password]) {
+    if (!component) continue;
+    redactions.add(component);
+    redactions.add(decodeURIComponent(component));
+  }
 }
 
 export function reverseDependencyOrder(plan: PreviewExecutionPlan): string[] {

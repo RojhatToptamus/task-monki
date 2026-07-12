@@ -77,6 +77,14 @@ export interface OciResourceRuntimeHooks {
 
 export class OciResourceRuntime {
   private readonly healthStops = new Map<string, () => Promise<void>>();
+  private readonly resourceCleanup = new Map<
+    string,
+    Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>
+  >();
+  private readonly environmentCleanup = new Map<
+    string,
+    Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'>
+  >();
 
   constructor(
     private readonly store: FileTaskStore,
@@ -85,10 +93,6 @@ export class OciResourceRuntime {
     private readonly credentials: PreviewCredentialHost,
     private readonly hooks: OciResourceRuntimeHooks = {}
   ) {}
-
-  redactionValues(): string[] {
-    return this.credentials.redactionValues();
-  }
 
   async ensureManagedPreview(input: {
     taskId: string;
@@ -254,7 +258,21 @@ export class OciResourceRuntime {
     return stop;
   }
 
-  async stopManagedResource(resourceId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+  stopManagedResource(resourceId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+    const existing = this.resourceCleanup.get(resourceId);
+    if (existing) return existing;
+    const operation = this.stopManagedResourceOnce(resourceId).finally(() => {
+      if (this.resourceCleanup.get(resourceId) === operation) {
+        this.resourceCleanup.delete(resourceId);
+      }
+    });
+    this.resourceCleanup.set(resourceId, operation);
+    return operation;
+  }
+
+  private async stopManagedResourceOnce(
+    resourceId: string
+  ): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
     let resource = await this.requireManagedResource(resourceId);
     if (resource.state === 'STOPPED') return 'ALREADY_EXITED';
     const now = new Date().toISOString();
@@ -292,7 +310,23 @@ export class OciResourceRuntime {
     }
   }
 
-  private async stopManagedEnvironment(environmentId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+  private stopManagedEnvironment(
+    environmentId: string
+  ): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+    const existing = this.environmentCleanup.get(environmentId);
+    if (existing) return existing;
+    const operation = this.stopManagedEnvironmentOnce(environmentId).finally(() => {
+      if (this.environmentCleanup.get(environmentId) === operation) {
+        this.environmentCleanup.delete(environmentId);
+      }
+    });
+    this.environmentCleanup.set(environmentId, operation);
+    return operation;
+  }
+
+  private async stopManagedEnvironmentOnce(
+    environmentId: string
+  ): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
     let environment = (await this.store.getPreviewManagedEnvironments()).find(
       (candidate) => candidate.id === environmentId
     );
@@ -537,7 +571,7 @@ export class OciResourceRuntime {
         setupAttemptedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
-      await this.waitUntilAuthenticated(plan, record, credential, binding, signal);
+      await this.waitUntilAuthenticated(plan, record, binding, signal);
       return record;
     } catch (error) {
       const message = this.credentials.redact(boundedError(error));
@@ -593,7 +627,6 @@ export class OciResourceRuntime {
   private async waitUntilAuthenticated(
     plan: PreviewOciResourcePlan,
     record: PreviewManagedResourceRecord,
-    credential: HostedResourceCredential,
     binding: RuntimeManagedResourceBinding,
     signal?: AbortSignal
   ): Promise<void> {
@@ -606,36 +639,31 @@ export class OciResourceRuntime {
     if (readiness.status !== 'PASSED') {
       throw new OciRuntimeError('UNHEALTHY_CONTAINER', `Managed resource ${plan.id} did not open its loopback port.`);
     }
-    const { env, command } = this.authenticationProbe(
+    const command = this.authenticationProbe(
       plan.type,
-      credential,
       plan.type === 'postgres' ? plan.database : undefined
     );
-    await this.retryExec(record, env, command, 60, signal);
+    await this.retryExec(record, command, 60, signal);
   }
 
   private authenticationProbe(
     type: PreviewManagedResourceRecord['type'],
-    credential: HostedResourceCredential,
     database?: string
-  ): { env: Record<string, string>; command: string[] } {
+  ): string[] {
     return type === 'postgres'
-      ? {
-          env: { PGPASSWORD: credential.password },
-          command: [
-            'psql', '-v', 'ON_ERROR_STOP=1', '-U', credential.username!,
-            '-d', database!, '-c', 'SELECT 1'
-          ]
-        }
-      : {
-          env: { REDIS_PASSWORD: credential.password },
-          command: ['sh', '-c', 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -qx PONG']
-        };
+      ? [
+          'sh', '-eu', '-c',
+          'PGPASSWORD="$(cat /run/taskmonki/postgres-password)"; export PGPASSWORD; exec psql -v ON_ERROR_STOP=1 -U "$(cat /run/taskmonki/postgres-user)" -d "$1" -c "SELECT 1"',
+          'task-monki-postgres-readiness', database!
+        ]
+      : [
+          'sh', '-eu', '-c',
+          'REDISCLI_AUTH="$(cat /run/taskmonki/redis-password)"; export REDISCLI_AUTH; test "$(redis-cli --no-auth-warning ping)" = PONG'
+        ];
   }
 
   private async retryExec(
     resource: PreviewManagedResourceRecord,
-    env: Record<string, string>,
     command: string[],
     timeoutSeconds: number,
     signal?: AbortSignal
@@ -647,10 +675,9 @@ export class OciResourceRuntime {
         await this.engine.run([
           '--context', resource.container.engine.contextName,
           'container', 'exec',
-          ...Object.keys(env).sort().flatMap((key) => ['--env', key]),
           resource.container.objectId!,
           ...command
-        ], this.engine.environment(env));
+        ], authenticationProbeEnvironment(this.engine.environment()));
         return;
       } catch {
         await delay(250, signal);
@@ -741,15 +768,14 @@ export class OciResourceRuntime {
     )) {
       throw new Error(`Managed resource ${resource.logicalResourceId} published binding changed.`);
     }
-    const { env, command } = this.authenticationProbe(resource.type, credential, safeBinding.database);
+    const command = this.authenticationProbe(resource.type, safeBinding.database);
     try {
       await this.engine.run([
         '--context', resource.container.engine.contextName,
         'container', 'exec',
-        ...Object.keys(env).sort().flatMap((key) => ['--env', key]),
         resource.container.objectId!,
         ...command
-      ], this.engine.environment(env));
+      ], authenticationProbeEnvironment(this.engine.environment()));
     } catch {
       throw new Error(`Managed resource ${resource.logicalResourceId} failed authenticated health verification.`);
     }
@@ -973,4 +999,12 @@ export class OciResourceRuntime {
       throw error;
     }
   }
+}
+
+function authenticationProbeEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const sanitized = { ...environment };
+  delete sanitized.PGPASSWORD;
+  delete sanitized.REDIS_PASSWORD;
+  delete sanitized.REDISCLI_AUTH;
+  return sanitized;
 }

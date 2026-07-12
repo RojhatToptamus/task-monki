@@ -6,7 +6,10 @@ import type {
   CodexExternalToolSettings
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { spawnPortable } from '../../process/portableChildProcess';
+import {
+  spawnPortable,
+  terminatePortableProcessTree
+} from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
@@ -49,6 +52,7 @@ export interface CodexAppServerSupervisorOptions {
   requestTimeoutMs?: number;
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
+  failClosedMcpDiscovery?: boolean;
 }
 
 export interface CodexAppServerLaunchConfig {
@@ -89,12 +93,14 @@ export async function resolveCodexAppServerArgv(input: {
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
   launch?: CodexAppServerLaunch;
+  failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
   const configOverrides = await resolveCodexExternalToolConfigOverrides({
     executable: input.executable,
     cwd: input.cwd,
     environment: input.environment,
-    settings: input.toolSettings
+    settings: input.toolSettings,
+    failClosedMcpDiscovery: input.failClosedMcpDiscovery
   });
   return codexAppServerArgvWithLaunch(
     input.launch?.argv ?? ['app-server', '--stdio'],
@@ -109,6 +115,8 @@ export class CodexAppServerSupervisor {
   private client?: CodexRpcClient;
   private server?: AgentServerInstance;
   private startPromise?: Promise<CodexRpcClient>;
+  private closePromise?: Promise<void>;
+  private shutdownPromise?: Promise<void>;
   private shuttingDown = false;
   private diagnosticTail = '';
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
@@ -139,6 +147,9 @@ export class CodexAppServerSupervisor {
   }
 
   start(): Promise<CodexRpcClient> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('Codex App Server is shutting down.'));
+    }
     if (this.client && this.child && !this.child.killed) {
       return Promise.resolve(this.client);
     }
@@ -150,11 +161,42 @@ export class CodexAppServerSupervisor {
     return this.startPromise;
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
+    const work = this.shutdownInternal().finally(() => {
+      if (this.shutdownPromise === work) this.shutdownPromise = undefined;
+    });
+    this.shutdownPromise = work;
+    return work;
+  }
+
+  resumeAfterShutdown(): void {
+    if (!this.shuttingDown) return;
+    if (
+      this.shutdownPromise ||
+      this.startPromise ||
+      this.closePromise ||
+      this.hasLiveChild()
+    ) {
+      throw new Error('Codex App Server shutdown has not finished.');
+    }
+    this.shuttingDown = false;
+  }
+
+  private async shutdownInternal(): Promise<void> {
+    const pendingStart = this.startPromise;
+    await this.stopCurrentChild('Codex App Server shut down.');
+    await pendingStart?.catch(() => undefined);
+    await this.stopCurrentChild('Codex App Server shut down.');
+  }
+
+  private async stopCurrentChild(reason: string): Promise<void> {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) {
-      this.client?.close('Codex App Server shut down.');
+      this.closeClient(reason);
+      await this.closePromise;
+      await this.disposeCurrentClient();
       return;
     }
 
@@ -163,15 +205,23 @@ export class CodexAppServerSupervisor {
       if (stored) {
         this.server = stored;
       }
-      if (!['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
-        await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
+      if (
+        this.server.status !== 'STARTING' &&
+        !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)
+      ) {
+        this.server = await this.store.updateAgentServer(this.server.id, {
+          status: 'STOPPING'
+        });
       }
     }
-    child.kill('SIGTERM');
+    this.closeClient(reason);
+    await terminatePortableProcessTree(child, 'SIGTERM');
     if (!(await waitForClose(child, 3_000))) {
-      child.kill('SIGKILL');
+      await terminatePortableProcessTree(child, 'SIGKILL');
       await waitForClose(child, 2_000);
     }
+    await this.closePromise;
+    await this.disposeCurrentClient();
   }
 
   async terminateUnresponsive(reason: string): Promise<void> {
@@ -183,13 +233,16 @@ export class CodexAppServerSupervisor {
         exitReason: reason
       });
     }
-    this.client?.close(reason);
+    this.closeClient(reason);
     if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
+      await terminatePortableProcessTree(child, 'SIGTERM');
       if (!(await waitForClose(child, 1_000))) {
-        child.kill('SIGKILL');
+        await terminatePortableProcessTree(child, 'SIGKILL');
+        await waitForClose(child, 2_000);
       }
+      await this.closePromise;
     }
+    await this.disposeCurrentClient();
   }
 
   private async startInternal(): Promise<CodexRpcClient> {
@@ -202,15 +255,17 @@ export class CodexAppServerSupervisor {
     const executable = runtime.executable;
     const runtimeVersion = runtime.version;
     this.runtimeDiagnostics = runtime.diagnostics;
-    this.shuttingDown = false;
+    this.assertStartupAllowed();
     this.diagnosticTail = '';
     const argv = await resolveCodexAppServerArgv({
       executable,
       cwd: this.options.cwd,
       environment: this.options.environment,
       toolSettings: this.options.toolSettings,
+      failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
       launch: runtime.compatibility.launch
     });
+    this.assertStartupAllowed();
 
     const server = await this.store.createAgentServer({
       provider: 'codex',
@@ -226,6 +281,7 @@ export class CodexAppServerSupervisor {
     this.server = server;
 
     try {
+      this.assertStartupAllowed();
       const child = spawnPortable(executable, argv, {
         cwd: this.options.cwd,
         env: sanitizeEnvironment(this.options.environment ?? process.env),
@@ -235,10 +291,12 @@ export class CodexAppServerSupervisor {
       this.child = child;
 
       await waitForSpawn(child);
+      this.assertStartupAllowed();
       await this.store.updateAgentServer(server.id, {
         status: 'RUNNING',
         pid: child.pid
       });
+      this.assertStartupAllowed();
 
       const client = new CodexRpcClient(
         child.stdin,
@@ -259,7 +317,10 @@ export class CodexAppServerSupervisor {
         this.events.emit('diagnostic', text);
       });
       child.once('close', (exitCode, signal) => {
-        void this.handleClose(exitCode, signal);
+        const work = this.handleClose(child, server, exitCode, signal).finally(() => {
+          if (this.closePromise === work) this.closePromise = undefined;
+        });
+        this.closePromise = work;
       });
       child.once('error', (error) => {
         this.events.emit('diagnostic', error.message);
@@ -277,30 +338,60 @@ export class CodexAppServerSupervisor {
           optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
         }
       });
+      this.assertStartupAllowed();
       await client.notify('initialized', {});
+      this.assertStartupAllowed();
 
       const ready = await this.store.updateAgentServer(server.id, {
         status: 'READY',
         initializedAt: new Date().toISOString(),
         lastHealthAt: new Date().toISOString()
       });
+      this.assertStartupAllowed();
       this.server = ready;
       this.events.emit('ready', ready);
       return client;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.store.updateAgentServer(server.id, {
-        status: 'FAILED',
-        exitedAt: new Date().toISOString(),
-        exitReason: message
-      });
-      this.client?.close(message);
-      this.child?.kill('SIGTERM');
+      await this.finalizeFailedStart(server.id, message);
+      this.closeClient(message);
+      const child = this.child;
+      if (child && child.exitCode === null && child.signalCode === null) {
+        await terminatePortableProcessTree(child, 'SIGTERM');
+        if (!(await waitForClose(child, 1_000))) {
+          await terminatePortableProcessTree(child, 'SIGKILL');
+          await waitForClose(child, 2_000);
+        }
+      }
+      await this.closePromise;
+      await this.disposeCurrentClient();
+      if (this.child === child) this.child = undefined;
       throw error;
     }
   }
 
+  private assertStartupAllowed(): void {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
+  }
+
+  private async finalizeFailedStart(serverId: string, message: string): Promise<void> {
+    try {
+      const stored = await this.store.getAgentServer(serverId);
+      if (!stored || isTerminalServerStatus(stored.status)) return;
+      this.server = await this.store.updateAgentServer(serverId, {
+        status: this.shuttingDown ? 'EXITED' : 'FAILED',
+        exitedAt: new Date().toISOString(),
+        exitReason: message
+      });
+    } catch {
+      // Process close may have finalized the same server record concurrently.
+    }
+  }
+
   private async failProtocol(error: Error): Promise<void> {
+    if (this.shuttingDown) return;
     if (this.server) {
       const stored = await this.store.getAgentServer(this.server.id);
       if (stored) {
@@ -313,25 +404,25 @@ export class CodexAppServerSupervisor {
         exitReason: `Protocol error: ${error.message}`
       });
     }
-    this.client?.close(`Protocol error: ${error.message}`);
-    this.child?.kill('SIGTERM');
+    this.closeClient(`Protocol error: ${error.message}`);
+    if (this.child) {
+      await terminatePortableProcessTree(this.child, 'SIGTERM');
+    }
   }
 
   private async handleClose(
+    child: ChildProcessWithoutNullStreams,
+    server: AgentServerInstance,
     exitCode: number | null,
     signal: NodeJS.Signals | null
   ): Promise<void> {
-    const server = this.server;
     const unexpected = !this.shuttingDown;
-    this.client?.close(
+    this.closeClient(
       unexpected ? 'Codex App Server exited unexpectedly.' : 'Codex App Server stopped.'
     );
-    this.client = undefined;
-    this.child = undefined;
+    await this.disposeCurrentClient();
+    if (this.child === child) this.child = undefined;
 
-    if (!server) {
-      return;
-    }
     const terminalStatus = unexpected && exitCode !== 0 ? 'FAILED' : 'EXITED';
     try {
       const stored = await this.store.updateAgentServer(server.id, {
@@ -347,6 +438,26 @@ export class CodexAppServerSupervisor {
       // A protocol failure may have already finalized the same server record.
       this.events.emit('exit', server, unexpected);
     }
+  }
+
+  private hasLiveChild(): boolean {
+    return Boolean(
+      this.child && this.child.exitCode === null && this.child.signalCode === null
+    );
+  }
+
+  private closeClient(reason: string): void {
+    const client = this.client;
+    if (!client) return;
+    client.close(reason);
+  }
+
+  private async disposeCurrentClient(): Promise<void> {
+    const client = this.client;
+    if (!client) return;
+    await client.drain();
+    client.events.removeAllListeners();
+    if (this.client === client) this.client = undefined;
   }
 }
 
@@ -379,8 +490,16 @@ function codexRuntimeResolutionDiagnostics(
 
 function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
-    child.once('spawn', resolve);
-    child.once('error', reject);
+    const onSpawn = () => {
+      child.off('error', onError);
+      resolve();
+    };
+    const onError = (error: Error) => {
+      child.off('spawn', onSpawn);
+      reject(error);
+    };
+    child.once('spawn', onSpawn);
+    child.once('error', onError);
   });
 }
 

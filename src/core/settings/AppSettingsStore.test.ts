@@ -30,6 +30,10 @@ describe('AppSettingsStore', () => {
       }
     });
     await expect(fs.stat(settingsPath)).resolves.toBeTruthy();
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(settingsPath)).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
+    }
   });
 
   it('merges nested patches without resetting sibling settings', async () => {
@@ -172,4 +176,35 @@ describe('AppSettingsStore', () => {
     const files = await fs.readdir(dir);
     expect(files.some((file) => file.startsWith('app-settings.json.invalid-'))).toBe(true);
   });
+
+  it('does not reuse or remove an untrusted legacy settings temporary path', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-temp-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const legacyTemporaryPath = `${settingsPath}.tmp`;
+    await fs.mkdir(legacyTemporaryPath);
+    await fs.writeFile(path.join(legacyTemporaryPath, 'marker'), 'keep');
+
+    await new AppSettingsStore(settingsPath).get();
+
+    await expect(fs.stat(settingsPath)).resolves.toMatchObject({ size: expect.any(Number) });
+    await expect(
+      fs.readFile(path.join(legacyTemporaryPath, 'marker'), 'utf8')
+    ).resolves.toBe('keep');
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a symlinked settings file without reading or replacing its target',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-link-'));
+      const settingsPath = path.join(dir, 'app-settings.json');
+      const outsidePath = path.join(dir, 'outside.json');
+      const outsideContents = JSON.stringify({ theme: 'dark' });
+      await fs.writeFile(outsidePath, outsideContents, { mode: 0o600 });
+      await fs.symlink(outsidePath, settingsPath);
+
+      await expect(new AppSettingsStore(settingsPath).get()).rejects.toBeTruthy();
+      await expect(fs.readFile(outsidePath, 'utf8')).resolves.toBe(outsideContents);
+      expect((await fs.lstat(settingsPath)).isSymbolicLink()).toBe(true);
+    }
+  );
 });

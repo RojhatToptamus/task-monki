@@ -28,6 +28,8 @@ describe('PreviewGraph', () => {
   it('runs initial setup against preview-owned bindings and reports setup completion before application start', async () => {
     const starts: string[] = [];
     const jobEnvironments: Record<string, Record<string, string>> = {};
+    const jobRedactions: Record<string, string[]> = {};
+    const cacheUrl = 'redis://:generated@127.0.0.1:41234/0';
     const plan = graphPlan({
       resources: [{
         id: 'cache', type: 'redis', image: 'redis:7-alpine', limits: {}
@@ -50,9 +52,10 @@ describe('PreviewGraph', () => {
     const graph = new PreviewGraph(
       {} as never,
       {
-        async run(input: { node: { id: string }; env: Record<string, string> }) {
+        async run(input: { node: { id: string }; env: Record<string, string>; redactions: string[] }) {
           starts.push(input.node.id);
           jobEnvironments[input.node.id] = input.env;
+          jobRedactions[input.node.id] = input.redactions;
         }
       } as never,
       {} as never, {} as never, {} as never, {} as never
@@ -61,13 +64,21 @@ describe('PreviewGraph', () => {
       taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, runSetup: true,
       resourceBindings: {
-        cache: { ports: { redis: 41234 }, redisUrl: 'redis://:generated@127.0.0.1:41234/0' }
+        cache: {
+          ports: { redis: 41234 }, redisUrl: cacheUrl
+        },
+        unrelated: {
+          ports: { redis: 41235 }, redisUrl: 'redis://:credential-for-an-unrelated-resource@127.0.0.1:41235/0'
+        }
       },
       async onSetupComplete() { starts.push('setup-complete'); },
       async updateGenerationState() {}
     });
     expect(starts).toEqual(['migrate', 'seed', 'setup-complete']);
-    expect(jobEnvironments.migrate.REDIS_URL).toBe('redis://:generated@127.0.0.1:41234/0');
+    expect(jobEnvironments.migrate.REDIS_URL).toBe(cacheUrl);
+    expect(jobRedactions.migrate).toEqual([cacheUrl, 'generated']);
+    expect(jobRedactions.seed).toEqual([]);
+    expect(jobRedactions.migrate).not.toContain('credential-for-an-unrelated-resource');
     await running.stop();
   });
 
@@ -96,7 +107,9 @@ describe('PreviewGraph', () => {
     const running = await graph.start({
       taskId: 'task', generationId: 'replacement', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, runSetup: false,
-      resourceBindings: { cache: { ports: { redis: 41_234 }, redisUrl: 'redis://stable' } },
+      resourceBindings: {
+        cache: { ports: { redis: 41_234 }, redisUrl: 'redis://stable' }
+      },
       async updateGenerationState() {}
     });
 

@@ -70,7 +70,7 @@ export interface OpenTargetHost {
   stat(filePath: string): Promise<{ isFile: boolean; isDirectory: boolean; size: number } | null>;
   realpath(filePath: string): Promise<string>;
   access(filePath: string, executable?: boolean): Promise<boolean>;
-  readFile(filePath: string): Promise<Buffer>;
+  readFile(filePath: string, rootPath?: string, maxBytes?: number): Promise<Buffer>;
   launchExecutable(executable: string, argv: string[], cwd?: string): Promise<void>;
   openDefault(filePath: string): Promise<void>;
   reveal(filePath: string): Promise<void>;
@@ -326,36 +326,50 @@ export class OpenTargetService {
   }
 
   private async canCopyFileContents(target: ResolvedOpenTarget): Promise<TextFileReadiness> {
+    return (await this.readTextFileContents(target)).readiness;
+  }
+
+  private async readTextFileContents(
+    target: ResolvedOpenTarget
+  ): Promise<{ readiness: TextFileReadiness; text?: string }> {
     if (!target.exists) {
-      return { ok: false, reason: 'File is missing.' };
+      return { readiness: { ok: false, reason: 'File is missing.' } };
     }
     if (target.kind !== 'file') {
-      return { ok: false, reason: 'Target is not a file.' };
+      return { readiness: { ok: false, reason: 'Target is not a file.' } };
     }
     if ((target.statSize ?? 0) > MAX_COPY_FILE_BYTES) {
-      return { ok: false, reason: 'File is too large to copy safely.' };
+      return { readiness: { ok: false, reason: 'File is too large to copy safely.' } };
     }
-    const buffer = await this.host.readFile(target.path);
+    const buffer = await this.host.readFile(
+      target.path,
+      target.rootPath,
+      MAX_COPY_FILE_BYTES
+    );
+    if (buffer.byteLength > MAX_COPY_FILE_BYTES) {
+      return { readiness: { ok: false, reason: 'File is too large to copy safely.' } };
+    }
     if (buffer.includes(0)) {
-      return { ok: false, reason: 'Binary file contents cannot be copied.' };
+      return { readiness: { ok: false, reason: 'Binary file contents cannot be copied.' } };
     }
     try {
-      new TextDecoder('utf-8', { fatal: true }).decode(buffer);
-      return { ok: true };
+      return {
+        readiness: { ok: true },
+        text: new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+      };
     } catch {
-      return { ok: false, reason: 'File is not valid UTF-8 text.' };
+      return { readiness: { ok: false, reason: 'File is not valid UTF-8 text.' } };
     }
   }
 
   private async copyFileContents(target: ResolvedOpenTarget): Promise<OpenTargetActionResult> {
-    const readiness = await this.canCopyFileContents(target);
-    if (!readiness.ok) {
-      return { ok: false, message: readiness.reason };
+    const result = await this.readTextFileContents(target);
+    if (!result.readiness.ok || result.text === undefined) {
+      return { ok: false, message: result.readiness.reason };
     }
-    const buffer = await this.host.readFile(target.path);
     return {
       ok: true,
-      clipboardText: new TextDecoder('utf-8').decode(buffer)
+      clipboardText: result.text
     };
   }
 
@@ -555,8 +569,8 @@ export function createNodeOpenTargetHost(): OpenTargetHost {
         return false;
       }
     },
-    readFile(filePath) {
-      return fs.readFile(filePath);
+    readFile(filePath, rootPath, maxBytes) {
+      return readFileFromVerifiedDescriptor(filePath, rootPath, maxBytes);
     },
     async launchExecutable(executable, argv, cwd) {
       const child = spawnPortable(executable, argv, {
@@ -585,6 +599,89 @@ export function createNodeOpenTargetHost(): OpenTargetHost {
       return await macAppIconDataUrl(filePath);
     }
   };
+}
+
+async function readFileFromVerifiedDescriptor(
+  filePath: string,
+  rootPath?: string,
+  maxBytes = MAX_COPY_FILE_BYTES
+): Promise<Buffer> {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes <= 0 ||
+    maxBytes > MAX_COPY_FILE_BYTES
+  ) {
+    throw new Error('File copy size limit is invalid.');
+  }
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0)
+    );
+  } catch (error) {
+    throw new Error('File could not be opened safely.', { cause: error });
+  }
+
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error('Target is not a file.');
+    if (before.size > maxBytes) throw new Error('File is too large to copy safely.');
+
+    if (rootPath) {
+      const [realRoot, realTarget] = await Promise.all([
+        fs.realpath(rootPath),
+        fs.realpath(filePath)
+      ]);
+      assertContainedPath(realTarget, realRoot);
+      const pathStat = await fs.stat(realTarget);
+      if (!sameOpenFileIdentity(before, pathStat)) {
+        throw new Error('File changed while it was being opened.');
+      }
+    }
+
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let byteCount = 0;
+    while (byteCount < buffer.byteLength) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        byteCount,
+        buffer.byteLength - byteCount,
+        byteCount
+      );
+      if (bytesRead === 0) break;
+      byteCount += bytesRead;
+    }
+    if (byteCount > maxBytes) throw new Error('File is too large to copy safely.');
+
+    const after = await handle.stat();
+    if (
+      !sameOpenFileIdentity(before, after) ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs
+    ) {
+      throw new Error('File changed while it was being copied.');
+    }
+    return buffer.subarray(0, byteCount);
+  } finally {
+    await handle.close();
+  }
+}
+
+function assertContainedPath(candidate: string, root: string): void {
+  const relative = path.relative(root, candidate);
+  if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return;
+  throw new Error('Path escapes the recorded Task Monki root.');
+}
+
+function sameOpenFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint }
+): boolean {
+  if (left.dev !== right.dev) return false;
+  return left.ino === 0 || right.ino === 0 || left.ino === right.ino;
 }
 
 const APP_DEFINITIONS: OpenAppDefinition[] = [

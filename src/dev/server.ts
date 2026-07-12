@@ -1,14 +1,32 @@
-import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
-import type { AppUpdateEvent } from '../shared/contracts';
+import {
+  createDevApiTokenLease,
+  DEFAULT_DEV_API_PORT,
+  DEFAULT_DEV_RENDERER_PORT,
+  devApiExpectedHost,
+  devRendererOrigin,
+  parseDevPort,
+  type DevApiTokenLease
+} from './devApiSecurity';
+import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
+import { DevProcessLifecycle } from './devProcessLifecycle';
+import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 import { chooseRepositoryFolder } from './folderPicker';
-import { authorizeDevApiRequest } from './devApiAuthorization';
 
-const port = Number(process.env.TASK_MANAGER_API_PORT ?? 3099);
+const port = parseDevPort(
+  process.env.TASK_MANAGER_API_PORT,
+  DEFAULT_DEV_API_PORT,
+  'TASK_MANAGER_API_PORT'
+);
+const rendererPort = parseDevPort(
+  process.env.TASK_MANAGER_RENDERER_PORT,
+  DEFAULT_DEV_RENDERER_PORT,
+  'TASK_MANAGER_RENDERER_PORT'
+);
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
 const storeDir =
   process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-monki-dev-store');
@@ -16,23 +34,20 @@ const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
 const previewRoot =
   process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
-const devApiToken = process.env.TASK_MANAGER_DEV_API_TOKEN ?? '';
-const rendererOrigin =
-  process.env.TASK_MANAGER_RENDERER_ORIGIN ?? 'http://127.0.0.1:5173';
-if (!devApiToken) {
-  throw new Error(
-    'TASK_MANAGER_DEV_API_TOKEN is required. Run npm run dev:seed and source dev-api.env.'
-  );
-}
+const agentProviderStartupDisabledReason =
+  deterministicDevSeedProviderDisabledReason(process.env);
+const taskStore = new FileTaskStore(storeDir);
 
 const service = new TaskManagerService(
-  new FileTaskStore(storeDir),
+  taskStore,
   defaultRepositoryPath,
   undefined,
   {
     appSettingsStore: new AppSettingsStore(appSettingsPath),
     previewEnabled: true,
     previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
+    allowAgentNetworkAccess: false,
+    agentProviderStartupDisabledReason,
     previewRoot,
     previewLauncherPath: path.join(
       process.cwd(),
@@ -40,299 +55,64 @@ const service = new TaskManagerService(
     )
   }
 );
-const clients = new Set<http.ServerResponse>();
-let server: http.Server | undefined;
-let shutdownPromise: Promise<void> | undefined;
+const security = {
+  token: '',
+  expectedHost: devApiExpectedHost(port),
+  expectedOrigin: devRendererOrigin(rendererPort)
+};
 
-function sendEvent(response: http.ServerResponse, event: AppUpdateEvent): void {
-  response.write(`event: update\n`);
-  response.write(`data: ${JSON.stringify(event)}\n\n`);
-}
+let devServer: DevHttpServer | undefined;
+let tokenLease: DevApiTokenLease | undefined;
+const lifecycle = new DevProcessLifecycle();
 
-function sendJson(response: http.ServerResponse, statusCode: number, body: unknown): void {
-  response.writeHead(statusCode, {
-    'content-type': 'application/json',
-    'access-control-allow-origin': rendererOrigin,
-    vary: 'Origin',
-    'access-control-allow-headers': 'content-type',
-    'access-control-allow-methods': 'GET,POST,OPTIONS'
+async function start(): Promise<void> {
+  tokenLease = await createDevApiTokenLease(port);
+  if (lifecycle.isStopping) return;
+  security.token = tokenLease.token;
+
+  await service.init();
+  if (lifecycle.isStopping) return;
+
+  devServer = createDevHttpServer({
+    service,
+    security,
+    chooseRepositoryFolder
   });
-  response.end(JSON.stringify(body));
-}
+  await listen(devServer.server, port);
+  if (lifecycle.isStopping) return;
 
-async function readJson(request: http.IncomingMessage): Promise<unknown> {
-  let body = '';
-  for await (const chunk of request) {
-    body += chunk;
-  }
-  return body ? JSON.parse(body) : {};
-}
-
-async function route(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
-  const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
-
-  const authorization = authorizeDevApiRequest(request.headers, {
-    token: devApiToken,
-    rendererOrigin
-  });
-  if (!authorization.authorized) {
-    sendJson(response, 403, { error: authorization.reason });
-    return;
-  }
-
-  if (request.method === 'OPTIONS') {
-    sendJson(response, 204, {});
-    return;
-  }
-
-  if (request.method === 'GET' && url.pathname === '/api/events') {
-    response.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-      'access-control-allow-origin': rendererOrigin,
-      vary: 'Origin'
-    });
-    clients.add(response);
-    request.on('close', () => clients.delete(response));
-    return;
-  }
-
-  try {
-    if (request.method === 'GET' && url.pathname === '/api/defaultRepositoryPath') {
-      sendJson(response, 200, await service.getDefaultRepositoryPath());
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/agent/provider') {
-      sendJson(response, 200, await service.getAgentProviderState());
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/settings') {
-      sendJson(response, 200, await service.getAppSettings());
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/settings') {
-      sendJson(response, 200, await service.updateAppSettings((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/settings/tools') {
-      sendJson(response, 200, await service.getExternalToolStatus());
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/settings/tools/test') {
-      sendJson(response, 200, await service.testExternalTool((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/open-target/inspect') {
-      sendJson(response, 200, await service.inspectOpenTarget((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/open-target/execute') {
-      sendJson(response, 200, await service.executeOpenTargetAction((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/tasks') {
-      sendJson(response, 200, await service.listTasks());
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/repository/validate') {
-      const body = (await readJson(request)) as { path: string };
-      sendJson(response, 200, await service.validateRepository(body.path));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/repository/chooseFolder') {
-      sendJson(response, 200, (await chooseRepositoryFolder()) ?? null);
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/tasks') {
-      sendJson(response, 200, await service.createTask((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/prompt/refine') {
-      sendJson(response, 200, await service.refinePrompt((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/worktrees/prepare') {
-      sendJson(response, 200, await service.prepareWorktree((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/start') {
-      sendJson(response, 200, await service.startRun((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/steer') {
-      await service.steerRun((await readJson(request)) as never);
-      sendJson(response, 200, {});
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/continue') {
-      sendJson(response, 200, await service.continueRun((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/retry') {
-      sendJson(response, 200, await service.retryRun((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/review') {
-      sendJson(response, 200, await service.startReview((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/agent/goal/sync') {
-      sendJson(response, 200, await service.syncAgentGoal((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/runs/cancel') {
-      await service.cancelRun((await readJson(request)) as never);
-      sendJson(response, 200, {});
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/interactions/respond') {
-      sendJson(
-        response,
-        200,
-        await service.respondToInteraction((await readJson(request)) as never)
-      );
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/evidence/refresh') {
-      sendJson(response, 200, await service.refreshEvidence((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/git/delivery-commit') {
-      sendJson(response, 200, await service.createDeliveryCommit((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/github/preflight') {
-      sendJson(response, 200, await service.preflightGitHub((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/github/publish') {
-      sendJson(response, 200, await service.publishBranch((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/github/pr/create') {
-      sendJson(response, 200, await service.createPullRequest((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/github/refresh') {
-      sendJson(response, 200, await service.refreshGitHub((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/preview/resolve') {
-      sendJson(response, 200, await service.resolvePreview((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
-      sendJson(response, 200, await service.approvePreviewPlan((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/start') {
-      sendJson(response, 200, await service.startPreview((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
-      sendJson(response, 200, await service.stopPreview((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/open') {
-      sendJson(response, 200, await service.openPreview((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/log/read') {
-      sendJson(response, 200, await service.readPreviewLog((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/reset-data') {
-      sendJson(response, 200, await service.resetPreviewData((await readJson(request)) as never));
-      return;
-    }
-    if (request.method === 'POST' && url.pathname === '/api/preview/retry-setup') {
-      sendJson(response, 200, await service.retryPreviewSetup((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
-      sendJson(response, 200, await service.transitionTask((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/tasks/delete') {
-      sendJson(response, 200, await service.deleteTask((await readJson(request)) as never));
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/artifact/read') {
-      const text = await service.readArtifact((await readJson(request)) as never);
-      sendJson(response, 200, text);
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/agent/protocol/read') {
-      sendJson(
-        response,
-        200,
-        await service.readProtocolMessage((await readJson(request)) as never)
-      );
-      return;
-    }
-
-    sendJson(response, 404, { error: 'Not found' });
-  } catch (error) {
-    sendJson(response, 500, {
-      error: error instanceof Error ? error.message : 'Unknown server error.'
-    });
+  console.log(`Task Monki dev API listening on http://${security.expectedHost}`);
+  console.log(`Renderer origin: ${security.expectedOrigin}`);
+  console.log(`Store: ${storeDir}`);
+  console.log(`Default repository: ${defaultRepositoryPath}`);
+  if (agentProviderStartupDisabledReason) {
+    console.log(`Agent provider: ${agentProviderStartupDisabledReason}`);
   }
 }
-
-service.events.on((event) => {
-  for (const client of clients) {
-    sendEvent(client, event);
-  }
-});
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
-  shutdownPromise ??= (async () => {
-    console.log(`Received ${signal}; shutting down.`);
-    for (const client of clients) {
-      client.end();
-    }
-    clients.clear();
-    if (server) {
-      await new Promise<void>((resolve, reject) => {
-        server?.close((error) => (error ? reject(error) : resolve()));
-      });
-    }
-    await service.shutdown();
-  })();
-  await shutdownPromise;
+  console.log(`Received ${signal}; shutting down.`);
+  await lifecycle.stop(cleanupResources);
+}
+
+async function cleanupResources(): Promise<void> {
+  security.token = '';
+  const activeServer = devServer;
+  const activeTokenLease = tokenLease;
+  devServer = undefined;
+  tokenLease = undefined;
+  const cleanupErrors: unknown[] = [];
+  const serviceCleanup = attemptCleanup(() => service.shutdown(), cleanupErrors);
+
+  await attemptCleanup(() => activeTokenLease?.dispose(), cleanupErrors);
+  if (activeServer) {
+    await attemptCleanup(() => activeServer.closeEventStreams(), cleanupErrors);
+    await attemptCleanup(() => closeServer(activeServer.server), cleanupErrors);
+    await attemptCleanup(() => activeServer.dispose(), cleanupErrors);
+  }
+  await serviceCleanup;
+
+  if (cleanupErrors.length > 0) throw cleanupErrors[0];
 }
 
 function handleSignal(signal: NodeJS.Signals): void {
@@ -342,17 +122,55 @@ function handleSignal(signal: NodeJS.Signals): void {
   });
 }
 
+function listen(server: import('node:http').Server, listenPort: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(listenPort, '127.0.0.1');
+  });
+}
+
+function closeServer(server: import('node:http').Server): Promise<void> {
+  if (!server.listening) {
+    server.closeAllConnections();
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    server.closeIdleConnections();
+    server.closeAllConnections();
+  });
+}
+
+async function attemptCleanup(
+  cleanup: () => void | Promise<void>,
+  errors: unknown[]
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (error) {
+    errors.push(error);
+  }
+}
+
 process.on('SIGINT', () => handleSignal('SIGINT'));
 process.on('SIGTERM', () => handleSignal('SIGTERM'));
 
-service.init().then(() => {
-  server = http.createServer((request, response) => void route(request, response));
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`Task Monki dev API listening on http://127.0.0.1:${port}`);
-    console.log(`Store: ${storeDir}`);
-    console.log(`Default repository: ${defaultRepositoryPath}`);
-  });
-}).catch((error: unknown) => {
+const startupPromise = lifecycle.start(start);
+void startupPromise.catch(async (error: unknown) => {
+  try {
+    await lifecycle.stop(cleanupResources);
+  } catch (cleanupError) {
+    console.error('Task Monki dev API failed to clean up after startup.', cleanupError);
+  }
   console.error('Task Monki dev API failed to start.', error);
   process.exitCode = 1;
 });

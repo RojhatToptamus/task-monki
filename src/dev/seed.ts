@@ -34,10 +34,9 @@ async function main(): Promise<void> {
   console.log(`Environment file: ${manifest.envFilePath}`);
   console.log('');
   for (const [key, value] of Object.entries(manifest.env)) {
-    if (key === 'TASK_MANAGER_DEV_API_TOKEN') continue;
     console.log(`export ${key}=${JSON.stringify(value)}`);
   }
-  console.log('The development API token is not printed; seed files are mode 0600.');
+  console.log('Seed files are mode 0600.');
   console.log('');
   console.log('Then run:');
   console.log('  npm run dev:api');

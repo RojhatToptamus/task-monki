@@ -24,6 +24,10 @@ import {
   seedTaskMonkiDevelopmentData,
   type DevSeedManifest
 } from './seedData';
+import {
+  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
+  deterministicDevSeedProviderDisabledReason
+} from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -63,9 +67,11 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
-      TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173'
+      TASK_MANAGER_DETERMINISTIC_SEED: '1'
     });
-    expect(manifest.env.TASK_MANAGER_DEV_API_TOKEN).toMatch(/^[0-9a-f]{64}$/);
+    expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
+      DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+    );
     expect((await fs.stat(manifest.envFilePath)).mode & 0o777).toBe(0o600);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(

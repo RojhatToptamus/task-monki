@@ -43,6 +43,18 @@ export interface NativeLaunchInput {
   persistStarted?(identity: PreviewNativeProcessIdentity): Promise<void>;
 }
 
+interface NativeLaunchContract {
+  executable: string;
+  argv: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  stdoutPath: string;
+  stderrPath: string;
+  maxLogBytes: number;
+  redactions: string[];
+  digest: string;
+}
+
 export interface ProcessIdentityInspector {
   inspect(pid: number): Promise<PreviewProcessIdentity>;
 }
@@ -90,28 +102,31 @@ export class NativeLauncherHost {
       detached: process.platform !== 'win32',
       silent: true,
       execPath: this.launcherExecPath,
-      env: {
-        ...process.env,
-        ...this.launcherEnv,
-        TASK_MONKI_PREVIEW_COMMAND: JSON.stringify({
-          executable: input.executable,
-          argv: input.argv,
-          cwd: input.cwd,
-          env: input.env,
-          stdoutPath: input.stdoutPath,
-          stderrPath: input.stderrPath,
-          maxLogBytes: input.maxLogBytes ?? 256 * 1024,
-          redactions: input.redactions ?? [],
-          digest: commandDigest
-        })
-      }
+      env: { ...this.launcherEnv }
     });
     launcher.stdout?.resume();
     launcher.stderr?.resume();
     const completion = completionReceipt(launcher, input.receiptPath);
 
     try {
-      const prepared = await waitForMessage(launcher, 'prepared');
+      const [prepared] = await Promise.all([
+        waitForMessage(launcher, 'prepared'),
+        sendMessage(launcher, {
+          type: 'configure',
+          ownershipToken,
+          command: {
+            executable: input.executable,
+            argv: input.argv,
+            cwd: input.cwd,
+            env: input.env,
+            stdoutPath: input.stdoutPath,
+            stderrPath: input.stderrPath,
+            maxLogBytes: input.maxLogBytes ?? 256 * 1024,
+            redactions: input.redactions ?? [],
+            digest: commandDigest
+          } satisfies NativeLaunchContract
+        })
+      ]);
       const launcherIdentity = await this.inspector.inspect(prepared.launcherPid);
       if (!launcherIdentity.command.includes(ownershipToken)) {
         throw new Error('Native launcher identity does not contain its ownership token.');
@@ -243,6 +258,19 @@ function sameIdentity(actual: PreviewProcessIdentity, expected: PreviewProcessId
     actual.startedAt === expected.startedAt &&
     actual.command === expected.command
   );
+}
+
+function sendMessage(child: ChildProcess, message: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!child.send) {
+      reject(new Error('Native launcher owner IPC is unavailable.'));
+      return;
+    }
+    child.send(message, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 function waitForMessage(

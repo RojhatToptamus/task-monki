@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-02
+Date: 2026-07-12
 
 This document describes the current architecture, not an old migration plan.
 
@@ -159,9 +159,13 @@ services, workers, routes, and managed OCI resources. Task Monki:
   managed-resource record owns its exact container and volume;
 - keeps generated database/cache credentials only in a main-process runtime
   credential host, delivers container secrets through runtime-mounted files,
-  redacts credential values from native logs, and stores only safe binding
-  identity, ports, username/database metadata, and digests;
-- passes generated database/cache URLs only to nodes with explicit ready
+  resolves generated URLs only for the nodes whose typed environment entries
+  name that resource, and gives each recipient only its own log redactions;
+  native launch contracts cross an ownership-token-authenticated IPC channel,
+  while the launcher helper inherits no ambient Task Monki environment;
+  persisted records contain only safe binding identity, ports,
+  username/database metadata, and digests;
+- passes generated database/cache URLs only to explicit recipients with ready
   dependencies, runs selected migration/seed scenarios in dependency order,
   never automatically retries setup, and permits explicit setup retry only
   after current-plan/approval/exact-authority preflight when every selected
@@ -213,13 +217,36 @@ services, workers, routes, and managed OCI resources. Task Monki:
   volumes, the environment-owned network, and marker-owned workspaces;
   ambiguous cleanup remains `CLEANUP_INCOMPLETE` and is retryable.
 
-Graceful app quit stops managed previews before the Codex provider. Restart
-reconciliation does not adopt native services, workers, or managed OCI
-resources: it stops every exact verified owner and records
+Graceful app quit synchronously fences new service actions, cancels and joins
+initialization and already-started work, and starts the preview and Codex
+runtime owners' single-flight shutdown paths together. App Server shutdown
+cancels pending startup and restart work, drains RPC handling, removes process
+listeners, and terminates the portable child process tree; only an explicit
+settings restart may reopen that lifecycle, and a concurrent terminal shutdown
+wins. Preview restart reconciliation does not adopt native services, workers,
+or managed OCI resources: it stops every exact verified owner and records
 `CLEANUP_INCOMPLETE` for ambiguous identities without broad deletion. Required
 managed-resource death fails and detaches the complete active application but
 preserves its volume until explicit Reset or destructive Stop. Preview events
 do not update `Task.workflowPhase` or the agent projection.
+
+## Renderer and development-host trust
+
+The Electron renderer runs with context isolation and sandboxing, without Node
+integration. A local CSP permits only packaged renderer assets and the exact
+development WebSocket origin when applicable. Typed IPC rejects messages that
+do not originate from the expected main frame, and the main process blocks
+renderer navigation, popup creation, permission requests, and unexpected
+external targets.
+
+The browser development host is a distinct loopback boundary. Its API requires
+a short-lived private token transferred to Vite through a one-use local lease,
+plus the exact Host, renderer Origin, and Fetch Metadata. It bounds JSON bodies
+and event streams and closes both during process shutdown. Browser-hosted agent
+runs are non-escalatable: network access and external Codex tools are forced
+off, and unsafe persisted settings are refused. Deterministic seed hosts keep
+the provider inert so synthetic provider records cannot start a live Codex
+process.
 
 ## Settings
 

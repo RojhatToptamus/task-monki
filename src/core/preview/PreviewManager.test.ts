@@ -17,6 +17,69 @@ afterEach(async () => {
   );
 });
 
+function previewGatewayStub() {
+  return {
+    async listen(preferredPort: number) {
+      return { port: preferredPort || 31_337, relocated: false };
+    },
+    async close() {},
+    removeOwnedRoutes() {},
+    replaceRoutes() {}
+  };
+}
+
+function previewReconcilerStub() {
+  return { async reconcile() {} };
+}
+
+describe('PreviewManager lifecycle', () => {
+  it('joins an in-flight initialization and closes the gateway when shutdown wins', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-manager-lifecycle-'));
+    fixtureRoots.push(root);
+    const store = new FileTaskStore(path.join(root, 'store'));
+    let releaseReconcile!: () => void;
+    const reconcileGate = new Promise<void>((resolve) => { releaseReconcile = resolve; });
+    let markReconcileStarted!: () => void;
+    const reconcileStarted = new Promise<void>((resolve) => { markReconcileStarted = resolve; });
+    let closeCalls = 0;
+    const manager = new PreviewManager(
+      store,
+      new AppEventBus(),
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {
+        async listen() { return { port: 31_337, relocated: false }; },
+        async close() { closeCalls += 1; },
+        removeOwnedRoutes() {},
+        replaceRoutes() {}
+      } as never,
+      {} as never,
+      {
+        async reconcile() {
+          markReconcileStarted();
+          await reconcileGate;
+        }
+      } as never,
+      {} as never
+    );
+
+    const initializing = manager.init();
+    await reconcileStarted;
+    const shutdown = manager.shutdown();
+    expect(manager.shutdown()).toBe(shutdown);
+    releaseReconcile();
+
+    await expect(initializing).rejects.toThrow('initialization was canceled');
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(closeCalls).toBeGreaterThanOrEqual(1);
+    await expect(manager.init()).rejects.toThrow('shutting down');
+    await expect(manager.resolve({} as never)).rejects.toThrow('shutting down');
+  });
+});
+
 describe('PreviewManager source preparation cleanup', () => {
   it.each([
     ['cleans the workspace and records FAILED', false, 'FAILED'],
@@ -76,11 +139,12 @@ routes:
       new PreviewApprovalPolicy(store),
       source as never,
       {} as never,
+      previewGatewayStub() as never,
       {} as never,
-      {} as never,
-      {} as never,
+      previewReconcilerStub() as never,
       {} as never
     );
+    await manager.init(0, { reconcile: false });
     const context = { task, iteration, worktree };
     const resolved = await manager.resolve(context);
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -162,9 +226,10 @@ routes:
     const manager = new PreviewManager(
       store, new AppEventBus(), new PreviewRecipeLoader(), new PreviewPlanResolver(),
       new PreviewApprovalPolicy(store), source as never, {} as never,
-      { removeOwnedRoutes() {} } as never,
-      {} as never, {} as never, {} as never
+      previewGatewayStub() as never,
+      {} as never, previewReconcilerStub() as never, {} as never
     );
+    await manager.init(0, { reconcile: false });
     const context = { task, iteration, worktree };
     const resolved = await manager.resolve(context);
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -227,11 +292,12 @@ routes:
         }
       } as never,
       {} as never,
+      previewGatewayStub() as never,
       {} as never,
-      {} as never,
-      {} as never,
+      previewReconcilerStub() as never,
       {} as never
     );
+    await manager.init(0, { reconcile: false });
     const context = { task, iteration, worktree };
     const resolved = await manager.resolve(context);
     if (resolved.status !== 'PLAN') throw new Error('Expected plan.');
@@ -352,12 +418,13 @@ scenarios:
         async cleanupOwnedGeneration() { events.push('application-stopped'); }
       } as never,
       {} as never,
-      { removeOwnedRoutes() {} } as never,
+      previewGatewayStub() as never,
       {} as never,
-      {} as never,
+      previewReconcilerStub() as never,
       {} as never,
       oci as never
     );
+    await manager.init(0, { reconcile: false });
     const context = { task, iteration, worktree };
     const initial = await manager.resolve(context);
     if (initial.status !== 'PLAN') throw new Error('Expected initial plan.');

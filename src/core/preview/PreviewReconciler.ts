@@ -1,6 +1,7 @@
 import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewGateway } from './PreviewGateway';
+import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
@@ -28,24 +29,12 @@ export class PreviewReconciler {
   }
 
   private async reconcileGeneration(generation: PreviewGenerationRecord): Promise<void> {
-    let cleanupIncomplete = false;
-    const resources = await this.store.getPreviewResources(generation.id);
-    for (const resource of resources) {
-      if (resource.state === 'STOPPED') continue;
-      if (['EXITED', 'FAILED'].includes(resource.state)) continue;
-      const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
-      if (result === 'REFUSED') cleanupIncomplete = true;
-    }
-    if (!cleanupIncomplete) {
-      try {
-        await this.sourcePreparer.cleanupOwnedGeneration({
-          taskId: generation.taskId,
-          generationId: generation.id
-        });
-      } catch {
-        cleanupIncomplete = true;
-      }
-    }
+    const cleanupIncomplete = await cleanupPreviewGenerationRuntime({
+      generation,
+      store: this.store,
+      nativeRuntime: this.nativeRuntime,
+      sourcePreparer: this.sourcePreparer
+    });
     await this.store.savePreviewGeneration({
       ...generation,
       routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),

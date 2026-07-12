@@ -26,6 +26,7 @@ describe('prepareProcessCommand', () => {
         'C:\\Users\\Runner Admin\\AppData\\Local\\Temp\\fake-codex.cmd',
         ['app-server', '--listen', 'stdio://'],
         'win32',
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
         { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }
       )
     ).toEqual({
@@ -33,9 +34,28 @@ describe('prepareProcessCommand', () => {
       argv: [
         '/d',
         '/s',
+        '/v:off',
         '/c',
         '"C:\\Users\\Runner^ Admin\\AppData\\Local\\Temp\\fake-codex.cmd ^"app-server^" ^"--listen^" ^"stdio://^""'
       ],
+      windowsVerbatimArguments: true
+    });
+  });
+
+  it('uses a trusted host command processor when the child environment is minimal', () => {
+    expect(
+      prepareProcessCommand(
+        'C:\\Tools\\git.cmd',
+        ['--version'],
+        'win32',
+        { PATH: 'C:\\Tools' },
+        {
+          ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+          SystemRoot: 'C:\\Windows'
+        }
+      )
+    ).toMatchObject({
+      executable: 'C:\\Windows\\System32\\cmd.exe',
       windowsVerbatimArguments: true
     });
   });
@@ -51,11 +71,28 @@ describe('prepareProcessCommand', () => {
       argv: [
         '/d',
         '/s',
+        '/v:off',
         '/c',
         '"C:\\Program^ Files\\tool.cmd ^"hello^ world^" ^"a^&b^" ^"^%PATH^%^" ^"quote\\^"arg^""'
       ],
       windowsVerbatimArguments: true
     });
+  });
+
+  it('adds a second escaping pass only for batch launchers that forward through %*', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki cmd shim '));
+    const executable = path.join(directory, 'forwarding.cmd');
+    await fs.writeFile(executable, '@echo off\r\nnode tool.cjs %*\r\n', 'utf8');
+
+    expect(
+      prepareProcessCommand(
+        executable,
+        ['space arg', 'a&b'],
+        'win32',
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
+        { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }
+      ).argv.at(-1)
+    ).toContain('^^^"space^^^ arg^^^" ^^^"a^^^&b^^^"');
   });
 
   it.runIf(process.platform === 'win32')(
@@ -72,6 +109,57 @@ describe('prepareProcessCommand', () => {
       });
 
       expect(stdout.trim()).toBe('--version|space arg');
+    }
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'preserves cmd metacharacters with a deliberately minimal child environment',
+    async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki cmd minimal '));
+      const executable = await writeEchoExecutable(directory);
+      const args = [
+        'space arg',
+        'quote"arg',
+        '%PATH%',
+        '!bang!',
+        'a&b',
+        'a|b',
+        '(group)'
+      ];
+
+      const { stdout } = await execFilePortable(executable, args, {
+        cwd: directory,
+        env: { PATH: directory },
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024
+      });
+
+      expect(stdout.trim()).toBe(args.join('|'));
+    }
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'passes the trusted command processor through the child environment',
+    async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki cmd env '));
+      const executable = await writeNodeExecutable(
+        directory,
+        'fake-codex-env',
+        "process.stdout.write(process.env.ComSpec ?? process.env.COMSPEC ?? 'missing');\n"
+      );
+
+      const { stdout } = await execFilePortable(executable, [], {
+        cwd: directory,
+        env: {
+          PATH: directory,
+          ComSpec: 'C:\\Untrusted\\cmd.exe'
+        },
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024
+      });
+
+      expect(path.win32.basename(stdout.trim()).toLowerCase()).toBe('cmd.exe');
+      expect(stdout.trim().toLowerCase()).not.toBe('c:\\untrusted\\cmd.exe');
     }
   );
 

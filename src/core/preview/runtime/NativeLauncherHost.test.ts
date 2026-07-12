@@ -66,6 +66,39 @@ describeMac('NativeLauncherHost macOS ownership integration', () => {
     expect(JSON.stringify(await readNativeLauncherReceipt(fixture.receiptPath))).not.toContain(password);
   });
 
+  it('keeps the host environment and launch contract out of the launcher environment', async () => {
+    const fixture = await createFixture();
+    const hostSecretKey = `TASK_MONKI_HOST_SECRET_${Date.now()}`;
+    const hostSecret = 'host-secret-that-the-preview-must-not-inherit';
+    const unrelatedCredential = 'credential-for-a-different-preview-recipient';
+    const launcherEnvironmentPath = path.join(fixture.root, 'launcher-environment.txt');
+    process.env[hostSecretKey] = hostSecret;
+    try {
+      const script = [
+        `const { execFileSync } = require('node:child_process');`,
+        `const fs = require('node:fs');`,
+        `const output = execFileSync('/bin/ps', ['eww', '-p', String(process.ppid)], { encoding: 'utf8' });`,
+        `fs.writeFileSync(${JSON.stringify(launcherEnvironmentPath)}, output);`
+      ].join(' ');
+      const owned = await fixture.host.launch({
+        ...fixture.input,
+        executable: process.execPath,
+        argv: ['-e', script],
+        redactions: [unrelatedCredential],
+        async persistPrepared() {}
+      });
+      await expect(owned.completion).resolves.toMatchObject({ state: 'EXITED', exitCode: 0 });
+    } finally {
+      delete process.env[hostSecretKey];
+    }
+
+    const launcherEnvironment = await fs.readFile(launcherEnvironmentPath, 'utf8');
+    expect(launcherEnvironment).not.toContain(hostSecretKey);
+    expect(launcherEnvironment).not.toContain(hostSecret);
+    expect(launcherEnvironment).not.toContain(unrelatedCredential);
+    expect(launcherEnvironment).not.toContain('TASK_MONKI_PREVIEW_COMMAND');
+  });
+
   it('fails the owned launch cleanly when bounded log capture cannot write', async () => {
     const fixture = await createFixture();
     const owned = await fixture.host.launch({

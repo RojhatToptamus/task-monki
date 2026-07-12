@@ -55,6 +55,100 @@ describe('FileTaskStore', () => {
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'refuses a symlink swapped into a managed artifact path',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-swap-'));
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Artifact swap',
+        prompt: 'Keep output contained.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/artifact-swap',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        provider: 'codex'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'ANALYSIS',
+        prompt: task.prompt
+      });
+      const output = (await store.snapshot()).artifacts.find(
+        (artifact) => artifact.id === run.outputArtifactId
+      )!;
+      const outside = path.join(dir, 'outside.txt');
+      await fs.writeFile(outside, 'outside', 'utf8');
+      await fs.rm(output.path);
+      await fs.symlink(outside, output.path);
+
+      await expect(store.appendArtifact(output.id, 'leak')).rejects.toThrow(
+        'could not be opened safely'
+      );
+      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
+    }
+  );
+
+  it('rejects a durable artifact record that claims a path outside the managed directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-path-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Artifact path integrity',
+      prompt: 'Keep artifact paths managed.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/artifact-path-integrity',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    await store.createRun({ task, session, mode: 'ANALYSIS', prompt: task.prompt });
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      artifacts: Array<{ path: string }>;
+    };
+    persisted.artifacts[0]!.path = path.join(dir, 'outside-artifact.log');
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
+      mode: 0o600
+    });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'artifact path failed its managed-path integrity check'
+    );
+  });
+
+  it('fails closed instead of recursively deleting a temporary-path directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-temp-'));
+    await new FileTaskStore(dir).snapshot();
+    const temporaryDirectory = path.join(dir, 'store.json.attacker.tmp');
+    await fs.mkdir(temporaryDirectory);
+    await fs.writeFile(path.join(temporaryDirectory, 'keep.txt'), 'keep', 'utf8');
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'temporary path failed its integrity check'
+    );
+    await expect(
+      fs.readFile(path.join(temporaryDirectory, 'keep.txt'), 'utf8')
+    ).resolves.toBe('keep');
+  });
+
   it('recovers queued persistence after a write failure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-retry-'));
     const store = new FileTaskStore(dir);
@@ -65,9 +159,23 @@ describe('FileTaskStore', () => {
       repositoryPath: dir
     });
 
-    const writeFile = vi
-      .spyOn(fs, 'writeFile')
-      .mockRejectedValueOnce(new Error('Injected store write failure.'));
+    const originalOpen = fs.open.bind(fs);
+    const storeTemporaryPathPrefix = `${path.join(dir, 'store.json')}.`;
+    let injectedFailure = false;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (
+        !injectedFailure &&
+        String(args[0]).startsWith(storeTemporaryPathPrefix) &&
+        String(args[0]).endsWith('.tmp')
+      ) {
+        injectedFailure = true;
+        vi.spyOn(handle, 'writeFile').mockRejectedValueOnce(
+          new Error('Injected store write failure.')
+        );
+      }
+      return handle;
+    });
     try {
       await expect(
         store.createTask({
@@ -77,8 +185,15 @@ describe('FileTaskStore', () => {
         })
       ).rejects.toThrow('Injected store write failure');
     } finally {
-      writeFile.mockRestore();
+      open.mockRestore();
     }
+
+    expect(injectedFailure).toBe(true);
+    expect(
+      (await fs.readdir(dir)).filter(
+        (entry) => entry.startsWith('store.json.') && entry.endsWith('.tmp')
+      )
+    ).toEqual([]);
 
     await store.createTask({
       title: 'Persists after recovery',

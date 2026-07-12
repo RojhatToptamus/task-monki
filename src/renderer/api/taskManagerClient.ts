@@ -57,6 +57,28 @@ import type {
 const apiBase = import.meta.env.VITE_TASK_MANAGER_API_URL ?? '';
 const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
 
+interface StructuredApiError {
+  error: {
+    code?: string;
+    message?: string;
+    retryable?: boolean;
+    requestId?: string;
+  };
+}
+
+export class TaskManagerApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly retryable = false,
+    readonly requestId?: string
+  ) {
+    super(message);
+    this.name = 'TaskManagerApiError';
+  }
+}
+
 export const taskManagerApi: TaskManagerApi =
   (typeof window === 'undefined' ? undefined : window.taskManager) ??
   createBrowserTaskManagerApi(apiBase);
@@ -219,13 +241,45 @@ async function post<T>(baseUrl: string, path: string, body: unknown): Promise<T>
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T | { error?: string };
+  let body: T | { error?: string } | StructuredApiError;
+  try {
+    body = (await response.json()) as T | { error?: string } | StructuredApiError;
+  } catch {
+    if (!response.ok) {
+      throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
+    }
+    throw new TaskManagerApiError('The server returned an invalid response.', response.status);
+  }
   if (!response.ok) {
-    throw new Error(
-      typeof body === 'object' && body && 'error' in body && body.error
+    const structured = structuredError(body);
+    if (structured) {
+      throw new TaskManagerApiError(
+        structured.message ?? `HTTP ${response.status}`,
+        response.status,
+        structured.code,
+        structured.retryable ?? false,
+        structured.requestId
+      );
+    }
+    const legacyMessage =
+      typeof body === 'object' &&
+      body !== null &&
+      'error' in body &&
+      typeof body.error === 'string'
         ? body.error
-        : `HTTP ${response.status}`
+        : undefined;
+    throw new TaskManagerApiError(
+      legacyMessage ?? `HTTP ${response.status}`,
+      response.status
     );
   }
   return body as T;
+}
+
+function structuredError(body: unknown): StructuredApiError['error'] | undefined {
+  if (!body || typeof body !== 'object' || !('error' in body)) return undefined;
+  const error = (body as { error?: unknown }).error;
+  return error && typeof error === 'object'
+    ? (error as StructuredApiError['error'])
+    : undefined;
 }

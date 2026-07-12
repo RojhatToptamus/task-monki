@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import type {
   AgentExecutionSettings,
   AgentProtocolMessageReference,
@@ -31,6 +30,7 @@ import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
+import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
 
 export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v1';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
@@ -80,8 +80,7 @@ export interface DevSeedManifest {
     TASK_MANAGER_WORKTREE_ROOT: string;
     TASK_MANAGER_PREVIEW_ROOT: string;
     TASK_MANAGER_PREVIEW_RECONCILE: '0';
-    TASK_MANAGER_DEV_API_TOKEN: string;
-    TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173';
+    TASK_MANAGER_DETERMINISTIC_SEED: '1';
   };
   counts: {
     tasks: number;
@@ -538,8 +537,7 @@ export async function seedTaskMonkiDevelopmentData(
       TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: paths.previewRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
-      TASK_MANAGER_DEV_API_TOKEN: randomBytes(32).toString('hex'),
-      TASK_MANAGER_RENDERER_ORIGIN: 'http://127.0.0.1:5173'
+      [DETERMINISTIC_DEV_SEED_ENV_VAR]: '1'
     },
     counts: {
       tasks: snapshot.tasks.length,

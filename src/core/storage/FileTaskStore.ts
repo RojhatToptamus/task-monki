@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -54,6 +55,13 @@ import {
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
+import {
+  enforcePosixMode,
+  hasNoGroupOrOtherPosixAccess,
+  isOwnedByCurrentUser,
+  posixModeMatches,
+  syncDirectoryIfSupported
+} from '../filesystem/secureFilesystem';
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
 import { createDomainEvent } from './domainEvent';
 import {
@@ -187,6 +195,26 @@ const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
   'MERGED_AND_VERIFIED',
   'MANUAL'
 ];
+const MAX_STORE_FILE_BYTES = 256 * 1024 * 1024;
+const ARTIFACT_KINDS: readonly ArtifactKind[] = [
+  'agent-prompt',
+  'agent-output',
+  'agent-diagnostics',
+  'agent-final',
+  'diff',
+  'git-snapshot',
+  'pr-body',
+  'preview-source-manifest',
+  'preview-stdout',
+  'preview-stderr'
+];
+const UUID_FILE_SEGMENT =
+  '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const UUID_FILE_SEGMENT_PATTERN = new RegExp(`^${UUID_FILE_SEGMENT}$`, 'u');
+const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
+  `^${UUID_FILE_SEGMENT}-(?:task|${UUID_FILE_SEGMENT})-(?:${ARTIFACT_KINDS.join('|')})-${UUID_FILE_SEGMENT}\\.log$`,
+  'u'
+);
 
 function normalizeCreateTaskCompletionPolicy(
   value: CreateTaskRequest['completionPolicy']
@@ -228,25 +256,88 @@ export class FileTaskStore {
       return;
     }
 
-    await fs.mkdir(this.artifactsDir, { recursive: true });
+    await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
+    const baseEntry = await fs.lstat(this.baseDir);
+    if (
+      !baseEntry.isDirectory() ||
+      baseEntry.isSymbolicLink() ||
+      !isOwnedByCurrentUser(baseEntry)
+    ) {
+      throw new Error('Task store root failed its directory integrity check.');
+    }
+    await enforcePosixMode(this.baseDir, 0o700);
+    await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
+    await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
 
+    let raw: string | undefined;
     try {
-      const raw = await fs.readFile(this.storePath, 'utf8');
+      raw = await readPrivateStoreFile(this.storePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
+    if (raw === undefined) {
+      this.state = createEmptyState();
+      await this.reconcileArtifacts();
+      await this.persist();
+    } else {
       const migrated = migratePersistedState(JSON.parse(raw) as PersistedState);
       const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
       this.state = normalized.state;
+      await this.reconcileArtifacts();
       if (migrated.changed || normalized.changed) {
         await this.persist();
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      this.state = createEmptyState();
-      await this.persist();
     }
 
     this.loaded = true;
+  }
+
+  private async reconcileArtifacts(): Promise<void> {
+    await assertArtifactDirectory(this.baseDir, this.artifactsDir);
+    const taskIds = new Set(this.state.tasks.map((task) => task.id));
+    const runsById = new Map(this.state.runs.map((run) => [run.id, run]));
+    const artifactIds = new Set<string>();
+    const expectedByName = new Map<string, ArtifactRecord>();
+    for (const artifact of this.state.artifacts) {
+      const fileName = validateArtifactRecord(
+        artifact,
+        this.artifactsDir,
+        taskIds,
+        runsById
+      );
+      if (artifactIds.has(artifact.id) || expectedByName.has(fileName)) {
+        throw new Error('Task artifact records contain duplicate managed identifiers.');
+      }
+      artifactIds.add(artifact.id);
+      expectedByName.set(fileName, artifact);
+    }
+
+    let removedOrphans = 0;
+    for (const entry of await fs.readdir(this.artifactsDir, { withFileTypes: true })) {
+      const entryPath = path.join(this.artifactsDir, entry.name);
+      const stat = await fs.lstat(entryPath);
+      if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
+        throw new Error('Task artifact directory contains an unsafe entry.');
+      }
+      if (expectedByName.has(entry.name)) {
+        if (!stat.isFile()) {
+          throw new Error('Stored task artifact path is not a regular file.');
+        }
+        await secureArtifactFile(entryPath);
+        continue;
+      }
+      if (!MANAGED_ARTIFACT_FILE_PATTERN.test(entry.name)) continue;
+      if (!stat.isFile()) {
+        throw new Error('Orphan task artifact path is not a regular file.');
+      }
+      assertArtifactOwnedByCurrentUser(stat);
+      await fs.unlink(entryPath);
+      removedOrphans += 1;
+    }
+    if (removedOrphans > 0) {
+      await syncDirectoryIfSupported(this.artifactsDir);
+    }
   }
 
   async snapshot(): Promise<TaskSnapshot> {
@@ -1251,8 +1342,8 @@ export class FileTaskStore {
       (candidate) =>
         candidate.id === generation.approvalId &&
         candidate.taskId === generation.taskId &&
-        candidate.planId === generation.planId &&
         candidate.executionDigest === generation.executionDigest &&
+        candidate.scope === 'TASK' &&
         (!candidate.invalidatedAt || Boolean(existing))
     );
     const authorityChanged =
@@ -1853,9 +1944,9 @@ export class FileTaskStore {
       runId
     });
     await Promise.all([
-      fs.writeFile(promptArtifact.path, input.prompt, { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
+      writeNewArtifactFile(promptArtifact.path, input.prompt),
+      writeNewArtifactFile(outputArtifact.path, ''),
+      writeNewArtifactFile(diagnosticArtifact.path, '')
     ]);
     promptArtifact.byteCount = Buffer.byteLength(input.prompt);
 
@@ -1996,9 +2087,9 @@ export class FileTaskStore {
       { runId }
     );
     await Promise.all([
-      fs.writeFile(promptArtifact.path, prompt, { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
+      writeNewArtifactFile(promptArtifact.path, prompt),
+      writeNewArtifactFile(outputArtifact.path, ''),
+      writeNewArtifactFile(diagnosticArtifact.path, '')
     ]);
     promptArtifact.byteCount = Buffer.byteLength(prompt);
 
@@ -2695,8 +2786,7 @@ export class FileTaskStore {
       throw new Error(`Artifact not found: ${artifactId}`);
     }
 
-    await fs.mkdir(path.dirname(artifact.path), { recursive: true });
-    await fs.appendFile(artifact.path, chunk, 'utf8');
+    await appendManagedArtifactFile(artifact.path, chunk);
 
     const byteCount = Buffer.byteLength(chunk);
     const updatedAt = new Date().toISOString();
@@ -2716,8 +2806,7 @@ export class FileTaskStore {
   ): Promise<ArtifactRecord> {
     await this.init();
     const artifact = await this.createArtifactRecord(taskId, kind);
-    await fs.mkdir(path.dirname(artifact.path), { recursive: true });
-    await fs.writeFile(artifact.path, '', { encoding: 'utf8', mode: 0o600 });
+    await writeNewArtifactFile(artifact.path, '');
     this.state = {
       ...this.state,
       artifacts: [artifact, ...this.state.artifacts]
@@ -2751,7 +2840,7 @@ export class FileTaskStore {
         ])
       : input;
     if (output.byteLength > 0) {
-      await fs.appendFile(artifact.path, output);
+      await appendManagedArtifactFile(artifact.path, output);
     }
 
     const byteCount = artifact.byteCount + output.byteLength;
@@ -2769,10 +2858,11 @@ export class FileTaskStore {
     await this.init();
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
     if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
-    const stat = await fs.stat(artifact.path).catch((error) => {
+    const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     });
+    const stat = handle ? await handle.stat().finally(() => handle.close()) : undefined;
     const updated: ArtifactRecord = {
       ...artifact,
       byteCount: stat?.size ?? 0,
@@ -2791,7 +2881,7 @@ export class FileTaskStore {
     await this.init();
 
     const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
-    await fs.writeFile(artifact.path, content, 'utf8');
+    await writeNewArtifactFile(artifact.path, content);
 
     const hash = createHash('sha256').update(content).digest('hex');
     const stored: ArtifactRecord = {
@@ -2824,7 +2914,7 @@ export class FileTaskStore {
     await this.init();
 
     const artifact = await this.createArtifactRecord(taskId, kind);
-    await fs.writeFile(artifact.path, content, 'utf8');
+    await writeNewArtifactFile(artifact.path, content);
 
     const stored: ArtifactRecord = {
       ...artifact,
@@ -2848,7 +2938,12 @@ export class FileTaskStore {
       throw new Error(`Artifact not found: ${artifactId}`);
     }
     try {
-      return await fs.readFile(artifact.path, 'utf8');
+      const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY);
+      try {
+        return await handle.readFile('utf8');
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return '';
@@ -2869,7 +2964,7 @@ export class FileTaskStore {
     }
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
     if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
-    const handle = await fs.open(artifact.path, 'r').catch((error) => {
+    const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     });
@@ -2927,15 +3022,312 @@ export class FileTaskStore {
   }
 
   private async persist(): Promise<void> {
-    await fs.mkdir(this.baseDir, { recursive: true });
-    const tmpPath = `${this.storePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.state, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.chmod(tmpPath, 0o600);
-    await fs.rename(tmpPath, this.storePath);
+    await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
+    const tmpPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      handle = await fs.open(
+        tmpPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        0o600
+      );
+      await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
+      await enforcePosixMode(handle, 0o600);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fs.rename(tmpPath, this.storePath);
+      await syncDirectoryIfSupported(this.baseDir);
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      await fs.unlink(tmpPath).catch(() => undefined);
+      throw error;
+    }
   }
+}
+
+async function readPrivateStoreFile(storePath: string): Promise<string> {
+  const handle = await fs.open(
+    storePath,
+    fsConstants.O_RDONLY |
+      (fsConstants.O_NOFOLLOW ?? 0) |
+      (fsConstants.O_NONBLOCK ?? 0)
+  );
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.size <= 0 ||
+      stat.size > MAX_STORE_FILE_BYTES ||
+      !hasNoGroupOrOtherPosixAccess(stat) ||
+      !isOwnedByCurrentUser(stat)
+    ) {
+      throw new Error('Task store file failed its integrity check.');
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength !== stat.size) {
+      throw new Error('Task store file changed while it was being read.');
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function cleanupStoreTemporaryFiles(
+  baseDir: string,
+  storePath: string
+): Promise<void> {
+  const storeName = path.basename(storePath);
+  for (const entry of await fs.readdir(baseDir, { withFileTypes: true })) {
+    if (
+      entry.name !== `${storeName}.tmp` &&
+      !(entry.name.startsWith(`${storeName}.`) && entry.name.endsWith('.tmp'))
+    ) {
+      continue;
+    }
+    const temporaryPath = path.join(baseDir, entry.name);
+    const stat = await fs.lstat(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!stat) continue;
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      throw new Error('Task store temporary path failed its integrity check.');
+    }
+    await fs.unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+}
+
+async function initializeArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<void> {
+  try {
+    await fs.mkdir(artifactsDir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  const before = await inspectArtifactDirectory(baseDir, artifactsDir);
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      artifactsDir,
+      fsConstants.O_RDONLY |
+        (fsConstants.O_DIRECTORY ?? 0) |
+        (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Task artifact directory failed its integrity check.');
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isDirectory() || !sameFileIdentity(stat, before)) {
+      throw new Error('Task artifact directory changed during initialization.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    await enforcePosixMode(handle, 0o700);
+  } finally {
+    await handle.close();
+  }
+  await assertArtifactDirectory(baseDir, artifactsDir);
+}
+
+async function assertArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<void> {
+  const stat = await inspectArtifactDirectory(baseDir, artifactsDir);
+  assertArtifactPrivateMode(stat, 0o700);
+}
+
+async function inspectArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<Awaited<ReturnType<typeof fs.lstat>>> {
+  const stat = await fs.lstat(artifactsDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('Task artifact directory failed its integrity check.');
+  }
+  assertArtifactOwnedByCurrentUser(stat);
+  const [baseRealPath, artifactRealPath] = await Promise.all([
+    fs.realpath(baseDir),
+    fs.realpath(artifactsDir)
+  ]);
+  const expectedArtifactPath = path.join(baseRealPath, path.basename(artifactsDir));
+  if (!sameAbsolutePath(artifactRealPath, expectedArtifactPath)) {
+    throw new Error('Task artifact directory escaped its managed root.');
+  }
+  return stat;
+}
+
+function validateArtifactRecord(
+  artifact: ArtifactRecord,
+  artifactsDir: string,
+  taskIds: ReadonlySet<string>,
+  runsById: ReadonlyMap<string, RunRecord>
+): string {
+  const run = artifact.runId === undefined ? undefined : runsById.get(artifact.runId);
+  if (
+    !artifact ||
+    typeof artifact !== 'object' ||
+    !UUID_FILE_SEGMENT_PATTERN.test(artifact.id) ||
+    !UUID_FILE_SEGMENT_PATTERN.test(artifact.taskId) ||
+    (artifact.runId !== undefined && !UUID_FILE_SEGMENT_PATTERN.test(artifact.runId)) ||
+    !ARTIFACT_KINDS.includes(artifact.kind) ||
+    !Number.isSafeInteger(artifact.byteCount) ||
+    artifact.byteCount < 0 ||
+    !isCanonicalStoreTimestamp(artifact.createdAt) ||
+    !isCanonicalStoreTimestamp(artifact.updatedAt) ||
+    artifact.updatedAt < artifact.createdAt ||
+    !taskIds.has(artifact.taskId) ||
+    (artifact.runId !== undefined && (!run || run.taskId !== artifact.taskId))
+  ) {
+    throw new Error('Task artifact record failed its integrity check.');
+  }
+  const ownerId = artifact.runId ?? 'task';
+  const fileName = `${artifact.taskId}-${ownerId}-${artifact.kind}-${artifact.id}.log`;
+  if (
+    !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
+    !sameAbsolutePath(artifact.path, path.join(artifactsDir, fileName))
+  ) {
+    throw new Error('Task artifact path failed its managed-path integrity check.');
+  }
+  return fileName;
+}
+
+function isCanonicalStoreTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+async function secureArtifactFile(filePath: string): Promise<void> {
+  const before = await fs.lstat(filePath);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error('Stored task artifact is not a regular file.');
+  }
+  assertArtifactOwnedByCurrentUser(before);
+  const handle = await openManagedArtifactFile(filePath, fsConstants.O_RDONLY);
+  try {
+    const stat = await handle.stat();
+    if (!sameFileIdentity(stat, before)) {
+      throw new Error('Stored task artifact changed during validation.');
+    }
+    if (!posixModeMatches(stat, 0o600)) {
+      await enforcePosixMode(handle, 0o600);
+      await handle.sync();
+    }
+    assertArtifactPrivateMode(await handle.stat(), 0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeNewArtifactFile(
+  filePath: string,
+  content: string | Buffer
+): Promise<void> {
+  const handle = await fs.open(
+    filePath,
+    fsConstants.O_WRONLY |
+      fsConstants.O_CREAT |
+      fsConstants.O_EXCL |
+      (fsConstants.O_NOFOLLOW ?? 0),
+    0o600
+  );
+  try {
+    await handle.writeFile(content);
+    await enforcePosixMode(handle, 0o600);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function appendManagedArtifactFile(
+  filePath: string,
+  content: string | Buffer
+): Promise<void> {
+  const handle = await openManagedArtifactFile(
+    filePath,
+    fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT,
+    0o600
+  );
+  try {
+    await handle.writeFile(content);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function openManagedArtifactFile(
+  filePath: string,
+  flags: number,
+  mode?: number
+): Promise<Awaited<ReturnType<typeof fs.open>>> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      filePath,
+      flags |
+        (fsConstants.O_NOFOLLOW ?? 0) |
+        (fsConstants.O_NONBLOCK ?? 0),
+      mode
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    throw new Error('Stored task artifact could not be opened safely.', { cause: error });
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error('Stored task artifact is not a regular file.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    if (!posixModeMatches(stat, 0o600)) {
+      await enforcePosixMode(handle, 0o600);
+    }
+    assertArtifactPrivateMode(await handle.stat(), 0o600);
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+function assertArtifactOwnedByCurrentUser(
+  stat: { uid: number | bigint }
+): void {
+  if (!isOwnedByCurrentUser(stat)) {
+    throw new Error('Task artifact entry is not owned by the current user.');
+  }
+}
+
+function assertArtifactPrivateMode(
+  stat: { mode: number | bigint },
+  expected: number
+): void {
+  if (!posixModeMatches(stat, expected)) {
+    throw new Error('Task artifact entry has unsafe permissions.');
+  }
+}
+
+function sameFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint }
+): boolean {
+  if (left.dev !== right.dev) return false;
+  return left.ino === 0 || right.ino === 0 || left.ino === right.ino;
+}
+
+function sameAbsolutePath(left: string, right: string): boolean {
+  return path.isAbsolute(left) && path.isAbsolute(right) && path.relative(left, right) === '';
 }
 
 function requireCurrentState(state: PersistedState): StoreState {

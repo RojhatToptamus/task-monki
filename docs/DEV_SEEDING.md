@@ -26,13 +26,13 @@ npm run dev:renderer
 ```
 
 The development renderer uses Vite's same-origin `/api` proxy to the local
-control API on `127.0.0.1:3099`. The sourced environment gives the proxy a
-per-seed secret that is never exposed to renderer code. The control API also
-rejects browser requests whose `Origin` is not the configured renderer origin.
+control API on `127.0.0.1:3099`. The API creates a short-lived private token
+lease that Vite consumes into proxy memory before agent work can run. The
+control API also verifies the exact Host, renderer Origin, and Fetch Metadata.
 
 `npm run dev:seed` resets only the seed-owned root and prints the non-sensitive
-environment variables written to `dev-api.env`. The token is not printed, and
-both the seed manifest and environment file are forced to mode `0600`:
+environment variables written to `dev-api.env`. Both the seed manifest and
+environment file are forced to mode `0600`:
 
 - `TASK_MANAGER_STORE_DIR`
 - `TASK_MANAGER_APP_SETTINGS_PATH`
@@ -41,8 +41,14 @@ both the seed manifest and environment file are forced to mode `0600`:
 - `TASK_MANAGER_PREVIEW_ROOT`
 - `TASK_MANAGER_PREVIEW_RECONCILE=0` (keeps synthetic preview UI states intact;
   normal product/dev runs reconcile by default)
-- `TASK_MANAGER_DEV_API_TOKEN` (random per-seed proxy credential)
-- `TASK_MANAGER_RENDERER_ORIGIN=http://127.0.0.1:5173`
+- `TASK_MANAGER_DETERMINISTIC_SEED=1` (keeps the live Codex provider inert so
+  synthetic provider records cannot start or recover real agent work)
+
+The browser development host always forces agent network access and external
+Codex tools off. When the deterministic seed flag is present, it also skips
+provider startup and reports that explicit disabled reason through provider
+preflight and any attempted run action. Unset the seed environment before using
+the development host for live, local-only Codex work.
 
 The default seed root is `.local/task-monki-dev-seed`, which is ignored by git.
 Reset safety is marker-based: non-empty directories without the Task Monki seed

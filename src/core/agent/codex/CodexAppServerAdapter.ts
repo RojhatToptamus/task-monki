@@ -157,6 +157,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private restartTimer?: NodeJS.Timeout;
   private restartWork?: Promise<void>;
   private runtimeLossWork?: Promise<void>;
+  private initializeWork?: Promise<void>;
   private shutdownWork?: Promise<void>;
   private inboundQueue: Promise<void> = Promise.resolve();
   private readonly interruptRequestTimeoutMs: number;
@@ -165,14 +166,16 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private initialized = false;
   private runtimeConfigRestartPending = false;
   private shuttingDown = false;
+  private terminalShutdownRequested = false;
   private supervisorExitListenerAttached = false;
   private readonly handleSupervisorExit = (
     server: AgentServerInstance,
     unexpected: boolean
   ): void => {
     if (!unexpected || this.shuttingDown) return;
-    const previous = this.runtimeLossWork ?? Promise.resolve();
-    const work = previous
+    const previousRuntimeLoss = this.runtimeLossWork ?? Promise.resolve();
+    const pendingInbound = this.inboundQueue;
+    const work = Promise.all([previousRuntimeLoss, pendingInbound])
       .then(() => this.handleRuntimeLoss(server.id))
       .then(() => {
         if (!this.shuttingDown) this.scheduleRestart();
@@ -199,17 +202,32 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.attachSupervisorExitListener();
   }
 
-  async initialize(): Promise<void> {
-    if (this.initialized) {
-      return;
+  initialize(): Promise<void> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('Codex App Server is shutting down.'));
     }
-    this.shuttingDown = false;
+    if (this.initialized) {
+      return Promise.resolve();
+    }
+    if (this.initializeWork) return this.initializeWork;
+    const work = this.completeInitialize().finally(() => {
+      if (this.initializeWork === work) this.initializeWork = undefined;
+    });
+    this.initializeWork = work;
+    return work;
+  }
+
+  private async completeInitialize(): Promise<void> {
     this.attachSupervisorExitListener();
-    this.initialized = true;
     await this.recoverPersistedRuntimeLosses();
+    this.assertRuntimeActive();
     await this.ensureClient();
+    this.assertRuntimeActive();
     await this.refreshPreflight();
+    this.assertRuntimeActive();
     await this.reconcile();
+    this.assertRuntimeActive();
+    this.initialized = true;
   }
 
   async preflight(): Promise<AgentPreflight> {
@@ -819,6 +837,11 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   shutdown(): Promise<void> {
+    this.terminalShutdownRequested = true;
+    return this.stopRuntime();
+  }
+
+  private stopRuntime(): Promise<void> {
     if (this.shutdownWork) return this.shutdownWork;
     this.shuttingDown = true;
     this.detachSupervisorExitListener();
@@ -848,6 +871,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     toolSettings: CodexExternalToolSettings;
     restart: boolean;
   }): Promise<void> {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
     this.supervisor.setExecutable(input.executable);
     this.supervisor.setToolSettings(input.toolSettings);
     if (!this.initialized) {
@@ -868,7 +894,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       return;
     }
 
-    await this.shutdown();
+    await this.stopRuntime();
+    if (this.terminalShutdownRequested) return;
     this.runtimeConfigRestartPending = false;
     this.boundClient = undefined;
     this.models = [];
@@ -881,6 +908,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       warnings: []
     };
     this.emitProviderUpdate();
+    this.supervisor.resumeAfterShutdown();
+    this.shuttingDown = false;
+    this.attachSupervisorExitListener();
     await this.initialize();
   }
 
@@ -893,17 +923,19 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private async ensureClient(): Promise<CodexRpcClient> {
-    if (this.shuttingDown) {
-      throw new Error('Codex App Server is shutting down.');
-    }
+    this.assertRuntimeActive();
     const client = await this.supervisor.start();
-    if (this.shuttingDown) {
-      throw new Error('Codex App Server is shutting down.');
-    }
+    this.assertRuntimeActive();
     if (client !== this.boundClient) {
       this.bindClient(client);
     }
     return client;
+  }
+
+  private assertRuntimeActive(): void {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
   }
 
   private bindClient(client: CodexRpcClient): void {
@@ -2101,13 +2133,26 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private async completeShutdown(): Promise<void> {
+    const supervisorShutdown = this.supervisor.shutdown();
     await Promise.all([
       this.runtimeLossWork ?? Promise.resolve(),
-      this.restartWork ?? Promise.resolve()
+      this.restartWork ?? Promise.resolve(),
+      this.initializeWork?.catch(() => undefined) ?? Promise.resolve(),
+      supervisorShutdown
     ]);
-    await this.supervisor.shutdown();
-    this.boundClient = undefined;
+    await this.inboundQueue;
+    this.unbindClient();
+    this.initialized = false;
     this.restartAttempt = 0;
+  }
+
+  private unbindClient(): void {
+    const client = this.boundClient;
+    if (!client) return;
+    client.events.removeAllListeners('notification');
+    client.events.removeAllListeners('serverRequest');
+    client.events.removeAllListeners('unsupportedServerRequest');
+    this.boundClient = undefined;
   }
 
   private async recordReconciliation(

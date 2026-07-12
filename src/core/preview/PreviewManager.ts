@@ -17,6 +17,7 @@ import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewGateway } from './PreviewGateway';
+import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewRecipeLoader, selectPreviewScenario } from './PreviewRecipeLoader';
@@ -49,6 +50,9 @@ export class PreviewManager {
   private readonly startups = new Map<string, AbortController>();
   private readonly resourceHealthStops = new Map<string, () => Promise<void>>();
   private gatewayPort: number | undefined;
+  private lifecycle: 'NEW' | 'INITIALIZING' | 'READY' | 'SHUTTING_DOWN' | 'STOPPED' = 'NEW';
+  private initWork?: Promise<{ port: number; relocated: boolean }>;
+  private shutdownWork?: Promise<void>;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -65,17 +69,27 @@ export class PreviewManager {
     private readonly ociRuntime?: OciResourceRuntime
   ) {}
 
-  async init(
+  init(
     preferredGatewayPort = 0,
     options: { reconcile?: boolean } = {}
   ): Promise<{ port: number; relocated: boolean }> {
-    const listening = await this.gateway.listen(preferredGatewayPort);
-    this.gatewayPort = listening.port;
-    if (options.reconcile !== false) await this.reconciler.reconcile();
-    return listening;
+    if (this.lifecycle === 'READY') {
+      return Promise.resolve({ port: this.requireGatewayPort(), relocated: false });
+    }
+    if (this.initWork) return this.initWork;
+    if (this.lifecycle === 'SHUTTING_DOWN' || this.lifecycle === 'STOPPED') {
+      return Promise.reject(new Error('Preview runtime is shutting down.'));
+    }
+    this.lifecycle = 'INITIALIZING';
+    const operation = this.initialize(preferredGatewayPort, options).finally(() => {
+      if (this.initWork === operation) this.initWork = undefined;
+    });
+    this.initWork = operation;
+    return operation;
   }
 
   async resolve(context: PreviewTaskContext, scenarioId?: string): Promise<ResolvePreviewResult> {
+    this.assertAcceptingWork();
     const loaded = await this.recipeLoader.load(context.worktree.worktreePath);
     if (loaded.status === 'MISSING') return { status: 'UNAVAILABLE', reason: loaded.reason };
     const parsed = scenarioId
@@ -99,6 +113,7 @@ export class PreviewManager {
   }
 
   approve(input: { taskId: string; planId: string; executionDigest: string }): Promise<PreviewApprovalRecord> {
+    this.assertAcceptingWork();
     return this.approvalPolicy.approve(input);
   }
 
@@ -107,7 +122,9 @@ export class PreviewManager {
     gitSnapshot: GitSnapshotRecord;
     reobserveGit(): Promise<GitSnapshotRecord>;
   }, scenarioId?: string, setupRetryResourceIds?: string[]): Promise<PreparedPreviewGeneration> {
+    this.assertAcceptingWork();
     const resolved = await this.resolve(input.context, scenarioId);
+    this.assertAcceptingWork();
     if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
     const approval = await this.approvalPolicy.requireMatching(resolved.plan);
     const sourceHeadSha = input.gitSnapshot.headSha;
@@ -141,10 +158,26 @@ export class PreviewManager {
       createdAt: now,
       updatedAt: now
     };
-    generation = await this.store.savePreviewGeneration(generation);
     const controller = new AbortController();
-    this.startups.set(generation.id, controller);
+    this.startups.set(id, controller);
+    generation = await this.store.savePreviewGeneration(generation).catch((error) => {
+      if (this.startups.get(id) === controller) this.startups.delete(id);
+      throw error;
+    });
+    if (controller.signal.aborted || this.lifecycle !== 'READY') {
+      generation = await this.saveGeneration({
+        ...generation,
+        state: 'STOPPED',
+        routingState: 'RETIRED',
+        cleanupReason: 'Preview startup was canceled before source preparation.',
+        stoppedAt: new Date().toISOString()
+      });
+      if (this.startups.get(id) === controller) this.startups.delete(id);
+      throwIfStartupCanceled(controller.signal);
+      throw new Error('Preview runtime is shutting down.');
+    }
     return this.withGenerationLock(generation.id, async () => {
+      throwIfStartupCanceled(controller.signal);
       generation = await this.saveGeneration({ ...generation, state: 'PREPARING_SOURCE' });
       let prepared: Awaited<ReturnType<PreviewSourcePreparer['prepare']>> | undefined;
       try {
@@ -211,6 +244,7 @@ export class PreviewManager {
   }
 
   execute(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
+    this.assertAcceptingWork();
     const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
@@ -260,7 +294,6 @@ export class PreviewManager {
           markerDigest: prepared.markerDigest,
           plan: prepared.plan.executionPlan,
           resourceBindings: managed?.bindings,
-          redactions: managed ? this.requireOciRuntime().redactionValues() : [],
           runSetup: setupResourceIds.length > 0,
           onSetupComplete: async () => {
             await this.requireOciRuntime().markSetupReady(setupResourceIds);
@@ -582,7 +615,22 @@ export class PreviewManager {
     return retryIds;
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.lifecycle = 'SHUTTING_DOWN';
+    for (const controller of this.startups.values()) controller.abort();
+    const operation = this.shutdownOnce().finally(() => {
+      this.lifecycle = 'STOPPED';
+      if (this.shutdownWork === operation) this.shutdownWork = undefined;
+    });
+    this.shutdownWork = operation;
+    return operation;
+  }
+
+  private async shutdownOnce(): Promise<void> {
+    await this.initWork?.catch(() => undefined);
+    for (const controller of this.startups.values()) controller.abort();
+    await Promise.allSettled([...this.locks.values()]);
     const failures: string[] = [];
     await Promise.all(
       [...this.resourceHealthStops.keys()].map((taskId) => this.stopResourceHealthWatch(taskId))
@@ -604,6 +652,40 @@ export class PreviewManager {
     if (failures.length > 0) {
       throw new Error(
         `Preview shutdown left ${failures.length} generation(s) with unverified cleanup residue.`
+      );
+    }
+  }
+
+  private async initialize(
+    preferredGatewayPort: number,
+    options: { reconcile?: boolean }
+  ): Promise<{ port: number; relocated: boolean }> {
+    try {
+      const listening = await this.gateway.listen(preferredGatewayPort);
+      this.gatewayPort = listening.port;
+      if (this.lifecycle !== 'INITIALIZING') {
+        throw new Error('Preview runtime initialization was canceled.');
+      }
+      if (options.reconcile !== false) await this.reconciler.reconcile();
+      if (this.lifecycle !== 'INITIALIZING') {
+        throw new Error('Preview runtime initialization was canceled.');
+      }
+      this.lifecycle = 'READY';
+      return listening;
+    } catch (error) {
+      this.gatewayPort = undefined;
+      await this.gateway.close().catch(() => undefined);
+      if (this.lifecycle === 'INITIALIZING') this.lifecycle = 'NEW';
+      throw error;
+    }
+  }
+
+  private assertAcceptingWork(): void {
+    if (this.lifecycle !== 'READY') {
+      throw new Error(
+        this.lifecycle === 'SHUTTING_DOWN' || this.lifecycle === 'STOPPED'
+          ? 'Preview runtime is shutting down.'
+          : 'Preview runtime is not initialized.'
       );
     }
   }
@@ -694,28 +776,15 @@ export class PreviewManager {
 
   private async cleanupApplicationRuntime(generation: PreviewGenerationRecord): Promise<boolean> {
     this.detachRoutes(generation);
-    let cleanupIncomplete = false;
     const live = this.live.get(generation.id);
-    if (live) {
-      cleanupIncomplete = await live.stop().catch(() => 'REFUSED' as const) === 'REFUSED';
-      this.live.delete(generation.id);
-    } else {
-      for (const resource of await this.store.getPreviewResources(generation.id)) {
-        if (resource.state === 'STOPPED') continue;
-        if (['EXITED', 'FAILED'].includes(resource.state)) continue;
-        if (await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const) === 'REFUSED') {
-          cleanupIncomplete = true;
-        }
-      }
-    }
-    if (!cleanupIncomplete) {
-      await this.sourcePreparer.cleanupOwnedGeneration({
-        taskId: generation.taskId,
-        generationId: generation.id
-      }).catch(() => {
-        cleanupIncomplete = true;
-      });
-    }
+    const cleanupIncomplete = await cleanupPreviewGenerationRuntime({
+      generation,
+      store: this.store,
+      nativeRuntime: this.nativeRuntime,
+      sourcePreparer: this.sourcePreparer,
+      liveGraph: live
+    });
+    if (live) this.live.delete(generation.id);
     return cleanupIncomplete;
   }
 

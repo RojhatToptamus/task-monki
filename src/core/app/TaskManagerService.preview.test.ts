@@ -267,8 +267,14 @@ import fs from 'node:fs/promises';
 const path = 'worker-attempt.txt';
 const count = Number(await fs.readFile(path, 'utf8').catch(() => '0')) + 1;
 await fs.writeFile(path, String(count));
-if (count === 1) setTimeout(() => process.exit(7), 150);
-else setInterval(() => {}, 1000);
+if (count === 1) {
+  const timer = setInterval(async () => {
+    const restart = await fs.access('restart-worker').then(() => true, () => false);
+    if (!restart) return;
+    clearInterval(timer);
+    process.exit(7);
+  }, 10);
+} else setInterval(() => {}, 1000);
 `);
     await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
 version: 1
@@ -313,6 +319,7 @@ routes:
         (attempt) => attempt.nodeId === 'indexer' && attempt.attempt === 1 && attempt.state === 'READY'
       )
     ).toBe(true);
+    await fs.writeFile(path.join(generation.workspacePath, 'source', 'restart-worker'), 'restart');
     expect(generation.routes).toHaveLength(2);
     const app = generation.routes.find((route) => route.id === 'app')!;
     const api = generation.routes.find((route) => route.id === 'api')!;

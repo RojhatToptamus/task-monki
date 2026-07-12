@@ -369,6 +369,168 @@ describe('CodexAppServerAdapter', () => {
     }
   });
 
+  it('cancels and joins initialization that is waiting on the App Server', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-init-shutdown-race-'));
+    const codexHome = path.join(dir, 'codex-home');
+    const initializeMarker = path.join(codexHome, 'initialize-started');
+    await fs.mkdir(codexHome);
+    const executable = await writeFakeCodexExecutable(dir, 'gate-startup-initialize');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      environment: {
+        ...process.env,
+        CODEX_HOME: codexHome
+      },
+      requestTimeoutMs: 5_000,
+      restartDelaysMs: []
+    });
+
+    const initializing = adapter.initialize();
+    const rejectedInitialization = expect(initializing).rejects.toThrow(
+      'Codex App Server'
+    );
+    await waitForPath(initializeMarker);
+    const internals = adapter as unknown as {
+      boundClient?: { events: { eventNames(): Array<string | symbol> } };
+      initializeWork?: Promise<void>;
+      restartTimer?: NodeJS.Timeout;
+      restartWork?: Promise<void>;
+      runtimeLossWork?: Promise<void>;
+      supervisor: {
+        child?: unknown;
+        currentClient?: { events: { eventNames(): Array<string | symbol> } };
+        events: { listenerCount(event: string): number };
+      };
+    };
+    const client = internals.supervisor.currentClient;
+    expect(client).toBeDefined();
+
+    await adapter.shutdown();
+    await rejectedInitialization;
+
+    expect(client?.events.eventNames()).toEqual([]);
+    expect(internals.boundClient).toBeUndefined();
+    expect(internals.initializeWork).toBeUndefined();
+    expect(internals.restartTimer).toBeUndefined();
+    expect(internals.restartWork).toBeUndefined();
+    expect(internals.runtimeLossWork).toBeUndefined();
+    expect(internals.supervisor.child).toBeUndefined();
+    expect(internals.supervisor.currentClient).toBeUndefined();
+    expect(internals.supervisor.events.listenerCount('exit')).toBe(0);
+    expect((await store.snapshot()).agentServers).toHaveLength(1);
+    await expect(adapter.initialize()).rejects.toThrow(
+      'Codex App Server is shutting down.'
+    );
+  });
+
+  it('reopens the stopped lifecycle only for an explicit runtime-config restart', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-explicit-restart-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    await adapter.initialize();
+    await adapter.updateRuntimeConfig({
+      executable,
+      toolSettings: {
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      },
+      restart: true
+    });
+
+    const servers = (await store.snapshot()).agentServers;
+    expect(servers).toHaveLength(2);
+    expect(servers.filter((server) => server.status === 'READY')).toHaveLength(1);
+    expect(servers.filter((server) => server.status === 'EXITED')).toHaveLength(1);
+    await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('does not resume an internal settings restart joined by terminal shutdown', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-terminal-restart-race-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [5]
+    });
+    await adapter.initialize();
+
+    const internals = adapter as unknown as {
+      terminalShutdownRequested: boolean;
+      restartTimer?: NodeJS.Timeout;
+      restartWork?: Promise<void>;
+      runtimeLossWork?: Promise<void>;
+      initializeWork?: Promise<void>;
+      supervisorExitListenerAttached: boolean;
+      supervisor: {
+        shutdown(): Promise<void>;
+        child?: unknown;
+        currentClient?: unknown;
+        events: { listenerCount(event: string): number };
+      };
+    };
+    const originalShutdown = internals.supervisor.shutdown.bind(internals.supervisor);
+    let releaseInternalStop!: () => void;
+    const internalStopGate = new Promise<void>((resolve) => {
+      releaseInternalStop = resolve;
+    });
+    let markInternalStopStarted!: () => void;
+    const internalStopStarted = new Promise<void>((resolve) => {
+      markInternalStopStarted = resolve;
+    });
+    internals.supervisor.shutdown = async () => {
+      await originalShutdown();
+      markInternalStopStarted();
+      await internalStopGate;
+    };
+
+    try {
+      const settingsRestart = adapter.updateRuntimeConfig({
+        executable,
+        toolSettings: {
+          webSearchMode: 'disabled',
+          mcpServers: 'disabled',
+          apps: 'disabled'
+        },
+        restart: true
+      });
+      await internalStopStarted;
+      const terminalShutdown = adapter.shutdown();
+      releaseInternalStop();
+      await Promise.all([settingsRestart, terminalShutdown]);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const servers = (await store.snapshot()).agentServers;
+      expect(servers).toHaveLength(1);
+      expect(servers[0]?.status).toBe('EXITED');
+      expect(internals.terminalShutdownRequested).toBe(true);
+      expect(internals.restartTimer).toBeUndefined();
+      expect(internals.restartWork).toBeUndefined();
+      expect(internals.runtimeLossWork).toBeUndefined();
+      expect(internals.initializeWork).toBeUndefined();
+      expect(internals.supervisor.child).toBeUndefined();
+      expect(internals.supervisor.currentClient).toBeUndefined();
+      expect(internals.supervisorExitListenerAttached).toBe(false);
+      expect(internals.supervisor.events.listenerCount('exit')).toBe(0);
+    } finally {
+      internals.supervisor.shutdown = originalShutdown;
+      releaseInternalStop();
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('marks a request stale when App Server clears it before a response', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-stale-'));
     const executable = await writeFakeCodexExecutable(dir, 'clear');
@@ -1050,7 +1212,8 @@ function fakeCodexScript(
     | 'review-interrupt-ambiguous-no-terminal'
     | 'review-interrupt-no-active'
     | 'interrupt-ambiguous-then-terminal'
-    | 'interrupt-ambiguous-no-terminal' = 'normal'
+    | 'interrupt-ambiguous-no-terminal'
+    | 'gate-startup-initialize' = 'normal'
 ): string {
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) {
@@ -1260,6 +1423,16 @@ rl.on('line', (line) => {
   }
   switch (message.method) {
     case 'initialize':
+      if (
+        mode === 'gate-startup-initialize' &&
+        !(process.env.CODEX_HOME || '').includes('task-monki-codex-probe-')
+      ) {
+        require('node:fs').writeFileSync(
+          require('node:path').join(process.env.CODEX_HOME, 'initialize-started'),
+          'started'
+        );
+        break;
+      }
       send({ id: message.id, result: {
         userAgent: 'fake',
         codexHome: process.cwd(),
@@ -1639,4 +1812,17 @@ rl.on('line', (line) => {
   }
 });
 `;
+}
+
+async function waitForPath(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
 }

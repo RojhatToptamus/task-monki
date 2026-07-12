@@ -28,8 +28,41 @@ describe('OciResourceRuntime', () => {
     expect(fixture.cli.calls.filter((call) => call.argv.includes('create'))).toHaveLength(3);
     expect(JSON.stringify(fixture.store)).not.toContain(password);
     expect(fixture.cli.calls.some((call) => call.argv.some((argument) => argument.includes(password)))).toBe(false);
-    expect(fixture.cli.calls.some((call) => Object.values(call.env).includes(password))).toBe(true);
+    expect(fixture.cli.calls.some((call) => Object.values(call.env).includes(password))).toBe(false);
+    const authenticatedExec = fixture.cli.calls.find(
+      (call) => call.argv.includes('container') && call.argv.includes('exec')
+    );
+    expect(authenticatedExec?.argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis-password'));
+    expect(authenticatedExec?.argv).not.toContain('REDIS_PASSWORD');
     expect(second.bindings.cache.redisUrl).toBe(first.bindings.cache.redisUrl);
+  });
+
+  it('authenticates from mounted secret files without credentials in the host OCI process', async () => {
+    const fixture = createFixture({ hostAuthenticationEnv: true });
+    const managed = await fixture.runtime.ensureManagedPreview(
+      runtimeInput(fixture.identity, [postgresResource(), redisResource()])
+    );
+    const credentials = managed.resources.map((resource) => fixture.credentials.require(resource.id));
+    const execCalls = fixture.cli.calls.filter(
+      (call) => call.argv.includes('container') && call.argv.includes('exec')
+    );
+
+    expect(execCalls).toHaveLength(2);
+    for (const call of execCalls) {
+      expect(call.argv).not.toContain('--env');
+      expect(call.env.PGPASSWORD).toBeUndefined();
+      expect(call.env.REDIS_PASSWORD).toBeUndefined();
+      expect(call.env.REDISCLI_AUTH).toBeUndefined();
+      for (const credential of credentials) {
+        expect(JSON.stringify(call)).not.toContain(credential.password);
+      }
+    }
+    expect(execCalls.some((call) =>
+      call.argv.some((argument) => argument.includes('/run/taskmonki/postgres-password'))
+    )).toBe(true);
+    expect(execCalls.some((call) =>
+      call.argv.some((argument) => argument.includes('/run/taskmonki/redis-password'))
+    )).toBe(true);
   });
 
   it('refuses reuse when persisted safe binding identity no longer matches runtime authority', async () => {
@@ -116,6 +149,34 @@ describe('OciResourceRuntime', () => {
     })).rejects.toThrow();
     await expect(fixture.runtime.stopManagedResource(resource.id)).resolves.toBe('STOPPED');
     expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(true);
+  });
+
+  it('joins concurrent task and global cleanup for each exact OCI owner', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(
+      runtimeInput(fixture.identity, [redisResource()])
+    );
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+
+    const results = await Promise.all([
+      fixture.runtime.cleanupTaskResources('task-1'),
+      fixture.runtime.cleanupTaskResources()
+    ]);
+
+    expect(results).not.toContain('REFUSED');
+    expect((await fixture.store.getPreviewManagedResources('task-1'))[0].state).toBe('STOPPED');
+    expect((await fixture.store.getPreviewManagedEnvironments())[0].state).toBe('STOPPED');
+    for (const objectId of [
+      managed.resources[0].container.objectId!,
+      managed.resources[0].volume.objectId!,
+      managed.environment.network.objectId!
+    ]) {
+      expect(
+        fixture.cli.calls.filter(
+          (call) => call.argv.includes('rm') && call.argv.includes(objectId)
+        )
+      ).toHaveLength(1);
+    }
   });
 
   it('retries observed setup failure only through explicit authority without recreating the resource', async () => {
@@ -363,7 +424,7 @@ describe('OciResourceRuntime', () => {
         expect(new Set(ports).size).toBe(ports.length);
         expect(new Set(previews.flatMap((preview) => Object.values(preview.bindings).map((binding) => binding.postgresUrl ?? binding.redisUrl))).size).toBe(4);
         const firstIdentity = identitySummary(previews[0]);
-        await assertRealAuthentication(adapter, previews[0], credentials);
+        await assertRealAuthentication(adapter, previews[0]);
 
         const replacement = await runtime.ensureManagedPreview({
           taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
@@ -371,7 +432,7 @@ describe('OciResourceRuntime', () => {
         });
         expect(replacement.setupResourceIds).toEqual([]);
         expect(identitySummary(replacement)).toEqual(firstIdentity);
-        await assertRealAuthentication(adapter, replacement, credentials);
+        await assertRealAuthentication(adapter, replacement);
 
         const oldDatabase = replacement.resources.find((resource) => resource.logicalResourceId === 'database')!;
         const stableCache = replacement.resources.find((resource) => resource.logicalResourceId === 'cache')!;
@@ -386,7 +447,7 @@ describe('OciResourceRuntime', () => {
         )!;
         expect(firstResetDatabase.id).not.toBe(oldDatabase.id);
         expect(reset.resources.find((resource) => resource.logicalResourceId === 'cache')?.id).toBe(stableCache.id);
-        await assertRealAuthentication(adapter, reset, credentials);
+        await assertRealAuthentication(adapter, reset);
 
         await runtime.stopManagedResource(firstResetDatabase.id);
         const repeatedReset = await runtime.ensureManagedPreview({
@@ -413,7 +474,7 @@ describe('OciResourceRuntime', () => {
         expect(alternatingReset.resources.find((resource) => resource.logicalResourceId === 'database')?.id)
           .toBe(stableDatabase.id);
         expect(resetCache.id).not.toBe(stableCache.id);
-        await assertRealAuthentication(adapter, alternatingReset, credentials);
+        await assertRealAuthentication(adapter, alternatingReset);
 
         await adapter.run([
           '--context', capability.identity.contextName,
@@ -465,25 +526,24 @@ describe('OciResourceRuntime', () => {
 
 async function assertRealAuthentication(
   adapter: OciEngineAdapter,
-  runtime: Awaited<ReturnType<OciResourceRuntime['ensureManagedPreview']>>,
-  credentials: PreviewCredentialHost
+  runtime: Awaited<ReturnType<OciResourceRuntime['ensureManagedPreview']>>
 ): Promise<void> {
   const database = runtime.resources.find((resource) => resource.logicalResourceId === 'database')!;
-  const databaseCredential = credentials.require(database.id);
   await expect(adapter.run([
     '--context', database.container.engine.contextName,
-    'container', 'exec', '--env', 'PGPASSWORD', database.container.objectId!,
-    'psql', '-v', 'ON_ERROR_STOP=1', '-U', databaseCredential.username!, '-d', 'app', '-c', 'SELECT 1'
-  ], adapter.environment({ PGPASSWORD: databaseCredential.password }))).resolves.toMatchObject({
+    'container', 'exec', database.container.objectId!,
+    'sh', '-eu', '-c',
+    'PGPASSWORD="$(cat /run/taskmonki/postgres-password)"; export PGPASSWORD; exec psql -v ON_ERROR_STOP=1 -U "$(cat /run/taskmonki/postgres-user)" -d app -c "SELECT 1"'
+  ])).resolves.toMatchObject({
     stdout: expect.stringContaining('1')
   });
   const cache = runtime.resources.find((resource) => resource.logicalResourceId === 'cache')!;
-  const cacheCredential = credentials.require(cache.id);
   await expect(adapter.run([
     '--context', cache.container.engine.contextName,
-    'container', 'exec', '--env', 'REDIS_PASSWORD', cache.container.objectId!,
-    'sh', '-c', 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping'
-  ], adapter.environment({ REDIS_PASSWORD: cacheCredential.password }))).resolves.toMatchObject({
+    'container', 'exec', cache.container.objectId!,
+    'sh', '-eu', '-c',
+    'REDISCLI_AUTH="$(cat /run/taskmonki/redis-password)"; export REDISCLI_AUTH; exec redis-cli --no-auth-warning ping'
+  ])).resolves.toMatchObject({
     stdout: expect.stringContaining('PONG')
   });
 }
@@ -530,10 +590,21 @@ function createFixture(options: {
   failAfter?: 'network-create' | 'volume-create' | 'container-create';
   inheritedLabels?: boolean;
   failRemoveOnce?: 'container' | 'network' | 'volume';
+  hostAuthenticationEnv?: boolean;
 } = {}) {
   const store = new MemoryManagedStore();
   const cli = new FakeOciCli(options.inheritedLabels === true, options.failRemoveOnce);
-  const adapter = new OciEngineAdapter({ execute: cli.execute });
+  const adapter = new OciEngineAdapter({
+    execute: cli.execute,
+    env: options.hostAuthenticationEnv
+      ? {
+          ...process.env,
+          PGPASSWORD: 'unrelated-host-postgres-secret',
+          REDIS_PASSWORD: 'unrelated-host-redis-secret',
+          REDISCLI_AUTH: 'unrelated-host-redis-cli-secret'
+        }
+      : undefined
+  });
   const identity: PreviewOciEngineIdentity = {
     contextName: 'desktop-linux', endpointDigest: cli.endpointDigest, engineId: cli.engineId,
     serverVersion: '28.0.4', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'

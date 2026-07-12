@@ -8,14 +8,7 @@ Normative plan: [`../plans/task-preview-implementation-plan.md`](../plans/task-p
 
 This document explains why Task Monki uses native application generations plus preview-owned managed dependencies. It does not define phase acceptance criteria or a parallel lifecycle. The implementation plan is authoritative whenever wording differs.
 
-The immediate work is deliberately narrow:
-
-1. correct Phase 2 application-generation overlap;
-2. replace the unshipped Phase 3 managed-data prototype with preview-owned PostgreSQL;
-3. add Redis through the proven contract;
-4. add supervision, reset/setup, crash, pruning, and engine-context hardening.
-
-Private inputs and attached dependencies remain Phase 4, Compose remains Phase 5, multi-repository source composition remains Phase 6, and AI-assisted discovery remains Phase 7. Generic OCI support follows typed PostgreSQL/Redis only when they prove a genuinely common lifecycle.
+Phases 1-3 now implement this model. Private inputs and attached dependencies remain Phase 4, Compose remains Phase 5, multi-repository source composition remains Phase 6, and AI-assisted discovery remains Phase 7. Generic OCI support follows typed PostgreSQL/Redis only when they prove a genuinely common lifecycle.
 
 ## 1. Architectural decision
 
@@ -76,15 +69,17 @@ This separation is sufficient. A generic repository/factory/plugin framework wou
 
 Generated database/cache credentials must remain stable across A1 → A2, but Phase 3 does not yet have the encrypted private-binding system planned for Phase 4.
 
-The smallest safe bridge is a main-process runtime credential host keyed by managed-resource ID:
+The Phase 3 bridge is a main-process runtime credential host keyed by managed-resource ID:
 
-- plaintext exists only in the Electron/main preview runtime;
+- plaintext authority originates in the Electron/main preview runtime;
 - `FileTaskStore` retains non-secret binding identity/digest and safe metadata, never the value;
-- orchestration resolves a typed connection binding only when starting a declared recipient;
+- orchestration resolves a typed connection binding only when starting a declared recipient and sends only that recipient's values and redaction set to its launcher;
 - renderer reload does not affect the host;
 - main-process restart loses the value and therefore cleans exact surviving resources instead of adopting them.
 
-This converts a security limitation into an explicit lifecycle boundary. Phase 4 can replace the volatile host with encrypted durable bindings without changing environment/resource/attachment ownership.
+Native preview commands are explicitly approved and execute under the user's OS identity. Recipient scoping is therefore an enforced delivery boundary, not a claim that mutually hostile same-UID processes are sandboxed from one another. Launcher environments, host helper-process environments, logs, argv, records, and non-recipient node contracts must still contain no unrelated secret. If a later product requirement treats approved native code as hostile to other recipients, that requires a separate process-isolation decision rather than an encryption-only change.
+
+This converts the volatile-storage limitation into an explicit lifecycle boundary. Phase 4 can replace the volatile host with encrypted durable bindings without changing environment/resource/attachment ownership.
 
 ## 5. Why the preview owns one stable network
 

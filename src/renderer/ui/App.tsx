@@ -44,6 +44,7 @@ import {
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from '../model/repositories';
+import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
@@ -265,12 +266,22 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
-    return taskManagerApi.onUpdate((event) => {
+    const scheduler = createUpdateRefreshScheduler({
+      delayMs: 50,
+      refresh,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const unsubscribe = taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
         void taskManagerApi.getAgentProviderState().then(setProviderState);
       }
-      void refresh();
+      scheduler.request();
     });
+    return () => {
+      unsubscribe();
+      scheduler.dispose();
+    };
   }, [refresh]);
 
   const theme = appSettings.theme;

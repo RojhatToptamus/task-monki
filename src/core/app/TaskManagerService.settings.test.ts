@@ -113,6 +113,85 @@ describe('TaskManagerService settings', () => {
     }
   });
 
+  it('forces external tools off and rejects enabling them in browser development', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-browser-tools-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const settingsStore = new MemoryAppSettingsStore({
+      codexExternalTools: {
+        webSearchMode: 'live',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: settingsStore,
+      worktreeRoot: path.join(dir, 'worktrees'),
+      allowAgentNetworkAccess: false
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAppSettings()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+      const snapshot = await waitForAgentServerSnapshot(store);
+      expect(snapshot.agentServers[0]?.argv).toEqual([
+        'app-server',
+        '--stdio',
+        '-c',
+        'features.apps=false',
+        '-c',
+        'web_search="disabled"',
+        '-c',
+        'mcp_servers.docs={enabled=false, command="docs-mcp"}'
+      ]);
+      await expect(
+        service.updateAppSettings({
+          codexExternalTools: { apps: 'enabled' }
+        })
+      ).rejects.toThrow('disabled in the browser development server');
+      expect((await settingsStore.get()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('keeps deterministic seed hosts inert without starting Codex', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: 'codex-not-used',
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentProviderStartupDisabledReason: reason
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAgentProviderState()).preflight).toMatchObject({
+        ready: false,
+        problems: [reason]
+      });
+      expect((await store.snapshot()).agentServers).toHaveLength(0);
+      await expect(
+        service.refinePrompt({ repositoryPath: dir, input: 'Refine me.' })
+      ).rejects.toThrow(reason);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   it('defers provider restart while a run requires recovery', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-recovery-'));

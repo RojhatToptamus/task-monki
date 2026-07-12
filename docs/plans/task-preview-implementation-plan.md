@@ -1,6 +1,6 @@
 # Task Monki local preview implementation plan
 
-Status: Phase 1 and Phase 2 implementation code exists; the unshipped Phase 3 managed-data prototype is approved for replacement
+Status: Phases 0-3 are implemented; this is the current baseline for Phase 4 planning
 Date: 2026-07-12
 Supporting rationale: [`../private/task-preview-local-execution-architecture.md`](../private/task-preview-local-execution-architecture.md)
 
@@ -12,17 +12,15 @@ Task Monki owns preview authority and evidence. Provider output, application log
 
 ## 1. Current branch baseline
 
-The current branch is beyond the original Phase 0/1 planning baseline:
+- `TASK_STORE_SCHEMA_VERSION` is 13.
+- Phase 1 implements restricted recipe parsing, task-scoped approval, coherent source capture outside the worktree, native launcher ownership, bounded logs, readiness, stable loopback gateway routes, stop, shutdown, and conservative reconciliation.
+- Phase 2 implements multiple services/routes, workers, DAG scheduling, HTTP/TCP/argv probes, liveness, bounded restart, typed origins, candidate/active/retired generations, ready-before-cutover route replacement, and the exclusive-node overlap contract in section 4.
+- Phase 3 implements stable preview-owned PostgreSQL and Redis resources, one environment-owned network, non-owning generation attachments, volatile credentials, authenticated readiness, setup/retry/reset, post-ready health handling, exact OCI cleanup, and restart cleanup without adoption.
+- Private inputs, encrypted durable bindings, and attached dependencies are not implemented. They remain Phase 4.
 
-- `TASK_STORE_SCHEMA_VERSION` is 12.
-- Phase 1 native preview behavior is implemented: restricted recipe parsing, task-scoped approval, coherent source capture outside the worktree, native launcher ownership, bounded logs, readiness, stable loopback gateway routes, stop, shutdown, and conservative reconciliation.
-- Phase 2 implementation code exists: multiple services/routes, workers, DAG scheduling, HTTP/TCP/argv probes, liveness, bounded restart, typed origins, candidate/active/retired generations, and ready-before-cutover route replacement.
-- The Phase 2 replacement implementation still needs the overlap correction in section 4 before revised Phase 3 work begins.
-- Phase 3 implementation code exists only as an unshipped prototype. It includes engine/context identity, typed PostgreSQL/Redis and generic OCI recipe shapes, generated bindings, setup scenarios, reset, and OCI cleanup, but its generation-owned managed-data lifecycle is rejected and must be replaced.
+The ownership model in sections 2-6 is the architecture to preserve. Phase 4 may replace volatile credential storage, but it must not make managed data generation-owned or give attached dependencies cleanup authority.
 
-The current Phase 3 prototype is evidence about useful low-level engine behavior, not an architecture to preserve. No application code, tests, schemas, or current-behavior docs are changed by this plan-only revision.
-
-Historical Phase 0/1 prototype results remain useful only as evidence for source coherence, native process identity, restricted YAML, and gateway behavior. They are not current implementation instructions and are intentionally omitted here.
+The current unit/integration suite covers the domain and fake-engine contracts. The real-engine acceptance matrix in sections 8 and 10 remains a release gate: it must still prove true main-process death/restart, manager-level A1 → A2 reuse, exact crash-boundary cleanup, and two named macOS engine contexts. Historical Phase 0/1 prototypes remain evidence only and are not production dependencies.
 
 ## 2. Product invariants that remain
 
@@ -114,22 +112,20 @@ It contains no object ownership, credentials, adoption state, or cleanup authori
 
 ### 3.4 Volatile credential host
 
-Generated managed-resource credentials exist only in the Electron/main-process preview runtime:
+Generated managed-resource credential authority and long-lived plaintext storage exist only in the Electron/main-process preview runtime:
 
 - a small runtime-owned credential host/registry holds plaintext values keyed by managed-resource ID;
 - the managed-resource record stores only non-secret binding identity/digest and safe username/database metadata;
-- application generation orchestration requests a typed connection binding and injects it directly only into declared recipients;
+- application generation orchestration requests a typed connection binding and injects it directly only into declared recipients, with a recipient-scoped launcher contract and redaction set;
 - credentials remain stable across A1 → A2 while the main process remains alive;
 - renderer reload does not affect the credential host;
 - full main-process restart does not attempt resource adoption because plaintext credentials are no longer available;
 - restart reconciliation verifies and cleans exact surviving OCI resources;
 - Phase 4 may replace the volatile host with encrypted durable bindings without changing preview-owned resource authority.
 
-Plaintext credentials must never enter `FileTaskStore`, `TaskSnapshot`, plans, approvals, events, artifacts, logs, errors, argv, or renderer state. The implementation should use the smallest testable runtime component that satisfies this contract; no generic secret framework is required in Phase 3.
+Plaintext credentials must never enter `FileTaskStore`, `TaskSnapshot`, plans, approvals, events, artifacts, logs, errors, argv, renderer state, unrelated node contracts, or host helper-process environments. Approved native preview commands run under the user's OS identity; recipient scope governs what Task Monki delivers and is not an OS sandbox between mutually hostile same-UID processes. The implementation should use the smallest testable runtime component that satisfies this contract; no generic secret framework is required in Phase 3.
 
-## 4. Phase 2 prerequisite: safe application-generation overlap
-
-Correct Phase 2 replacement before revised managed-resource work begins.
+## 4. Phase 2 application-generation overlap contract
 
 Replacement has four explicit boundaries:
 
@@ -161,11 +157,11 @@ Phase 2 correction acceptance:
 - no failure path leaves two unapproved exclusive owners running;
 - existing ready-before-cutover generation, source, route, and native ownership evidence remains intact.
 
-## 5. Revised Phase 3 scope
+## 5. Phase 3 scope
 
-### 5.1 Immediate slice and ordering
+### 5.1 Implemented slice
 
-The revised Phase 3 slice is native application generations plus preview-owned managed data:
+Phase 3 is native application generations plus preview-owned managed data:
 
 1. PostgreSQL vertical slice;
 2. authenticated PostgreSQL reuse across A1 → A2;
@@ -175,7 +171,7 @@ The revised Phase 3 slice is native application generations plus preview-owned m
 6. reset and setup scenarios;
 7. crash, pruning, labels, limits, and alternative-context hardening.
 
-Generic OCI support does not delay PostgreSQL/Redis correction. Add it only after the typed adapters prove a genuinely shared stable lifecycle.
+Generic OCI remains out of scope until the typed adapters prove a genuinely shared stable lifecycle.
 
 The replacement recipe exposes no managed-data lifetime selector: typed managed resources are preview-owned by definition.
 
@@ -186,9 +182,9 @@ Not Phase 3:
 - companion/multi-repository source composition: Phase 6;
 - AI-assisted recipe discovery: Phase 7.
 
-### 5.2 Explicitly rejected prototype concepts
+### 5.2 Explicitly rejected concepts
 
-Remove rather than patch:
+The implementation must not reintroduce:
 
 - generation-owned OCI managed-resource records;
 - `scope: generation` and equivalent generation-lifetime recipe behavior for managed data;
@@ -202,7 +198,7 @@ Remove rather than patch:
 - restart adoption of managed resources without credentials;
 - cleanup branches and tests that exist only to preserve those concepts.
 
-No prototype schema migration, compatibility reader, feature flag, or parallel old/new lifecycle is permitted. This is a one-time replacement of unshipped prototype state, not a general policy for released schemas.
+No compatibility reader, feature flag, or parallel old/new lifecycle is required for these unreleased rejected designs.
 
 ### 5.3 Managed-resource creation and setup
 
@@ -346,31 +342,15 @@ Source-only changes create a new generation without requiring command reapproval
 
 Resolution must present inactive scenario resources/jobs as inactive; they must not silently broaden engine requirements, reset controls, or approval claims.
 
-## 7. Implementation transition
+## 7. Current implementation shape
 
-The current Phase 3 managed-data runtime is disposable prototype code.
+- `PreviewManager` owns product orchestration: resolve, approve, capture, start, replace, reset, stop, and shutdown.
+- `PreviewGraph` owns one live application generation's native DAG, probes, supervision, and exclusive-node handoff.
+- `OciResourceRuntime` owns the preview environment and typed managed-resource lifecycle, including exact inspection and cleanup.
+- `PreviewReconciler` performs stop-only restart recovery and never adopts native or OCI resources.
+- `FileTaskStore` is durable authority; live maps and subprocess output are handles or observations only.
 
-Retain only behavior that directly matches the revised invariants:
-
-- explicit Docker context selection;
-- endpoint and engine identity verification;
-- exact object IDs;
-- loopback-only dynamic publication;
-- Task Monki reserved ownership-label subset;
-- useful low-level Docker command execution, bounded output, and error classification.
-
-Delete rejected lifecycle paths before building the replacement. Do not “refactor until tests pass” around the old runtime.
-
-Implementation order:
-
-1. Delete rejected runtime, recipe, record, cleanup, reset, and prototype-test paths.
-2. Define the minimal preview-environment, managed-resource, volatile credential-host, and generation-attachment contracts.
-3. Implement the PostgreSQL vertical slice from those contracts.
-4. Add real authenticated lifecycle tests, including A1 → A2 stable identity.
-5. Add Redis using the proven contract.
-6. Add post-ready supervision, overlap-safe replacement, reset/setup, crash, pruning, and alternative-context hardening incrementally.
-
-Class names and prototype file structure are not compatibility commitments. Reuse code only when its behavior directly matches the revised invariants.
+Phase 4 must extend these boundaries rather than add a second lifecycle. In particular, encrypted binding storage may replace the volatile credential host, while attached resources remain non-owned and are categorically excluded from stop, reset, and reconciliation cleanup.
 
 ### Implementation-quality constraints
 
@@ -467,6 +447,8 @@ Class names and prototype file structure are not compatibility commitments. Reus
 - Leave ambiguous proposals incomplete for explicit owner review.
 
 ## 10. Required implementation evidence
+
+The default suite does not substitute for the opt-in real-engine gates below. Phase 3 must not be treated as fully accepted until those gates have run against the supported context matrix and the visible destructive/recovery states have been rendered in both themes.
 
 | Work | Required evidence |
 |---|---|

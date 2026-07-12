@@ -99,18 +99,6 @@ export class PreviewCredentialHost {
     return redacted;
   }
 
-  redactionValues(): string[] {
-    return [...new Set([...this.credentials.values()].flatMap((credential) => [
-      credential.password,
-      encodeURIComponent(credential.password),
-      credential.username,
-      credential.username ? encodeURIComponent(credential.username) : undefined,
-      credential.binding?.postgresUrl,
-      credential.binding?.redisUrl
-    ]).filter((value): value is string => Boolean(value)))]
-      .sort((left, right) => right.length - left.length);
-  }
-
   async delete(resourceId: string): Promise<void> {
     this.credentials.delete(resourceId);
     await fs.rm(path.join(this.root, resourceId), { recursive: true, force: true });

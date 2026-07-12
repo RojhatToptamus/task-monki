@@ -21,6 +21,11 @@ import {
   type AgentProviderAdapter
 } from './AgentProviderAdapter';
 import { AgentInteractionService } from './AgentInteractionService';
+import {
+  assertBrowserDevSettingsSafe,
+  BROWSER_DEV_BOUNDARY_MESSAGE,
+  browserDevSettingsViolations
+} from './BrowserDevAgentBoundary';
 
 const MAX_CONCURRENT_TURNS = 2;
 const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
@@ -30,6 +35,10 @@ const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
   'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT',
   'INTERRUPTING'
+];
+const RECOVERABLE_RUN_STATUSES: RunRecord['status'][] = [
+  ...ACTIVE_RUN_STATUSES,
+  'RECOVERY_REQUIRED'
 ];
 
 export interface StartOrchestratedTurn {
@@ -64,21 +73,55 @@ export class AgentOrchestrator {
   constructor(
     private readonly store: FileTaskStore,
     private readonly events: AppEventBus,
-    private readonly adapter: AgentProviderAdapter
+    private readonly adapter: AgentProviderAdapter,
+    private readonly options: {
+      allowNetworkAccess?: boolean;
+      providerStartupDisabledReason?: string;
+    } = {}
   ) {
     this.interactions = new AgentInteractionService(store, events, adapter);
   }
 
   async initialize(): Promise<void> {
+    if (this.options.providerStartupDisabledReason) return;
+    if (this.options.allowNetworkAccess === false) {
+      await this.terminalizeUnsafePersistedRuns();
+    }
     try {
       await this.adapter.initialize();
-    } catch {
+    } catch (error) {
+      if (this.options.allowNetworkAccess === false) {
+        await this.adapter.shutdown().catch(() => undefined);
+        throw error;
+      }
       // Provider readiness is exposed through preflight and should not prevent the
       // local task/evidence application from opening.
+    }
+    if (this.options.allowNetworkAccess === false) {
+      const terminalized = await this.terminalizeUnsafePersistedRuns();
+      if (terminalized > 0) {
+        await this.adapter.shutdown().catch(() => undefined);
+        throw new Error(
+          `${BROWSER_DEV_BOUNDARY_MESSAGE} Provider recovery reported unsafe observed settings, so Codex was stopped before the development API credential was published.`
+        );
+      }
     }
   }
 
   async getProviderState(): Promise<AgentProviderState> {
+    if (this.options.providerStartupDisabledReason) {
+      return {
+        preflight: {
+          provider: 'codex',
+          ready: false,
+          capabilities: await this.adapter.capabilities(),
+          problems: [this.options.providerStartupDisabledReason],
+          warnings: []
+        },
+        models: [],
+        refreshedAt: new Date().toISOString()
+      };
+    }
     const preflight = await this.adapter.preflight();
     let models: AgentProviderState['models'] = [];
     if (preflight.ready) {
@@ -102,6 +145,7 @@ export class AgentOrchestrator {
   }
 
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
+    this.assertProviderStartupAvailable();
     const settings = await this.validateSettings(input.settings);
     await this.assertCapacity();
 
@@ -122,6 +166,7 @@ export class AgentOrchestrator {
     ) {
       throw new Error('Selected agent session does not belong to this task iteration.');
     }
+    this.assertBrowserDevSessionSafe(session, 'Selected session');
     await this.assertNoPendingInteractions(session.id);
 
     const activeSessionRun = await this.store.getActiveRunForSession(session.id);
@@ -140,6 +185,7 @@ export class AgentOrchestrator {
         worktreePath: input.worktree.worktreePath,
         settings
       });
+      this.assertBrowserDevSessionSafe(session, 'Created session');
     }
 
     const run = await this.store.createRun({
@@ -165,6 +211,7 @@ export class AgentOrchestrator {
             settings,
             error
           );
+          this.assertBrowserDevSessionSafe(recovered, 'Recreated session');
           await this.startProviderTurn(run, recovered, input, settings);
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
@@ -189,12 +236,21 @@ export class AgentOrchestrator {
   private async startReviewSerially(
     input: StartOrchestratedReview
   ): Promise<RunRecord> {
+    this.assertProviderStartupAvailable();
     if (!this.adapter.startReview) {
       throw new Error('This provider does not support detached review.');
     }
     const settings = await this.validateSettings(input.settings);
     await this.assertCapacity();
     const sourceSession = await this.requireSession(input.sourceRun.sessionId);
+    this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
+    if (input.sourceRun.observedSettings) {
+      this.assertBrowserDevSettings(
+        input.sourceRun.observedSettings,
+        'Review source run observed settings'
+      );
+    }
+    this.assertBrowserDevSessionSafe(sourceSession, 'Review source session');
     await this.assertNoPendingInteractions(sourceSession.id);
     const reviewSession = await this.store.createAgentSession({
       task: input.task,
@@ -227,6 +283,7 @@ export class AgentOrchestrator {
             settings,
             error
           );
+          this.assertBrowserDevSessionSafe(recovered, 'Recreated review source session');
           await this.startProviderReview(run, recovered, reviewSession, input.target);
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
@@ -240,6 +297,7 @@ export class AgentOrchestrator {
   }
 
   async steerRun(runId: string, instruction: string): Promise<void> {
+    this.assertProviderStartupAvailable();
     const prompt = instruction.trim();
     if (!prompt) {
       throw new Error('An instruction is required.');
@@ -271,6 +329,7 @@ export class AgentOrchestrator {
   }
 
   async interruptRun(runId: string): Promise<void> {
+    this.assertProviderStartupAvailable();
     const run = await this.store.getRun(runId);
     if (!run || !run.providerTurnId) {
       return;
@@ -308,9 +367,28 @@ export class AgentOrchestrator {
     }
   }
 
-  respondToInteraction(
+  async respondToInteraction(
     input: RespondToInteractionRequest
   ): Promise<InteractionRequestRecord> {
+    this.assertProviderStartupAvailable();
+    if (
+      this.options.allowNetworkAccess === false &&
+      input.decision.action !== 'DECLINE' &&
+      input.decision.action !== 'CANCEL'
+    ) {
+      const interaction = await this.store.getInteractionRequest(
+        input.interactionRequestId
+      );
+      if (
+        interaction?.taskId === input.taskId &&
+        interaction.runId === input.runId &&
+        interaction.type !== 'USER_INPUT'
+      ) {
+        throw new Error(
+          `${BROWSER_DEV_BOUNDARY_MESSAGE} Unexpected provider approval requests can only be declined or canceled.`
+        );
+      }
+    }
     return this.interactions.respond(input);
   }
 
@@ -318,6 +396,7 @@ export class AgentOrchestrator {
     task: Task,
     sessionId: string
   ): Promise<import('../../shared/contracts').AgentGoalSnapshotRecord> {
+    this.assertProviderStartupAvailable();
     const session = await this.requireSession(sessionId);
     if (session.taskId !== task.id) {
       throw new Error('Agent session does not belong to the selected task.');
@@ -431,13 +510,159 @@ export class AgentOrchestrator {
       settings.modelProvider && settings.modelProvider !== 'codex'
         ? settings.modelProvider
         : 'openai';
-    return {
+    const resolvedSettings: AgentExecutionSettings = {
       ...settings,
       model: model.model,
       modelProvider,
       reasoningEffort: effort,
       serviceTier: settings.serviceTier ?? model.defaultServiceTier
     };
+    this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    return resolvedSettings;
+  }
+
+  private async terminalizeUnsafePersistedRuns(): Promise<number> {
+    const snapshot = await this.store.snapshot();
+    const sessions = new Map(
+      snapshot.agentSessions.map((session) => [session.id, session])
+    );
+    const latestObservations = new Map<
+      string,
+      (typeof snapshot.agentSettingsObservations)[number]
+    >();
+    for (const observation of snapshot.agentSettingsObservations) {
+      const current = latestObservations.get(observation.sessionId);
+      if (!current || observation.observedAt > current.observedAt) {
+        latestObservations.set(observation.sessionId, observation);
+      }
+    }
+
+    let terminalized = 0;
+    for (const run of snapshot.runs.filter((candidate) =>
+      RECOVERABLE_RUN_STATUSES.includes(candidate.status)
+    )) {
+      const session = sessions.get(run.sessionId);
+      const violations = [
+        ...browserDevSettingsViolations(run.requestedSettings).map(
+          (violation) => `run ${violation}`
+        ),
+        ...(run.observedSettings
+          ? browserDevSettingsViolations(run.observedSettings).map(
+              (violation) => `run observed settings ${violation}`
+            )
+          : []),
+        ...(session
+          ? browserDevSettingsViolations(session.requestedSettings).map(
+              (violation) => `session ${violation}`
+            )
+          : []),
+        ...(session?.observedSettings
+          ? browserDevSettingsViolations(session.observedSettings).map(
+              (violation) => `session observed settings ${violation}`
+            )
+          : []),
+        ...(latestObservations.get(run.sessionId)
+          ? browserDevSettingsViolations(
+              latestObservations.get(run.sessionId)!.settings
+            ).map((violation) => `latest settings observation ${violation}`)
+          : []),
+        ...(snapshot.interactionRequests.some(
+          (interaction) =>
+            interaction.runId === run.id &&
+            interaction.type !== 'USER_INPUT' &&
+            ['PENDING', 'RESPONDING'].includes(interaction.status)
+        )
+          ? ['run has a persisted provider approval request']
+          : [])
+      ];
+      const uniqueViolations = [...new Set(violations)];
+      if (uniqueViolations.length === 0) continue;
+
+      const reason = `${BROWSER_DEV_BOUNDARY_MESSAGE} The persisted run was not resumed because of: ${uniqueViolations.join(', ')}.`;
+      const finalArtifact = await this.store.writeFinalArtifact(
+        run.taskId,
+        run.id,
+        `# Agent turn blocked at startup\n\n${reason}\n`
+      );
+      await this.store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_RUN_FAILED',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'process',
+          payload: {
+            error: reason,
+            terminalReason: reason,
+            finalArtifactId: finalArtifact.id,
+            securityBoundary: 'BROWSER_DEV'
+          }
+        })
+      );
+      for (const interaction of snapshot.interactionRequests.filter(
+        (candidate) =>
+          candidate.runId === run.id &&
+          ['PENDING', 'RESPONDING'].includes(candidate.status)
+      )) {
+        await this.store.transitionInteractionRequest(
+          interaction.id,
+          interaction.status,
+          {
+            status: 'STALE',
+            resolution: { reason },
+            resolvedAt: new Date().toISOString()
+          }
+        );
+      }
+      if (session) {
+        await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+      }
+      this.events.emit({
+        type: 'run.terminal',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        payload: {
+          status: 'failed',
+          error: reason,
+          finalArtifactId: finalArtifact.id
+        },
+        at: new Date().toISOString()
+      });
+      terminalized += 1;
+    }
+    return terminalized;
+  }
+
+  private assertProviderStartupAvailable(): void {
+    if (this.options.providerStartupDisabledReason) {
+      throw new Error(this.options.providerStartupDisabledReason);
+    }
+  }
+
+  private assertBrowserDevSettings(
+    settings: AgentExecutionSettings,
+    subject: string
+  ): void {
+    if (this.options.allowNetworkAccess !== false) return;
+    assertBrowserDevSettingsSafe(settings, subject);
+  }
+
+  private assertBrowserDevSessionSafe(
+    session: AgentSessionRecord,
+    subject: string
+  ): void {
+    this.assertBrowserDevSettings(session.requestedSettings, subject);
+    if (session.observedSettings) {
+      this.assertBrowserDevSettings(
+        session.observedSettings,
+        `${subject} observed settings`
+      );
+    }
   }
 
   private async assertCapacity(): Promise<void> {

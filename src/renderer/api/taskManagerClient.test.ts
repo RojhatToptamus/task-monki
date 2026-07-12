@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppUpdateEvent } from '../../shared/contracts';
-import { createBrowserTaskManagerApi } from './taskManagerClient';
+import { createBrowserTaskManagerApi, TaskManagerApiError } from './taskManagerClient';
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -184,6 +184,40 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       taskId: 'task-1',
       generationId: 'generation-1',
       routeId: 'app'
+    });
+  });
+});
+
+describe('createBrowserTaskManagerApi structured errors', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('preserves safe server error metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 413,
+        json: async () => ({
+          error: {
+            code: 'REQUEST_BODY_TOO_LARGE',
+            message: 'The request is too large.',
+            retryable: false,
+            requestId: 'request-1'
+          }
+        })
+      }) as Response)
+    );
+
+    const error = await createBrowserTaskManagerApi('')
+      .getAppSettings()
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(TaskManagerApiError);
+    expect(error).toMatchObject({
+      message: 'The request is too large.',
+      status: 413,
+      code: 'REQUEST_BODY_TOO_LARGE',
+      retryable: false,
+      requestId: 'request-1'
     });
   });
 });

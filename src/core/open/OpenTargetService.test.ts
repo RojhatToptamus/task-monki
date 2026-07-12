@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -41,6 +43,24 @@ describe('OpenTargetService', () => {
   it('provides an icon reader in the shared Node host', () => {
     expect(createNodeOpenTargetHost().getFileIconDataUrl).toEqual(expect.any(Function));
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses descriptor copy when the selected file is replaced by a symlink',
+    async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-open-copy-'));
+      const worktree = path.join(directory, 'worktree');
+      const outside = path.join(directory, 'outside.txt');
+      const selected = path.join(worktree, 'selected.txt');
+      await fs.mkdir(worktree);
+      await fs.writeFile(outside, 'outside secret', 'utf8');
+      await fs.symlink(outside, selected);
+
+      await expect(
+        createNodeOpenTargetHost().readFile(selected, worktree, 512 * 1024)
+      ).rejects.toThrow('could not be opened safely');
+      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside secret');
+    }
+  );
 
   it('detects an editor from PATH and opens a worktree file with line and column', async () => {
     const host = new FakeOpenTargetHost({

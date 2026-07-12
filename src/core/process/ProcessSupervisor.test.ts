@@ -1,4 +1,8 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
 import { ProcessSupervisor } from './ProcessSupervisor';
 
 describe('ProcessSupervisor', () => {
@@ -31,9 +35,58 @@ describe('ProcessSupervisor', () => {
     await child.cancel();
 
     const result = await closed;
-    expect(result.signal).toBeTruthy();
+    expect(result.exitCode !== null || result.signal !== null).toBe(true);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'cancels the real descendant launched by a Windows cmd shim',
+    async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-process-tree-')
+      );
+      const executable = await writeNodeExecutable(
+        directory,
+        'long-running-child',
+        "console.log(process.pid); setInterval(() => {}, 30_000);\n"
+      );
+      const supervisor = new ProcessSupervisor();
+      const child = supervisor.start({ executable, argv: [], cwd: directory });
+      const terminal = collect(child);
+      const descendantPid = await readFirstStdoutLine(child);
+
+      await child.cancel();
+      await terminal;
+
+      await expectProcessToExit(Number(descendantPid));
+    }
+  );
 });
+
+function readFirstStdoutLine(
+  child: ReturnType<ProcessSupervisor['start']>
+): Promise<string> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    child.events.on('stdout', (chunk) => {
+      stdout += chunk.toString('utf8');
+      const line = stdout.match(/^([^\r\n]+)[\r\n]/u)?.[1];
+      if (line) resolve(line);
+    });
+  });
+}
+
+async function expectProcessToExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Windows descendant process ${pid} is still running.`);
+}
 
 function collect(child: ReturnType<ProcessSupervisor['start']>): Promise<{
   stdout: string;

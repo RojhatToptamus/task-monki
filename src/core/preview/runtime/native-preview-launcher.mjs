@@ -3,10 +3,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const [receiptPath, ownershipToken] = process.argv.slice(2);
-const command = JSON.parse(process.env.TASK_MONKI_PREVIEW_COMMAND ?? '{}');
-if (!receiptPath || !ownershipToken || !command.executable || !Array.isArray(command.argv)) {
+if (!receiptPath || !ownershipToken) {
   throw new Error('Native preview launcher received an invalid launch contract.');
 }
+const command = await receiveLaunchContract(ownershipToken);
 
 let target;
 let committed = false;
@@ -22,6 +22,7 @@ const redactions = Array.isArray(command.redactions)
       .sort((left, right) => right.length - left.length)
   : [];
 const stopTimers = new Set();
+let receiptWrite = Promise.resolve();
 
 await writeReceipt({
   version: 1,
@@ -49,6 +50,49 @@ const commitTimer = setTimeout(async () => {
   process.exit(2);
 }, 5_000);
 commitTimer.unref();
+
+function receiveLaunchContract(expectedOwnershipToken) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => finish(new Error('Owner did not configure launch before timeout.')),
+      5_000
+    );
+    timer.unref();
+    const onMessage = (message) => {
+      if (message?.type !== 'configure') return;
+      if (message.ownershipToken !== expectedOwnershipToken) {
+        finish(new Error('Native preview launcher rejected an unauthenticated launch contract.'));
+        return;
+      }
+      const value = message.command;
+      if (
+        !value ||
+        typeof value.executable !== 'string' ||
+        !Array.isArray(value.argv) ||
+        typeof value.cwd !== 'string' ||
+        !value.env ||
+        typeof value.env !== 'object' ||
+        typeof value.stdoutPath !== 'string' ||
+        typeof value.stderrPath !== 'string' ||
+        typeof value.digest !== 'string'
+      ) {
+        finish(new Error('Native preview launcher received an invalid launch contract.'));
+        return;
+      }
+      finish(undefined, value);
+    };
+    const onDisconnect = () => finish(new Error('Native preview launcher owner disconnected before configuration.'));
+    function finish(error, value) {
+      clearTimeout(timer);
+      process.off('message', onMessage);
+      process.off('disconnect', onDisconnect);
+      if (error) reject(error);
+      else resolve(value);
+    }
+    process.on('message', onMessage);
+    process.once('disconnect', onDisconnect);
+  });
+}
 
 async function commitLaunch() {
   committed = true;
@@ -270,7 +314,12 @@ async function writeTerminal(extra) {
   await writeReceipt({ ...baseReceipt(extra.state), ...extra });
 }
 
-async function writeReceipt(value) {
+function writeReceipt(value) {
+  receiptWrite = receiptWrite.then(() => writeReceiptNow(value));
+  return receiptWrite;
+}
+
+async function writeReceiptNow(value) {
   await fs.mkdir(path.dirname(receiptPath), { recursive: true });
   const temporary = `${receiptPath}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {

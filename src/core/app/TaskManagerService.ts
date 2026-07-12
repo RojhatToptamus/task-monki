@@ -55,6 +55,7 @@ import type {
   StopPreviewRequest
 } from '../../shared/contracts';
 import {
+  DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
@@ -92,6 +93,18 @@ import { PreviewManager } from '../preview/PreviewManager';
 import { createPreviewManager } from '../preview/createPreviewManager';
 import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
 
+type TaskManagerLifecycleState =
+  | 'NEW'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'SHUTTING_DOWN'
+  | 'STOPPED';
+
+interface TaskActionWork {
+  label: string;
+  work: Promise<unknown>;
+}
+
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
@@ -105,7 +118,13 @@ export class TaskManagerService {
   private readonly previews: PreviewManager;
   private readonly previewEnabled: boolean;
   private readonly previewReconcile: boolean;
-  private readonly taskActionLocks = new Map<string, string>();
+  private readonly browserDevAgentBoundary: boolean;
+  private readonly agentProviderStartupDisabledReason?: string;
+  private readonly taskActionLocks = new Map<string, TaskActionWork>();
+  private readonly activeControlActions = new Set<Promise<unknown>>();
+  private lifecycleState: TaskManagerLifecycleState = 'NEW';
+  private initWork?: Promise<void>;
+  private shutdownWork?: Promise<void>;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private codexExecutable: string | undefined;
 
@@ -133,9 +152,14 @@ export class TaskManagerService {
       previewOpenHost?: PreviewUrlHost;
       previewEnabled?: boolean;
       previewReconcile?: boolean;
+      allowAgentNetworkAccess?: boolean;
+      agentProviderStartupDisabledReason?: string;
     } = {}
   ) {
     const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
+    this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
+    this.agentProviderStartupDisabledReason =
+      options.agentProviderStartupDisabledReason;
     this.events = events;
     this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
     this.externalToolResolver = new ExternalToolResolver({
@@ -171,12 +195,17 @@ export class TaskManagerService {
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
-      toolSettings: this.appSettings.codexExternalTools
+      toolSettings: this.appSettings.codexExternalTools,
+      failClosedMcpDiscovery: this.browserDevAgentBoundary
     });
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ?? this.codexAdapter
+      options.agentProviderAdapter ?? this.codexAdapter,
+      {
+        allowNetworkAccess: options.allowAgentNetworkAccess,
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
+      }
     );
     this.worktrees = new WorktreeService(
       options.worktreeRoot ??
@@ -191,22 +220,58 @@ export class TaskManagerService {
     });
   }
 
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    if (this.lifecycleState === 'READY') return Promise.resolve();
+    if (this.initWork) return this.initWork;
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      return Promise.reject(new Error('Task Manager is shutting down.'));
+    }
+    this.lifecycleState = 'INITIALIZING';
+    const work = this.initializeInternal()
+      .then(() => {
+        this.assertInitializing();
+        this.lifecycleState = 'READY';
+      })
+      .catch((error: unknown) => {
+        if (this.lifecycleState === 'INITIALIZING') {
+          this.lifecycleState = 'NEW';
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.initWork === work) this.initWork = undefined;
+      });
+    this.initWork = work;
+    return work;
+  }
+
+  private async initializeInternal(): Promise<void> {
     await this.store.init();
-    this.appSettings = await this.appSettingsStore.get();
+    this.assertInitializing();
+    this.appSettings = await this.loadBoundarySafeAppSettings();
+    this.assertInitializing();
     await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
+    this.assertInitializing();
     if (this.previewEnabled) {
       const gateway = await this.previews.init(this.appSettings.previewGateway.port ?? 0, {
         reconcile: this.previewReconcile
       });
+      this.assertInitializing();
       if (this.appSettings.previewGateway.port !== gateway.port) {
         this.appSettings = await this.appSettingsStore.update({
           previewGateway: { port: gateway.port }
         });
+        this.assertInitializing();
       }
     }
     await this.agents.initialize();
+    this.assertInitializing();
+    if (this.agentProviderStartupDisabledReason) return;
     const snapshot = await this.store.snapshot();
+    this.assertInitializing();
     const recoveryTaskIds = new Set(
       snapshot.runs
         .filter((run) => run.recoveryState !== 'NONE')
@@ -217,6 +282,7 @@ export class TaskManagerService {
         this.refreshEvidence({ taskId }).catch(() => undefined)
       )
     );
+    this.assertInitializing();
   }
 
   getDefaultRepositoryPath(): string {
@@ -224,14 +290,38 @@ export class TaskManagerService {
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.appSettingsStore.get();
+    this.appSettings = await this.loadBoundarySafeAppSettings();
     return structuredClone(this.appSettings);
   }
 
-  async updateAppSettings(
+  updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
-    this.appSettings = await this.appSettingsStore.update(input);
+    return this.withControlAction(() => this.updateAppSettingsInternal(input));
+  }
+
+  private async updateAppSettingsInternal(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    if (
+      this.browserDevAgentBoundary &&
+      input.codexExternalTools &&
+      !codexExternalToolsAreDisabled({
+        ...(await this.appSettingsStore.get()).codexExternalTools,
+        ...input.codexExternalTools
+      })
+    ) {
+      throw new Error(
+        'Codex web search, MCP servers, and apps are disabled in the browser development server because external tool processes are outside its loopback security boundary. Use the Electron app to enable them.'
+      );
+    }
+    const safeInput: UpdateAppSettingsRequest = this.browserDevAgentBoundary
+      ? {
+          ...input,
+          codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
+        }
+      : input;
+    this.appSettings = await this.appSettingsStore.update(safeInput);
     const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
@@ -281,6 +371,12 @@ export class TaskManagerService {
   async executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
+    return this.withControlAction(() => this.executeOpenTargetActionInternal(input));
+  }
+
+  private async executeOpenTargetActionInternal(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult> {
     this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.execute(input, {
       snapshot: await this.store.snapshot(),
@@ -302,10 +398,13 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
+    this.assertAcceptingWork();
     return this.store.createTask(input);
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
+    this.assertAcceptingWork();
+    this.assertAgentProviderAvailable();
     const refined = await this.promptRefiner.refine(
       input.repositoryPath,
       input.input,
@@ -323,6 +422,14 @@ export class TaskManagerService {
   }
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
+    return this.withTaskAction(input.taskId, 'Worktree preparation', () =>
+      this.prepareWorktreeUnlocked(input)
+    );
+  }
+
+  private async prepareWorktreeUnlocked(
+    input: PrepareWorktreeRequest
+  ): Promise<WorktreeRecord> {
     const task = await this.requireTask(input.taskId);
     const existing = await this.store.getCurrentWorktree(task.id);
     if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
@@ -379,10 +486,11 @@ export class TaskManagerService {
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent run', async () => {
+      this.assertAgentProviderAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-      const worktree = await this.prepareWorktree({ taskId: task.id });
+      const worktree = await this.prepareWorktreeUnlocked({ taskId: task.id });
       return this.startPreparedRun({
         task,
         worktree,
@@ -398,6 +506,7 @@ export class TaskManagerService {
     mode?: AgentRunMode;
     settings?: AgentExecutionSettings;
   }): Promise<RunRecord> {
+    this.assertAgentProviderAvailable();
     const { task, worktree } = input;
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
@@ -428,10 +537,14 @@ export class TaskManagerService {
   }
 
   cancelRun(input: CancelRunRequest): Promise<void> {
-    return this.agents.interruptRun(input.runId);
+    return this.withControlAction(() => this.agents.interruptRun(input.runId));
   }
 
-  async steerRun(input: SteerRunRequest): Promise<void> {
+  steerRun(input: SteerRunRequest): Promise<void> {
+    return this.withControlAction(() => this.steerRunInternal(input));
+  }
+
+  private async steerRunInternal(input: SteerRunRequest): Promise<void> {
     const run = await this.requireRunForTask(input.runId, input.taskId);
     const snapshot = await this.store.snapshot();
     const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
@@ -446,6 +559,7 @@ export class TaskManagerService {
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
+      this.assertAgentProviderAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -481,6 +595,7 @@ export class TaskManagerService {
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent retry', async () => {
+      this.assertAgentProviderAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -595,6 +710,19 @@ export class TaskManagerService {
     return status;
   }
 
+  private async loadBoundarySafeAppSettings(): Promise<TaskManagerAppSettings> {
+    const stored = await this.appSettingsStore.get();
+    if (
+      !this.browserDevAgentBoundary ||
+      codexExternalToolsAreDisabled(stored.codexExternalTools)
+    ) {
+      return stored;
+    }
+    return this.appSettingsStore.update({
+      codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
+    });
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
@@ -602,6 +730,7 @@ export class TaskManagerService {
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Codex review', async () => {
+      this.assertAgentProviderAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
@@ -641,16 +770,69 @@ export class TaskManagerService {
     });
   }
 
-  async syncAgentGoal(input: SyncAgentGoalRequest) {
+  syncAgentGoal(input: SyncAgentGoalRequest) {
+    return this.withControlAction(() => this.syncAgentGoalInternal(input));
+  }
+
+  private async syncAgentGoalInternal(input: SyncAgentGoalRequest) {
+    this.assertAgentProviderAvailable();
     const task = await this.requireTask(input.taskId);
     return this.agents.syncGoal(task, input.sessionId);
   }
 
   respondToInteraction(input: RespondToInteractionRequest) {
-    return this.agents.respondToInteraction(input);
+    return this.withControlAction(() => this.agents.respondToInteraction(input));
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    if (this.lifecycleState === 'STOPPED') return Promise.resolve();
+    this.lifecycleState = 'SHUTTING_DOWN';
+    const pendingInitialization = this.initWork;
+    const pendingTaskActions = [...this.taskActionLocks.values()].map(
+      ({ work }) => work
+    );
+    const pendingControlActions = [...this.activeControlActions];
+    const work = this.completeShutdown(
+      pendingInitialization,
+      pendingTaskActions,
+      pendingControlActions
+    )
+      .finally(() => {
+        this.lifecycleState = 'STOPPED';
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      });
+    this.shutdownWork = work;
+    return work;
+  }
+
+  private async completeShutdown(
+    pendingInitialization: Promise<void> | undefined,
+    pendingTaskActions: Promise<unknown>[],
+    pendingControlActions: Promise<unknown>[]
+  ): Promise<void> {
+    const initialRuntimeShutdown = this.shutdownRuntimeOwners();
+    const pendingWork = Promise.allSettled([
+      pendingInitialization ?? Promise.resolve(),
+      ...pendingTaskActions,
+      ...pendingControlActions
+    ]);
+    const [initialRuntimeResult] = await Promise.allSettled([
+      initialRuntimeShutdown,
+      pendingWork
+    ]);
+    const [finalRuntimeResult] = await Promise.allSettled([
+      this.shutdownRuntimeOwners()
+    ]);
+    if (initialRuntimeResult.status === 'rejected') {
+      throw initialRuntimeResult.reason;
+    }
+    if (finalRuntimeResult.status === 'rejected') {
+      throw finalRuntimeResult.reason;
+    }
+  }
+
+  private async shutdownRuntimeOwners(): Promise<void> {
     const [agentResult, previewResult] = await Promise.allSettled([
       this.agents.shutdown(),
       this.previews.shutdown()
@@ -676,7 +858,13 @@ export class TaskManagerService {
     });
   }
 
-  async approvePreviewPlan(
+  approvePreviewPlan(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    return this.withControlAction(() => this.approvePreviewPlanInternal(input));
+  }
+
+  private async approvePreviewPlanInternal(
     input: ApprovePreviewPlanRequest
   ): Promise<PreviewApprovalRecord> {
     this.assertPreviewEnabled();
@@ -737,7 +925,13 @@ export class TaskManagerService {
     });
   }
 
-  async stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.withControlAction(() => this.stopPreviewInternal(input));
+  }
+
+  private async stopPreviewInternal(
+    input: StopPreviewRequest
+  ): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
     const generation = await this.store.getPreviewGeneration(input.generationId);
     if (!generation || generation.taskId !== input.taskId) {
@@ -770,6 +964,10 @@ export class TaskManagerService {
   }
 
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    return this.withControlAction(() => this.openPreviewInternal(input));
+  }
+
+  private openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
     this.assertPreviewEnabled();
     return this.previews.open(input);
   }
@@ -780,6 +978,7 @@ export class TaskManagerService {
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
+    this.assertAcceptingWork();
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
     const verified = await this.worktrees.verify(worktree);
@@ -1207,17 +1406,52 @@ export class TaskManagerService {
     label: string,
     action: () => Promise<T>
   ): Promise<T> {
+    this.assertAcceptingWork();
     const current = this.taskActionLocks.get(taskId);
     if (current) {
-      throw new Error(`${current} is already running for this task.`);
+      throw new Error(`${current.label} is already running for this task.`);
     }
-    this.taskActionLocks.set(taskId, label);
+    const work = Promise.resolve().then(action);
+    const entry: TaskActionWork = { label, work };
+    this.taskActionLocks.set(taskId, entry);
     try {
-      return await action();
+      return await work;
     } finally {
-      if (this.taskActionLocks.get(taskId) === label) {
+      if (this.taskActionLocks.get(taskId) === entry) {
         this.taskActionLocks.delete(taskId);
       }
+    }
+  }
+
+  private withControlAction<T>(action: () => Promise<T>): Promise<T> {
+    this.assertAcceptingWork();
+    const work = Promise.resolve().then(action);
+    this.activeControlActions.add(work);
+    void work.then(
+      () => this.activeControlActions.delete(work),
+      () => this.activeControlActions.delete(work)
+    );
+    return work;
+  }
+
+  private assertInitializing(): void {
+    if (this.lifecycleState !== 'INITIALIZING') {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAcceptingWork(): void {
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAgentProviderAvailable(): void {
+    if (this.agentProviderStartupDisabledReason) {
+      throw new Error(this.agentProviderStartupDisabledReason);
     }
   }
 
@@ -1329,6 +1563,16 @@ function affectsCodexRuntimeSettings(input: UpdateAppSettingsRequest): boolean {
   return Boolean(
     input.codexExternalTools ||
       (input.externalExecutables && 'codexExecutablePath' in input.externalExecutables)
+  );
+}
+
+function codexExternalToolsAreDisabled(
+  settings: TaskManagerAppSettings['codexExternalTools']
+): boolean {
+  return (
+    settings.webSearchMode === 'disabled' &&
+    settings.mcpServers === 'disabled' &&
+    settings.apps === 'disabled'
   );
 }
 
