@@ -85,7 +85,9 @@ An observed setup failure may expose **Retry setup** only when every selected
 migration and seed job declares `retrySafe: true`. Retry revalidates the current
 plan, approval, engine, and exact managed-resource authority, then reuses the
 same resource identity and data. Ambiguous completion and non-retry-safe setup
-remain blocked from automatic or user-triggered replay.
+remain blocked from replay and expose destructive resource Reset instead. When
+a failed replacement left the previous application active, Reset stops that
+complete active application before deleting the selected resource.
 
 Reset data is an explicit destructive action. Task Monki revalidates the
 current plan and approval before mutation, detaches routes, stops the complete

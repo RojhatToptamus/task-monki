@@ -5,8 +5,6 @@ import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 
-const TERMINAL_GENERATIONS: PreviewGenerationRecord['state'][] = ['STOPPED'];
-
 export class PreviewReconciler {
   constructor(
     private readonly store: FileTaskStore,
@@ -20,7 +18,7 @@ export class PreviewReconciler {
     this.gateway.clearRoutes();
     const generations = await this.store.getPreviewGenerations();
     for (const generation of generations) {
-      if (TERMINAL_GENERATIONS.includes(generation.state)) continue;
+      if (generation.state === 'STOPPED') continue;
       await this.reconcileGeneration(generation);
     }
     await this.ociRuntime?.cleanupTaskResources();
@@ -34,11 +32,7 @@ export class PreviewReconciler {
     const resources = await this.store.getPreviewResources(generation.id);
     for (const resource of resources) {
       if (resource.state === 'STOPPED') continue;
-      if (resource.adapterKind === 'NATIVE_PROCESS' && ['EXITED', 'FAILED'].includes(resource.state)) continue;
-      if (resource.adapterKind !== 'NATIVE_PROCESS') {
-        cleanupIncomplete = true;
-        continue;
-      }
+      if (['EXITED', 'FAILED'].includes(resource.state)) continue;
       const result = await this.nativeRuntime.stop(resource).catch(() => 'REFUSED' as const);
       if (result === 'REFUSED') cleanupIncomplete = true;
     }

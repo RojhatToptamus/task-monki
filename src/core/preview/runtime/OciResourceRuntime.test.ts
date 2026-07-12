@@ -16,14 +16,14 @@ describe('OciResourceRuntime', () => {
   it('keeps one preview-owned resource stable across application generations without persisting credentials', async () => {
     const fixture = createFixture();
     const first = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupReady(first.createdResourceIds);
+    await fixture.runtime.markSetupReady(first.setupResourceIds);
     const ready = await fixture.store.getPreviewManagedResources('task-1');
     const password = fixture.credentials.require(ready[0].id).password;
     const firstIdentity = identitySummary(first);
 
     const second = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
 
-    expect(second.createdResourceIds).toEqual([]);
+    expect(second.setupResourceIds).toEqual([]);
     expect(identitySummary(second)).toEqual(firstIdentity);
     expect(fixture.cli.calls.filter((call) => call.argv.includes('create'))).toHaveLength(3);
     expect(JSON.stringify(fixture.store)).not.toContain(password);
@@ -32,10 +32,21 @@ describe('OciResourceRuntime', () => {
     expect(second.bindings.cache.redisUrl).toBe(first.bindings.cache.redisUrl);
   });
 
+  it('refuses reuse when persisted safe binding identity no longer matches runtime authority', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    fixture.store.resources[0].binding!.ports.redis += 1;
+
+    await expect(
+      fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]))
+    ).rejects.toThrow('binding identity is invalid');
+  });
+
   it('creates exactly one network owner and lets generation history have no cleanup authority', async () => {
     const fixture = createFixture();
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [postgresResource(), redisResource()]));
-    await fixture.runtime.markSetupReady(managed.createdResourceIds);
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
 
     expect(fixture.store.environments).toHaveLength(1);
     expect(fixture.store.resources).toHaveLength(2);
@@ -53,7 +64,7 @@ describe('OciResourceRuntime', () => {
       previewKey: 'preview-2',
       markerDigest: 'marker-2'
     });
-    await fixture.runtime.markSetupReady([...first.createdResourceIds, ...second.createdResourceIds]);
+    await fixture.runtime.markSetupReady([...first.setupResourceIds, ...second.setupResourceIds]);
 
     expect(second.environment.id).not.toBe(first.environment.id);
     expect(second.environment.network.objectId).not.toBe(first.environment.network.objectId);
@@ -70,7 +81,7 @@ describe('OciResourceRuntime', () => {
   it('resets only the selected managed resource and never mounts one volume into two containers', async () => {
     const fixture = createFixture();
     const first = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [postgresResource(), redisResource()]));
-    await fixture.runtime.markSetupReady(first.createdResourceIds);
+    await fixture.runtime.markSetupReady(first.setupResourceIds);
     const database = first.resources.find((resource) => resource.logicalResourceId === 'database')!;
     const cache = first.resources.find((resource) => resource.logicalResourceId === 'cache')!;
 
@@ -89,10 +100,28 @@ describe('OciResourceRuntime', () => {
     expect(new Set(volumeMounts).size).toBe(volumeMounts.length);
   });
 
+  it('permits exact cleanup preflight when a failed resource container is already absent', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    const resource = managed.resources[0];
+    fixture.cli.objects.get(resource.container.objectId!)!.removed = true;
+
+    await expect(fixture.runtime.verifyManagedPreview({
+      taskId: 'task-1', expectedEngine: fixture.identity, resources: [redisResource()],
+      verification: 'CLEANUP'
+    })).resolves.toMatchObject({ resources: [{ id: resource.id }] });
+    await expect(fixture.runtime.verifyManagedPreview({
+      taskId: 'task-1', expectedEngine: fixture.identity, resources: [redisResource()]
+    })).rejects.toThrow();
+    await expect(fixture.runtime.stopManagedResource(resource.id)).resolves.toBe('STOPPED');
+    expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(true);
+  });
+
   it('retries observed setup failure only through explicit authority without recreating the resource', async () => {
     const fixture = createFixture();
     const first = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupFailure(first.createdResourceIds, {
+    await fixture.runtime.markSetupFailure(first.setupResourceIds, {
       ambiguous: false,
       reason: 'observed setup failure'
     });
@@ -102,12 +131,12 @@ describe('OciResourceRuntime', () => {
 
     const retried = await fixture.runtime.ensureManagedPreview({
       ...runtimeInput(fixture.identity, [redisResource()]),
-      retrySetupResourceIds: first.createdResourceIds
+      retrySetupResourceIds: first.setupResourceIds
     });
-    expect(retried.createdResourceIds).toEqual(first.createdResourceIds);
+    expect(retried.setupResourceIds).toEqual(first.setupResourceIds);
     expect(identitySummary(retried)).toEqual(identitySummary(first));
     expect(fixture.cli.calls.filter((call) => call.argv.includes('create'))).toHaveLength(3);
-    await fixture.runtime.markSetupReady(retried.createdResourceIds);
+    await fixture.runtime.markSetupReady(retried.setupResourceIds);
     expect((await fixture.store.getPreviewManagedResources('task-1'))[0].state).toBe('READY');
   });
 
@@ -130,7 +159,10 @@ describe('OciResourceRuntime', () => {
   it('accepts inherited labels, refuses engine retarget cleanup, and keeps failure retryable', async () => {
     const fixture = createFixture({ inheritedLabels: true });
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupReady(managed.createdResourceIds);
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    await expect(fixture.runtime.ensureManagedPreview(
+      runtimeInput({ ...fixture.identity, endpointDigest: 'different-approved-endpoint' }, [redisResource()])
+    )).rejects.toMatchObject({ code: 'ENGINE_IDENTITY_MISMATCH' });
     fixture.cli.engineId = 'retargeted-engine';
 
     await expect(fixture.runtime.cleanupTaskResources('task-1')).resolves.toBe('REFUSED');
@@ -141,7 +173,7 @@ describe('OciResourceRuntime', () => {
   it('refuses cleanup when an exact recorded object still exists with altered ownership labels', async () => {
     const fixture = createFixture();
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupReady(managed.createdResourceIds);
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
     const container = fixture.cli.objects.get(managed.resources[0].container.objectId!)!;
     container.labels['io.taskmonki.preview.store'] = 'different-store';
 
@@ -150,10 +182,20 @@ describe('OciResourceRuntime', () => {
     expect((await fixture.store.getPreviewManagedResources('task-1'))[0].state).toBe('CLEANUP_INCOMPLETE');
   });
 
+  it('treats an object name as diagnostic when exact identity and reserved ownership labels match', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    fixture.cli.objects.get(managed.resources[0].container.objectId!)!.name = 'renamed-for-diagnostics';
+
+    await expect(fixture.runtime.cleanupTaskResources('task-1')).resolves.toBe('STOPPED');
+    expect((await fixture.store.getPreviewManagedResources('task-1'))[0].state).toBe('STOPPED');
+  });
+
   it('keeps partial cleanup failure visible and retries exact remaining objects', async () => {
     const fixture = createFixture({ failRemoveOnce: 'volume' });
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupReady(managed.createdResourceIds);
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
 
     await expect(fixture.runtime.cleanupTaskResources('task-1')).resolves.toBe('REFUSED');
     expect((await fixture.store.getPreviewManagedResources('task-1'))[0].state).toBe('CLEANUP_INCOMPLETE');
@@ -165,15 +207,106 @@ describe('OciResourceRuntime', () => {
   it('marks post-ready resource death without deleting its volume', async () => {
     const fixture = createFixture();
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
-    await fixture.runtime.markSetupReady(managed.createdResourceIds);
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
     const resource = managed.resources[0];
     fixture.cli.objects.get(resource.container.objectId!)!.running = false;
 
-    const failure = new Promise<PreviewManagedResourceRecord>((resolve) => {
-      fixture.runtime.watchRequiredResources('task-1', async (failed) => resolve(failed));
-    });
+    let resolveFailure!: (resource: PreviewManagedResourceRecord) => void;
+    const failure = new Promise<PreviewManagedResourceRecord>((resolve) => { resolveFailure = resolve; });
+    await fixture.runtime.watchRequiredResources(
+      'task-1', [resource.id], async (failed) => resolveFailure(failed)
+    );
     await expect(failure).resolves.toMatchObject({ id: resource.id, state: 'FAILED' });
     expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(false);
+  });
+
+  it('marks post-ready authenticated health failure without deleting data', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    const resource = managed.resources[0];
+    fixture.cli.resourceExecHealthy = false;
+
+    let resolveFailure!: (resource: PreviewManagedResourceRecord) => void;
+    const failure = new Promise<PreviewManagedResourceRecord>((resolve) => { resolveFailure = resolve; });
+    await fixture.runtime.watchRequiredResources(
+      'task-1', [resource.id], async (failed) => resolveFailure(failed)
+    );
+    await expect(failure).resolves.toMatchObject({ id: resource.id, state: 'FAILED' });
+    expect(fixture.cli.objects.get(resource.container.objectId!)?.running).toBe(true);
+    expect(fixture.cli.objects.get(resource.volume.objectId!)?.removed).toBe(false);
+  });
+
+  it('retries delivery of a recorded health failure until the owner handles it', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    const resource = managed.resources[0];
+    fixture.cli.objects.get(resource.container.objectId!)!.running = false;
+    let attempts = 0;
+    let resolveHandled!: () => void;
+    const handled = new Promise<void>((resolve) => { resolveHandled = resolve; });
+    const stop = await fixture.runtime.watchRequiredResources('task-1', [resource.id], async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('Injected owner update failure.');
+      resolveHandled();
+    });
+
+    await handled;
+    expect(attempts).toBe(2);
+    expect((await fixture.store.getPreviewManagedResource(resource.id))?.state).toBe('FAILED');
+    await stop();
+  });
+
+  it('joins an in-flight health failure callback before destructive cleanup', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    const resource = managed.resources[0];
+    fixture.cli.objects.get(resource.container.objectId!)!.running = false;
+    let releaseFailure!: () => void;
+    const failureGate = new Promise<void>((resolve) => { releaseFailure = resolve; });
+    let markFailureStarted!: () => void;
+    const failureStarted = new Promise<void>((resolve) => { markFailureStarted = resolve; });
+    await fixture.runtime.watchRequiredResources('task-1', [resource.id], async () => {
+      markFailureStarted();
+      await failureGate;
+    });
+    await failureStarted;
+
+    let cleanupSettled = false;
+    const cleanup = fixture.runtime.cleanupTaskResources('task-1').then((result) => {
+      cleanupSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cleanupSettled).toBe(false);
+    releaseFailure();
+    await expect(cleanup).resolves.toBe('STOPPED');
+  });
+
+  it('supervises only resources attached to the active application generation', async () => {
+    const fixture = createFixture();
+    const managed = await fixture.runtime.ensureManagedPreview(
+      runtimeInput(fixture.identity, [postgresResource(), redisResource()])
+    );
+    await fixture.runtime.markSetupReady(managed.setupResourceIds);
+    const database = managed.resources.find((resource) => resource.logicalResourceId === 'database')!;
+    const cache = managed.resources.find((resource) => resource.logicalResourceId === 'cache')!;
+    fixture.cli.objects.get(database.container.objectId!)!.running = false;
+    let failed = false;
+    let resolveFailure!: (resource: PreviewManagedResourceRecord) => void;
+    const failure = new Promise<PreviewManagedResourceRecord>((resolve) => { resolveFailure = resolve; });
+    await fixture.runtime.watchRequiredResources('task-1', [cache.id], async (resource) => {
+        failed = true;
+        resolveFailure(resource);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(failed).toBe(false);
+    fixture.cli.objects.get(cache.container.objectId!)!.running = false;
+    await expect(failure).resolves.toMatchObject({ id: cache.id, state: 'FAILED' });
+    expect((await fixture.store.getPreviewManagedResource(database.id))?.state).toBe('READY');
   });
 
   it.runIf(process.platform === 'darwin' && process.env.TASK_MONKI_OCI_INTEGRATION === '1')(
@@ -187,7 +320,13 @@ describe('OciResourceRuntime', () => {
       const capability = await adapter.requireReady();
       const credentialRoot = `/tmp/task-monki-oci-${randomUUID()}`;
       const credentials = new PreviewCredentialHost(credentialRoot);
-      const runtime = new OciResourceRuntime(store as never, adapter, new PreviewReadinessService(), credentials);
+      const runtime = new OciResourceRuntime(
+        store as never,
+        adapter,
+        new PreviewReadinessService(),
+        credentials,
+        { healthIntervalMs: 100 }
+      );
       const previews = await Promise.all(['one', 'two'].map((suffix) => runtime.ensureManagedPreview({
         taskId: `task-${suffix}`,
         previewKey: `preview-${suffix}`,
@@ -196,7 +335,30 @@ describe('OciResourceRuntime', () => {
         resources: [postgresResource(), redisResource()]
       })));
       try {
-        for (const preview of previews) await runtime.markSetupReady(preview.createdResourceIds);
+        for (const preview of previews) await runtime.markSetupReady(preview.setupResourceIds);
+        const failedSetup = await runtime.ensureManagedPreview({
+          taskId: 'task-retry', previewKey: 'preview-retry', markerDigest: 'marker-retry',
+          expectedEngine: capability.identity, resources: [redisResource()]
+        });
+        await runtime.markSetupFailure(failedSetup.setupResourceIds, {
+          ambiguous: false,
+          reason: 'observed real-engine setup failure'
+        });
+        await expect(runtime.ensureManagedPreview({
+          taskId: 'task-retry', previewKey: 'preview-retry', markerDigest: 'marker-retry',
+          expectedEngine: capability.identity, resources: [redisResource()]
+        })).rejects.toThrow('setup failed');
+        const retriedSetup = await runtime.ensureManagedPreview({
+          taskId: 'task-retry', previewKey: 'preview-retry', markerDigest: 'marker-retry',
+          expectedEngine: capability.identity, resources: [redisResource()],
+          retrySetupResourceIds: failedSetup.setupResourceIds
+        });
+        expect(identitySummary(retriedSetup)).toEqual(identitySummary(failedSetup));
+        await runtime.markSetupReady(retriedSetup.setupResourceIds);
+        await expect(runtime.ensureManagedPreview({
+          taskId: 'task-retry', previewKey: 'preview-retry', markerDigest: 'marker-retry',
+          expectedEngine: capability.identity, resources: [redisResource()]
+        })).resolves.toMatchObject({ setupResourceIds: [] });
         const ports = previews.flatMap((preview) => Object.values(preview.bindings).flatMap((binding) => Object.values(binding.ports)));
         expect(new Set(ports).size).toBe(ports.length);
         expect(new Set(previews.flatMap((preview) => Object.values(preview.bindings).map((binding) => binding.postgresUrl ?? binding.redisUrl))).size).toBe(4);
@@ -207,7 +369,7 @@ describe('OciResourceRuntime', () => {
           taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
           expectedEngine: capability.identity, resources: [postgresResource(), redisResource()]
         });
-        expect(replacement.createdResourceIds).toEqual([]);
+        expect(replacement.setupResourceIds).toEqual([]);
         expect(identitySummary(replacement)).toEqual(firstIdentity);
         await assertRealAuthentication(adapter, replacement, credentials);
 
@@ -218,21 +380,55 @@ describe('OciResourceRuntime', () => {
           taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
           expectedEngine: capability.identity, resources: [postgresResource(), redisResource()]
         });
-        await runtime.markSetupReady(reset.createdResourceIds);
-        expect(reset.resources.find((resource) => resource.logicalResourceId === 'database')?.id).not.toBe(oldDatabase.id);
+        await runtime.markSetupReady(reset.setupResourceIds);
+        const firstResetDatabase = reset.resources.find(
+          (resource) => resource.logicalResourceId === 'database'
+        )!;
+        expect(firstResetDatabase.id).not.toBe(oldDatabase.id);
         expect(reset.resources.find((resource) => resource.logicalResourceId === 'cache')?.id).toBe(stableCache.id);
+        await assertRealAuthentication(adapter, reset, credentials);
+
+        await runtime.stopManagedResource(firstResetDatabase.id);
+        const repeatedReset = await runtime.ensureManagedPreview({
+          taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
+          expectedEngine: capability.identity, resources: [postgresResource(), redisResource()]
+        });
+        await runtime.markSetupReady(repeatedReset.setupResourceIds);
+        const stableDatabase = repeatedReset.resources.find(
+          (resource) => resource.logicalResourceId === 'database'
+        )!;
+        expect(stableDatabase.id).not.toBe(firstResetDatabase.id);
+        expect(repeatedReset.resources.find((resource) => resource.logicalResourceId === 'cache')?.id)
+          .toBe(stableCache.id);
+
+        await runtime.stopManagedResource(stableCache.id);
+        const alternatingReset = await runtime.ensureManagedPreview({
+          taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
+          expectedEngine: capability.identity, resources: [postgresResource(), redisResource()]
+        });
+        await runtime.markSetupReady(alternatingReset.setupResourceIds);
+        const resetCache = alternatingReset.resources.find(
+          (resource) => resource.logicalResourceId === 'cache'
+        )!;
+        expect(alternatingReset.resources.find((resource) => resource.logicalResourceId === 'database')?.id)
+          .toBe(stableDatabase.id);
+        expect(resetCache.id).not.toBe(stableCache.id);
+        await assertRealAuthentication(adapter, alternatingReset, credentials);
 
         await adapter.run([
           '--context', capability.identity.contextName,
-          'container', 'rm', '--force', stableCache.container.objectId!
+          'container', 'rm', '--force', resetCache.container.objectId!
         ]);
-        const failed = await new Promise<PreviewManagedResourceRecord>((resolve) => {
-          runtime.watchRequiredResources('task-one', async (resource) => resolve(resource));
-        });
-        expect(failed).toMatchObject({ id: stableCache.id, state: 'FAILED' });
+        let resolveFailure!: (resource: PreviewManagedResourceRecord) => void;
+        const failure = new Promise<PreviewManagedResourceRecord>((resolve) => { resolveFailure = resolve; });
+        await runtime.watchRequiredResources(
+          'task-one', [resetCache.id], async (resource) => resolveFailure(resource)
+        );
+        const failed = await failure;
+        expect(failed).toMatchObject({ id: resetCache.id, state: 'FAILED' });
         await expect(adapter.run([
           '--context', capability.identity.contextName,
-          'volume', 'inspect', stableCache.volume.objectId!
+          'volume', 'inspect', resetCache.volume.objectId!
         ])).resolves.toBeDefined();
 
         const restarted = new OciResourceRuntime(
@@ -348,7 +544,10 @@ function createFixture(options: {
     adapter,
     { async waitForTcp() { return { status: 'PASSED' as const }; } } as never,
     credentials,
-    { afterMutation(operation) { if (operation === options.failAfter) throw new Error('injected crash'); } }
+    {
+      healthIntervalMs: 20,
+      afterMutation(operation) { if (operation === options.failAfter) throw new Error('injected crash'); }
+    }
   );
   return { store, cli, runtime, identity, credentials };
 }
@@ -395,6 +594,7 @@ class FakeOciCli {
   ]]);
   readonly endpointDigest = 'f120d06200affbb4da036243e8ea30b016001f09b53b4c29cdb696824006c005';
   engineId = 'engine-id';
+  resourceExecHealthy = true;
   private sequence = 0;
   private imageAvailable = false;
 
@@ -433,7 +633,10 @@ class FakeOciCli {
       if (object) object.running = true;
       return output('ok\n');
     }
-    if (command[0] === 'container' && command[1] === 'exec') return output('ok\n');
+    if (command[0] === 'container' && command[1] === 'exec') {
+      if (!this.resourceExecHealthy) throw new Error('authenticated command failed');
+      return output('ok\n');
+    }
     if (['container', 'network', 'volume'].includes(command[0]) && command[1] === 'inspect') {
       const object = this.objects.get(command[2]);
       if (!object || object.removed) throw new Error('not found');

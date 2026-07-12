@@ -15,6 +15,7 @@ import {
   buildPreviewViewModel,
   selectPreviewActionGeneration,
   selectPreviewDiagnosticAttempts,
+  selectPreviewResetResources,
   type PreviewActionId
 } from '../model/preview';
 import { StatusChip } from './StatusBadge';
@@ -44,6 +45,8 @@ export function PreviewPanel(props: {
   const [resetBusy, setResetBusy] = useState<string>();
   const view = buildPreviewViewModel(props);
   const tone = view.tone === 'warning' ? 'warning' : view.tone === 'neutral' ? 'neutral' : view.tone;
+  const resetGeneration = view.recoveryGeneration ?? view.activeGeneration ?? view.generation;
+  const resettableResources = selectPreviewResetResources(props, view);
 
   const act = async (action: PreviewActionId) => {
     if (busy.has(action) || (busy.size > 0 && !(action === 'STOP' && busy.has('START')))) return;
@@ -56,10 +59,11 @@ export function PreviewPanel(props: {
       if (action === 'START') {
         await props.onStart(props.task.id, view.plan?.executionPlan.selectedScenarioId);
       }
-      if (action === 'RETRY_SETUP' && view.generation && view.plan) {
+      const retryGeneration = view.recoveryGeneration ?? view.generation;
+      if (action === 'RETRY_SETUP' && retryGeneration && view.plan) {
         await props.onRetrySetup(
           props.task.id,
-          view.generation.id,
+          retryGeneration.id,
           view.plan.executionPlan.selectedScenarioId
         );
       }
@@ -135,7 +139,7 @@ export function PreviewPanel(props: {
   };
 
   const resetData = async (resourceId: string) => {
-    const generation = view.activeGeneration ?? view.generation;
+    const generation = resetGeneration;
     const scenarioId = view.plan?.executionPlan.selectedScenarioId;
     if (!generation || !scenarioId || resetBusy) return;
     if (!window.confirm(
@@ -195,8 +199,7 @@ export function PreviewPanel(props: {
             View logs
           </button>
         ) : null}
-        {(view.activeGeneration ?? view.generation)?.state === 'READY' && view.plan ? view.plan.executionPlan.resources
-          .map((resource) => (
+        {resettableResources.map((resource) => (
             <button
               key={`reset-${resource.id}`}
               type="button"
@@ -206,7 +209,7 @@ export function PreviewPanel(props: {
             >
               {resetBusy === resource.id ? 'Resetting…' : `Reset ${resource.id} data`}
             </button>
-          )) : null}
+          ))}
       </div>
 
       {logs !== undefined ? (

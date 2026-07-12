@@ -36,7 +36,6 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewNativeResourceRecord,
-  PreviewOciResourceRecord,
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReviewRollupRecord,
@@ -458,10 +457,13 @@ export class FileTaskStore {
     if (!this.state.tasks.some((task) => task.id === environment.taskId)) {
       throw new Error('Preview managed environment references a missing task.');
     }
-    const sameTask = this.state.previewManagedEnvironments.find(
-      (candidate) => candidate.taskId === environment.taskId && candidate.id !== environment.id
+    const hasOtherLiveEnvironment = this.state.previewManagedEnvironments.some(
+      (candidate) =>
+        candidate.taskId === environment.taskId &&
+        candidate.id !== environment.id &&
+        candidate.state !== 'STOPPED'
     );
-    if (sameTask && sameTask.state !== 'STOPPED') {
+    if (environment.state !== 'STOPPED' && hasOtherLiveEnvironment) {
       throw new Error('A task preview may have only one managed environment.');
     }
     this.state = {
@@ -490,7 +492,9 @@ export class FileTaskStore {
         candidate.id !== resource.id &&
         candidate.state !== 'STOPPED'
     );
-    if (duplicate) throw new Error(`Managed resource ${resource.logicalResourceId} already exists.`);
+    if (resource.state !== 'STOPPED' && duplicate) {
+      throw new Error(`Managed resource ${resource.logicalResourceId} already exists.`);
+    }
     this.state = {
       ...this.state,
       previewManagedResources: [
@@ -722,9 +726,7 @@ export class FileTaskStore {
     return clone(attempt);
   }
 
-  async savePreviewResource(resource: PreviewNativeResourceRecord): Promise<PreviewNativeResourceRecord>;
-  async savePreviewResource(resource: PreviewOciResourceRecord): Promise<PreviewOciResourceRecord>;
-  async savePreviewResource(resource: PreviewResourceRecord): Promise<PreviewResourceRecord> {
+  async savePreviewResource(resource: PreviewNativeResourceRecord): Promise<PreviewNativeResourceRecord> {
     await this.init();
     this.assertPreviewChildReferences(resource.taskId, resource.generationId, 'resource');
     this.state = {
@@ -3031,6 +3033,12 @@ function migratePersistedState(state: PersistedState): {
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
   let changed = false;
+  const previewResources = state.previewResources.filter(
+    (resource) => (resource as { adapterKind: string }).adapterKind === 'NATIVE_PROCESS'
+  );
+  if (previewResources.length !== state.previewResources.length) {
+    changed = true;
+  }
   const activeRunStatuses: RunRecord['status'][] = [
     'QUEUED',
     'STARTING',
@@ -3180,7 +3188,9 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     };
   });
 
-  return changed ? { state: { ...state, runs, tasks }, changed } : { state, changed };
+  return changed
+    ? { state: { ...state, runs, tasks, previewResources }, changed }
+    : { state, changed };
 }
 
 function removeTaskLink(task: Task, deletedTaskId: string, now: string): Task {

@@ -213,6 +213,54 @@ describe('FileTaskStore', () => {
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow('Unsupported Task Monki store schema 12');
   });
 
+  it('repairs schema 13 stores by removing obsolete generation-owned OCI duplicates', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-oci-duplicate-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({ title: 'OCI duplicate', prompt: 'Repair it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    persisted.previewResources = [{
+      id: 'legacy-container', taskId: 'task', generationId: 'generation', logicalNodeId: 'database',
+      adapterKind: 'OCI_CONTAINER', state: 'RUNNING', ownershipMarkerDigest: 'marker',
+      oci: { engine, objectId: 'container', objectName: 'container', labelsDigest: 'labels' },
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    }];
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.previewResources).toEqual([]);
+    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      previewResources: unknown[];
+    };
+    expect(rewritten.previewResources).toEqual([]);
+  });
+
+  it('allows stopped environment history but enforces one live environment per task', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-managed-environment-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Managed environment', prompt: 'Test', repositoryPath: dir });
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const environment = (id: string, state: 'READY' | 'STOPPED') => ({
+      id, previewKey: 'task-preview', taskId: task.id, state, engine,
+      network: { engine, objectId: `network-${id}`, objectName: `network-${id}`, labelsDigest: 'labels' },
+      ownershipMarkerDigest: 'marker', createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    });
+    await store.savePreviewManagedEnvironment(environment('old', 'STOPPED'));
+    await store.savePreviewManagedEnvironment(environment('live', 'READY'));
+    await store.savePreviewManagedEnvironment(environment('old', 'STOPPED'));
+
+    await expect(store.savePreviewManagedEnvironment(environment('duplicate', 'READY')))
+      .rejects.toThrow('only one managed environment');
+  });
+
   it('persists preview records and refuses task deletion while ownership is unresolved', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-'));
     const store = new FileTaskStore(dir);
@@ -362,7 +410,7 @@ describe('FileTaskStore', () => {
     const managedResource = await store.savePreviewManagedResource({
       id: 'managed-database', taskId: task.id, environmentId: environment.id,
       logicalResourceId: 'database', type: 'postgres', state: 'READY', planDigest: 'resource-plan',
-      ownershipMarkerDigest: 'resource-marker', imageReference: 'postgres:17-alpine', imageId: 'image',
+      ownershipMarkerDigest: 'resource-marker',
       container: { engine, objectId: 'container', objectName: 'container', labelsDigest: 'container-labels' },
       volume: { engine, objectId: 'volume', objectName: 'volume', labelsDigest: 'volume-labels' },
       binding: {

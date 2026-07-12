@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   PreviewManagedEnvironmentRecord,
   PreviewManagedResourceRecord,
+  PreviewManagedResourceState,
   PreviewOciEngineIdentity,
   PreviewOciObjectIdentity,
   PreviewOciPublishedPort,
@@ -43,7 +44,7 @@ import {
 const PULL_TIMEOUT_MS = 5 * 60_000;
 const MUTATION_TIMEOUT_MS = 60_000;
 const MAX_DISCOVERED_OBJECTS = 2;
-const RESOURCE_HEALTH_INTERVAL_MS = 1_000;
+const RESOURCE_HEALTH_INTERVAL_MS = 5_000;
 
 export type OciRuntimeErrorCode =
   | 'ENGINE_MISSING'
@@ -54,8 +55,6 @@ export type OciRuntimeErrorCode =
   | 'IMAGE_ARCHITECTURE_MISMATCH'
   | 'CREATE_FAILED'
   | 'UNHEALTHY_CONTAINER'
-  | 'SETUP_FAILED'
-  | 'RECOVERY_REQUIRED'
   | 'CLEANUP_FAILED';
 
 export class OciRuntimeError extends Error {
@@ -64,21 +63,20 @@ export class OciRuntimeError extends Error {
   }
 }
 
-export type OciResourceBinding = RuntimeManagedResourceBinding;
-
 export interface ManagedPreviewRuntime {
   environment: PreviewManagedEnvironmentRecord;
   resources: PreviewManagedResourceRecord[];
-  bindings: Record<string, OciResourceBinding>;
-  createdResourceIds: string[];
+  bindings: Record<string, RuntimeManagedResourceBinding>;
+  setupResourceIds: string[];
 }
 
 export interface OciResourceRuntimeHooks {
   afterMutation?(operation: 'network-create' | 'volume-create' | 'container-create'): Promise<void> | void;
+  healthIntervalMs?: number;
 }
 
 export class OciResourceRuntime {
-  private readonly healthStops = new Map<string, () => void>();
+  private readonly healthStops = new Map<string, () => Promise<void>>();
 
   constructor(
     private readonly store: FileTaskStore,
@@ -102,9 +100,9 @@ export class OciResourceRuntime {
     signal?: AbortSignal;
   }): Promise<ManagedPreviewRuntime> {
     const environment = await this.ensureEnvironment(input);
-    const bindings: Record<string, OciResourceBinding> = {};
+    const bindings: Record<string, RuntimeManagedResourceBinding> = {};
     const records: PreviewManagedResourceRecord[] = [];
-    const createdResourceIds: string[] = [];
+    const setupResourceIds: string[] = [];
     for (const plan of input.resources) {
       throwIfAborted(input.signal);
       const existing = (await this.store.getPreviewManagedResources(input.taskId)).find(
@@ -134,51 +132,51 @@ export class OciResourceRuntime {
             })
           : existing;
         records.push(reusable);
-        if (retryingSetup) createdResourceIds.push(existing.id);
+        if (retryingSetup) setupResourceIds.push(existing.id);
         continue;
       }
       const created = await this.createManagedResource(environment, plan, input.markerDigest, input.signal);
       bindings[plan.id] = this.credentials.requireBinding(created.id);
       records.push(created);
-      createdResourceIds.push(created.id);
+      setupResourceIds.push(created.id);
     }
-    return { environment, resources: records, bindings, createdResourceIds };
+    return { environment, resources: records, bindings, setupResourceIds };
   }
 
   async verifyManagedPreview(input: {
     taskId: string;
     expectedEngine: PreviewOciEngineIdentity;
     resources: PreviewOciResourcePlan[];
-    allowSetupFailed?: boolean;
+    resourceStates?: readonly PreviewManagedResourceState[];
+    verification?: 'REUSABLE' | 'CLEANUP';
   }): Promise<{ environment: PreviewManagedEnvironmentRecord; resources: PreviewManagedResourceRecord[] }> {
     const environment = await this.store.getPreviewManagedEnvironment(input.taskId);
     if (!environment || environment.state !== 'READY') {
       throw new Error('Managed preview environment is not ready.');
     }
     await this.requireEngine(input.expectedEngine);
-    if (
-      environment.engine.contextName !== input.expectedEngine.contextName ||
-      environment.engine.endpointDigest !== input.expectedEngine.endpointDigest ||
-      environment.engine.engineId !== input.expectedEngine.engineId
-    ) {
-      throw new OciRuntimeError('ENGINE_IDENTITY_MISMATCH', 'The approved OCI engine no longer owns this preview environment.');
-    }
+    this.assertEngineIdentity(environment.engine, input.expectedEngine);
     await this.assertObject('network', environment.network, expectedEnvironmentLabels(
       this.store.getStoreIdentity(), environment
     ));
+    const allowedStates = new Set(input.resourceStates ?? ['READY']);
     const records: PreviewManagedResourceRecord[] = [];
     for (const plan of input.resources) {
       const resource = (await this.store.getPreviewManagedResources(input.taskId)).find(
         (candidate) =>
           candidate.environmentId === environment.id &&
           candidate.logicalResourceId === plan.id &&
-          (candidate.state === 'READY' || (input.allowSetupFailed && candidate.state === 'SETUP_FAILED'))
+          allowedStates.has(candidate.state)
       );
       if (!resource || resource.planDigest !== digestResourcePlan(plan)) {
         throw new Error(`Managed resource ${plan.id} does not match the current approved plan.`);
       }
-      this.credentials.requireBinding(resource.id);
-      await this.verifyManagedResource(resource);
+      if (input.verification === 'CLEANUP') {
+        await this.verifyManagedResourceCleanupAuthority(resource);
+      } else {
+        this.credentials.requireBinding(resource.id);
+        await this.verifyManagedResource(resource);
+      }
       records.push(resource);
     }
     return { environment, resources: records };
@@ -213,33 +211,43 @@ export class OciResourceRuntime {
     }
   }
 
-  watchRequiredResources(
+  async watchRequiredResources(
     taskId: string,
+    resourceIds: readonly string[],
     onFailure: (resource: PreviewManagedResourceRecord, reason: string) => Promise<void>
-  ): () => void {
-    this.healthStops.get(taskId)?.();
+  ): Promise<() => Promise<void>> {
+    await this.healthStops.get(taskId)?.();
+    const requiredIds = new Set(resourceIds);
     let stopped = false;
     let checking = false;
+    let pendingFailure: { resource: PreviewManagedResourceRecord; reason: string } | undefined;
+    let operation = Promise.resolve();
     const timer = setInterval(() => {
       if (stopped || checking) return;
       checking = true;
-      void this.checkRequiredResources(taskId)
+      operation = (pendingFailure
+        ? Promise.resolve(pendingFailure)
+        : this.checkRequiredResources(taskId, requiredIds))
         .then(async (failure) => {
           if (!failure || stopped) return;
+          pendingFailure = failure;
+          await onFailure(failure.resource, failure.reason);
           stopped = true;
           clearInterval(timer);
-          this.healthStops.delete(taskId);
-          await onFailure(failure.resource, failure.reason);
         })
+        .catch(() => undefined)
         .finally(() => {
           checking = false;
+          if (stopped && this.healthStops.get(taskId) === stop) this.healthStops.delete(taskId);
         });
-    }, RESOURCE_HEALTH_INTERVAL_MS);
+    }, this.hooks.healthIntervalMs ?? RESOURCE_HEALTH_INTERVAL_MS);
     timer.unref?.();
-    const stop = () => {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(timer);
+    const stop = async () => {
+      if (!stopped) {
+        stopped = true;
+        clearInterval(timer);
+      }
+      await operation;
       if (this.healthStops.get(taskId) === stop) this.healthStops.delete(taskId);
     };
     this.healthStops.set(taskId, stop);
@@ -284,7 +292,7 @@ export class OciResourceRuntime {
     }
   }
 
-  async stopManagedEnvironment(environmentId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
+  private async stopManagedEnvironment(environmentId: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
     let environment = (await this.store.getPreviewManagedEnvironments()).find(
       (candidate) => candidate.id === environmentId
     );
@@ -326,8 +334,8 @@ export class OciResourceRuntime {
   }
 
   async cleanupTaskResources(taskId?: string): Promise<'STOPPED' | 'ALREADY_EXITED' | 'REFUSED'> {
-    if (taskId) this.healthStops.get(taskId)?.();
-    else for (const stop of this.healthStops.values()) stop();
+    if (taskId) await this.healthStops.get(taskId)?.();
+    else await Promise.all([...this.healthStops.values()].map((stop) => stop()));
     let changed = false;
     let refused = false;
     const resources = (await this.store.getPreviewManagedResources(taskId)).filter(
@@ -347,28 +355,6 @@ export class OciResourceRuntime {
     return refused ? 'REFUSED' : changed ? 'STOPPED' : 'ALREADY_EXITED';
   }
 
-  async replaceManagedResource(input: {
-    taskId: string;
-    logicalResourceId: string;
-    plan: PreviewOciResourcePlan;
-    markerDigest: string;
-    signal?: AbortSignal;
-  }): Promise<{ resource: PreviewManagedResourceRecord; binding: OciResourceBinding }> {
-    const environment = await this.store.getPreviewManagedEnvironment(input.taskId);
-    if (!environment || environment.state !== 'READY') {
-      throw new Error('Managed preview environment is not ready for resource reset.');
-    }
-    const current = (await this.store.getPreviewManagedResources(input.taskId)).find(
-      (resource) => resource.logicalResourceId === input.logicalResourceId && resource.state !== 'STOPPED'
-    );
-    if (!current) throw new Error(`Managed resource ${input.logicalResourceId} was not found.`);
-    if (await this.stopManagedResource(current.id) === 'REFUSED') {
-      throw new OciRuntimeError('CLEANUP_FAILED', `Managed resource ${input.logicalResourceId} cleanup is incomplete.`);
-    }
-    const resource = await this.createManagedResource(environment, input.plan, input.markerDigest, input.signal);
-    return { resource, binding: this.credentials.requireBinding(resource.id) };
-  }
-
   private async ensureEnvironment(input: {
     taskId: string;
     previewKey: string;
@@ -380,7 +366,8 @@ export class OciResourceRuntime {
       if (existing.state !== 'READY') {
         throw new Error(`Managed preview environment is ${existing.state.toLowerCase().replace(/_/g, ' ')}.`);
       }
-      await this.requireEngine(existing.engine);
+      this.assertEngineIdentity(existing.engine, input.expectedEngine);
+      await this.requireEngine(input.expectedEngine);
       await this.assertObject('network', existing.network, expectedEnvironmentLabels(
         this.store.getStoreIdentity(), existing
       ));
@@ -487,7 +474,6 @@ export class OciResourceRuntime {
       state: 'INTENDED',
       planDigest: digestResourcePlan(plan),
       ownershipMarkerDigest: markerDigest,
-      imageReference: plan.image,
       container,
       volume,
       creationAttemptedAt: now,
@@ -523,7 +509,6 @@ export class OciResourceRuntime {
       record = await this.store.savePreviewManagedResource({
         ...record,
         container: createdContainer,
-        imageId,
         updatedAt: new Date().toISOString()
       });
       const publishedPorts = await this.waitForPublishedPorts(createdContainer, Object.keys(resourcePorts(plan)).length, signal);
@@ -609,7 +594,7 @@ export class OciResourceRuntime {
     plan: PreviewOciResourcePlan,
     record: PreviewManagedResourceRecord,
     credential: HostedResourceCredential,
-    binding: OciResourceBinding,
+    binding: RuntimeManagedResourceBinding,
     signal?: AbortSignal
   ): Promise<void> {
     const portId = plan.type === 'postgres' ? 'postgres' : 'redis';
@@ -621,13 +606,31 @@ export class OciResourceRuntime {
     if (readiness.status !== 'PASSED') {
       throw new OciRuntimeError('UNHEALTHY_CONTAINER', `Managed resource ${plan.id} did not open its loopback port.`);
     }
-    const env: Record<string, string> = plan.type === 'postgres'
-      ? { PGPASSWORD: credential.password }
-      : { REDIS_PASSWORD: credential.password };
-    const command = plan.type === 'postgres'
-      ? ['psql', '-v', 'ON_ERROR_STOP=1', '-U', credential.username!, '-d', plan.database, '-c', 'SELECT 1']
-      : ['sh', '-c', 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -qx PONG'];
+    const { env, command } = this.authenticationProbe(
+      plan.type,
+      credential,
+      plan.type === 'postgres' ? plan.database : undefined
+    );
     await this.retryExec(record, env, command, 60, signal);
+  }
+
+  private authenticationProbe(
+    type: PreviewManagedResourceRecord['type'],
+    credential: HostedResourceCredential,
+    database?: string
+  ): { env: Record<string, string>; command: string[] } {
+    return type === 'postgres'
+      ? {
+          env: { PGPASSWORD: credential.password },
+          command: [
+            'psql', '-v', 'ON_ERROR_STOP=1', '-U', credential.username!,
+            '-d', database!, '-c', 'SELECT 1'
+          ]
+        }
+      : {
+          env: { REDIS_PASSWORD: credential.password },
+          command: ['sh', '-c', 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping | grep -qx PONG']
+        };
   }
 
   private async retryExec(
@@ -698,13 +701,66 @@ export class OciResourceRuntime {
     const inspection = await this.inspect('container', resource.container.objectId!, resource.container.engine.contextName);
     const state = asRecord(inspection.State, 'container state');
     if (state.Running !== true) throw new Error(`Managed resource ${resource.logicalResourceId} is not running.`);
+    const safeBinding = resource.binding;
+    const credential = this.credentials.require(resource.id);
+    if (!safeBinding || safeBinding.digest !== bindingDigest({
+      id: safeBinding.id,
+      type: resource.type,
+      host: safeBinding.host,
+      ports: safeBinding.ports,
+      username: safeBinding.username,
+      database: safeBinding.database
+    })) {
+      throw new Error(`Managed resource ${resource.logicalResourceId} binding identity is invalid.`);
+    }
+    if (
+      (resource.type === 'postgres' && (
+        !safeBinding.database ||
+        !safeBinding.username ||
+        safeBinding.username !== credential.username
+      )) ||
+      (resource.type === 'redis' && (safeBinding.database !== undefined || safeBinding.username !== undefined))
+    ) {
+      throw new Error(`Managed resource ${resource.logicalResourceId} binding metadata is invalid.`);
+    }
+    const runtimeBinding = this.credentials.requireBinding(resource.id);
+    if (
+      Object.keys(runtimeBinding.ports).length !== Object.keys(safeBinding.ports).length ||
+      Object.entries(runtimeBinding.ports).some(([id, port]) => safeBinding.ports[id] !== port)
+    ) {
+      throw new Error(`Managed resource ${resource.logicalResourceId} runtime binding does not match its record.`);
+    }
+    const expectedContainerPort = resource.type === 'postgres' ? 5432 : 6379;
+    const portId = resource.type === 'postgres' ? 'postgres' : 'redis';
+    const published = await this.inspectPublishedPorts(resource.container);
+    if (!published.some(
+      (port) =>
+        port.containerPort === expectedContainerPort &&
+        port.protocol === 'tcp' &&
+        port.hostPort === safeBinding.ports[portId]
+    )) {
+      throw new Error(`Managed resource ${resource.logicalResourceId} published binding changed.`);
+    }
+    const { env, command } = this.authenticationProbe(resource.type, credential, safeBinding.database);
+    try {
+      await this.engine.run([
+        '--context', resource.container.engine.contextName,
+        'container', 'exec',
+        ...Object.keys(env).sort().flatMap((key) => ['--env', key]),
+        resource.container.objectId!,
+        ...command
+      ], this.engine.environment(env));
+    } catch {
+      throw new Error(`Managed resource ${resource.logicalResourceId} failed authenticated health verification.`);
+    }
   }
 
   private async checkRequiredResources(
-    taskId: string
+    taskId: string,
+    requiredIds: ReadonlySet<string>
   ): Promise<{ resource: PreviewManagedResourceRecord; reason: string } | undefined> {
     for (const resource of await this.store.getPreviewManagedResources(taskId)) {
-      if (resource.state !== 'READY') continue;
+      if (resource.state !== 'READY' || !requiredIds.has(resource.id)) continue;
       try {
         await this.verifyManagedResource(resource);
       } catch {
@@ -718,6 +774,18 @@ export class OciResourceRuntime {
       }
     }
     return undefined;
+  }
+
+  private async verifyManagedResourceCleanupAuthority(
+    resource: PreviewManagedResourceRecord
+  ): Promise<void> {
+    await this.requireEngine(resource.container.engine);
+    await this.findVerifiedOwnedObject('container', resource.container, expectedManagedResourceLabels(
+      this.store.getStoreIdentity(), resource, 'container'
+    ));
+    await this.findVerifiedOwnedObject('volume', resource.volume, expectedManagedResourceLabels(
+      this.store.getStoreIdentity(), resource, 'volume'
+    ));
   }
 
   private mapPublishedPorts(
@@ -782,19 +850,8 @@ export class OciResourceRuntime {
     identity: PreviewOciObjectIdentity,
     expectedLabels: Record<string, string>
   ): Promise<void> {
-    let objectId = identity.objectId;
-    if (objectId) {
-      const inspection = await this.inspect(kind, objectId, identity.engine.contextName).catch(() => undefined);
-      if (inspection) {
-        this.assertObjectInspection(kind, objectId, identity, expectedLabels, inspection);
-      } else {
-        objectId = await this.discoverExactObject(kind, identity, expectedLabels);
-      }
-    } else {
-      objectId = await this.discoverExactObject(kind, identity, expectedLabels);
-    }
+    const objectId = await this.findVerifiedOwnedObject(kind, identity, expectedLabels);
     if (!objectId) return;
-    await this.assertObject(kind, { ...identity, objectId }, expectedLabels);
     const args = kind === 'container'
       ? ['container', 'rm', '--force', objectId]
       : [kind, 'rm', objectId];
@@ -807,6 +864,28 @@ export class OciResourceRuntime {
     } catch (error) {
       throw new OciRuntimeError('CLEANUP_FAILED', `OCI ${kind} cleanup failed: ${boundedError(error)}`, { cause: error });
     }
+  }
+
+  private async findVerifiedOwnedObject(
+    kind: OciObjectKind,
+    identity: PreviewOciObjectIdentity,
+    expectedLabels: Record<string, string>
+  ): Promise<string | undefined> {
+    if (identity.labelsDigest !== digestLabels(expectedLabels)) {
+      throw new Error(`OCI ${kind} Task Monki ownership-label identity does not match.`);
+    }
+    if (identity.objectId) {
+      const inspection = await this.inspect(
+        kind, identity.objectId, identity.engine.contextName
+      ).catch(() => undefined);
+      if (inspection) {
+        this.assertObjectInspection(kind, identity.objectId, identity, expectedLabels, inspection);
+        return identity.objectId;
+      }
+    }
+    const discovered = await this.discoverExactObject(kind, identity, expectedLabels);
+    if (discovered) await this.assertObject(kind, { ...identity, objectId: discovered }, expectedLabels);
+    return discovered;
   }
 
   private async discoverExactObject(
@@ -844,11 +923,9 @@ export class OciResourceRuntime {
     inspection: Record<string, unknown>
   ): void {
     const actualId = String(inspection.Id ?? inspection.ID ?? inspection.Name ?? '');
-    const actualName = String(inspection.Name ?? '').replace(/^\//, '');
     const actualLabels = readLabels(inspection, kind);
     if (
       !actualId.startsWith(objectId) ||
-      actualName !== identity.objectName ||
       identity.labelsDigest !== digestLabels(expectedLabels) ||
       !sameLabels(actualLabels, expectedLabels)
     ) {
@@ -868,6 +945,22 @@ export class OciResourceRuntime {
     const resource = await this.store.getPreviewManagedResource(id);
     if (!resource) throw new Error(`Managed preview resource not found: ${id}`);
     return resource;
+  }
+
+  private assertEngineIdentity(
+    recorded: PreviewOciEngineIdentity,
+    expected: PreviewOciEngineIdentity
+  ): void {
+    if (
+      recorded.contextName !== expected.contextName ||
+      recorded.endpointDigest !== expected.endpointDigest ||
+      recorded.engineId !== expected.engineId
+    ) {
+      throw new OciRuntimeError(
+        'ENGINE_IDENTITY_MISMATCH',
+        'The approved OCI engine no longer owns this preview environment.'
+      );
+    }
   }
 
   private async requireEngine(expected: PreviewOciEngineIdentity) {

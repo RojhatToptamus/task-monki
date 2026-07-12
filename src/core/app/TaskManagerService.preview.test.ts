@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { PreviewGenerationRecord } from '../../shared/contracts';
+import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import type { FileTaskStore } from '../storage/FileTaskStore';
 import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
@@ -598,12 +598,73 @@ routes:
     const starting = scenario.service.startPreview({ taskId: task.id });
     await expect(
       scenario.service.deleteTask({ taskId: task.id, removeWorktree: false })
-    ).rejects.toThrow('Preview source capture is already running');
+    ).rejects.toThrow('Preview startup is already running');
     const ready = await starting;
     const snapshot = await scenario.store.snapshot();
     expect(snapshot.tasks.some((candidate) => candidate.id === task.id)).toBe(true);
     expect(snapshot.previewGenerations.every((generation) => generation.taskId === task.id)).toBe(true);
     await scenario.service.stopPreview({ taskId: task.id, generationId: ready.id });
+  }, 20_000);
+
+  it('checks Git before destructive reset and permits reset orchestration for recovery-required setup', async () => {
+    const scenario = await previewScenario('task-monki-preview-reset-order');
+    const task = await prepareApprovedPreview(scenario);
+    const plan = await scenario.store.getLatestPreviewPlan(task.id);
+    const approval = plan
+      ? await scenario.store.getMatchingPreviewApproval(task.id, plan.executionDigest)
+      : undefined;
+    const worktree = await scenario.store.getCurrentWorktree(task.id);
+    if (!plan || !approval || !worktree) throw new Error('Expected approved preview context.');
+    const now = new Date().toISOString();
+    const active = await scenario.store.savePreviewGeneration({
+      id: 'reset-order-active', previewKey: 'task-reset-order', taskId: task.id,
+      iterationId: worktree.iterationId, worktreeId: worktree.id, planId: plan.id,
+      approvalId: approval.id, executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git-active', sourceHeadSha: worktree.headSha!,
+      sourceDirtyFingerprint: 'dirty-active', workspacePath: '/tmp/reset-order-active',
+      state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT', routes: [],
+      createdAt: now, updatedAt: now
+    });
+    const recovery = await scenario.store.savePreviewGeneration({
+      ...active,
+      id: 'reset-order-recovery',
+      sourceGitSnapshotId: 'git-recovery',
+      workspacePath: '/tmp/reset-order-recovery',
+      state: 'RECOVERY_REQUIRED',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: active.id,
+      failureReason: 'Ambiguous setup completion.'
+    });
+    const internals = scenario.service as unknown as {
+      previews: { resetData(input: unknown): Promise<void> };
+      refreshEvidence(input: { taskId: string }): Promise<GitSnapshotRecord>;
+    };
+    const originalRefresh = internals.refreshEvidence.bind(scenario.service);
+    const originalReset = internals.previews.resetData.bind(internals.previews);
+    let resetCalls = 0;
+    internals.previews.resetData = async () => {
+      resetCalls += 1;
+      throw new Error('reset orchestration reached');
+    };
+    internals.refreshEvidence = async () => ({
+      id: 'conflicted', taskId: task.id, iterationId: worktree.iterationId,
+      worktreeId: worktree.id, status: 'CONFLICTED', capturedAt: now
+    } as GitSnapshotRecord);
+
+    await expect(scenario.service.resetPreviewData({
+      taskId: task.id, generationId: recovery.id, resourceId: 'database', scenarioId: 'default'
+    })).rejects.toThrow('Git status is CONFLICTED');
+    expect(resetCalls).toBe(0);
+
+    internals.refreshEvidence = originalRefresh;
+    await expect(scenario.service.resetPreviewData({
+      taskId: task.id, generationId: recovery.id, resourceId: 'database', scenarioId: 'default'
+    })).rejects.toThrow('reset orchestration reached');
+    expect(resetCalls).toBe(1);
+
+    internals.previews.resetData = originalReset;
+    await scenario.store.savePreviewGeneration({ ...active, state: 'STOPPED', routingState: 'RETIRED' });
+    await scenario.store.savePreviewGeneration({ ...recovery, state: 'STOPPED', routingState: 'RETIRED' });
   }, 20_000);
 
   it('runs three task previews concurrently with distinct resources and stops all on graceful shutdown', async () => {
@@ -847,10 +908,15 @@ defaultScenario: full
       expect(attempts.find((attempt) => attempt.nodeId === 'migrate')?.state).toBe('SUCCEEDED');
       expect(attempts.find((attempt) => attempt.nodeId === 'seed')?.state).toBe('SUCCEEDED');
       await scenario.service.stopPreview({ taskId: task.id, generationId: ready.id });
-      const resources = (await scenario.store.snapshot()).previewResources.filter(
-        (resource) => resource.taskId === task.id && resource.adapterKind !== 'NATIVE_PROCESS'
+      const stopped = await scenario.store.snapshot();
+      const resources = stopped.previewManagedResources.filter((resource) => resource.taskId === task.id);
+      const environments = stopped.previewManagedEnvironments.filter(
+        (environment) => environment.taskId === task.id
       );
+      expect(resources).toHaveLength(2);
       expect(resources.every((resource) => resource.state === 'STOPPED')).toBe(true);
+      expect(environments).toHaveLength(1);
+      expect(environments[0].state).toBe('STOPPED');
     },
     180_000
   );

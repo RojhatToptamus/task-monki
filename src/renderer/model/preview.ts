@@ -28,6 +28,7 @@ export interface PreviewViewModel {
   generation?: PreviewGenerationRecord;
   activeGeneration?: PreviewGenerationRecord;
   replacementGeneration?: PreviewGenerationRecord;
+  recoveryGeneration?: PreviewGenerationRecord;
   latestAttempt?: PreviewNodeAttemptRecord;
   actions: PreviewActionModel[];
 }
@@ -37,13 +38,24 @@ export interface PreviewPlanLine {
   value: string;
 }
 
+export interface PreviewViewModelInput {
+  task: Task;
+  worktree?: WorktreeRecord;
+  plans: PreviewPlanRecord[];
+  approvals: PreviewApprovalRecord[];
+  generations: PreviewGenerationRecord[];
+  generationAttachments?: PreviewGenerationAttachmentRecord[];
+  managedResources?: PreviewManagedResourceRecord[];
+  attempts: PreviewNodeAttemptRecord[];
+}
+
 export function selectPreviewActionGeneration(
   view: PreviewViewModel,
   action: 'OPEN' | 'STOP'
 ): PreviewGenerationRecord | undefined {
   return action === 'OPEN'
     ? view.activeGeneration ?? view.generation
-    : view.replacementGeneration ?? view.generation;
+    : view.replacementGeneration ?? view.recoveryGeneration ?? view.generation;
 }
 
 export function selectPreviewDiagnosticAttempts(
@@ -211,16 +223,7 @@ function formatProbe(
   return `${endpoint} · absolute deadline ${probe.timeoutSeconds}s`;
 }
 
-export function buildPreviewViewModel(input: {
-  task: Task;
-  worktree?: WorktreeRecord;
-  plans: PreviewPlanRecord[];
-  approvals: PreviewApprovalRecord[];
-  generations: PreviewGenerationRecord[];
-  generationAttachments?: PreviewGenerationAttachmentRecord[];
-  managedResources?: PreviewManagedResourceRecord[];
-  attempts: PreviewNodeAttemptRecord[];
-}): PreviewViewModel {
+export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewViewModel {
   if (!input.worktree || input.worktree.status !== 'PRESENT') {
     return {
       status: 'Unavailable',
@@ -257,14 +260,18 @@ export function buildPreviewViewModel(input: {
     (candidate) =>
       candidate.routingState === 'CANDIDATE' &&
       Boolean(candidate.replacesGenerationId) &&
-      !['FAILED', 'STOPPED', 'CLEANUP_INCOMPLETE'].includes(candidate.state)
+      !['FAILED', 'RECOVERY_REQUIRED', 'STOPPED'].includes(candidate.state)
   );
   const failedReplacement = generations.find(
     (candidate) =>
       candidate.routingState === 'CANDIDATE' &&
       Boolean(candidate.replacesGenerationId) &&
-      candidate.state === 'FAILED'
+      ['FAILED', 'RECOVERY_REQUIRED'].includes(candidate.state)
   );
+  const currentFailedReplacement =
+    failedReplacement?.executionDigest === plan.executionDigest
+      ? failedReplacement
+      : undefined;
   const generation = replacementGeneration ?? activeGeneration ?? generations[0];
   const diagnosticGeneration = replacementGeneration ?? failedReplacement ?? generation;
   const latestAttempt = input.attempts
@@ -292,7 +299,10 @@ export function buildPreviewViewModel(input: {
       ]
     };
   }
-  if (!generation || generation.executionDigest !== plan.executionDigest) {
+  if (
+    (!generation || generation.executionDigest !== plan.executionDigest) &&
+    !currentFailedReplacement
+  ) {
     return {
       status: 'Ready to start',
       tone: 'action',
@@ -314,6 +324,25 @@ export function buildPreviewViewModel(input: {
         : [{ id: 'START', label: 'Start preview', kind: 'primary' }]
     };
   }
+  if (replacementGeneration?.state === 'CLEANUP_INCOMPLETE') {
+    return {
+      status: 'Cleanup incomplete',
+      tone: 'error',
+      summary:
+        replacementGeneration.cleanupReason ??
+        'The current preview remains available, but its failed replacement still has unverified cleanup residue.',
+      plan,
+      approval,
+      generation: replacementGeneration,
+      activeGeneration,
+      replacementGeneration,
+      latestAttempt,
+      actions: [
+        ...(activeGeneration ? [{ id: 'OPEN' as const, label: 'Open current', kind: 'primary' as const }] : []),
+        { id: 'STOP', label: 'Retry cleanup', kind: 'secondary' }
+      ]
+    };
+  }
   if (replacementGeneration) {
     return {
       status: 'Replacing',
@@ -332,43 +361,35 @@ export function buildPreviewViewModel(input: {
     };
   }
   if (generation.state === 'READY') {
+    const setupRecovery = evaluateSetupRecovery(input, plan, currentFailedReplacement);
     return {
       status: generation.freshness === 'STALE' ? 'Running · stale' : 'Running',
       tone: generation.freshness === 'STALE' ? 'warning' : 'success',
       summary:
-        generation.freshness === 'STALE'
-          ? 'This preview still serves its captured source. The task changed after capture.'
-          : failedReplacement
-            ? `The current preview is still serving. Its last replacement failed: ${failedReplacement.failureReason ?? 'startup failed'}`
+        currentFailedReplacement
+          ? `The current preview is still serving captured source. Its replacement failed: ${currentFailedReplacement.failureReason ?? 'startup failed'}`
+          : generation.freshness === 'STALE'
+            ? 'This preview still serves its captured source. The task changed after capture.'
             : 'All required nodes are ready and the stable Task Monki routes are attached.',
       plan,
       approval,
       generation,
       activeGeneration,
+      recoveryGeneration: setupRecovery.hasManagedFailure ? currentFailedReplacement : undefined,
       latestAttempt,
       actions: [
         { id: 'OPEN', label: 'Open preview', kind: 'primary' },
-        { id: 'START', label: 'Replace', kind: 'secondary' },
+        ...(setupRecovery.canRetry
+          ? [{ id: 'RETRY_SETUP' as const, label: 'Retry setup', kind: 'secondary' as const }]
+          : setupRecovery.hasManagedFailure
+            ? []
+            : [{ id: 'START' as const, label: 'Replace', kind: 'secondary' as const }]),
         { id: 'STOP', label: 'Stop Preview & Delete Data', kind: 'secondary' }
       ]
     };
   }
   if (generation.state === 'FAILED') {
-    const scenario = plan.executionPlan.scenarios.find(
-      (candidate) => candidate.id === plan.executionPlan.selectedScenarioId
-    );
-    const setupJobs = plan.executionPlan.jobs.filter((job) => scenario?.jobs.includes(job.id));
-    const attachedResourceIds = new Set(
-      input.generationAttachments
-        ?.filter((attachment) => attachment.generationId === generation.id)
-        .map((attachment) => attachment.managedResourceId) ?? []
-    );
-    const canRetrySetup =
-      input.managedResources?.some(
-        (resource) => attachedResourceIds.has(resource.id) && resource.state === 'SETUP_FAILED'
-      ) === true &&
-      setupJobs.length > 0 &&
-      setupJobs.every((job) => job.retrySafe);
+    const setupRecovery = evaluateSetupRecovery(input, plan, generation);
     return {
       status: 'Failed',
       tone: 'error',
@@ -376,10 +397,13 @@ export function buildPreviewViewModel(input: {
       plan,
       approval,
       generation,
+      recoveryGeneration: setupRecovery.hasManagedFailure ? generation : undefined,
       latestAttempt,
-      actions: canRetrySetup
+      actions: setupRecovery.canRetry
         ? [{ id: 'RETRY_SETUP', label: 'Retry setup', kind: 'primary' }]
-        : [{ id: 'START', label: 'Try again', kind: 'secondary' }]
+        : setupRecovery.hasManagedFailure
+          ? [{ id: 'STOP', label: 'Stop Preview & Delete Data', kind: 'secondary' }]
+          : [{ id: 'START', label: 'Try again', kind: 'secondary' }]
     };
   }
   if (generation.state === 'RECOVERY_REQUIRED') {
@@ -390,8 +414,9 @@ export function buildPreviewViewModel(input: {
       plan,
       approval,
       generation,
+      recoveryGeneration: generation,
       latestAttempt,
-      actions: [{ id: 'STOP', label: 'Retry cleanup', kind: 'secondary' }]
+      actions: [{ id: 'STOP', label: 'Stop Preview & Delete Data', kind: 'secondary' }]
     };
   }
   if (generation.state === 'CLEANUP_INCOMPLETE') {
@@ -429,6 +454,86 @@ export function buildPreviewViewModel(input: {
     generation,
     latestAttempt,
     actions: [{ id: 'STOP', label: 'Cancel and clean up', kind: 'secondary' }]
+  };
+}
+
+export function selectPreviewResetResources(
+  input: PreviewViewModelInput,
+  view: PreviewViewModel
+): PreviewPlanRecord['executionPlan']['resources'] {
+  const generation = view.recoveryGeneration ?? view.activeGeneration ?? view.generation;
+  const scenario = view.plan?.executionPlan.scenarios.find(
+    (candidate) => candidate.id === view.plan?.executionPlan.selectedScenarioId
+  );
+  if (!generation || !scenario || !view.plan) return [];
+  const activeResourceIds = new Set(scenario.resources);
+  if (generation.state === 'READY') {
+    return view.plan.executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
+  }
+  if (!['FAILED', 'RECOVERY_REQUIRED'].includes(generation.state)) return [];
+  const attachedResourceIds = new Set(
+    input.generationAttachments
+      ?.filter((attachment) => attachment.generationId === generation.id)
+      .map((attachment) => attachment.managedResourceId) ?? []
+  );
+  const failedLogicalResourceIds = new Set(
+    input.managedResources
+      ?.filter(
+        (resource) =>
+          attachedResourceIds.has(resource.id) &&
+          ['SETUP_FAILED', 'RECOVERY_REQUIRED', 'FAILED'].includes(resource.state)
+      )
+      .map((resource) => resource.logicalResourceId) ?? []
+  );
+  return view.plan.executionPlan.resources.filter(
+    (resource) => activeResourceIds.has(resource.id) && failedLogicalResourceIds.has(resource.id)
+  );
+}
+
+function evaluateSetupRecovery(
+  input: PreviewViewModelInput,
+  plan: PreviewPlanRecord,
+  generation?: PreviewGenerationRecord
+): { hasManagedFailure: boolean; canRetry: boolean } {
+  if (!generation || generation.executionDigest !== plan.executionDigest) {
+    return { hasManagedFailure: false, canRetry: false };
+  }
+  const scenario = plan.executionPlan.scenarios.find(
+    (candidate) => candidate.id === plan.executionPlan.selectedScenarioId
+  );
+  const setupJobs = plan.executionPlan.jobs.filter((job) => scenario?.jobs.includes(job.id));
+  const setupJobIds = new Set(setupJobs.map((job) => job.id));
+  const attachedResourceIds = new Set(
+    input.generationAttachments
+      ?.filter((attachment) => attachment.generationId === generation.id)
+      .map((attachment) => attachment.managedResourceId) ?? []
+  );
+  const attachedResources = input.managedResources?.filter(
+    (resource) => attachedResourceIds.has(resource.id)
+  ) ?? [];
+  const hasAttachedManagedFailure = attachedResources.some((resource) =>
+    ['SETUP_FAILED', 'RECOVERY_REQUIRED', 'FAILED'].includes(resource.state)
+  );
+  const hasManagedFailure =
+    hasAttachedManagedFailure ||
+    (input.managedResources?.some((resource) =>
+      ['SETUP_FAILED', 'RECOVERY_REQUIRED', 'FAILED', 'CLEANUP_INCOMPLETE'].includes(resource.state)
+    ) ?? false);
+  const hasRetryableState = attachedResources.some((resource) => resource.state === 'SETUP_FAILED');
+  const hasAttemptEvidence = input.attempts.some(
+    (attempt) =>
+      attempt.generationId === generation.id &&
+      setupJobIds.has(attempt.nodeId) &&
+      ['FAILED', 'RECOVERY_REQUIRED', 'STOPPED'].includes(attempt.state)
+  );
+  return {
+    hasManagedFailure,
+    canRetry:
+      hasManagedFailure &&
+      hasRetryableState &&
+      hasAttemptEvidence &&
+      setupJobs.length > 0 &&
+      setupJobs.every((job) => job.retrySafe)
   };
 }
 

@@ -279,15 +279,23 @@ describe('PreviewManager managed reset preflight', () => {
     const recipe = (command: string) => `version: 1
 resources:
   database: { type: postgres, database: app }
+jobs:
+  migrate:
+    command: [node, migrate.mjs]
+    needs: { database: ready }
+    role: migration
+    retrySafe: true
 services:
   web:
     command: [node, ${command}]
-    needs: { database: ready }
+    needs: { database: ready, migrate: succeeded }
     env: { DATABASE_URL: { type: postgres-url, resource: database } }
     ports: { http: { env: PORT } }
     ready: { type: http, port: http, path: /ready }
 routes:
   app: { service: web, port: http, primary: true }
+scenarios:
+  default: { jobs: [migrate], resources: [database] }
 `;
     await fs.writeFile(recipePath, recipe('server-a.mjs'));
     const store = new FileTaskStore(path.join(root, 'store'));
@@ -296,6 +304,7 @@ routes:
       task, branchName: 'codex/reset', worktreePath, baseSha: 'head'
     });
     const events: string[] = [];
+    const healthCallbacks: Array<(resource: unknown, reason: string) => Promise<void>> = [];
     const identity = {
       contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
       serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
@@ -303,11 +312,27 @@ routes:
     const oci = {
       async verifyManagedPreview() {
         events.push('authority-verified');
-        return { resources: [{ id: 'managed-database', logicalResourceId: 'database' }] };
+        return {
+          resources: [{
+            id: 'managed-database', logicalResourceId: 'database', state: 'SETUP_FAILED'
+          }]
+        };
       },
       async stopManagedResource(id: string) {
         events.push(`resource-stopped:${id}`);
         return 'STOPPED' as const;
+      },
+      async cleanupTaskResources(taskId: string) {
+        events.push(`managed-cleanup:${taskId}`);
+        return 'STOPPED' as const;
+      },
+      async watchRequiredResources(
+        _taskId: string,
+        _resourceIds: string[],
+        onFailure: (resource: unknown, reason: string) => Promise<void>
+      ) {
+        healthCallbacks.push(onFailure);
+        return async () => {};
       }
     };
     const manager = new PreviewManager(
@@ -370,5 +395,125 @@ routes:
       'authority-verified', 'application-stopped', 'resource-stopped:managed-database'
     ]);
     expect(await store.getPreviewGeneration(generation.id)).toMatchObject({ state: 'STOPPED' });
+
+    const preservedActive = await store.savePreviewGeneration({
+      ...generation,
+      id: 'preserved-active-generation',
+      planId: current.plan.id,
+      approvalId: (await store.getMatchingPreviewApproval(task.id, current.plan.executionDigest))!.id,
+      executionDigest: current.plan.executionDigest,
+      state: 'READY',
+      routingState: 'ACTIVE',
+      stoppedAt: undefined
+    });
+    const failed = await store.savePreviewGeneration({
+      ...generation,
+      id: 'failed-setup-generation',
+      planId: current.plan.id,
+      approvalId: (await store.getMatchingPreviewApproval(task.id, current.plan.executionDigest))!.id,
+      executionDigest: current.plan.executionDigest,
+      state: 'FAILED',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: preservedActive.id,
+      failureReason: 'Migration failed.',
+      stoppedAt: undefined
+    });
+    const getAttachments = store.getPreviewGenerationAttachments.bind(store);
+    store.getPreviewGenerationAttachments = async (generationId) => generationId === failed.id
+      ? [{
+          id: 'failed-attachment', taskId: task.id, generationId: failed.id,
+          managedResourceId: 'managed-database', logicalResourceId: 'database',
+          bindingId: 'binding', attachedAt: now
+        }]
+      : getAttachments(generationId);
+    await expect(manager.authorizeSetupRetry({
+      taskId: task.id, generationId: failed.id, scenarioId: 'default', context
+    })).rejects.toThrow('prior failed or ambiguous setup-attempt evidence');
+    await store.savePreviewNodeAttempt({
+      id: 'failed-migration-attempt', taskId: task.id, generationId: failed.id,
+      nodeId: 'migrate', kind: 'JOB', attempt: 1, commandDigest: 'migrate', state: 'FAILED',
+      stdoutArtifactId: 'stdout', stderrArtifactId: 'stderr', endedAt: now
+    });
+    await expect(manager.authorizeSetupRetry({
+      taskId: task.id, generationId: failed.id, scenarioId: 'default', context
+    })).resolves.toEqual(['managed-database']);
+    events.length = 0;
+
+    await manager.resetData({
+      taskId: task.id, generationId: failed.id, resourceId: 'database',
+      scenarioId: 'default', context
+    });
+    expect(events).toEqual([
+      'authority-verified', 'application-stopped', 'application-stopped',
+      'resource-stopped:managed-database'
+    ]);
+    expect(await store.getPreviewGeneration(preservedActive.id)).toMatchObject({ state: 'STOPPED' });
+    expect(await store.getPreviewGeneration(failed.id)).toMatchObject({ state: 'STOPPED' });
+
+    const cleanupActive = await store.savePreviewGeneration({
+      ...preservedActive,
+      id: 'cleanup-active-generation',
+      state: 'READY',
+      routingState: 'ACTIVE',
+      stoppedAt: undefined
+    });
+    const cleanupCandidate = await store.savePreviewGeneration({
+      ...failed,
+      id: 'cleanup-candidate-generation',
+      state: 'CLEANUP_INCOMPLETE',
+      replacesGenerationId: cleanupActive.id,
+      cleanupReason: 'Candidate cleanup needs another exact attempt.',
+      stoppedAt: undefined
+    });
+    events.length = 0;
+    await manager.stop(cleanupCandidate.id);
+    expect(events).toEqual(['application-stopped']);
+    expect(await store.getPreviewGeneration(cleanupActive.id)).toMatchObject({ state: 'READY' });
+    expect(await store.getPreviewGeneration(cleanupCandidate.id)).toMatchObject({ state: 'STOPPED' });
+
+    const destructiveCandidate = await store.savePreviewGeneration({
+      ...failed,
+      id: 'destructive-failed-generation',
+      state: 'FAILED',
+      replacesGenerationId: cleanupActive.id,
+      stoppedAt: undefined
+    });
+    let healthStopCalls = 0;
+    const healthStops = (manager as unknown as {
+      resourceHealthStops: Map<string, () => Promise<void>>;
+    }).resourceHealthStops;
+    healthStops.set(task.id, async () => { healthStopCalls += 1; });
+    events.length = 0;
+    await manager.stop(destructiveCandidate.id);
+    expect(events).toEqual([
+      'application-stopped', 'application-stopped', `managed-cleanup:${task.id}`
+    ]);
+    expect(healthStopCalls).toBe(1);
+    expect(healthStops.has(task.id)).toBe(false);
+    expect(await store.getPreviewGeneration(cleanupActive.id)).toMatchObject({ state: 'STOPPED' });
+    expect(await store.getPreviewGeneration(destructiveCandidate.id)).toMatchObject({ state: 'STOPPED' });
+
+    const retired = await store.savePreviewGeneration({
+      ...failed,
+      id: 'retired-health-generation',
+      state: 'READY',
+      routingState: 'RETIRED',
+      stoppedAt: undefined
+    });
+    const currentActive = await store.savePreviewGeneration({
+      ...preservedActive,
+      id: 'active-health-generation',
+      state: 'READY',
+      routingState: 'ACTIVE',
+      stoppedAt: undefined
+    });
+    const startHealthWatch = (manager as unknown as {
+      startResourceHealthWatch(taskId: string, generationId: string, resourceIds: string[]): Promise<void>;
+    }).startResourceHealthWatch.bind(manager);
+    await startHealthWatch(task.id, retired.id, ['old-resource']);
+    await startHealthWatch(task.id, currentActive.id, ['new-resource']);
+    await healthCallbacks[0]({}, 'Retired resource failed during cutover.');
+    expect(await store.getPreviewGeneration(retired.id)).toMatchObject({ state: 'FAILED' });
+    expect(await store.getPreviewGeneration(currentActive.id)).toMatchObject({ state: 'READY' });
   });
 });

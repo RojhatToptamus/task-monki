@@ -9,7 +9,8 @@ import {
   buildPreviewPlanSummary,
   buildPreviewViewModel,
   selectPreviewActionGeneration,
-  selectPreviewDiagnosticAttempts
+  selectPreviewDiagnosticAttempts,
+  selectPreviewResetResources
 } from './preview';
 
 const task: Task = {
@@ -117,6 +118,20 @@ describe('preview view model', () => {
         preserved
       )
     ).toEqual([earlierFailedAttempt, failedAttempt]);
+
+    const cleanupCandidate = {
+      ...candidate,
+      state: 'CLEANUP_INCOMPLETE' as const,
+      cleanupReason: 'Candidate cleanup needs another exact attempt.'
+    };
+    const cleanup = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [cleanupCandidate, active], attempts: []
+    });
+    expect(cleanup.status).toBe('Cleanup incomplete');
+    expect(cleanup.actions.map((action) => action.label)).toEqual(['Open current', 'Retry cleanup']);
+    expect(selectPreviewActionGeneration(cleanup, 'OPEN')?.id).toBe(active.id);
+    expect(selectPreviewActionGeneration(cleanup, 'STOP')?.id).toBe(cleanupCandidate.id);
   });
 
   it('keeps current preview controls visible while a changed plan awaits approval or replacement', () => {
@@ -160,6 +175,10 @@ describe('preview view model', () => {
       role: 'migration', retrySafe: true
     }];
     plan.executionPlan.scenarios[0].jobs = ['migrate'];
+    plan.executionPlan.resources = [{
+      id: 'database', type: 'postgres', image: 'postgres:17-alpine', database: 'app', limits: {}
+    }];
+    plan.executionPlan.scenarios[0].resources = ['database'];
     const approval = {
       id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
       scope: 'TASK' as const, approvedAt: task.createdAt
@@ -174,7 +193,11 @@ describe('preview view model', () => {
     };
     const input = {
       task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
-      generations: [failed], attempts: [], managedResources: [setupFailedResource()],
+      generations: [failed], attempts: [{
+        id: 'attempt-1', taskId: task.id, generationId: failed.id, nodeId: 'migrate',
+        kind: 'JOB' as const, attempt: 1, commandDigest: 'command', state: 'FAILED' as const,
+        stdoutArtifactId: 'stdout', stderrArtifactId: 'stderr', endedAt: task.updatedAt
+      }], managedResources: [setupFailedResource()],
       generationAttachments: [{
         id: 'attachment-1', taskId: task.id, generationId: failed.id,
         managedResourceId: 'resource-1', logicalResourceId: 'database',
@@ -182,11 +205,60 @@ describe('preview view model', () => {
       }]
     };
 
-    expect(buildPreviewViewModel(input).actions).toEqual([
+    const view = buildPreviewViewModel(input);
+    expect(view.actions).toEqual([
       { id: 'RETRY_SETUP', label: 'Retry setup', kind: 'primary' }
     ]);
+    expect(selectPreviewResetResources(input, view).map((resource) => resource.id)).toEqual(['database']);
+    const active = {
+      ...failed, id: 'active', state: 'READY' as const, routingState: 'ACTIVE' as const,
+      planId: 'previous-plan', approvalId: 'previous-approval', executionDigest: 'previous-execution',
+      freshness: 'STALE' as const, failureReason: undefined
+    };
+    const failedCandidate = {
+      ...failed, id: 'failed-candidate', routingState: 'CANDIDATE' as const,
+      replacesGenerationId: active.id
+    };
+    const replacementInput = {
+      ...input,
+      generations: [failedCandidate, active],
+      attempts: input.attempts.map((attempt) => ({ ...attempt, generationId: failedCandidate.id })),
+      generationAttachments: input.generationAttachments.map((attachment) => ({
+        ...attachment, generationId: failedCandidate.id
+      }))
+    };
+    const replacementView = buildPreviewViewModel(replacementInput);
+    expect(replacementView.actions.map((action) => action.id)).toEqual(['OPEN', 'RETRY_SETUP', 'STOP']);
+    expect(replacementView.recoveryGeneration?.id).toBe(failedCandidate.id);
+    expect(selectPreviewActionGeneration(replacementView, 'STOP')?.id).toBe(failedCandidate.id);
+    expect(replacementView.summary).toContain('migration failed');
+    expect(selectPreviewResetResources(replacementInput, replacementView).map((resource) => resource.id))
+      .toEqual(['database']);
+
+    const recoveryInput = {
+      ...replacementInput,
+      generations: [{ ...failedCandidate, state: 'RECOVERY_REQUIRED' as const }, active],
+      managedResources: input.managedResources.map((resource) => ({
+        ...resource, state: 'RECOVERY_REQUIRED' as const
+      }))
+    };
+    const recoveryView = buildPreviewViewModel(recoveryInput);
+    expect(recoveryView.status).toBe('Running · stale');
+    expect(recoveryView.actions.map((action) => action.id)).toEqual(['OPEN', 'STOP']);
+    expect(recoveryView.recoveryGeneration?.id).toBe(failedCandidate.id);
+    expect(selectPreviewActionGeneration(recoveryView, 'STOP')?.id).toBe(failedCandidate.id);
+    expect(selectPreviewResetResources(recoveryInput, recoveryView).map((resource) => resource.id))
+      .toEqual(['database']);
+
+    const unattachedFailureInput = {
+      ...input,
+      generationAttachments: []
+    };
+    const unattachedFailureView = buildPreviewViewModel(unattachedFailureInput);
+    expect(unattachedFailureView.actions.map((action) => action.id)).toEqual(['STOP']);
+    expect(selectPreviewResetResources(unattachedFailureInput, unattachedFailureView)).toEqual([]);
     plan.executionPlan.jobs[0].retrySafe = false;
-    expect(buildPreviewViewModel(input).actions[0]?.id).toBe('START');
+    expect(buildPreviewViewModel(input).actions[0]?.id).toBe('STOP');
   });
 
   it('renders every approval authority without ambiguous argv or hidden literal values', () => {
@@ -235,7 +307,6 @@ function setupFailedResource(): PreviewManagedResourceRecord {
   return {
     id: 'resource-1', taskId: task.id, environmentId: 'environment-1', logicalResourceId: 'database',
     type: 'postgres', state: 'SETUP_FAILED', planDigest: 'plan', ownershipMarkerDigest: 'marker',
-    imageReference: 'postgres:17-alpine',
     container: { engine, objectId: 'container-1', objectName: 'container', labelsDigest: 'labels' },
     volume: { engine, objectId: 'volume-1', objectName: 'volume', labelsDigest: 'labels' },
     createdAt: task.createdAt, updatedAt: task.updatedAt

@@ -15,7 +15,7 @@ import { NativeJobRunner } from './runtime/NativeJobRunner';
 import { NativeServiceRuntime, type RunningNativeService } from './runtime/NativeServiceRuntime';
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
 import type { PreviewListenerInspector } from './runtime/PreviewListenerInspector';
-import type { OciResourceBinding } from './runtime/OciResourceRuntime';
+import type { RuntimeManagedResourceBinding } from './runtime/PreviewCredentialHost';
 
 const MAX_PARALLEL_NATIVE_EFFECTS = 4;
 
@@ -59,7 +59,7 @@ export class PreviewGraph {
     sourcePath: string;
     markerDigest: string;
     plan: PreviewExecutionPlan;
-    resourceBindings?: Record<string, OciResourceBinding>;
+    resourceBindings?: Record<string, RuntimeManagedResourceBinding>;
     redactions?: string[];
     runSetup: boolean;
     onSetupComplete?(): Promise<void>;
@@ -95,7 +95,7 @@ export class PreviewGraph {
     const startupInput = { ...input, signal: startupAbort.signal };
     const running = new Map<string, RunningLongNode>();
     const allocatedPorts: Record<string, Record<string, number>> = {};
-    const resourceBindings: Record<string, OciResourceBinding> = { ...(input.resourceBindings ?? {}) };
+    const resourceBindings: Record<string, RuntimeManagedResourceBinding> = { ...(input.resourceBindings ?? {}) };
     const promises = new Map<string, Promise<void>>();
     let phase: PreviewGenerationState | undefined;
 
@@ -353,7 +353,7 @@ export class PreviewGraph {
     owner: RunningLongNode,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>,
-    resourceBindings: Record<string, OciResourceBinding>
+    resourceBindings: Record<string, RuntimeManagedResourceBinding>
   ): Promise<string | undefined> {
     const stopping = waitForAbort(input.signal);
     while (!owner.stopping) {
@@ -437,7 +437,7 @@ export class PreviewGraph {
     owner: RunningLongNode,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>,
-    resourceBindings: Record<string, OciResourceBinding>
+    resourceBindings: Record<string, RuntimeManagedResourceBinding>
   ): Promise<void> {
     while (!owner.current.isRunning()) {
       const exit = await owner.current.completion;
@@ -482,7 +482,7 @@ export class PreviewGraph {
     owner: RunningLongNode,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>,
-    resourceBindings: Record<string, OciResourceBinding>
+    resourceBindings: Record<string, RuntimeManagedResourceBinding>
   ): Promise<string | undefined> {
     const live = owner.node.liveness;
     if (!live) return undefined;
@@ -514,7 +514,7 @@ export class PreviewGraph {
     owner: RunningLongNode,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>,
-    resourceBindings: Record<string, OciResourceBinding>
+    resourceBindings: Record<string, RuntimeManagedResourceBinding>
   ): Promise<void> {
     if (!owner.node.ready) {
       await this.store.savePreviewNodeAttempt({ ...owner.current.attempt, state: 'READY' });
@@ -577,7 +577,7 @@ export class PreviewGraph {
     probe: PreviewReadinessPlan,
     semaphore: Semaphore,
     allPorts: Record<string, Record<string, number>>,
-    resourceBindings: Record<string, OciResourceBinding>,
+    resourceBindings: Record<string, RuntimeManagedResourceBinding>,
     signal?: AbortSignal
   ): Promise<PreviewReadinessResult> {
     if (probe.type === 'http') {
@@ -702,7 +702,7 @@ function resolveEnvironment(
   env: Record<string, PreviewEnvironmentValue>,
   allPorts: Record<string, Record<string, number>>,
   routeOrigins: Record<string, string>,
-  resourceBindings: Record<string, OciResourceBinding>
+  resourceBindings: Record<string, RuntimeManagedResourceBinding>
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {

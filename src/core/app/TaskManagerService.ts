@@ -698,39 +698,45 @@ export class TaskManagerService {
 
   private async startPreviewWithSetup(
     input: StartPreviewRequest,
-    setupRetry?: RetryPreviewSetupRequest
+    setupRetry?: RetryPreviewSetupRequest,
+    reset?: ResetPreviewDataRequest
   ): Promise<PreviewGenerationRecord> {
     this.assertPreviewEnabled();
     if (process.platform !== 'darwin') {
       throw new Error('Native previews are supported on macOS only.');
     }
-    const prepared = await this.withTaskAction(input.taskId, 'Preview source capture', async () => {
+    return this.withTaskAction(input.taskId, reset ? 'Preview data reset' : 'Preview startup', async () => {
       const context = await this.requirePreviewContext(input.taskId);
       const currentSnapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
-      const activeGeneration = currentSnapshot.previewGenerations.find(
+      const blockingGeneration = currentSnapshot.previewGenerations.find(
         (generation) =>
           generation.taskId === input.taskId &&
           generation.routingState !== 'ACTIVE' &&
-          !['STOPPED', 'FAILED', 'CLEANUP_INCOMPLETE'].includes(generation.state)
+          (
+            generation.state === 'CLEANUP_INCOMPLETE' ||
+            (generation.state === 'RECOVERY_REQUIRED' && !reset) ||
+            !['STOPPED', 'FAILED', 'RECOVERY_REQUIRED'].includes(generation.state)
+          )
       );
-      if (activeGeneration) {
+      if (blockingGeneration) {
         throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
       }
-      const setupRetryResourceIds = setupRetry
-        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
-        : undefined;
       const gitSnapshot = await this.refreshEvidence({ taskId: input.taskId });
       if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
         throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
       }
-      return this.previews.prepare({
+      if (reset) await this.previews.resetData({ ...reset, context });
+      const setupRetryResourceIds = setupRetry
+        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
+        : undefined;
+      const prepared = await this.previews.prepare({
         context,
         gitSnapshot,
         reobserveGit: () => this.refreshEvidence({ taskId: input.taskId })
       }, input.scenarioId, setupRetryResourceIds);
+      return this.previews.execute(prepared);
     });
-    return this.previews.execute(prepared);
   }
 
   async stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
@@ -739,14 +745,23 @@ export class TaskManagerService {
     if (!generation || generation.taskId !== input.taskId) {
       throw new Error('Preview generation was not found for this task.');
     }
-    return this.previews.stop(generation.id);
+    const cancelingStartup =
+      generation.routingState === 'CANDIDATE' &&
+      !['FAILED', 'STOPPED', 'CLEANUP_INCOMPLETE', 'RECOVERY_REQUIRED'].includes(generation.state);
+    if (cancelingStartup) {
+      return this.previews.stop(generation.id);
+    }
+    return this.withTaskAction(input.taskId, 'Preview stop', () =>
+      this.previews.stop(generation.id)
+    );
   }
 
   async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
-    this.assertPreviewEnabled();
-    const context = await this.requirePreviewContext(input.taskId);
-    await this.previews.resetData({ ...input, context });
-    return this.startPreview({ taskId: input.taskId, scenarioId: input.scenarioId });
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      undefined,
+      input
+    );
   }
 
   async retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord> {

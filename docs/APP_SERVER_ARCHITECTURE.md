@@ -205,8 +205,9 @@ services, workers, routes, and managed OCI resources. Task Monki:
 - tails only the selected artifact through bounded byte-range reads rather
   than refreshing the full task snapshot for each log update;
 - makes Reset destructive only after current-plan/approval and exact-authority
-  preflight, stops the complete application, preserves unrelated managed
-  resources, and replaces only the selected resource;
+  preflight, supports recovery from setup failure, stops any complete active
+  application, preserves unrelated managed resources, and replaces only the
+  selected resource;
 - labels Stop Preview **Stop Preview & Delete Data**, then detaches routes and
   stops/removes only exact verified processes, engine-bound labeled containers,
   volumes, the environment-owned network, and marker-owned workspaces;

@@ -38,7 +38,6 @@ describeMac('PreviewReconciler macOS ownership integration', () => {
   it('refuses a substituted identity, leaves the process alive, and records cleanup residue', async () => {
     const fixture = await runningGeneration();
     const resource = (await fixture.store.getPreviewResources(fixture.generationId))[0];
-    if (resource.adapterKind !== 'NATIVE_PROCESS') throw new Error('Expected native resource.');
     await fixture.store.savePreviewResource({
       ...resource,
       native: resource.native

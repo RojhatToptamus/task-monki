@@ -368,8 +368,6 @@ export interface PreviewManagedResourceRecord {
   state: PreviewManagedResourceState;
   planDigest: string;
   ownershipMarkerDigest: string;
-  imageReference: string;
-  imageId?: string;
   container: PreviewOciObjectIdentity;
   volume: PreviewOciObjectIdentity;
   binding?: PreviewManagedResourceBindingRecord;
@@ -413,16 +411,9 @@ interface PreviewResourceRecordBase {
 export interface PreviewNativeResourceRecord extends PreviewResourceRecordBase {
   adapterKind: 'NATIVE_PROCESS';
   native?: PreviewNativeProcessIdentity;
-  oci?: never;
 }
 
-export interface PreviewOciResourceRecord extends PreviewResourceRecordBase {
-  adapterKind: 'OCI_CONTAINER' | 'OCI_NETWORK' | 'OCI_VOLUME';
-  native?: never;
-  oci: PreviewOciObjectIdentity;
-}
-
-export type PreviewResourceRecord = PreviewNativeResourceRecord | PreviewOciResourceRecord;
+export type PreviewResourceRecord = PreviewNativeResourceRecord;
 
 export interface PreviewNodeAttemptRecord {
   id: string;
