@@ -47,8 +47,13 @@ export class PreviewCredentialHost {
       containerEnvironment.POSTGRES_PASSWORD_FILE = '/run/taskmonki/postgres-password';
       containerEnvironment.POSTGRES_DB = resource.database;
     } else {
-      const passwordPath = await this.writeSecret(directory, 'redis-password', password);
-      secretMounts.push({ sourcePath: passwordPath, targetPath: '/run/taskmonki/redis-password' });
+      const configPath = await this.writeSecret(
+        directory,
+        'redis.conf',
+        `appendonly yes\nrequirepass ${password}\n`,
+        0o644
+      );
+      secretMounts.push({ sourcePath: configPath, targetPath: '/run/taskmonki/redis.conf' });
     }
     const hosted: HostedResourceCredential = {
       resourceId,
@@ -109,10 +114,15 @@ export class PreviewCredentialHost {
     await fs.rm(this.root, { recursive: true, force: true });
   }
 
-  private async writeSecret(directory: string, name: string, value: string): Promise<string> {
+  private async writeSecret(
+    directory: string,
+    name: string,
+    value: string,
+    mode = 0o600
+  ): Promise<string> {
     const filePath = path.join(directory, name);
-    await fs.writeFile(filePath, value, { encoding: 'utf8', mode: 0o600 });
-    await fs.chmod(filePath, 0o600);
+    await fs.writeFile(filePath, value, { encoding: 'utf8', mode });
+    await fs.chmod(filePath, mode);
     return filePath;
   }
 }

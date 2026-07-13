@@ -9,6 +9,7 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
@@ -34,6 +35,7 @@ import type {
   RunRecord,
   StartRunRequest,
   StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
@@ -204,6 +206,10 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
     retryPreviewSetup: (input: RetryPreviewSetupRequest) =>
       post<PreviewGenerationRecord>(baseUrl, '/api/preview/retry-setup', input),
+    setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
+      post(baseUrl, '/api/preview/binding/set', input),
+    deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
+      post<void>(baseUrl, '/api/preview/binding/delete', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

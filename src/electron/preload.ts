@@ -17,6 +17,8 @@ import type {
   ReadArtifactRequest,
   ReadPreviewLogRequest,
   ResetPreviewDataRequest,
+  SetPreviewLocalAttachmentBindingRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   RefreshEvidenceRequest,
@@ -37,6 +39,7 @@ import type {
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
+import type { PreviewPrivateInputApi } from '../shared/preview';
 
 function getWindowChromePlatform(): WindowChromePlatform {
   if (process.platform === 'darwin') {
@@ -99,6 +102,10 @@ const api: TaskManagerApi = {
   readPreviewLog: (input: ReadPreviewLogRequest) => ipcRenderer.invoke('preview:log:read', input),
   resetPreviewData: (input: ResetPreviewDataRequest) => ipcRenderer.invoke('preview:resetData', input),
   retryPreviewSetup: (input: RetryPreviewSetupRequest) => ipcRenderer.invoke('preview:retrySetup', input),
+  setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
+    ipcRenderer.invoke('preview:binding:set', input),
+  deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
+    ipcRenderer.invoke('preview:binding:delete', input),
   transitionTask: (input: TransitionTaskRequest) => ipcRenderer.invoke('task:transition', input),
   deleteTask: (input: DeleteTaskRequest) => ipcRenderer.invoke('task:delete', input),
   readArtifact: (input: ReadArtifactRequest) => ipcRenderer.invoke('artifact:read', input),
@@ -112,6 +119,13 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
+const privateInputs: PreviewPrivateInputApi = {
+  set: (input) => ipcRenderer.invoke('preview:private:set', input),
+  import: (input) => ipcRenderer.invoke('preview:private:import', input),
+  delete: (input) => ipcRenderer.invoke('preview:private:delete', input),
+  retryCleanup: () => ipcRenderer.invoke('preview:private:retryCleanup')
+};
+contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
   syncWindowChrome: () => ipcRenderer.send('windowChrome:sync')

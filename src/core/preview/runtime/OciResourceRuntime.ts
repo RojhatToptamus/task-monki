@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Client as PgClient, type ClientConfig } from 'pg';
 import type {
   PreviewManagedEnvironmentRecord,
   PreviewManagedResourceRecord,
@@ -45,6 +46,7 @@ const PULL_TIMEOUT_MS = 5 * 60_000;
 const MUTATION_TIMEOUT_MS = 60_000;
 const MAX_DISCOVERED_OBJECTS = 2;
 const RESOURCE_HEALTH_INTERVAL_MS = 5_000;
+const POSTGRES_PROBE_TIMEOUT_MS = 5_000;
 
 export type OciRuntimeErrorCode =
   | 'ENGINE_MISSING'
@@ -73,6 +75,67 @@ export interface ManagedPreviewRuntime {
 export interface OciResourceRuntimeHooks {
   afterMutation?(operation: 'network-create' | 'volume-create' | 'container-create'): Promise<void> | void;
   healthIntervalMs?: number;
+  postgresProbe?(input: ManagedPostgresProbeInput): Promise<void>;
+}
+
+export interface ManagedPostgresProbeInput {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface ManagedPostgresClient {
+  connect(): Promise<unknown>;
+  query(text: string): Promise<unknown>;
+  end(): Promise<void>;
+}
+
+export type ManagedPostgresClientFactory = (
+  config: ClientConfig
+) => ManagedPostgresClient;
+
+export async function probeManagedPostgres(
+  input: ManagedPostgresProbeInput,
+  createClient: ManagedPostgresClientFactory = (config) => new PgClient(config)
+): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? POSTGRES_PROBE_TIMEOUT_MS;
+  const client = createClient({
+    host: input.host,
+    port: input.port,
+    database: input.database,
+    user: input.user,
+    password: input.password,
+    ssl: false,
+    connectionTimeoutMillis: timeoutMs,
+    query_timeout: timeoutMs
+  });
+  let closePromise: Promise<void> | undefined;
+  const close = () => closePromise ??= client.end().catch(() => undefined);
+  let rejectAbort!: (reason: Error) => void;
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const onAbort = () => {
+    void close();
+    rejectAbort(abortError(input.signal));
+  };
+  input.signal?.addEventListener('abort', onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
+  const operation = (async () => {
+    await client.connect();
+    throwIfAborted(input.signal);
+    await client.query('SELECT 1');
+    throwIfAborted(input.signal);
+  })();
+  try {
+    await Promise.race([operation, aborted]);
+  } finally {
+    input.signal?.removeEventListener('abort', onAbort);
+    await close();
+    await operation.catch(() => undefined);
+  }
 }
 
 export class OciResourceRuntime {
@@ -639,27 +702,64 @@ export class OciResourceRuntime {
     if (readiness.status !== 'PASSED') {
       throw new OciRuntimeError('UNHEALTHY_CONTAINER', `Managed resource ${plan.id} did not open its loopback port.`);
     }
-    const command = this.authenticationProbe(
-      plan.type,
-      plan.type === 'postgres' ? plan.database : undefined
-    );
-    await this.retryExec(record, command, 60, signal);
+    if (plan.type === 'postgres') {
+      await this.retryPostgres(record, binding, plan.database, 60, signal);
+    } else {
+      await this.retryExec(record, this.redisAuthenticationProbe(), 60, signal);
+    }
   }
 
-  private authenticationProbe(
-    type: PreviewManagedResourceRecord['type'],
-    database?: string
-  ): string[] {
-    return type === 'postgres'
-      ? [
-          'sh', '-eu', '-c',
-          'PGPASSWORD="$(cat /run/taskmonki/postgres-password)"; export PGPASSWORD; exec psql -v ON_ERROR_STOP=1 -U "$(cat /run/taskmonki/postgres-user)" -d "$1" -c "SELECT 1"',
-          'task-monki-postgres-readiness', database!
-        ]
-      : [
-          'sh', '-eu', '-c',
-          'REDISCLI_AUTH="$(cat /run/taskmonki/redis-password)"; export REDISCLI_AUTH; test "$(redis-cli --no-auth-warning ping)" = PONG'
-        ];
+  private redisAuthenticationProbe(): string[] {
+    return [
+      'sh', '-eu', '-c',
+      'REDISCLI_AUTH="$(sed -n "s/^requirepass //p" /run/taskmonki/redis.conf)"; export REDISCLI_AUTH; test "$(redis-cli --no-auth-warning ping)" = PONG'
+    ];
+  }
+
+  private async retryPostgres(
+    resource: PreviewManagedResourceRecord,
+    binding: RuntimeManagedResourceBinding,
+    database: string,
+    timeoutSeconds: number,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (Date.now() < deadline) {
+      throwIfAborted(signal);
+      try {
+        await this.probePostgres(resource, binding, database, signal, Math.min(
+          POSTGRES_PROBE_TIMEOUT_MS,
+          Math.max(1, deadline - Date.now())
+        ));
+        return;
+      } catch {
+        throwIfAborted(signal);
+        await delay(250, signal);
+      }
+    }
+    throw new OciRuntimeError(
+      'UNHEALTHY_CONTAINER',
+      `Managed resource ${resource.logicalResourceId} failed authenticated readiness.`
+    );
+  }
+
+  private probePostgres(
+    resource: PreviewManagedResourceRecord,
+    binding: RuntimeManagedResourceBinding,
+    database: string,
+    signal?: AbortSignal,
+    timeoutMs = POSTGRES_PROBE_TIMEOUT_MS
+  ): Promise<void> {
+    const credential = this.credentials.require(resource.id);
+    return (this.hooks.postgresProbe ?? probeManagedPostgres)({
+      host: '127.0.0.1',
+      port: binding.ports.postgres,
+      database,
+      user: credential.username!,
+      password: credential.password,
+      signal,
+      timeoutMs
+    });
   }
 
   private async retryExec(
@@ -768,14 +868,17 @@ export class OciResourceRuntime {
     )) {
       throw new Error(`Managed resource ${resource.logicalResourceId} published binding changed.`);
     }
-    const command = this.authenticationProbe(resource.type, safeBinding.database);
     try {
-      await this.engine.run([
-        '--context', resource.container.engine.contextName,
-        'container', 'exec',
-        resource.container.objectId!,
-        ...command
-      ], authenticationProbeEnvironment(this.engine.environment()));
+      if (resource.type === 'postgres') {
+        await this.probePostgres(resource, runtimeBinding, safeBinding.database!);
+      } else {
+        await this.engine.run([
+          '--context', resource.container.engine.contextName,
+          'container', 'exec',
+          resource.container.objectId!,
+          ...this.redisAuthenticationProbe()
+        ], authenticationProbeEnvironment(this.engine.environment()));
+      }
     } catch {
       throw new Error(`Managed resource ${resource.logicalResourceId} failed authenticated health verification.`);
     }
@@ -1007,4 +1110,10 @@ function authenticationProbeEnvironment(environment: NodeJS.ProcessEnv): NodeJS.
   delete sanitized.REDIS_PASSWORD;
   delete sanitized.REDISCLI_AUTH;
   return sanitized;
+}
+
+function abortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error('Managed PostgreSQL authentication was canceled.');
 }

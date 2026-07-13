@@ -33,6 +33,7 @@ import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
   PreviewManagedEnvironmentRecord,
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
@@ -445,6 +446,61 @@ export class FileTaskStore {
         (resource) => !generationId || resource.generationId === generationId
       )
     );
+  }
+
+  async getPreviewLocalBindings(taskId?: string): Promise<PreviewLocalAttachmentBindingRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewLocalBindings.filter((binding) => !taskId || binding.taskId === taskId)
+    );
+  }
+
+  async getPreviewLocalBinding(
+    taskId: string,
+    attachmentId: string
+  ): Promise<PreviewLocalAttachmentBindingRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewLocalBindings.find(
+        (binding) => binding.taskId === taskId && binding.attachmentId === attachmentId
+      )
+    );
+  }
+
+  async savePreviewLocalBinding(
+    binding: PreviewLocalAttachmentBindingRecord
+  ): Promise<PreviewLocalAttachmentBindingRecord> {
+    await this.init();
+    if (!this.state.tasks.some((task) => task.id === binding.taskId)) {
+      throw new Error('Preview local binding references a missing task.');
+    }
+    const conflicting = this.state.previewLocalBindings.find(
+      (candidate) =>
+        candidate.taskId === binding.taskId &&
+        candidate.attachmentId === binding.attachmentId &&
+        candidate.id !== binding.id
+    );
+    if (conflicting) throw new Error('Preview attachment already has a local binding.');
+    this.state = {
+      ...this.state,
+      previewLocalBindings: [
+        binding,
+        ...this.state.previewLocalBindings.filter((candidate) => candidate.id !== binding.id)
+      ]
+    };
+    await this.persistQueued();
+    return clone(binding);
+  }
+
+  async deletePreviewLocalBinding(taskId: string, attachmentId: string): Promise<void> {
+    await this.init();
+    this.state = {
+      ...this.state,
+      previewLocalBindings: this.state.previewLocalBindings.filter(
+        (binding) => binding.taskId !== taskId || binding.attachmentId !== attachmentId
+      )
+    };
+    await this.persistQueued();
   }
 
   async savePreviewPlan(plan: PreviewPlanRecord): Promise<PreviewPlanRecord> {
@@ -1173,6 +1229,9 @@ export class FileTaskStore {
         (record) => record.taskId !== taskId
       ),
       previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewLocalBindings: this.state.previewLocalBindings.filter(
         (record) => record.taskId !== taskId
       ),
       previewNodeAttempts: this.state.previewNodeAttempts.filter(
@@ -3364,6 +3423,7 @@ function requireCurrentState(state: PersistedState): StoreState {
     'previewManagedEnvironments',
     'previewManagedResources',
     'previewGenerationAttachments',
+    'previewLocalBindings',
     'previewNodeAttempts',
     'previewResources',
     'events',
@@ -3413,6 +3473,7 @@ function migratePersistedState(state: PersistedState): {
       previewManagedEnvironments: [],
       previewManagedResources: [],
       previewGenerationAttachments: [],
+      previewLocalBindings: [],
       previewNodeAttempts: [],
       previewResources: [],
       schemaVersion: TASK_STORE_SCHEMA_VERSION
@@ -3420,7 +3481,42 @@ function migratePersistedState(state: PersistedState): {
     changed = true;
   }
 
+  if (next.schemaVersion === 13) {
+    next = {
+      ...next,
+      previewLocalBindings: [],
+      previewPlans: Array.isArray(next.previewPlans)
+        ? next.previewPlans.map((plan) => migratePhaseThreePreviewPlan(plan)) as PreviewPlanRecord[]
+        : next.previewPlans,
+      previewGenerations: Array.isArray(next.previewGenerations)
+        ? next.previewGenerations.map((generation) => ({
+            ...generation,
+            attachmentReadiness: []
+          }))
+        : next.previewGenerations,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    };
+    changed = true;
+  }
+
   return { state: next, changed };
+}
+
+function migratePhaseThreePreviewPlan(plan: unknown): unknown {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
+  const record = plan as Record<string, unknown>;
+  const executionPlan = record.executionPlan;
+  if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) {
+    return plan;
+  }
+  return {
+    ...record,
+    executionPlan: {
+      ...(executionPlan as Record<string, unknown>),
+      inputs: [],
+      attachments: []
+    }
+  };
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {

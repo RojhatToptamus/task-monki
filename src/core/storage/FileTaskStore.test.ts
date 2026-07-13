@@ -309,6 +309,7 @@ describe('FileTaskStore', () => {
       expect.arrayContaining([expect.objectContaining({ id: worktree.id })])
     );
     expect(migrated.previewPlans).toEqual([]);
+    expect(migrated.previewLocalBindings).toEqual([]);
     expect(migrated.previewApprovals).toEqual([]);
     expect(migrated.previewGenerations).toEqual([]);
     expect(migrated.previewManagedEnvironments).toEqual([]);
@@ -334,6 +335,8 @@ describe('FileTaskStore', () => {
     await store.createTask({ title: 'OCI duplicate', prompt: 'Repair it', repositoryPath: dir });
     const storePath = path.join(dir, 'store.json');
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 13;
+    delete persisted.previewLocalBindings;
     const engine = {
       contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
       serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'

@@ -19,6 +19,7 @@ import { OciEngineAdapter } from './runtime/OciEngineAdapter';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewCredentialHost } from './runtime/PreviewCredentialHost';
 import path from 'node:path';
+import { PreviewPrivateVault, type PreviewSecretProtector } from './private/PreviewPrivateVault';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
@@ -29,6 +30,7 @@ export interface CreatePreviewManagerOptions {
   ociContextName?: string;
   ociEnv?: NodeJS.ProcessEnv;
   openHost?: PreviewUrlHost;
+  secretProtector?: PreviewSecretProtector;
 }
 
 export function createPreviewManager(
@@ -68,7 +70,7 @@ export function createPreviewManager(
     store,
     events,
     new PreviewRecipeLoader(),
-    new PreviewPlanResolver(ociEngine),
+    new PreviewPlanResolver(ociEngine, store),
     new PreviewApprovalPolicy(store),
     source,
     graph,
@@ -76,6 +78,9 @@ export function createPreviewManager(
     nativeRuntime,
     new PreviewReconciler(store, gateway, nativeRuntime, source, ociRuntime),
     new PreviewOpenService(store, options.openHost),
-    ociRuntime
+    ociRuntime,
+    options.secretProtector
+      ? new PreviewPrivateVault(path.join(options.previewRoot, 'private-vault'), options.secretProtector)
+      : undefined
   );
 }

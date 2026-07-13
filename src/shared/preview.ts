@@ -1,4 +1,4 @@
-export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'RESOURCE' | 'PROBE';
+export type PreviewNodeKind = 'JOB' | 'SERVICE' | 'WORKER' | 'RESOURCE' | 'ATTACHMENT' | 'PROBE';
 
 export const PREVIEW_POSIX_INHERITED_ENV_KEYS = [
   'HOME',
@@ -68,6 +68,10 @@ export interface PreviewPortPlan {
 export type PreviewEnvironmentValue =
   | string
   | {
+      type: 'private-input';
+      input: string;
+    }
+  | {
       type: 'service-origin';
       service: string;
       port: string;
@@ -83,6 +87,26 @@ export type PreviewEnvironmentValue =
   | {
       type: 'redis-url';
       resource: string;
+    }
+  | {
+      type: 'attached-http-origin';
+      attachment: string;
+    }
+  | {
+      type: 'attached-tcp-host';
+      attachment: string;
+    }
+  | {
+      type: 'attached-tcp-port';
+      attachment: string;
+    }
+  | {
+      type: 'attached-postgres-url';
+      attachment: string;
+    }
+  | {
+      type: 'attached-redis-url';
+      attachment: string;
     };
 
 export interface PreviewHttpReadinessPlan {
@@ -101,6 +125,7 @@ export interface PreviewTcpReadinessPlan {
 export interface PreviewArgvReadinessPlan extends PreviewCommandPlan {
   type: 'argv';
   timeoutSeconds: number;
+  env?: Record<string, PreviewEnvironmentValue>;
 }
 
 export type PreviewReadinessPlan =
@@ -174,6 +199,110 @@ export type PreviewOciResourcePlan =
   | PreviewPostgresResourcePlan
   | PreviewRedisResourcePlan;
 
+export interface PreviewPrivateInputPlan {
+  id: string;
+  type: 'private';
+  label?: string;
+}
+
+export interface PreviewLocalAttachmentTarget {
+  type: 'local';
+}
+
+export interface PreviewHttpEndpointTarget {
+  type: 'endpoint';
+  scheme: 'http' | 'https';
+  host: string;
+  port: number;
+  basePath: string;
+}
+
+export interface PreviewTcpEndpointTarget {
+  type: 'endpoint';
+  host: string;
+  port: number;
+}
+
+export interface PreviewPostgresEndpointTarget {
+  type: 'endpoint';
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  tls: 'disabled' | 'system-verified';
+}
+
+export interface PreviewRedisEndpointTarget {
+  type: 'endpoint';
+  host: string;
+  port: number;
+  database: number;
+  username?: string;
+  tls: 'disabled' | 'system-verified';
+}
+
+export interface PreviewTaskRouteTarget {
+  type: 'task-preview-route';
+  targetTaskId: string;
+  routeId: string;
+  basePath: string;
+}
+
+export interface PreviewAttachmentCheckPlan {
+  timeoutSeconds: number;
+  path?: string;
+}
+
+interface PreviewAttachmentPlanBase {
+  id: string;
+  label?: string;
+  check?: PreviewAttachmentCheckPlan;
+}
+
+export interface PreviewHttpAttachmentPlan extends PreviewAttachmentPlanBase {
+  type: 'http';
+  target: PreviewLocalAttachmentTarget | PreviewHttpEndpointTarget | PreviewTaskRouteTarget;
+}
+
+export interface PreviewTcpAttachmentPlan extends PreviewAttachmentPlanBase {
+  type: 'tcp';
+  target: PreviewLocalAttachmentTarget | PreviewTcpEndpointTarget;
+}
+
+export interface PreviewPostgresAttachmentPlan extends PreviewAttachmentPlanBase {
+  type: 'postgres';
+  target: PreviewLocalAttachmentTarget | PreviewPostgresEndpointTarget;
+  passwordInput?: string;
+}
+
+export interface PreviewRedisAttachmentPlan extends PreviewAttachmentPlanBase {
+  type: 'redis';
+  target: PreviewLocalAttachmentTarget | PreviewRedisEndpointTarget;
+  passwordInput?: string;
+}
+
+export type PreviewAttachmentPlan =
+  | PreviewHttpAttachmentPlan
+  | PreviewTcpAttachmentPlan
+  | PreviewPostgresAttachmentPlan
+  | PreviewRedisAttachmentPlan;
+
+export type PreviewResolvedAttachmentTarget =
+  | PreviewHttpEndpointTarget
+  | PreviewTcpEndpointTarget
+  | PreviewPostgresEndpointTarget
+  | PreviewRedisEndpointTarget
+  | PreviewTaskRouteTarget;
+
+export interface PreviewLocalAttachmentBindingRecord {
+  id: string;
+  taskId: string;
+  attachmentId: string;
+  target: PreviewResolvedAttachmentTarget;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PreviewScenarioPlan {
   id: string;
   label?: string;
@@ -183,6 +312,8 @@ export interface PreviewScenarioPlan {
 
 export interface PreviewExecutionPlan {
   version: 1;
+  inputs?: PreviewPrivateInputPlan[];
+  attachments?: PreviewAttachmentPlan[];
   jobs: PreviewJobPlan[];
   resources: PreviewOciResourcePlan[];
   services: PreviewServicePlan[];
@@ -248,6 +379,7 @@ export interface PreviewGenerationRecord {
   replacesGenerationId?: string;
   freshness: 'CURRENT' | 'STALE' | 'UNKNOWN';
   routes: PreviewRouteRecord[];
+  attachmentReadiness?: PreviewAttachmentReadinessEvidence[];
   failureReason?: string;
   cleanupReason?: string;
   createdAt: string;
@@ -255,6 +387,21 @@ export interface PreviewGenerationRecord {
   readyAt?: string;
   cutoverAt?: string;
   stoppedAt?: string;
+}
+
+export type PreviewAttachmentFailureCode =
+  | 'TARGET_UNAVAILABLE'
+  | 'CHECK_TIMEOUT'
+  | 'TLS_FAILED'
+  | 'AUTHENTICATION_FAILED'
+  | 'CHECK_FAILED'
+  | 'CHECK_CANCELED';
+
+export interface PreviewAttachmentReadinessEvidence {
+  attachmentId: string;
+  status: 'PASSED' | 'FAILED';
+  observedAt: string;
+  failureCode?: PreviewAttachmentFailureCode;
 }
 
 export interface PreviewProcessIdentity {
@@ -443,9 +590,84 @@ export interface ResolvePreviewRequest {
   scenarioId?: string;
 }
 
+export type PreviewExecutionBlocker =
+  | { kind: 'PRIVATE_INPUT_MISSING'; inputId: string }
+  | { kind: 'PRIVATE_INPUT_LOCKED'; inputId: string }
+  | { kind: 'PRIVATE_INPUT_CORRUPT'; inputId: string }
+  | { kind: 'PROTECTION_UNAVAILABLE'; inputId: string };
+
+export interface PreviewExecutionReadiness {
+  status: 'READY' | 'BLOCKED';
+  blockers: PreviewExecutionBlocker[];
+}
+
 export type ResolvePreviewResult =
   | { status: 'UNAVAILABLE'; reason: string }
-  | { status: 'PLAN'; plan: PreviewPlanRecord; approval?: PreviewApprovalRecord };
+  | {
+      status: 'CONFIGURATION_REQUIRED';
+      reason: string;
+      attachmentIds: string[];
+    }
+  | {
+      status: 'PLAN';
+      plan: PreviewPlanRecord;
+      approval?: PreviewApprovalRecord;
+      executionReadiness: PreviewExecutionReadiness;
+    };
+
+export interface SetPreviewLocalAttachmentBindingRequest {
+  taskId: string;
+  attachmentId: string;
+  target: PreviewResolvedAttachmentTarget;
+}
+
+export interface DeletePreviewLocalAttachmentBindingRequest {
+  taskId: string;
+  attachmentId: string;
+}
+
+export interface SetPreviewPrivateInputRequest {
+  taskId: string;
+  inputId: string;
+  value: string;
+}
+
+export interface ImportPreviewPrivateInputRequest {
+  taskId: string;
+  inputId: string;
+  key: string;
+}
+
+export interface DeletePreviewPrivateInputRequest {
+  taskId: string;
+  inputId: string;
+}
+
+export interface RetryPreviewVaultCleanupResult {
+  status: 'CLEAN' | 'CLEANUP_PENDING' | 'RECOVERY_REQUIRED';
+}
+
+export type PreviewPrivateInputOperationResult =
+  | { status: 'STORED' | 'IMPORTED' | 'DELETED' | 'CANCELED' }
+  | {
+      status: 'FAILED';
+      code:
+        | 'PROTECTION_UNAVAILABLE'
+        | 'INPUT_NOT_DECLARED'
+        | 'INVALID_VALUE'
+        | 'INVALID_KEY'
+        | 'KEY_MISSING'
+        | 'KEY_DUPLICATE'
+        | 'UNSAFE_IMPORT_FILE'
+        | 'VAULT_RECOVERY_REQUIRED';
+    };
+
+export interface PreviewPrivateInputApi {
+  set(input: SetPreviewPrivateInputRequest): Promise<PreviewPrivateInputOperationResult>;
+  import(input: ImportPreviewPrivateInputRequest): Promise<PreviewPrivateInputOperationResult>;
+  delete(input: DeletePreviewPrivateInputRequest): Promise<PreviewPrivateInputOperationResult>;
+  retryCleanup(): Promise<RetryPreviewVaultCleanupResult>;
+}
 
 export interface ApprovePreviewPlanRequest {
   taskId: string;

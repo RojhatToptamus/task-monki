@@ -11,12 +11,14 @@ import {
   type Node
 } from 'yaml';
 import type {
+  PreviewAttachmentPlan,
   PreviewEnvironmentValue,
   PreviewExecutionPlan,
   PreviewJobPlan,
   PreviewLivenessPlan,
   PreviewOciResourceLimits,
   PreviewOciResourcePlan,
+  PreviewPrivateInputPlan,
   PreviewReadinessPlan,
   PreviewRoutePlan,
   PreviewScenarioPlan,
@@ -29,6 +31,8 @@ export const PREVIEW_RECIPE_PATH = '.taskmonki/preview.yaml' as const;
 export const MAX_PREVIEW_RECIPE_BYTES = 64 * 1024;
 const MAX_NODES = 32;
 const MAX_RESOURCES = 16;
+const MAX_ATTACHMENTS = 16;
+const MAX_INPUTS = 32;
 const MAX_SCENARIOS = 16;
 const MAX_COMMAND_ARGS = 64;
 const MAX_ARGUMENT_BYTES = 2_048;
@@ -154,13 +158,18 @@ export function selectPreviewScenario(
 function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecutionPlan {
   assertKeys(
     recipe,
-    ['version', 'jobs', 'resources', 'services', 'workers', 'routes', 'scenarios', 'defaultScenario'],
+    [
+      'version', 'inputs', 'attachments', 'jobs', 'resources', 'services', 'workers', 'routes',
+      'scenarios', 'defaultScenario'
+    ],
     'recipe'
   );
   if (recipe.version !== 1) {
     throw new Error('Preview recipe version must be 1.');
   }
 
+  const inputs = normalizeNodeMap(recipe.inputs, 'inputs', normalizeInput);
+  const attachments = normalizeNodeMap(recipe.attachments, 'attachments', normalizeAttachment);
   const jobs = normalizeNodeMap(recipe.jobs, 'jobs', normalizeJob);
   const resources = normalizeNodeMap(recipe.resources, 'resources', normalizeResource);
   const services = normalizeNodeMap(recipe.services, 'services', normalizeService);
@@ -171,6 +180,12 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
   }
   if (resources.length > MAX_RESOURCES) {
     throw new Error(`Preview recipe exceeds ${MAX_RESOURCES} OCI resources.`);
+  }
+  if (attachments.length > MAX_ATTACHMENTS) {
+    throw new Error(`Preview recipe exceeds ${MAX_ATTACHMENTS} attached dependencies.`);
+  }
+  if (inputs.length > MAX_INPUTS) {
+    throw new Error(`Preview recipe exceeds ${MAX_INPUTS} private inputs.`);
   }
   const totalPorts = [...services, ...workers].reduce(
     (count, node) => count + Object.keys(node.ports).length,
@@ -190,6 +205,8 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
   }
 
   const jobById = new Map(jobs.map((job) => [job.id, job]));
+  const inputById = new Map(inputs.map((input) => [input.id, input]));
+  const attachmentById = new Map(attachments.map((attachment) => [attachment.id, attachment]));
   const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
   const serviceById = new Map(services.map((service) => [service.id, service]));
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
@@ -198,21 +215,29 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     ...jobById.keys(),
     ...resourceById.keys(),
     ...serviceById.keys(),
-    ...workerById.keys()
+    ...workerById.keys(),
+    ...attachmentById.keys()
   ]);
-  if (allIds.size !== jobs.length + resources.length + services.length + workers.length) {
-    throw new Error('Preview job, resource, service, and worker identifiers must be unique.');
+  if (allIds.size !== jobs.length + resources.length + services.length + workers.length + attachments.length) {
+    throw new Error('Preview job, resource, attachment, service, and worker identifiers must be unique.');
   }
   for (const job of jobs) {
     for (const [dependencyId, condition] of Object.entries(job.needs)) {
       if (
         (condition === 'succeeded' && !jobById.has(dependencyId)) ||
-        (condition === 'ready' && !resourceById.has(dependencyId))
+        (condition === 'ready' && !resourceById.has(dependencyId) && !attachmentById.has(dependencyId))
       ) {
         throw new Error(`Job ${job.id} needs an unknown or unsupported ${condition} node ${dependencyId}.`);
       }
     }
-    validateEnvironmentReferences(job, serviceById, routeById, resourceById);
+    if (
+      job.role !== 'generic' &&
+      (Object.keys(job.needs).some((id) => attachmentById.has(id)) ||
+        environmentAttachmentIds(job.env).length > 0)
+    ) {
+      throw new Error(`${job.id} cannot use attached dependencies from a migration or seed job.`);
+    }
+    validateEnvironmentReferences(job, serviceById, routeById, resourceById, attachmentById, inputById);
   }
   for (const node of [...services, ...workers]) {
     for (const [dependencyId, condition] of Object.entries(node.needs)) {
@@ -221,12 +246,14 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
         (condition === 'ready' &&
           !serviceById.has(dependencyId) &&
           !workerById.has(dependencyId) &&
-          !resourceById.has(dependencyId))
+          !resourceById.has(dependencyId) &&
+          !attachmentById.has(dependencyId))
       ) {
         throw new Error(`${node.id} needs unknown ${condition} node ${dependencyId}.`);
       }
     }
-    validateEnvironmentReferences(node, serviceById, routeById, resourceById);
+    validateEnvironmentReferences(node, serviceById, routeById, resourceById, attachmentById, inputById);
+    validateProbeEnvironmentReferences(node, serviceById, routeById, resourceById, attachmentById, inputById);
   }
   for (const service of services) {
     for (const dependencyId of Object.keys(service.needs)) {
@@ -261,15 +288,19 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     recipe.scenarios !== undefined
   );
   validateScenarioGraph(selectedScenarioId, scenarios, jobs, resources, services, workers);
+  validateAttachmentAndInputUsage(inputs, attachments, jobs, services, workers);
   assertAcyclic([
     ...jobs,
     ...resources.map((resource) => ({ id: resource.id, needs: {} })),
+    ...attachments.map((attachment) => ({ id: attachment.id, needs: {} })),
     ...services,
     ...workers
   ]);
 
   return {
     version: 1,
+    inputs,
+    attachments,
     jobs,
     resources,
     services,
@@ -278,6 +309,159 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     scenarios,
     selectedScenarioId
   };
+}
+
+function normalizeInput(
+  value: Record<string, unknown>,
+  context: string,
+  id: string
+): PreviewPrivateInputPlan {
+  assertKeys(value, ['type', 'label'], context);
+  if (value.type !== 'private') throw new Error(`${context}.type must be private.`);
+  return { id, type: 'private', label: optionalLabel(value.label, context) };
+}
+
+function normalizeAttachment(
+  value: Record<string, unknown>,
+  context: string,
+  id: string
+): PreviewAttachmentPlan {
+  const type = value.type;
+  if (!['http', 'tcp', 'postgres', 'redis'].includes(String(type))) {
+    throw new Error(`${context}.type must be http, tcp, postgres, or redis.`);
+  }
+  const base = {
+    id,
+    label: optionalLabel(value.label, context),
+    check: normalizeAttachmentCheck(value.check, `${context}.check`, type as PreviewAttachmentPlan['type'])
+  };
+  const target = normalizeAttachmentTarget(
+    value.target,
+    `${context}.target`,
+    type as PreviewAttachmentPlan['type']
+  );
+  if (type === 'http' || type === 'tcp') {
+    assertKeys(value, ['type', 'label', 'target', 'check'], context);
+    return { ...base, type, target } as PreviewAttachmentPlan;
+  }
+  assertKeys(value, ['type', 'label', 'target', 'credentials', 'check'], context);
+  const credentials = optionalRecord(value.credentials, `${context}.credentials`);
+  assertKeys(credentials, ['passwordInput'], `${context}.credentials`);
+  const passwordInput = credentials.passwordInput;
+  if (passwordInput !== undefined) {
+    if (typeof passwordInput !== 'string') {
+      throw new Error(`${context}.credentials.passwordInput must name a private input.`);
+    }
+    assertId(passwordInput, `${context}.credentials.passwordInput`);
+  }
+  return { ...base, type, target, passwordInput } as PreviewAttachmentPlan;
+}
+
+function normalizeAttachmentCheck(
+  value: unknown,
+  context: string,
+  type: PreviewAttachmentPlan['type']
+): PreviewAttachmentPlan['check'] {
+  if (value === undefined) return undefined;
+  const check = requiredRecord(value, context);
+  assertKeys(check, type === 'http' ? ['path', 'timeoutSeconds'] : ['timeoutSeconds'], context);
+  const timeoutSeconds = check.timeoutSeconds ?? 10;
+  if (!Number.isInteger(timeoutSeconds) || Number(timeoutSeconds) < 1 || Number(timeoutSeconds) > 60) {
+    throw new Error(`${context}.timeoutSeconds must be between 1 and 60.`);
+  }
+  if (type !== 'http') return { timeoutSeconds: Number(timeoutSeconds) };
+  const pathValue = check.path ?? '/';
+  return { timeoutSeconds: Number(timeoutSeconds), path: normalizeHttpPath(pathValue, `${context}.path`) };
+}
+
+function normalizeAttachmentTarget(
+  value: unknown,
+  context: string,
+  type: PreviewAttachmentPlan['type']
+): PreviewAttachmentPlan['target'] {
+  const target = requiredRecord(value, context);
+  if (target.type === 'local') {
+    assertKeys(target, ['type'], context);
+    return { type: 'local' };
+  }
+  if (target.type !== 'endpoint') throw new Error(`${context}.type must be endpoint or local.`);
+  const host = normalizeAttachmentHost(target.host, `${context}.host`);
+  if (type === 'http') {
+    assertKeys(target, ['type', 'scheme', 'host', 'port', 'basePath'], context);
+    const scheme = target.scheme ?? 'http';
+    if (scheme !== 'http' && scheme !== 'https') throw new Error(`${context}.scheme must be http or https.`);
+    return {
+      type: 'endpoint', scheme, host,
+      port: target.port === undefined
+        ? (scheme === 'https' ? 443 : 80)
+        : normalizeAttachmentPort(target.port, `${context}.port`),
+      basePath: normalizeHttpPath(target.basePath ?? '/', `${context}.basePath`)
+    };
+  }
+  if (type === 'tcp') {
+    assertKeys(target, ['type', 'host', 'port'], context);
+    return { type: 'endpoint', host, port: normalizeAttachmentPort(target.port, `${context}.port`) };
+  }
+  if (type === 'postgres') {
+    assertKeys(target, ['type', 'host', 'port', 'database', 'username', 'tls'], context);
+    const database = normalizePublicConnectionPart(target.database, `${context}.database`);
+    const username = normalizePublicConnectionPart(target.username, `${context}.username`);
+    return {
+      type: 'endpoint', host, port: normalizeAttachmentPort(target.port, `${context}.port`), database, username,
+      tls: normalizeTls(target.tls, `${context}.tls`)
+    };
+  }
+  assertKeys(target, ['type', 'host', 'port', 'database', 'username', 'tls'], context);
+  const database = target.database ?? 0;
+  if (!Number.isInteger(database) || Number(database) < 0 || Number(database) > 65_535) {
+    throw new Error(`${context}.database must be between 0 and 65535.`);
+  }
+  const username = target.username === undefined
+    ? undefined
+    : normalizePublicConnectionPart(target.username, `${context}.username`);
+  return {
+    type: 'endpoint', host, port: normalizeAttachmentPort(target.port, `${context}.port`), database: Number(database), username,
+    tls: normalizeTls(target.tls, `${context}.tls`)
+  };
+}
+
+function normalizeAttachmentHost(value: unknown, context: string): string {
+  if (
+    typeof value !== 'string' || !value || Buffer.byteLength(value) > 253 ||
+    /[\s\0\r\n/@?#]/.test(value) || value.startsWith('-')
+  ) throw new Error(`${context} must be a bounded credential-free hostname or IP address.`);
+  return value.toLowerCase();
+}
+
+function normalizeAttachmentPort(value: unknown, context: string): number {
+  if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 65_535) {
+    throw new Error(`${context} must be between 1 and 65535.`);
+  }
+  return Number(value);
+}
+
+function normalizeHttpPath(value: unknown, context: string): string {
+  if (
+    typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') ||
+    /[\0\r\n?#]/.test(value) || Buffer.byteLength(value) > 2_048
+  ) throw new Error(`${context} must be a safe absolute path without query or fragment.`);
+  return value;
+}
+
+function normalizePublicConnectionPart(value: unknown, context: string): string {
+  if (
+    typeof value !== 'string' || !value || Buffer.byteLength(value) > 256 ||
+    /[\0\r\n]/.test(value)
+  ) throw new Error(`${context} must be a bounded public value.`);
+  return value;
+}
+
+function normalizeTls(value: unknown, context: string): 'disabled' | 'system-verified' {
+  const tls = value ?? 'disabled';
+  if (tls !== 'disabled' && tls !== 'system-verified') {
+    throw new Error(`${context} must be disabled or system-verified.`);
+  }
+  return tls;
 }
 
 function normalizeJob(value: Record<string, unknown>, context: string, id: string): PreviewJobPlan {
@@ -330,12 +514,30 @@ function normalizeEnvironment(value: unknown, context: string): Record<string, P
         throw new Error(`${context}.${key} has an invalid route-origin reference.`);
       }
       normalized[key] = { type: 'route-origin', route: reference.route };
+    } else if (reference.type === 'private-input') {
+      assertKeys(reference, ['type', 'input'], `${context}.${key}`);
+      if (typeof reference.input !== 'string') {
+        throw new Error(`${context}.${key} has an invalid private-input reference.`);
+      }
+      normalized[key] = { type: 'private-input', input: reference.input };
     } else if (reference.type === 'postgres-url' || reference.type === 'redis-url') {
       assertKeys(reference, ['type', 'resource'], `${context}.${key}`);
       if (typeof reference.resource !== 'string') {
         throw new Error(`${context}.${key} has an invalid ${reference.type} reference.`);
       }
       normalized[key] = { type: reference.type, resource: reference.resource };
+    } else if (
+      reference.type === 'attached-http-origin' ||
+      reference.type === 'attached-tcp-host' ||
+      reference.type === 'attached-tcp-port' ||
+      reference.type === 'attached-postgres-url' ||
+      reference.type === 'attached-redis-url'
+    ) {
+      assertKeys(reference, ['type', 'attachment'], `${context}.${key}`);
+      if (typeof reference.attachment !== 'string') {
+        throw new Error(`${context}.${key} has an invalid ${reference.type} reference.`);
+      }
+      normalized[key] = { type: reference.type, attachment: reference.attachment };
     } else {
       throw new Error(`${context}.${key} must be a literal or supported typed reference.`);
     }
@@ -533,12 +735,13 @@ function normalizeProbe(
     return { type: 'tcp', port: probe.port as string, timeoutSeconds: Number(timeoutSeconds) };
   }
   if (probe.type === 'argv') {
-    assertKeys(probe, ['type', 'cwd', 'command', 'timeoutSeconds'], context);
+    assertKeys(probe, ['type', 'cwd', 'command', 'timeoutSeconds', 'env'], context);
     return {
       type: 'argv',
       cwd: normalizeCwd(probe.cwd, context),
       command: normalizeCommand(probe.command, context),
-      timeoutSeconds: Number(timeoutSeconds)
+      timeoutSeconds: Number(timeoutSeconds),
+      env: normalizeEnvironment(probe.env, `${context}.env`)
     };
   }
   throw new Error(`${context}.type must be http, tcp, or argv.`);
@@ -610,9 +813,12 @@ function validateEnvironmentReferences(
   node: PreviewJobPlan | PreviewServicePlan | PreviewWorkerPlan,
   services: Map<string, PreviewServicePlan>,
   routes: Map<string, PreviewRoutePlan>,
-  resources: Map<string, PreviewOciResourcePlan>
+  resources: Map<string, PreviewOciResourcePlan>,
+  attachments: Map<string, PreviewAttachmentPlan>,
+  inputs: Map<string, PreviewPrivateInputPlan>,
+  environment = node.env
 ): void {
-  for (const [key, value] of Object.entries(node.env)) {
+  for (const [key, value] of Object.entries(environment)) {
     if (typeof value === 'string') continue;
     if (value.type === 'service-origin') {
       const service = services.get(value.service);
@@ -626,7 +832,11 @@ function validateEnvironmentReferences(
       if (!routes.has(value.route)) {
         throw new Error(`${node.id}.env.${key} references an unknown route origin.`);
       }
-    } else {
+    } else if (value.type === 'private-input') {
+      if (!inputs.has(value.input)) {
+        throw new Error(`${node.id}.env.${key} references an unknown private input.`);
+      }
+    } else if (value.type === 'postgres-url' || value.type === 'redis-url') {
       const resource = resources.get(value.resource);
       if (!resource) {
         throw new Error(`${node.id}.env.${key} references an unknown OCI resource.`);
@@ -640,8 +850,95 @@ function validateEnvironmentReferences(
       if (value.type === 'redis-url' && resource.type !== 'redis') {
         throw new Error(`${node.id}.env.${key} requires a Redis resource.`);
       }
+    } else {
+      const attachment = attachments.get(value.attachment);
+      if (!attachment) {
+        throw new Error(`${node.id}.env.${key} references an unknown attachment.`);
+      }
+      const expected =
+        value.type === 'attached-http-origin' ? 'http' :
+        value.type === 'attached-tcp-host' || value.type === 'attached-tcp-port' ? 'tcp' :
+        value.type === 'attached-postgres-url' ? 'postgres' : 'redis';
+      if (attachment.type !== expected) {
+        throw new Error(`${node.id}.env.${key} requires a ${expected} attachment.`);
+      }
     }
   }
+}
+
+function validateProbeEnvironmentReferences(
+  node: PreviewServicePlan | PreviewWorkerPlan,
+  services: Map<string, PreviewServicePlan>,
+  routes: Map<string, PreviewRoutePlan>,
+  resources: Map<string, PreviewOciResourcePlan>,
+  attachments: Map<string, PreviewAttachmentPlan>,
+  inputs: Map<string, PreviewPrivateInputPlan>
+): void {
+  for (const probe of [node.ready, node.liveness?.probe]) {
+    if (probe?.type !== 'argv') continue;
+    validateEnvironmentReferences(
+      node, services, routes, resources, attachments, inputs, probe.env ?? {}
+    );
+  }
+}
+
+function validateAttachmentAndInputUsage(
+  inputs: PreviewPrivateInputPlan[],
+  attachments: PreviewAttachmentPlan[],
+  jobs: PreviewJobPlan[],
+  services: PreviewServicePlan[],
+  workers: PreviewWorkerPlan[]
+): void {
+  const nodes = [...jobs, ...services, ...workers];
+  const usedInputs = new Set<string>();
+  const usedAttachments = new Set<string>();
+  const checkedAttachments = new Set<string>();
+  for (const attachment of attachments) {
+    const passwordInput = attachmentPasswordInput(attachment);
+    if (passwordInput) usedInputs.add(passwordInput);
+  }
+  for (const node of nodes) {
+    for (const id of Object.keys(node.needs)) {
+      if (attachments.some((attachment) => attachment.id === id)) {
+        usedAttachments.add(id);
+        checkedAttachments.add(id);
+        if (!attachments.find((attachment) => attachment.id === id)?.check) {
+          throw new Error(`${node.id} needs attachment ${id} ready, but it declares no check.`);
+        }
+      }
+    }
+    for (const env of [node.env, ...('ready' in node ? [
+      node.ready.type === 'argv' ? node.ready.env ?? {} : {},
+      node.liveness?.probe.type === 'argv' ? node.liveness.probe.env ?? {} : {}
+    ] : [])]) {
+      for (const value of Object.values(env)) {
+        if (typeof value === 'string') continue;
+        if (value.type === 'private-input') usedInputs.add(value.input);
+        if ('attachment' in value) usedAttachments.add(value.attachment);
+      }
+    }
+  }
+  for (const attachment of attachments) {
+    const passwordInput = attachmentPasswordInput(attachment);
+    if (passwordInput && !inputs.some((input) => input.id === passwordInput)) {
+      throw new Error(`Attachment ${attachment.id} references unknown private input ${passwordInput}.`);
+    }
+    if (!usedAttachments.has(attachment.id)) {
+      throw new Error(`Attachment ${attachment.id} must have a declared recipient or readiness dependency.`);
+    }
+    if (attachment.check && !checkedAttachments.has(attachment.id)) {
+      throw new Error(`Attachment ${attachment.id} declares an unused readiness check.`);
+    }
+  }
+  for (const input of inputs) {
+    if (!usedInputs.has(input.id)) throw new Error(`Private input ${input.id} has no declared recipient.`);
+  }
+}
+
+function environmentAttachmentIds(environment: Record<string, PreviewEnvironmentValue>): string[] {
+  return Object.values(environment).flatMap((value) =>
+    typeof value !== 'string' && 'attachment' in value ? [value.attachment] : []
+  );
 }
 
 function normalizeScenarios(
@@ -878,9 +1175,25 @@ function executionAuthority(plan: PreviewExecutionPlan): unknown {
     ...scenario.jobs
   ]);
   const activeResources = new Set(scenario.resources);
+  const { activeAttachmentIds, checkedAttachmentIds, activeInputIds } =
+    collectActiveBindingAuthority(plan, activeJobs);
+  const activeAttachments = (plan.attachments ?? []).filter(
+    (attachment) => activeAttachmentIds.has(attachment.id)
+  );
+  for (const attachment of activeAttachments) {
+    const passwordInput = attachmentPasswordInput(attachment);
+    if (passwordInput) activeInputIds.add(passwordInput);
+  }
   return {
     version: plan.version,
     selectedScenarioId: plan.selectedScenarioId,
+    inputs: (plan.inputs ?? [])
+      .filter((input) => activeInputIds.has(input.id))
+      .map(({ label: _label, ...input }) => input),
+    attachments: activeAttachments.map(({ label: _label, check, ...attachment }) => ({
+      ...attachment,
+      check: checkedAttachmentIds.has(attachment.id) ? check : undefined
+    })),
     jobs: plan.jobs
       .filter((job) => activeJobs.has(job.id))
       .map(({ label: _label, ...job }) => job),
@@ -891,6 +1204,81 @@ function executionAuthority(plan: PreviewExecutionPlan): unknown {
     workers: plan.workers.map(({ label: _label, ...worker }) => worker),
     routes: plan.routes
   };
+}
+
+export function previewExecutionAuthority(plan: PreviewExecutionPlan): unknown {
+  return executionAuthority(plan);
+}
+
+export function previewExecutionDigest(plan: PreviewExecutionPlan): string {
+  return sha256(canonicalJson(executionAuthority(plan)));
+}
+
+export function activePreviewAttachmentIds(plan: PreviewExecutionPlan): string[] {
+  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
+  if (!scenario) return [];
+  const activeJobs = new Set([
+    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+    ...scenario.jobs
+  ]);
+  return [...collectActiveBindingAuthority(plan, activeJobs).activeAttachmentIds].sort();
+}
+
+export function activePreviewInputIds(plan: PreviewExecutionPlan): string[] {
+  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
+  if (!scenario) return [];
+  const activeJobs = new Set([
+    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+    ...scenario.jobs
+  ]);
+  return [...collectActiveBindingAuthority(plan, activeJobs).activeInputIds].sort();
+}
+
+function collectActiveBindingAuthority(
+  plan: PreviewExecutionPlan,
+  activeJobs: ReadonlySet<string>
+): {
+  activeAttachmentIds: Set<string>;
+  checkedAttachmentIds: Set<string>;
+  activeInputIds: Set<string>;
+} {
+  const activeNodes = [
+    ...plan.jobs.filter((job) => activeJobs.has(job.id)),
+    ...plan.services,
+    ...plan.workers
+  ];
+  const activeAttachmentIds = new Set<string>();
+  const checkedAttachmentIds = new Set<string>();
+  const activeInputIds = new Set<string>();
+  for (const node of activeNodes) {
+    for (const dependencyId of Object.keys(node.needs)) {
+      if ((plan.attachments ?? []).some((attachment) => attachment.id === dependencyId)) {
+        activeAttachmentIds.add(dependencyId);
+        checkedAttachmentIds.add(dependencyId);
+      }
+    }
+    for (const environment of [node.env, ...('ready' in node ? [
+      node.ready.type === 'argv' ? node.ready.env ?? {} : {},
+      node.liveness?.probe.type === 'argv' ? node.liveness.probe.env ?? {} : {}
+    ] : [])]) {
+      for (const value of Object.values(environment)) {
+        if (typeof value === 'string') continue;
+        if (value.type === 'private-input') activeInputIds.add(value.input);
+        if ('attachment' in value) activeAttachmentIds.add(value.attachment);
+      }
+    }
+  }
+  for (const attachment of plan.attachments ?? []) {
+    const passwordInput = attachmentPasswordInput(attachment);
+    if (activeAttachmentIds.has(attachment.id) && passwordInput) {
+      activeInputIds.add(passwordInput);
+    }
+  }
+  return { activeAttachmentIds, checkedAttachmentIds, activeInputIds };
+}
+
+function attachmentPasswordInput(attachment: PreviewAttachmentPlan): string | undefined {
+  return 'passwordInput' in attachment ? attachment.passwordInput : undefined;
 }
 
 function rejectUnsafeYamlNode(node: Node | null): void {

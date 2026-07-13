@@ -75,6 +75,7 @@ const emptySnapshot: TaskSnapshot = {
   agentSubagentObservations: [],
   interactionRequests: [],
   previewPlans: [],
+  previewLocalBindings: [],
   previewApprovals: [],
   previewGenerations: [],
   previewManagedEnvironments: [],
@@ -574,7 +575,10 @@ export function App() {
     setError(undefined);
     try {
       const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
-      if (result.status === 'UNAVAILABLE') throw new Error(result.reason);
+      if (result.status === 'UNAVAILABLE' || result.status === 'CONFIGURATION_REQUIRED') throw new Error(result.reason);
+      if (result.executionReadiness.status === 'BLOCKED') {
+        notify(`Preview needs ${result.executionReadiness.blockers.map((blocker) => blocker.inputId).join(', ')} before Start. The capability plan can still be approved.`, 'info');
+      }
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not resolve preview configuration.');

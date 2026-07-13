@@ -17,11 +17,13 @@ import type {
 } from './agent';
 import type {
   ApprovePreviewPlanRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
   PreviewManagedEnvironmentRecord,
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
@@ -33,6 +35,7 @@ import type {
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
+  SetPreviewLocalAttachmentBindingRequest,
   StartPreviewRequest,
   StopPreviewRequest
 } from './preview';
@@ -40,7 +43,7 @@ import type {
 export * from './agent';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 13 as const;
+export const TASK_STORE_SCHEMA_VERSION = 14 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -690,6 +693,7 @@ export interface TaskSnapshot {
   previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
   previewManagedResources: PreviewManagedResourceRecord[];
   previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
   previewNodeAttempts: PreviewNodeAttemptRecord[];
   previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
@@ -1014,6 +1018,12 @@ export interface TaskManagerApi {
   readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
   resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord>;
   retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord>;
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord>;
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

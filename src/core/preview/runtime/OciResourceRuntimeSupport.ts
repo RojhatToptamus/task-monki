@@ -99,7 +99,7 @@ export function resourceVolumeMount(resource: PreviewOciResourcePlan): string {
 
 export function resourceCommand(resource: PreviewOciResourcePlan): string[] {
   return resource.type === 'redis'
-    ? ['sh', '-c', 'exec redis-server --appendonly yes --requirepass "$(cat /run/taskmonki/redis-password)"']
+    ? ['redis-server', '/run/taskmonki/redis.conf']
     : [];
 }
 

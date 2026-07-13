@@ -1,7 +1,7 @@
 # Task Monki local preview implementation plan
 
-Status: Phases 0-3 are implemented; this is the current baseline for Phase 4 planning
-Date: 2026-07-12
+Status: Phases 0-3 and the bounded Phase 4 private-input/attachment path are implemented; managed credentials retain the hardened volatile Phase 3 lifecycle
+Date: 2026-07-13
 Supporting rationale: [`../private/task-preview-local-execution-architecture.md`](../private/task-preview-local-execution-architecture.md)
 
 ## Authority of this plan
@@ -12,11 +12,12 @@ Task Monki owns preview authority and evidence. Provider output, application log
 
 ## 1. Current branch baseline
 
-- `TASK_STORE_SCHEMA_VERSION` is 13.
+- `TASK_STORE_SCHEMA_VERSION` is 14, with a selective additive 13 → 14 migration.
 - Phase 1 implements restricted recipe parsing, task-scoped approval, coherent source capture outside the worktree, native launcher ownership, bounded logs, readiness, stable loopback gateway routes, stop, shutdown, and conservative reconciliation.
 - Phase 2 implements multiple services/routes, workers, DAG scheduling, HTTP/TCP/argv probes, liveness, bounded restart, typed origins, candidate/active/retired generations, ready-before-cutover route replacement, and the exclusive-node overlap contract in section 4.
 - Phase 3 implements stable preview-owned PostgreSQL and Redis resources, one environment-owned network, non-owning generation attachments, volatile credentials, authenticated readiness, setup/retry/reset, post-ready health handling, exact OCI cleanup, and restart cleanup without adoption.
-- Private inputs, encrypted durable bindings, and attached dependencies are not implemented. They remain Phase 4.
+- Phase 4 adds capability-only private input declarations, main-only macOS `safeStorage` revisions and exact generation retention, single-key `.env` import, task-local public attachment bindings, recipient-scoped delivery, and optional one-shot HTTP/TCP/PostgreSQL/Redis readiness checks. Attached targets remain strictly non-owned and have no post-ready supervisor.
+- Managed PostgreSQL and Redis credentials remain in the volatile Phase 3 credential host. Protected runtime files bootstrap the pinned images, Redis reads a mounted configuration without secret argv, and PostgreSQL readiness authenticates through its published loopback TCP port. The failed stdin experiment is not a production transport.
 
 The ownership model in sections 2-6 is the architecture to preserve. Phase 4 may replace volatile credential storage, but it must not make managed data generation-owned or give attached dependencies cleanup authority.
 
@@ -121,7 +122,7 @@ Generated managed-resource credential authority and long-lived plaintext storage
 - renderer reload does not affect the credential host;
 - full main-process restart does not attempt resource adoption because plaintext credentials are no longer available;
 - restart reconciliation verifies and cleans exact surviving OCI resources;
-- Phase 4 may replace the volatile host with encrypted durable bindings without changing preview-owned resource authority.
+- durable managed-resource credential recovery is deferred until a product requirement justifies cross-main-process reuse or adoption.
 
 Plaintext credentials must never enter `FileTaskStore`, `TaskSnapshot`, plans, approvals, events, artifacts, logs, errors, argv, renderer state, unrelated node contracts, or host helper-process environments. Approved native preview commands run under the user's OS identity; recipient scope governs what Task Monki delivers and is not an OS sandbox between mutually hostile same-UID processes. The implementation should use the smallest testable runtime component that satisfies this contract; no generic secret framework is required in Phase 3.
 
@@ -422,10 +423,11 @@ Phase 4 must extend these boundaries rather than add a second lifecycle. In part
 
 ### Phase 4 — private inputs and attached dependencies
 
-- Add recipient-scoped input declarations and encrypted local bindings.
-- Replace the volatile managed credential host with durable encrypted bindings without changing preview environment/resource authority.
-- Add attached HTTP/TCP/database resources that Task Monki may check but never stop/reset/delete.
-- Prove plaintext absence across store, snapshot, argv, plans, logs, artifacts, events, errors, and renderer state.
+- Implemented: recipient-scoped private input declarations, encrypted immutable local revisions, dedicated manual/single-key import IPC, and execution-readiness blockers that do not block planning or approval.
+- Implemented: literal and task-local HTTP/TCP/PostgreSQL/Redis attachments, stable cross-task route identity, environment-only delivery with zero checks, and optional memoized one-shot startup readiness.
+- Implemented: attachment non-ownership, no continuous watches, no post-ready consumer transition, exact generation lease retention, and best-effort encrypted cleanup debt after task deletion.
+- Implemented: the volatile managed credential host uses protected runtime files, Redis configuration delivery without plaintext argv, and authenticated PostgreSQL readiness over the published loopback TCP port. Durable managed credentials, stdin transport, and managed-resource adoption remain out of scope.
+- Release evidence must still prove plaintext absence across store, snapshot, argv, plans, logs, artifacts, events, errors, renderer state, Docker inspect/log/layer/volume surfaces, and nonrecipients.
 
 ### Phase 5 — existing Compose application adapter
 

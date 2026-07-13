@@ -3,6 +3,29 @@ import type { PreviewExecutionPlan, PreviewJobPlan } from '../../shared/contract
 import { PreviewGraph, reverseDependencyOrder } from './PreviewGraph';
 
 describe('PreviewGraph', () => {
+  it('does not check environment-only attachments and memoizes explicit checks per generation', async () => {
+    let checks = 0;
+    const runs: Array<Record<string, string>> = [];
+    const plan = graphPlan({
+      attachments: [{ id: 'smtp', type: 'tcp', target: { type: 'endpoint', host: '127.0.0.1', port: 2525 }, check: { timeoutSeconds: 1 } }],
+      jobs: [
+        { ...job('env-only', ['node']), env: { SMTP_HOST: { type: 'attached-tcp-host', attachment: 'smtp' } } },
+        job('one', ['node'], { smtp: 'ready' }),
+        job('two', ['node'], { smtp: 'ready' })
+      ], services: [], workers: [], routes: []
+    });
+    const graph = new PreviewGraph(
+      {} as never,
+      { async run(input: { env: Record<string, string> }) { runs.push(input.env); } } as never,
+      {} as never, {} as never, {} as never, {} as never,
+      { async check() { checks += 1; return { status: 'PASSED', observedAt: new Date().toISOString() }; } } as never
+    );
+    const running = await graph.start({ taskId: 'task', generationId: 'generation', generationRoot: '/tmp', sourcePath: '/tmp', markerDigest: 'marker', plan, runSetup: false, async updateGenerationState() {} });
+    expect(checks).toBe(1);
+    expect(runs).toContainEqual({ SMTP_HOST: '127.0.0.1' });
+    await running.stop();
+  });
+
   it('runs preparation jobs after their declared success dependencies', async () => {
     const starts: string[] = [];
     const plan = graphPlan({
@@ -384,9 +407,19 @@ describe('PreviewGraph', () => {
       fixture.services as never,
       fixture.readiness as never,
       fixture.ports as never,
-      fixture.listeners as never
+      fixture.listeners as never,
+      { async check() { events.push('check:upstream'); return { status: 'PASSED', observedAt: new Date().toISOString() }; } } as never
     );
     const plan = replacementPlan('exclusive');
+    plan.attachments = [{
+      id: 'upstream', type: 'http',
+      target: { type: 'endpoint', scheme: 'http', host: '127.0.0.1', port: 8080, basePath: '/' },
+      check: { path: '/ready', timeoutSeconds: 5 }
+    }];
+    plan.workers[0].needs = { upstream: 'ready' };
+    plan.workers[0].env = {
+      UPSTREAM_ORIGIN: { type: 'attached-http-origin', attachment: 'upstream' }
+    };
     const running = await graph.start({
       taskId: 'task', generationId: 'old', generationRoot: '/tmp', sourcePath: '/tmp',
       markerDigest: 'marker', plan, runSetup: false,
@@ -395,7 +428,9 @@ describe('PreviewGraph', () => {
     });
 
     expect(events.indexOf('start:web')).toBeLessThan(events.indexOf('handoff-boundary'));
+    expect(events.indexOf('check:upstream')).toBeLessThan(events.indexOf('handoff-boundary'));
     expect(events.indexOf('handoff-boundary')).toBeLessThan(events.indexOf('start:consumer'));
+    expect(events.filter((event) => event === 'check:upstream')).toHaveLength(1);
     await expect(running.stopExclusive()).resolves.toBe('STOPPED');
     await expect(running.restoreExclusive()).resolves.toBe(true);
     expect(events.filter((event) => event === 'start:consumer')).toHaveLength(2);
@@ -517,7 +552,7 @@ function longRunningFixture(events: string[]) {
 
 function graphPlan(
   input: Pick<PreviewExecutionPlan, 'jobs' | 'services' | 'workers' | 'routes'> &
-    Partial<Pick<PreviewExecutionPlan, 'resources' | 'scenarios' | 'selectedScenarioId'>>
+    Partial<Pick<PreviewExecutionPlan, 'resources' | 'attachments' | 'scenarios' | 'selectedScenarioId'>>
 ): PreviewExecutionPlan {
   return {
     version: 1,
@@ -526,6 +561,7 @@ function graphPlan(
     workers: input.workers,
     routes: input.routes,
     resources: input.resources ?? [],
+    attachments: input.attachments ?? [],
     scenarios: input.scenarios ?? [{ id: 'default', jobs: [], resources: [] }],
     selectedScenarioId: input.selectedScenarioId ?? 'default'
   };

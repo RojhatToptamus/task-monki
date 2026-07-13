@@ -343,6 +343,15 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
       sendJson(response, requestId, 200, await options.service.retryPreviewSetup((await readJson()) as never));
       return;
     }
+    if (request.method === 'POST' && url.pathname === '/api/preview/binding/set') {
+      sendJson(response, requestId, 200, await options.service.setPreviewLocalAttachmentBinding((await readJson()) as never));
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/preview/binding/delete') {
+      await options.service.deletePreviewLocalAttachmentBinding((await readJson()) as never);
+      sendJson(response, requestId, 200, null);
+      return;
+    }
 
     if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
       sendJson(response, requestId, 200, await options.service.transitionTask((await readJson()) as never));

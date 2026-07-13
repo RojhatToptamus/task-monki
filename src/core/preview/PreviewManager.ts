@@ -5,7 +5,10 @@ import type {
   OpenPreviewResult,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewResolvedAttachmentTarget,
   PreviewPlanRecord,
+  PreviewPrivateInputOperationResult,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResolvePreviewResult,
@@ -20,6 +23,7 @@ import { PreviewGateway } from './PreviewGateway';
 import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
+import { PreviewLocalBindingRequiredError } from './PreviewPlanResolver';
 import { PreviewRecipeLoader, selectPreviewScenario } from './PreviewRecipeLoader';
 import { PreviewReconciler } from './PreviewReconciler';
 import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
@@ -27,6 +31,8 @@ import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService } from './runtime/PreviewOpenService';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewJobCompletionAmbiguousError } from './runtime/NativeJobRunner';
+import { activePreviewInputIds } from './PreviewRecipeLoader';
+import { PreviewPrivateVault, type PreviewPrivateLease } from './private/PreviewPrivateVault';
 
 export interface PreviewTaskContext {
   task: Task;
@@ -42,6 +48,7 @@ export interface PreparedPreviewGeneration {
   markerDigest: string;
   controller: AbortController;
   setupRetryResourceIds?: string[];
+  privateLease?: PreviewPrivateLease;
 }
 
 export class PreviewManager {
@@ -66,7 +73,8 @@ export class PreviewManager {
     private readonly nativeRuntime: NativeServiceRuntime,
     private readonly reconciler: PreviewReconciler,
     private readonly opener: PreviewOpenService,
-    private readonly ociRuntime?: OciResourceRuntime
+    private readonly ociRuntime?: OciResourceRuntime,
+    private readonly privateVault?: PreviewPrivateVault
   ) {}
 
   init(
@@ -95,7 +103,19 @@ export class PreviewManager {
     const parsed = scenarioId
       ? selectPreviewScenario(loaded.parsed, scenarioId)
       : loaded.parsed;
-    const candidate = await this.planResolver.resolve({ ...context, parsed });
+    let candidate: PreviewPlanRecord;
+    try {
+      candidate = await this.planResolver.resolve({ ...context, parsed });
+    } catch (error) {
+      if (error instanceof PreviewLocalBindingRequiredError) {
+        return {
+          status: 'CONFIGURATION_REQUIRED',
+          reason: error.message,
+          attachmentIds: error.attachmentIds
+        };
+      }
+      throw error;
+    }
     const latest = await this.store.getLatestPreviewPlan(context.task.id);
     const plan =
       latest &&
@@ -109,12 +129,102 @@ export class PreviewManager {
       context.task.id,
       plan.executionDigest
     );
-    return { status: 'PLAN', plan, approval };
+    const inputIds = activePreviewInputIds(plan.executionPlan);
+    const blockers = inputIds.length
+      ? this.privateVault
+        ? await this.privateVault.readiness(context.task.id, inputIds)
+        : inputIds.map((inputId) => ({ kind: 'PROTECTION_UNAVAILABLE' as const, inputId }))
+      : [];
+    return {
+      status: 'PLAN',
+      plan,
+      approval,
+      executionReadiness: { status: blockers.length ? 'BLOCKED' : 'READY', blockers }
+    };
+  }
+
+  async setPrivateInput(taskId: string, inputId: string, value: string): Promise<PreviewPrivateInputOperationResult> {
+    this.assertAcceptingWork();
+    if (!value || Buffer.byteLength(value, 'utf8') > 8_192 || value.includes('\0')) return { status: 'FAILED', code: 'INVALID_VALUE' };
+    if (!this.privateVault) return { status: 'FAILED', code: 'PROTECTION_UNAVAILABLE' };
+    const declared = await this.isPrivateInputDeclared(taskId, inputId);
+    if (!declared) return { status: 'FAILED', code: 'INPUT_NOT_DECLARED' };
+    const result = await this.privateVault.set(taskId, inputId, value);
+    return result === 'STORED' ? { status: 'STORED' } : { status: 'FAILED', code: result };
+  }
+
+  async deletePrivateInput(taskId: string, inputId: string): Promise<PreviewPrivateInputOperationResult> {
+    this.assertAcceptingWork();
+    if (!this.privateVault) return { status: 'FAILED', code: 'PROTECTION_UNAVAILABLE' };
+    await this.privateVault.remove(taskId, inputId);
+    return { status: 'DELETED' };
+  }
+
+  async retryPrivateVaultCleanup() {
+    return { status: await this.sweepPrivateVault() };
+  }
+
+  async retireDeletedTaskPrivateInputs(taskId: string): Promise<void> {
+    await this.privateVault?.retireTask(taskId);
   }
 
   approve(input: { taskId: string; planId: string; executionDigest: string }): Promise<PreviewApprovalRecord> {
     this.assertAcceptingWork();
     return this.approvalPolicy.approve(input);
+  }
+
+  async setLocalAttachmentBinding(input: {
+    context: PreviewTaskContext;
+    taskId: string;
+    attachmentId: string;
+    target: PreviewResolvedAttachmentTarget;
+  }): Promise<PreviewLocalAttachmentBindingRecord> {
+    this.assertAcceptingWork();
+    const loaded = await this.recipeLoader.load(input.context.worktree.worktreePath);
+    if (loaded.status !== 'LOADED') throw new Error(loaded.reason);
+    const attachment = (loaded.parsed.executionPlan.attachments ?? []).find(
+      (candidate) => candidate.id === input.attachmentId
+    );
+    if (!attachment || attachment.target.type !== 'local') {
+      throw new Error('Preview attachment does not declare a local target binding.');
+    }
+    validateLocalAttachmentTarget(input.taskId, attachment.type, input.target);
+    const existing = await this.store.getPreviewLocalBinding(input.taskId, input.attachmentId);
+    const now = new Date().toISOString();
+    const binding = await this.store.savePreviewLocalBinding({
+      id: existing?.id ?? randomUUID(),
+      taskId: input.taskId,
+      attachmentId: input.attachmentId,
+      target: structuredClone(input.target),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    });
+    this.events.emit({
+      type: 'preview.updated', taskId: input.taskId, payload: binding, at: now
+    });
+    return binding;
+  }
+
+  async deleteLocalAttachmentBinding(input: {
+    context: PreviewTaskContext;
+    taskId: string;
+    attachmentId: string;
+  }): Promise<void> {
+    this.assertAcceptingWork();
+    const loaded = await this.recipeLoader.load(input.context.worktree.worktreePath);
+    if (loaded.status === 'LOADED') {
+      const attachment = (loaded.parsed.executionPlan.attachments ?? []).find(
+        (candidate) => candidate.id === input.attachmentId
+      );
+      if (attachment && attachment.target.type !== 'local') {
+        throw new Error('Literal preview attachment targets do not have local bindings.');
+      }
+    }
+    await this.store.deletePreviewLocalBinding(input.taskId, input.attachmentId);
+    this.events.emit({
+      type: 'preview.updated', taskId: input.taskId,
+      payload: { attachmentId: input.attachmentId, deleted: true }, at: new Date().toISOString()
+    });
   }
 
   async prepare(input: {
@@ -127,9 +237,21 @@ export class PreviewManager {
     this.assertAcceptingWork();
     if (resolved.status !== 'PLAN') throw new Error(resolved.reason);
     const approval = await this.approvalPolicy.requireMatching(resolved.plan);
+    const requiredInputs = activePreviewInputIds(resolved.plan.executionPlan);
+    let privateLease: PreviewPrivateLease | undefined;
+    if (requiredInputs.length) {
+      const acquired = this.privateVault
+        ? await this.privateVault.acquire(input.context.task.id, requiredInputs)
+        : requiredInputs.map((inputId) => ({ kind: 'PROTECTION_UNAVAILABLE' as const, inputId }));
+      if (Array.isArray(acquired)) {
+        throw new Error(`Preview execution is blocked: ${acquired.map((blocker) => `${blocker.kind}:${blocker.inputId}`).join(', ')}.`);
+      }
+      privateLease = acquired;
+    }
     const sourceHeadSha = input.gitSnapshot.headSha;
     const sourceDirtyFingerprint = input.gitSnapshot.dirtyFingerprint;
     if (!sourceHeadSha || !sourceDirtyFingerprint) {
+      await privateLease?.release();
       throw new Error('Preview source capture requires complete Git HEAD and dirty fingerprint evidence.');
     }
     const id = randomUUID();
@@ -155,13 +277,26 @@ export class PreviewManager {
       replacesGenerationId: replaced?.id,
       freshness: 'CURRENT',
       routes: [],
+      attachmentReadiness: [],
       createdAt: now,
       updatedAt: now
     };
     const controller = new AbortController();
     this.startups.set(id, controller);
-    generation = await this.store.savePreviewGeneration(generation).catch((error) => {
+    try {
+      if (privateLease) {
+        await this.privateVault?.retainGeneration(id, input.context.task.id, privateLease.revisions);
+      }
+    } catch (error) {
       if (this.startups.get(id) === controller) this.startups.delete(id);
+      await privateLease?.release();
+      await this.privateVault?.releaseGeneration(id).catch(() => undefined);
+      throw error;
+    }
+    generation = await this.store.savePreviewGeneration(generation).catch(async (error) => {
+      if (this.startups.get(id) === controller) this.startups.delete(id);
+      await privateLease?.release();
+      await this.privateVault?.releaseGeneration(id);
       throw error;
     });
     if (controller.signal.aborted || this.lifecycle !== 'READY') {
@@ -173,6 +308,8 @@ export class PreviewManager {
         stoppedAt: new Date().toISOString()
       });
       if (this.startups.get(id) === controller) this.startups.delete(id);
+      await privateLease?.release();
+      await this.privateVault?.releaseGeneration(id);
       throwIfStartupCanceled(controller.signal);
       throw new Error('Preview runtime is shutting down.');
     }
@@ -214,6 +351,7 @@ export class PreviewManager {
           sourcePath: prepared.sourcePath,
           markerDigest: prepared.markerDigest,
           controller,
+          privateLease,
           setupRetryResourceIds
         };
       } catch (error) {
@@ -238,6 +376,8 @@ export class PreviewManager {
         });
         await this.store.prunePreviewHistory(generation.taskId);
         if (this.startups.get(generation.id) === controller) this.startups.delete(generation.id);
+        await privateLease?.release();
+        await this.privateVault?.releaseGeneration(generation.id);
         throw error;
       }
     });
@@ -294,6 +434,18 @@ export class PreviewManager {
           markerDigest: prepared.markerDigest,
           plan: prepared.plan.executionPlan,
           resourceBindings: managed?.bindings,
+          privateBindings: prepared.privateLease?.values,
+          attachmentGatewayPort: this.requireGatewayPort(),
+          releaseBindings: async () => { await prepared.privateLease?.release(); await this.privateVault?.releaseGeneration(generation.id); },
+          onAttachmentEvidence: async (evidence) => {
+            generation = await this.saveGeneration({
+              ...generation,
+              attachmentReadiness: [
+                ...(generation.attachmentReadiness ?? []).filter((item) => item.attachmentId !== evidence.attachmentId),
+                evidence
+              ]
+            });
+          },
           runSetup: setupResourceIds.length > 0,
           onSetupComplete: async () => {
             await this.requireOciRuntime().markSetupReady(setupResourceIds);
@@ -649,6 +801,7 @@ export class PreviewManager {
       failures.push('preview-scoped-oci-resources');
     }
     await this.gateway.close();
+    await this.privateVault?.shutdown();
     if (failures.length > 0) {
       throw new Error(
         `Preview shutdown left ${failures.length} generation(s) with unverified cleanup residue.`
@@ -661,6 +814,7 @@ export class PreviewManager {
     options: { reconcile?: boolean }
   ): Promise<{ port: number; relocated: boolean }> {
     try {
+      await this.sweepPrivateVault();
       const listening = await this.gateway.listen(preferredGatewayPort);
       this.gatewayPort = listening.port;
       if (this.lifecycle !== 'INITIALIZING') {
@@ -785,12 +939,30 @@ export class PreviewManager {
       liveGraph: live
     });
     if (live) this.live.delete(generation.id);
+    if (!cleanupIncomplete) await this.privateVault?.releaseGeneration(generation.id);
     return cleanupIncomplete;
   }
 
   private requireOciRuntime(): OciResourceRuntime {
     if (!this.ociRuntime) throw new Error('OCI preview resources are unavailable.');
     return this.ociRuntime;
+  }
+
+  private async isPrivateInputDeclared(taskId: string, inputId: string): Promise<boolean> {
+    const plan = await this.store.getLatestPreviewPlan(taskId);
+    return Boolean(plan?.executionPlan.inputs?.some((input) => input.id === inputId));
+  }
+
+  private async sweepPrivateVault(): Promise<'CLEAN' | 'CLEANUP_PENDING' | 'RECOVERY_REQUIRED'> {
+    if (!this.privateVault) return 'RECOVERY_REQUIRED';
+    const snapshot = await this.store.snapshot();
+    return this.privateVault.sweep({
+      taskIds: new Set(snapshot.tasks.map((task) => task.id)),
+      retainedGenerationIds: new Set(snapshot.previewGenerations.filter((generation) =>
+        !['STOPPED', 'FAILED'].includes(generation.state) ||
+        ['CLEANUP_INCOMPLETE', 'RECOVERY_REQUIRED'].includes(generation.state)
+      ).map((generation) => generation.id))
+    });
   }
 
   private requireOciEngine(plan: PreviewPlanRecord) {
@@ -867,6 +1039,67 @@ function stablePreviewKey(taskId: string): string {
 
 function boundedError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024);
+}
+
+function validateLocalAttachmentTarget(
+  consumerTaskId: string,
+  attachmentType: 'http' | 'tcp' | 'postgres' | 'redis',
+  target: PreviewResolvedAttachmentTarget
+): void {
+  if (!target || typeof target !== 'object') throw new Error('Preview attachment target is invalid.');
+  if (target.type === 'task-preview-route') {
+    if (
+      attachmentType !== 'http' ||
+      target.targetTaskId === consumerTaskId ||
+      !isBoundedIdentifier(target.targetTaskId, 256) ||
+      !/^[a-z][a-z0-9-]{0,47}$/.test(target.routeId) ||
+      !isSafeAttachmentPath(target.basePath)
+    ) {
+      throw new Error('Task preview route binding is invalid.');
+    }
+    return;
+  }
+  if (target.type !== 'endpoint' || !isSafeAttachmentHost(target.host) || !isPort(target.port)) {
+    throw new Error('Preview endpoint binding is invalid.');
+  }
+  if (attachmentType === 'http') {
+    if (!('scheme' in target) || !['http', 'https'].includes(target.scheme) || !isSafeAttachmentPath(target.basePath)) {
+      throw new Error('HTTP preview endpoint binding is invalid.');
+    }
+    return;
+  }
+  if (attachmentType === 'tcp') {
+    if ('scheme' in target || 'database' in target) throw new Error('TCP preview endpoint binding is invalid.');
+    return;
+  }
+  if (!('database' in target) || !('tls' in target) || !['disabled', 'system-verified'].includes(target.tls)) {
+    throw new Error('Database preview endpoint binding is invalid.');
+  }
+  if (attachmentType === 'postgres') {
+    if (typeof target.database !== 'string' || !target.database || !('username' in target) || !target.username) {
+      throw new Error('PostgreSQL preview endpoint binding is invalid.');
+    }
+    return;
+  }
+  if (typeof target.database !== 'number' || !Number.isInteger(target.database) || target.database < 0 || target.database > 65_535) {
+    throw new Error('Redis preview endpoint binding is invalid.');
+  }
+}
+
+function isSafeAttachmentHost(value: string): boolean {
+  return Boolean(value) && Buffer.byteLength(value) <= 253 && !/[\s\0\r\n/@?#]/.test(value) && !value.startsWith('-');
+}
+
+function isSafeAttachmentPath(value: string): boolean {
+  return value.startsWith('/') && !value.startsWith('//') && !/[\0\r\n?#]/.test(value) && Buffer.byteLength(value) <= 2_048;
+}
+
+function isPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535;
+}
+
+function isBoundedIdentifier(value: string, maxBytes: number): boolean {
+  return Boolean(value) && !/[\0\r\n]/.test(value) && Buffer.byteLength(value) <= maxBytes;
 }
 
 function throwIfStartupCanceled(signal: AbortSignal): void {

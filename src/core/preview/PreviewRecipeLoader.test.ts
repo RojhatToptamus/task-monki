@@ -313,6 +313,54 @@ routes:
     ).toThrow();
   });
 
+  it('keeps private values out of capability plans while approving exact recipients and optional attachment checks', () => {
+    const parsed = parsePreviewRecipe(`
+version: 1
+inputs:
+  token: { type: private, label: API token }
+attachments:
+  upstream:
+    type: http
+    target: { type: endpoint, host: 127.0.0.1, port: 8080 }
+    check: { path: /health, timeoutSeconds: 3 }
+services:
+  web:
+    command: [node, server.mjs]
+    needs: { upstream: ready }
+    env:
+      TOKEN: { type: private-input, input: token }
+      UPSTREAM: { type: attached-http-origin, attachment: upstream }
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+    expect(parsed.executionPlan.inputs).toEqual([{ id: 'token', type: 'private', label: 'API token' }]);
+    expect(parsed.executionDigest).not.toContain('API token');
+    expect(JSON.stringify(parsed.executionPlan)).not.toContain('secret');
+  });
+
+  it('rejects dead attachment checks and attached credentials in setup jobs', () => {
+    const base = `
+version: 1
+inputs: { password: { type: private } }
+attachments:
+  database:
+    type: postgres
+    target: { type: endpoint, host: 127.0.0.1, port: 5432, database: app, username: reader }
+    credentials: { passwordInput: password }
+    check: { timeoutSeconds: 3 }
+jobs:
+  migrate:
+    role: migration
+    command: [node, migrate.mjs]
+    env: { DATABASE_URL: { type: attached-postgres-url, attachment: database } }
+services: {}
+routes: {}
+`;
+    expect(() => parsePreviewRecipe(base)).toThrow();
+  });
+
   it('caps executable graph size at 32 nodes', () => {
     const jobs = Array.from({ length: 32 }, (_, index) => `  job-${index}: { command: [node, -e, process.exit(0)] }`).join('\n');
     expect(() => parsePreviewRecipe(`${RECIPE}\n`)).not.toThrow();

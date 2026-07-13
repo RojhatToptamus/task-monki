@@ -84,6 +84,20 @@ export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLin
       value: `${scenario.label ?? scenario.id} · jobs=${scenario.jobs.join(', ') || 'none'} · resources=${scenario.resources.join(', ') || 'none'}`
     });
   }
+  for (const input of plan.executionPlan.inputs ?? []) {
+    lines.push({ label: `Private input · ${input.id}`, value: 'Encrypted local binding · value excluded from plan and approval digest' });
+  }
+  for (const attachment of plan.executionPlan.attachments ?? []) {
+    const target = attachment.target.type === 'task-preview-route'
+      ? `task=${attachment.target.targetTaskId} route=${attachment.target.routeId}`
+      : attachment.target.type === 'endpoint'
+        ? `endpoint=${attachment.target.host}:${attachment.target.port}`
+        : 'local target required';
+    lines.push({
+      label: `Attached ${attachment.type} · ${attachment.id}`,
+      value: `${target} · non-owned${attachment.check ? ` · one-shot check ${attachment.check.timeoutSeconds}s` : ' · no check'}`
+    });
+  }
   for (const resource of plan.executionPlan.resources) {
     const active = scenario?.resources.includes(resource.id) ?? false;
     const type = resource.type === 'postgres'
@@ -207,7 +221,9 @@ function appendLongNodeSummary(
 function formatEnvironmentReference(value: Exclude<import('../../shared/preview').PreviewEnvironmentValue, string>): string {
   if (value.type === 'route-origin') return `<route-origin:${value.route}>`;
   if (value.type === 'service-origin') return `<service-origin:${value.service}.${value.port}>`;
-  return `<${value.type}:${value.resource}>`;
+  if (value.type === 'private-input') return `<private-input:${value.input}>`;
+  if ('resource' in value) return `<${value.type}:${value.resource}>`;
+  return `<${value.type}:${value.attachment}>`;
 }
 
 function formatProbe(

@@ -1,14 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
+  PreviewAttachmentPlan,
+  PreviewExecutionPlan,
   PreviewOciEngineCapability,
   PreviewPlanRecord,
   WorktreeRecord
 } from '../../shared/contracts';
 import type { Task, TaskIteration } from '../../shared/contracts';
-import type { ParsedPreviewRecipe } from './PreviewRecipeLoader';
+import {
+  activePreviewAttachmentIds,
+  previewExecutionDigest,
+  type ParsedPreviewRecipe
+} from './PreviewRecipeLoader';
 import { canonicalProspectivePath, isPathWithin } from './PreviewPaths';
 import { OciEngineAdapter } from './runtime/OciEngineAdapter';
+import { FileTaskStore } from '../storage/FileTaskStore';
 
 export interface ResolvePreviewPlanInput {
   task: Task;
@@ -19,7 +26,10 @@ export interface ResolvePreviewPlanInput {
 }
 
 export class PreviewPlanResolver {
-  constructor(private readonly ociEngine?: OciEngineAdapter) {}
+  constructor(
+    private readonly ociEngine?: OciEngineAdapter,
+    private readonly store?: FileTaskStore
+  ) {}
 
   async resolve(input: ResolvePreviewPlanInput): Promise<PreviewPlanRecord> {
     const worktreeRoot = await canonicalProspectivePath(input.worktree.worktreePath);
@@ -44,11 +54,12 @@ export class PreviewPlanResolver {
       }
     }
 
-    const selectedScenario = input.parsed.executionPlan.scenarios.find(
-      (scenario) => scenario.id === input.parsed.executionPlan.selectedScenarioId
+    const executionPlan = await this.resolveLocalAttachments(input.task.id, input.parsed.executionPlan);
+    const selectedScenario = executionPlan.scenarios.find(
+      (scenario) => scenario.id === executionPlan.selectedScenarioId
     );
     const activeResourceIds = new Set(selectedScenario?.resources ?? []);
-    const activeResources = input.parsed.executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
+    const activeResources = executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
     const hasOciResources = activeResources.length > 0;
     const ociCapability: PreviewOciEngineCapability | undefined = hasOciResources
       ? await this.ociEngine?.probe() ?? {
@@ -68,20 +79,67 @@ export class PreviewPlanResolver {
       recipePath: '.taskmonki/preview.yaml',
       recipeVersion: 1,
       recipeDigest: input.parsed.recipeDigest,
-      executionDigest: hasOciResources
-        ? digestOciAuthority(input.parsed.executionDigest, ociCapability!)
-        : input.parsed.executionDigest,
-      executionPlan: input.parsed.executionPlan,
+      executionDigest: ociCapability
+        ? digestOciAuthority(previewExecutionDigest(executionPlan), ociCapability)
+        : previewExecutionDigest(executionPlan),
+      executionPlan,
       ociCapability,
       warnings: [
         'Native preview commands run as your local user and are not sandboxed.',
         'Commands may access the network; Task Monki does not enforce a no-network mode.',
-        'Environment values are repository-visible literals or generated non-secret origins; secret inputs are unsupported.',
+        'Private input values are delivered only to the explicitly approved recipients that name them.',
+        'Attached dependencies are non-owned; Task Monki never stops, resets, deletes, migrates, or reconciles them.',
         ...ociWarnings(activeResources, ociCapability)
       ],
       createdAt: input.now ?? new Date().toISOString()
     };
   }
+
+  private async resolveLocalAttachments(
+    taskId: string,
+    plan: PreviewExecutionPlan
+  ): Promise<PreviewExecutionPlan> {
+    const activeIds = new Set(activePreviewAttachmentIds(plan));
+    const missing: string[] = [];
+    const attachments: PreviewAttachmentPlan[] = [];
+    for (const attachment of plan.attachments ?? []) {
+      if (attachment.target.type !== 'local' || !activeIds.has(attachment.id)) {
+        attachments.push(attachment);
+        continue;
+      }
+      const binding = await this.store?.getPreviewLocalBinding(taskId, attachment.id);
+      if (!binding) {
+        missing.push(attachment.id);
+        attachments.push(attachment);
+        continue;
+      }
+      assertTargetMatchesAttachment(attachment, binding.target);
+      attachments.push({ ...attachment, target: binding.target } as PreviewAttachmentPlan);
+    }
+    if (missing.length > 0) throw new PreviewLocalBindingRequiredError(missing);
+    return { ...plan, attachments };
+  }
+}
+
+export class PreviewLocalBindingRequiredError extends Error {
+  constructor(readonly attachmentIds: string[]) {
+    super(`Local preview bindings are required for: ${attachmentIds.join(', ')}.`);
+  }
+}
+
+function assertTargetMatchesAttachment(
+  attachment: PreviewAttachmentPlan,
+  target: import('../../shared/contracts').PreviewResolvedAttachmentTarget
+): void {
+  const matches =
+    attachment.type === 'http'
+      ? target.type === 'task-preview-route' || (target.type === 'endpoint' && 'scheme' in target)
+      : attachment.type === 'tcp'
+        ? target.type === 'endpoint' && !('scheme' in target) && !('database' in target)
+        : attachment.type === 'postgres'
+          ? target.type === 'endpoint' && 'database' in target && typeof target.database === 'string'
+          : target.type === 'endpoint' && 'database' in target && typeof target.database === 'number';
+  if (!matches) throw new Error(`Local binding for attachment ${attachment.id} has the wrong target type.`);
 }
 
 function assertRequestedLimitsSupported(

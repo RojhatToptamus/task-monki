@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { Client as PgClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 import type {
   PreviewManagedEnvironmentRecord,
@@ -10,7 +13,12 @@ import type {
 import { PreviewReadinessService } from '../PreviewReadinessService';
 import { OciEngineAdapter, type OciCommandExecutor } from './OciEngineAdapter';
 import { PreviewCredentialHost } from './PreviewCredentialHost';
-import { OciResourceRuntime } from './OciResourceRuntime';
+import {
+  OciResourceRuntime,
+  probeManagedPostgres,
+  type ManagedPostgresClient,
+  type ManagedPostgresProbeInput
+} from './OciResourceRuntime';
 
 describe('OciResourceRuntime', () => {
   it('keeps one preview-owned resource stable across application generations without persisting credentials', async () => {
@@ -32,12 +40,40 @@ describe('OciResourceRuntime', () => {
     const authenticatedExec = fixture.cli.calls.find(
       (call) => call.argv.includes('container') && call.argv.includes('exec')
     );
-    expect(authenticatedExec?.argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis-password'));
+    expect(authenticatedExec?.argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis.conf'));
     expect(authenticatedExec?.argv).not.toContain('REDIS_PASSWORD');
     expect(second.bindings.cache.redisUrl).toBe(first.bindings.cache.redisUrl);
   });
 
-  it('authenticates from mounted secret files without credentials in the host OCI process', async () => {
+  it('launches Redis from a protected config without credentials in argv or configured environment', async () => {
+    const fixture = createFixture();
+    try {
+      const managed = await fixture.runtime.ensureManagedPreview(
+        runtimeInput(fixture.identity, [redisResource()])
+      );
+      const credential = fixture.credentials.require(managed.resources[0].id);
+      const mount = credential.secretMounts[0];
+      const createCall = fixture.cli.calls.find(
+        (call) => call.argv.includes('container') && call.argv.includes('create')
+      )!;
+
+      expect(mount.targetPath).toBe('/run/taskmonki/redis.conf');
+      expect(await fs.readFile(mount.sourcePath, 'utf8')).toBe(
+        `appendonly yes\nrequirepass ${credential.password}\n`
+      );
+      expect((await fs.stat(path.dirname(mount.sourcePath))).mode & 0o777).toBe(0o700);
+      expect((await fs.stat(mount.sourcePath)).mode & 0o777).toBe(0o644);
+      expect(createCall.argv).toContain('redis-server');
+      expect(createCall.argv).toContain('/run/taskmonki/redis.conf');
+      expect(createCall.argv).not.toContain('sh');
+      expect(JSON.stringify(createCall)).not.toContain(credential.password);
+      expect(Object.values(createCall.env)).not.toContain(credential.password);
+    } finally {
+      await fixture.credentials.clear();
+    }
+  });
+
+  it('authenticates PostgreSQL over its published TCP binding without a Docker helper credential', async () => {
     const fixture = createFixture({ hostAuthenticationEnv: true });
     const managed = await fixture.runtime.ensureManagedPreview(
       runtimeInput(fixture.identity, [postgresResource(), redisResource()])
@@ -47,7 +83,7 @@ describe('OciResourceRuntime', () => {
       (call) => call.argv.includes('container') && call.argv.includes('exec')
     );
 
-    expect(execCalls).toHaveLength(2);
+    expect(execCalls).toHaveLength(1);
     for (const call of execCalls) {
       expect(call.argv).not.toContain('--env');
       expect(call.env.PGPASSWORD).toBeUndefined();
@@ -57,12 +93,65 @@ describe('OciResourceRuntime', () => {
         expect(JSON.stringify(call)).not.toContain(credential.password);
       }
     }
+    expect(execCalls[0].argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis.conf'));
     expect(execCalls.some((call) =>
       call.argv.some((argument) => argument.includes('/run/taskmonki/postgres-password'))
-    )).toBe(true);
-    expect(execCalls.some((call) =>
-      call.argv.some((argument) => argument.includes('/run/taskmonki/redis-password'))
-    )).toBe(true);
+    )).toBe(false);
+    expect(fixture.postgres.calls).toHaveLength(1);
+    expect(fixture.postgres.calls[0]).toMatchObject({
+      host: '127.0.0.1',
+      port: managed.bindings.database.ports.postgres,
+      database: 'app',
+      user: credentials.find((credential) => credential.type === 'postgres')!.username,
+      password: credentials.find((credential) => credential.type === 'postgres')!.password
+    });
+  });
+
+  it('closes the PostgreSQL client after a bounded timeout', async () => {
+    let ended = 0;
+    let configuredTimeout: number | undefined;
+    const client: ManagedPostgresClient = {
+      async connect() { throw new Error('connection timeout'); },
+      async query() {},
+      async end() { ended += 1; }
+    };
+
+    await expect(probeManagedPostgres({
+      host: '127.0.0.1', port: 5432, database: 'app', user: 'tm_user', password: 'secret', timeoutMs: 25
+    }, (config) => {
+      configuredTimeout = config.connectionTimeoutMillis;
+      expect(config.query_timeout).toBe(25);
+      return client;
+    })).rejects.toThrow('connection timeout');
+
+    expect(configuredTimeout).toBe(25);
+    expect(ended).toBe(1);
+  });
+
+  it('cancels and joins an in-flight PostgreSQL client before returning', async () => {
+    const controller = new AbortController();
+    let rejectConnect!: (error: Error) => void;
+    let ended = 0;
+    const client: ManagedPostgresClient = {
+      connect() {
+        return new Promise((_resolve, reject) => { rejectConnect = reject; });
+      },
+      async query() {},
+      async end() {
+        ended += 1;
+        rejectConnect(new Error('connection closed'));
+      }
+    };
+    const operation = probeManagedPostgres({
+      host: '127.0.0.1', port: 5432, database: 'app', user: 'tm_user', password: 'secret',
+      signal: controller.signal
+    }, () => client);
+    await Promise.resolve();
+
+    controller.abort(new Error('preview canceled'));
+
+    await expect(operation).rejects.toThrow('preview canceled');
+    expect(ended).toBe(1);
   });
 
   it('refuses reuse when persisted safe binding identity no longer matches runtime authority', async () => {
@@ -424,7 +513,7 @@ describe('OciResourceRuntime', () => {
         expect(new Set(ports).size).toBe(ports.length);
         expect(new Set(previews.flatMap((preview) => Object.values(preview.bindings).map((binding) => binding.postgresUrl ?? binding.redisUrl))).size).toBe(4);
         const firstIdentity = identitySummary(previews[0]);
-        await assertRealAuthentication(adapter, previews[0]);
+        await assertRealAuthentication(adapter, previews[0], credentials);
 
         const replacement = await runtime.ensureManagedPreview({
           taskId: 'task-one', previewKey: 'preview-one', markerDigest: 'marker-one',
@@ -432,7 +521,7 @@ describe('OciResourceRuntime', () => {
         });
         expect(replacement.setupResourceIds).toEqual([]);
         expect(identitySummary(replacement)).toEqual(firstIdentity);
-        await assertRealAuthentication(adapter, replacement);
+        await assertRealAuthentication(adapter, replacement, credentials);
 
         const oldDatabase = replacement.resources.find((resource) => resource.logicalResourceId === 'database')!;
         const stableCache = replacement.resources.find((resource) => resource.logicalResourceId === 'cache')!;
@@ -447,7 +536,7 @@ describe('OciResourceRuntime', () => {
         )!;
         expect(firstResetDatabase.id).not.toBe(oldDatabase.id);
         expect(reset.resources.find((resource) => resource.logicalResourceId === 'cache')?.id).toBe(stableCache.id);
-        await assertRealAuthentication(adapter, reset);
+        await assertRealAuthentication(adapter, reset, credentials);
 
         await runtime.stopManagedResource(firstResetDatabase.id);
         const repeatedReset = await runtime.ensureManagedPreview({
@@ -474,7 +563,7 @@ describe('OciResourceRuntime', () => {
         expect(alternatingReset.resources.find((resource) => resource.logicalResourceId === 'database')?.id)
           .toBe(stableDatabase.id);
         expect(resetCache.id).not.toBe(stableCache.id);
-        await assertRealAuthentication(adapter, alternatingReset);
+        await assertRealAuthentication(adapter, alternatingReset, credentials);
 
         await adapter.run([
           '--context', capability.identity.contextName,
@@ -526,26 +615,81 @@ describe('OciResourceRuntime', () => {
 
 async function assertRealAuthentication(
   adapter: OciEngineAdapter,
-  runtime: Awaited<ReturnType<OciResourceRuntime['ensureManagedPreview']>>
+  runtime: Awaited<ReturnType<OciResourceRuntime['ensureManagedPreview']>>,
+  credentials: PreviewCredentialHost
 ): Promise<void> {
   const database = runtime.resources.find((resource) => resource.logicalResourceId === 'database')!;
-  await expect(adapter.run([
-    '--context', database.container.engine.contextName,
-    'container', 'exec', database.container.objectId!,
-    'sh', '-eu', '-c',
-    'PGPASSWORD="$(cat /run/taskmonki/postgres-password)"; export PGPASSWORD; exec psql -v ON_ERROR_STOP=1 -U "$(cat /run/taskmonki/postgres-user)" -d app -c "SELECT 1"'
-  ])).resolves.toMatchObject({
-    stdout: expect.stringContaining('1')
-  });
+  const databaseCredential = credentials.require(database.id);
+  const databasePort = runtime.bindings.database.ports.postgres;
+  await expect(queryRealPostgres({
+    port: databasePort,
+    user: databaseCredential.username!,
+    password: databaseCredential.password
+  })).resolves.toBeUndefined();
+  await expect(queryRealPostgres({
+    port: databasePort,
+    user: databaseCredential.username!,
+    password: 'deliberately-wrong-password'
+  })).rejects.toThrow();
+
   const cache = runtime.resources.find((resource) => resource.logicalResourceId === 'cache')!;
+  const cacheCredential = credentials.require(cache.id);
+  const unauthenticated = await adapter.run([
+    '--context', cache.container.engine.contextName,
+    'container', 'exec', cache.container.objectId!,
+    'redis-cli', 'ping'
+  ]);
+  expect(unauthenticated.stdout).not.toContain('PONG');
   await expect(adapter.run([
     '--context', cache.container.engine.contextName,
     'container', 'exec', cache.container.objectId!,
     'sh', '-eu', '-c',
-    'REDISCLI_AUTH="$(cat /run/taskmonki/redis-password)"; export REDISCLI_AUTH; exec redis-cli --no-auth-warning ping'
+    'REDISCLI_AUTH="$(sed -n "s/^requirepass //p" /run/taskmonki/redis.conf)"; export REDISCLI_AUTH; exec redis-cli --no-auth-warning ping'
   ])).resolves.toMatchObject({
     stdout: expect.stringContaining('PONG')
   });
+  const surfaces = await Promise.all([
+    adapter.run([
+      '--context', cache.container.engine.contextName,
+      'container', 'inspect', cache.container.objectId!
+    ]),
+    adapter.run([
+      '--context', cache.container.engine.contextName,
+      'container', 'logs', cache.container.objectId!
+    ]),
+    adapter.run([
+      '--context', cache.container.engine.contextName,
+      'container', 'top', cache.container.objectId!, '-eo', 'pid,user,args'
+    ])
+  ]);
+  for (const surface of surfaces) {
+    const serialized = JSON.stringify(surface);
+    expect(serialized).not.toContain(cacheCredential.password);
+    expect(serialized).not.toContain(encodeURIComponent(cacheCredential.password));
+  }
+}
+
+async function queryRealPostgres(input: {
+  port: number;
+  user: string;
+  password: string;
+}): Promise<void> {
+  const client = new PgClient({
+    host: '127.0.0.1',
+    port: input.port,
+    database: 'app',
+    user: input.user,
+    password: input.password,
+    ssl: false,
+    connectionTimeoutMillis: 5_000,
+    query_timeout: 5_000
+  });
+  try {
+    await client.connect();
+    await client.query('SELECT 1');
+  } finally {
+    await client.end().catch(() => undefined);
+  }
 }
 
 function runtimeInput(expectedEngine: PreviewOciEngineIdentity, resources: Array<PreviewPostgresResourcePlan | PreviewRedisResourcePlan>) {
@@ -594,6 +738,7 @@ function createFixture(options: {
 } = {}) {
   const store = new MemoryManagedStore();
   const cli = new FakeOciCli(options.inheritedLabels === true, options.failRemoveOnce);
+  const postgres = new FakePostgresProbe();
   const adapter = new OciEngineAdapter({
     execute: cli.execute,
     env: options.hostAuthenticationEnv
@@ -617,10 +762,21 @@ function createFixture(options: {
     credentials,
     {
       healthIntervalMs: 20,
-      afterMutation(operation) { if (operation === options.failAfter) throw new Error('injected crash'); }
+      afterMutation(operation) { if (operation === options.failAfter) throw new Error('injected crash'); },
+      postgresProbe: postgres.probe
     }
   );
-  return { store, cli, runtime, identity, credentials };
+  return { store, cli, postgres, runtime, identity, credentials };
+}
+
+class FakePostgresProbe {
+  readonly calls: ManagedPostgresProbeInput[] = [];
+  healthy = true;
+
+  probe = async (input: ManagedPostgresProbeInput): Promise<void> => {
+    this.calls.push({ ...input });
+    if (!this.healthy) throw new Error('authenticated PostgreSQL query failed');
+  };
 }
 
 class MemoryManagedStore {

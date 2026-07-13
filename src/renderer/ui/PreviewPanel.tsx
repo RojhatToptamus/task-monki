@@ -177,6 +177,14 @@ export function PreviewPanel(props: {
       ) : null}
 
       {view.plan ? <PreviewPlanSummary plan={view.plan} expanded={!view.approval} /> : null}
+      {view.plan?.executionPlan.inputs?.length ? (
+        <div className="tm-preview__planbody" aria-label="Private preview inputs">
+          {view.plan.executionPlan.inputs.map((input) => (
+            <PrivateInputControl key={input.id} taskId={props.task.id} inputId={input.id} label={input.label ?? input.id} onChanged={() => props.onResolve(props.task.id, view.plan?.executionPlan.selectedScenarioId)} />
+          ))}
+          <p className="tm-preview__warning">Private values stay encrypted locally. Updating a value preserves capability approval and applies to the next preview generation.</p>
+        </div>
+      ) : null}
 
       <div className="tm-preview__actions">
         {view.actions.map((action) => (
@@ -234,6 +242,36 @@ export function PreviewPanel(props: {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function PrivateInputControl(props: { taskId: string; inputId: string; label: string; onChanged(): Promise<void> }) {
+  const valueRef = useRef<HTMLInputElement>(null);
+  const keyRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async (action: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    try { await action(); await props.onChanged(); } finally {
+      if (valueRef.current) valueRef.current.value = '';
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="tm-preview__planline">
+      <label className="tm-field"><span>{props.label}</span><input ref={valueRef} type="password" autoComplete="off" disabled={busy} /></label>
+      <button type="button" className="outline-button" disabled={busy} onClick={() => void run(async () => {
+        const value = valueRef.current?.value ?? '';
+        const result = await window.previewPrivateInputs?.set({ taskId: props.taskId, inputId: props.inputId, value });
+        if (!result || result.status === 'FAILED') throw new Error('Private input could not be stored.');
+      })}>Save</button>
+      <label className="tm-field"><span>.env key</span><input ref={keyRef} type="text" autoComplete="off" disabled={busy} /></label>
+      <button type="button" className="outline-button" disabled={busy} onClick={() => void run(async () => {
+        const result = await window.previewPrivateInputs?.import({ taskId: props.taskId, inputId: props.inputId, key: keyRef.current?.value ?? '' });
+        if (!result || result.status === 'FAILED') throw new Error('Private input import failed.');
+      })}>Import one key</button>
+      <button type="button" className="outline-button" disabled={busy} onClick={() => void run(() => window.previewPrivateInputs?.delete({ taskId: props.taskId, inputId: props.inputId }) ?? Promise.reject())}>Delete</button>
+    </div>
   );
 }
 

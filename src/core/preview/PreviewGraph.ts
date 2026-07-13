@@ -16,6 +16,7 @@ import { NativeServiceRuntime, type RunningNativeService } from './runtime/Nativ
 import { PreviewPortAllocator } from './runtime/PreviewPortAllocator';
 import type { PreviewListenerInspector } from './runtime/PreviewListenerInspector';
 import type { RuntimeManagedResourceBinding } from './runtime/PreviewCredentialHost';
+import { attachmentEnvironmentValue, PreviewAttachedDependencyRuntime } from './runtime/PreviewAttachedDependencyRuntime';
 
 const MAX_PARALLEL_NATIVE_EFFECTS = 4;
 
@@ -49,7 +50,8 @@ export class PreviewGraph {
     private readonly services: NativeServiceRuntime,
     private readonly readiness: PreviewReadinessService,
     private readonly ports: PreviewPortAllocator,
-    private readonly listeners: PreviewListenerInspector
+    private readonly listeners: PreviewListenerInspector,
+    private readonly attachments = new PreviewAttachedDependencyRuntime()
   ) {}
 
   async start(input: {
@@ -60,6 +62,10 @@ export class PreviewGraph {
     markerDigest: string;
     plan: PreviewExecutionPlan;
     resourceBindings?: Record<string, RuntimeManagedResourceBinding>;
+    privateBindings?: Readonly<Record<string, string>>;
+    attachmentGatewayPort?: number;
+    onAttachmentEvidence?(evidence: import('../../shared/preview').PreviewAttachmentReadinessEvidence): Promise<void>;
+    releaseBindings?(): Promise<void>;
     runSetup: boolean;
     onSetupComplete?(): Promise<void>;
     beforeExclusiveStart?(): Promise<void>;
@@ -81,9 +87,11 @@ export class PreviewGraph {
     const resources = input.plan.resources.filter((resource) => activeResourceIds.has(resource.id));
     const longNodes = [...input.plan.services, ...input.plan.workers];
     const resourceNodes = resources.map((resource) => ({ ...resource, needs: {} as Record<string, never> }));
-    const allNodes = [...jobs, ...resourceNodes, ...longNodes];
+    const attachmentNodes = (input.plan.attachments ?? []).map((attachment) => ({ ...attachment, needs: {} as Record<string, never> }));
+    const allNodes = [...jobs, ...resourceNodes, ...longNodes, ...attachmentNodes];
     const byId = new Map(allNodes.map((node) => [node.id, node]));
     const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
+    const attachmentById = new Map(attachmentNodes.map((attachment) => [attachment.id, attachment]));
     if (byId.size !== allNodes.length) throw new Error('Preview graph node identifiers are not unique.');
     assertGraphAcyclic(byId, satisfiedSetupJobIds);
     const semaphore = new Semaphore(MAX_PARALLEL_NATIVE_EFFECTS);
@@ -123,6 +131,18 @@ export class PreviewGraph {
           }
           return;
         }
+        const attachment = attachmentById.get(node.id);
+        if (attachment) {
+          const result = await this.attachments.check(
+            attachment,
+            input.privateBindings ?? {},
+            startupAbort.signal,
+            input.attachmentGatewayPort
+          );
+          await input.onAttachmentEvidence?.({ attachmentId: attachment.id, ...result });
+          if (result.status === 'FAILED') throw new Error(`Preview attachment ${attachment.id} readiness failed (${result.failureCode ?? 'CHECK_FAILED'}).`);
+          return;
+        }
         if ('critical' in node) {
           const kind = input.plan.services.some((service) => service.id === node.id) ? 'SERVICE' : 'WORKER';
           const ports = await this.allocatePorts(node);
@@ -131,7 +151,7 @@ export class PreviewGraph {
             throwIfAborted(startupAbort.signal);
             try {
               const resolved = resolveEnvironment(
-                node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+                node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
               );
               return await this.services.start({
                 ...runtimeInput(startupInput),
@@ -166,7 +186,7 @@ export class PreviewGraph {
           throwIfAborted(startupAbort.signal);
           try {
             const resolved = resolveEnvironment(
-              node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+              node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
             );
             return await this.jobs.run({
               ...runtimeInput(startupInput),
@@ -211,6 +231,36 @@ export class PreviewGraph {
       throwIfAborted(startupAbort.signal);
       await this.assertRoutedListeners(input.plan, running, allocatedPorts);
       if (exclusiveWorkers.length > 0) {
+        await Promise.all(exclusiveWorkers.map(async (worker) => {
+          await Promise.all(
+            Object.keys(worker.needs)
+              .filter((dependencyId) => attachmentById.has(dependencyId))
+              .sort()
+              .map(execute)
+          );
+          throwIfAborted(startupAbort.signal);
+          resolveEnvironment(
+            worker.env,
+            allocatedPorts,
+            input.routeOrigins ?? {},
+            resourceBindings,
+            input.plan,
+            input.privateBindings ?? {},
+            input.attachmentGatewayPort
+          );
+          for (const probe of [worker.ready, worker.liveness?.probe]) {
+            if (probe?.type !== 'argv') continue;
+            resolveEnvironment(
+              probe.env ?? {},
+              allocatedPorts,
+              input.routeOrigins ?? {},
+              resourceBindings,
+              input.plan,
+              input.privateBindings ?? {},
+              input.attachmentGatewayPort
+            );
+          }
+        }));
         await input.beforeExclusiveStart?.();
         await Promise.all(exclusiveWorkers.map((worker) => execute(worker.id)));
         await Promise.all(
@@ -226,6 +276,7 @@ export class PreviewGraph {
       await this.stopNodes(running, reverseDependencyOrder(input.plan));
       for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
       input.signal?.removeEventListener('abort', onInputAbort);
+      await input.releaseBindings?.();
       throw error;
     }
     input.signal?.removeEventListener('abort', onInputAbort);
@@ -290,7 +341,7 @@ export class PreviewGraph {
             attempt: owner.attempt,
             portValues: owner.ports,
             ...resolvedRuntimeEnvironment(
-              owner.node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings
+              owner.node.env, allocatedPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
             )
           }));
           await this.waitUntilReady(input, owner, semaphore, allocatedPorts, resourceBindings);
@@ -346,6 +397,7 @@ export class PreviewGraph {
           const result = await this.stopNodes(running, reverseDependencyOrder(input.plan));
           await Promise.allSettled([...supervisions, ...activeLiveness]);
           for (const ports of Object.values(allocatedPorts)) this.releasePorts(ports);
+          await input.releaseBindings?.();
           return result;
         })();
         return stopOperation;
@@ -416,7 +468,7 @@ export class PreviewGraph {
             attempt: owner.attempt,
             portValues: owner.ports,
             ...resolvedRuntimeEnvironment(
-              owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
+              owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
             )
           });
         });
@@ -467,7 +519,7 @@ export class PreviewGraph {
             attempt: owner.attempt,
             portValues: owner.ports,
             ...resolvedRuntimeEnvironment(
-              owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
+              owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
             )
           });
         });
@@ -596,7 +648,7 @@ export class PreviewGraph {
       await semaphore.run(() => {
         throwIfAborted(signal);
         const resolved = resolveEnvironment(
-          owner.node.env, allPorts, input.routeOrigins ?? {}, resourceBindings
+          probe.env ?? {}, allPorts, input.routeOrigins ?? {}, resourceBindings, input.plan, input.privateBindings ?? {}, input.attachmentGatewayPort
         );
         return this.jobs.run({
           ...runtimeInput(input),
@@ -708,9 +760,12 @@ function resolvedRuntimeEnvironment(
   env: Record<string, PreviewEnvironmentValue>,
   allPorts: Record<string, Record<string, number>>,
   routeOrigins: Record<string, string>,
-  resourceBindings: Record<string, RuntimeManagedResourceBinding>
+  resourceBindings: Record<string, RuntimeManagedResourceBinding>,
+  plan: PreviewExecutionPlan,
+  privateBindings: Readonly<Record<string, string>>,
+  attachmentGatewayPort?: number
 ): { resolvedEnv: Record<string, string>; redactions: string[] } {
-  const resolved = resolveEnvironment(env, allPorts, routeOrigins, resourceBindings);
+  const resolved = resolveEnvironment(env, allPorts, routeOrigins, resourceBindings, plan, privateBindings, attachmentGatewayPort);
   return { resolvedEnv: resolved.values, redactions: resolved.redactions };
 }
 
@@ -718,7 +773,10 @@ function resolveEnvironment(
   env: Record<string, PreviewEnvironmentValue>,
   allPorts: Record<string, Record<string, number>>,
   routeOrigins: Record<string, string>,
-  resourceBindings: Record<string, RuntimeManagedResourceBinding>
+  resourceBindings: Record<string, RuntimeManagedResourceBinding>,
+  plan: PreviewExecutionPlan,
+  privateBindings: Readonly<Record<string, string>>,
+  attachmentGatewayPort?: number
 ): { values: Record<string, string>; redactions: string[] } {
   const result: Record<string, string> = {};
   const redactions = new Set<string>();
@@ -732,7 +790,7 @@ function resolveEnvironment(
       const port = allPorts[value.service]?.[value.port];
       if (!port) throw new Error(`Preview service origin ${value.service}.${value.port} is unavailable.`);
       result[key] = `http://127.0.0.1:${port}`;
-    } else {
+    } else if (value.type === 'postgres-url' || value.type === 'redis-url') {
       const binding = resourceBindings[value.resource];
       if (!binding) throw new Error(`Preview OCI environment reference ${value.resource} is unavailable.`);
       if (value.type === 'postgres-url') {
@@ -743,6 +801,17 @@ function resolveEnvironment(
         result[key] = binding.redisUrl;
       }
       addUrlRedactions(redactions, result[key]);
+    } else if (value.type === 'private-input') {
+      const secret = privateBindings[value.input];
+      if (!secret) throw new Error(`Private input ${value.input} is unavailable.`);
+      result[key] = secret; redactions.add(secret);
+    } else if (value.type.startsWith('attached-')) {
+      const attachment = (plan.attachments ?? []).find((candidate) => candidate.id === value.attachment);
+      if (!attachment) throw new Error(`Preview attachment ${value.attachment} is unavailable.`);
+      result[key] = attachmentEnvironmentValue(attachment, value.type, privateBindings, attachmentGatewayPort);
+      if (value.type === 'attached-postgres-url' || value.type === 'attached-redis-url') addUrlRedactions(redactions, result[key]);
+    } else {
+      throw new Error(`Preview environment reference ${value.type} has not been resolved.`);
     }
   }
   return {

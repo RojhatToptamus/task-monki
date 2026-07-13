@@ -655,6 +655,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     agentSubagentObservations: [],
     interactionRequests: [],
     previewPlans: [],
+    previewLocalBindings: [],
     previewApprovals: [],
     previewGenerations: [],
     previewManagedEnvironments: [],

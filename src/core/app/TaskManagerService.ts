@@ -41,10 +41,12 @@ import type {
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
   ApprovePreviewPlanRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewApprovalRecord,
   PreviewGenerationRecord,
+  PreviewLocalAttachmentBindingRecord,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
@@ -52,6 +54,7 @@ import type {
   ResolvePreviewRequest,
   ResolvePreviewResult,
   StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
   StopPreviewRequest
 } from '../../shared/contracts';
 import {
@@ -150,6 +153,7 @@ export class TaskManagerService {
       previewOciContextName?: string;
       previewOciEnv?: NodeJS.ProcessEnv;
       previewOpenHost?: PreviewUrlHost;
+      previewSecretProtector?: import('../preview/private/PreviewPrivateVault').PreviewSecretProtector;
       previewEnabled?: boolean;
       previewReconcile?: boolean;
       allowAgentNetworkAccess?: boolean;
@@ -190,7 +194,8 @@ export class TaskManagerService {
         ociContextName:
           options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
         ociEnv: options.previewOciEnv,
-        openHost: options.previewOpenHost
+        openHost: options.previewOpenHost,
+        secretProtector: options.previewSecretProtector
       });
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
@@ -864,6 +869,22 @@ export class TaskManagerService {
     return this.withControlAction(() => this.approvePreviewPlanInternal(input));
   }
 
+  setPreviewPrivateInput(input: { taskId: string; inputId: string; value: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input update', () =>
+      this.previews.setPrivateInput(input.taskId, input.inputId, input.value)
+    );
+  }
+
+  deletePreviewPrivateInput(input: { taskId: string; inputId: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input deletion', () =>
+      this.previews.deletePrivateInput(input.taskId, input.inputId)
+    );
+  }
+
+  retryPreviewPrivateVaultCleanup() {
+    return this.withControlAction(() => this.previews.retryPrivateVaultCleanup());
+  }
+
   private async approvePreviewPlanInternal(
     input: ApprovePreviewPlanRequest
   ): Promise<PreviewApprovalRecord> {
@@ -961,6 +982,26 @@ export class TaskManagerService {
       { taskId: input.taskId, scenarioId: input.scenarioId },
       input
     );
+  }
+
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord> {
+    return this.withTaskAction(input.taskId, 'Preview binding update', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      return this.previews.setLocalAttachmentBinding({ ...input, context });
+    });
+  }
+
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void> {
+    return this.withTaskAction(input.taskId, 'Preview binding deletion', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previews.deleteLocalAttachmentBinding({ ...input, context });
+    });
   }
 
   openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
@@ -1244,6 +1285,7 @@ export class TaskManagerService {
       }
 
       await this.store.deleteTask(task.id);
+      await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
       const result = { taskId: task.id, removedWorktree };
       this.events.emit({
         type: 'task.deleted',
