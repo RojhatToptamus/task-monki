@@ -378,6 +378,59 @@ routes:
 `)).toThrow('exceeds 32');
   });
 
+  it('normalizes an explicit Compose adapter without inventing a native graph', () => {
+    const parsed = parsePreviewRecipe(`
+version: 1
+compose:
+  files: [compose.yaml]
+  projectDirectory: .
+  profiles: [preview]
+  rootServices: [web]
+  services:
+    web:
+      ports: { http: { target: 3000 } }
+      ready: { type: http, port: http, path: /ready, timeoutSeconds: 20 }
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+    expect(parsed.executionPlan).toEqual(expect.objectContaining({
+      adapter: 'COMPOSE',
+      jobs: [],
+      resources: [],
+      services: [],
+      workers: []
+    }));
+    expect(parsed.executionPlan.compose).toEqual(expect.objectContaining({
+      files: ['compose.yaml'],
+      rootServices: ['web']
+    }));
+  });
+
+  it('rejects mixed Compose/native authority and private delivery to Compose', () => {
+    const base = `
+version: 1
+compose:
+  files: [compose.yaml]
+  projectDirectory: .
+  profiles: []
+  rootServices: [web]
+  services:
+    web:
+      ports: { http: { target: 3000 } }
+      ready: { type: tcp, port: http }
+routes: { app: { service: web, port: http, primary: true } }
+`;
+    expect(() => parsePreviewRecipe(base.replace('routes:', 'inputs: { token: { type: private } }\nroutes:')))
+      .toThrow('cannot mix');
+    expect(() => parsePreviewRecipe(base.replace(
+      'routes:',
+      'services: { native: { command: [node, a], ports: { http: { env: PORT } }, ready: { type: tcp, port: http } } }\nroutes:'
+    )))
+      .toThrow('cannot mix');
+    expect(() => parsePreviewRecipe(base.replace('files: [compose.yaml]', 'files: [../compose.yaml]')))
+      .toThrow('stay within');
+  });
+
   it('rejects external symlinks, special entries, and oversized files before parsing', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-recipe-boundary-'));
     fixtureRoots.push(root);

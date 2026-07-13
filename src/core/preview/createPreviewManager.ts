@@ -20,6 +20,9 @@ import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewCredentialHost } from './runtime/PreviewCredentialHost';
 import path from 'node:path';
 import { PreviewPrivateVault, type PreviewSecretProtector } from './private/PreviewPrivateVault';
+import { PreviewComposeCliAdapter } from './compose/PreviewComposeCliAdapter';
+import { PreviewComposeInspector } from './compose/PreviewComposeInspector';
+import { PreviewComposeRuntime } from './compose/PreviewComposeRuntime';
 
 export interface CreatePreviewManagerOptions {
   previewRoot: string;
@@ -58,6 +61,26 @@ export function createPreviewManager(
     new PreviewReadinessService(),
     credentialHost
   );
+  const composeControlRoot = path.join(options.previewRoot, 'compose-control');
+  const composeCli = new PreviewComposeCliAdapter({
+    executable: options.ociExecutablePath,
+    contextName: options.ociContextName,
+    dockerConfigPath: options.ociEnv?.DOCKER_CONFIG ?? path.join(
+      options.ociEnv?.HOME ?? process.env.HOME ?? '',
+      '.docker'
+    ),
+    controlledHome: composeControlRoot
+  });
+  const composeInspector = new PreviewComposeInspector(
+    composeCli,
+    path.join(composeControlRoot, 'inspection')
+  );
+  const composeRuntime = new PreviewComposeRuntime(
+    store,
+    composeCli,
+    composeInspector,
+    ociEngine
+  );
   const graph = new PreviewGraph(
     store,
     new NativeJobRunner(store, launcher),
@@ -70,17 +93,18 @@ export function createPreviewManager(
     store,
     events,
     new PreviewRecipeLoader(),
-    new PreviewPlanResolver(ociEngine, store),
+    new PreviewPlanResolver(ociEngine, store, composeInspector),
     new PreviewApprovalPolicy(store),
     source,
     graph,
     gateway,
     nativeRuntime,
-    new PreviewReconciler(store, gateway, nativeRuntime, source, ociRuntime),
+    new PreviewReconciler(store, gateway, nativeRuntime, source, ociRuntime, composeRuntime),
     new PreviewOpenService(store, options.openHost),
     ociRuntime,
     options.secretProtector
       ? new PreviewPrivateVault(path.join(options.previewRoot, 'private-vault'), options.secretProtector)
-      : undefined
+      : undefined,
+    composeRuntime
   );
 }

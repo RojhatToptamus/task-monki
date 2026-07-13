@@ -200,9 +200,25 @@ services, workers, routes, and managed OCI resources. Task Monki:
   after all required nodes are ready, then stops the retired graph in reverse
   dependency order; failed or canceled candidates do not detach the active
   generation;
+- supports an explicit existing-Compose adapter as a serialized exception to
+  native ready-before-cutover: Compose performs merge/interpolation/dependency
+  resolution, Task Monki records one stable task project, inspection/build run
+  before route detachment, and failed activation preserves verified volumes
+  without claiming automatic rollback;
+- feature-probes `config --no-env-resolution` and bounded `up` controls, invokes
+  Compose with explicit context/config/project/file/profile authority and a
+  clean environment, and stores only a sanitized normalized model with
+  environment key and file-secret recipient identities rather than values;
+- never sends Task Monki private-vault values to Compose, modifies repository
+  Compose files, uses broad orphan/volume cleanup, or deletes external objects,
+  images, or build cache;
+- classifies Compose changes as stateless in-place update, restart preserving
+  exact owned volumes, or explicit destructive reset; removed owned volumes are
+  retained until destructive Stop, while stop/reconciliation operate only on
+  recorded IDs plus the reserved ownership-label subset;
 - preserves the stable gateway authority upstream and rewrites absolute
   target-origin redirects back to that authority;
-- stores compact preview records in schema 13, retains at most 20 terminal
+- stores compact preview records in schema 15, retains at most 20 terminal
   generations per task and 20 completed argv probe attempts per live node,
   keeps live preview-environment and managed-resource authority outside
   generation pruning, and keeps each stdout/stderr artifact bounded;

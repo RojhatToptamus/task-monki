@@ -46,6 +46,62 @@ describe('PreviewPlanResolver', () => {
     await fs.mkdir(worktreePath);
     await expect(resolveOci(worktreePath, 'engine', support, limits)).rejects.toThrow(name);
   });
+
+  it('folds normalized Compose inspection and exact engine authority into approval', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-plan-compose-'));
+    const worktreePath = path.join(root, 'worktree');
+    await fs.mkdir(worktreePath);
+    const now = '2026-01-01T00:00:00.000Z';
+    const resolver = new PreviewPlanResolver({
+      async probe() {
+        return {
+          status: 'READY', contextName: 'desktop-linux', supportsMemoryLimit: true,
+          supportsCpuLimit: true, supportsPidsLimit: true,
+          identity: {
+            contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+            serverVersion: '28', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
+          }
+        };
+      }
+    } as never, undefined, {
+      async inspect() {
+        return {
+          composeVersion: '2.40.0', supportsNoEnvResolution: true as const,
+          trustDigest: 'trust', configDigest: 'config',
+          hostInputs: [{ kind: 'COMPOSE_FILE' as const, path: 'compose.yaml' }],
+          services: [{
+            id: 'web', image: 'node:22', dependsOn: [], exposedPorts: [3000], environmentKeys: [], secretSources: [],
+            namedVolumes: [], networks: ['default'], healthcheck: { test: ['CMD', 'true'] }
+          }],
+          volumes: [], networks: [{ name: 'default', external: false }]
+        };
+      }
+    } as never);
+    const plan = await resolver.resolve({
+      task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryPath: worktreePath, workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
+      iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
+      worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryPath: worktreePath, worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
+      parsed: parsePreviewRecipe(`
+version: 1
+compose:
+  files: [compose.yaml]
+  projectDirectory: .
+  profiles: []
+  rootServices: [web]
+  services:
+    web:
+      ports: { http: { target: 3000 } }
+      ready: { type: tcp, port: http }
+routes: { app: { service: web, port: http, primary: true } }
+`),
+      now
+    });
+    expect(plan.executionPlan.compose?.inspection).toEqual(expect.objectContaining({
+      trustDigest: 'trust', configDigest: 'config'
+    }));
+    expect(plan.ociCapability?.status).toBe('READY');
+    expect(plan.warnings.join('\n')).toContain('one serialized task-scoped project');
+  });
 });
 
 function resolve(worktreePath: string, cwd: string) {

@@ -172,6 +172,72 @@ export interface PreviewRoutePlan {
   primary: boolean;
 }
 
+export interface PreviewComposePortPlan {
+  target: number;
+  protocol: 'tcp';
+}
+
+export interface PreviewComposeServicePlan {
+  id: string;
+  ports: Record<string, PreviewComposePortPlan>;
+  ready?: PreviewHttpReadinessPlan | PreviewTcpReadinessPlan;
+}
+
+export interface PreviewComposeHostInput {
+  kind: 'COMPOSE_FILE' | 'ENV_FILE' | 'SECRET_FILE' | 'BUILD_CONTEXT' | 'DOCKERFILE';
+  path: string;
+  format?: 'COMPOSE' | 'RAW';
+}
+
+export interface PreviewComposeServiceInspection {
+  id: string;
+  image?: string;
+  platform?: string;
+  build?: { context: string; dockerfile?: string };
+  command?: string[];
+  entrypoint?: string[];
+  user?: string;
+  workingDirectory?: string;
+  dependsOn: Array<{
+    service: string;
+    condition: 'service_started' | 'service_healthy';
+    required: boolean;
+    restart: boolean;
+  }>;
+  exposedPorts: number[];
+  environmentKeys: string[];
+  secretSources: string[];
+  namedVolumes: Array<{ source: string; target: string; readOnly: boolean }>;
+  networks: string[];
+  healthcheck?: {
+    test: string[];
+    interval?: string;
+    timeout?: string;
+    startPeriod?: string;
+    retries?: number;
+  };
+}
+
+export interface PreviewComposeInspection {
+  composeVersion: string;
+  supportsNoEnvResolution: true;
+  trustDigest: string;
+  configDigest: string;
+  hostInputs: PreviewComposeHostInput[];
+  services: PreviewComposeServiceInspection[];
+  volumes: Array<{ name: string; external: boolean; driver?: string }>;
+  networks: Array<{ name: string; external: boolean }>;
+}
+
+export interface PreviewComposePlan {
+  files: string[];
+  projectDirectory: string;
+  profiles: string[];
+  rootServices: string[];
+  services: PreviewComposeServicePlan[];
+  inspection?: PreviewComposeInspection;
+}
+
 export interface PreviewOciResourceLimits {
   cpus?: number;
   memoryMb?: number;
@@ -312,6 +378,8 @@ export interface PreviewScenarioPlan {
 
 export interface PreviewExecutionPlan {
   version: 1;
+  adapter?: 'NATIVE' | 'COMPOSE';
+  compose?: PreviewComposePlan;
   inputs?: PreviewPrivateInputPlan[];
   attachments?: PreviewAttachmentPlan[];
   jobs: PreviewJobPlan[];
@@ -368,6 +436,8 @@ export interface PreviewGenerationRecord {
   planId: string;
   approvalId: string;
   executionDigest: string;
+  adapter?: 'NATIVE' | 'COMPOSE';
+  composeChange?: PreviewComposeChangeKind;
   sourceGitSnapshotId: string;
   sourceHeadSha: string;
   sourceDirtyFingerprint: string;
@@ -386,6 +456,65 @@ export interface PreviewGenerationRecord {
   updatedAt: string;
   readyAt?: string;
   cutoverAt?: string;
+  stoppedAt?: string;
+}
+
+export type PreviewComposeChangeKind =
+  | 'IN_PLACE_UPDATE'
+  | 'RESTART_PRESERVE_DATA'
+  | 'DESTRUCTIVE_RESET_REQUIRED';
+
+export type PreviewComposeProjectState =
+  | 'INTENDED'
+  | 'STARTING'
+  | 'READY'
+  | 'PREPARING_UPDATE'
+  | 'UPDATING'
+  | 'RESTARTING'
+  | 'RECOVERY_REQUIRED'
+  | 'STOPPING'
+  | 'STOPPED'
+  | 'CLEANUP_INCOMPLETE';
+
+export interface PreviewComposeContainerRecord {
+  serviceId: string;
+  object: PreviewOciObjectIdentity;
+}
+
+export interface PreviewComposeVolumeRecord {
+  logicalName: string;
+  external: boolean;
+  state: 'ACTIVE' | 'RETAINED';
+  object?: PreviewOciObjectIdentity;
+}
+
+export interface PreviewComposeNetworkRecord {
+  logicalName: string;
+  external: boolean;
+  object?: PreviewOciObjectIdentity;
+}
+
+export interface PreviewComposeProjectRecord {
+  id: string;
+  taskId: string;
+  previewKey: string;
+  projectName: string;
+  state: PreviewComposeProjectState;
+  engine: PreviewOciEngineIdentity;
+  composeVersion: string;
+  trustDigest: string;
+  configDigest: string;
+  ownershipMarkerDigest: string;
+  activeGenerationId?: string;
+  pendingGenerationId?: string;
+  containers: PreviewComposeContainerRecord[];
+  volumes: PreviewComposeVolumeRecord[];
+  networks: PreviewComposeNetworkRecord[];
+  failureReason?: string;
+  cleanupAttemptedAt?: string;
+  cleanupError?: string;
+  createdAt: string;
+  updatedAt: string;
   stoppedAt?: string;
 }
 

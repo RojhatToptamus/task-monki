@@ -140,6 +140,38 @@ describe('PreviewReconciler graph coverage', () => {
     await reconciler.reconcile();
     expect(calls).toEqual(['routes-cleared', 'managed-environment-cleaned']);
   });
+
+  it('retains captured source when exact Compose restart cleanup is refused', async () => {
+    const now = new Date().toISOString();
+    const generation = {
+      id: 'generation', taskId: 'task', adapter: 'COMPOSE' as const,
+      state: 'READY' as const, routingState: 'ACTIVE' as const,
+      routes: [{ id: 'app', state: 'ATTACHED' as const }], createdAt: now, updatedAt: now
+    };
+    let saved: PreviewGenerationRecord | undefined;
+    let sourceCleanupCalls = 0;
+    const reconciler = new PreviewReconciler(
+      {
+        async getPreviewGenerations() { return [generation]; },
+        async savePreviewGeneration(value: PreviewGenerationRecord) { saved = value; return value; },
+        async prunePreviewHistory() { return 0; }
+      } as never,
+      { clearRoutes() {} } as never,
+      {} as never,
+      { async cleanupOwnedGeneration() { sourceCleanupCalls += 1; } } as never,
+      undefined,
+      { async reconcile() { return new Set(['task']); } } as never
+    );
+
+    await reconciler.reconcile();
+
+    expect(sourceCleanupCalls).toBe(0);
+    expect(saved).toMatchObject({
+      state: 'CLEANUP_INCOMPLETE',
+      routingState: 'RETIRED',
+      routes: [{ state: 'DETACHED' }]
+    });
+  });
 });
 
 async function runningGeneration() {

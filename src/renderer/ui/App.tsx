@@ -77,6 +77,7 @@ const emptySnapshot: TaskSnapshot = {
   previewPlans: [],
   previewLocalBindings: [],
   previewApprovals: [],
+  previewComposeProjects: [],
   previewGenerations: [],
   previewManagedEnvironments: [],
   previewManagedResources: [],

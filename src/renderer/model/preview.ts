@@ -69,6 +69,62 @@ export function selectPreviewDiagnosticAttempts(
 }
 
 export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLine[] {
+  if (plan.executionPlan.adapter === 'COMPOSE') {
+    const compose = plan.executionPlan.compose;
+    const inspection = compose?.inspection;
+    if (!compose || !inspection) return [];
+    const lines: PreviewPlanLine[] = [
+      {
+        label: 'Adapter',
+        value: `Docker Compose ${inspection.composeVersion} · one stable serialized project for this task`
+      }
+    ];
+    const engine = plan.ociCapability?.identity;
+    if (engine) {
+      lines.push({
+        label: 'Engine',
+        value: `context=${JSON.stringify(engine.contextName)} · engine=${engine.engineId} · ${engine.operatingSystem}/${engine.architecture} · server=${engine.serverVersion}`
+      });
+    }
+    lines.push(
+      {
+        label: 'Configuration',
+        value: `files=${compose.files.map((file) => JSON.stringify(file)).join(', ')} · projectDirectory=${JSON.stringify(compose.projectDirectory)} · profiles=${compose.profiles.join(', ') || 'none'}`
+      },
+      {
+        label: 'Root services',
+        value: compose.rootServices.join(', ')
+      }
+    );
+    for (const input of inspection.hostInputs) {
+      lines.push({
+        label: `Repository input · ${input.kind.toLowerCase().replace(/_/g, ' ')}`,
+        value: `${input.path}${input.format ? ` · ${input.format.toLowerCase()} format` : ''}`
+      });
+    }
+    for (const service of inspection.services) {
+      const data = service.namedVolumes.filter((volume) => !volume.readOnly).map((volume) => `${volume.source}:${volume.target}`);
+      lines.push({
+        label: `Compose service · ${service.id}`,
+        value: `${service.image ? `image=${JSON.stringify(service.image)}` : 'local build'} · depends=${service.dependsOn.map((dependency) => `${dependency.service}:${dependency.condition}`).join(', ') || 'none'} · env keys=${service.environmentKeys.join(', ') || 'none'} · file secrets=${service.secretSources.join(', ') || 'none'}${data.length ? ` · writable data=${data.join(', ')}` : ''}`
+      });
+    }
+    for (const route of plan.executionPlan.routes) {
+      lines.push({
+        label: `Route · ${route.id}`,
+        value: `${route.id} → ${route.service}.${route.port}${route.primary ? ' · primary' : ''}`
+      });
+    }
+    lines.push({
+      label: 'Replacement',
+      value: 'Build and inspection happen first; activation is serialized with route downtime and has no automatic rollback'
+    });
+    lines.push({
+      label: 'Cleanup',
+      value: 'Stop Preview deletes only exact Task Monki-labeled project containers, owned networks, and active or retained owned volumes; external resources, images, and build cache are never removed'
+    });
+    return lines;
+  }
   const lines: PreviewPlanLine[] = [
     {
       label: 'Built-in environment',
@@ -298,7 +354,9 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Approval required',
       tone: 'action',
-      summary: 'Review the exact native commands, environment, readiness check, route, and cleanup before running.',
+      summary: plan.executionPlan.adapter === 'COMPOSE'
+        ? 'Review the normalized Compose services, repository inputs, routes, data authority, and exact cleanup before running.'
+        : 'Review the exact native commands, environment, readiness check, route, and cleanup before running.',
       plan,
       generation,
       activeGeneration,
@@ -323,7 +381,9 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       status: 'Ready to start',
       tone: 'action',
       summary: activeGeneration
-        ? 'The current preview remains available. The approved plan can replace it after captured source is verified.'
+        ? plan.executionPlan.adapter === 'COMPOSE'
+          ? 'The current preview stays available during capture, inspection, and build. Its routes detach when serialized activation begins.'
+          : 'The current preview remains available. The approved plan can replace it after captured source is verified.'
         : 'The current execution plan is approved. Source will be captured outside the task worktree.',
       plan,
       approval,
@@ -363,7 +423,9 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Replacing',
       tone: 'action',
-      summary: 'The current preview remains available while Task Monki prepares and verifies its replacement.',
+      summary: plan.executionPlan.adapter === 'COMPOSE'
+        ? 'Task Monki is preparing the stable Compose project. Routes may be temporarily detached once activation begins.'
+        : 'The current preview remains available while Task Monki prepares and verifies its replacement.',
       plan,
       approval,
       generation: replacementGeneration,
@@ -378,6 +440,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
   }
   if (generation.state === 'READY') {
     const setupRecovery = evaluateSetupRecovery(input, plan, currentFailedReplacement);
+    const composeResetRequired = currentFailedReplacement?.composeChange === 'DESTRUCTIVE_RESET_REQUIRED';
     return {
       status: generation.freshness === 'STALE' ? 'Running · stale' : 'Running',
       tone: generation.freshness === 'STALE' ? 'warning' : 'success',
@@ -386,16 +449,22 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
           ? `The current preview is still serving captured source. Its replacement failed: ${currentFailedReplacement.failureReason ?? 'startup failed'}`
           : generation.freshness === 'STALE'
             ? 'This preview still serves its captured source. The task changed after capture.'
-            : 'All required nodes are ready and the stable Task Monki routes are attached.',
+            : plan.executionPlan.adapter === 'COMPOSE'
+              ? 'The task-scoped Compose project is ready and the stable Task Monki routes are attached.'
+              : 'All required nodes are ready and the stable Task Monki routes are attached.',
       plan,
       approval,
       generation,
       activeGeneration,
-      recoveryGeneration: setupRecovery.hasManagedFailure ? currentFailedReplacement : undefined,
+      recoveryGeneration: setupRecovery.hasManagedFailure || composeResetRequired
+        ? currentFailedReplacement
+        : undefined,
       latestAttempt,
       actions: [
         { id: 'OPEN', label: 'Open preview', kind: 'primary' },
-        ...(setupRecovery.canRetry
+        ...(composeResetRequired
+          ? []
+          : setupRecovery.canRetry
           ? [{ id: 'RETRY_SETUP' as const, label: 'Retry setup', kind: 'secondary' as const }]
           : setupRecovery.hasManagedFailure
             ? []
@@ -426,7 +495,9 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Recovery required',
       tone: 'error',
-      summary: 'Task Monki needs to reconcile the recorded runtime before cleanup can be attempted safely.',
+      summary: plan.executionPlan.adapter === 'COMPOSE'
+        ? 'Compose activation changed the stable project but did not reach readiness. Routes are detached and verified data volumes are preserved.'
+        : 'Task Monki needs to reconcile the recorded runtime before cleanup can be attempted safely.',
       plan,
       approval,
       generation,

@@ -1,6 +1,6 @@
 # Task Monki local preview implementation plan
 
-Status: Phases 0-3 and the bounded Phase 4 private-input/attachment path are implemented; managed credentials retain the hardened volatile Phase 3 lifecycle
+Status: Phases 0-4 and the bounded Phase 5 Compose adapter are implemented; the real-Compose release gate still requires a CLI with `config --no-env-resolution`
 Date: 2026-07-13
 Supporting rationale: [`../private/task-preview-local-execution-architecture.md`](../private/task-preview-local-execution-architecture.md)
 
@@ -12,11 +12,12 @@ Task Monki owns preview authority and evidence. Provider output, application log
 
 ## 1. Current branch baseline
 
-- `TASK_STORE_SCHEMA_VERSION` is 14, with a selective additive 13 → 14 migration.
+- `TASK_STORE_SCHEMA_VERSION` is 15, with selective additive 13 → 15 and 14 → 15 migrations.
 - Phase 1 implements restricted recipe parsing, task-scoped approval, coherent source capture outside the worktree, native launcher ownership, bounded logs, readiness, stable loopback gateway routes, stop, shutdown, and conservative reconciliation.
 - Phase 2 implements multiple services/routes, workers, DAG scheduling, HTTP/TCP/argv probes, liveness, bounded restart, typed origins, candidate/active/retired generations, ready-before-cutover route replacement, and the exclusive-node overlap contract in section 4.
 - Phase 3 implements stable preview-owned PostgreSQL and Redis resources, one environment-owned network, non-owning generation attachments, volatile credentials, authenticated readiness, setup/retry/reset, post-ready health handling, exact OCI cleanup, and restart cleanup without adoption.
 - Phase 4 adds capability-only private input declarations, main-only macOS `safeStorage` revisions and exact generation retention, single-key `.env` import, task-local public attachment bindings, recipient-scoped delivery, and optional one-shot HTTP/TCP/PostgreSQL/Redis readiness checks. Attached targets remain strictly non-owned and have no post-ready supervisor.
+- Phase 5 adds a conservative existing-Compose adapter with one stable task-scoped project, two-pass normalized inspection, exact project object authority, loopback route exports, serialized replacement, retained owned volumes, and stop-only restart reconciliation.
 - Managed PostgreSQL and Redis credentials remain in the volatile Phase 3 credential host. Protected runtime files bootstrap the pinned images, Redis reads a mounted configuration without secret argv, and PostgreSQL readiness authenticates through its published loopback TCP port. The failed stdin experiment is not a production transport.
 
 The ownership model in sections 2-6 is the architecture to preserve. Phase 4 may replace volatile credential storage, but it must not make managed data generation-owned or give attached dependencies cleanup authority.
@@ -25,7 +26,7 @@ The current unit/integration suite covers the domain and fake-engine contracts. 
 
 ## 2. Product invariants that remain
 
-Application generations remain first-class Task Monki records. A1 → A2 ready-before-cutover replacement is required.
+Application generations remain first-class Task Monki records. Native A1 → A2 replacement remains ready-before-cutover. Compose is the explicit exception: one stable project cannot provide a second isolated candidate, so inspection and build happen while A1 is routed, then routes detach before serialized in-place activation. Failed activation preserves verified volumes and remains offline; Task Monki does not claim automatic rollback.
 
 Each generation still has:
 
@@ -431,10 +432,19 @@ Phase 4 must extend these boundaries rather than add a second lifecycle. In part
 
 ### Phase 5 — existing Compose application adapter
 
-- Inspect and approve normalized repository-owned Compose configuration.
-- Use exact project/config/object authority and loopback exports.
-- Keep Compose persistent data under preview/Compose-project authority; never reintroduce generation-owned managed data.
-- Do not rewrite repository Compose files or infer migration/worker semantics.
+- Implemented recipe mode: explicit local Compose files, project directory, profiles, root services, exposed service ports, bounded HTTP/TCP readiness, and stable Task Monki routes. Native nodes, managed resources, attachments, and private inputs cannot be mixed into this mode.
+- Compose remains authoritative for merge, interpolation, service dependencies, profiles, and normalized configuration. Task Monki performs only a conservative pre-scan needed to bound host reads and reject unsupported authority.
+- Inspection uses an empty explicit env file, `COMPOSE_DISABLE_ENV_FILE=1`, a clean helper environment, explicit context/config/project/file/profile arguments, and two normalized passes. The structural pass requires feature-probed `config --no-interpolate --no-env-resolution`; there is no fallback when the flag is absent.
+- Materialized environment values are transient main-process data. Plans retain only environment key names, file-secret recipient names, public command/image/build/topology authority, relative repository inputs, and digests over the sanitized model. Task Monki vault values are never delivered to Compose.
+- Repository `env_file` and file-backed secret paths must be static, bounded, regular, non-symlink inputs contained by captured source. Ignored or worktree-only files fail the captured-source reinspection. Environment-backed/external Compose secrets, build secrets/SSH, interpolation outside service environment values, bind mounts, source host ports, include/extends/provider, custom host namespaces, scaling/watch/restart policies, and broad device/privilege authority are rejected.
+- One durable Compose project record per task owns exact engine, project, reserved-label, container, owned-network, and active/retained owned-volume authority. External networks and read-only external volumes are recorded as non-owned references and never mutated.
+- Change policy has exactly three outcomes: stateless in-place update; full project restart preserving verified volumes; or explicit destructive reset required. Data-bearing image/build/command/entrypoint/user/layout changes and volume driver/ownership changes never proceed automatically.
+- Replacement builds first, detaches routes immediately before mutation, updates or restarts the same project, waits for Compose running/healthy state plus Task Monki loopback readiness, then reattaches routes. Failure after mutation removes exact failed containers, preserves volumes, and leaves `RECOVERY_REQUIRED` with no automatic rollback claim.
+- Removed owned volumes become retained project data and are deleted only by explicit **Stop Preview & Delete Data**. Cleanup never uses `compose down -v`, `--remove-orphans`, a name prefix, or image/build-cache pruning.
+- A single bounded project health watch fails and detaches the complete Compose preview when a recorded container stops or ownership becomes unverifiable. It owns one timer, is canceled and joined on stop/shutdown, and never creates a second lifecycle authority.
+- Graceful stop/task deletion/shutdown deletes exact owned containers, active and retained owned volumes, and owned networks. Relaunch reconciliation is stop-only and never adopts a project. Repository Compose files are never modified.
+
+The final local release gate passed on Docker Desktop 4.81.0 with Engine 29.6.1 (API 1.55), Compose 5.2.0, and Linux arm64. The CLI exposes `config --no-env-resolution`, and the real-project matrix verified initial start, data-preserving update and restart, explicit reset with new volume identity, readiness failure and retry, cancellation on both sides of activation, exact cleanup, external-resource noninterference, closed published ports, and zero labeled Docker residue.
 
 ### Phase 6 — multi-repository source composition
 
@@ -461,6 +471,7 @@ The default suite does not substitute for the opt-in real-engine gates below. Ph
 | Supervision | Post-ready database/cache death fails/detaches the complete app without deleting volumes. |
 | Ownership/recovery | Real process termination at create/record boundaries, exact cleanup without adoption, inherited-label image, unrelated-object noninterference, >20-generation pruning. |
 | Engine capability | Requested unsupported-limit rejection; advisory disk display; Docker Desktop plus one alternative macOS context. |
+| Compose adapter | Required-flag feature probe; clean two-pass inspection with leakage canaries; stable-project in-place/restart/reset classification; loopback-only routes; volume retention across update/failure; external-object noninterference; exact destructive stop; true relaunch stop-only reconciliation. |
 
 Mocks are useful for domain transitions but cannot satisfy real process, authenticated database/cache, engine identity, crash recovery, or cleanup gates.
 

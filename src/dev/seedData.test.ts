@@ -106,6 +106,8 @@ describe('Task Monki development seed data', () => {
     ]);
     expect(view('preview-preparing').status).toBe('Preparing source');
     expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-compose-ready')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-compose-recovery').summary).toContain('verified data volumes are preserved');
     expect(view('preview-replacing').status).toBe('Replacing');
     expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
     expect(view('preview-replacement-failed').summary).toContain('Candidate web service exited');

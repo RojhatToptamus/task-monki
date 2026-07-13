@@ -289,6 +289,77 @@ describe('preview view model', () => {
     expect(text).toContain('HTTP 127.0.0.1:<web.http via PORT>/health · absolute deadline 17s');
     expect(text).toContain('Route · app: app → web.http · primary');
   });
+
+  it('renders only sanitized Compose authority and uses structured reset-required evidence', () => {
+    const plan = testPlan();
+    plan.executionPlan = {
+      version: 1,
+      adapter: 'COMPOSE',
+      compose: {
+        files: ['compose.yaml'], projectDirectory: '.', profiles: ['preview'], rootServices: ['web'],
+        services: [{
+          id: 'web', ports: { http: { target: 3000, protocol: 'tcp' } },
+          ready: { type: 'tcp', port: 'http', timeoutSeconds: 30 }
+        }],
+        inspection: {
+          composeVersion: '2.40.0', supportsNoEnvResolution: true,
+          trustDigest: 'trust', configDigest: 'config',
+          hostInputs: [{ kind: 'ENV_FILE', path: 'preview.env', format: 'COMPOSE' }],
+          services: [{
+            id: 'web', image: 'app:latest', dependsOn: [],
+            exposedPorts: [3000], environmentKeys: ['DATABASE_URL'], secretSources: ['database-password'],
+            namedVolumes: [{ source: 'data', target: '/data', readOnly: false }],
+            networks: ['default']
+          }],
+          volumes: [{ name: 'data', external: false }],
+          networks: [{ name: 'default', external: false }]
+        }
+      },
+      jobs: [], resources: [], services: [], workers: [],
+      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+    };
+    plan.ociCapability = {
+      status: 'READY', contextName: 'desktop-linux', supportsMemoryLimit: true,
+      supportsCpuLimit: true, supportsPidsLimit: true,
+      identity: {
+        contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+        serverVersion: '29.6.1', apiVersion: '1.55', operatingSystem: 'linux', architecture: 'arm64'
+      }
+    };
+    const summary = buildPreviewPlanSummary(plan).map((line) => `${line.label}: ${line.value}`).join('\n');
+    expect(summary).toContain('context="desktop-linux" · engine=engine · linux/arm64');
+    expect(summary).toContain('env keys=DATABASE_URL');
+    expect(summary).toContain('file secrets=database-password');
+    expect(summary).not.toContain('plaintext-canary');
+
+    const approval = {
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK' as const, approvedAt: task.createdAt
+    };
+    const active = {
+      id: 'active', previewKey: 'task-task1', taskId: task.id, iterationId: 'iteration-1',
+      worktreeId: 'worktree-1', planId: plan.id, approvalId: approval.id,
+      executionDigest: plan.executionDigest, adapter: 'COMPOSE' as const,
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      workspacePath: '/active', state: 'READY' as const, routingState: 'ACTIVE' as const,
+      freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
+    };
+    const resetCandidate = {
+      ...active, id: 'candidate', workspacePath: '/candidate',
+      state: 'RECOVERY_REQUIRED' as const, routingState: 'CANDIDATE' as const,
+      composeChange: 'DESTRUCTIVE_RESET_REQUIRED' as const, replacesGenerationId: active.id,
+      failureReason: 'public wording may change',
+      updatedAt: new Date(Date.parse(task.updatedAt) + 1).toISOString()
+    };
+    const view = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [resetCandidate, active], attempts: []
+    });
+    expect(view.recoveryGeneration?.id).toBe(resetCandidate.id);
+    expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'STOP']);
+    expect(selectPreviewActionGeneration(view, 'STOP')?.id).toBe(resetCandidate.id);
+  });
 });
 
 function uncheckedWorktree() {

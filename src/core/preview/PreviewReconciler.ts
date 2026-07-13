@@ -5,6 +5,7 @@ import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
+import { PreviewComposeRuntime } from './compose/PreviewComposeRuntime';
 
 export class PreviewReconciler {
   constructor(
@@ -12,14 +13,28 @@ export class PreviewReconciler {
     private readonly gateway: PreviewGateway,
     private readonly nativeRuntime: NativeServiceRuntime,
     private readonly sourcePreparer: PreviewSourcePreparer,
-    private readonly ociRuntime?: OciResourceRuntime
+    private readonly ociRuntime?: OciResourceRuntime,
+    private readonly composeRuntime?: PreviewComposeRuntime
   ) {}
 
   async reconcile(): Promise<void> {
     this.gateway.clearRoutes();
+    const composeCleanupFailures = await this.composeRuntime?.reconcile() ?? new Set<string>();
     const generations = await this.store.getPreviewGenerations();
     for (const generation of generations) {
       if (generation.state === 'STOPPED') continue;
+      if (composeCleanupFailures.has(generation.taskId)) {
+        await this.store.savePreviewGeneration({
+          ...generation,
+          routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+          routingState: 'RETIRED',
+          state: 'CLEANUP_INCOMPLETE',
+          cleanupReason: 'Restart reconciliation could not verify exact Compose project cleanup; captured source was retained.',
+          updatedAt: new Date().toISOString(),
+          stoppedAt: undefined
+        });
+        continue;
+      }
       await this.reconcileGeneration(generation);
     }
     await this.ociRuntime?.cleanupTaskResources();

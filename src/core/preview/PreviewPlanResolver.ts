@@ -16,6 +16,8 @@ import {
 import { canonicalProspectivePath, isPathWithin } from './PreviewPaths';
 import { OciEngineAdapter } from './runtime/OciEngineAdapter';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { PreviewComposeInspector } from './compose/PreviewComposeInspector';
+import { previewComposeProjectName } from './compose/PreviewComposeIdentity';
 
 export interface ResolvePreviewPlanInput {
   task: Task;
@@ -28,7 +30,8 @@ export interface ResolvePreviewPlanInput {
 export class PreviewPlanResolver {
   constructor(
     private readonly ociEngine?: OciEngineAdapter,
-    private readonly store?: FileTaskStore
+    private readonly store?: FileTaskStore,
+    private readonly composeInspector?: PreviewComposeInspector
   ) {}
 
   async resolve(input: ResolvePreviewPlanInput): Promise<PreviewPlanRecord> {
@@ -54,13 +57,13 @@ export class PreviewPlanResolver {
       }
     }
 
-    const executionPlan = await this.resolveLocalAttachments(input.task.id, input.parsed.executionPlan);
+    let executionPlan = await this.resolveLocalAttachments(input.task.id, input.parsed.executionPlan);
     const selectedScenario = executionPlan.scenarios.find(
       (scenario) => scenario.id === executionPlan.selectedScenarioId
     );
     const activeResourceIds = new Set(selectedScenario?.resources ?? []);
     const activeResources = executionPlan.resources.filter((resource) => activeResourceIds.has(resource.id));
-    const hasOciResources = activeResources.length > 0;
+    const hasOciResources = activeResources.length > 0 || executionPlan.adapter === 'COMPOSE';
     const ociCapability: PreviewOciEngineCapability | undefined = hasOciResources
       ? await this.ociEngine?.probe() ?? {
           status: 'ENGINE_MISSING',
@@ -71,6 +74,23 @@ export class PreviewPlanResolver {
         }
       : undefined;
     assertRequestedLimitsSupported(activeResources, ociCapability);
+    if (executionPlan.adapter === 'COMPOSE') {
+      if (!executionPlan.compose) throw new Error('Compose preview declaration is missing.');
+      if (ociCapability?.status !== 'READY' || !ociCapability.identity) {
+        throw new Error(ociCapability?.reason ?? 'A ready Docker engine is required to inspect Compose previews.');
+      }
+      if (!this.composeInspector) throw new Error('Compose preview inspection is unavailable.');
+      const inspection = await this.composeInspector.inspect({
+        sourceRoot: worktreeRoot,
+        contextName: ociCapability.identity.contextName,
+        projectName: previewComposeProjectName(input.task.id),
+        plan: executionPlan.compose
+      });
+      executionPlan = {
+        ...executionPlan,
+        compose: { ...executionPlan.compose, inspection }
+      };
+    }
     return {
       id: randomUUID(),
       taskId: input.task.id,
@@ -89,6 +109,11 @@ export class PreviewPlanResolver {
         'Commands may access the network; Task Monki does not enforce a no-network mode.',
         'Private input values are delivered only to the explicitly approved recipients that name them.',
         'Attached dependencies are non-owned; Task Monki never stops, resets, deletes, migrates, or reconciles them.',
+        ...(executionPlan.adapter === 'COMPOSE' ? [
+          'Compose previews use one serialized task-scoped project; route downtime begins when activation starts.',
+          'Failed Compose activation preserves verified volumes but does not automatically restore the previous application.',
+          'Task Monki never delivers private-vault values to Compose.'
+        ] : []),
         ...ociWarnings(activeResources, ociCapability)
       ],
       createdAt: input.now ?? new Date().toISOString()

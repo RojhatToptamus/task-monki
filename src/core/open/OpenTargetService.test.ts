@@ -657,6 +657,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     previewPlans: [],
     previewLocalBindings: [],
     previewApprovals: [],
+    previewComposeProjects: [],
     previewGenerations: [],
     previewManagedEnvironments: [],
     previewManagedResources: [],

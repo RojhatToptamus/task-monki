@@ -329,6 +329,22 @@ describe('FileTaskStore', () => {
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow('Unsupported Task Monki store schema 12');
   });
 
+  it('migrates schema 14 by adding task-scoped Compose authority without changing existing data', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema14-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Phase 4 task', prompt: 'Preserve it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 14;
+    delete persisted.previewComposeProjects;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.schemaVersion).toBe(15);
+    expect(snapshot.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(snapshot.previewComposeProjects).toEqual([]);
+  });
+
   it('repairs schema 13 stores by removing obsolete generation-owned OCI duplicates', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-oci-duplicate-'));
     const store = new FileTaskStore(dir);

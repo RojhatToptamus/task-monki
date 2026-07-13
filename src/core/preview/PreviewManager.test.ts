@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore } from '../storage/FileTaskStore';
@@ -9,6 +9,10 @@ import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewManager } from './PreviewManager';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewRecipeLoader } from './PreviewRecipeLoader';
+import {
+  PreviewComposeActivationError,
+  PreviewComposeResetRequiredError
+} from './compose/PreviewComposeRuntime';
 
 const fixtureRoots: string[] = [];
 afterEach(async () => {
@@ -332,6 +336,227 @@ routes:
       new Set(observedGenerationIds.slice(-20))
     );
     expect(generations.some((generation) => generation.id === observedGenerationIds[0])).toBe(false);
+  });
+});
+
+describe('PreviewManager Compose adapter', () => {
+  it('routes the stable project through the existing generation boundary and destructively stops it once', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-manager-compose-'));
+    fixtureRoots.push(root);
+    const worktreePath = path.join(root, 'worktree');
+    const previewRoot = path.join(root, 'preview');
+    await fs.mkdir(path.join(worktreePath, '.taskmonki'), { recursive: true });
+    await fs.writeFile(path.join(worktreePath, '.taskmonki', 'preview.yaml'), `
+version: 1
+compose:
+  files: [compose.yaml]
+  projectDirectory: .
+  profiles: []
+  rootServices: [web]
+  services:
+    web:
+      ports: { http: { target: 3000 } }
+      ready: { type: tcp, port: http }
+routes: { app: { service: web, port: http, primary: true } }
+`);
+    await fs.writeFile(path.join(worktreePath, 'compose.yaml'), 'services: { web: { image: node:22, expose: [3000] } }\n');
+    const store = new FileTaskStore(path.join(root, 'store'));
+    const task = await store.createTask({ title: 'Compose manager', prompt: 'Test', repositoryPath: worktreePath });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/compose-manager', worktreePath, baseSha: 'head'
+    });
+    const inspection = {
+      composeVersion: '2.40.0', supportsNoEnvResolution: true as const,
+      trustDigest: 'trust', configDigest: 'config',
+      hostInputs: [{ kind: 'COMPOSE_FILE' as const, path: 'compose.yaml' }],
+      services: [{
+        id: 'web', image: 'node:22', dependsOn: [], exposedPorts: [3000], environmentKeys: [], secretSources: [],
+        namedVolumes: [], networks: ['default'], healthcheck: true
+      }],
+      volumes: [], networks: [{ name: 'default', external: false }]
+    };
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '28', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const source = {
+      getGenerationPath(taskId: string, generationId: string) {
+        return path.join(previewRoot, taskId, generationId);
+      },
+      async prepare(input: { taskId: string; generationId: string }) {
+        const generationRoot = path.join(previewRoot, input.taskId, input.generationId);
+        const sourcePath = path.join(generationRoot, 'source');
+        await fs.mkdir(sourcePath, { recursive: true });
+        return {
+          generationRoot, sourcePath, markerDigest: 'marker',
+          manifest: { version: 1 as const, headSha: 'head', entries: [], digest: 'manifest' }
+        };
+      },
+      async cleanupOwnedGeneration(input: { taskId: string; generationId: string }) {
+        await fs.rm(path.join(previewRoot, input.taskId, input.generationId), { recursive: true, force: true });
+        return true;
+      }
+    };
+    let cleanupCalls = 0;
+    let routeOwner = '';
+    const removedRouteOwners: string[] = [];
+    let lastPreviousInspection: unknown;
+    let failureMode: 'NONE' | 'RESET' | 'UNCERTAIN_ACTIVATION' = 'NONE';
+    const composeRuntime = {
+      async apply(input: { beforeActivation(): Promise<void>; previousInspection?: unknown }) {
+        lastPreviousInspection = input.previousInspection;
+        if (failureMode === 'RESET') {
+          throw new PreviewComposeResetRequiredError(['Data compatibility changed.']);
+        }
+        await input.beforeActivation();
+        if (failureMode === 'UNCERTAIN_ACTIVATION') {
+          throw new PreviewComposeActivationError(
+            true,
+            true,
+            'Compose activation failed after the stable project began changing.'
+          );
+        }
+        return { project: {}, change: 'RESTART_PRESERVE_DATA' as const, ports: { web: { http: 49152 } } };
+      },
+      async watch() { return async () => undefined; },
+      async stopWatch() {},
+      async cleanupTask() { cleanupCalls += 1; return 'CLEANED' as const; },
+      async shutdown() {}
+    };
+    const gateway = {
+      async listen() { return { port: 31337, relocated: false }; },
+      async close() {},
+      removeOwnedRoutes(owner: string) { removedRouteOwners.push(owner); },
+      replaceRoutes(owner: string) { routeOwner = owner; }
+    };
+    const manager = new PreviewManager(
+      store,
+      new AppEventBus(),
+      new PreviewRecipeLoader(),
+      new PreviewPlanResolver({ async probe() {
+        return {
+          status: 'READY', contextName: engine.contextName, identity: engine,
+          supportsMemoryLimit: true, supportsCpuLimit: true, supportsPidsLimit: true
+        };
+      } } as never, store, { async inspect() { return inspection; } } as never),
+      new PreviewApprovalPolicy(store),
+      source as never,
+      {} as never,
+      gateway as never,
+      { async stop() { return 'ALREADY_EXITED'; } } as never,
+      previewReconcilerStub() as never,
+      {} as never,
+      undefined,
+      undefined,
+      composeRuntime as never
+    );
+    await manager.init(0, { reconcile: false });
+    const context = { task, iteration, worktree };
+    const resolved = await manager.resolve(context);
+    if (resolved.status !== 'PLAN') throw new Error('Expected Compose plan.');
+    await manager.approve({
+      taskId: task.id, planId: resolved.plan.id, executionDigest: resolved.plan.executionDigest
+    });
+    const gitSnapshot = {
+      id: 'git', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      status: 'CLEAN', headSha: 'head', dirtyFingerprint: 'dirty', capturedAt: new Date().toISOString()
+    } as GitSnapshotRecord;
+    const prepared = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    const ready = await manager.execute(prepared);
+    expect(ready).toEqual(expect.objectContaining({
+      adapter: 'COMPOSE', state: 'READY', routingState: 'ACTIVE',
+      composeChange: 'RESTART_PRESERVE_DATA'
+    }));
+    expect(routeOwner).toBe(ready.id);
+    expect(ready.routes[0]?.targetPort).toBe(49152);
+
+    const saveGeneration = store.savePreviewGeneration.bind(store);
+    let rejectDetachedGenerationId: string | undefined = ready.id;
+    const saveGenerationSpy = vi.spyOn(store, 'savePreviewGeneration').mockImplementation(async (value) => {
+      if (
+        rejectDetachedGenerationId === value.id &&
+        value.routes.length > 0 &&
+        value.routes.every((route) => route.state === 'DETACHED')
+      ) {
+        rejectDetachedGenerationId = undefined;
+        throw new Error('injected detached-generation persistence failure');
+      }
+      return saveGeneration(value);
+    });
+    const rollbackCandidate = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    await expect(manager.execute(rollbackCandidate)).rejects.toThrow(
+      'injected detached-generation persistence failure'
+    );
+    expect(removedRouteOwners).not.toContain(ready.id);
+    expect(await store.getPreviewGeneration(ready.id)).toEqual(expect.objectContaining({
+      state: 'READY',
+      routes: [expect.objectContaining({ state: 'ATTACHED' })]
+    }));
+
+    failureMode = 'RESET';
+    const resetCandidate = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    await expect(manager.execute(resetCandidate)).rejects.toBeInstanceOf(PreviewComposeResetRequiredError);
+    expect(await store.getPreviewGeneration(resetCandidate.generation.id)).toEqual(expect.objectContaining({
+      state: 'RECOVERY_REQUIRED',
+      routingState: 'CANDIDATE',
+      composeChange: 'DESTRUCTIVE_RESET_REQUIRED'
+    }));
+    expect(await store.getPreviewGeneration(ready.id)).toEqual(expect.objectContaining({
+      state: 'READY', routingState: 'ACTIVE'
+    }));
+
+    failureMode = 'UNCERTAIN_ACTIVATION';
+    const uncertainCandidate = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    await expect(manager.execute(uncertainCandidate)).rejects.toBeInstanceOf(PreviewComposeActivationError);
+    expect(await store.getPreviewGeneration(uncertainCandidate.generation.id)).toEqual(expect.objectContaining({
+      state: 'CLEANUP_INCOMPLETE', routingState: 'RETIRED'
+    }));
+    await expect(fs.access(uncertainCandidate.generationRoot)).resolves.toBeUndefined();
+    expect(await store.getPreviewGeneration(ready.id)).toEqual(expect.objectContaining({
+      state: 'CLEANUP_INCOMPLETE', routingState: 'RETIRED'
+    }));
+
+    await store.savePreviewComposeProject({
+      id: 'compose-project', taskId: task.id, previewKey: ready.previewKey,
+      projectName: 'taskmonki_test', state: 'RECOVERY_REQUIRED', engine,
+      composeVersion: inspection.composeVersion, trustDigest: inspection.trustDigest,
+      configDigest: inspection.configDigest, ownershipMarkerDigest: 'marker',
+      containers: [], volumes: [], networks: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+    });
+    failureMode = 'RESET';
+    const recoveryCandidate = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    await expect(manager.execute(recoveryCandidate)).rejects.toBeInstanceOf(
+      PreviewComposeResetRequiredError
+    );
+    expect(lastPreviousInspection).toEqual(inspection);
+
+    failureMode = 'NONE';
+    const cutoverCandidate = await manager.prepare({
+      context, gitSnapshot, async reobserveGit() { return gitSnapshot; }
+    });
+    vi.spyOn(store, 'cutoverPreviewGenerations').mockRejectedValueOnce(
+      new Error('injected Compose cutover persistence failure')
+    );
+    await expect(manager.execute(cutoverCandidate)).rejects.toThrow(
+      'injected Compose cutover persistence failure'
+    );
+    expect(removedRouteOwners).toContain(cutoverCandidate.generation.id);
+
+    const stopped = await manager.stop(ready.id);
+    expect(stopped.state).toBe('STOPPED');
+    expect(cleanupCalls).toBeGreaterThanOrEqual(2);
+    saveGenerationSpy.mockRestore();
   });
 });
 

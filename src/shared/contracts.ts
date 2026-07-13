@@ -21,6 +21,7 @@ import type {
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
   PreviewGenerationRecord,
   PreviewGenerationAttachmentRecord,
   PreviewLocalAttachmentBindingRecord,
@@ -43,7 +44,7 @@ import type {
 export * from './agent';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 14 as const;
+export const TASK_STORE_SCHEMA_VERSION = 15 as const;
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -689,6 +690,7 @@ export interface TaskSnapshot {
   interactionRequests: InteractionRequestRecord[];
   previewPlans: PreviewPlanRecord[];
   previewApprovals: PreviewApprovalRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
   previewGenerations: PreviewGenerationRecord[];
   previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
   previewManagedResources: PreviewManagedResourceRecord[];

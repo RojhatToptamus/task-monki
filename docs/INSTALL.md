@@ -15,6 +15,10 @@ Install these before using Task Monki:
 - Codex CLI 0.141.0 or newer, installed and authenticated
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features
+- Optional: Docker Desktop for managed-data and existing-Compose previews.
+  Compose previews require a Compose CLI that exposes
+  `docker compose config --no-env-resolution`; Task Monki feature-probes this
+  and refuses the preview before mutation when it is unavailable.
 
 Task Monki does not bundle Git, Codex CLI, or GitHub CLI. Packaged desktop apps
 try common command locations. If a CLI is installed somewhere unusual, open

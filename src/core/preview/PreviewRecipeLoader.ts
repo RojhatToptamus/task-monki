@@ -12,6 +12,7 @@ import {
 } from 'yaml';
 import type {
   PreviewAttachmentPlan,
+  PreviewComposePlan,
   PreviewEnvironmentValue,
   PreviewExecutionPlan,
   PreviewJobPlan,
@@ -160,7 +161,7 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     recipe,
     [
       'version', 'inputs', 'attachments', 'jobs', 'resources', 'services', 'workers', 'routes',
-      'scenarios', 'defaultScenario'
+      'scenarios', 'defaultScenario', 'compose'
     ],
     'recipe'
   );
@@ -175,6 +176,44 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
   const services = normalizeNodeMap(recipe.services, 'services', normalizeService);
   const workers = normalizeNodeMap(recipe.workers, 'workers', normalizeWorker);
   const routes = normalizeNodeMap(recipe.routes, 'routes', normalizeRoute);
+  const compose = recipe.compose === undefined
+    ? undefined
+    : normalizeComposePlan(requiredRecord(recipe.compose, 'compose'));
+  if (compose) {
+    if (inputs.length || attachments.length || jobs.length || resources.length || services.length || workers.length) {
+      throw new Error('Compose preview recipes cannot mix native nodes, managed resources, attachments, or private inputs.');
+    }
+    if (routes.length === 0 || routes.length > MAX_ROUTES) {
+      throw new Error(`Preview recipe must contain 1-${MAX_ROUTES} routes.`);
+    }
+    if (routes.filter((route) => route.primary).length !== 1) {
+      throw new Error('Preview recipe requires exactly one primary route.');
+    }
+    const composeServices = new Map(compose.services.map((service) => [service.id, service]));
+    for (const route of routes) {
+      const service = composeServices.get(route.service);
+      if (!service?.ports[route.port]) {
+        throw new Error(`Route ${route.id} references an unknown Compose service port.`);
+      }
+      if (!service.ready) {
+        throw new Error(`Routed Compose service ${service.id} requires an explicit bounded readiness check.`);
+      }
+    }
+    return {
+      version: 1,
+      adapter: 'COMPOSE',
+      compose,
+      inputs: [],
+      attachments: [],
+      jobs: [],
+      resources: [],
+      services: [],
+      workers: [],
+      routes,
+      scenarios: [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: 'default'
+    };
+  }
   if (jobs.length + services.length + workers.length + resources.length > MAX_NODES) {
     throw new Error(`Preview recipe exceeds ${MAX_NODES} executable nodes.`);
   }
@@ -299,6 +338,7 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
 
   return {
     version: 1,
+    adapter: 'NATIVE',
     inputs,
     attachments,
     jobs,
@@ -309,6 +349,83 @@ function normalizeExecutionPlan(recipe: Record<string, unknown>): PreviewExecuti
     scenarios,
     selectedScenarioId
   };
+}
+
+function normalizeComposePlan(value: Record<string, unknown>): PreviewComposePlan {
+  assertKeys(value, ['files', 'projectDirectory', 'profiles', 'rootServices', 'services'], 'compose');
+  const files = normalizeSafeRelativePaths(value.files, 'compose.files', 4);
+  if (files.length === 0) throw new Error('compose.files must name at least one Compose file.');
+  const projectDirectory = normalizeCwd(value.projectDirectory, 'compose.projectDirectory');
+  const profiles = normalizeStringList(value.profiles, 'compose.profiles', 16, 128);
+  const rootServices = normalizeStringList(value.rootServices, 'compose.rootServices', 64, 128);
+  if (rootServices.length === 0) throw new Error('compose.rootServices must name at least one service.');
+  const serviceValues = requiredRecord(value.services, 'compose.services');
+  const services = Object.keys(serviceValues).sort().map((id) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(id)) {
+      throw new Error('compose.services contains an invalid Compose service name.');
+    }
+    const context = `compose.services.${id}`;
+    const service = requiredRecord(serviceValues[id], context);
+    assertKeys(service, ['ports', 'ready'], context);
+    const portValues = requiredRecord(service.ports, `${context}.ports`);
+    if (Object.keys(portValues).length === 0 || Object.keys(portValues).length > MAX_TOTAL_PORTS) {
+      throw new Error(`${context}.ports must contain a bounded nonempty port map.`);
+    }
+    const ports: PreviewComposePlan['services'][number]['ports'] = {};
+    for (const name of Object.keys(portValues).sort()) {
+      assertId(name, `${context}.ports`);
+      const port = requiredRecord(portValues[name], `${context}.ports.${name}`);
+      assertKeys(port, ['target', 'protocol'], `${context}.ports.${name}`);
+      const target = port.target;
+      if (!Number.isInteger(target) || Number(target) < 1 || Number(target) > 65_535) {
+        throw new Error(`${context}.ports.${name}.target must be between 1 and 65535.`);
+      }
+      if (port.protocol !== undefined && port.protocol !== 'tcp') {
+        throw new Error(`${context}.ports.${name}.protocol must be tcp.`);
+      }
+      ports[name] = { target: Number(target), protocol: 'tcp' };
+    }
+    const ready = normalizeProbe(service.ready, `${context}.ready`, ports, 30);
+    if (ready.type === 'argv') throw new Error(`${context}.ready must be http or tcp for Compose.`);
+    return { id, ports, ready };
+  });
+  if (services.length === 0 || services.length > 64) {
+    throw new Error('compose.services must contain 1-64 exposed services.');
+  }
+  const serviceIds = new Set(services.map((service) => service.id));
+  for (const id of rootServices) {
+    if (!serviceIds.has(id)) throw new Error(`compose.rootServices names undeclared service ${id}.`);
+  }
+  return { files, projectDirectory, profiles, rootServices, services };
+}
+
+function normalizeSafeRelativePaths(value: unknown, context: string, limit: number): string[] {
+  const values = normalizeStringList(value, context, limit, 512);
+  return values.map((candidate) => {
+    const normalized = normalizeCwd(candidate, context);
+    if (normalized === '.') throw new Error(`${context} entries must name files.`);
+    return normalized;
+  });
+}
+
+function normalizeStringList(
+  value: unknown,
+  context: string,
+  limit: number,
+  maxBytes: number
+): string[] {
+  if (!Array.isArray(value) || value.length > limit) {
+    throw new Error(`${context} must be a list with at most ${limit} entries.`);
+  }
+  const result = value.map((candidate) => {
+    if (
+      typeof candidate !== 'string' || !candidate || candidate.includes('\0') ||
+      /[\r\n]/.test(candidate) || Buffer.byteLength(candidate) > maxBytes
+    ) throw new Error(`${context} contains an invalid entry.`);
+    return candidate;
+  });
+  if (new Set(result).size !== result.length) throw new Error(`${context} contains duplicates.`);
+  return result;
 }
 
 function normalizeInput(
@@ -1168,6 +1285,15 @@ function assertAcyclic(nodes: Array<{ id: string; needs: Record<string, unknown>
 }
 
 function executionAuthority(plan: PreviewExecutionPlan): unknown {
+  if (plan.adapter === 'COMPOSE') {
+    if (!plan.compose) throw new Error('Compose execution authority is missing its declaration.');
+    return {
+      version: plan.version,
+      adapter: 'COMPOSE',
+      compose: plan.compose,
+      routes: plan.routes
+    };
+  }
   const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
   if (!scenario) throw new Error(`Selected preview scenario is missing: ${plan.selectedScenarioId}.`);
   const activeJobs = new Set([
@@ -1215,6 +1341,7 @@ export function previewExecutionDigest(plan: PreviewExecutionPlan): string {
 }
 
 export function activePreviewAttachmentIds(plan: PreviewExecutionPlan): string[] {
+  if (plan.adapter === 'COMPOSE') return [];
   const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
   if (!scenario) return [];
   const activeJobs = new Set([
@@ -1225,6 +1352,7 @@ export function activePreviewAttachmentIds(plan: PreviewExecutionPlan): string[]
 }
 
 export function activePreviewInputIds(plan: PreviewExecutionPlan): string[] {
+  if (plan.adapter === 'COMPOSE') return [];
   const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
   if (!scenario) return [];
   const activeJobs = new Set([

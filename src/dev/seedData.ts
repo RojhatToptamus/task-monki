@@ -389,6 +389,11 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
   scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
   scenario('preview-oci-ready', 'preview', 'OCI preview ready', 'PostgreSQL and Redis are ready after the selected migration and seed scenario.', ['preview:READY', 'resources:POSTGRES_REDIS']),
+  scenario('preview-compose-approval-required', 'preview', 'Compose preview approval required', 'Normalized Compose authority is ready for explicit approval.', ['preview:APPROVAL_REQUIRED', 'adapter:COMPOSE']),
+  scenario('preview-compose-updating', 'preview', 'Compose preview updating', 'The stable Compose project is inside serialized activation.', ['preview:RUNNING_GRAPH', 'adapter:COMPOSE']),
+  scenario('preview-compose-reset-required', 'preview', 'Compose preview reset required', 'A data compatibility change requires explicit destructive reset.', ['preview:RECOVERY_REQUIRED', 'adapter:COMPOSE', 'change:DESTRUCTIVE_RESET_REQUIRED']),
+  scenario('preview-compose-ready', 'preview', 'Compose preview ready', 'One task-scoped Compose project is ready with stable routes and owned data.', ['preview:READY', 'adapter:COMPOSE']),
+  scenario('preview-compose-recovery', 'preview', 'Compose preview recovery', 'Serialized Compose activation failed while owned volumes remained preserved.', ['preview:RECOVERY_REQUIRED', 'adapter:COMPOSE']),
   scenario('preview-replacing', 'preview', 'Preview replacing', 'The active preview stays routed while a candidate waits for readiness.', ['preview:REPLACING']),
   scenario('preview-replacement-failed', 'preview', 'Preview replacement failed', 'A failed candidate leaves the active preview available.', ['preview:READY', 'replacement:FAILED']),
   scenario('preview-failed', 'preview', 'Preview failed', 'A preview job failed with retained bounded logs.', ['preview:FAILED']),
@@ -739,6 +744,11 @@ async function seedScenario(
     case 'preview-preparing':
     case 'preview-ready':
     case 'preview-oci-ready':
+    case 'preview-compose-approval-required':
+    case 'preview-compose-updating':
+    case 'preview-compose-reset-required':
+    case 'preview-compose-ready':
+    case 'preview-compose-recovery':
     case 'preview-replacing':
     case 'preview-replacement-failed':
     case 'preview-failed':
@@ -837,8 +847,13 @@ async function createPreviewScenario(
   const state = await createWorktreeState(ctx, definition, 'clean');
   if (definition.slug === 'preview-missing-recipe') return state;
   const ociReady = definition.slug === 'preview-oci-ready';
+  const composePreview = definition.slug.startsWith('preview-compose-');
+  const composeEngine = {
+    contextName: 'desktop-linux', endpointDigest: 'seed-endpoint', engineId: 'seed-engine',
+    serverVersion: '28.0.4', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
+  };
   const now = new Date().toISOString();
-  const plan = await ctx.store.savePreviewPlan({
+  let plan = await ctx.store.savePreviewPlan({
     id: `seed-plan-${definition.slug}`,
     taskId: state.task.id,
     iterationId: state.iteration.id,
@@ -928,7 +943,58 @@ async function createPreviewScenario(
     ],
     createdAt: now
   });
-  if (definition.slug === 'preview-approval-required') return state;
+  if (composePreview) {
+    plan = await ctx.store.savePreviewPlan({
+      ...plan,
+      executionPlan: {
+        version: 1,
+        adapter: 'COMPOSE',
+        compose: {
+          files: ['compose.yaml'], projectDirectory: '.', profiles: [], rootServices: ['web'],
+          services: [{
+            id: 'web', ports: { http: { target: 3000, protocol: 'tcp' } },
+            ready: { type: 'http', port: 'http', path: '/ready', timeoutSeconds: 30 }
+          }],
+          inspection: {
+            composeVersion: '2.40.0', supportsNoEnvResolution: true,
+            trustDigest: `seed-compose-trust-${definition.slug}`,
+            configDigest: `seed-compose-config-${definition.slug}`,
+            hostInputs: [
+              { kind: 'COMPOSE_FILE', path: 'compose.yaml' },
+              { kind: 'ENV_FILE', path: 'preview.env', format: 'COMPOSE' }
+            ],
+            services: [{
+              id: 'web', image: 'seed/web:latest', dependsOn: [{
+                service: 'database', condition: 'service_healthy', required: true, restart: false
+              }],
+              exposedPorts: [3000], environmentKeys: ['DATABASE_URL'], secretSources: [], namedVolumes: [],
+              networks: ['default'], healthcheck: { test: ['CMD', 'true'] }
+            }, {
+              id: 'database', image: 'postgres:17-alpine', dependsOn: [],
+              exposedPorts: [5432], environmentKeys: ['POSTGRES_DB'], secretSources: ['database-password'],
+              namedVolumes: [{ source: 'database-data', target: '/var/lib/postgresql/data', readOnly: false }],
+              networks: ['default'], healthcheck: { test: ['CMD-SHELL', 'pg_isready'] }
+            }],
+            volumes: [{ name: 'database-data', external: false }],
+            networks: [{ name: 'default', external: false }]
+          }
+        },
+        inputs: [], attachments: [], jobs: [], resources: [], services: [], workers: [],
+        routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+      },
+      warnings: [
+        'Compose previews use one serialized task-scoped project; route downtime begins when activation starts.',
+        'Task Monki never delivers private-vault values to Compose.'
+      ],
+      ociCapability: {
+        status: 'READY', contextName: composeEngine.contextName,
+        supportsMemoryLimit: true, supportsCpuLimit: true, supportsPidsLimit: true,
+        identity: composeEngine
+      }
+    });
+  }
+  if (['preview-approval-required', 'preview-compose-approval-required'].includes(definition.slug)) return state;
   const generationPlan =
     definition.slug === 'preview-active-approval-required'
       ? await ctx.store.savePreviewPlan({
@@ -955,7 +1021,7 @@ async function createPreviewScenario(
     `${JSON.stringify({ version: 1, headSha: state.gitSnapshot?.headSha, entries: [], digest: 'seed-manifest' })}\n`
   );
   const routeAttached = generationState === 'READY';
-  const generation = await ctx.store.savePreviewGeneration({
+  let generation = await ctx.store.savePreviewGeneration({
     id: generationId,
     previewKey: `task-${state.task.id.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 16)}`,
     taskId: state.task.id,
@@ -964,6 +1030,8 @@ async function createPreviewScenario(
     planId: generationPlan.id,
     approvalId: approval.id,
     executionDigest: generationPlan.executionDigest,
+    adapter: composePreview ? 'COMPOSE' : 'NATIVE',
+    composeChange: composePreview ? 'RESTART_PRESERVE_DATA' : undefined,
     sourceGitSnapshotId: state.gitSnapshot?.id ?? 'seed-git',
     sourceHeadSha: state.gitSnapshot?.headSha ?? ctx.baseSha,
     sourceDirtyFingerprint: state.gitSnapshot?.dirtyFingerprint ?? 'seed-dirty',
@@ -987,7 +1055,11 @@ async function createPreviewScenario(
         ]
       : [],
     failureReason:
-      generationState === 'FAILED' ? 'Preview job prepare failed with exit code 7.' : undefined,
+      generationState === 'FAILED'
+        ? 'Preview job prepare failed with exit code 7.'
+        : definition.slug === 'preview-compose-recovery'
+          ? 'Compose activation failed after the stable project began changing; verified data volumes were preserved.'
+          : undefined,
     cleanupReason:
       generationState === 'CLEANUP_INCOMPLETE'
         ? 'Recorded native process identity could not be verified; cleanup was refused.'
@@ -997,6 +1069,80 @@ async function createPreviewScenario(
     readyAt: routeAttached ? now : undefined,
     stoppedAt: generationState === 'STOPPED' ? now : undefined
   });
+  if (composePreview) {
+    const engine = composeEngine;
+    const replacementState = ['preview-compose-updating', 'preview-compose-reset-required'].includes(definition.slug);
+    let activeGenerationId: string | undefined;
+    if (replacementState) {
+      const activeId = `${generation.id}-active`;
+      const activeAt = new Date(Date.parse(now) - 1_000).toISOString();
+      await ctx.store.savePreviewGeneration({
+        ...generation,
+        id: activeId,
+        workspacePath: path.join(ctx.previewRoot, state.task.id, activeId),
+        state: 'READY',
+        routingState: 'ACTIVE',
+        composeChange: 'IN_PLACE_UPDATE',
+        replacesGenerationId: undefined,
+        routes: [{
+          id: 'app', hostname: `app.seed-${definition.slug}.preview.localhost`,
+          url: `http://app.seed-${definition.slug}.preview.localhost:31337/`,
+          gatewayPort: 31337, targetHost: '127.0.0.1',
+          targetPort: 41000 + ctx.scenarios.length, state: 'ATTACHED'
+        }],
+        failureReason: undefined,
+        createdAt: activeAt,
+        updatedAt: activeAt,
+        readyAt: activeAt
+      });
+      generation = await ctx.store.savePreviewGeneration({
+        ...generation,
+        composeChange: definition.slug === 'preview-compose-reset-required'
+          ? 'DESTRUCTIVE_RESET_REQUIRED'
+          : 'IN_PLACE_UPDATE',
+        replacesGenerationId: activeId,
+        failureReason: definition.slug === 'preview-compose-reset-required'
+          ? 'Compose preview requires explicit data reset: data-bearing service compatibility changed.'
+          : undefined
+      });
+      activeGenerationId = activeId;
+    }
+    await ctx.store.savePreviewComposeProject({
+      id: `seed-compose-project-${definition.slug}`,
+      taskId: state.task.id,
+      previewKey: generation.previewKey,
+      projectName: `taskmonki_seed_${definition.slug.replace(/[^a-z0-9]/g, '_')}`,
+      state: definition.slug === 'preview-compose-updating'
+        ? 'UPDATING'
+        : definition.slug === 'preview-compose-reset-required' || generationState === 'READY'
+          ? 'READY'
+          : 'RECOVERY_REQUIRED',
+      engine,
+      composeVersion: '2.40.0',
+      trustDigest: `seed-compose-trust-${definition.slug}`,
+      configDigest: `seed-compose-config-${definition.slug}`,
+      ownershipMarkerDigest: 'seed-compose-marker',
+      activeGenerationId: activeGenerationId ?? (generationState === 'READY' ? generation.id : undefined),
+      pendingGenerationId: definition.slug === 'preview-compose-updating' ? generation.id : undefined,
+      containers: generationState === 'READY' || replacementState ? [{
+        serviceId: 'web', object: {
+          engine, objectId: `seed-container-${definition.slug}`, objectName: `seed-${definition.slug}-web-1`, labelsDigest: 'seed-labels'
+        }
+      }] : [],
+      volumes: [{
+        logicalName: 'database-data', external: false, state: 'ACTIVE',
+        object: { engine, objectId: `seed-volume-${definition.slug}`, objectName: `seed-${definition.slug}-data`, labelsDigest: 'seed-labels' }
+      }],
+      networks: generationState === 'READY' || replacementState ? [{
+        logicalName: 'default', external: false,
+        object: { engine, objectId: `seed-network-${definition.slug}`, objectName: `seed-${definition.slug}-default`, labelsDigest: 'seed-labels' }
+      }] : [],
+      failureReason: generation.failureReason,
+      createdAt: now,
+      updatedAt: now
+    });
+    return state;
+  }
   if (generationState === 'PREPARING_SOURCE') return state;
   const stdout = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stdout');
   const stderr = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stderr');
@@ -1087,10 +1233,11 @@ async function createPreviewScenario(
 
 function previewStateForSeed(slug: string): PreviewGenerationState {
   if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
-  if (['preview-ready', 'preview-oci-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
+  if (slug === 'preview-compose-updating') return 'RUNNING_GRAPH';
+  if (['preview-ready', 'preview-oci-ready', 'preview-compose-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
   if (slug === 'preview-failed') return 'FAILED';
   if (slug === 'preview-stopped') return 'STOPPED';
-  if (slug === 'preview-recovery-required') return 'RECOVERY_REQUIRED';
+  if (['preview-recovery-required', 'preview-compose-recovery', 'preview-compose-reset-required'].includes(slug)) return 'RECOVERY_REQUIRED';
   if (slug === 'preview-cleanup-incomplete') return 'CLEANUP_INCOMPLETE';
   throw new Error(`No seeded preview state for ${slug}.`);
 }

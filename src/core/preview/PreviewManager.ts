@@ -4,6 +4,7 @@ import type {
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewApprovalRecord,
+  PreviewComposeInspection,
   PreviewGenerationRecord,
   PreviewLocalAttachmentBindingRecord,
   PreviewResolvedAttachmentTarget,
@@ -33,6 +34,11 @@ import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewJobCompletionAmbiguousError } from './runtime/NativeJobRunner';
 import { activePreviewInputIds } from './PreviewRecipeLoader';
 import { PreviewPrivateVault, type PreviewPrivateLease } from './private/PreviewPrivateVault';
+import {
+  PreviewComposeActivationError,
+  PreviewComposeResetRequiredError,
+  PreviewComposeRuntime
+} from './compose/PreviewComposeRuntime';
 
 export interface PreviewTaskContext {
   task: Task;
@@ -74,7 +80,8 @@ export class PreviewManager {
     private readonly reconciler: PreviewReconciler,
     private readonly opener: PreviewOpenService,
     private readonly ociRuntime?: OciResourceRuntime,
-    private readonly privateVault?: PreviewPrivateVault
+    private readonly privateVault?: PreviewPrivateVault,
+    private readonly composeRuntime?: PreviewComposeRuntime
   ) {}
 
   init(
@@ -117,6 +124,12 @@ export class PreviewManager {
       throw error;
     }
     const latest = await this.store.getLatestPreviewPlan(context.task.id);
+    const active = (await this.store.getPreviewGenerations(context.task.id)).find(
+      (generation) => generation.routingState === 'ACTIVE' && generation.state === 'READY'
+    );
+    if (active && (active.adapter ?? 'NATIVE') !== (candidate.executionPlan.adapter ?? 'NATIVE')) {
+      throw new Error('Stop the current preview before switching between native and Compose adapters.');
+    }
     const plan =
       latest &&
       latest.iterationId === candidate.iterationId &&
@@ -268,6 +281,7 @@ export class PreviewManager {
       planId: resolved.plan.id,
       approvalId: approval.id,
       executionDigest: resolved.plan.executionDigest,
+      adapter: resolved.plan.executionPlan.adapter ?? 'NATIVE',
       sourceGitSnapshotId: input.gitSnapshot.id,
       sourceHeadSha,
       sourceDirtyFingerprint,
@@ -385,6 +399,9 @@ export class PreviewManager {
 
   execute(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
     this.assertAcceptingWork();
+    if (prepared.plan.executionPlan.adapter === 'COMPOSE') {
+      return this.executeCompose(prepared);
+    }
     const controller = prepared.controller;
     return this.withGenerationLock(prepared.generation.id, async () => {
       let generation = prepared.generation;
@@ -572,6 +589,196 @@ export class PreviewManager {
     });
   }
 
+  private executeCompose(prepared: PreparedPreviewGeneration): Promise<PreviewGenerationRecord> {
+    const controller = prepared.controller;
+    return this.withGenerationLock(prepared.generation.id, async () => {
+      let generation = prepared.generation;
+      const compose = prepared.plan.executionPlan.compose;
+      const approvedInspection = compose?.inspection;
+      if (!compose || !approvedInspection) {
+        throw new Error('Approved Compose inspection is missing.');
+      }
+      const runtime = this.requireComposeRuntime();
+      const replaced = generation.replacesGenerationId
+        ? await this.store.getPreviewGeneration(generation.replacesGenerationId)
+        : undefined;
+      const previousPlan = replaced ? await this.store.getPreviewPlan(replaced.planId) : undefined;
+      let previousInspection = previousPlan?.executionPlan.adapter === 'COMPOSE'
+        ? previousPlan.executionPlan.compose?.inspection
+        : undefined;
+      let activationStarted = false;
+      try {
+        previousInspection ??= await this.findComposeProjectInspection(
+          generation.taskId,
+          generation.id
+        );
+        generation = await this.saveGeneration({ ...generation, state: 'RUNNING_GRAPH' });
+        const applied = await runtime.apply({
+          taskId: generation.taskId,
+          previewKey: generation.previewKey,
+          generationId: generation.id,
+          sourcePath: prepared.sourcePath,
+          generationRoot: prepared.generationRoot,
+          markerDigest: prepared.markerDigest,
+          plan: compose,
+          approvedInspection,
+          previousInspection,
+          expectedEngine: this.requireOciEngine(prepared.plan),
+          signal: controller.signal,
+          beforeActivation: async () => {
+            if (replaced) {
+              const detached = await this.saveGeneration({
+                ...replaced,
+                routes: replaced.routes.map((route) => ({ ...route, state: 'DETACHED' as const }))
+              });
+              this.detachRoutes(detached);
+            }
+            activationStarted = true;
+          }
+        });
+        const routes = prepared.plan.executionPlan.routes.map((route) => {
+          const targetPort = applied.ports[route.service]?.[route.port];
+          if (!targetPort) throw new Error(`Compose route ${route.id} target port is unavailable.`);
+          const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
+          return {
+            id: route.id,
+            hostname,
+            url: `http://${hostname}:${this.requireGatewayPort()}/`,
+            gatewayPort: this.requireGatewayPort(),
+            targetHost: '127.0.0.1' as const,
+            targetPort,
+            state: 'ATTACHED' as const
+          };
+        });
+        const cutoverAt = new Date().toISOString();
+        const candidate: PreviewGenerationRecord = {
+          ...generation,
+          composeChange: applied.change,
+          state: 'READY',
+          routingState: 'ACTIVE',
+          routes,
+          readyAt: cutoverAt,
+          cutoverAt,
+          updatedAt: cutoverAt
+        };
+        this.gateway.replaceRoutes(
+          generation.id,
+          Object.fromEntries(routes.map((route) => [route.hostname, {
+            host: route.targetHost,
+            port: route.targetPort
+          }])),
+          replaced?.id
+        );
+        let cutover: Awaited<ReturnType<FileTaskStore['cutoverPreviewGenerations']>>;
+        try {
+          cutover = await this.store.cutoverPreviewGenerations({
+            candidate,
+            replaced: replaced
+              ? {
+                  ...replaced,
+                  routingState: 'RETIRED',
+                  routes: replaced.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+                  updatedAt: cutoverAt
+                }
+              : undefined
+          });
+        } catch (error) {
+          this.gateway.removeOwnedRoutes(generation.id);
+          throw error;
+        }
+        generation = cutover.candidate;
+        this.emitGeneration(generation);
+        if (cutover.replaced) {
+          this.emitGeneration(cutover.replaced);
+          await this.stopApplicationGeneration(cutover.replaced.id).catch(() => undefined);
+        }
+        await runtime.watch(generation.taskId, async (reason) => {
+          await this.withGenerationLock(generation.id, async () => {
+            const current = await this.store.getPreviewGeneration(generation.id);
+            if (!current || current.state !== 'READY') return;
+            this.detachRoutes(current);
+            const composeCleanupIncomplete =
+              await runtime.cleanupTask(current.taskId, { deleteData: false }) === 'REFUSED';
+            const cleanupIncomplete = composeCleanupIncomplete
+              ? true
+              : await this.cleanupApplicationRuntime(current);
+            await this.saveGeneration({
+              ...current,
+              routes: current.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+              routingState: 'RETIRED',
+              state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+              failureReason: reason,
+              cleanupReason: cleanupIncomplete
+                ? 'Compose failure cleanup could not verify captured-source removal.'
+                : undefined
+            });
+          });
+        });
+        return generation;
+      } catch (error) {
+        if (error instanceof PreviewComposeResetRequiredError) {
+          const cleanupIncomplete = await this.cleanupApplicationRuntime(generation);
+          await this.saveGeneration({
+            ...generation,
+            composeChange: 'DESTRUCTIVE_RESET_REQUIRED',
+            state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'RECOVERY_REQUIRED',
+            failureReason: error.message,
+            cleanupReason: cleanupIncomplete
+              ? 'Compose reset-required candidate workspace cleanup is incomplete.'
+              : undefined
+          });
+          throw error;
+        }
+        const changedProject = activationStarted ||
+          (error instanceof PreviewComposeActivationError && error.activationStarted);
+        let composeCleanupIncomplete = error instanceof PreviewComposeActivationError
+          ? error.cleanupIncomplete
+          : false;
+        if (changedProject && !(error instanceof PreviewComposeActivationError)) {
+          composeCleanupIncomplete =
+            await runtime.cleanupTask(generation.taskId, { deleteData: false }) === 'REFUSED';
+        }
+        if (changedProject && replaced) {
+          const cleanupIncomplete = composeCleanupIncomplete
+            ? true
+            : await this.cleanupApplicationRuntime(replaced);
+          await this.saveGeneration({
+            ...replaced,
+            routes: replaced.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+            routingState: 'RETIRED',
+            state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'FAILED',
+            failureReason: 'Compose replacement changed the stable project but did not reach readiness.',
+            cleanupReason: cleanupIncomplete
+              ? 'Compose replacement cleanup is incomplete; captured source was retained.'
+              : undefined
+          });
+        }
+        if (changedProject) {
+          const cleanupIncomplete = composeCleanupIncomplete
+            ? true
+            : await this.cleanupApplicationRuntime(generation);
+          await this.saveGeneration({
+            ...generation,
+            routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+            routingState: 'RETIRED',
+            state: cleanupIncomplete ? 'CLEANUP_INCOMPLETE' : 'RECOVERY_REQUIRED',
+            failureReason: error instanceof Error ? error.message : 'Compose activation failed.',
+            cleanupReason: cleanupIncomplete
+              ? 'Compose activation cleanup is incomplete; captured source was retained.'
+              : undefined
+          });
+          throw error;
+        }
+        await this.cleanupFailedGeneration(generation, error);
+        throw error;
+      }
+    }).finally(() => {
+      if (this.startups.get(prepared.generation.id) === controller) {
+        this.startups.delete(prepared.generation.id);
+      }
+    });
+  }
+
   async stop(generationId: string): Promise<PreviewGenerationRecord> {
     const generation = await this.requireGeneration(generationId);
     this.startups.get(generationId)?.abort();
@@ -582,6 +789,21 @@ export class PreviewManager {
     if (cancelingCandidate) return this.stopApplicationGeneration(generationId);
 
     await this.stopResourceHealthWatch(generation.taskId);
+    await this.composeRuntime?.stopWatch(generation.taskId);
+    const stoppingCompose = (generation.adapter ?? 'NATIVE') === 'COMPOSE';
+    if (stoppingCompose && this.composeRuntime) {
+      for (const taskGeneration of await this.store.getPreviewGenerations(generation.taskId)) {
+        this.detachRoutes(taskGeneration);
+      }
+      if (await this.composeRuntime.cleanupTask(generation.taskId, { deleteData: true }) === 'REFUSED') {
+        return this.saveGeneration({
+          ...generation,
+          routes: generation.routes.map((route) => ({ ...route, state: 'DETACHED' as const })),
+          state: 'CLEANUP_INCOMPLETE',
+          cleanupReason: 'Compose preview project cleanup is incomplete; captured source was retained.'
+        });
+      }
+    }
     let stopped = await this.stopApplicationGeneration(generationId);
     for (const candidate of await this.store.getPreviewGenerations(generation.taskId)) {
       if (candidate.id === generationId || ['STOPPED', 'FAILED'].includes(candidate.state)) continue;
@@ -593,6 +815,13 @@ export class PreviewManager {
         ...stopped,
         state: 'CLEANUP_INCOMPLETE',
         cleanupReason: 'Managed preview environment cleanup is incomplete.'
+      });
+    }
+    if (!stoppingCompose && this.composeRuntime && await this.composeRuntime.cleanupTask(generation.taskId, { deleteData: true }) === 'REFUSED') {
+      stopped = await this.saveGeneration({
+        ...stopped,
+        state: 'CLEANUP_INCOMPLETE',
+        cleanupReason: 'Compose preview project cleanup is incomplete.'
       });
     }
     return stopped;
@@ -646,6 +875,18 @@ export class PreviewManager {
 
   async stopTask(taskId: string): Promise<void> {
     await this.stopResourceHealthWatch(taskId);
+    await this.composeRuntime?.stopWatch(taskId);
+    const composeProject = await this.store.getPreviewComposeProject(taskId);
+    if (composeProject?.state !== 'STOPPED') {
+      for (const generation of await this.store.getPreviewGenerations(taskId)) this.detachRoutes(generation);
+    }
+    if (
+      composeProject?.state !== 'STOPPED' &&
+      this.composeRuntime &&
+      await this.composeRuntime.cleanupTask(taskId, { deleteData: true }) === 'REFUSED'
+    ) {
+      throw new Error('Task Compose preview cleanup is incomplete; task deletion was refused.');
+    }
     for (const generation of await this.store.getPreviewGenerations(taskId)) {
       if (generation.state === 'STOPPED') continue;
       const stopped = await this.stopApplicationGeneration(generation.id);
@@ -782,12 +1023,27 @@ export class PreviewManager {
   private async shutdownOnce(): Promise<void> {
     await this.initWork?.catch(() => undefined);
     for (const controller of this.startups.values()) controller.abort();
+    await this.composeRuntime?.shutdown();
     await Promise.allSettled([...this.locks.values()]);
     const failures: string[] = [];
     await Promise.all(
       [...this.resourceHealthStops.keys()].map((taskId) => this.stopResourceHealthWatch(taskId))
     );
+    if (this.composeRuntime) {
+      for (const project of await this.store.getPreviewComposeProjects()) {
+        if (project.state === 'STOPPED') continue;
+        for (const generation of await this.store.getPreviewGenerations(project.taskId)) {
+          this.detachRoutes(generation);
+        }
+        if (await this.composeRuntime.cleanupTask(project.taskId, { deleteData: true }) === 'REFUSED') {
+          failures.push(`compose-project:${project.id}`);
+        }
+      }
+    }
     for (const generation of await this.store.getPreviewGenerations()) {
+      if (failures.includes(`compose-project:${(await this.store.getPreviewComposeProject(generation.taskId))?.id}`)) {
+        continue;
+      }
       if (!['STOPPED', 'FAILED'].includes(generation.state)) {
         try {
           const stopped = await this.stopApplicationGeneration(generation.id);
@@ -799,6 +1055,9 @@ export class PreviewManager {
     }
     if (this.ociRuntime && await this.ociRuntime.cleanupTaskResources() === 'REFUSED') {
       failures.push('preview-scoped-oci-resources');
+    }
+    if (this.composeRuntime) {
+      await this.composeRuntime.shutdown();
     }
     await this.gateway.close();
     await this.privateVault?.shutdown();
@@ -946,6 +1205,41 @@ export class PreviewManager {
   private requireOciRuntime(): OciResourceRuntime {
     if (!this.ociRuntime) throw new Error('OCI preview resources are unavailable.');
     return this.ociRuntime;
+  }
+
+  private requireComposeRuntime(): PreviewComposeRuntime {
+    if (!this.composeRuntime) throw new Error('Compose preview runtime is unavailable.');
+    return this.composeRuntime;
+  }
+
+  private async findComposeProjectInspection(
+    taskId: string,
+    excludedGenerationId: string
+  ): Promise<PreviewComposeInspection | undefined> {
+    const project = await this.store.getPreviewComposeProject(taskId);
+    if (!project || project.state === 'STOPPED') return undefined;
+    const generations = (await this.store.getPreviewGenerations(taskId))
+      .filter((generation) =>
+        generation.id !== excludedGenerationId &&
+        (generation.adapter ?? 'NATIVE') === 'COMPOSE' &&
+        generation.composeChange !== 'DESTRUCTIVE_RESET_REQUIRED'
+      )
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    for (const generation of generations) {
+      const plan = await this.store.getPreviewPlan(generation.planId);
+      const inspection = plan?.executionPlan.adapter === 'COMPOSE'
+        ? plan.executionPlan.compose?.inspection
+        : undefined;
+      if (
+        inspection?.trustDigest === project.trustDigest &&
+        inspection.configDigest === project.configDigest
+      ) {
+        return inspection;
+      }
+    }
+    throw new Error(
+      'Compose project compatibility authority is unavailable; stop and delete its data before starting again.'
+    );
   }
 
   private async isPrivateInputDeclared(taskId: string, inputId: string): Promise<boolean> {

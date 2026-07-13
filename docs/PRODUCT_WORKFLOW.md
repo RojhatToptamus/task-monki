@@ -97,6 +97,29 @@ labeled **Stop Preview & Delete Data** because it removes the application,
 managed containers, volumes, network, and data. Attached dependencies, generic
 OCI resources, and user-supplied secrets are not part of this phase.
 
+An existing repository Compose application may instead use the explicit
+Compose preview adapter. Task Monki shows the normalized services, repository
+file inputs, public routes, retained-data authority, selected engine, and
+cleanup scope before approval. One stable Compose project belongs to the task;
+containers, owned networks, and active or retained named volumes belong to that
+project rather than to an application generation.
+
+Compose replacement is intentionally serialized. Source capture, inspection,
+and build occur while the current routes remain available. Routes detach when
+activation of the stable project begins and reattach only after Compose and
+Task Monki readiness both pass. A failure after activation begins stays offline
+with verified volumes preserved; the UI must not claim that the previous
+application was restored. A compatibility-sensitive data change requires the
+owner to stop and explicitly delete project data before starting fresh.
+
+Compose private-value delivery is unsupported. Task Monki never forwards its
+encrypted private inputs through Compose environment, argv, build inputs, or
+temporary host files. Repository `env_file` and file-backed Compose secrets are
+shown as repository-owned inputs and must exist in captured source. Stop remains
+**Stop Preview & Delete Data**: it deletes exact Task Monki-owned project
+containers, owned networks, and active or retained owned volumes, while leaving
+external resources, images, and build cache untouched.
+
 ## Activity Timeline
 
 The Overview may show `Activity Timeline` below PR Status. It is a curated task

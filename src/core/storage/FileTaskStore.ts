@@ -31,6 +31,7 @@ import type {
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
   PreviewGenerationRecord,
   PreviewGenerationAttachmentRecord,
   PreviewLocalAttachmentBindingRecord,
@@ -403,6 +404,16 @@ export class FileTaskStore {
     return clone(this.state.previewManagedEnvironments.find((environment) => environment.taskId === taskId));
   }
 
+  async getPreviewComposeProject(taskId: string): Promise<PreviewComposeProjectRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewComposeProjects.find((project) => project.taskId === taskId));
+  }
+
+  async getPreviewComposeProjects(): Promise<PreviewComposeProjectRecord[]> {
+    await this.init();
+    return clone(this.state.previewComposeProjects);
+  }
+
   async getPreviewManagedEnvironments(): Promise<PreviewManagedEnvironmentRecord[]> {
     await this.init();
     return clone(this.state.previewManagedEnvironments);
@@ -622,6 +633,30 @@ export class FileTaskStore {
     };
     await this.persistQueued();
     return clone(environment);
+  }
+
+  async savePreviewComposeProject(
+    project: PreviewComposeProjectRecord
+  ): Promise<PreviewComposeProjectRecord> {
+    await this.init();
+    if (!this.state.tasks.some((task) => task.id === project.taskId)) {
+      throw new Error('Preview Compose project references a missing task.');
+    }
+    const conflicting = this.state.previewComposeProjects.find(
+      (candidate) => candidate.taskId === project.taskId && candidate.id !== project.id
+    );
+    if (conflicting && conflicting.state !== 'STOPPED') {
+      throw new Error('A task preview may have only one Compose project record.');
+    }
+    this.state = {
+      ...this.state,
+      previewComposeProjects: [
+        project,
+        ...this.state.previewComposeProjects.filter((candidate) => candidate.taskId !== project.taskId)
+      ]
+    };
+    await this.persistQueued();
+    return clone(project);
   }
 
   async savePreviewManagedResource(
@@ -1127,6 +1162,12 @@ export class FileTaskStore {
     if (activeManagedEnvironment || activeManagedResource) {
       throw new Error('Task has an active or unverified managed preview environment. Stop or reconcile it before deletion.');
     }
+    const activeComposeProject = this.state.previewComposeProjects.find(
+      (project) => project.taskId === taskId && project.state !== 'STOPPED'
+    );
+    if (activeComposeProject) {
+      throw new Error('Task has an active or unverified Compose preview project. Stop or reconcile it before deletion.');
+    }
     const nonterminalPreviewGeneration = this.state.previewGenerations.find(
       (generation) =>
         generation.taskId === taskId && !['STOPPED', 'FAILED'].includes(generation.state)
@@ -1217,6 +1258,9 @@ export class FileTaskStore {
       ),
       previewPlans: this.state.previewPlans.filter((record) => record.taskId !== taskId),
       previewApprovals: this.state.previewApprovals.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewComposeProjects: this.state.previewComposeProjects.filter(
         (record) => record.taskId !== taskId
       ),
       previewGenerations: this.state.previewGenerations.filter(
@@ -3419,6 +3463,7 @@ function requireCurrentState(state: PersistedState): StoreState {
     'interactionRequests',
     'previewPlans',
     'previewApprovals',
+    'previewComposeProjects',
     'previewGenerations',
     'previewManagedEnvironments',
     'previewManagedResources',
@@ -3469,6 +3514,7 @@ function migratePersistedState(state: PersistedState): {
       ...next,
       previewPlans: [],
       previewApprovals: [],
+      previewComposeProjects: [],
       previewGenerations: [],
       previewManagedEnvironments: [],
       previewManagedResources: [],
@@ -3485,12 +3531,14 @@ function migratePersistedState(state: PersistedState): {
     next = {
       ...next,
       previewLocalBindings: [],
+      previewComposeProjects: [],
       previewPlans: Array.isArray(next.previewPlans)
-        ? next.previewPlans.map((plan) => migratePhaseThreePreviewPlan(plan)) as PreviewPlanRecord[]
+        ? next.previewPlans.map((plan) => migratePhaseFourPreviewPlan(migratePhaseThreePreviewPlan(plan))) as PreviewPlanRecord[]
         : next.previewPlans,
       previewGenerations: Array.isArray(next.previewGenerations)
         ? next.previewGenerations.map((generation) => ({
             ...generation,
+            adapter: 'NATIVE',
             attachmentReadiness: []
           }))
         : next.previewGenerations,
@@ -3499,7 +3547,33 @@ function migratePersistedState(state: PersistedState): {
     changed = true;
   }
 
+  if (next.schemaVersion === 14) {
+    next = {
+      ...next,
+      previewComposeProjects: [],
+      previewPlans: Array.isArray(next.previewPlans)
+        ? next.previewPlans.map((plan) => migratePhaseFourPreviewPlan(plan)) as PreviewPlanRecord[]
+        : next.previewPlans,
+      previewGenerations: Array.isArray(next.previewGenerations)
+        ? next.previewGenerations.map((generation) => ({ ...generation, adapter: 'NATIVE' }))
+        : next.previewGenerations,
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    };
+    changed = true;
+  }
+
   return { state: next, changed };
+}
+
+function migratePhaseFourPreviewPlan(plan: unknown): unknown {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
+  const record = plan as Record<string, unknown>;
+  const executionPlan = record.executionPlan;
+  if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) return plan;
+  return {
+    ...record,
+    executionPlan: { ...(executionPlan as Record<string, unknown>), adapter: 'NATIVE' }
+  };
 }
 
 function migratePhaseThreePreviewPlan(plan: unknown): unknown {

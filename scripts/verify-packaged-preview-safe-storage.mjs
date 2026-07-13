@@ -29,7 +29,13 @@ async function main() {
   running = await launchPackagedApp({ executablePath, repositoryPath, userDataPath });
   capturedOutput.push(running.output);
   const first = await running.cdp.evaluate(`(async () => {
-    await window.__taskMonkiPackagedVerifierWaitForApi();
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!window.taskManager || !window.previewPrivateInputs) {
+      throw new Error('Trusted packaged renderer APIs did not become available.');
+    }
     const task = await window.taskManager.createTask({
       title: 'Packaged safeStorage relaunch verification',
       prompt: 'Verify encrypted private input persistence across a packaged relaunch.',
@@ -65,7 +71,13 @@ async function main() {
   running = await launchPackagedApp({ executablePath, repositoryPath, userDataPath });
   capturedOutput.push(running.output);
   const second = await running.cdp.evaluate(`(async () => {
-    await window.__taskMonkiPackagedVerifierWaitForApi();
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!window.taskManager || !window.previewPrivateInputs) {
+      throw new Error('Trusted packaged renderer APIs did not become available.');
+    }
     const resolved = await window.taskManager.resolvePreview({ taskId: ${JSON.stringify(first.taskId)} });
     if (resolved.status !== 'PLAN' || resolved.executionReadiness.status !== 'READY') {
       throw new Error('The private input was not ready after relaunch.');
@@ -151,25 +163,48 @@ async function launchPackagedApp({ executablePath, repositoryPath, userDataPath 
   child.stderr.on('data', (chunk) => { stderr = appendBounded(stderr, chunk); });
   const output = () => `${stdout}\n${stderr}`;
   try {
-    const target = await waitForRendererTarget(port, child, output);
-    const cdp = await CdpConnection.open(target.webSocketDebuggerUrl);
-    await cdp.evaluate(`(() => {
-      window.__taskMonkiPackagedVerifierWaitForApi = async () => {
-        const deadline = Date.now() + 30000;
-        while (Date.now() < deadline) {
-          if (window.taskManager && window.previewPrivateInputs) return;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        throw new Error('Trusted packaged renderer APIs did not become available.');
-      };
-      return true;
-    })()`);
+    const cdp = await connectToTrustedRenderer(port, child, output);
     return { child, cdp, output };
   } catch (error) {
     child.kill('SIGTERM');
     await once(child, 'exit').catch(() => undefined);
     throw error;
   }
+}
+
+async function connectToTrustedRenderer(port, child, output) {
+  const deadline = Date.now() + 45_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    let cdp;
+    try {
+      const target = await waitForRendererTarget(port, child, output);
+      cdp = await CdpConnection.open(target.webSocketDebuggerUrl);
+      const verifyTrustedApi = `(async () => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline && (!window.taskManager || !window.previewPrivateInputs)) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        if (!window.taskManager || !window.previewPrivateInputs) {
+          throw new Error('Trusted packaged renderer APIs did not become available.');
+        }
+        await window.taskManager.getDefaultRepositoryPath();
+        return true;
+      })()`;
+      await cdp.evaluate(verifyTrustedApi);
+      await delay(250);
+      await cdp.evaluate(verifyTrustedApi);
+      return cdp;
+    } catch (error) {
+      lastError = error;
+      cdp?.close();
+      if (child.exitCode !== null) break;
+      await delay(100);
+    }
+  }
+  throw new Error(
+    `Timed out waiting for a stable trusted packaged renderer: ${lastError instanceof Error ? lastError.message : String(lastError)}\n${output()}`
+  );
 }
 
 async function stopPackagedApp(runningApp) {

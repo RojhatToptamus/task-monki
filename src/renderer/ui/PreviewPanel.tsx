@@ -75,7 +75,10 @@ export function PreviewPanel(props: {
       const stopGeneration = selectPreviewActionGeneration(view, 'STOP');
       if (action === 'STOP' && stopGeneration) {
         const destructive = view.actions.find((candidate) => candidate.id === 'STOP')?.label.includes('Delete Data');
-        if (destructive && !window.confirm('Stop this preview and permanently delete its managed PostgreSQL/Redis data?')) return;
+        const destructiveCopy = view.plan?.executionPlan.adapter === 'COMPOSE'
+          ? 'Stop this preview and permanently delete every active or retained Task Monki-owned Compose volume? External resources, images, and build cache are not touched.'
+          : 'Stop this preview and permanently delete its managed PostgreSQL/Redis data?';
+        if (destructive && !window.confirm(destructiveCopy)) return;
         await props.onStop(props.task.id, stopGeneration.id);
       }
     } finally {
