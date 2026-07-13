@@ -28,11 +28,14 @@ import type {
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
   PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
   PreviewGenerationRecord,
   PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
+  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -111,7 +114,7 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
-import { PreviewPanel } from './PreviewPanel';
+import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 
 interface TaskDetailProps {
   error?: string;
@@ -145,6 +148,9 @@ interface TaskDetailProps {
   previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
   previewManagedResources: PreviewManagedResourceRecord[];
   previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewRuntimeResources: PreviewResourceRecord[];
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -181,7 +187,7 @@ interface HeadAction {
   onClick(): void;
 }
 
-type DetailTab = 'overview' | 'evidence' | 'debug';
+type DetailTab = 'overview' | 'preview' | 'evidence' | 'debug';
 
 const REVIEW_START_PENDING_TIMEOUT_MS = 5000;
 const REVIEW_MASCOT_MIN_ACTIVE_MS = 1600;
@@ -684,6 +690,27 @@ export function TaskDetail(props: TaskDetailProps) {
   const detailHeadClassName = props.showMascot
     ? 'tm-detail__head tm-detail__head--with-mascot'
     : 'tm-detail__head';
+  const previewPanelProps = {
+    task,
+    worktree,
+    plans: props.previewPlans,
+    approvals: props.previewApprovals,
+    generations: props.previewGenerations,
+    generationAttachments: props.previewGenerationAttachments,
+    managedResources: props.previewManagedResources,
+    attempts: props.previewNodeAttempts,
+    composeProjects: props.previewComposeProjects,
+    localBindings: props.previewLocalBindings,
+    runtimeResources: props.previewRuntimeResources,
+    onResolve: props.onResolvePreview,
+    onApprove: props.onApprovePreview,
+    onStart: props.onStartPreview,
+    onOpen: props.onOpenPreview,
+    onStop: props.onStopPreview,
+    onResetData: props.onResetPreviewData,
+    onRetrySetup: props.onRetryPreviewSetup,
+    onReadLog: props.onReadPreviewLog
+  };
 
   return (
     <main className="tm-detail">
@@ -742,6 +769,7 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
         <div className="tm-tabs">
           <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
+          <TabButton label="Preview" active={tab === 'preview'} onClick={() => setTab('preview')} />
           <TabButton
             label="Evidence"
             active={tab === 'evidence'}
@@ -893,29 +921,19 @@ export function TaskDetail(props: TaskDetailProps) {
                 onInvestigate={() => void investigateFailingChecks()}
               />
 
-              <PreviewPanel
+              <PreviewOverviewCard
                 key={task.id}
-                task={task}
-                worktree={worktree}
-                plans={props.previewPlans}
-                approvals={props.previewApprovals}
-                generations={props.previewGenerations}
-                generationAttachments={props.previewGenerationAttachments}
-                managedResources={props.previewManagedResources}
-                attempts={props.previewNodeAttempts}
-                onResolve={props.onResolvePreview}
-                onApprove={props.onApprovePreview}
-                onStart={props.onStartPreview}
-                onOpen={props.onOpenPreview}
-                onStop={props.onStopPreview}
-                onResetData={props.onResetPreviewData}
-                onRetrySetup={props.onRetryPreviewSetup}
-                onReadLog={props.onReadPreviewLog}
+                {...previewPanelProps}
+                onShowDetails={() => setTab('preview')}
               />
 
               <TaskActivityPanel view={overviewActivity} variant="overview" />
             </div>
           </div>
+        ) : null}
+
+        {tab === 'preview' ? (
+          <PreviewWorkspace key={task.id} {...previewPanelProps} />
         ) : null}
 
         {tab === 'evidence' ? (

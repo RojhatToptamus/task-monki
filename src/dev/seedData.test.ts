@@ -104,13 +104,14 @@ describe('Task Monki development seed data', () => {
     expect(view('preview-active-approval-required').actions.map((action) => action.id)).toEqual([
       'OPEN', 'APPROVE', 'STOP'
     ]);
-    expect(view('preview-preparing').status).toBe('Preparing source');
+    expect(view('preview-preparing').status).toBe('Starting');
     expect(view('preview-ready').status).toBe('Running');
     expect(view('preview-compose-ready')).toMatchObject({ status: 'Running', tone: 'success' });
     expect(view('preview-compose-recovery').summary).toContain('verified data volumes are preserved');
     expect(view('preview-replacing').status).toBe('Replacing');
     expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
-    expect(view('preview-replacement-failed').summary).toContain('Candidate web service exited');
+    expect(view('preview-replacement-failed').summary).toContain('latest replacement did not reach readiness');
+    expect(view('preview-replacement-failed').summary).not.toContain('Candidate web service exited');
     expect(view('preview-failed').status).toBe('Failed');
     expect(view('preview-stale').status).toContain('stale');
     expect(view('preview-stopped').status).toBe('Stopped');

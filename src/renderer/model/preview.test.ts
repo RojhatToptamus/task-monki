@@ -6,10 +6,12 @@ import {
   type Task
 } from '../../shared/contracts';
 import {
+  buildPreviewPlanGroups,
   buildPreviewPlanSummary,
   buildPreviewViewModel,
   selectPreviewActionGeneration,
   selectPreviewDiagnosticAttempts,
+  selectPreviewOverviewProjection,
   selectPreviewResetResources
 } from './preview';
 
@@ -68,6 +70,9 @@ describe('preview view model', () => {
     });
     expect(view.status).toContain('stale');
     expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
+    expect(selectPreviewOverviewProjection(view)).toMatchObject({
+      recommendedAction: { id: 'START', label: 'Replace' }
+    });
   });
 
   it('keeps the active preview actionable while a candidate is replacing it or has failed', () => {
@@ -107,9 +112,16 @@ describe('preview view model', () => {
     });
     expect(preserved.status).toBe('Running');
     expect(preserved.generation?.id).toBe(active.id);
-    expect(preserved.summary).toContain('candidate failed');
+    expect(preserved.summary).toBe(
+      'The current preview is still serving captured source. Its latest replacement did not reach readiness.'
+    );
+    expect(preserved.summary).not.toContain('candidate failed');
     expect(preserved.latestAttempt?.id).toBe(failedAttempt.id);
+    expect(preserved.failedReplacementGeneration?.id).toBe(failed.id);
     expect(preserved.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
+    expect(selectPreviewOverviewProjection(preserved)).toMatchObject({
+      recommendedAction: { id: 'START' }
+    });
     expect(selectPreviewActionGeneration(preserved, 'OPEN')?.id).toBe(active.id);
     expect(selectPreviewActionGeneration(preserved, 'STOP')?.id).toBe(active.id);
     expect(
@@ -132,6 +144,118 @@ describe('preview view model', () => {
     expect(cleanup.actions.map((action) => action.label)).toEqual(['Open current', 'Retry cleanup']);
     expect(selectPreviewActionGeneration(cleanup, 'OPEN')?.id).toBe(active.id);
     expect(selectPreviewActionGeneration(cleanup, 'STOP')?.id).toBe(cleanupCandidate.id);
+  });
+
+  it('does not surface a failed replacement after a later generation succeeds', () => {
+    const plan = testPlan();
+    const approval = {
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK' as const, approvedAt: task.createdAt
+    };
+    const previousActive = {
+      id: 'previous-active', previewKey: 'task-task1', taskId: task.id,
+      iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id,
+      approvalId: approval.id, executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git-old', sourceHeadSha: 'old', sourceDirtyFingerprint: 'dirty-old',
+      workspacePath: '/previous', state: 'STOPPED' as const, routingState: 'RETIRED' as const,
+      freshness: 'STALE' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
+    };
+    const failedReplacement = {
+      ...previousActive,
+      id: 'failed-replacement',
+      workspacePath: '/failed',
+      state: 'FAILED' as const,
+      routingState: 'CANDIDATE' as const,
+      replacesGenerationId: previousActive.id,
+      failureReason: 'obsolete failure',
+      updatedAt: '2026-01-01T00:01:00.000Z'
+    };
+    const currentActive = {
+      ...previousActive,
+      id: 'current-active',
+      sourceGitSnapshotId: 'git-current',
+      sourceHeadSha: 'current',
+      sourceDirtyFingerprint: 'clean',
+      workspacePath: '/current',
+      state: 'READY' as const,
+      routingState: 'ACTIVE' as const,
+      freshness: 'CURRENT' as const,
+      createdAt: '2026-01-01T00:02:00.000Z',
+      updatedAt: '2026-01-01T00:02:00.000Z',
+      readyAt: '2026-01-01T00:02:00.000Z'
+    };
+    const failedAttempt = {
+      id: 'failed-attempt', taskId: task.id, generationId: failedReplacement.id,
+      nodeId: 'web', kind: 'SERVICE' as const, attempt: 1, commandDigest: 'old-command',
+      state: 'FAILED' as const, stdoutArtifactId: 'old-stdout', stderrArtifactId: 'old-stderr',
+      endedAt: failedReplacement.updatedAt
+    };
+    const currentAttempt = {
+      ...failedAttempt,
+      id: 'current-attempt',
+      generationId: currentActive.id,
+      commandDigest: 'current-command',
+      state: 'SUCCEEDED' as const,
+      endedAt: currentActive.updatedAt
+    };
+
+    const view = buildPreviewViewModel({
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval],
+      generations: [currentActive, failedReplacement, previousActive],
+      attempts: [failedAttempt, currentAttempt]
+    });
+
+    expect(view.status).toBe('Running');
+    expect(view.summary).not.toContain('obsolete failure');
+    expect(view.failedReplacementGeneration).toBeUndefined();
+    expect(view.latestAttempt?.id).toBe(currentAttempt.id);
+    expect(selectPreviewDiagnosticAttempts([failedAttempt, currentAttempt], view))
+      .toEqual([currentAttempt]);
+    expect(selectPreviewOverviewProjection(view)).toMatchObject({
+      recommendedAction: { id: 'OPEN' }
+    });
+  });
+
+  it('projects the remaining start, failure, recovery, cleanup, and stopped states', () => {
+    const plan = testPlan();
+    const approval = {
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK' as const, approvedAt: task.createdAt
+    };
+    const baseGeneration = {
+      id: 'generation', previewKey: 'task-task1', taskId: task.id,
+      iterationId: 'iteration-1', worktreeId: 'worktree-1', planId: plan.id,
+      approvalId: approval.id, executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'clean',
+      workspacePath: '/preview', routingState: 'RETIRED' as const,
+      freshness: 'CURRENT' as const, routes: [], createdAt: task.createdAt, updatedAt: task.updatedAt
+    };
+    const input = {
+      task, worktree: uncheckedWorktree(), plans: [plan], approvals: [approval], attempts: []
+    };
+
+    expect(buildPreviewViewModel({ ...input, generations: [] }).status).toBe('Ready to start');
+    for (const [state, expected] of [
+      ['RUNNING_GRAPH', 'Starting'],
+      ['FAILED', 'Failed'],
+      ['RECOVERY_REQUIRED', 'Recovery required'],
+      ['CLEANUP_INCOMPLETE', 'Cleanup incomplete'],
+      ['STOPPED', 'Stopped']
+    ] as const) {
+      expect(buildPreviewViewModel({
+        ...input,
+        generations: [{ ...baseGeneration, state }]
+      }).status).toBe(expected);
+    }
+    expect(buildPreviewViewModel({
+      ...input,
+      generations: [{
+        ...baseGeneration,
+        state: 'READY',
+        routingState: 'ACTIVE',
+        freshness: 'STALE'
+      }]
+    }).status).toBe('Running · stale');
   });
 
   it('keeps current preview controls visible while a changed plan awaits approval or replacement', () => {
@@ -231,7 +355,8 @@ describe('preview view model', () => {
     expect(replacementView.actions.map((action) => action.id)).toEqual(['OPEN', 'RETRY_SETUP', 'STOP']);
     expect(replacementView.recoveryGeneration?.id).toBe(failedCandidate.id);
     expect(selectPreviewActionGeneration(replacementView, 'STOP')?.id).toBe(failedCandidate.id);
-    expect(replacementView.summary).toContain('migration failed');
+    expect(replacementView.summary).not.toContain('migration failed');
+    expect(replacementView.summary).toContain('latest replacement did not reach readiness');
     expect(selectPreviewResetResources(replacementInput, replacementView).map((resource) => resource.id))
       .toEqual(['database']);
 
@@ -288,6 +413,17 @@ describe('preview view model', () => {
     expect(text).toContain('TASK_MONKI_PREVIEW="1"');
     expect(text).toContain('HTTP 127.0.0.1:<web.http via PORT>/health · absolute deadline 17s');
     expect(text).toContain('Route · app: app → web.http · primary');
+
+    const groups = buildPreviewPlanGroups(plan);
+    expect(groups.map((group) => group.label)).toEqual([
+      'Application',
+      'Setup jobs',
+      'Routes',
+      'Runtime authority'
+    ]);
+    const groupedLines = groups.flatMap((group) => group.lines);
+    expect(groupedLines).toHaveLength(summary.length);
+    expect(groupedLines).toEqual(expect.arrayContaining(summary));
   });
 
   it('renders only sanitized Compose authority and uses structured reset-required evidence', () => {

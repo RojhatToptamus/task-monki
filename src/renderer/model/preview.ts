@@ -28,14 +28,29 @@ export interface PreviewViewModel {
   generation?: PreviewGenerationRecord;
   activeGeneration?: PreviewGenerationRecord;
   replacementGeneration?: PreviewGenerationRecord;
+  failedReplacementGeneration?: PreviewGenerationRecord;
   recoveryGeneration?: PreviewGenerationRecord;
   latestAttempt?: PreviewNodeAttemptRecord;
   actions: PreviewActionModel[];
 }
 
+export interface PreviewOverviewProjection {
+  recommendedAction?: PreviewActionModel;
+  primaryRoute?: {
+    generation: PreviewGenerationRecord;
+    route: PreviewGenerationRecord['routes'][number];
+  };
+}
+
 export interface PreviewPlanLine {
   label: string;
   value: string;
+}
+
+export interface PreviewPlanGroup {
+  id: 'application' | 'setup' | 'routes' | 'data' | 'bindings' | 'authority';
+  label: string;
+  lines: PreviewPlanLine[];
 }
 
 export interface PreviewViewModelInput {
@@ -66,6 +81,69 @@ export function selectPreviewDiagnosticAttempts(
   return generationId
     ? attempts.filter((attempt) => attempt.generationId === generationId)
     : [];
+}
+
+export function selectPreviewOverviewProjection(
+  view: PreviewViewModel
+): PreviewOverviewProjection {
+  const openGeneration = view.activeGeneration ?? (
+    view.generation?.state === 'READY' ? view.generation : undefined
+  );
+  const runningCurrent =
+    view.status === 'Running' &&
+    !view.failedReplacementGeneration &&
+    !view.recoveryGeneration;
+  const recommendedAction = runningCurrent
+    ? view.actions.find((action) => action.id === 'OPEN')
+    : view.status === 'Replacing'
+      ? view.actions.find((action) => action.id === 'OPEN')
+      : ['APPROVE', 'RETRY_SETUP', 'START', 'RESOLVE', 'OPEN']
+          .map((id) => view.actions.find((action) => action.id === id))
+          .find((action): action is PreviewActionModel => Boolean(action));
+  const route = openGeneration?.routes.find((candidate) => candidate.state === 'ATTACHED');
+
+  return {
+    recommendedAction,
+    primaryRoute: openGeneration && route ? { generation: openGeneration, route } : undefined
+  };
+}
+
+export function buildPreviewPlanGroups(plan: PreviewPlanRecord): PreviewPlanGroup[] {
+  const groups: PreviewPlanGroup[] = [
+    { id: 'application', label: 'Application', lines: [] },
+    { id: 'setup', label: 'Setup jobs', lines: [] },
+    { id: 'routes', label: 'Routes', lines: [] },
+    { id: 'data', label: 'Data and dependencies', lines: [] },
+    { id: 'bindings', label: 'Private inputs', lines: [] },
+    { id: 'authority', label: 'Runtime authority', lines: [] }
+  ];
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  for (const line of buildPreviewPlanSummary(plan)) {
+    byId.get(groupForPlanLine(line.label))?.lines.push(line);
+  }
+  return groups.filter((group) => group.lines.length > 0);
+}
+
+function groupForPlanLine(label: string): PreviewPlanGroup['id'] {
+  if (label.startsWith('Route')) return 'routes';
+  if (
+    label.startsWith('Resource') ||
+    label.startsWith('Inactive resource') ||
+    label.startsWith('Limits') ||
+    label.startsWith('Generated access') ||
+    label.startsWith('Attached ')
+  ) return 'data';
+  if (label.startsWith('Private input')) return 'bindings';
+  if (
+    label === 'Scenario' ||
+    label.startsWith('Job') ||
+    label.startsWith('Inactive job')
+  ) return 'setup';
+  if (
+    ['Adapter', 'Engine', 'Configuration', 'Root services', 'Replacement', 'Cleanup'].includes(label) ||
+    label.startsWith('Repository input')
+  ) return 'authority';
+  return 'application';
 }
 
 export function buildPreviewPlanSummary(plan: PreviewPlanRecord): PreviewPlanLine[] {
@@ -341,11 +419,12 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       ['FAILED', 'RECOVERY_REQUIRED'].includes(candidate.state)
   );
   const currentFailedReplacement =
-    failedReplacement?.executionDigest === plan.executionDigest
+    failedReplacement?.executionDigest === plan.executionDigest &&
+    (!activeGeneration || failedReplacement.replacesGenerationId === activeGeneration.id)
       ? failedReplacement
       : undefined;
   const generation = replacementGeneration ?? activeGeneration ?? generations[0];
-  const diagnosticGeneration = replacementGeneration ?? failedReplacement ?? generation;
+  const diagnosticGeneration = replacementGeneration ?? currentFailedReplacement ?? generation;
   const latestAttempt = input.attempts
     .filter((attempt) => attempt.generationId === diagnosticGeneration?.id)
     .sort((a, b) => (b.endedAt ?? b.startedAt ?? '').localeCompare(a.endedAt ?? a.startedAt ?? ''))[0];
@@ -404,9 +483,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Cleanup incomplete',
       tone: 'error',
-      summary:
-        replacementGeneration.cleanupReason ??
-        'The current preview remains available, but its failed replacement still has unverified cleanup residue.',
+      summary: 'The current preview remains available, but its failed replacement still has unverified cleanup residue.',
       plan,
       approval,
       generation: replacementGeneration,
@@ -446,7 +523,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       tone: generation.freshness === 'STALE' ? 'warning' : 'success',
       summary:
         currentFailedReplacement
-          ? `The current preview is still serving captured source. Its replacement failed: ${currentFailedReplacement.failureReason ?? 'startup failed'}`
+          ? 'The current preview is still serving captured source. Its latest replacement did not reach readiness.'
           : generation.freshness === 'STALE'
             ? 'This preview still serves its captured source. The task changed after capture.'
             : plan.executionPlan.adapter === 'COMPOSE'
@@ -456,6 +533,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
       approval,
       generation,
       activeGeneration,
+      failedReplacementGeneration: currentFailedReplacement,
       recoveryGeneration: setupRecovery.hasManagedFailure || composeResetRequired
         ? currentFailedReplacement
         : undefined,
@@ -478,7 +556,9 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Failed',
       tone: 'error',
-      summary: generation.failureReason ?? 'Preview startup failed. Inspect the recorded node logs.',
+      summary: latestAttempt
+        ? `${latestAttempt.nodeId} failed during preview startup. Open its logs for technical details.`
+        : 'Preview startup failed. Open the recorded logs for technical details.',
       plan,
       approval,
       generation,
@@ -510,9 +590,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Cleanup incomplete',
       tone: 'error',
-      summary:
-        generation.cleanupReason ??
-        'Task Monki refused to modify a process or workspace whose ownership could not be verified.',
+      summary: 'Task Monki could not verify exact cleanup. Retry cleanup after checking the recorded technical evidence.',
       plan,
       approval,
       generation,
@@ -533,7 +611,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     };
   }
   return {
-    status: humanize(generation.state),
+    status: 'Starting',
     tone: 'action',
     summary: 'Task Monki is preparing captured source and verifying the declared service readiness.',
     plan,
@@ -626,8 +704,4 @@ function evaluateSetupRecovery(
 
 function formatArgv(argv: string[]): string {
   return argv.map((argument) => JSON.stringify(argument)).join(' ');
-}
-
-function humanize(value: string): string {
-  return value.toLowerCase().replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
 }

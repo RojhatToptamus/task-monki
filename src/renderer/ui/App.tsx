@@ -431,6 +431,15 @@ export function App() {
   const selectedPreviewManagedResources = selectedTask
     ? snapshot.previewManagedResources.filter((record) => record.taskId === selectedTask.id)
     : [];
+  const selectedPreviewComposeProjects = selectedTask
+    ? snapshot.previewComposeProjects.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewLocalBindings = selectedTask
+    ? snapshot.previewLocalBindings.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewRuntimeResources = selectedTask
+    ? snapshot.previewResources.filter((record) => record.taskId === selectedTask.id)
+    : [];
   const selectedPreviewNodeAttempts = selectedTask
     ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
     : [];
@@ -1153,6 +1162,9 @@ export function App() {
             previewGenerations={selectedPreviewGenerations}
             previewGenerationAttachments={selectedPreviewGenerationAttachments}
             previewManagedResources={selectedPreviewManagedResources}
+            previewComposeProjects={selectedPreviewComposeProjects}
+            previewLocalBindings={selectedPreviewLocalBindings}
+            previewRuntimeResources={selectedPreviewRuntimeResources}
             previewNodeAttempts={selectedPreviewNodeAttempts}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}

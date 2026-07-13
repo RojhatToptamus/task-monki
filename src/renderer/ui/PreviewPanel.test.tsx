@@ -1,0 +1,447 @@
+import { renderToStaticMarkup } from 'react-dom/server';
+import { describe, expect, it } from 'vitest';
+import {
+  createInitialProjection,
+  type PreviewGenerationRecord,
+  type PreviewNodeAttemptRecord,
+  type PreviewPlanRecord,
+  type Task,
+  type WorktreeRecord
+} from '../../shared/contracts';
+import {
+  PreviewOverviewCard,
+  PreviewWorkspace,
+  type PreviewPanelProps
+} from './PreviewPanel';
+
+describe('Preview surfaces', () => {
+  it('keeps Overview compact and routes approval through the detailed workspace', () => {
+    const html = renderToStaticMarkup(
+      <PreviewOverviewCard {...previewProps()} onShowDetails={() => {}} />
+    );
+
+    expect(html).toContain('Approval required');
+    expect(html).toContain('Review plan');
+    expect(html).toContain('Details');
+    expect(html).not.toContain('Currentness');
+    expect(html).not.toContain('No attached route');
+    expect(html).not.toContain('Review execution plan');
+    expect(html).not.toContain('Private inputs');
+    expect(html).not.toContain('View logs');
+    expect(html).not.toContain('Stop Preview');
+    expect(html).not.toContain('Reset database');
+    expect(html).not.toContain('node&quot; &quot;server.mjs');
+  });
+
+  it('shows only status, explanation, and action before the recipe is checked', () => {
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace {...previewProps({ includePlan: false })} />
+    );
+
+    expect(html).toContain('Not checked');
+    expect(html).toContain('Check preview');
+    expect(html).not.toContain('id="preview-plan-authority"');
+    expect(html).not.toContain('id="preview-application"');
+    expect(html).not.toContain('id="preview-routes"');
+    expect(html).not.toContain('id="preview-data"');
+    expect(html).not.toContain('Technical details');
+    expect(html).not.toContain('Data scenario');
+  });
+
+  it('makes approval the focus and keeps exact authority behind disclosure', () => {
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps()} />);
+
+    expect(html).toContain('Review execution plan');
+    expect(html).toContain('Approve plan');
+    expect(html).toContain('Application');
+    expect(html).toContain('Setup jobs');
+    expect(html).toContain('Routes');
+    expect(html).toContain('Data and dependencies');
+    expect(html).toContain('Private inputs');
+    expect(html).toContain('Runtime authority');
+    expect(html).toContain('Exact commands, recipients, and cleanup details');
+    expect(html).toContain('accounts.internal:443');
+    expect(html).not.toContain('id="preview-application"');
+    expect(html).not.toContain('id="preview-routes"');
+    expect(html).not.toContain('id="preview-data"');
+    expect(html).not.toContain('Not run');
+    expect(html).not.toContain('Not created');
+    expect(html).not.toContain('plaintext-canary');
+  });
+
+  it('keeps ready-to-start free of empty runtime sections', () => {
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({ approved: true })} />);
+
+    expect(html).toContain('Ready to start');
+    expect(html).toContain('Start preview');
+    expect(html).toContain('Approved plan details');
+    expect(html).toContain('Private inputs');
+    expect(html).not.toContain('id="preview-application"');
+    expect(html).not.toContain('id="preview-routes"');
+    expect(html).not.toContain('id="preview-data"');
+    expect(html).not.toContain('Technical details');
+    expect(html).not.toContain('Not run');
+    expect(html).not.toContain('Not created');
+  });
+
+  it('shows only observed nodes while startup is in progress', () => {
+    const generation = generationFixture({ state: 'RUNNING_GRAPH', routingState: 'CANDIDATE' });
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      generation,
+      attempts: [attemptFixture(generation.id, 'RUNNING')]
+    })} />);
+
+    expect(html).toContain('Starting');
+    expect(html).toContain('Cancel and clean up');
+    expect(html).toContain('id="preview-application"');
+    expect(html).toContain('web');
+    expect(html).not.toContain('Not run');
+    expect(html).not.toContain('id="preview-routes"');
+    expect((html.match(/Starting/g) ?? [])).toHaveLength(1);
+  });
+
+  it('separates the active generation from its candidate during replacement', () => {
+    const base = previewProps({ approved: true, generation: activeGeneration() });
+    const candidate: PreviewGenerationRecord = {
+      ...activeGeneration(),
+      id: 'candidate-generation',
+      state: 'WAITING_READY',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: 'active-generation',
+      routes: [],
+      workspacePath: '/preview/candidate',
+      createdAt: '2026-07-13T10:01:00.000Z',
+      updatedAt: '2026-07-13T10:01:00.000Z',
+      readyAt: undefined
+    };
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace {...base} generations={[candidate, activeGeneration()]} />
+    );
+
+    expect(html).toContain('Replacing');
+    expect(html).toContain('Active');
+    expect(html).toContain('Candidate');
+    expect(html).toContain('Waiting ready');
+    expect(html).toContain('Open current');
+    expect(html).toContain('Preview options');
+  });
+
+  it('keeps failure copy safe, concise, and free of empty sections', () => {
+    const generation = generationFixture({
+      state: 'FAILED',
+      failureReason: 'docker run --label io.taskmonki.preview.store=internal-secret'
+    });
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      generation,
+      attempts: [attemptFixture(generation.id, 'FAILED')]
+    })} />);
+
+    expect(html).toContain('web failed during preview startup');
+    expect(html).toContain('Try again');
+    expect(html).toContain('View logs');
+    expect(html).not.toContain('docker run');
+    expect(html).not.toContain('io.taskmonki.preview.store');
+    expect(html).not.toContain('internal-secret');
+    expect(html).not.toContain('id="preview-routes"');
+    expect(html).not.toContain('id="preview-data"');
+    expect((html.match(/web failed during preview startup/g) ?? [])).toHaveLength(1);
+  });
+
+  it('keeps destructive and attached-resource actions out of the normal running surface', () => {
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      generation: activeGeneration(),
+      attempts: [attemptFixture('active-generation', 'RUNNING')]
+    })} />);
+
+    expect(html).toContain('Open preview');
+    expect(html).toContain('app.task.preview.localhost');
+    expect(html).toContain('Preview options');
+    expect(html).not.toContain('Stop Preview &amp; Delete Data');
+    expect(html).not.toContain('Reset accounts');
+    expect(html).not.toContain('plaintext-canary');
+  });
+
+  it('keeps recovery and cleanup errors singular and safe', () => {
+    const recoveryHtml = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      generation: generationFixture({
+        state: 'RECOVERY_REQUIRED',
+        failureReason: 'docker inspect --format internal-label-canary'
+      })
+    })} />);
+    expect(recoveryHtml).toContain('Recovery required');
+    expect(recoveryHtml).toContain('Preview options');
+    expect(recoveryHtml).not.toContain('docker inspect');
+    expect(recoveryHtml).not.toContain('internal-label-canary');
+    expect(recoveryHtml).not.toContain('id="preview-application"');
+    expect(recoveryHtml).not.toContain('id="preview-routes"');
+    expect(recoveryHtml).not.toContain('id="preview-data"');
+
+    const cleanupHtml = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      generation: generationFixture({
+        state: 'CLEANUP_INCOMPLETE',
+        cleanupReason: 'raw ownership marker internal-cleanup-canary'
+      })
+    })} />);
+    expect(cleanupHtml).toContain('Cleanup incomplete');
+    expect(cleanupHtml).toContain('Retry cleanup');
+    expect(cleanupHtml).not.toContain('raw ownership marker');
+    expect(cleanupHtml).not.toContain('internal-cleanup-canary');
+    expect((cleanupHtml.match(/Task Monki could not verify exact cleanup/g) ?? []))
+      .toHaveLength(1);
+  });
+
+  it('presents Compose approval without native-only warnings or empty runtime rows', () => {
+    const props = previewProps();
+    const plan: PreviewPlanRecord = {
+      ...props.plans[0],
+      executionPlan: {
+        version: 1,
+        adapter: 'COMPOSE',
+        compose: {
+          files: ['compose.yaml'],
+          projectDirectory: '.',
+          profiles: [],
+          rootServices: ['web'],
+          services: [{ id: 'web', ports: { http: { target: 80, protocol: 'tcp' } } }],
+          inspection: {
+            composeVersion: '5.2.0',
+            supportsNoEnvResolution: true,
+            trustDigest: 'trust',
+            configDigest: 'config',
+            hostInputs: [{ kind: 'COMPOSE_FILE', path: 'compose.yaml' }],
+            services: [{
+              id: 'web', image: 'nginx:1.27-alpine', dependsOn: [], exposedPorts: [80],
+              environmentKeys: [], secretSources: [],
+              namedVolumes: [{ source: 'cache-data', target: '/data', readOnly: false }],
+              networks: ['default']
+            }],
+            volumes: [{ name: 'cache-data', external: false }],
+            networks: [{ name: 'default', external: false }]
+          }
+        },
+        jobs: [], resources: [], services: [], workers: [],
+        routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }],
+        selectedScenarioId: 'default'
+      },
+      warnings: [
+        'Native preview commands run with the current user privileges.',
+        'Compose networks remain task-scoped.'
+      ]
+    };
+
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace {...props} plans={[plan]} />
+    );
+
+    expect(html).toContain('Review execution plan');
+    expect(html).toContain('cache-data');
+    expect(html).toContain('Compose networks remain task-scoped.');
+    expect(html).not.toContain('Native preview commands run');
+    expect(html).not.toContain('id="preview-application"');
+    expect(html).not.toContain('id="preview-data"');
+    expect(html).not.toContain('Not created');
+  });
+});
+
+function previewProps(options: {
+  approved?: boolean;
+  generation?: PreviewGenerationRecord;
+  attempts?: PreviewPanelProps['attempts'];
+  includePlan?: boolean;
+} = {}): PreviewPanelProps {
+  const plan = previewPlan();
+  return {
+    task: taskFixture(),
+    worktree: worktreeFixture(),
+    plans: options.includePlan === false ? [] : [plan],
+    approvals: options.approved ? [{
+      id: 'approval-1',
+      taskId: 'task-1',
+      planId: plan.id,
+      executionDigest: plan.executionDigest,
+      scope: 'TASK',
+      approvedAt: '2026-07-13T10:00:00.000Z'
+    }] : [],
+    generations: options.generation ? [options.generation] : [],
+    generationAttachments: [],
+    attempts: options.attempts ?? [],
+    managedResources: [],
+    composeProjects: [],
+    localBindings: [],
+    runtimeResources: [],
+    onResolve: async () => {},
+    onApprove: async () => {},
+    onStart: async () => {},
+    onOpen: async () => {},
+    onStop: async () => {},
+    onResetData: async () => {},
+    onRetrySetup: async () => {},
+    onReadLog: async () => ({ chunk: '', nextOffset: 0, endOfFile: true })
+  };
+}
+
+function taskFixture(): Task {
+  return {
+    id: 'task-1',
+    title: 'Preview task',
+    prompt: 'Implement a preview.',
+    repositoryPath: '/repo',
+    workflowPhase: 'IN_PROGRESS',
+    resolution: 'NONE',
+    completionPolicy: 'LOCAL_ACCEPTANCE',
+    phaseVersion: 1,
+    currentIterationId: 'iteration-1',
+    currentWorktreeId: 'worktree-1',
+    forkedAlternativeTaskIds: [],
+    agentSettings: {},
+    createdAt: '2026-07-13T10:00:00.000Z',
+    updatedAt: '2026-07-13T10:00:00.000Z',
+    projection: createInitialProjection('2026-07-13T10:00:00.000Z')
+  };
+}
+
+function worktreeFixture(): WorktreeRecord {
+  return {
+    id: 'worktree-1',
+    taskId: 'task-1',
+    iterationId: 'iteration-1',
+    repositoryPath: '/repo',
+    worktreePath: '/worktree',
+    branchName: 'codex/preview',
+    baseSha: 'base',
+    status: 'PRESENT',
+    createdAt: '2026-07-13T10:00:00.000Z',
+    updatedAt: '2026-07-13T10:00:00.000Z'
+  };
+}
+
+function previewPlan(): PreviewPlanRecord {
+  return {
+    id: 'plan-1',
+    taskId: 'task-1',
+    iterationId: 'iteration-1',
+    worktreeId: 'worktree-1',
+    recipePath: '.taskmonki/preview.yaml',
+    recipeVersion: 1,
+    recipeDigest: 'recipe',
+    executionDigest: 'execution',
+    executionPlan: {
+      version: 1,
+      inputs: [{ id: 'api-token', type: 'private', label: 'API token' }],
+      attachments: [{
+        id: 'accounts',
+        type: 'http',
+        target: { type: 'endpoint', scheme: 'https', host: 'accounts.internal', port: 443, basePath: '/' },
+        check: { path: '/ready', timeoutSeconds: 10 }
+      }],
+      jobs: [{
+        id: 'prepare',
+        cwd: '.',
+        command: ['node', 'prepare.mjs'],
+        needs: {},
+        env: {},
+        role: 'generic',
+        retrySafe: false
+      }],
+      resources: [],
+      services: [{
+        id: 'web',
+        cwd: '.',
+        command: ['node', 'server.mjs'],
+        needs: { prepare: 'succeeded', accounts: 'ready' },
+        env: {
+          API_TOKEN: { type: 'private-input', input: 'api-token' },
+          ACCOUNTS_ORIGIN: { type: 'attached-http-origin', attachment: 'accounts' }
+        },
+        ports: { http: { env: 'PORT' } },
+        ready: { type: 'http', port: 'http', path: '/ready', timeoutSeconds: 20 },
+        critical: true,
+        restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
+      }],
+      workers: [],
+      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+      scenarios: [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: 'default'
+    },
+    warnings: ['Native commands run as your local user.'],
+    createdAt: '2026-07-13T10:00:00.000Z'
+  };
+}
+
+function activeGeneration(): PreviewGenerationRecord {
+  return {
+    id: 'active-generation',
+    previewKey: 'task-task1',
+    taskId: 'task-1',
+    iterationId: 'iteration-1',
+    worktreeId: 'worktree-1',
+    planId: 'plan-1',
+    approvalId: 'approval-1',
+    executionDigest: 'execution',
+    sourceGitSnapshotId: 'git-1',
+    sourceHeadSha: 'abcdef1234567890',
+    sourceDirtyFingerprint: 'clean',
+    workspacePath: '/preview/active',
+    state: 'READY',
+    routingState: 'ACTIVE',
+    freshness: 'CURRENT',
+    attachmentReadiness: [{
+      attachmentId: 'accounts',
+      status: 'PASSED',
+      observedAt: '2026-07-13T10:00:00.000Z'
+    }],
+    routes: [{
+      id: 'app',
+      hostname: 'app.task.preview.localhost',
+      url: 'http://app.task.preview.localhost:31337/',
+      gatewayPort: 31337,
+      targetHost: '127.0.0.1',
+      targetPort: 41000,
+      state: 'ATTACHED'
+    }],
+    createdAt: '2026-07-13T10:00:00.000Z',
+    updatedAt: '2026-07-13T10:00:00.000Z',
+    readyAt: '2026-07-13T10:00:00.000Z'
+  };
+}
+
+function generationFixture(
+  overrides: Partial<PreviewGenerationRecord> = {}
+): PreviewGenerationRecord {
+  return {
+    ...activeGeneration(),
+    id: 'generation',
+    workspacePath: '/preview/generation',
+    routingState: 'RETIRED',
+    routes: [],
+    attachmentReadiness: [],
+    readyAt: undefined,
+    ...overrides
+  };
+}
+
+function attemptFixture(
+  generationId: string,
+  state: PreviewNodeAttemptRecord['state']
+): PreviewNodeAttemptRecord {
+  return {
+    id: `attempt-${generationId}`,
+    taskId: 'task-1',
+    generationId,
+    nodeId: 'web',
+    kind: 'SERVICE',
+    attempt: 1,
+    commandDigest: 'command',
+    state,
+    stdoutArtifactId: 'stdout',
+    stderrArtifactId: 'stderr',
+    startedAt: '2026-07-13T10:00:01.000Z',
+    endedAt: state === 'RUNNING' ? undefined : '2026-07-13T10:00:02.000Z'
+  };
+}
