@@ -39,6 +39,12 @@ secret-bearing, binary, generated, dependency/cache, and oversized content is ex
 The agent cannot write the worktree and is instructed not to run the app,
 tests, scripts, Docker, or network services.
 
+For supported framework versions, Task Monki adds narrow compatibility facts
+to the evidence bundle. For example, a Next.js script that pins a port or
+enables HTTPS can receive a reviewable Preview-only HTTP command using the
+dynamically allocated `PORT`; the YAML comment explains that deviation. Task
+Monki does not guess a rewrite for unknown framework versions or arguments.
+
 The modal displays the complete YAML alongside evidence, assumptions,
 omissions, and unresolved decisions. You may edit, regenerate, discard, or
 close. Close and Discard do not change the repository. Only **Accept & save

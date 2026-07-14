@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parsePreviewRecipe } from '../PreviewRecipeLoader';
+import { PREVIEW_FRAMEWORK_CAPABILITIES_VERSION } from './PreviewFrameworkCapabilities';
 import {
   buildPreviewRecipeGenerationInstruction,
   PREVIEW_RECIPE_GENERATION_CONTRACT,
@@ -26,6 +27,10 @@ describe('Preview recipe generation support', () => {
     expect(instruction).toContain('Do not run the application');
     expect(instruction).toContain('Do not modify files');
     expect(instruction).toContain('Never reproduce or infer secret values');
+    expect(instruction).toContain(PREVIEW_FRAMEWORK_CAPABILITIES_VERSION);
+    expect(instruction).toContain('compatiblePreviewCommand');
+    expect(instruction).toContain('copy those lines exactly');
+    expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
     expect(instruction).toContain('insufficient-evidence');
     expect(instruction).toContain('Every evidence path must exist');
   });

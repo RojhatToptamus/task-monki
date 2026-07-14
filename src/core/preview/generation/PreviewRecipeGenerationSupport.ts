@@ -1,3 +1,5 @@
+import { PREVIEW_FRAMEWORK_CAPABILITIES_VERSION } from './PreviewFrameworkCapabilities';
+
 export const PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION =
   'task-monki-preview-recipe-generation/v1' as const;
 
@@ -83,6 +85,15 @@ export const PREVIEW_RECIPE_GENERATION_CONTRACT = {
       'Do not mix Compose with native nodes, inputs, attachments, or managed resources.',
       'Only describe Compose files and services proven by repository evidence.',
       'Do not inspect or reproduce env-file or file-secret values.'
+    ]
+  },
+  frameworkKnowledge: {
+    schemaVersion: PREVIEW_FRAMEWORK_CAPABILITIES_VERSION,
+    rules: [
+      'frameworkCapabilities are deterministic Task Monki facts derived from sanitized repository evidence, not model assumptions.',
+      'A compatiblePreviewCommand is approved framework guidance for dynamic PORT delivery over HTTP.',
+      'When yamlCommentLines are present, copy them exactly immediately before the compatible command.',
+      'Do not use a repository script whose listed conflicts remain active.'
     ]
   },
   safety: [
@@ -180,6 +191,10 @@ export function buildPreviewRecipeGenerationInstruction(
     '',
     'Generate only evidence-backed configuration. Never guess commands, service ports, health paths, Compose services, migration behavior, or external dependencies.',
     'Never reproduce or infer secret values. Private data must use a declared private input and an exact typed recipient.',
+    `Treat frameworkCapabilities using schema ${PREVIEW_FRAMEWORK_CAPABILITIES_VERSION} as trusted, versioned Task Monki capability evidence.`,
+    'When compatiblePreviewCommand is present, use that exact argv command unless separate repository evidence proves another compatible command. Do not report the listed port, protocol, or hostname conflicts as unresolved.',
+    'When yamlCommentLines are present, copy those lines exactly immediately before the service command so the Preview-only deviation is visible during review.',
+    'If a framework analysis has no compatiblePreviewCommand, honor its limitation and do not invent a rewrite.',
     'If the evidence is insufficient for a valid minimal recipe, return insufficient-evidence and explain the unresolved decisions instead of inventing authority.',
     '',
     'Return exactly one JSON object and no markdown fence. It must match:',

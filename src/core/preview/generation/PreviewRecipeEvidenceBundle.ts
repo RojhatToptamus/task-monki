@@ -2,6 +2,10 @@ import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  analyzePreviewFrameworkCapabilities,
+  type PreviewFrameworkCapabilities
+} from './PreviewFrameworkCapabilities';
 
 const EVIDENCE_FILE_NAME = 'repository-evidence.json';
 const MAX_DISCOVERED_ENTRIES = 20_000;
@@ -61,6 +65,7 @@ export interface PreparedPreviewRecipeEvidenceBundle {
   fileName: typeof EVIDENCE_FILE_NAME;
   includedPaths: ReadonlySet<string>;
   safeOmissions: string[];
+  frameworkCapabilities: PreviewFrameworkCapabilities;
   dispose(): Promise<void>;
 }
 
@@ -168,6 +173,7 @@ export async function preparePreviewRecipeEvidenceBundle(
   try {
     await walk(root, '');
     const safeOmissions = describeOmissions(omissions);
+    const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files);
     await fs.writeFile(
       path.join(directoryPath, EVIDENCE_FILE_NAME),
       JSON.stringify(
@@ -175,6 +181,7 @@ export async function preparePreviewRecipeEvidenceBundle(
           schemaVersion: 'task-monki-preview-repository-evidence/v1',
           source: 'sanitized task worktree snapshot',
           files,
+          frameworkCapabilities,
           omissions: safeOmissions
         },
         null,
@@ -187,6 +194,7 @@ export async function preparePreviewRecipeEvidenceBundle(
       fileName: EVIDENCE_FILE_NAME,
       includedPaths,
       safeOmissions,
+      frameworkCapabilities,
       dispose: () => fs.rm(directoryPath, { recursive: true, force: true })
     };
   } catch (error) {

@@ -772,7 +772,8 @@ export type PreviewRecipeValidationIssueCode =
   | 'EMPTY_RECIPE'
   | 'RECIPE_TOO_LARGE'
   | 'INVALID_RECIPE'
-  | 'SECRET_LITERAL';
+  | 'SECRET_LITERAL'
+  | 'INCOMPATIBLE_COMMAND';
 
 export interface PreviewRecipeValidationIssue {
   code: PreviewRecipeValidationIssueCode;

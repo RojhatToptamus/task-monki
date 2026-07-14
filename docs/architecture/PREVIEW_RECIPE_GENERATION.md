@@ -34,6 +34,8 @@ The generator receives versioned support material from
 - a stable behavioral instruction;
 - the machine-readable `task-monki-preview-recipe-generation/v1` authoring
   contract;
+- deterministic `task-monki-preview-framework-capabilities/v1` compatibility
+  facts derived from sanitized repository manifests;
 - parser-tested native, private-input/managed-data, and Compose examples;
 - the structured output contract;
 - safety, evidence, omission, and error rules.
@@ -42,6 +44,16 @@ The authoring contract is guidance for the agent, not an executable schema.
 `PreviewRecipeLoader.parsePreviewRecipe` remains the only semantic recipe
 parser and final authority. Every bundled example is tested against it so
 support material cannot silently drift away from accepted syntax.
+
+Framework compatibility facts are versioned separately from the recipe
+schema. The first profile covers direct Next.js 15-16 development scripts. It
+proves standard HTTP `PORT` delivery and classifies fixed `-p`/`--port`,
+experimental HTTPS, and incompatible hostname arguments. When those conflicts
+can be removed without changing the application entry point, the evidence
+bundle supplies one exact Preview-only command and exact explanatory YAML
+comment lines. Unknown script shapes, unsupported framework versions, and
+unrecognized arguments remain fail-closed rather than becoming guessed
+commands.
 
 The agent must return a single structured object containing either a complete
 YAML draft or `insufficient-evidence`, plus:
@@ -55,6 +67,12 @@ YAML draft or `insufficient-evidence`, plus:
 Every evidence path must exist in the sanitized bundle. Outputs are bounded,
 unknown fields are rejected, secret canary patterns are rejected, and a draft
 without evidence is invalid.
+
+Generated drafts may not retain a repository script with a known port or
+protocol conflict. If a draft uses a supplied compatible framework command,
+validation also requires its review comment. This keeps the compatibility
+decision visible and prevents a model from silently reintroducing the original
+fixed-port or HTTPS listener.
 
 ## Repository inspection boundary
 

@@ -25,6 +25,7 @@ import {
   buildPreviewRecipeGenerationInstruction,
   PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION
 } from './PreviewRecipeGenerationSupport';
+import type { PreviewFrameworkCapabilities } from './PreviewFrameworkCapabilities';
 import { preparePreviewRecipeEvidenceBundle } from './PreviewRecipeEvidenceBundle';
 
 const GENERATION_TIMEOUT_MS = 120_000;
@@ -253,7 +254,10 @@ export class PreviewRecipeGenerationService {
           input.onUpdate
         );
       }
-      const validation = validatePreviewRecipeDraft(parsed.yaml ?? '');
+      const validation = validateGeneratedPreviewRecipeDraft(
+        parsed.yaml ?? '',
+        evidence.frameworkCapabilities
+      );
       if (validation.status !== 'VALID') {
         return this.finish(
           input.taskId,
@@ -397,6 +401,64 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
     };
   }
   return { status: 'VALID' };
+}
+
+function validateGeneratedPreviewRecipeDraft(
+  yaml: string,
+  capabilities: PreviewFrameworkCapabilities
+): PreviewRecipeValidation {
+  const validation = validatePreviewRecipeDraft(yaml);
+  if (validation.status !== 'VALID') return validation;
+  const plan = parsePreviewRecipe(yaml).executionPlan;
+  const commands = [...plan.services, ...plan.workers].map((node) => node.command);
+  for (const command of commands) {
+    if (containsExplicitRuntimeConflict(command)) {
+      return incompatibleCommand(
+        'The generated command contains a fixed port or HTTPS listener flag that conflicts with Preview.'
+      );
+    }
+  }
+  const normalizedYaml = yaml.split(/\r?\n/).map((line) => line.trimStart()).join('\n');
+  for (const capability of capabilities.analyses) {
+    if (capability.conflicts.length === 0 || !capability.compatiblePreviewCommand) continue;
+    if (commands.some((command) => equalCommand(command, capability.scriptCommand))) {
+      return incompatibleCommand(
+        'The generated command uses a repository script with a known Preview port or protocol conflict.'
+      );
+    }
+    if (
+      commands.some((command) => equalCommand(command, capability.compatiblePreviewCommand!)) &&
+      capability.yamlCommentLines &&
+      !normalizedYaml.includes(capability.yamlCommentLines.join('\n'))
+    ) {
+      return incompatibleCommand(
+        'The generated Preview-only framework command must retain its compatibility comment.'
+      );
+    }
+  }
+  return validation;
+}
+
+function containsExplicitRuntimeConflict(command: string[]): boolean {
+  const nextIndex = command.findIndex((argument, index) =>
+    (argument === 'next' || argument.endsWith('/next')) && command[index + 1] === 'dev'
+  );
+  if (nextIndex < 0) return false;
+  return command.slice(nextIndex + 2).some((argument) =>
+    argument === '-p' ||
+    argument === '--port' ||
+    /^(?:-p=?|--port=)\d+$/.test(argument) ||
+    argument === '--experimental-https' ||
+    /^--experimental-https-(?:key|cert|ca)(?:=|$)/.test(argument)
+  );
+}
+
+function equalCommand(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function incompatibleCommand(message: string): PreviewRecipeValidation {
+  return { status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND', message }] };
 }
 
 function containsSecretLiteral(plan: PreviewExecutionPlan): boolean {

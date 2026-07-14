@@ -129,6 +129,86 @@ describe('PreviewRecipeGenerationService', () => {
     await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
   });
 
+  it('turns trusted Next.js fixed-port and HTTPS analysis into an actionable draft', async () => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
+      const evidence = JSON.parse(
+        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
+      ) as { frameworkCapabilities: { analyses: Array<Record<string, unknown>> } };
+      expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
+        conflicts: [{ code: 'HTTPS_LISTENER' }, { code: 'FIXED_PORT' }],
+        compatiblePreviewCommand: [
+          'npm', 'exec', '--offline', '--', 'next', 'dev', '--turbopack',
+          '--hostname', '127.0.0.1'
+        ]
+      });
+      expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
+      return { result: Promise.resolve(nextAgentDraft()), cancel: async () => {} };
+    });
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('READY');
+    expect(result.draft?.yaml).toContain(
+      "# The repository's existing development script pins port 8000 and enables"
+    );
+    expect(result.draft?.report.unresolvedDecisions).toEqual([]);
+  });
+
+  it('uses trusted PORT support for a standard Next.js script instead of requesting more evidence', async () => {
+    const root = await nextWorktree('next dev --turbopack', '15.5.2');
+    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
+      const evidence = JSON.parse(
+        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
+      ) as { frameworkCapabilities: { analyses: Array<Record<string, unknown>> } };
+      expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
+        conflicts: [],
+        compatiblePreviewCommand: ['npm', 'run', 'dev'],
+        portBinding: { type: 'environment', name: 'PORT' }
+      });
+      return {
+        result: Promise.resolve(nextAgentDraft('[npm, run, dev]', '')),
+        cancel: async () => {}
+      };
+    });
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('READY');
+    expect(result.report).toBeUndefined();
+    expect(result.draft?.report.unresolvedDecisions).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: 'the original conflicting repository script',
+      command: '[npm, run, dev]',
+      comment: nextCompatibilityComment()
+    },
+    {
+      name: 'a rewritten command without its compatibility comment',
+      command: '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]',
+      comment: ''
+    },
+    {
+      name: 'a direct Next.js command retaining conflicting listener flags',
+      command: '[npm, exec, --offline, --, next, dev, --experimental-https, --port, "8000"]',
+      comment: nextCompatibilityComment()
+    }
+  ])('rejects $name', async ({ command, comment }) => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(nextAgentDraft(command, comment)),
+      cancel: async () => {}
+    }));
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.failureCode).toBe('INVALID_AGENT_OUTPUT');
+    expect(result.message).toMatch(/conflict|compatibility comment/);
+  });
+
   it('rejects literal secret-like environment delivery before acceptance', () => {
     expect(validatePreviewRecipeDraft(`version: 1
 services:
@@ -207,6 +287,23 @@ async function previewWorktree(): Promise<string> {
   return root;
 }
 
+async function nextWorktree(
+  script = 'next dev --turbopack --experimental-https -p 8000',
+  version = '^16.1.6'
+): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-next-generation-test-'));
+  roots.push(root);
+  await fs.writeFile(
+    path.join(root, 'package.json'),
+    JSON.stringify({
+      dependencies: { next: version },
+      scripts: { dev: script }
+    }),
+    'utf8'
+  );
+  return root;
+}
+
 function agentDraft(): string {
   return JSON.stringify({
     schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
@@ -233,4 +330,36 @@ routes:
     omissions: ['No health endpoint was evidenced.'],
     unresolvedDecisions: []
   });
+}
+
+function nextAgentDraft(
+  command = '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]',
+  comment = nextCompatibilityComment()
+): string {
+  return JSON.stringify({
+    schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
+    status: 'draft',
+    yaml: `version: 1
+services:
+  web:
+${comment}${comment ? '\n' : ''}    command: ${command}
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`,
+    summary: 'Runs Next.js through the trusted Preview-compatible HTTP command.',
+    evidence: [{ path: 'package.json', finding: 'The repository declares a supported Next.js dev script.' }],
+    assumptions: [],
+    omissions: [],
+    unresolvedDecisions: []
+  });
+}
+
+function nextCompatibilityComment(): string {
+  return [
+    "    # The repository's existing development script pins port 8000 and enables",
+    '    # HTTPS. This Preview command intentionally uses standard HTTP and Task',
+    "    # Monki's dynamically allocated port."
+  ].join('\n');
 }
