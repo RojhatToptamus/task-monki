@@ -16,6 +16,7 @@ describe('TaskManagerService shutdown coordination', () => {
       store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
+      previewRecipeGenerator: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'READY';
     internals.taskActionLocks = new Map();
@@ -34,6 +35,7 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push('preview-finished');
       }
     };
+    internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
 
     const shutdown = service.shutdown();
     await Promise.resolve();
@@ -66,6 +68,7 @@ describe('TaskManagerService shutdown coordination', () => {
       appSettingsStore: { get(): Promise<never> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
+      previewRecipeGenerator: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'NEW';
     internals.taskActionLocks = new Map();
@@ -95,6 +98,7 @@ describe('TaskManagerService shutdown coordination', () => {
         calls.push('preview-shutdown');
       }
     };
+    internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
 
     const firstInit = service.init();
     const secondInit = service.init();
@@ -126,6 +130,7 @@ describe('TaskManagerService shutdown coordination', () => {
       store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
+      previewRecipeGenerator: { shutdown(): Promise<void> };
       withTaskAction<T>(
         taskId: string,
         label: string,
@@ -139,6 +144,7 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.store = { close: () => Promise.resolve() };
     internals.agents = { shutdown: () => Promise.resolve() };
     internals.previews = { shutdown: () => Promise.resolve() };
+    internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
 
     const action = internals.withTaskAction('task-1', 'Preview startup', async () => {
       markActionStarted();
@@ -193,6 +199,7 @@ describe('TaskManagerService shutdown coordination', () => {
         getProviderState(): Promise<unknown>;
       };
       previews: { shutdown(): Promise<void> };
+      previewRecipeGenerator: { shutdown(): Promise<void> };
       events: { emit(event: unknown): void };
     };
     internals.lifecycleState = 'READY';
@@ -237,6 +244,7 @@ describe('TaskManagerService shutdown coordination', () => {
         events.push(`preview-shutdown-${shutdownCount}`);
       }
     };
+    internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
     internals.events = { emit() {} };
 
     const update = service.updateAppSettings({

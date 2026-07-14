@@ -8,9 +8,12 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
   PreviewResourceRecord,
   PreviewRouteRecord,
   ReadPreviewLogResult,
+  ResolvePreviewResult,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -46,7 +49,23 @@ export interface PreviewPanelProps {
   localBindings: PreviewLocalAttachmentBindingRecord[];
   runtimeResources: PreviewResourceRecord[];
   executionReadiness?: PreviewExecutionReadiness;
+  resolution?: ResolvePreviewResult;
+  recipeGeneration?: PreviewRecipeGenerationSnapshot;
   onResolve(taskId: string, scenarioId?: string): Promise<void>;
+  onGetRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onGenerateRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onValidateRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<PreviewRecipeValidation>;
+  onAcceptRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
+  onDiscardRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onWriteRecipeManually(taskId: string, worktreeId: string): Promise<void>;
   onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
   onStart(taskId: string, scenarioId?: string): Promise<void>;
   onOpen(taskId: string, generationId: string, routeId: string): Promise<void>;
@@ -246,6 +265,14 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
     void props.onResolve(props.task.id, plan.executionPlan.selectedScenarioId)
       .catch(() => setReadinessCheckFailed(true));
   }, [plan, props.onResolve, props.task.id, readinessPending]);
+
+  if (
+    !plan &&
+    props.resolution?.status === 'UNAVAILABLE' &&
+    props.resolution.reasonCode === 'RECIPE_MISSING'
+  ) {
+    return <PreviewMissingRecipeSetup {...props} />;
+  }
 
   return (
     <section className="tm-preview-workspace" aria-label="Preview">
@@ -456,6 +483,409 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
       ) : null}
     </section>
   );
+}
+
+function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [localGeneration, setLocalGeneration] = useState(props.recipeGeneration);
+  const returnFocusRef = useRef<HTMLElement | undefined>(undefined);
+
+  useEffect(() => {
+    if (props.recipeGeneration) setLocalGeneration(props.recipeGeneration);
+  }, [props.recipeGeneration]);
+
+  const generate = async () => {
+    setLocalGeneration((current) => ({
+      taskId: props.task.id,
+      status: 'GENERATING',
+      stage: 'PREPARING_EVIDENCE',
+      draft: current?.draft,
+      startedAt: new Date().toISOString()
+    }));
+    try {
+      setLocalGeneration(await props.onGenerateRecipe(props.task.id));
+    } catch {
+      setLocalGeneration((current) => ({
+        taskId: props.task.id,
+        status: 'FAILED',
+        draft: current?.draft,
+        failureCode: 'AGENT_UNAVAILABLE',
+        message: 'The Preview recipe agent could not produce a draft.'
+      }));
+    }
+  };
+
+  const openGenerator = async (returnFocus: HTMLElement) => {
+    returnFocusRef.current = returnFocus;
+    setModalOpen(true);
+    try {
+      const current = await props.onGetRecipeGeneration(props.task.id);
+      setLocalGeneration(current);
+      if (current.status === 'EMPTY') await generate();
+    } catch {
+      setLocalGeneration({
+        taskId: props.task.id,
+        status: 'FAILED',
+        failureCode: 'AGENT_UNAVAILABLE',
+        message: 'The Preview recipe agent could not be opened.'
+      });
+    }
+  };
+
+  const discard = async () => {
+    setLocalGeneration(await props.onDiscardRecipeDraft(props.task.id));
+    setModalOpen(false);
+  };
+
+  return (
+    <section className="tm-preview-workspace" aria-label="Preview">
+      <header className="tm-preview-workspace__head tm-preview-setup__head">
+        <div className="tm-preview-workspace__decision">
+          <div className="tm-preview-statusline tm-preview-statusline--action">
+            <span aria-hidden="true" />
+            <strong>Preview setup</strong>
+            <small>Recipe required</small>
+          </div>
+          <p>
+            This worktree does not contain <code>.taskmonki/preview.yaml</code>. Generate a
+            reviewable draft or create the recipe yourself.
+          </p>
+        </div>
+        <div className="tm-preview-workspace__actions">
+          <button
+            type="button"
+            className="primary-button"
+            onClick={(event) => void openGenerator(event.currentTarget)}
+          >
+            Generate with agent
+          </button>
+          <button
+            type="button"
+            className="outline-button"
+            onClick={() => props.worktree && void props.onWriteRecipeManually(
+              props.task.id,
+              props.worktree.id
+            )}
+          >
+            Write manually
+          </button>
+        </div>
+      </header>
+
+      <div className="tm-preview-setup">
+        <div className="tm-preview-setup__path" aria-label="Preview recipe path">
+          <span>Repository recipe</span>
+          <code>.taskmonki/preview.yaml</code>
+        </div>
+        <div className="tm-preview-setup__rules">
+          <p>
+            The agent inspects a bounded read-only evidence bundle and cannot write the
+            repository. You review the complete YAML before accepting it.
+          </p>
+          <p>
+            Acceptance creates only the Preview recipe, then checks it through the normal
+            parser. Approval and Start remain separate actions.
+          </p>
+        </div>
+      </div>
+
+      {modalOpen ? (
+        <PreviewRecipeGenerationModal
+          taskId={props.task.id}
+          state={localGeneration ?? { taskId: props.task.id, status: 'EMPTY' }}
+          returnFocus={returnFocusRef.current}
+          onClose={() => setModalOpen(false)}
+          onRegenerate={generate}
+          onValidate={props.onValidateRecipeDraft}
+          onAccept={props.onAcceptRecipeDraft}
+          onDiscard={discard}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+export function PreviewRecipeGenerationModal({
+  taskId,
+  state,
+  returnFocus,
+  onClose,
+  onRegenerate,
+  onValidate,
+  onAccept,
+  onDiscard
+}: {
+  taskId: string;
+  state: PreviewRecipeGenerationSnapshot;
+  returnFocus?: HTMLElement;
+  onClose(): void;
+  onRegenerate(): Promise<void>;
+  onValidate(taskId: string, draftId: string, yaml: string): Promise<PreviewRecipeValidation>;
+  onAccept(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
+  onDiscard(): Promise<void>;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [yaml, setYaml] = useState(state.draft?.yaml ?? '');
+  const [loadedDraftId, setLoadedDraftId] = useState(state.draft?.id);
+  const [edited, setEdited] = useState(false);
+  const [validation, setValidation] = useState<PreviewRecipeValidation>();
+  const [accepting, setAccepting] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [regenerateArmed, setRegenerateArmed] = useState(false);
+  const busy = accepting || discarding;
+  const busyRef = useRef(busy);
+  const closeRef = useRef(onClose);
+  busyRef.current = busy;
+  closeRef.current = onClose;
+  const generating = state.status === 'GENERATING';
+  const report = state.report ?? state.draft?.report;
+
+  useEffect(() => {
+    if (state.draft && state.draft.id !== loadedDraftId) {
+      setYaml(state.draft.yaml);
+      setLoadedDraftId(state.draft.id);
+      setEdited(false);
+      setValidation(state.draft.validation);
+      setRegenerateArmed(false);
+    }
+  }, [loadedDraftId, state.draft]);
+
+  useEffect(() => {
+    panelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyRef.current) closeRef.current();
+      if (event.key !== 'Tab') return;
+      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ) ?? [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      returnFocus?.focus();
+    };
+  }, [returnFocus]);
+
+  const validateAndAccept = async () => {
+    const draft = state.draft;
+    if (!draft || accepting || generating) return;
+    setAccepting(true);
+    try {
+      const nextValidation = await onValidate(taskId, draft.id, yaml);
+      setValidation(nextValidation);
+      if (nextValidation.status !== 'VALID') return;
+      await onAccept(taskId, draft.id, yaml);
+      onClose();
+    } finally {
+      setAccepting(false);
+    }
+  };
+
+  const regenerate = async () => {
+    if (generating) return;
+    if (edited && !regenerateArmed) {
+      setRegenerateArmed(true);
+      return;
+    }
+    setValidation(undefined);
+    setRegenerateArmed(false);
+    await onRegenerate();
+  };
+
+  const discard = async () => {
+    setDiscarding(true);
+    try {
+      await onDiscard();
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
+  return (
+    <div
+      className="tm-modal tm-preview-recipe-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="preview-recipe-generation-title"
+    >
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onClose} />
+      <div
+        ref={panelRef}
+        className="tm-modal__panel tm-preview-recipe-review"
+        tabIndex={-1}
+      >
+        <header className="tm-preview-recipe-review__head">
+          <div>
+            <span className="tm-preview-recipe-review__eyebrow">Agent draft</span>
+            <h3 id="preview-recipe-generation-title">Review Preview configuration</h3>
+            <p>
+              Nothing is written until you accept. Approval and Start remain separate.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="tm-preview-recipe-review__close"
+            disabled={busy}
+            aria-label="Close Preview recipe review"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+
+        {generating ? (
+          <div className="tm-preview-recipe-progress" role="status" aria-live="polite">
+            <span className="tm-preview-recipe-progress__dot" aria-hidden="true" />
+            <div>
+              <strong>{generationStageLabel(state.stage)}</strong>
+              <p>{generationStageDetail(state.stage)}</p>
+            </div>
+          </div>
+        ) : null}
+
+        {state.status === 'FAILED' || state.status === 'NEEDS_INPUT' ? (
+          <div className="tm-preview-recipe-message" role="status">
+            <strong>{state.status === 'NEEDS_INPUT' ? 'More evidence is needed' : 'Draft not generated'}</strong>
+            <p>{state.message}</p>
+          </div>
+        ) : null}
+
+        {state.draft ? (
+          <div className="tm-preview-recipe-review__body">
+            <section className="tm-preview-recipe-editor" aria-label="Generated Preview YAML">
+              <div className="tm-preview-recipe-editor__head">
+                <div>
+                  <strong>Complete YAML</strong>
+                  <span>{edited ? 'Edited' : 'Generated'} · {yaml.split('\n').length} lines</span>
+                </div>
+                <code>.taskmonki/preview.yaml</code>
+              </div>
+              <textarea
+                aria-label="Preview recipe YAML"
+                value={yaml}
+                disabled={generating || busy}
+                spellCheck={false}
+                onChange={(event) => {
+                  setYaml(event.target.value);
+                  setEdited(event.target.value !== state.draft?.yaml);
+                  setValidation(undefined);
+                  setRegenerateArmed(false);
+                }}
+              />
+              {validation?.status === 'INVALID' ? (
+                <div className="tm-preview-recipe-validation" role="alert">
+                  {validation.issues.map((issue) => (
+                    <p key={issue.code}>{issue.message}</p>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+            {report ? (
+              <PreviewRecipeGenerationReportView report={report} originalDraftOnly={edited} />
+            ) : null}
+          </div>
+        ) : report ? (
+          <PreviewRecipeGenerationReportView report={report} />
+        ) : null}
+
+        <footer className="tm-preview-recipe-review__footer">
+          <div className="tm-preview-recipe-review__secondary">
+            <button type="button" className="outline-button" disabled={busy} onClick={onClose}>
+              Close
+            </button>
+            <button
+              type="button"
+              className="tm-preview-recipe-review__discard"
+              disabled={busy}
+              onClick={() => void discard()}
+            >
+              {discarding ? 'Discarding…' : 'Discard'}
+            </button>
+          </div>
+          <div className="tm-preview-recipe-review__primary">
+            {regenerateArmed ? <span>Your edits will be replaced.</span> : null}
+            <button
+              type="button"
+              className="outline-button"
+              disabled={busy || generating}
+              onClick={() => void regenerate()}
+            >
+              {regenerateArmed ? 'Replace draft' : 'Regenerate'}
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!state.draft || busy || generating}
+              onClick={() => void validateAndAccept()}
+            >
+              {accepting ? 'Checking…' : 'Accept & save recipe'}
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function PreviewRecipeGenerationReportView({
+  report,
+  originalDraftOnly = false
+}: {
+  report: import('../../shared/contracts').PreviewRecipeGenerationReport;
+  originalDraftOnly?: boolean;
+}) {
+  const sections = [
+    ['Evidence', report.evidence.map((item) => `${item.path} — ${item.finding}`)],
+    ['Assumptions', report.assumptions],
+    ['Omissions', report.omissions],
+    ['Unresolved', report.unresolvedDecisions]
+  ] as const;
+  return (
+    <aside className="tm-preview-recipe-report" aria-label="Generation report">
+      <div>
+        <span>{originalDraftOnly ? 'Generation report · original draft' : 'Generation report'}</span>
+        <strong>{report.summary}</strong>
+      </div>
+      {sections.map(([label, items]) => items.length ? (
+        <section key={label}>
+          <h4>{label}</h4>
+          <ul>
+            {items.map((item, index) => <li key={`${label}-${index}`}>{item}</li>)}
+          </ul>
+        </section>
+      ) : null)}
+    </aside>
+  );
+}
+
+function generationStageLabel(stage?: PreviewRecipeGenerationSnapshot['stage']): string {
+  if (stage === 'GENERATING_DRAFT') return 'Agent is drafting the recipe';
+  if (stage === 'VALIDATING_DRAFT') return 'Validating against Preview';
+  return 'Preparing safe repository evidence';
+}
+
+function generationStageDetail(stage?: PreviewRecipeGenerationSnapshot['stage']): string {
+  if (stage === 'GENERATING_DRAFT') {
+    return 'Reading only the bounded evidence bundle and mapping proven commands, ports, and readiness.';
+  }
+  if (stage === 'VALIDATING_DRAFT') {
+    return 'The existing Preview parser is checking the complete generated YAML.';
+  }
+  return 'Likely secret-bearing, binary, generated, and oversized files are excluded before inspection.';
 }
 
 function usePreviewController(props: PreviewPanelProps): PreviewController {

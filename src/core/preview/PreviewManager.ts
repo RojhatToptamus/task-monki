@@ -106,7 +106,13 @@ export class PreviewManager {
   async resolve(context: PreviewTaskContext, scenarioId?: string): Promise<ResolvePreviewResult> {
     this.assertAcceptingWork();
     const loaded = await this.recipeLoader.load(context.worktree.worktreePath);
-    if (loaded.status === 'MISSING') return { status: 'UNAVAILABLE', reason: loaded.reason };
+    if (loaded.status === 'MISSING') {
+      return {
+        status: 'UNAVAILABLE',
+        reasonCode: 'RECIPE_MISSING',
+        reason: loaded.reason
+      };
+    }
     const parsed = scenarioId
       ? selectPreviewScenario(loaded.parsed, scenarioId)
       : loaded.parsed;

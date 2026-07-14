@@ -5,6 +5,7 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
+  ResolvePreviewResult,
   Task,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -64,6 +65,7 @@ export interface PreviewViewModelInput {
   generationAttachments?: PreviewGenerationAttachmentRecord[];
   managedResources?: PreviewManagedResourceRecord[];
   attempts: PreviewNodeAttemptRecord[];
+  resolution?: ResolvePreviewResult;
 }
 
 export function selectPreviewActionGeneration(
@@ -461,6 +463,17 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const plan = plans[0];
   if (!plan) {
+    if (
+      input.resolution?.status === 'UNAVAILABLE' &&
+      input.resolution.reasonCode === 'RECIPE_MISSING'
+    ) {
+      return {
+        status: 'Setup required',
+        tone: 'action',
+        summary: 'Add a repository-owned Preview recipe before checking execution authority.',
+        actions: []
+      };
+    }
     return {
       status: 'Not checked',
       tone: 'neutral',

@@ -13,7 +13,8 @@ security boundaries, read the
 You need:
 
 - a task with an active Task Monki worktree;
-- `.taskmonki/preview.yaml` in that repository;
+- `.taskmonki/preview.yaml` in that repository, authored manually or accepted
+  from an agent-generated draft;
 - the commands named by the recipe available to the captured source;
 - Docker Desktop or another verified Docker-compatible context only when the
   recipe uses managed PostgreSQL/Redis or the Compose adapter;
@@ -26,6 +27,28 @@ mutation when it is missing.
 Preview is independent of the task's board phase and AI run. Starting,
 replacing, opening, stopping, or failing a Preview does not move the task
 between Backlog, In Progress, Review, or Done.
+
+### Setting up a missing recipe
+
+When **Check preview** confirms that `.taskmonki/preview.yaml` is missing, the
+Preview workspace offers **Generate with agent** and **Write manually**.
+
+Generation opens a review modal immediately and shows progress while an
+ephemeral read-only agent inspects a bounded sanitized evidence bundle. Likely
+secret-bearing, binary, generated, dependency/cache, and oversized content is excluded.
+The agent cannot write the worktree and is instructed not to run the app,
+tests, scripts, Docker, or network services.
+
+The modal displays the complete YAML alongside evidence, assumptions,
+omissions, and unresolved decisions. You may edit, regenerate, discard, or
+close. Close and Discard do not change the repository. Only **Accept & save
+recipe** exclusively creates `.taskmonki/preview.yaml`; it refuses to overwrite
+a file created while the draft was open, then runs the normal Preview parser
+and check. Acceptance never approves a plan or starts Preview.
+
+See [Preview Recipe Generation](architecture/PREVIEW_RECIPE_GENERATION.md) for
+the support contract, inspection boundary, transient lifecycle, and exact
+write rules.
 
 ## The Preview surfaces
 
@@ -578,8 +601,10 @@ claim that the previous application was restored.
 
 ### No Preview available
 
-Confirm `.taskmonki/preview.yaml` exists in the task worktree and is a regular
-file. Use **Check preview** after changing it.
+Use **Generate with agent** to prepare a reviewable evidence-backed draft, or
+**Write manually** to open the task worktree. Confirm the accepted/manual file
+is a regular `.taskmonki/preview.yaml`, then use **Check preview** after changing
+it.
 
 ### Approval required again
 

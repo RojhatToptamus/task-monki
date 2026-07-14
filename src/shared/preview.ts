@@ -719,6 +719,8 @@ export interface ResolvePreviewRequest {
   scenarioId?: string;
 }
 
+export type PreviewUnavailableReasonCode = 'RECIPE_MISSING';
+
 export type PreviewExecutionBlocker =
   | { kind: 'PRIVATE_INPUT_MISSING'; inputId: string }
   | { kind: 'PRIVATE_INPUT_LOCKED'; inputId: string }
@@ -731,7 +733,11 @@ export interface PreviewExecutionReadiness {
 }
 
 export type ResolvePreviewResult =
-  | { status: 'UNAVAILABLE'; reason: string }
+  | {
+      status: 'UNAVAILABLE';
+      reason: string;
+      reasonCode?: PreviewUnavailableReasonCode;
+    }
   | {
       status: 'CONFIGURATION_REQUIRED';
       reason: string;
@@ -743,6 +749,93 @@ export type ResolvePreviewResult =
       approval?: PreviewApprovalRecord;
       executionReadiness: PreviewExecutionReadiness;
     };
+
+export type PreviewRecipeGenerationStage =
+  | 'PREPARING_EVIDENCE'
+  | 'GENERATING_DRAFT'
+  | 'VALIDATING_DRAFT';
+
+export interface PreviewRecipeGenerationEvidence {
+  path: string;
+  finding: string;
+}
+
+export interface PreviewRecipeGenerationReport {
+  summary: string;
+  evidence: PreviewRecipeGenerationEvidence[];
+  assumptions: string[];
+  omissions: string[];
+  unresolvedDecisions: string[];
+}
+
+export type PreviewRecipeValidationIssueCode =
+  | 'EMPTY_RECIPE'
+  | 'RECIPE_TOO_LARGE'
+  | 'INVALID_RECIPE'
+  | 'SECRET_LITERAL';
+
+export interface PreviewRecipeValidationIssue {
+  code: PreviewRecipeValidationIssueCode;
+  message: string;
+}
+
+export type PreviewRecipeValidation =
+  | { status: 'VALID' }
+  | { status: 'INVALID'; issues: PreviewRecipeValidationIssue[] };
+
+export interface PreviewRecipeGenerationDraft {
+  id: string;
+  taskId: string;
+  yaml: string;
+  report: PreviewRecipeGenerationReport;
+  validation: PreviewRecipeValidation;
+  generatedAt: string;
+}
+
+export type PreviewRecipeGenerationFailureCode =
+  | 'AGENT_UNAVAILABLE'
+  | 'GENERATION_TIMED_OUT'
+  | 'INVALID_AGENT_OUTPUT'
+  | 'INSUFFICIENT_EVIDENCE';
+
+export interface PreviewRecipeGenerationSnapshot {
+  taskId: string;
+  status: 'EMPTY' | 'GENERATING' | 'READY' | 'NEEDS_INPUT' | 'FAILED';
+  stage?: PreviewRecipeGenerationStage;
+  draft?: PreviewRecipeGenerationDraft;
+  report?: PreviewRecipeGenerationReport;
+  failureCode?: PreviewRecipeGenerationFailureCode;
+  message?: string;
+  startedAt?: string;
+}
+
+export interface GetPreviewRecipeGenerationRequest {
+  taskId: string;
+}
+
+export interface GeneratePreviewRecipeRequest {
+  taskId: string;
+  model?: string;
+}
+
+export interface ValidatePreviewRecipeDraftRequest {
+  taskId: string;
+  draftId: string;
+  yaml: string;
+}
+
+export interface AcceptPreviewRecipeDraftRequest
+  extends ValidatePreviewRecipeDraftRequest {}
+
+export interface AcceptPreviewRecipeDraftResult {
+  recipePath: '.taskmonki/preview.yaml';
+  resolution?: ResolvePreviewResult;
+  checkError?: string;
+}
+
+export interface DiscardPreviewRecipeDraftRequest {
+  taskId: string;
+}
 
 export interface SetPreviewLocalAttachmentBindingRequest {
   taskId: string;

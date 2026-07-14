@@ -42,6 +42,25 @@ describe('preview view model', () => {
     });
     expect(unchecked.actions[0]?.id).toBe('RESOLVE');
 
+    const missing = buildPreviewViewModel({
+      task,
+      worktree: uncheckedWorktree(),
+      plans: [],
+      approvals: [],
+      generations: [],
+      attempts: [],
+      resolution: {
+        status: 'UNAVAILABLE',
+        reasonCode: 'RECIPE_MISSING',
+        reason: 'No Preview recipe exists.'
+      }
+    });
+    expect(missing).toMatchObject({
+      status: 'Setup required',
+      tone: 'action',
+      actions: []
+    });
+
     const plan = {
       id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1',
       recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,

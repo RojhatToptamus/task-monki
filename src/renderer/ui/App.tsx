@@ -10,6 +10,9 @@ import {
   type ExternalToolStatusReport,
   type GitSnapshotRecord,
   type InteractionRequestRecord,
+  type PreviewRecipeGenerationSnapshot,
+  type PreviewRecipeValidation,
+  type ResolvePreviewResult,
   type Task,
   type TaskManagerAppSettings,
   type TaskSnapshot,
@@ -96,6 +99,30 @@ function prefersDarkScheme(): boolean {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
 }
 
+function retainTaskEntries<T>(
+  current: Record<string, T>,
+  tasks: Array<Pick<Task, 'id'>>
+): Record<string, T> {
+  const liveTaskIds = new Set(tasks.map((task) => task.id));
+  const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
+  return retainedEntries.length === Object.keys(current).length
+    ? current
+    : Object.fromEntries(retainedEntries);
+}
+
+function isPreviewRecipeGenerationSnapshot(
+  value: unknown
+): value is PreviewRecipeGenerationSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as { taskId?: unknown; status?: unknown };
+  return (
+    typeof candidate.taskId === 'string' &&
+    ['EMPTY', 'GENERATING', 'READY', 'NEEDS_INPUT', 'FAILED'].includes(
+      String(candidate.status)
+    )
+  );
+}
+
 interface AppNotification {
   id: string;
   tone: NotificationTone;
@@ -129,6 +156,12 @@ export function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
     Record<string, PreviewExecutionReadiness>
+  >({});
+  const [previewResolutions, setPreviewResolutions] = useState<
+    Record<string, ResolvePreviewResult>
+  >({});
+  const [previewRecipeGenerations, setPreviewRecipeGenerations] = useState<
+    Record<string, PreviewRecipeGenerationSnapshot>
   >({});
   const windowChromePlatform = resolveWindowChromePlatform();
 
@@ -190,6 +223,8 @@ export function App() {
         ? current
         : Object.fromEntries(retainedEntries);
     });
+    setPreviewResolutions((current) => retainTaskEntries(current, next.tasks));
+    setPreviewRecipeGenerations((current) => retainTaskEntries(current, next.tasks));
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
     const next = await taskManagerApi.getExternalToolStatus();
@@ -289,6 +324,16 @@ export function App() {
     const unsubscribe = taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
         void taskManagerApi.getAgentProviderState().then(setProviderState);
+      }
+      if (
+        event.type === 'preview.recipe-generation.updated' &&
+        isPreviewRecipeGenerationSnapshot(event.payload)
+      ) {
+        const recipeGeneration = event.payload;
+        setPreviewRecipeGenerations((current) => ({
+          ...current,
+          [event.taskId]: recipeGeneration
+        }));
       }
       scheduler.request();
     });
@@ -606,7 +651,9 @@ export function App() {
     setError(undefined);
     try {
       const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
-      if (result.status === 'UNAVAILABLE' || result.status === 'CONFIGURATION_REQUIRED') throw new Error(result.reason);
+      setPreviewResolutions((current) => ({ ...current, [taskId]: result }));
+      if (result.status === 'UNAVAILABLE') return;
+      if (result.status === 'CONFIGURATION_REQUIRED') throw new Error(result.reason);
       setPreviewExecutionReadiness((current) => ({
         ...current,
         [taskId]: result.executionReadiness
@@ -614,6 +661,87 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not resolve preview configuration.');
+      throw caught;
+    }
+  };
+
+  const getPreviewRecipeGeneration = async (taskId: string) => {
+    const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId });
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
+  };
+
+  const generatePreviewRecipe = async (taskId: string) => {
+    try {
+      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const state = await taskManagerApi.generatePreviewRecipe({
+        taskId,
+        model: refinementModel?.model
+      });
+      setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+      return state;
+    } catch (caught) {
+      reportActionError(caught, 'Could not generate a Preview recipe.');
+      throw caught;
+    }
+  };
+
+  const validatePreviewRecipeDraft = (
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<PreviewRecipeValidation> =>
+    taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml });
+
+  const acceptPreviewRecipeDraft = async (
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ) => {
+    try {
+      const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml });
+      setPreviewRecipeGenerations((current) => ({
+        ...current,
+        [taskId]: { taskId, status: 'EMPTY' }
+      }));
+      if (result.resolution) {
+        const resolution = result.resolution;
+        setPreviewResolutions((current) => ({ ...current, [taskId]: resolution }));
+        if (resolution.status === 'PLAN') {
+          setPreviewExecutionReadiness((current) => ({
+            ...current,
+            [taskId]: resolution.executionReadiness
+          }));
+        }
+      }
+      await refresh();
+      notify(
+        result.checkError ?? 'Preview recipe saved. Review the resolved plan before approving it.',
+        result.checkError ? 'info' : 'success'
+      );
+      return result;
+    } catch (caught) {
+      reportActionError(caught, 'Could not accept the Preview recipe.');
+      throw caught;
+    }
+  };
+
+  const discardPreviewRecipeDraft = async (taskId: string) => {
+    const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId });
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
+  };
+
+  const writePreviewRecipeManually = async (taskId: string, worktreeId: string) => {
+    try {
+      const result = await taskManagerApi.executeOpenTargetAction({
+        target: { type: 'worktree', worktreeId, taskId },
+        action: 'open'
+      });
+      if (!result.ok) throw new Error(result.message ?? 'Could not open the task worktree.');
+      notify('Worktree opened. Create .taskmonki/preview.yaml, then check Preview.', 'info');
+    } catch (caught) {
+      reportActionError(caught, 'Could not open the task worktree.');
       throw caught;
     }
   };
@@ -1192,6 +1320,10 @@ export function App() {
             previewExecutionReadiness={selectedTask
               ? previewExecutionReadiness[selectedTask.id]
               : undefined}
+            previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
+            previewRecipeGeneration={selectedTask
+              ? previewRecipeGenerations[selectedTask.id]
+              : undefined}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
@@ -1206,6 +1338,12 @@ export function App() {
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
             onResolvePreview={resolvePreview}
+            onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
+            onGeneratePreviewRecipe={generatePreviewRecipe}
+            onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
+            onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
+            onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
+            onWritePreviewRecipeManually={writePreviewRecipeManually}
             onApprovePreview={approvePreview}
             onStartPreview={startPreview}
             onOpenPreview={openPreview}

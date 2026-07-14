@@ -16,8 +16,9 @@ application while Task Monki retains independent evidence for what source,
 capabilities, processes, containers, routes, dependencies, and cleanup
 authority were used.
 
-The current implementation includes the completed Phase 0-5 model:
+The current implementation includes:
 
+- review-first agent assistance for authoring a missing repository recipe;
 - a restricted versioned recipe and explicit capability approval;
 - immutable source captures and evidence-bearing application generations;
 - native jobs, services, workers, routes, readiness, liveness, restart, and
@@ -28,8 +29,9 @@ The current implementation includes the completed Phase 0-5 model:
   attachments, including another task's preview route;
 - a conservative adapter for an existing repository Compose application.
 
-Preview is intentionally not a universal development-environment system. It
-does not infer how to run a repository, adopt surviving runtime objects,
+Preview is intentionally not a universal development-environment system. An
+agent may propose evidence-backed authoring configuration, but Task Monki does
+not silently infer or execute it. Preview does not adopt surviving runtime objects,
 compose multiple repositories, start producer tasks automatically, or provide
 a generic dependency/plugin framework.
 
@@ -60,6 +62,9 @@ The current boundaries are:
 ```mermaid
 flowchart LR
   UI["Preview card and workspace"] --> Service["TaskManagerService"]
+  Service --> Draft["Transient recipe generation"]
+  Draft --> Evidence["Sanitized bounded evidence"]
+  Draft --> Parser["Existing strict recipe parser"]
   Service --> Manager["PreviewManager"]
   Manager --> Recipe["Recipe loader and plan resolver"]
   Manager --> Source["Immutable source preparer"]
@@ -116,6 +121,14 @@ The loader accepts a bounded regular file inside the worktree, uses YAML's core
 schema, and rejects duplicate keys, aliases, anchors, merge keys, custom tags,
 non-string mapping keys, unknown fields, unbounded commands, escaping paths,
 invalid references, graph cycles, and unsupported mixed authority.
+
+When that file is missing, a separate main-process authoring workflow may
+prepare a transient agent draft from sanitized bounded evidence. The complete
+YAML and structured generation report stay reviewable until explicit
+acceptance. Acceptance exclusively creates only the recipe and then returns to
+this same loader/resolver path; it cannot approve or start Preview. Agent
+generation has no durable task-store record and no parallel parser or runtime
+lifecycle. See [Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
 
 Parsing produces two hashes:
 

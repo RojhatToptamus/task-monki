@@ -10,6 +10,7 @@ import {
 } from '../../shared/contracts';
 import {
   PreviewOverviewCard,
+  PreviewRecipeGenerationModal,
   PreviewWorkspace,
   type PreviewPanelProps
 } from './PreviewPanel';
@@ -47,6 +48,102 @@ describe('Preview surfaces', () => {
     expect(html).not.toContain('id="preview-data"');
     expect(html).not.toContain('Technical details');
     expect(html).not.toContain('Data scenario');
+  });
+
+  it('offers agent generation and manual authoring after a missing recipe is confirmed', () => {
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace
+        {...previewProps({ includePlan: false })}
+        resolution={{
+          status: 'UNAVAILABLE',
+          reasonCode: 'RECIPE_MISSING',
+          reason: 'No .taskmonki/preview.yaml exists in the task worktree.'
+        }}
+      />
+    );
+
+    expect(html).toContain('Preview setup');
+    expect(html).toContain('Generate with agent');
+    expect(html).toContain('Write manually');
+    expect(html).toContain('.taskmonki/preview.yaml');
+    expect(html).toContain('Approval and Start remain separate actions');
+    expect(html).not.toContain('Approve plan');
+    expect(html).not.toContain('Start preview');
+  });
+
+  it('renders the complete generated YAML and generation report before acceptance', () => {
+    const yaml = `version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`;
+    const html = renderToStaticMarkup(
+      <PreviewRecipeGenerationModal
+        taskId="task-1"
+        state={{
+          taskId: 'task-1',
+          status: 'READY',
+          draft: {
+            id: 'draft-1',
+            taskId: 'task-1',
+            yaml,
+            validation: { status: 'VALID' },
+            generatedAt: '2026-07-14T10:00:00.000Z',
+            report: {
+              summary: 'Runs the proven server entry point.',
+              evidence: [{ path: 'package.json', finding: 'The dev script runs server.mjs.' }],
+              assumptions: ['The server reads PORT.'],
+              omissions: ['No HTTP health path was evidenced.'],
+              unresolvedDecisions: []
+            }
+          }
+        }}
+        onClose={() => {}}
+        onRegenerate={async () => {}}
+        onValidate={async () => ({ status: 'VALID' })}
+        onAccept={async () => ({ recipePath: '.taskmonki/preview.yaml' })}
+        onDiscard={async () => {}}
+      />
+    );
+
+    expect(html).toContain('Review Preview configuration');
+    expect(html).toContain('Complete YAML');
+    expect(html).toContain('command: [node, server.mjs]');
+    expect(html).toContain('package.json — The dev script runs server.mjs.');
+    expect(html).toContain('Assumptions');
+    expect(html).toContain('Omissions');
+    expect(html).toContain('Regenerate');
+    expect(html).toContain('Discard');
+    expect(html).toContain('Accept &amp; save recipe');
+  });
+
+  it('keeps the review modal open on a visible generation progress state', () => {
+    const html = renderToStaticMarkup(
+      <PreviewRecipeGenerationModal
+        taskId="task-1"
+        state={{
+          taskId: 'task-1',
+          status: 'GENERATING',
+          stage: 'GENERATING_DRAFT',
+          startedAt: '2026-07-14T10:00:00.000Z'
+        }}
+        onClose={() => {}}
+        onRegenerate={async () => {}}
+        onValidate={async () => ({ status: 'VALID' })}
+        onAccept={async () => ({ recipePath: '.taskmonki/preview.yaml' })}
+        onDiscard={async () => {}}
+      />
+    );
+
+    expect(html).toContain('Agent is drafting the recipe');
+    expect(html).toContain('Reading only the bounded evidence bundle');
+    expect(html).toContain('Close');
+    expect(html).toContain('Discard');
+    expect(html).toContain('disabled=""');
   });
 
   it('routes private-input checks through Preview before allowing Overview to start', () => {
@@ -383,6 +480,12 @@ function previewProps(options: {
     runtimeResources: [],
     executionReadiness: options.approved ? { status: 'READY', blockers: [] } : undefined,
     onResolve: async () => {},
+    onGetRecipeGeneration: async () => ({ taskId: 'task-1', status: 'EMPTY' }),
+    onGenerateRecipe: async () => ({ taskId: 'task-1', status: 'EMPTY' }),
+    onValidateRecipeDraft: async () => ({ status: 'VALID' }),
+    onAcceptRecipeDraft: async () => ({ recipePath: '.taskmonki/preview.yaml' }),
+    onDiscardRecipeDraft: async () => ({ taskId: 'task-1', status: 'EMPTY' }),
+    onWriteRecipeManually: async () => {},
     onApprove: async () => {},
     onStart: async () => {},
     onOpen: async () => {},

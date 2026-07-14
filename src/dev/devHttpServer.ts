@@ -543,6 +543,56 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/get') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getPreviewRecipeGeneration((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/generate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.generatePreviewRecipe((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/validate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.validatePreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/accept') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.acceptPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/discard') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.discardPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
         sendJson(
           response,

@@ -224,6 +224,10 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.attachSupervisorExitListener();
   }
 
+  get currentRuntimeExecutable(): string | undefined {
+    return this.supervisor.currentServer?.executable;
+  }
+
   initialize(): Promise<void> {
     if (this.shuttingDown) {
       return Promise.reject(new Error('Codex App Server is shutting down.'));

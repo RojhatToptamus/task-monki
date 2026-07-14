@@ -35,6 +35,9 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  ResolvePreviewResult,
   PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
@@ -156,6 +159,8 @@ interface TaskDetailProps {
   previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
   previewRuntimeResources: PreviewResourceRecord[];
   previewExecutionReadiness?: PreviewExecutionReadiness;
+  previewResolution?: ResolvePreviewResult;
+  previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -173,6 +178,20 @@ interface TaskDetailProps {
   onCreatePullRequest(taskId: string, title?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onResolvePreview(taskId: string, scenarioId?: string): Promise<void>;
+  onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onGeneratePreviewRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onValidatePreviewRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<PreviewRecipeValidation>;
+  onAcceptPreviewRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
+  onDiscardPreviewRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onWritePreviewRecipeManually(taskId: string, worktreeId: string): Promise<void>;
   onApprovePreview(taskId: string, planId: string, executionDigest: string): Promise<void>;
   onStartPreview(taskId: string, scenarioId?: string): Promise<void>;
   onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
@@ -708,7 +727,15 @@ export function TaskDetail(props: TaskDetailProps) {
     localBindings: props.previewLocalBindings,
     runtimeResources: props.previewRuntimeResources,
     executionReadiness: props.previewExecutionReadiness,
+    resolution: props.previewResolution,
+    recipeGeneration: props.previewRecipeGeneration,
     onResolve: props.onResolvePreview,
+    onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
+    onGenerateRecipe: props.onGeneratePreviewRecipe,
+    onValidateRecipeDraft: props.onValidatePreviewRecipeDraft,
+    onAcceptRecipeDraft: props.onAcceptPreviewRecipeDraft,
+    onDiscardRecipeDraft: props.onDiscardPreviewRecipeDraft,
+    onWriteRecipeManually: props.onWritePreviewRecipeManually,
     onApprove: props.onApprovePreview,
     onStart: props.onStartPreview,
     onOpen: props.onOpenPreview,

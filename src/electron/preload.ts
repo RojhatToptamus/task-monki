@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   CancelRunRequest,
   ContinueRunRequest,
@@ -7,8 +8,11 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
   PrepareWorktreeRequest,
   ApprovePreviewPlanRequest,
@@ -36,7 +40,8 @@ import type {
   TaskManagerApi,
   TransitionTaskRequest,
   StopPreviewRequest,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
 import {
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -122,6 +127,16 @@ const api: TaskManagerApi = {
     ipcRenderer.invoke('github:createPullRequest', input),
   refreshGitHub: (input: RefreshGitHubRequest) => ipcRenderer.invoke('github:refresh', input),
   resolvePreview: (input: ResolvePreviewRequest) => ipcRenderer.invoke('preview:resolve', input),
+  getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:get', input),
+  generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:generate', input),
+  validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:validate', input),
+  acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:accept', input),
+  discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:discard', input),
   approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
     ipcRenderer.invoke('preview:approve', input),
   startPreview: (input: StartPreviewRequest) => ipcRenderer.invoke('preview:start', input),

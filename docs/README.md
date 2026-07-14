@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-11
+Date: 2026-07-14
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -32,12 +32,15 @@ behavior and architecture, not private roadmap sequencing.
 1. `docs/architecture/PREVIEW_ARCHITECTURE.md`
    - Canonical Preview authority, lifecycle, native/Compose runtime, security,
      ownership, storage, shutdown, and recovery architecture.
-2. `docs/APP_SERVER_ARCHITECTURE.md`
+2. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
+   - Agent-assisted Preview recipe authoring, sanitized repository evidence,
+     structured drafts, review UX, validation, and exact acceptance boundary.
+3. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-3. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+4. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
-3. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+5. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
    - Current restricted attachment formats (and explicitly unsupported generic
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,

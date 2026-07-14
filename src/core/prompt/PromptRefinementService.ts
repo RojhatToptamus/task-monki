@@ -6,11 +6,13 @@ import {
   type CodexExternalToolSettings,
   type RefinePromptResponse
 } from '../../shared/contracts';
-import { ProcessSupervisor } from '../process/ProcessSupervisor';
 import {
-  codexExternalToolConfigOverrides,
-  resolveCodexExternalToolConfigOverrides
+  codexExternalToolConfigOverrides
 } from '../agent/codex/CodexToolConfig';
+import {
+  buildCodexEphemeralReadOnlyCommand,
+  startCodexEphemeralReadOnlyRun
+} from '../agent/codex/CodexEphemeralReadOnlyRunner';
 import {
   buildPromptRefinementFallbackPrompt,
   buildPromptRefinementInstruction
@@ -18,7 +20,6 @@ import {
 
 const REFINEMENT_REASONING_EFFORT = 'low';
 const REFINEMENT_TIMEOUT_MS = 90_000;
-const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 export interface PromptRefinementRunRequest {
   repositoryPath: string;
@@ -83,26 +84,13 @@ export function buildRefinementCommand(
   }
   const selectedModel = model.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL;
 
-  return {
-    executable,
-    argv: [
-      '--ask-for-approval',
-      'never',
-      'exec',
-      '--json',
-      '--ephemeral',
-      '--sandbox',
-      'read-only',
-      '--cd',
-      repositoryPath,
-      '--model',
-      selectedModel,
-      '-c',
-      `model_reasoning_effort="${REFINEMENT_REASONING_EFFORT}"`,
-      ...configOverrides.flatMap((override) => ['-c', override]),
-      '-'
-    ]
-  };
+  return buildCodexEphemeralReadOnlyCommand({
+    cwd: repositoryPath,
+    model: selectedModel,
+    reasoningEffort: REFINEMENT_REASONING_EFFORT,
+    configOverrides,
+    executable
+  });
 }
 
 async function runCodexRefinement({
@@ -113,105 +101,17 @@ async function runCodexRefinement({
   toolSettings,
   failClosedMcpDiscovery
 }: PromptRefinementRunRequest): Promise<string> {
-  const executable = codexExecutable ?? 'codex';
-  const command = buildRefinementCommand(
-    repositoryPath,
-    model,
-    await resolveCodexExternalToolConfigOverrides({
-      executable,
-      cwd: repositoryPath,
-      settings: toolSettings,
-      failClosedMcpDiscovery
-    }),
-    executable
-  );
-  const process = new ProcessSupervisor().start({
-    executable: command.executable,
-    argv: command.argv,
+  const run = await startCodexEphemeralReadOnlyRun({
     cwd: repositoryPath,
-    stdin: instruction
+    instruction,
+    model: model?.trim() || DEFAULT_PROMPT_REFINEMENT_MODEL,
+    reasoningEffort: REFINEMENT_REASONING_EFFORT,
+    timeoutMs: REFINEMENT_TIMEOUT_MS,
+    codexExecutable,
+    toolSettings,
+    failClosedMcpDiscovery
   });
-
-  return new Promise((resolve, reject) => {
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      void process.cancel();
-      reject(new Error('Prompt refinement timed out.'));
-    }, REFINEMENT_TIMEOUT_MS);
-
-    const finish = (callback: () => void) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      callback();
-    };
-
-    process.events.on('stdout', (chunk) => {
-      stdout = appendBounded(stdout, chunk.toString('utf8'));
-    });
-    process.events.on('stderr', (chunk) => {
-      stderr = appendBounded(stderr, chunk.toString('utf8'));
-    });
-    process.events.once('error', (error) => finish(() => reject(error)));
-    process.events.once('close', ({ exitCode, signal }) => {
-      finish(() => {
-        if (exitCode !== 0) {
-          const detail = stderr.trim().slice(-500);
-          reject(
-            new Error(
-              `Prompt refinement process failed (${signal ?? `exit ${exitCode}`})${
-                detail ? `: ${detail}` : '.'
-              }`
-            )
-          );
-          return;
-        }
-
-        const message = extractFinalAgentMessage(stdout);
-        if (!message) {
-          reject(new Error('Prompt refinement returned no final message.'));
-          return;
-        }
-        resolve(message);
-      });
-    });
-  });
-}
-
-function extractFinalAgentMessage(stdout: string): string | undefined {
-  let finalMessage: string | undefined;
-
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
-    }
-    try {
-      const event = JSON.parse(line) as {
-        type?: unknown;
-        item?: { type?: unknown; text?: unknown };
-      };
-      if (
-        event.type === 'item.completed' &&
-        event.item?.type === 'agent_message' &&
-        typeof event.item.text === 'string'
-      ) {
-        finalMessage = event.item.text;
-      }
-    } catch {
-      // Codex JSONL should be valid, but unrelated non-JSON output is ignored.
-    }
-  }
-
-  return finalMessage;
+  return run.result;
 }
 
 function parseModelRefinement(output: string): Pick<
@@ -268,13 +168,6 @@ async function buildDeterministicFallback(
     titleSuggestion,
     source: 'deterministic-fallback'
   };
-}
-
-function appendBounded(current: string, next: string): string {
-  const combined = current + next;
-  return combined.length <= MAX_OUTPUT_BYTES
-    ? combined
-    : combined.slice(combined.length - MAX_OUTPUT_BYTES);
 }
 
 async function readRepositoryContext(repositoryPath: string): Promise<string> {

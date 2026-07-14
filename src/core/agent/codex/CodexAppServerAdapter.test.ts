@@ -33,6 +33,7 @@ describe('CodexAppServerAdapter', () => {
     expect(provider.preflight.ready, JSON.stringify(provider.preflight.problems)).toBe(true);
     expect(provider.models[0]?.model).toBe('fake-model');
     expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
+    expect(adapter.currentRuntimeExecutable).toBe(executable);
     const initializedServer = (await store.snapshot()).agentServers[0];
     expect(initializedServer.runtimeResolution).toMatchObject({
       selectedExecutable: executable,

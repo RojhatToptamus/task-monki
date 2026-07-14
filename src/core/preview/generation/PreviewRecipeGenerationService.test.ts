@@ -1,0 +1,236 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { CodexEphemeralRunError } from '../../agent/codex/CodexEphemeralReadOnlyRunner';
+import {
+  PreviewRecipeGenerationService,
+  validatePreviewRecipeDraft
+} from './PreviewRecipeGenerationService';
+import { PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION } from './PreviewRecipeGenerationSupport';
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe('PreviewRecipeGenerationService', () => {
+  it('keeps a valid evidence-backed draft transient until exact acceptance', async () => {
+    const root = await previewWorktree();
+    let evidenceBundle = '';
+    const service = new PreviewRecipeGenerationService(async ({ cwd, instruction }) => {
+      evidenceBundle = await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8');
+      expect(instruction).toContain('Do not run the application');
+      return {
+        result: Promise.resolve(agentDraft()),
+        cancel: async () => {}
+      };
+    });
+
+    const generated = await service.generate({
+      taskId: 'task-1',
+      worktreePath: root,
+      model: 'gpt-test'
+    });
+
+    expect(generated.status).toBe('READY');
+    expect(generated.draft?.validation).toEqual({ status: 'VALID' });
+    expect(evidenceBundle).toContain('package.json');
+    expect(evidenceBundle).not.toContain('.env.local');
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+
+    await service.writeAcceptedRecipe({
+      taskId: 'task-1',
+      draftId: generated.draft!.id,
+      yaml: generated.draft!.yaml,
+      worktreePath: root
+    });
+
+    expect(await fs.readFile(path.join(root, '.taskmonki', 'preview.yaml'), 'utf8')).toBe(
+      generated.draft!.yaml
+    );
+    expect(await fs.readdir(path.join(root, '.taskmonki'))).toEqual(['preview.yaml']);
+    expect(service.completeAcceptance('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+  });
+
+  it('never overwrites a manual recipe that appears while a draft is reviewed', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(agentDraft()),
+      cancel: async () => {}
+    }));
+    const generated = await service.generate({ taskId: 'task-1', worktreePath: root });
+    await fs.mkdir(path.join(root, '.taskmonki'));
+    await fs.writeFile(path.join(root, '.taskmonki', 'preview.yaml'), 'manual\n', 'utf8');
+
+    await expect(
+      service.writeAcceptedRecipe({
+        taskId: 'task-1',
+        draftId: generated.draft!.id,
+        yaml: generated.draft!.yaml,
+        worktreePath: root
+      })
+    ).rejects.toThrow('appeared while this draft was under review');
+    expect(await fs.readFile(path.join(root, '.taskmonki', 'preview.yaml'), 'utf8')).toBe(
+      'manual\n'
+    );
+  });
+
+  it('keeps validation, regeneration, close/reopen state, and discard transient', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(agentDraft()),
+      cancel: async () => {}
+    }));
+
+    const first = await service.generate({ taskId: 'task-1', worktreePath: root });
+    expect(service.get('task-1')).toEqual(first);
+    expect(service.validate('task-1', first.draft!.id, first.draft!.yaml)).toEqual({
+      status: 'VALID'
+    });
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+
+    const regenerated = await service.generate({ taskId: 'task-1', worktreePath: root });
+    expect(regenerated.status).toBe('READY');
+    expect(regenerated.draft!.id).not.toBe(first.draft!.id);
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+
+    await expect(service.discard('task-1')).resolves.toEqual({
+      taskId: 'task-1',
+      status: 'EMPTY'
+    });
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it('returns a reviewable evidence report when the agent refuses to invent authority', async () => {
+    const root = await previewWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(JSON.stringify({
+        schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
+        status: 'insufficient-evidence',
+        yaml: null,
+        summary: 'No application entry point was proven.',
+        evidence: [{ path: 'package.json', finding: 'No runnable preview script is declared.' }],
+        assumptions: [],
+        omissions: ['No command was guessed.'],
+        unresolvedDecisions: ['Choose the application command and listening port.']
+      })),
+      cancel: async () => {}
+    }));
+
+    const result = await service.generate({ taskId: 'task-1', worktreePath: root });
+
+    expect(result.status).toBe('NEEDS_INPUT');
+    expect(result.failureCode).toBe('INSUFFICIENT_EVIDENCE');
+    expect(result.report?.unresolvedDecisions).toEqual([
+      'Choose the application command and listening port.'
+    ]);
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
+  });
+
+  it('rejects literal secret-like environment delivery before acceptance', () => {
+    expect(validatePreviewRecipeDraft(`version: 1
+services:
+  web:
+    command: [node, server.mjs]
+    env: { API_TOKEN: plaintext-canary }
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`)).toEqual({
+      status: 'INVALID',
+      issues: [{
+        code: 'SECRET_LITERAL',
+        message: 'Secret-like environment keys must use a private input reference, never a literal value.'
+      }]
+    });
+
+    expect(validatePreviewRecipeDraft(`version: 1
+# token = "hardcoded-token-canary"
+services:
+  web:
+    command: [node, server.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+routes:
+  app: { service: web, port: http, primary: true }
+`)).toMatchObject({
+      status: 'INVALID',
+      issues: [{ code: 'SECRET_LITERAL' }]
+    });
+  });
+
+  it('cancels and joins in-flight agent work during shutdown', async () => {
+    const root = await previewWorktree();
+    let signalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let rejectResult!: (error: Error) => void;
+    let canceled = false;
+    const result = new Promise<string>((_resolve, reject) => {
+      rejectResult = reject;
+    });
+    const service = new PreviewRecipeGenerationService(async () => {
+      signalStarted();
+      return {
+        result,
+        cancel: async () => {
+          canceled = true;
+          rejectResult(new CodexEphemeralRunError('CANCELED', 'canceled'));
+        }
+      };
+    });
+
+    const generation = service.generate({ taskId: 'task-1', worktreePath: root });
+    await started;
+    await service.shutdown();
+
+    expect(canceled).toBe(true);
+    expect((await generation).status).toBe('EMPTY');
+    expect(service.get('task-1')).toEqual({ taskId: 'task-1', status: 'EMPTY' });
+  });
+});
+
+async function previewWorktree(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-generation-test-'));
+  roots.push(root);
+  await fs.writeFile(
+    path.join(root, 'package.json'),
+    JSON.stringify({ scripts: { dev: 'node server.mjs' } }),
+    'utf8'
+  );
+  await fs.writeFile(path.join(root, 'server.mjs'), 'console.log("server")\n', 'utf8');
+  await fs.writeFile(path.join(root, '.env.local'), 'API_TOKEN=plaintext-canary\n', 'utf8');
+  return root;
+}
+
+function agentDraft(): string {
+  return JSON.stringify({
+    schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
+    status: 'draft',
+    yaml: `version: 1
+
+services:
+  web:
+    command: [node, server.mjs]
+    ports:
+      http: { env: PORT }
+    # No health endpoint was evidenced, so readiness checks only the listener.
+    ready: { type: tcp, port: http }
+
+routes:
+  app: { service: web, port: http, primary: true }
+`,
+    summary: 'Runs the proven Node entry point behind one stable route.',
+    evidence: [
+      { path: 'package.json', finding: 'The dev script runs node server.mjs.' },
+      { path: 'server.mjs', finding: 'The repository contains the declared entry point.' }
+    ],
+    assumptions: ['The application reads the generated PORT environment variable.'],
+    omissions: ['No health endpoint was evidenced.'],
+    unresolvedDecisions: []
+  });
+}

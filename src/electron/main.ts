@@ -16,6 +16,7 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
@@ -23,6 +24,9 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeletePreviewLocalAttachmentBindingRequest,
+  DiscardPreviewRecipeDraftRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
@@ -49,7 +53,8 @@ import type {
   TestExternalToolRequest,
   TransitionTaskRequest,
   StopPreviewRequest,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
 import {
   ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS,
@@ -450,6 +455,30 @@ function installIpcHandlers(): void {
 
   handleTrustedIpc('preview:resolve', async (_, input: ResolvePreviewRequest) =>
     service.resolvePreview(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:get',
+    async (_, input: GetPreviewRecipeGenerationRequest) =>
+      service.getPreviewRecipeGeneration(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:generate',
+    async (_, input: GeneratePreviewRecipeRequest) => service.generatePreviewRecipe(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:validate',
+    async (_, input: ValidatePreviewRecipeDraftRequest) =>
+      service.validatePreviewRecipeDraft(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:accept',
+    async (_, input: AcceptPreviewRecipeDraftRequest) =>
+      service.acceptPreviewRecipeDraft(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:discard',
+    async (_, input: DiscardPreviewRecipeDraftRequest) =>
+      service.discardPreviewRecipeDraft(input)
   );
   handleTrustedIpc('preview:approve', async (_, input: ApprovePreviewPlanRequest) =>
     service.approvePreviewPlan(input)

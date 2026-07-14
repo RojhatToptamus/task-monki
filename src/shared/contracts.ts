@@ -16,8 +16,13 @@ import type {
   InteractionRequestRecord
 } from './agent';
 import type {
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
   ApprovePreviewPlanRequest,
+  DiscardPreviewRecipeDraftRequest,
   DeletePreviewLocalAttachmentBindingRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   OpenPreviewRequest,
   OpenPreviewResult,
   PreviewApprovalRecord,
@@ -29,6 +34,8 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
   PreviewResourceRecord,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
@@ -38,7 +45,8 @@ import type {
   ResolvePreviewResult,
   SetPreviewLocalAttachmentBindingRequest,
   StartPreviewRequest,
-  StopPreviewRequest
+  StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest
 } from './preview';
 import type {
   AttachmentContent,
@@ -997,6 +1005,7 @@ export interface AppUpdateEvent {
     | 'projection.updated'
     | 'finding.updated'
     | 'preview.updated'
+    | 'preview.recipe-generation.updated'
     | 'preview.log.updated'
     | 'task.deleted';
   taskId: string;
@@ -1048,6 +1057,21 @@ export interface TaskManagerApi {
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
   resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult>;
+  getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation>;
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult>;
+  discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
   approvePreviewPlan(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord>;
   startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
   stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;

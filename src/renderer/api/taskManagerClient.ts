@@ -1,4 +1,5 @@
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   ApprovePreviewPlanRequest,
   CancelRunRequest,
@@ -9,9 +10,12 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DiscardPreviewRecipeDraftRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
@@ -53,7 +57,8 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   TestExternalToolRequest,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../../shared/contracts';
 import type {
   AttachmentContent,
@@ -213,6 +218,16 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
     resolvePreview: (input: ResolvePreviewRequest) =>
       post<ResolvePreviewResult>(baseUrl, '/api/preview/resolve', input),
+    getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/get', input),
+    generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/generate', input),
+    validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/validate', input),
+    acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/accept', input),
+    discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/discard', input),
     approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
       post<PreviewApprovalRecord>(baseUrl, '/api/preview/approve', input),
     startPreview: (input: StartPreviewRequest) =>

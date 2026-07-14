@@ -31,14 +31,16 @@ import { AppEventBus } from '../core/runner/AppEventBus';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
 
-interface ScenarioOptions {
+export interface ScenarioOptions {
   name?: string;
   ghPath?: string;
   previewEnabled?: boolean;
   previewOciExecutablePath?: string;
   previewOciContextName?: string;
   previewOciEnv?: NodeJS.ProcessEnv;
+  previewRecipeGenerator?: PreviewRecipeGenerationService;
 }
 
 interface CreateScenarioTaskInput {
@@ -88,6 +90,7 @@ export async function createTaskMonkiScenario(
     worktreeRoot,
     ghPath: options.ghPath,
     agentProviderAdapter: agent,
+    previewRecipeGenerator: options.previewRecipeGenerator,
     previewEnabled: options.previewEnabled,
     previewRoot,
     previewLauncherPath: path.join(

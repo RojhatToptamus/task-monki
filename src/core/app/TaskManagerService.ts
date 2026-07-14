@@ -1,12 +1,17 @@
 import type {
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
@@ -47,6 +52,8 @@ import type {
   PreviewApprovalRecord,
   PreviewGenerationRecord,
   PreviewLocalAttachmentBindingRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
@@ -56,6 +63,7 @@ import type {
   StartPreviewRequest,
   SetPreviewLocalAttachmentBindingRequest,
   StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest,
   AttachmentContent,
   AttachmentDraftSnapshot,
   DiscardTaskAttachmentDraftRequest,
@@ -99,8 +107,9 @@ import {
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
-import { PreviewManager } from '../preview/PreviewManager';
+import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
 import { createPreviewManager } from '../preview/createPreviewManager';
+import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
 import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
 import {
   assertAttachmentSandboxSupportsDelivery,
@@ -132,6 +141,7 @@ export class TaskManagerService {
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
   private readonly previews: PreviewManager;
+  private readonly previewRecipeGenerator: PreviewRecipeGenerationService;
   private readonly previewEnabled: boolean;
   private readonly previewReconcile: boolean;
   private readonly browserDevAgentBoundary: boolean;
@@ -159,6 +169,7 @@ export class TaskManagerService {
       agentProviderAdapter?: AgentProviderAdapter;
       openTargetHost?: OpenTargetHost;
       previewManager?: PreviewManager;
+      previewRecipeGenerator?: PreviewRecipeGenerationService;
       previewRoot?: string;
       previewLauncherPath?: string;
       previewLauncherExecPath?: string;
@@ -191,6 +202,8 @@ export class TaskManagerService {
     this.openTargets = new OpenTargetService(options.openTargetHost);
     this.previewEnabled = options.previewEnabled === true;
     this.previewReconcile = options.previewReconcile !== false;
+    this.previewRecipeGenerator =
+      options.previewRecipeGenerator ?? new PreviewRecipeGenerationService();
     this.previews =
       options.previewManager ??
       createPreviewManager(store, events, {
@@ -541,7 +554,7 @@ export class TaskManagerService {
       input.repositoryPath,
       input.input,
       input.model,
-      this.codexExecutable,
+      this.codexAdapter.currentRuntimeExecutable ?? this.codexExecutable,
       this.appSettings.codexExternalTools,
       this.browserDevAgentBoundary
     );
@@ -973,12 +986,16 @@ export class TaskManagerService {
   }
 
   private async shutdownRuntimeOwners(): Promise<void> {
-    const [agentResult, previewResult] = await Promise.allSettled([
+    const [agentResult, previewResult, previewRecipeGenerationResult] = await Promise.allSettled([
       this.agents.shutdown(),
-      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown()
+      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown(),
+      this.previewRecipeGenerator.shutdown()
     ]);
     if (agentResult.status === 'rejected') throw agentResult.reason;
     if (previewResult.status === 'rejected') throw previewResult.reason;
+    if (previewRecipeGenerationResult.status === 'rejected') {
+      throw previewRecipeGenerationResult.reason;
+    }
   }
 
   async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
@@ -995,6 +1012,109 @@ export class TaskManagerService {
         at: new Date().toISOString()
       });
       return result;
+    });
+  }
+
+  async getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.get(input.taskId);
+  }
+
+  async generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    this.assertAgentProviderAvailable();
+    const context = await this.withTaskAction(
+      input.taskId,
+      'Preview recipe generation preparation',
+      () => this.requirePreviewContext(input.taskId)
+    );
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.generate({
+        taskId: input.taskId,
+        worktreePath: context.worktree.worktreePath,
+        model: input.model,
+        codexExecutable: this.codexAdapter.currentRuntimeExecutable ?? this.codexExecutable,
+        onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
+      })
+    );
+  }
+
+  async validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.validate(input.taskId, input.draftId, input.yaml);
+  }
+
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previewRecipeGenerator.writeAcceptedRecipe({
+        taskId: input.taskId,
+        draftId: input.draftId,
+        yaml: input.yaml,
+        worktreePath: context.worktree.worktreePath
+      });
+      this.emitPreviewRecipeGenerationUpdate(
+        context,
+        this.previewRecipeGenerator.completeAcceptance(input.taskId)
+      );
+      let resolution: ResolvePreviewResult | undefined;
+      let checkError: string | undefined;
+      try {
+        resolution = await this.previews.resolve(context);
+        this.events.emit({
+          type: 'preview.updated',
+          taskId: input.taskId,
+          iterationId: context.iteration.id,
+          worktreeId: context.worktree.id,
+          payload: resolution,
+          at: new Date().toISOString()
+        });
+      } catch {
+        checkError =
+          'The recipe was saved, but Preview could not finish checking it. Use Check preview to retry.';
+      }
+      return {
+        recipePath: '.taskmonki/preview.yaml',
+        resolution,
+        checkError
+      };
+    });
+  }
+
+  async discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    const context = await this.requirePreviewContext(input.taskId);
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.discard(input.taskId, (state) =>
+        this.emitPreviewRecipeGenerationUpdate(context, state)
+      )
+    );
+  }
+
+  private emitPreviewRecipeGenerationUpdate(
+    context: PreviewTaskContext,
+    state: PreviewRecipeGenerationSnapshot
+  ): void {
+    this.events.emit({
+      type: 'preview.recipe-generation.updated',
+      taskId: context.task.id,
+      iterationId: context.iteration.id,
+      worktreeId: context.worktree.id,
+      payload: state,
+      at: new Date().toISOString()
     });
   }
 
@@ -1413,6 +1533,7 @@ export class TaskManagerService {
       // Preview cleanup is part of deletion authority. The store keeps its
       // resource ledger intact if any process or workspace identity is ambiguous.
       await this.previews.stopTask(task.id);
+      await this.previewRecipeGenerator.discard(task.id);
 
       let removedWorktree = false;
       if (input.removeWorktree) {
