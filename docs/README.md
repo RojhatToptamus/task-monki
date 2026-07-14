@@ -29,18 +29,24 @@ behavior and architecture, not private roadmap sequencing.
 
 ### Architecture
 
-1. `docs/APP_SERVER_ARCHITECTURE.md`
+1. `docs/architecture/PREVIEW_ARCHITECTURE.md`
+   - Canonical Preview authority, lifecycle, native/Compose runtime, security,
+     ownership, storage, shutdown, and recovery architecture.
+2. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-2. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+3. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
 
 ### User And Maintainer Docs
 
-1. `docs/INSTALL.md`
+1. `docs/PREVIEW_GUIDE.md`
+   - Public Preview workflow, UI actions, recipe reference, native and Compose
+     examples, private inputs, attachments, data effects, and troubleshooting.
+2. `docs/INSTALL.md`
    - User-facing install, prerequisite, unsigned-build, and manual update
      instructions.
-2. `docs/RELEASING.md`
+3. `docs/RELEASING.md`
    - Maintainer workflow for unsigned GitHub Releases.
 
 ### Interface Design

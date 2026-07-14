@@ -132,119 +132,26 @@ mode or follow-up behavior.
 
 ## Local preview control plane
 
-Local previews are a separate Task Monki-owned domain. They are not Codex
-turns, agent run modes, workflow transitions, or provider evidence. The
-renderer can only call typed preview operations: resolve, approve, start, open,
-stop, reset owned data, and read a recorded log artifact.
+Preview is a separate Task Monki-owned domain, not a Codex turn, agent run mode,
+workflow transition, or provider-evidence stream. Its manager, graph, native
+launcher, managed OCI and Compose runtimes, encrypted vault, loopback gateway,
+store records, stop-only reconciliation, and renderer projection have their own
+authority and shutdown boundaries.
 
-The preview runtime supports macOS task worktrees with bounded native jobs,
-services, workers, routes, and managed OCI resources. Task Monki:
+The canonical current description is
+[Preview Architecture](architecture/PREVIEW_ARCHITECTURE.md). Repository
+authors and users should read the [Preview Guide](PREVIEW_GUIDE.md). Those
+documents define native and Compose behavior, capability approval, source
+generations, private inputs, attached dependencies, exact ownership, destructive
+cleanup, shutdown, and recovery without duplicating the App Server lifecycle
+here.
 
-- reads only a bounded, regular `.taskmonki/preview.yaml` contained by the
-  verified worktree, then parses it with the restricted v1 schema;
-- records a normalized execution digest and task-scoped approval before any
-  command can run; the approval surface enumerates every quoted argv, cwd,
-  inherited/literal/generated environment rule, readiness check, route mapping,
-  warning, and cleanup authority;
-- captures tracked plus non-ignored untracked source into
-  `preview-runtime/<task>/<generation>/source` using a double-observed content
-  manifest, with production entry/path/aggregate/manifest limits, leaving the
-  task worktree editable and unchanged;
-- persists generation/resource intent before launcher or filesystem effects;
-- probes a Docker-compatible engine through one explicit context, binds approval
-  and every OCI record to its context/endpoint/engine identity, and treats an
-  engine retarget as an ownership mismatch;
-- supports typed preview-owned PostgreSQL and Redis; one preview environment
-  owns the selected engine identity and shared labeled network, while each
-  managed-resource record owns its exact container and volume;
-- keeps generated database/cache credentials only in a main-process runtime
-  credential host, delivers container secrets through runtime-mounted files,
-  resolves generated URLs only for the nodes whose typed environment entries
-  name that resource, and gives each recipient only its own log redactions;
-  native launch contracts cross an ownership-token-authenticated IPC channel,
-  while the launcher helper inherits no ambient Task Monki environment;
-  persisted records contain only safe binding identity, ports,
-  username/database metadata, and digests;
-- passes generated database/cache URLs only to explicit recipients with ready
-  dependencies, runs selected migration/seed scenarios in dependency order,
-  never automatically retries setup, and permits explicit setup retry only
-  after current-plan/approval/exact-authority preflight when every selected
-  setup job declares `retrySafe: true`; ambiguous completion remains blocked;
-- attaches application generations to managed resources without giving those
-  attachments cleanup authority; normal generation replacement reuses exact
-  resource/container/volume/port/credential identities and runs no migration
-  or seed;
-- treats routed services as overlap-safe during candidate readiness while
-  workers are exclusive by default; an exclusive worker stops before candidate
-  activation and failed activation restores and reverifies the old worker
-  within its declared readiness deadline unless `overlap: safe` was approved;
-- schedules the declared dependency DAG with at most four concurrent native
-  effects, so a shared monorepo install runs once while independent branches
-  can progress in parallel;
-- starts every native node through the bundled Node-mode launcher handshake,
-  recording its ownership token, PID, process-group ID, OS start identity,
-  command, and receipt before committing target spawn; the live launcher also
-  removes verified group descendants when the target leader exits;
-- supports HTTP, TCP, and finite argv readiness plus periodic liveness probes;
-  HTTP/TCP readiness ports and every routed target are verified as
-  loopback-only listeners owned by the recorded target process group;
-- resolves only typed, non-secret service and stable-route origins into node
-  environments; arbitrary secret or environment import remains unsupported;
-- applies bounded restart policies per service or worker, and fails the
-  generation only when a critical node exhausts its policy;
-- aborts and joins graph-owned readiness, liveness, supervision, and restart
-  operations during shutdown before releasing generated ports; marker-owned
-  workspace cleanup begins only after graph stop settles;
-- keeps the active generation routed while a candidate starts, atomically
-  replaces the complete set of stable `.preview.localhost` hostnames only
-  after all required nodes are ready, then stops the retired graph in reverse
-  dependency order; failed or canceled candidates do not detach the active
-  generation;
-- supports an explicit existing-Compose adapter as a serialized exception to
-  native ready-before-cutover: Compose performs merge/interpolation/dependency
-  resolution, Task Monki records one stable task project, inspection/build run
-  before route detachment, and failed activation preserves verified volumes
-  without claiming automatic rollback;
-- feature-probes `config --no-env-resolution` and bounded `up` controls, invokes
-  Compose with explicit context/config/project/file/profile authority and a
-  clean environment, and stores only a sanitized normalized model with
-  environment key and file-secret recipient identities rather than values;
-- never sends Task Monki private-vault values to Compose, modifies repository
-  Compose files, uses broad orphan/volume cleanup, or deletes external objects,
-  images, or build cache;
-- classifies Compose changes as stateless in-place update, restart preserving
-  exact owned volumes, or explicit destructive reset; removed owned volumes are
-  retained until destructive Stop, while stop/reconciliation operate only on
-  recorded IDs plus the reserved ownership-label subset;
-- preserves the stable gateway authority upstream and rewrites absolute
-  target-origin redirects back to that authority;
-- stores compact preview records in schema 15, retains at most 20 terminal
-  generations per task and 20 completed argv probe attempts per live node,
-  keeps live preview-environment and managed-resource authority outside
-  generation pruning, and keeps each stdout/stderr artifact bounded;
-- tails only the selected artifact through bounded byte-range reads rather
-  than refreshing the full task snapshot for each log update;
-- makes Reset destructive only after current-plan/approval and exact-authority
-  preflight, supports recovery from setup failure, stops any complete active
-  application, preserves unrelated managed resources, and replaces only the
-  selected resource;
-- labels Stop Preview **Stop Preview & Delete Data**, then detaches routes and
-  stops/removes only exact verified processes, engine-bound labeled containers,
-  volumes, the environment-owned network, and marker-owned workspaces;
-  ambiguous cleanup remains `CLEANUP_INCOMPLETE` and is retryable.
-
-Graceful app quit synchronously fences new service actions, cancels and joins
-initialization and already-started work, and starts the preview and Codex
+Graceful app quit fences new service actions and starts the Preview and Codex
 runtime owners' single-flight shutdown paths together. App Server shutdown
-cancels pending startup and restart work, drains RPC handling, removes process
-listeners, and terminates the portable child process tree; only an explicit
-settings restart may reopen that lifecycle, and a concurrent terminal shutdown
-wins. Preview restart reconciliation does not adopt native services, workers,
-or managed OCI resources: it stops every exact verified owner and records
-`CLEANUP_INCOMPLETE` for ambiguous identities without broad deletion. Required
-managed-resource death fails and detaches the complete active application but
-preserves its volume until explicit Reset or destructive Stop. Preview events
-do not update `Task.workflowPhase` or the agent projection.
+cancels pending startup/restart work, drains RPC handling, removes process
+listeners, and terminates its portable child process tree. Preview shutdown
+independently cancels and joins generation work, watches, sockets, and cleanup.
+Preview events never update `Task.workflowPhase` or the agent projection.
 
 ## Renderer and development-host trust
 

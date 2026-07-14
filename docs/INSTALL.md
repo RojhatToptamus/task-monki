@@ -20,6 +20,10 @@ Install these before using Task Monki:
   `docker compose config --no-env-resolution`; Task Monki feature-probes this
   and refuses the preview before mutation when it is unavailable.
 
+See the [Preview Guide](PREVIEW_GUIDE.md) for recipe setup, private-input
+platform requirements, supported native and Compose behavior, and current
+limitations.
+
 Task Monki does not bundle Git, Codex CLI, or GitHub CLI. Packaged desktop apps
 try common command locations. If a CLI is installed somewhere unusual, open
 Settings and set a custom executable path for Git, Codex CLI, or GitHub CLI.

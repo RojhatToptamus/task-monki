@@ -58,67 +58,24 @@ decisions or verified local evidence.
 ## Local preview
 
 Preview is independent of task workflow phase and provider-run state. The
-Preview card shows the approved execution authority, selected data scenario,
-active/candidate status, stable routes, and recorded native/OCI evidence.
+Overview card presents the current Preview decision and stable primary route;
+the full workspace presents capability approval, selected data scenario,
+application/setup evidence, bounded logs, routes, owned data, external
+attachments, private-input readiness, cleanup authority, and recovery actions.
 
-When an active preview exists, Start becomes Replace. During replacement the
-card keeps Open current available and Cancel replacement targets only the
-candidate. A failed candidate remains visible in history but must not hide or
-detach the active preview. After cutover, the new generation is active and the
-old generation is retired and cleaned. Open and Stop current also remain
-available when a changed recipe is awaiting approval, and failed-candidate
-logs remain selectable without replacing the active preview's workflow state.
+Native replacement preserves the current route while a candidate starts and
+makes cancellation candidate-only. Compose replacement is a serialized stable
+project update with an explicit route-downtime window after activation begins.
+**Stop Preview & Delete Data** and managed-resource Reset are intentionally
+destructive only for exact Task-Monki-owned runtime/data. Attached dependencies,
+producer tasks, external Compose objects, images, build cache, repository
+files, and user-owned secret files are never included in that authority.
 
-The log viewer selects one node attempt and one stream at a time. It tails that
-artifact through bounded range reads while open and stops polling when closed;
-normal task snapshot refreshes are not a log transport.
-
-Recipes may declare preview-owned PostgreSQL and Redis resources. Migration and
-seed jobs belong to explicit scenarios; choosing a different scenario changes
-the execution digest and requires approval. Managed resource identities,
-containers, volumes, ports, and generated credentials remain stable while
-application generations are replaced, and ordinary replacement does not rerun
-migrations or seeds. Workers are exclusive across replacement unless
-`overlap: safe` is explicitly approved.
-
-An observed setup failure may expose **Retry setup** only when every selected
-migration and seed job declares `retrySafe: true`. Retry revalidates the current
-plan, approval, engine, and exact managed-resource authority, then reuses the
-same resource identity and data. Ambiguous completion and non-retry-safe setup
-remain blocked from replay and expose destructive resource Reset instead. When
-a failed replacement left the previous application active, Reset stops that
-complete active application before deleting the selected resource.
-
-Reset data is an explicit destructive action. Task Monki revalidates the
-current plan and approval before mutation, detaches routes, stops the complete
-application, replaces only the selected managed resource, runs the approved
-setup scenario, and starts a fresh application generation. Stop Preview is
-labeled **Stop Preview & Delete Data** because it removes the application,
-managed containers, volumes, network, and data. Attached dependencies, generic
-OCI resources, and user-supplied secrets are not part of this phase.
-
-An existing repository Compose application may instead use the explicit
-Compose preview adapter. Task Monki shows the normalized services, repository
-file inputs, public routes, retained-data authority, selected engine, and
-cleanup scope before approval. One stable Compose project belongs to the task;
-containers, owned networks, and active or retained named volumes belong to that
-project rather than to an application generation.
-
-Compose replacement is intentionally serialized. Source capture, inspection,
-and build occur while the current routes remain available. Routes detach when
-activation of the stable project begins and reattach only after Compose and
-Task Monki readiness both pass. A failure after activation begins stays offline
-with verified volumes preserved; the UI must not claim that the previous
-application was restored. A compatibility-sensitive data change requires the
-owner to stop and explicitly delete project data before starting fresh.
-
-Compose private-value delivery is unsupported. Task Monki never forwards its
-encrypted private inputs through Compose environment, argv, build inputs, or
-temporary host files. Repository `env_file` and file-backed Compose secrets are
-shown as repository-owned inputs and must exist in captured source. Stop remains
-**Stop Preview & Delete Data**: it deletes exact Task Monki-owned project
-containers, owned networks, and active or retained owned volumes, while leaving
-external resources, images, and build cache untouched.
+The [Preview Guide](PREVIEW_GUIDE.md) is the public behavior and recipe
+reference. [Preview Architecture](architecture/PREVIEW_ARCHITECTURE.md) is the
+canonical lifecycle, security, storage, ownership, shutdown, and recovery
+source. Keep product copy and action rules consistent with those documents
+rather than adding a second Preview lifecycle here.
 
 ## Activity Timeline
 
