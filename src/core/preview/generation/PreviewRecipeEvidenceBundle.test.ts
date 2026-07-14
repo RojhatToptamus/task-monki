@@ -71,21 +71,90 @@ describe('PreviewRecipeEvidenceBundle', () => {
       }),
       'utf8'
     );
+    await writePackageLock(root, '^16.1.6', '16.2.3', 'lockfile-content-canary');
 
     const bundle = await preparePreviewRecipeEvidenceBundle(root);
     const evidence = JSON.parse(
       await fs.readFile(path.join(bundle.directoryPath, bundle.fileName), 'utf8')
-    ) as { frameworkCapabilities: typeof bundle.frameworkCapabilities };
+    ) as {
+      files: Array<{ path: string; content: string }>;
+      frameworkCapabilities: typeof bundle.frameworkCapabilities;
+    };
 
     expect(evidence.frameworkCapabilities).toEqual(bundle.frameworkCapabilities);
     expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
       conflicts: [{ code: 'HTTPS_LISTENER' }, { code: 'FIXED_PORT' }],
       compatiblePreviewCommand: [
-        'npm', 'exec', '--offline', '--', 'next', 'dev', '--turbopack',
+        './node_modules/.bin/next', 'dev', '--turbopack',
         '--hostname', '127.0.0.1'
-      ]
+      ],
+      dependencyPreparation: expect.objectContaining({
+        installCommand: ['npm', 'ci', '--no-audit', '--no-fund'],
+        lockfilePath: 'package-lock.json'
+      })
     });
+    expect(bundle.includedPaths.has('package-lock.json')).toBe(true);
+    expect(evidence.files.some((file) => file.path === 'package-lock.json')).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain('lockfile-content-canary');
+
+    await bundle.dispose();
+  });
+
+  it('fails closed without following a symlinked dependency lockfile', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-next-symlink-test-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'preview-next-lock-outside-'));
+    roots.push(root, outside);
+    await fs.writeFile(
+      path.join(root, 'package.json'),
+      JSON.stringify({
+        dependencies: { next: '^16.1.6' },
+        scripts: { dev: 'next dev' }
+      }),
+      'utf8'
+    );
+    await writePackageLock(outside, '^16.1.6', '16.2.3', 'outside-lock-canary');
+    await fs.symlink(
+      path.join(outside, 'package-lock.json'),
+      path.join(root, 'package-lock.json')
+    );
+
+    const bundle = await preparePreviewRecipeEvidenceBundle(root);
+    const evidenceText = await fs.readFile(
+      path.join(bundle.directoryPath, bundle.fileName),
+      'utf8'
+    );
+    const evidence = JSON.parse(evidenceText) as {
+      frameworkCapabilities: typeof bundle.frameworkCapabilities;
+    };
+
+    expect(evidence.frameworkCapabilities.analyses[0].compatiblePreviewCommand).toBeUndefined();
+    expect(evidence.frameworkCapabilities.analyses[0].limitation).toContain(
+      'safe regular file'
+    );
+    expect(bundle.includedPaths.has('package-lock.json')).toBe(false);
+    expect(evidenceText).not.toContain('outside-lock-canary');
 
     await bundle.dispose();
   });
 });
+
+async function writePackageLock(
+  root: string,
+  declaredVersion: string,
+  lockedVersion: string,
+  excludedCanary: string
+): Promise<void> {
+  await fs.writeFile(
+    path.join(root, 'package-lock.json'),
+    JSON.stringify({
+      name: 'preview-next-fixture',
+      lockfileVersion: 3,
+      packages: {
+        '': { dependencies: { next: declaredVersion } },
+        'node_modules/next': { version: lockedVersion }
+      },
+      ignoredPadding: excludedCanary
+    }),
+    'utf8'
+  );
+}

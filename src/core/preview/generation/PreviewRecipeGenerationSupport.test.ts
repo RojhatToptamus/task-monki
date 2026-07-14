@@ -29,6 +29,9 @@ describe('Preview recipe generation support', () => {
     expect(instruction).toContain('Never reproduce or infer secret values');
     expect(instruction).toContain(PREVIEW_FRAMEWORK_CAPABILITIES_VERSION);
     expect(instruction).toContain('compatiblePreviewCommand');
+    expect(instruction).toContain('dependencyPreparation');
+    expect(instruction).toContain('npm ci may run repository and dependency lifecycle scripts');
+    expect(instruction).toContain('Never use npm exec, npx, pnpm dlx, or yarn dlx');
     expect(instruction).toContain('copy those lines exactly');
     expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
     expect(instruction).toContain('insufficient-evidence');

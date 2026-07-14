@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { previewRouteHostname } from '../PreviewRouteHostname';
 import {
   PreviewAttachedDependencyRuntime,
   attachmentEnvironmentValue,
@@ -13,7 +14,8 @@ describe('PreviewAttachedDependencyRuntime', () => {
   });
 
   it('derives stable task-route authority without resolving a producer generation', () => {
-    expect(attachmentEnvironmentValue({ id: 'api', type: 'http', target: { type: 'task-preview-route', targetTaskId: 'Task-123', routeId: 'api', basePath: '/' } }, 'attached-http-origin', {}, 4123)).toBe('http://api.task-task123.preview.localhost:4123');
+    const hostname = previewRouteHostname('Task-123', 'api');
+    expect(attachmentEnvironmentValue({ id: 'api', type: 'http', target: { type: 'task-preview-route', targetTaskId: 'Task-123', routeId: 'api', basePath: '/' } }, 'attached-http-origin', {}, 4123)).toBe(`http://${hostname}:4123`);
   });
 
   it('checks a task route through the current gateway authority', async () => {
@@ -31,7 +33,7 @@ describe('PreviewAttachedDependencyRuntime', () => {
         check: { path: '/ready', timeoutSeconds: 1 }
       }, {}, undefined, 4123)).resolves.toMatchObject({ status: 'PASSED' });
       expect(fetch).toHaveBeenCalledWith(
-        new URL('http://api.task-task123.preview.localhost:4123/v1/ready'),
+        new URL(`http://${previewRouteHostname('Task-123', 'api')}:4123/v1/ready`),
         expect.objectContaining({ method: 'GET', redirect: 'manual' })
       );
     } finally {

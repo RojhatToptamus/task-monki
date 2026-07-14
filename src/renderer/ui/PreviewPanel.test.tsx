@@ -355,7 +355,7 @@ routes:
     );
 
     expect(html).toContain('Open preview');
-    expect(html).toContain('app.task.preview.localhost');
+    expect(html).toContain('tm-ac6194662119229bf44ff8f080aedb3d.localhost');
     expect(html).toContain('Preview options');
     expect(html).toContain('Replace…');
     expect(html).toContain('Runtime ownership · 1');
@@ -608,8 +608,8 @@ function activeGeneration(): PreviewGenerationRecord {
     }],
     routes: [{
       id: 'app',
-      hostname: 'app.task.preview.localhost',
-      url: 'http://app.task.preview.localhost:31337/',
+      hostname: 'tm-ac6194662119229bf44ff8f080aedb3d.localhost',
+      url: 'http://tm-ac6194662119229bf44ff8f080aedb3d.localhost:31337/',
       gatewayPort: 31337,
       targetHost: '127.0.0.1',
       targetPort: 41000,

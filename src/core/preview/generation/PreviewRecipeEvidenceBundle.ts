@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   analyzePreviewFrameworkCapabilities,
+  inspectPreviewFrameworkRepositoryFacts,
   type PreviewFrameworkCapabilities
 } from './PreviewFrameworkCapabilities';
 
@@ -54,9 +55,12 @@ const TEXT_BASENAMES = new Set([
   'Rakefile',
   'go.mod',
   'go.sum',
+  'requirements.txt'
+]);
+
+const DERIVED_ONLY_BASENAMES = new Set([
   'package-lock.json',
   'pnpm-lock.yaml',
-  'requirements.txt',
   'yarn.lock'
 ]);
 
@@ -133,6 +137,7 @@ export async function preparePreviewRecipeEvidenceBundle(
         omissions.symlinkOrSpecial += 1;
         continue;
       }
+      if (DERIVED_ONLY_BASENAMES.has(entry.name)) continue;
       if (isSecretBearingPath(relativePath)) {
         omissions.secretBearing += 1;
         continue;
@@ -173,7 +178,13 @@ export async function preparePreviewRecipeEvidenceBundle(
   try {
     await walk(root, '');
     const safeOmissions = describeOmissions(omissions);
-    const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files);
+    const repositoryFacts = await inspectPreviewFrameworkRepositoryFacts(root);
+    const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files, repositoryFacts);
+    for (const analysis of frameworkCapabilities.analyses) {
+      if (analysis.dependencyPreparation) {
+        includedPaths.add(analysis.dependencyPreparation.lockfilePath);
+      }
+    }
     await fs.writeFile(
       path.join(directoryPath, EVIDENCE_FILE_NAME),
       JSON.stringify(

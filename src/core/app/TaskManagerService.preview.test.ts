@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
+import { previewRouteHostname } from '../preview/PreviewRouteHostname';
 import type { FileTaskStore } from '../storage/FileTaskStore';
 import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 
@@ -45,6 +46,8 @@ describeMac('TaskManagerService native preview scenarios', () => {
     expect(ready.freshness).toBe('CURRENT');
     expect(ready.routes).toHaveLength(1);
     const route = ready.routes[0];
+    expect(route.hostname).toBe(previewRouteHostname(task.id, 'app'));
+    expect(route.hostname.split('.')).toHaveLength(2);
     await expect(requestRoute(route.gatewayPort, route.hostname, '/')).resolves.toMatchObject({
       status: 200,
       body: 'captured-untracked'
@@ -369,6 +372,9 @@ routes:
     expect(generation.routes).toHaveLength(2);
     const app = generation.routes.find((route) => route.id === 'app')!;
     const api = generation.routes.find((route) => route.id === 'api')!;
+    expect(app.hostname).toBe(previewRouteHostname(task.id, 'app'));
+    expect(api.hostname).toBe(previewRouteHostname(task.id, 'api'));
+    expect(app.hostname).not.toBe(api.hostname);
     await expect(requestRoute(api.gatewayPort, api.hostname, '/')).resolves.toMatchObject({ body: 'api' });
     await expect(requestRoute(app.gatewayPort, app.hostname, '/')).resolves.toMatchObject({
       body: `http://127.0.0.1:${api.targetPort}|http://${app.hostname}:${app.gatewayPort}`
@@ -742,6 +748,9 @@ routes:
     );
     expect(new Set(generations.map((generation) => generation.workspacePath)).size).toBe(3);
     expect(new Set(generations.map((generation) => generation.routes[0].hostname)).size).toBe(3);
+    expect(generations.map((generation) => generation.routes[0].hostname)).toEqual(
+      tasks.map((task) => previewRouteHostname(task.id, 'app'))
+    );
     expect(new Set(generations.map((generation) => generation.routes[0].targetPort)).size).toBe(3);
     const resources = (await scenario.store.snapshot()).previewResources.filter(
       (resource) => resource.logicalNodeId === 'web'
@@ -770,6 +779,7 @@ routes:
       await fs.writeFile(path.join(worktree.worktreePath, 'untracked-preview.txt'), `cycle-${index}`);
       latest = await scenario.service.startPreview({ taskId: task.id });
       stableHostname ??= latest.routes[0].hostname;
+      expect(stableHostname).toBe(previewRouteHostname(task.id, 'app'));
       expect(latest.routes[0].hostname).toBe(stableHostname);
       await expect(requestRoute(latest.routes[0].gatewayPort, stableHostname, '/')).resolves.toMatchObject({
         body: `cycle-${index}`

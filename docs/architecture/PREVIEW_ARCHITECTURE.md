@@ -130,6 +130,13 @@ this same loader/resolver path; it cannot approve or start Preview. Agent
 generation has no durable task-store record and no parallel parser or runtime
 lifecycle. See [Preview Recipe Generation](PREVIEW_RECIPE_GENERATION.md).
 
+For the bounded Next.js/npm profile, trusted authoring facts include a safely
+reduced root lockfile record. A compatible draft must declare one exact generic
+`npm ci` job and an explicit success edge before using the repository script or
+local Next.js binary. Generated commands cannot acquire missing packages
+implicitly. These are ordinary recipe jobs and graph edges, so they remain
+visible approval authority rather than becoming a second dependency lifecycle.
+
 Parsing produces two hashes:
 
 - `recipeDigest` identifies the normalized source recipe;
@@ -166,6 +173,12 @@ fingerprint, a bounded source manifest, file modes and hashes, and a workspace
 ownership marker. Absolute or escaping symlinks, submodules, special files,
 oversized inputs, or source changes during capture fail safely.
 
+Ignored dependency directories such as `node_modules` are never copied from
+the live worktree. An approved generic installation job may create them inside
+the captured generation workspace. The job runs once for that generation,
+before explicit consumers, and the generated files share the generation's
+exact cleanup boundary.
+
 A `PreviewGenerationRecord` is immutable execution evidence plus a state
 machine. It binds:
 
@@ -198,6 +211,9 @@ active attachments.
 
 - Jobs are finite commands. Generic jobs always participate; migration and seed
   jobs are scenario-selected.
+- Lockfile-backed dependency installation, when present, is one generic job
+  with explicit `needs: succeeded` consumers; the runtime does not infer or add
+  installation outside the approved recipe.
 - Services are long-running, have at least one generated loopback port, and
   require readiness.
 - Workers are long-running and may have zero ports. They are exclusive across
@@ -251,9 +267,13 @@ verification.
 
 [`PreviewGateway`](../../src/core/preview/PreviewGateway.ts) binds only
 `127.0.0.1` on a high local port. Routes use stable hostnames of the form
-`<route>.<task-key>.preview.localhost`. The gateway records the exact generation
-that owns each hostname and forwards HTTP and WebSocket traffic only to
-recorded loopback ports.
+`tm-<route-identity>.localhost`, with exactly one label before `.localhost`.
+One centralized, versioned derivation hashes the stable task and route IDs into
+a bounded DNS label. Generation, process, workspace, and gateway-port identity
+are excluded, so replacement generations retain one truthful browser,
+application, HTTP, and WebSocket origin. The gateway accepts only this exact
+Task Monki hostname shape, records the generation that owns it, and forwards
+traffic only to recorded loopback ports.
 
 Native route replacement is atomic inside the gateway. A target that is absent
 returns a bounded 503/502 response. Startup, stop, failure, shutdown, and
@@ -575,6 +595,9 @@ The security boundary is precise:
   events, general IPC/dev HTTP, logs, errors, artifacts/receipts, source
   manifests, Docker/Compose argv and inspection, nonrecipient launcher
   messages, and general renderer state/DOM after submission;
+- trusted authoring analysis may parse a bounded lockfile but exposes only
+  fixed package-manager/version facts, never raw lockfile contents, resolved
+  URLs, or unrelated dependency records;
 - redaction covers raw and URL-encoded managed credentials at runtime.
 
 Recipient scoping is a delivery guarantee, not an OS isolation guarantee.
@@ -685,6 +708,9 @@ evidence rather than inference from CLI compatibility.
   current macOS support matrix; broader Windows/Linux and alternative-engine
   claims require their own evidence.
 - Attached dependencies have startup-only checks, never continuous health.
+- Agent-generated dependency preparation currently supports only a root npm
+  project with a safely validated `package-lock.json`; other package managers,
+  ambiguous lockfiles, and unproven custom setup remain fail-closed.
 - Compose has serialized activation rather than ready-before-cutover, cannot
   receive Task Monki vault values, and intentionally rejects broad Compose
   authority.

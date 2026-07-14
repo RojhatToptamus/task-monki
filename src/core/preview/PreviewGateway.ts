@@ -2,6 +2,7 @@ import http, { type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
 import net from 'node:net';
 import { randomInt } from 'node:crypto';
 import type { Duplex } from 'node:stream';
+import { isPreviewRouteHostname } from './PreviewRouteHostname';
 
 export interface PreviewGatewayTarget {
   host: '127.0.0.1';
@@ -66,9 +67,8 @@ export class PreviewGateway {
     replacesGenerationId?: string
   ): void {
     const replacements = Object.entries(routes).map(([hostname, target]) => {
-      const normalized = normalizeHostname(hostname);
-      validateRoute(normalized, target);
-      return [normalized, { ...target, generationId }] as const;
+      validateRoute(hostname, target);
+      return [hostname, { ...target, generationId }] as const;
     });
     if (new Set(replacements.map(([hostname]) => hostname)).size !== replacements.length) {
       throw new Error('Preview gateway replacement contains duplicate hostnames.');
@@ -207,8 +207,8 @@ function normalizeHostname(value: string): string {
 }
 
 function validateRoute(hostname: string, target: Pick<PreviewGatewayTarget, 'host' | 'port'>): void {
-  if (!hostname.endsWith('.preview.localhost') || hostname.split('.').length < 4) {
-    throw new Error('Preview gateway routes must use a scoped .preview.localhost hostname.');
+  if (!isPreviewRouteHostname(hostname)) {
+    throw new Error('Preview gateway routes must use a Task Monki single-label .localhost hostname.');
   }
   if (target.host !== '127.0.0.1' || !isValidPort(target.port)) {
     throw new Error('Preview gateway targets must be valid IPv4 loopback ports.');
@@ -302,6 +302,7 @@ function isValidPort(port: number): boolean {
 }
 
 function trackSocket(set: Set<net.Socket>, socket: net.Socket): void {
+  if (set.has(socket)) return;
   set.add(socket);
   socket.once('close', () => set.delete(socket));
 }

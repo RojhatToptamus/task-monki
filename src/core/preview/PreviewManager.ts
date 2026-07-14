@@ -27,6 +27,7 @@ import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewLocalBindingRequiredError } from './PreviewPlanResolver';
 import { PreviewRecipeLoader, selectPreviewScenario } from './PreviewRecipeLoader';
 import { PreviewReconciler } from './PreviewReconciler';
+import { previewRouteHostname } from './PreviewRouteHostname';
 import { PreviewSourcePreparer, serializePreviewSourceManifest } from './PreviewSourcePreparer';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService } from './runtime/PreviewOpenService';
@@ -489,7 +490,7 @@ export class PreviewManager {
             : undefined,
           routeOrigins: Object.fromEntries(
             prepared.plan.executionPlan.routes.map((route) => {
-              const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
+              const hostname = previewRouteHostname(generation.taskId, route.id);
               return [route.id, `http://${hostname}:${this.requireGatewayPort()}`];
             })
           ),
@@ -513,7 +514,7 @@ export class PreviewManager {
         const routes = prepared.plan.executionPlan.routes.map((route) => {
           const targetPort = running.ports[route.service]?.[route.port];
           if (!targetPort) throw new Error(`Preview route ${route.id} target port is unavailable.`);
-          const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
+          const hostname = previewRouteHostname(generation.taskId, route.id);
           return {
             id: route.id,
             hostname,
@@ -649,7 +650,7 @@ export class PreviewManager {
         const routes = prepared.plan.executionPlan.routes.map((route) => {
           const targetPort = applied.ports[route.service]?.[route.port];
           if (!targetPort) throw new Error(`Compose route ${route.id} target port is unavailable.`);
-          const hostname = `${route.id}.${generation.previewKey}.preview.localhost`;
+          const hostname = previewRouteHostname(generation.taskId, route.id);
           return {
             id: route.id,
             hostname,

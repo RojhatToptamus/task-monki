@@ -15,7 +15,8 @@ You need:
 - a task with an active Task Monki worktree;
 - `.taskmonki/preview.yaml` in that repository, authored manually or accepted
   from an agent-generated draft;
-- the commands named by the recipe available to the captured source;
+- host executables named by the recipe available on `PATH`, with
+  repository-local dependencies prepared by explicit recipe jobs;
 - Docker Desktop or another verified Docker-compatible context only when the
   recipe uses managed PostgreSQL/Redis or the Compose adapter;
 - macOS `safeStorage` availability when the native recipe uses private inputs.
@@ -44,6 +45,10 @@ to the evidence bundle. For example, a Next.js script that pins a port or
 enables HTTPS can receive a reviewable Preview-only HTTP command using the
 dynamically allocated `PORT`; the YAML comment explains that deviation. Task
 Monki does not guess a rewrite for unknown framework versions or arguments.
+For a root npm project with a safely validated `package-lock.json`, the same
+facts require an explicit lockfile installation job and success dependency so
+the isolated captured source does not depend on the live worktree's ignored
+`node_modules` directory.
 
 The modal displays the complete YAML alongside evidence, assumptions,
 omissions, and unresolved decisions. You may edit, regenerate, discard, or
@@ -143,7 +148,10 @@ routes:
 ```
 
 Task Monki captures repository source, injects a dynamic loopback port into
-`PORT`, and routes `app.<task-key>.preview.localhost` through its local gateway.
+`PORT`, and routes each public route through a stable single-label hostname such
+as `tm-<route-identity>.localhost`. The identity is derived from the task and
+route, so replacement generations retain one truthful browser, HTTP, and
+WebSocket origin without putting generation or process identity in the URL.
 The process runs as your local user from the captured workspace, not from the
 live worktree.
 
@@ -153,6 +161,32 @@ live worktree.
 
 Jobs are finite commands. A generic job participates in every scenario and may
 be required with `needs: { job-id: succeeded }`.
+
+Dependency preparation belongs in a generic job because every captured source
+generation starts without ignored dependency directories. For a validated npm
+lockfile, an agent-generated Next.js recipe uses this shape:
+
+```yaml
+jobs:
+  install:
+    # Installs exactly from package-lock.json inside this captured Preview generation.
+    # npm may run repository and dependency lifecycle scripts.
+    command: [npm, ci, --no-audit, --no-fund]
+
+services:
+  web:
+    command: [./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]
+    needs: { install: succeeded }
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+```
+
+`npm ci` installs exactly from the lockfile and may run standard lifecycle
+scripts from the repository and its dependencies. Review that command as local
+code execution. Task Monki does not separately duplicate those lifecycle
+scripts, silently run `npm install`, or let `npm exec`/`npx` fetch a missing
+runtime package. A custom package script becomes another job only when the
+repository provides evidence that it is required.
 
 Migration and seed jobs are selected through scenarios and must declare
 `retrySafe`. A seed must depend on a migration succeeding. These setup jobs may
@@ -634,10 +668,10 @@ when Start is attempted.
 ### Readiness failed
 
 Open the relevant attempt's stdout/stderr. Check the exact generated port,
-probe path/command, timeout, dependency ordering, and whether the application
-listens on loopback. An attachment failure is a startup observation; verify
-the target, TLS, and credentials without expecting Task Monki to repair or
-restart the external service.
+probe path/command, timeout, dependency ordering, installation-job output, and
+whether the application listens on loopback. An attachment failure is a
+startup observation; verify the target, TLS, and credentials without expecting
+Task Monki to repair or restart the external service.
 
 ### Setup failed
 
@@ -681,6 +715,8 @@ recovery state. Renderer reload alone does not restart the main process.
 - continuous health monitoring of attached endpoints;
 - attached dependencies in migration or seed jobs;
 - generic OCI resources beyond typed PostgreSQL and Redis;
+- agent-generated dependency preparation for package managers other than a
+  root npm project with a safely validated `package-lock.json`;
 - durable adoption of managed resources after a Task Monki main-process crash;
 - multi-repository source composition and Git submodules in native source
   capture;

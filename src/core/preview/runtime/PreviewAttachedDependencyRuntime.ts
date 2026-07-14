@@ -2,6 +2,7 @@ import net from 'node:net';
 import { Client as PgClient, type ClientConfig } from 'pg';
 import { createClient } from 'redis';
 import type { PreviewAttachmentFailureCode, PreviewAttachmentPlan } from '../../../shared/preview';
+import { previewRouteHostname } from '../PreviewRouteHostname';
 
 export interface PreviewAttachmentCheckResult {
   status: 'PASSED' | 'FAILED';
@@ -69,7 +70,10 @@ export function attachmentEnvironmentValue(attachment: PreviewAttachmentPlan, ki
 function httpOrigin(attachment: Extract<PreviewAttachmentPlan, { type: 'http' }>, gatewayPort?: number): string {
   if (attachment.target.type === 'task-preview-route') {
     if (!gatewayPort) throw new Error('Preview gateway authority is unavailable.');
-    const hostname = `${attachment.target.routeId}.${stableKey(attachment.target.targetTaskId)}.preview.localhost`;
+    const hostname = previewRouteHostname(
+      attachment.target.targetTaskId,
+      attachment.target.routeId
+    );
     return `http://${hostname}:${gatewayPort}${attachment.target.basePath === '/' ? '' : attachment.target.basePath}`;
   }
   if (attachment.target.type !== 'endpoint') throw new Error('Unresolved HTTP target.');
@@ -175,6 +179,5 @@ function classify(error: unknown, local: AbortSignal, parent?: AbortSignal): Pre
   if (message.includes('certificate') || message.includes('tls')) return 'TLS_FAILED';
   return 'TARGET_UNAVAILABLE';
 }
-function stableKey(taskId: string): string { const compact = taskId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24); return `task-${compact || 'preview'}`; }
 function throwIfAborted(signal: AbortSignal): void { if (signal.aborted) throw abortError(signal); }
 function abortError(signal: AbortSignal): Error { return signal.reason instanceof Error ? signal.reason : new Error('canceled'); }

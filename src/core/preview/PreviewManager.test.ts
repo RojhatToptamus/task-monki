@@ -9,6 +9,7 @@ import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewManager } from './PreviewManager';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
 import { PreviewRecipeLoader } from './PreviewRecipeLoader';
+import { previewRouteHostname } from './PreviewRouteHostname';
 import {
   PreviewComposeActivationError,
   PreviewComposeResetRequiredError
@@ -471,6 +472,10 @@ routes: { app: { service: web, port: http, primary: true } }
     }));
     expect(routeOwner).toBe(ready.id);
     expect(ready.routes[0]?.targetPort).toBe(49152);
+    expect(ready.routes[0]?.hostname).toBe(previewRouteHostname(task.id, 'app'));
+    expect(ready.routes[0]?.url).toBe(
+      `http://${previewRouteHostname(task.id, 'app')}:31337/`
+    );
 
     const saveGeneration = store.savePreviewGeneration.bind(store);
     let rejectDetachedGenerationId: string | undefined = ready.id;

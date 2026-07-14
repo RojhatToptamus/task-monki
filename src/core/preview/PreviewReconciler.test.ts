@@ -7,6 +7,7 @@ import { git } from '../git/gitCli';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewReconciler } from './PreviewReconciler';
+import { previewRouteHostname } from './PreviewRouteHostname';
 import { PreviewSourcePreparer } from './PreviewSourcePreparer';
 import { NativeLauncherHost, type NativeOwnedProcess } from './runtime/NativeLauncherHost';
 import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
@@ -210,12 +211,13 @@ async function runningGeneration() {
     id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
     scope: 'TASK', approvedAt: now
   });
+  const routeHostname = previewRouteHostname(task.id, 'app');
   await store.savePreviewGeneration({
     id: generationId, previewKey: 'task-reconcile', taskId: task.id, iterationId: iteration.id,
     worktreeId: worktree.id, planId: plan.id, approvalId: approval.id, executionDigest: 'digest',
     sourceGitSnapshotId: 'git', sourceHeadSha: head, sourceDirtyFingerprint: 'dirty',
     workspacePath: prepared.generationRoot, state: 'READY', routingState: 'ACTIVE', freshness: 'CURRENT',
-    routes: [{ id: 'app', hostname: 'app.task-reconcile.preview.localhost', url: 'http://app.task-reconcile.preview.localhost:31234/', gatewayPort: 31234, targetHost: '127.0.0.1', targetPort: 41234, state: 'ATTACHED' }],
+    routes: [{ id: 'app', hostname: routeHostname, url: `http://${routeHostname}:31234/`, gatewayPort: 31234, targetHost: '127.0.0.1', targetPort: 41234, state: 'ATTACHED' }],
     createdAt: now, updatedAt: now
   });
   const resourceId = 'resource-1';

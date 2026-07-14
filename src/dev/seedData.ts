@@ -30,6 +30,7 @@ import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
+import { previewRouteHostname } from '../core/preview/PreviewRouteHostname';
 import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
 
 export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v1';
@@ -1023,6 +1024,7 @@ async function createPreviewScenario(
     `${JSON.stringify({ version: 1, headSha: state.gitSnapshot?.headSha, entries: [], digest: 'seed-manifest' })}\n`
   );
   const routeAttached = generationState === 'READY';
+  const routeHostname = previewRouteHostname(state.task.id, 'app');
   let generation = await ctx.store.savePreviewGeneration({
     id: generationId,
     previewKey: `task-${state.task.id.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 16)}`,
@@ -1047,8 +1049,8 @@ async function createPreviewScenario(
       ? [
           {
             id: 'app',
-            hostname: `app.seed-${definition.slug}.preview.localhost`,
-            url: `http://app.seed-${definition.slug}.preview.localhost:31337/`,
+            hostname: routeHostname,
+            url: `http://${routeHostname}:31337/`,
             gatewayPort: 31337,
             targetHost: '127.0.0.1',
             targetPort: 41000 + ctx.scenarios.length,
@@ -1087,8 +1089,8 @@ async function createPreviewScenario(
         composeChange: 'IN_PLACE_UPDATE',
         replacesGenerationId: undefined,
         routes: [{
-          id: 'app', hostname: `app.seed-${definition.slug}.preview.localhost`,
-          url: `http://app.seed-${definition.slug}.preview.localhost:31337/`,
+          id: 'app', hostname: routeHostname,
+          url: `http://${routeHostname}:31337/`,
           gatewayPort: 31337, targetHost: '127.0.0.1',
           targetPort: 41000 + ctx.scenarios.length, state: 'ATTACHED'
         }],

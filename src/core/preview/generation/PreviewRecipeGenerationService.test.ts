@@ -138,11 +138,15 @@ describe('PreviewRecipeGenerationService', () => {
       expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
         conflicts: [{ code: 'HTTPS_LISTENER' }, { code: 'FIXED_PORT' }],
         compatiblePreviewCommand: [
-          'npm', 'exec', '--offline', '--', 'next', 'dev', '--turbopack',
+          './node_modules/.bin/next', 'dev', '--turbopack',
           '--hostname', '127.0.0.1'
-        ]
+        ],
+        dependencyPreparation: expect.objectContaining({
+          installCommand: ['npm', 'ci', '--no-audit', '--no-fund']
+        })
       });
       expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
+      expect(instruction).toContain('exactly one generic finite job');
       return { result: Promise.resolve(nextAgentDraft()), cancel: async () => {} };
     });
 
@@ -164,6 +168,9 @@ describe('PreviewRecipeGenerationService', () => {
       expect(evidence.frameworkCapabilities.analyses[0]).toMatchObject({
         conflicts: [],
         compatiblePreviewCommand: ['npm', 'run', 'dev'],
+        dependencyPreparation: expect.objectContaining({
+          installCommand: ['npm', 'ci', '--no-audit', '--no-fund']
+        }),
         portBinding: { type: 'environment', name: 'PORT' }
       });
       return {
@@ -187,12 +194,12 @@ describe('PreviewRecipeGenerationService', () => {
     },
     {
       name: 'a rewritten command without its compatibility comment',
-      command: '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]',
+      command: '[./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]',
       comment: ''
     },
     {
       name: 'a direct Next.js command retaining conflicting listener flags',
-      command: '[npm, exec, --offline, --, next, dev, --experimental-https, --port, "8000"]',
+      command: '[./node_modules/.bin/next, dev, --experimental-https, --port, "8000"]',
       comment: nextCompatibilityComment()
     }
   ])('rejects $name', async ({ command, comment }) => {
@@ -207,6 +214,61 @@ describe('PreviewRecipeGenerationService', () => {
     expect(result.status).toBe('FAILED');
     expect(result.failureCode).toBe('INVALID_AGENT_OUTPUT');
     expect(result.message).toMatch(/conflict|compatibility comment/);
+  });
+
+  it.each([
+    ['the install job', { includeInstall: false }],
+    ['the explicit success edge', { includeInstallNeed: false }],
+    ['the lifecycle-script comment', { includeInstallComment: false }]
+  ])('rejects a generated framework draft missing %s', async (_name, options) => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(nextAgentDraft(undefined, undefined, options)),
+      cancel: async () => {}
+    }));
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.failureCode).toBe('INVALID_AGENT_OUTPUT');
+    expect(result.message).toMatch(/installation|install|lifecycle-script/);
+  });
+
+  it('rejects implicit package acquisition even when the command is otherwise valid YAML', async () => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(nextAgentDraft(
+        '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]'
+      )),
+      cancel: async () => {}
+    }));
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('FAILED');
+    expect(result.message).toContain('implicit npm exec');
+  });
+
+  it('revalidates edited generated YAML against its transient framework facts before acceptance', async () => {
+    const root = await nextWorktree();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(nextAgentDraft()),
+      cancel: async () => {}
+    }));
+    const generated = await service.generate({ taskId: 'task-next', worktreePath: root });
+    const edited = generated.draft!.yaml.replace('    needs: { install: succeeded }\n', '');
+
+    expect(service.validate('task-next', generated.draft!.id, edited)).toMatchObject({
+      status: 'INVALID',
+      issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED' }]
+    });
+    await expect(service.writeAcceptedRecipe({
+      taskId: 'task-next',
+      draftId: generated.draft!.id,
+      yaml: edited,
+      worktreePath: root
+    })).rejects.toThrow('explicitly need');
+    await expect(fs.access(path.join(root, '.taskmonki', 'preview.yaml'))).rejects.toThrow();
   });
 
   it('rejects literal secret-like environment delivery before acceptance', () => {
@@ -301,6 +363,24 @@ async function nextWorktree(
     }),
     'utf8'
   );
+  const lockedVersion = version.startsWith('^16') || version.startsWith('~16')
+    ? '16.2.3'
+    : version.startsWith('^15') || version.startsWith('~15')
+      ? '15.5.2'
+      : version.replace(/^[~^]/, '');
+  await fs.writeFile(
+    path.join(root, 'package-lock.json'),
+    JSON.stringify({
+      name: 'preview-next-fixture',
+      lockfileVersion: 3,
+      packages: {
+        '': { dependencies: { next: version } },
+        'node_modules/next': { version: lockedVersion }
+      },
+      ignoredPadding: 'x'.repeat(400 * 1024)
+    }),
+    'utf8'
+  );
   return root;
 }
 
@@ -333,27 +413,53 @@ routes:
 }
 
 function nextAgentDraft(
-  command = '[npm, exec, --offline, --, next, dev, --turbopack, --hostname, 127.0.0.1]',
-  comment = nextCompatibilityComment()
+  command = '[./node_modules/.bin/next, dev, --turbopack, --hostname, 127.0.0.1]',
+  comment = nextCompatibilityComment(),
+  options: {
+    includeInstall?: boolean;
+    includeInstallNeed?: boolean;
+    includeInstallComment?: boolean;
+  } = {}
 ): string {
+  const includeInstall = options.includeInstall ?? true;
+  const install = includeInstall
+    ? `jobs:
+  install:
+${options.includeInstallComment === false ? '' : `${nextInstallComment()}\n`}    command: [npm, ci, --no-audit, --no-fund]
+`
+    : '';
+  const installNeed = includeInstall && options.includeInstallNeed !== false
+    ? '    needs: { install: succeeded }\n'
+    : '';
   return JSON.stringify({
     schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
     status: 'draft',
     yaml: `version: 1
+${install}
 services:
   web:
 ${comment}${comment ? '\n' : ''}    command: ${command}
-    ports: { http: { env: PORT } }
+${installNeed}    ports: { http: { env: PORT } }
     ready: { type: tcp, port: http }
 routes:
   app: { service: web, port: http, primary: true }
 `,
     summary: 'Runs Next.js through the trusted Preview-compatible HTTP command.',
-    evidence: [{ path: 'package.json', finding: 'The repository declares a supported Next.js dev script.' }],
+    evidence: [
+      { path: 'package.json', finding: 'The repository declares a supported Next.js dev script.' },
+      { path: 'package-lock.json', finding: 'Trusted lockfile facts prove deterministic npm installation.' }
+    ],
     assumptions: [],
     omissions: [],
     unresolvedDecisions: []
   });
+}
+
+function nextInstallComment(): string {
+  return [
+    '    # Installs exactly from package-lock.json inside this captured Preview generation.',
+    '    # npm may run repository and dependency lifecycle scripts.'
+  ].join('\n');
 }
 
 function nextCompatibilityComment(): string {

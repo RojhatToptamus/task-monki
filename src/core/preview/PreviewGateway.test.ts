@@ -1,7 +1,8 @@
 import http from 'node:http';
 import net from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PreviewGateway } from './PreviewGateway';
+import { previewRouteHostname } from './PreviewRouteHostname';
 
 const closers: Array<() => Promise<void>> = [];
 const sockets = new WeakMap<http.Server, Set<net.Socket>>();
@@ -14,7 +15,7 @@ describe('PreviewGateway', () => {
     const first = await fixture((_request, response) => response.end('first'));
     const second = await fixture((_request, response) => response.end('second'));
     const gateway = await startGateway();
-    const hostname = 'app.task-a.preview.localhost';
+    const hostname = previewRouteHostname('task-a', 'app');
     gateway.instance.replaceRoutes('first', { [hostname]: { host: '127.0.0.1', port: first } });
     await expect(request(gateway.port, hostname)).resolves.toMatchObject({ status: 200, body: 'first' });
     gateway.instance.replaceRoutes('second', { [hostname]: { host: '127.0.0.1', port: second } }, 'first');
@@ -26,9 +27,9 @@ describe('PreviewGateway', () => {
     const newApp = await fixture((_request, response) => response.end('new-app'));
     const candidateOnlyTarget = await fixture((_request, response) => response.end('candidate-only'));
     const gateway = await startGateway();
-    const app = 'app.task-owned.preview.localhost';
-    const api = 'api.task-owned.preview.localhost';
-    const metrics = 'metrics.task-owned.preview.localhost';
+    const app = previewRouteHostname('task-owned', 'app');
+    const api = previewRouteHostname('task-owned', 'api');
+    const metrics = previewRouteHostname('task-owned', 'metrics');
     gateway.instance.replaceRoutes('old-generation', {
       [app]: { host: '127.0.0.1', port: oldTarget },
       [api]: { host: '127.0.0.1', port: oldTarget }
@@ -75,7 +76,7 @@ describe('PreviewGateway', () => {
     closers.push(() => instance.close());
     expect(listening.relocated).toBe(true);
     expect(listening.port).not.toBe(occupied);
-    const hostname = 'missing.task-a.preview.localhost';
+    const hostname = previewRouteHostname('task-a', 'missing');
     await expect(request(listening.port, hostname)).resolves.toEqual({
       status: 503,
       body: 'Preview route is unavailable.'
@@ -99,7 +100,7 @@ describe('PreviewGateway', () => {
       setTimeout(() => response.end('data: second\n\n'), 30);
     });
     const gateway = await startGateway();
-    const hostname = 'events.task-a.preview.localhost';
+    const hostname = previewRouteHostname('task-a', 'events');
     gateway.instance.replaceRoutes('events', { [hostname]: { host: '127.0.0.1', port: upstream } });
     const result = await stream(gateway.port, hostname, {
       connection: 'x-remove-me',
@@ -111,34 +112,107 @@ describe('PreviewGateway', () => {
   });
 
   it('preserves stable authority and rewrites target-origin absolute redirects', async () => {
-    let upstreamHost: string | undefined;
+    let upstreamHeaders: http.IncomingHttpHeaders | undefined;
     const upstream = await fixture((request, response) => {
-      upstreamHost = request.headers.host;
+      upstreamHeaders = request.headers;
       const address = request.socket.localAddress;
       const port = request.socket.localPort;
-      response.writeHead(302, { location: `http://${address}:${port}/signed-in?next=1` }).end();
+      response.writeHead(302, {
+        location: `http://${address}:${port}/signed-in?next=1`,
+        'set-cookie': 'preview-session=retained; Path=/; HttpOnly; SameSite=Lax'
+      }).end();
     });
     const gateway = await startGateway();
-    const hostname = 'redirect.task-a.preview.localhost';
+    const hostname = previewRouteHostname('task-a', 'redirect');
     const authority = `${hostname}:${gateway.port}`;
     gateway.instance.replaceRoutes('redirect', { [hostname]: { host: '127.0.0.1', port: upstream } });
-    const result = await requestWithHeaders(gateway.port, authority);
-    expect(upstreamHost).toBe(authority);
+    const result = await requestWithHeaders(gateway.port, authority, {
+      origin: `http://${authority}`,
+      cookie: 'browser-session=truthful'
+    });
+    expect(upstreamHeaders).toMatchObject({
+      host: authority,
+      origin: `http://${authority}`,
+      cookie: 'browser-session=truthful',
+      'x-forwarded-host': authority,
+      'x-forwarded-port': String(gateway.port),
+      'x-forwarded-proto': 'http'
+    });
     expect(result.headers.location).toBe(`http://${authority}/signed-in?next=1`);
+    expect(result.headers['set-cookie']).toEqual([
+      'preview-session=retained; Path=/; HttpOnly; SameSite=Lax'
+    ]);
   });
 
   it('tunnels an HTTP upgrade and subsequent bytes', async () => {
     const server = http.createServer();
-    server.on('upgrade', (_request, socket) => {
+    let upgradeHeaders: http.IncomingHttpHeaders | undefined;
+    server.on('upgrade', (request, socket) => {
+      upgradeHeaders = request.headers;
       socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
       socket.on('data', (chunk) => socket.write(`echo:${chunk.toString('utf8')}`));
     });
     const upstream = await listen(server);
     closers.push(() => closeServer(server));
     const gateway = await startGateway();
-    const hostname = 'socket.task-a.preview.localhost';
+    const hostname = previewRouteHostname('task-a', 'socket');
+    const authority = `${hostname}:${gateway.port}`;
     gateway.instance.replaceRoutes('socket', { [hostname]: { host: '127.0.0.1', port: upstream } });
-    await expect(rawUpgrade(gateway.port, hostname)).resolves.toContain('echo:ping');
+    await expect(rawUpgrade(gateway.port, authority)).resolves.toContain('echo:ping');
+    expect(upgradeHeaders).toMatchObject({
+      host: authority,
+      origin: `http://${authority}`,
+      'x-forwarded-host': authority,
+      'x-forwarded-port': String(gateway.port),
+      'x-forwarded-proto': 'http'
+    });
+  });
+
+  it('tracks a reused upstream socket once across sustained asset traffic', async () => {
+    const upstream = await fixture((_request, response) => response.end('asset'));
+    const gateway = await startGateway();
+    const hostname = previewRouteHostname('task-a', 'assets');
+    gateway.instance.replaceRoutes('assets', {
+      [hostname]: { host: '127.0.0.1', port: upstream }
+    });
+    const warningSpy = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
+
+    try {
+      for (let index = 0; index < 24; index += 1) {
+        await expect(request(gateway.port, hostname)).resolves.toMatchObject({
+          status: 200,
+          body: 'asset'
+        });
+      }
+      expect(
+        warningSpy.mock.calls.filter(([warning]) =>
+          warning instanceof Error
+            ? warning.name === 'MaxListenersExceededWarning'
+            : String(warning).includes('Possible EventEmitter memory leak')
+        )
+      ).toEqual([]);
+    } finally {
+      warningSpy.mockRestore();
+    }
+  });
+
+  it('rejects legacy, malformed, and foreign route registrations', async () => {
+    const upstream = await fixture((_request, response) => response.end('unused'));
+    const gateway = await startGateway();
+
+    for (const hostname of [
+      'app.task-a.preview.localhost',
+      'other.localhost',
+      'tm-deadbeef.localhost',
+      'tm-c56924243da73fb3ca189a97b3ea51d3.example.com',
+      'TM-C56924243DA73FB3CA189A97B3EA51D3.LOCALHOST',
+      'tm-c56924243da73fb3ca189a97b3ea51d3.localhost.',
+      'tm-c56924243da73fb3ca189a97b3ea51d3.localhost:31337'
+    ]) {
+      expect(() => gateway.instance.replaceRoutes('invalid', {
+        [hostname]: { host: '127.0.0.1', port: upstream }
+      })).toThrow('Task Monki single-label .localhost hostname');
+    }
   });
 });
 
@@ -162,10 +236,11 @@ function request(port: number, hostname: string): Promise<{ status: number; body
 
 function requestWithHeaders(
   port: number,
-  hostname: string
+  hostname: string,
+  extra: http.OutgoingHttpHeaders = {}
 ): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, headers: { host: hostname } }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, headers: { host: hostname, ...extra } }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => (body += chunk));
@@ -192,7 +267,7 @@ function stream(port: number, hostname: string, extra: http.OutgoingHttpHeaders)
   });
 }
 
-function rawUpgrade(port: number, hostname: string): Promise<string> {
+function rawUpgrade(port: number, authority: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');
     let output = '';
@@ -200,7 +275,9 @@ function rawUpgrade(port: number, hostname: string): Promise<string> {
     const timer = setTimeout(() => reject(new Error('Upgrade timed out.')), 2_000);
     socket.setEncoding('utf8');
     socket.once('connect', () =>
-      socket.write(`GET / HTTP/1.1\r\nHost: ${hostname}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`)
+      socket.write(
+        `GET / HTTP/1.1\r\nHost: ${authority}\r\nOrigin: http://${authority}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`
+      )
     );
     socket.on('data', (chunk) => {
       output += chunk;

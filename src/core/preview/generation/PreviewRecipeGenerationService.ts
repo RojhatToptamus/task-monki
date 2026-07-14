@@ -62,6 +62,10 @@ class InvalidAgentGenerationError extends Error {}
 export class PreviewRecipeGenerationService {
   private readonly states = new Map<string, PreviewRecipeGenerationSnapshot>();
   private readonly operations = new Map<string, ActiveGeneration>();
+  private readonly draftCapabilities = new Map<
+    string,
+    { taskId: string; capabilities: PreviewFrameworkCapabilities }
+  >();
   private shuttingDown = false;
 
   constructor(
@@ -119,7 +123,11 @@ export class PreviewRecipeGenerationService {
     if (!draft || draft.id !== draftId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    return validatePreviewRecipeDraft(yaml);
+    const capabilityEntry = this.draftCapabilities.get(draftId);
+    if (!capabilityEntry || capabilityEntry.taskId !== taskId) {
+      throw new Error('The Preview recipe draft is no longer current.');
+    }
+    return validateGeneratedPreviewRecipeDraft(yaml, capabilityEntry.capabilities);
   }
 
   async writeAcceptedRecipe(input: {
@@ -135,7 +143,14 @@ export class PreviewRecipeGenerationService {
     if (!state?.draft || state.draft.id !== input.draftId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    const validation = validatePreviewRecipeDraft(input.yaml);
+    const capabilityEntry = this.draftCapabilities.get(input.draftId);
+    if (!capabilityEntry || capabilityEntry.taskId !== input.taskId) {
+      throw new Error('The Preview recipe draft is no longer current.');
+    }
+    const validation = validateGeneratedPreviewRecipeDraft(
+      input.yaml,
+      capabilityEntry.capabilities
+    );
     if (validation.status !== 'VALID') {
       throw new Error(validation.issues[0]?.message ?? 'The Preview recipe is invalid.');
     }
@@ -144,6 +159,7 @@ export class PreviewRecipeGenerationService {
 
   completeAcceptance(taskId: string): PreviewRecipeGenerationSnapshot {
     this.states.delete(taskId);
+    this.clearDraftCapabilities(taskId);
     return { taskId, status: 'EMPTY' };
   }
 
@@ -158,6 +174,7 @@ export class PreviewRecipeGenerationService {
     }
     const empty = { taskId, status: 'EMPTY' as const };
     this.states.delete(taskId);
+    this.clearDraftCapabilities(taskId);
     onUpdate?.(structuredClone(empty));
     await operation?.settled?.catch(() => undefined);
     return empty;
@@ -178,6 +195,7 @@ export class PreviewRecipeGenerationService {
     );
     this.operations.clear();
     this.states.clear();
+    this.draftCapabilities.clear();
   }
 
   private async completeGeneration(
@@ -281,6 +299,11 @@ export class PreviewRecipeGenerationService {
         validation,
         generatedAt: new Date().toISOString()
       };
+      this.clearDraftCapabilities(input.taskId);
+      this.draftCapabilities.set(draft.id, {
+        taskId: input.taskId,
+        capabilities: structuredClone(evidence.frameworkCapabilities)
+      });
       return this.finish(
         input.taskId,
         operation,
@@ -344,6 +367,12 @@ export class PreviewRecipeGenerationService {
     else this.states.set(snapshot.taskId, snapshot);
     onUpdate?.(structuredClone(snapshot));
     return snapshot;
+  }
+
+  private clearDraftCapabilities(taskId: string): void {
+    for (const [draftId, entry] of this.draftCapabilities) {
+      if (entry.taskId === taskId) this.draftCapabilities.delete(draftId);
+    }
   }
 }
 
@@ -410,7 +439,13 @@ function validateGeneratedPreviewRecipeDraft(
   const validation = validatePreviewRecipeDraft(yaml);
   if (validation.status !== 'VALID') return validation;
   const plan = parsePreviewRecipe(yaml).executionPlan;
-  const commands = [...plan.services, ...plan.workers].map((node) => node.command);
+  const longNodes = [...plan.services, ...plan.workers];
+  const commands = longNodes.map((node) => node.command);
+  if (generatedCommands(plan).some(isImplicitPackageAcquisition)) {
+    return dependencyPreparationRequired(
+      'Generated Preview recipes must declare dependency installation as an explicit finite job; implicit npm exec, npx, or dlx acquisition is not allowed.'
+    );
+  }
   for (const command of commands) {
     if (containsExplicitRuntimeConflict(command)) {
       return incompatibleCommand(
@@ -420,14 +455,36 @@ function validateGeneratedPreviewRecipeDraft(
   }
   const normalizedYaml = yaml.split(/\r?\n/).map((line) => line.trimStart()).join('\n');
   for (const capability of capabilities.analyses) {
-    if (capability.conflicts.length === 0 || !capability.compatiblePreviewCommand) continue;
-    if (commands.some((command) => equalCommand(command, capability.scriptCommand))) {
+    const repositoryScriptNodes = longNodes.filter((node) =>
+      equalCommand(node.command, capability.scriptCommand)
+    );
+    const directFrameworkNodes = longNodes.filter((node) => invokesNextDev(node.command));
+    if (!capability.compatiblePreviewCommand) {
+      if (repositoryScriptNodes.length > 0 || directFrameworkNodes.length > 0) {
+        return dependencyPreparationRequired(
+          capability.limitation ?? 'The generated framework command has no trusted dependency-preparation path.'
+        );
+      }
+      continue;
+    }
+    if (capability.conflicts.length > 0 && repositoryScriptNodes.length > 0) {
       return incompatibleCommand(
         'The generated command uses a repository script with a known Preview port or protocol conflict.'
       );
     }
+    const compatibleNodes = longNodes.filter((node) =>
+      equalCommand(node.command, capability.compatiblePreviewCommand!)
+    );
     if (
-      commands.some((command) => equalCommand(command, capability.compatiblePreviewCommand!)) &&
+      directFrameworkNodes.length > 0 &&
+      directFrameworkNodes.some((node) => !compatibleNodes.includes(node))
+    ) {
+      return incompatibleCommand(
+        'The generated direct framework command does not match the trusted Preview-compatible command.'
+      );
+    }
+    if (
+      compatibleNodes.length > 0 &&
       capability.yamlCommentLines &&
       !normalizedYaml.includes(capability.yamlCommentLines.join('\n'))
     ) {
@@ -435,8 +492,68 @@ function validateGeneratedPreviewRecipeDraft(
         'The generated Preview-only framework command must retain its compatibility comment.'
       );
     }
+    const preparation = capability.dependencyPreparation;
+    if (!preparation || compatibleNodes.length === 0) continue;
+    const installJobs = plan.jobs.filter((job) =>
+      job.role === 'generic' &&
+      job.cwd === preparation.cwd &&
+      equalCommand(job.command, preparation.installCommand)
+    );
+    if (installJobs.length !== 1) {
+      return dependencyPreparationRequired(
+        'The generated framework command requires exactly one generic lockfile installation job in the package root.'
+      );
+    }
+    const installJob = installJobs[0];
+    if (Object.keys(installJob.needs).length > 0 || Object.keys(installJob.env).length > 0) {
+      return dependencyPreparationRequired(
+        'The trusted lockfile installation job must not invent prerequisites or environment overrides.'
+      );
+    }
+    if (
+      compatibleNodes.some((node) =>
+        node.cwd !== preparation.cwd || node.needs[installJob.id] !== 'succeeded'
+      )
+    ) {
+      return dependencyPreparationRequired(
+        'Every generated framework node must explicitly need the lockfile installation job to succeed.'
+      );
+    }
+    if (!normalizedYaml.includes(preparation.yamlCommentLines.join('\n'))) {
+      return dependencyPreparationRequired(
+        'The generated lockfile installation job must retain its lifecycle-script review comment.'
+      );
+    }
   }
   return validation;
+}
+
+function generatedCommands(plan: PreviewExecutionPlan): string[][] {
+  const nodes = [...plan.jobs, ...plan.services, ...plan.workers];
+  const commands = nodes.map((node) => node.command);
+  for (const node of [...plan.services, ...plan.workers]) {
+    if (node.ready.type === 'argv') commands.push(node.ready.command);
+    if (node.liveness?.probe.type === 'argv') commands.push(node.liveness.probe.command);
+  }
+  return commands;
+}
+
+function isImplicitPackageAcquisition(command: string[]): boolean {
+  return (
+    command[0] === 'npx' ||
+    (command[0] === 'npm' && command[1] === 'exec') ||
+    (command[0] === 'pnpm' && command[1] === 'dlx') ||
+    (command[0] === 'yarn' && command[1] === 'dlx')
+  );
+}
+
+function invokesNextDev(command: string[]): boolean {
+  const nextIndex = command.findIndex((argument) =>
+    argument === 'next' ||
+    argument.endsWith('/next') ||
+    argument.endsWith('/next/dist/bin/next')
+  );
+  return nextIndex >= 0 && command[nextIndex + 1] === 'dev';
 }
 
 function containsExplicitRuntimeConflict(command: string[]): boolean {
@@ -459,6 +576,13 @@ function equalCommand(left: string[], right: string[]): boolean {
 
 function incompatibleCommand(message: string): PreviewRecipeValidation {
   return { status: 'INVALID', issues: [{ code: 'INCOMPATIBLE_COMMAND', message }] };
+}
+
+function dependencyPreparationRequired(message: string): PreviewRecipeValidation {
+  return {
+    status: 'INVALID',
+    issues: [{ code: 'DEPENDENCY_PREPARATION_REQUIRED', message }]
+  };
 }
 
 function containsSecretLiteral(plan: PreviewExecutionPlan): boolean {

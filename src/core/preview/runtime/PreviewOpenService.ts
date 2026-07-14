@@ -1,5 +1,6 @@
 import type { OpenPreviewRequest, OpenPreviewResult } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { previewRouteHostname } from '../PreviewRouteHostname';
 
 export interface PreviewUrlHost {
   openExternal(url: string): Promise<void>;
@@ -26,11 +27,14 @@ export class PreviewOpenService {
     );
     if (!route) throw new Error('The recorded preview route is not attached.');
     const parsed = new URL(route.url);
+    const expectedHostname = previewRouteHostname(generation.taskId, route.id);
+    const expectedUrl = `http://${expectedHostname}:${route.gatewayPort}/`;
     if (
+      route.url !== expectedUrl ||
       parsed.protocol !== 'http:' ||
       parsed.hostname !== route.hostname ||
-      parsed.hostname !== parsed.hostname.toLowerCase() ||
-      !parsed.hostname.endsWith('.preview.localhost') ||
+      parsed.hostname !== expectedHostname ||
+      route.hostname !== expectedHostname ||
       Number(parsed.port) !== route.gatewayPort ||
       parsed.pathname !== '/' ||
       parsed.username ||

@@ -1,5 +1,9 @@
+import { constants } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
 export const PREVIEW_FRAMEWORK_CAPABILITIES_VERSION =
-  'task-monki-preview-framework-capabilities/v1' as const;
+  'task-monki-preview-framework-capabilities/v2' as const;
 
 export type PreviewFrameworkConflictCode =
   | 'FIXED_PORT'
@@ -15,18 +19,31 @@ export interface PreviewFrameworkConflict {
 
 export interface PreviewFrameworkCapability {
   framework: 'nextjs';
-  knowledgeVersion: 'nextjs-cli-15-16/v1';
+  knowledgeVersion: 'nextjs-cli-15-16/v2';
   sourcePath: 'package.json';
   detectedVersion: string;
+  lockedVersion?: string;
   scriptName: 'dev';
   repositoryCommand: string;
   scriptCommand: string[];
   portBinding: { type: 'environment'; name: 'PORT' };
   upstreamProtocol: 'http';
   conflicts: PreviewFrameworkConflict[];
+  dependencyPreparation?: PreviewFrameworkDependencyPreparation;
   compatiblePreviewCommand?: string[];
   yamlCommentLines?: string[];
   limitation?: string;
+}
+
+export interface PreviewFrameworkDependencyPreparation {
+  packageManager: 'npm';
+  lockfilePath: 'package-lock.json';
+  lockfileVersion: 2 | 3;
+  cwd: '.';
+  installCommand: string[];
+  installCommandMayRunLifecycleScripts: true;
+  repositoryLifecycleScripts: string[];
+  yamlCommentLines: string[];
 }
 
 export interface PreviewFrameworkCapabilities {
@@ -39,8 +56,32 @@ interface EvidenceFile {
   content: string;
 }
 
+type PreviewNpmPackageLockFact =
+  | {
+      status: 'VALID';
+      path: 'package-lock.json';
+      lockfileVersion: 2 | 3;
+      rootNextSpec?: string;
+      lockedNextVersion?: string;
+    }
+  | {
+      status: 'MISSING' | 'UNSAFE' | 'OVERSIZED' | 'INVALID' | 'UNSUPPORTED';
+      path: 'package-lock.json';
+    };
+
+export interface PreviewFrameworkRepositoryFacts {
+  rootLockfiles: readonly ('package-lock.json' | 'pnpm-lock.yaml' | 'yarn.lock')[];
+  npmPackageLock: PreviewNpmPackageLockFact;
+}
+
+const EMPTY_REPOSITORY_FACTS: PreviewFrameworkRepositoryFacts = {
+  rootLockfiles: [],
+  npmPackageLock: { status: 'MISSING', path: 'package-lock.json' }
+};
+
 const SUPPORTED_NEXT_VERSION =
   /^(?:\^|~)?(?:15|16)(?:\.\d+){0,2}(?:-[0-9A-Za-z.-]+)?$/;
+const SUPPORTED_LOCKED_NEXT_VERSION = /^(?:15|16)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const SAFE_NEXT_DEV_FLAGS = new Set([
   '--disable-source-maps',
   '--no-server-fast-refresh',
@@ -54,6 +95,21 @@ const HTTPS_VALUE_FLAGS = new Set([
   '--experimental-https-ca'
 ]);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0']);
+const MAX_PACKAGE_LOCK_BYTES = 16 * 1024 * 1024;
+const NPM_INSTALL_COMMAND = ['npm', 'ci', '--no-audit', '--no-fund'];
+const NPM_INSTALL_COMMENT_LINES = [
+  '# Installs exactly from package-lock.json inside this captured Preview generation.',
+  '# npm may run repository and dependency lifecycle scripts.'
+];
+const NPM_INSTALL_LIFECYCLE_SCRIPTS = [
+  'preinstall',
+  'install',
+  'postinstall',
+  'prepublish',
+  'preprepare',
+  'prepare',
+  'postprepare'
+] as const;
 
 /**
  * Converts sanitized repository facts into narrowly versioned runtime facts.
@@ -61,17 +117,49 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0']);
  * never needs to infer framework CLI behavior from model knowledge.
  */
 export function analyzePreviewFrameworkCapabilities(
-  files: readonly EvidenceFile[]
+  files: readonly EvidenceFile[],
+  repositoryFacts: PreviewFrameworkRepositoryFacts = EMPTY_REPOSITORY_FACTS
 ): PreviewFrameworkCapabilities {
   const packageFile = files.find((file) => file.path === 'package.json');
-  const analysis = packageFile ? analyzeNextPackage(packageFile.content) : undefined;
+  const analysis = packageFile
+    ? analyzeNextPackage(packageFile.content, repositoryFacts)
+    : undefined;
   return {
     schemaVersion: PREVIEW_FRAMEWORK_CAPABILITIES_VERSION,
     analyses: analysis ? [analysis] : []
   };
 }
 
-function analyzeNextPackage(content: string): PreviewFrameworkCapability | undefined {
+export async function inspectPreviewFrameworkRepositoryFacts(
+  repositoryPath: string
+): Promise<PreviewFrameworkRepositoryFacts> {
+  const root = await fs.realpath(path.resolve(repositoryPath));
+  const states = await Promise.all(
+    (['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'] as const).map(async (name) => ({
+      name,
+      state: await inspectRootFile(path.join(root, name))
+    }))
+  );
+  const rootLockfiles = states
+    .filter((entry) => entry.state === 'REGULAR')
+    .map((entry) => entry.name);
+  const packageLockState = states.find((entry) => entry.name === 'package-lock.json')?.state;
+  return {
+    rootLockfiles,
+    npmPackageLock:
+      packageLockState === 'REGULAR'
+        ? await readNpmPackageLockFact(path.join(root, 'package-lock.json'))
+        : {
+            status: packageLockState === 'MISSING' ? 'MISSING' : 'UNSAFE',
+            path: 'package-lock.json'
+          }
+  };
+}
+
+function analyzeNextPackage(
+  content: string,
+  repositoryFacts: PreviewFrameworkRepositoryFacts
+): PreviewFrameworkCapability | undefined {
   let packageJson: Record<string, unknown>;
   try {
     packageJson = JSON.parse(content) as Record<string, unknown>;
@@ -83,10 +171,10 @@ function analyzeNextPackage(content: string): PreviewFrameworkCapability | undef
   const script = scripts && typeof scripts.dev === 'string' ? scripts.dev.trim() : '';
   if (!version || !script) return undefined;
 
-  const packageRunner = packageManager(packageJson.packageManager);
+  const packageRunner = packageManager(packageJson.packageManager, repositoryFacts.rootLockfiles);
   const base: PreviewFrameworkCapability = {
     framework: 'nextjs',
-    knowledgeVersion: 'nextjs-cli-15-16/v1',
+    knowledgeVersion: 'nextjs-cli-15-16/v2',
     sourcePath: 'package.json',
     detectedVersion: version,
     scriptName: 'dev',
@@ -122,22 +210,31 @@ function analyzeNextPackage(content: string): PreviewFrameworkCapability | undef
       limitation: 'At least one development argument cannot be safely translated to the HTTP Preview runtime.'
     };
   }
-  if (conflicts.length === 0) {
-    return { ...base, conflicts, compatiblePreviewCommand: base.scriptCommand };
+  const preparation = npmDependencyPreparation(
+    packageJson,
+    version,
+    packageRunner,
+    repositoryFacts.npmPackageLock
+  );
+  if ('limitation' in preparation) {
+    return { ...base, conflicts, limitation: preparation.limitation };
   }
-
-  const compatiblePreviewCommand = directNextCommand(packageRunner, analyzed.preservedArguments);
-  if (!compatiblePreviewCommand) {
+  if (conflicts.length === 0) {
     return {
       ...base,
+      lockedVersion: preparation.lockedVersion,
       conflicts,
-      limitation: `Task Monki does not have a trusted direct Next.js command for package manager ${packageRunner}.`
+      dependencyPreparation: preparation.value,
+      compatiblePreviewCommand: base.scriptCommand
     };
   }
+
   return {
     ...base,
+    lockedVersion: preparation.lockedVersion,
     conflicts,
-    compatiblePreviewCommand,
+    dependencyPreparation: preparation.value,
+    compatiblePreviewCommand: directNextCommand(analyzed.preservedArguments),
     yamlCommentLines: previewCommandComment(conflicts)
   };
 }
@@ -212,12 +309,14 @@ function analyzeNextDevArguments(arguments_: string[]): {
   return { conflicts, preservedArguments, rewriteSafe };
 }
 
-function directNextCommand(packageRunner: string, preservedArguments: string[]): string[] | undefined {
-  const nextArguments = ['next', 'dev', ...preservedArguments, '--hostname', '127.0.0.1'];
-  if (packageRunner === 'npm') return ['npm', 'exec', '--offline', '--', ...nextArguments];
-  if (packageRunner === 'pnpm') return ['pnpm', 'exec', ...nextArguments];
-  if (packageRunner === 'yarn') return ['yarn', 'exec', ...nextArguments];
-  return undefined;
+function directNextCommand(preservedArguments: string[]): string[] {
+  return [
+    './node_modules/.bin/next',
+    'dev',
+    ...preservedArguments,
+    '--hostname',
+    '127.0.0.1'
+  ];
 }
 
 function previewCommandComment(conflicts: PreviewFrameworkConflict[]): string[] {
@@ -257,10 +356,74 @@ function dependencyVersion(packageJson: Record<string, unknown>, name: string): 
   return undefined;
 }
 
-function packageManager(value: unknown): string {
-  if (typeof value !== 'string') return 'npm';
-  const name = value.split('@', 1)[0].trim();
-  return ['npm', 'pnpm', 'yarn'].includes(name) ? name : 'npm';
+function packageManager(
+  value: unknown,
+  lockfiles: PreviewFrameworkRepositoryFacts['rootLockfiles']
+): string {
+  if (typeof value === 'string' && value.trim()) {
+    const match = /^([a-z0-9][a-z0-9-]*)(?:@.+)?$/i.exec(value.trim());
+    return match?.[1].toLowerCase() ?? 'unsupported';
+  }
+  const managers = new Set(lockfiles.map((lockfile) =>
+    lockfile === 'package-lock.json' ? 'npm' : lockfile === 'pnpm-lock.yaml' ? 'pnpm' : 'yarn'
+  ));
+  if (managers.size > 1) return 'ambiguous';
+  return [...managers][0] ?? 'npm';
+}
+
+function npmDependencyPreparation(
+  packageJson: Record<string, unknown>,
+  declaredVersion: string,
+  packageRunner: string,
+  packageLock: PreviewNpmPackageLockFact
+):
+  | { value: PreviewFrameworkDependencyPreparation; lockedVersion: string }
+  | { limitation: string } {
+  if (packageRunner === 'ambiguous') {
+    return { limitation: 'Multiple root package-manager lockfiles are present without an explicit packageManager declaration.' };
+  }
+  if (packageRunner !== 'npm') {
+    return {
+      limitation: `Task Monki does not have a trusted lockfile installation profile for package manager ${packageRunner}.`
+    };
+  }
+  if (packageLock.status !== 'VALID') {
+    const reason =
+      packageLock.status === 'MISSING' ? 'is missing' :
+      packageLock.status === 'OVERSIZED' ? 'exceeds the bounded inspection limit' :
+      packageLock.status === 'UNSUPPORTED' ? 'uses an unsupported lockfile version' :
+      packageLock.status === 'UNSAFE' ? 'is not a safe regular file' :
+      'could not be safely validated';
+    return {
+      limitation: `The root package-lock.json ${reason}; Task Monki cannot prove a deterministic dependency installation command.`
+    };
+  }
+  if (packageLock.rootNextSpec !== declaredVersion || !packageLock.lockedNextVersion) {
+    return {
+      limitation: 'package-lock.json does not consistently lock the root Next.js dependency declared by package.json.'
+    };
+  }
+  if (!SUPPORTED_LOCKED_NEXT_VERSION.test(packageLock.lockedNextVersion)) {
+    return {
+      limitation: 'The locked Next.js version is outside the trusted 15-16 capability range.'
+    };
+  }
+  const scripts = record(packageJson.scripts);
+  return {
+    lockedVersion: packageLock.lockedNextVersion,
+    value: {
+      packageManager: 'npm',
+      lockfilePath: 'package-lock.json',
+      lockfileVersion: packageLock.lockfileVersion,
+      cwd: '.',
+      installCommand: [...NPM_INSTALL_COMMAND],
+      installCommandMayRunLifecycleScripts: true,
+      repositoryLifecycleScripts: NPM_INSTALL_LIFECYCLE_SCRIPTS.filter(
+        (name) => typeof scripts?.[name] === 'string' && Boolean((scripts[name] as string).trim())
+      ),
+      yamlCommentLines: [...NPM_INSTALL_COMMENT_LINES]
+    }
+  };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -346,4 +509,72 @@ function unsupportedScript(argument: string): PreviewFrameworkConflict {
     argument,
     detail: 'The development script cannot be safely translated by the trusted Next.js capability profile.'
   };
+}
+
+async function inspectRootFile(
+  filePath: string
+): Promise<'MISSING' | 'REGULAR' | 'UNSAFE'> {
+  try {
+    const stat = await fs.lstat(filePath);
+    return stat.isFile() ? 'REGULAR' : 'UNSAFE';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'MISSING' : 'UNSAFE';
+  }
+}
+
+async function readNpmPackageLockFact(filePath: string): Promise<PreviewNpmPackageLockFact> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch {
+    return { status: 'UNSAFE', path: 'package-lock.json' };
+  }
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) return { status: 'UNSAFE', path: 'package-lock.json' };
+    if (before.size > MAX_PACKAGE_LOCK_BYTES) {
+      return { status: 'OVERSIZED', path: 'package-lock.json' };
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (
+      bytes.length !== before.size ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs
+    ) {
+      return { status: 'INVALID', path: 'package-lock.json' };
+    }
+    if (bytes.includes(0)) return { status: 'INVALID', path: 'package-lock.json' };
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(
+        new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      ) as Record<string, unknown>;
+    } catch {
+      return { status: 'INVALID', path: 'package-lock.json' };
+    }
+    const lockfileVersion = parsed.lockfileVersion;
+    if (lockfileVersion !== 2 && lockfileVersion !== 3) {
+      return { status: 'UNSUPPORTED', path: 'package-lock.json' };
+    }
+    const packages = record(parsed.packages);
+    const rootPackage = record(packages?.['']);
+    const lockedNext = record(packages?.['node_modules/next']);
+    const rootNextSpec = rootPackage ? dependencyVersion(rootPackage, 'next') : undefined;
+    const lockedNextVersion =
+      typeof lockedNext?.version === 'string' && lockedNext.version.length <= 128
+        ? lockedNext.version.trim()
+        : undefined;
+    return {
+      status: 'VALID',
+      path: 'package-lock.json',
+      lockfileVersion,
+      rootNextSpec,
+      lockedNextVersion
+    };
+  } finally {
+    await handle.close();
+  }
 }

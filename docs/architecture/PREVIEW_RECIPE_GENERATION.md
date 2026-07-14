@@ -32,9 +32,9 @@ The generator receives versioned support material from
 `PreviewRecipeGenerationSupport.ts`:
 
 - a stable behavioral instruction;
-- the machine-readable `task-monki-preview-recipe-generation/v1` authoring
+- the machine-readable `task-monki-preview-recipe-generation/v2` authoring
   contract;
-- deterministic `task-monki-preview-framework-capabilities/v1` compatibility
+- deterministic `task-monki-preview-framework-capabilities/v2` compatibility
   facts derived from sanitized repository manifests;
 - parser-tested native, private-input/managed-data, and Compose examples;
 - the structured output contract;
@@ -54,6 +54,16 @@ bundle supplies one exact Preview-only command and exact explanatory YAML
 comment lines. Unknown script shapes, unsupported framework versions, and
 unrecognized arguments remain fail-closed rather than becoming guessed
 commands.
+
+The Next.js profile also requires a safely validated root npm
+`package-lock.json`. It supplies one exact generic
+`npm ci --no-audit --no-fund` job, a repository-local framework command, and
+the required `needs: succeeded` edge. `npm ci` may run repository and
+dependency lifecycle scripts; that authority is stated in an exact review
+comment and is not expanded into guessed script jobs. Missing, stale, unsafe,
+ambiguous, or unsupported lockfiles/package managers produce a limitation
+instead of an executable command. Generated recipes may not use `npm exec`,
+`npx`, or package-manager `dlx` as implicit package acquisition.
 
 The agent must return a single structured object containing either a complete
 YAML draft or `insufficient-evidence`, plus:
@@ -94,8 +104,11 @@ temporary directory with:
 Traversal does not follow symlinks. It excludes likely secret-bearing paths
 and contents, VCS/dependency/cache/generated directories, binary or invalid
 UTF-8 files, unsupported formats, oversized files, and content beyond fixed
-file/count/byte limits. The report receives safe omission counts, never
-excluded paths or values. The temporary bundle is removed after success,
+file/count/byte limits. A trusted bounded parser may reduce a root npm lockfile
+to fixed fields such as lockfile version, root Next.js spec, and locked Next.js
+version; raw lockfile contents, resolved URLs, and unrelated dependency data
+are never included in the agent bundle. The report receives safe omission
+counts, never excluded values. The temporary bundle is removed after success,
 failure, cancellation, or shutdown.
 
 This boundary minimizes exposure but does not claim that arbitrary ordinary
@@ -124,9 +137,13 @@ Generated and user-edited YAML follows the same acceptance checks:
 1. nonempty and at most 64 KiB;
 2. accepted by `parsePreviewRecipe`;
 3. no literal value for a secret-like environment key;
-4. draft ID still matches the current task draft;
-5. task worktree and `.taskmonki` directory still resolve safely;
-6. target file does not already exist.
+4. no implicit package-acquisition command;
+5. every trusted framework command has its exact generic lockfile install job,
+   lifecycle review comment, package-root cwd, and explicit success edge;
+6. draft ID still matches the current task draft and its transient capability
+   facts, including after user edits;
+7. task worktree and `.taskmonki` directory still resolve safely;
+8. target file does not already exist.
 
 Validation returns fixed safe issue messages rather than reflecting YAML
 source snippets through errors. Agent stderr and raw malformed output are not
