@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
@@ -83,6 +84,51 @@ describeMac('TaskManagerService native preview scenarios', () => {
       expect.arrayContaining(['SUCCEEDED', 'STOPPED'])
     );
     expect(snapshot.artifacts.some((artifact) => artifact.kind === 'preview-source-manifest')).toBe(true);
+  }, 20_000);
+
+  it('retains every concurrent attachment-readiness result in generation evidence', async () => {
+    const scenario = await previewScenario('task-monki-preview-attachment-evidence');
+    const task = await scenario.createTask({ title: 'Concurrent attachment evidence' });
+    const worktree = await scenario.service.prepareWorktree({ taskId: task.id });
+    const target = net.createServer((socket) => socket.end());
+    await new Promise<void>((resolve, reject) => {
+      target.once('error', reject);
+      target.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const address = target.address();
+      if (!address || typeof address === 'string') throw new Error('Attachment target did not bind.');
+      const attachments = ['alpha', 'bravo', 'charlie', 'delta'];
+      await fs.writeFile(path.join(worktree.worktreePath, '.taskmonki', 'preview.yaml'), `
+version: 1
+attachments:
+${attachments.map((id) => `  ${id}:\n    type: tcp\n    target: { type: endpoint, host: 127.0.0.1, port: ${address.port} }\n    check: { timeoutSeconds: 2 }`).join('\n')}
+services:
+  web:
+    command: [node, server.mjs]
+    needs: { ${attachments.map((id) => `${id}: ready`).join(', ')} }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /health/ready, timeoutSeconds: 5 }
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+      const resolved = await scenario.service.resolvePreview({ taskId: task.id });
+      if (resolved.status !== 'PLAN') throw new Error('Expected a preview plan.');
+      await scenario.service.approvePreviewPlan({
+        taskId: task.id,
+        planId: resolved.plan.id,
+        executionDigest: resolved.plan.executionDigest
+      });
+      const ready = await scenario.service.startPreview({ taskId: task.id });
+      expect(ready.attachmentReadiness).toHaveLength(attachments.length);
+      expect(new Set(ready.attachmentReadiness?.map((item) => item.attachmentId))).toEqual(
+        new Set(attachments)
+      );
+      expect(ready.attachmentReadiness?.every((item) => item.status === 'PASSED')).toBe(true);
+      await scenario.service.stopPreview({ taskId: task.id, generationId: ready.id });
+    } finally {
+      await new Promise<void>((resolve, reject) => target.close((error) => error ? reject(error) : resolve()));
+    }
   }, 20_000);
 
   it('invalidates approval for capability changes and never starts the changed command', async () => {

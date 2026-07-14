@@ -408,6 +408,7 @@ export class PreviewManager {
       let setupResourceIds: string[] = [];
       let setupCompleted = false;
       let oldExclusiveHandedOff = false;
+      let attachmentEvidenceUpdate: Promise<void> = Promise.resolve();
       try {
         const scenario = prepared.plan.executionPlan.scenarios.find(
           (candidate) => candidate.id === prepared.plan.executionPlan.selectedScenarioId
@@ -455,13 +456,16 @@ export class PreviewManager {
           attachmentGatewayPort: this.requireGatewayPort(),
           releaseBindings: async () => { await prepared.privateLease?.release(); await this.privateVault?.releaseGeneration(generation.id); },
           onAttachmentEvidence: async (evidence) => {
-            generation = await this.saveGeneration({
-              ...generation,
-              attachmentReadiness: [
-                ...(generation.attachmentReadiness ?? []).filter((item) => item.attachmentId !== evidence.attachmentId),
-                evidence
-              ]
+            attachmentEvidenceUpdate = attachmentEvidenceUpdate.then(async () => {
+              generation = await this.saveGeneration({
+                ...generation,
+                attachmentReadiness: [
+                  ...(generation.attachmentReadiness ?? []).filter((item) => item.attachmentId !== evidence.attachmentId),
+                  evidence
+                ]
+              });
             });
+            await attachmentEvidenceUpdate;
           },
           runSetup: setupResourceIds.length > 0,
           onSetupComplete: async () => {
