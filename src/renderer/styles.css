@@ -2916,7 +2916,7 @@ textarea:focus-visible {
 .slideover__panel {
   display: flex;
   flex-direction: column;
-  width: clamp(460px, var(--slideover-width, 640px), 760px);
+  width: clamp(500px, var(--slideover-width, 660px), 760px);
   max-width: 96vw;
   height: 100%;
   border-top-left-radius: 14px;
@@ -2932,7 +2932,7 @@ textarea:focus-visible {
   justify-content: space-between;
   gap: 14px;
   flex: 0 0 auto;
-  padding: 22px 26px 18px;
+  padding: 20px 24px 17px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -2962,24 +2962,29 @@ textarea:focus-visible {
   flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface);
+  background: transparent;
   color: var(--muted);
-  font-size: 20px;
-  line-height: 1;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
 .slideover__close:hover {
   color: var(--text);
   border-color: var(--border-strong);
+  background: var(--surface2);
+}
+
+.slideover__close:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .slideover__body {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 20px;
   flex: 1;
   min-height: 0;
-  padding: 22px 26px 26px;
+  padding: 20px 24px 26px;
   overflow-y: auto;
 }
 
@@ -2987,26 +2992,6 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.newtask-section__heading {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-}
-
-.newtask-section__heading span {
-  color: var(--faint);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.newtask-section__heading i {
-  flex: 1;
-  height: 1px;
-  background: var(--border);
 }
 
 .field {
@@ -3102,13 +3087,232 @@ textarea:focus-visible {
 }
 
 .field__prompt-shell {
-  display: grid;
-  gap: 8px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  background: var(--surface);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.field__prompt-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.field__prompt-shell--dragging {
+  border-color: var(--text-soft);
 }
 
 /* Dim the input while refining without hiding the user's text. */
 .field__prompt-shell--running textarea {
   opacity: 0.45;
+}
+
+.field.field--prompt textarea {
+  min-height: clamp(190px, 26vh, 280px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  resize: vertical;
+}
+
+.field.field--prompt textarea:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.field__prompt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.task-attachment-input {
+  display: none;
+}
+
+.task-attachment-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.task-attachment-add:not(:disabled):hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.task-attachment-add:focus-visible,
+.task-attachment__remove:focus-visible,
+.newtask-settings > summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.task-attachment-add:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.task-attachment-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.task-attachments {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0 9px 9px;
+  list-style: none;
+}
+
+.task-attachment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface2);
+}
+
+.task-attachment__preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.task-attachment__preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.task-attachment__body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-attachment__name {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-attachment__meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-attachment--error .task-attachment__meta {
+  color: var(--error-ink);
+}
+
+.task-attachment__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.task-attachment__remove {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.task-attachment__remove:not(:disabled):hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.task-attachment__remove:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+
+.task-attachment-drop {
+  position: absolute;
+  inset: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.task-attachment-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.task-attachment-message--error {
+  color: var(--error-ink);
+}
+
+.task-attachment-message--error > span {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--state-blocked);
 }
 
 /* The refined text shown as a proposal with Accept / Revert. */
@@ -3167,8 +3371,7 @@ textarea:focus-visible {
   height: 42px;
 }
 
-/* Placeholders describe, they don't demonstrate — faint tone so they never
-   read as pre-filled content (audit New-task §03). */
+/* Keep placeholders visually distinct from entered content. */
 .field input::placeholder,
 .field textarea::placeholder {
   color: var(--faint);
@@ -3178,11 +3381,6 @@ textarea:focus-visible {
 .field select {
   height: 42px;
   cursor: pointer;
-}
-
-.field__mono {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
 }
 
 .field textarea {
@@ -3198,28 +3396,6 @@ textarea:focus-visible {
 .field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-.field--checkbox {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 11px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--bg);
-}
-
-.field--checkbox input {
-  width: auto;
-  height: auto;
-  margin-top: 3px;
-}
-
-.field--checkbox > span {
-  display: grid;
-  gap: 3px;
 }
 
 .segmented-effort {
@@ -3253,6 +3429,59 @@ textarea:focus-visible {
 .segmented-effort__button:disabled {
   cursor: default;
   opacity: 0.62;
+}
+
+.newtask-settings {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.newtask-settings > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.newtask-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.newtask-settings > summary:hover .newtask-settings__title {
+  color: var(--text);
+}
+
+.newtask-settings__title {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.newtask-settings__summary {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.newtask-settings > summary svg {
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+
+.newtask-settings[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.newtask-settings__content {
+  display: grid;
+  gap: 14px;
+  padding: 4px 0 16px;
 }
 
 .network-toggle {
@@ -3387,30 +3616,6 @@ textarea:focus-visible {
   transform: rotate(45deg);
 }
 
-.info-tip--right .info-tip__bubble {
-  right: -2px;
-  left: auto;
-}
-
-.info-tip--right .info-tip__bubble::before {
-  right: 11px;
-  left: auto;
-}
-
-.info-tip--above .info-tip__bubble {
-  top: auto;
-  bottom: calc(100% + 9px);
-}
-
-.info-tip--above .info-tip__bubble::before {
-  top: auto;
-  bottom: -4px;
-  border-top: 0;
-  border-left: 0;
-  border-right: 1px solid var(--border-strong);
-  border-bottom: 1px solid var(--border-strong);
-}
-
 .info-tip:hover .info-tip__bubble,
 .info-tip:focus-within .info-tip__bubble {
   opacity: 1;
@@ -3428,28 +3633,19 @@ textarea:focus-visible {
   border-top: 1px solid var(--border);
 }
 
-.slideover__footer-note {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  max-width: 230px;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
-}
-
-.slideover__footer-note svg {
-  flex: 0 0 auto;
-}
-
 .slideover__footer-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-left: auto;
 }
 
 @media (max-width: 560px) {
   .field-grid--two {
+    grid-template-columns: 1fr;
+  }
+
+  .task-attachments {
     grid-template-columns: 1fr;
   }
 
@@ -3462,9 +3658,10 @@ textarea:focus-visible {
     flex-direction: column;
   }
 
-  .slideover__footer-note {
-    max-width: none;
+  .slideover__footer-actions {
+    justify-content: flex-end;
   }
+
 }
 
 /* ----------------------------------------------------------------------- */
@@ -6040,6 +6237,55 @@ textarea:focus-visible {
 
 .tm-requestcard__prompt {
   margin-top: 14px;
+}
+
+.tm-requestcard__attachments {
+  margin-top: 14px;
+  border-top: 1px solid var(--hair);
+}
+
+.tm-requestcard__attachments-head,
+.tm-requestcard__attachments li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.tm-requestcard__attachments-head {
+  padding: 11px 0 7px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tm-requestcard__attachments ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tm-requestcard__attachments li {
+  min-height: 31px;
+  padding: 6px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.tm-requestcard__attachments li > span:first-child {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-requestcard__attachments li > span:last-child {
+  color: var(--muted);
+  font: 10.5px/1.4 var(--font-mono);
+  white-space: nowrap;
 }
 
 /* generic panel card */

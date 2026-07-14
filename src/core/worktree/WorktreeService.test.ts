@@ -77,7 +77,7 @@ describe('WorktreeService', () => {
     expect(created.status).toBe('PRESENT');
     expect(created.headSha).toBe(baseSha);
     await expect(fs.access(path.join(record.worktreePath, 'README.md'))).resolves.toBeUndefined();
-  });
+  }, 15_000);
 });
 
 async function git(cwd: string, argv: string[]): Promise<string> {

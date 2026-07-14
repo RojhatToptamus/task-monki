@@ -3,6 +3,7 @@ import type {
   AgentExecutionSettings,
   AgentInteractionRequestPayload,
   AgentInteractionDecision,
+  AgentPermissionApprovalRequest,
   AgentItemStatus,
   AgentModel,
   AgentPreflight,
@@ -37,7 +38,22 @@ import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError
 } from '../AgentProviderAdapter';
+import { assertBrowserDevSettingsSafe } from '../BrowserDevAgentBoundary';
+import {
+  assertAttachmentSandboxSupportsDelivery,
+  assertModelSupportsAttachments,
+  prepareAgentAttachmentDelivery,
+  toAgentTurnAttachments,
+  verifyAgentTurnAttachments
+} from '../AgentAttachmentDelivery';
+import { redactExternalPermissionPaths } from '../AgentPermissionRedaction';
 import { codexCapabilities } from './codexCapabilities';
+import {
+  assertCodexActivePermissionProfile,
+  assertCodexPermissionProfileEvidence,
+  codexPermissionProfileConfig,
+  type CodexPermissionProfileEvidence
+} from './CodexPermissionProfile';
 import {
   CodexAppServerSupervisor,
   type CodexAppServerSupervisorOptions
@@ -51,6 +67,10 @@ import type {
   CodexExternalToolSettings
 } from '../../../shared/agent';
 import type { UnsupportedCodexServerRequest } from './protocol/CodexProtocolCodec';
+import {
+  assertCodexAttachmentExternalToolsDisabled,
+  normalizeCodexExternalToolSettings
+} from './CodexToolConfig';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
@@ -80,8 +100,6 @@ import {
   mapTurnStatus,
   settingsFromThreadSettings,
   settingsFromThreadResponse,
-  toSandboxMode,
-  toSandboxPolicy
 } from './CodexEventMapper';
 import {
   mapCodexInteractionRequest,
@@ -109,6 +127,13 @@ const ACTIVE_RUN_STATES: RunRecord['status'][] = [
 const RUNTIME_CONFIG_PENDING_RESTART_WARNING =
   'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.';
 
+class BrowserDevBoundaryViolationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BrowserDevBoundaryViolationError';
+  }
+}
+
 function canRetargetReviewTurn(
   run: RunRecord,
   session: AgentSessionRecord
@@ -124,21 +149,13 @@ function isNoActiveTurnToInterrupt(error: Error): boolean {
   return /no active turn to interrupt/i.test(error.message);
 }
 
-function toThreadConfig(
-  settings: AgentExecutionSettings
-): Record<string, string> | null {
-  if (!settings.reasoningEffort) {
-    return null;
-  }
-  return { model_reasoning_effort: settings.reasoningEffort };
-}
-
 export interface CodexAppServerAdapterOptions
   extends Omit<CodexAppServerSupervisorOptions, 'appVersion'> {
   appVersion?: string;
   restartDelaysMs?: number[];
   interruptRequestTimeoutMs?: number;
   interruptCompletionTimeoutMs?: number;
+  enforceBrowserDevBoundary?: boolean;
 }
 
 export class CodexAppServerAdapter implements AgentProviderAdapter {
@@ -162,6 +179,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private inboundQueue: Promise<void> = Promise.resolve();
   private readonly interruptRequestTimeoutMs: number;
   private readonly interruptCompletionTimeoutMs: number;
+  private readonly enforceBrowserDevBoundary: boolean;
+  private externalToolSettings: CodexExternalToolSettings;
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
   private runtimeConfigRestartPending = false;
@@ -186,6 +205,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       if (this.runtimeLossWork === work) this.runtimeLossWork = undefined;
     });
   };
+  private securityBoundaryViolation?: string;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -195,6 +215,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.restartDelaysMs = options.restartDelaysMs ?? [500, 1_000, 2_000];
     this.interruptRequestTimeoutMs = options.interruptRequestTimeoutMs ?? 5_000;
     this.interruptCompletionTimeoutMs = options.interruptCompletionTimeoutMs ?? 15_000;
+    this.enforceBrowserDevBoundary = options.enforceBrowserDevBoundary === true;
+    this.externalToolSettings = normalizeCodexExternalToolSettings(options.toolSettings);
     this.supervisor = new CodexAppServerSupervisor(store, {
       ...options,
       appVersion: options.appVersion ?? '0.1.0'
@@ -225,7 +247,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.assertRuntimeActive();
     await this.refreshPreflight();
     this.assertRuntimeActive();
-    await this.reconcile();
+    await this.reconcileRuns(true);
     this.assertRuntimeActive();
     this.initialized = true;
   }
@@ -276,10 +298,19 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       cwd: input.worktreePath,
       approvalPolicy: toApprovalPolicy(settings),
       approvalsReviewer: toApprovalsReviewer(settings),
-      sandbox: toSandboxMode(settings),
-      config: toThreadConfig(settings),
+      config: codexPermissionProfileConfig({
+        sessionId: session.id,
+        settings,
+        worktreePath: input.worktreePath
+      }),
       ephemeral: false
     });
+    assertProviderPermissionProfile(session.id, input.worktreePath, response);
+    const observedSettings = settingsFromThreadResponse(response);
+    await this.assertResponseSettingsSafe(
+      observedSettings,
+      'Created session observed settings'
+    );
 
     const stored = await this.store.updateAgentSession(session.id, {
       providerSessionId: response.thread.id,
@@ -287,13 +318,13 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       status: mapThreadStatus(response.thread.status),
       materialized: false,
       requestedSettings: settings,
-      observedSettings: settingsFromThreadResponse(response),
+      observedSettings,
       lastAttachedAt: new Date().toISOString()
     });
     await this.recordSettingsObservation(
       stored,
       'THREAD_START_RESPONSE',
-      settingsFromThreadResponse(response)
+      observedSettings
     );
     return stored;
   }
@@ -305,31 +336,30 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       throw new Error(`Agent session ${session.id} has not been materialized.`);
     }
 
-    const client = await this.ensureClient();
-    const response = await client.request('thread/resume', {
-      threadId: providerSessionId,
-      model: session.requestedSettings.model ?? null,
-      modelProvider: session.requestedSettings.modelProvider ?? null,
-      serviceTier: session.requestedSettings.serviceTier ?? null,
-      cwd: session.worktreePath,
-      approvalPolicy: toApprovalPolicy(session.requestedSettings),
-      approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
-      sandbox: toSandboxMode(session.requestedSettings),
-      config: toThreadConfig(session.requestedSettings)
-    });
+    const response = await this.resumeSessionWithProfile(
+      session,
+      providerSessionId,
+      session.requestedSettings,
+      []
+    );
+    const observedSettings = settingsFromThreadResponse(response);
+    await this.assertResponseSettingsSafe(
+      observedSettings,
+      'Resumed session observed settings'
+    );
 
     const stored = await this.store.updateAgentSession(session.id, {
       providerSessionId: response.thread.id,
       providerSessionTreeId: response.thread.sessionId,
       status: mapThreadStatus(response.thread.status),
       materialized: true,
-      observedSettings: settingsFromThreadResponse(response),
+      observedSettings,
       lastAttachedAt: new Date().toISOString()
     });
     await this.recordSettingsObservation(
       stored,
       'THREAD_RESUME_RESPONSE',
-      settingsFromThreadResponse(response)
+      observedSettings
     );
     return stored;
   }
@@ -362,6 +392,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
+    const attachments = input.attachments ?? [];
     let session = await this.requireSession(input.session.localSessionId);
     if (!session.providerSessionId) {
       session = await this.createSession({
@@ -380,6 +411,46 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       throw new Error('Codex App Server is not ready to start a turn.');
     }
     const settings = input.settings ?? session.requestedSettings;
+    assertAttachmentSandboxSupportsDelivery(settings, attachments);
+    assertCodexAttachmentExternalToolsDisabled(this.externalToolSettings, attachments.length > 0);
+    if (attachments.length > 0) {
+      const selectedModel =
+        this.models.find((candidate) => candidate.model === settings.model) ??
+        this.models.find((candidate) => candidate.id === settings.model) ??
+        this.models.find((candidate) => candidate.isDefault);
+      if (!selectedModel) {
+        throw new Error('Codex did not report an available model for attachment delivery.');
+      }
+      assertModelSupportsAttachments(selectedModel, attachments);
+    }
+    const verifiedAttachments = await verifyAgentTurnAttachments(attachments);
+    const attachmentDelivery = prepareAgentAttachmentDelivery({
+      prompt: input.prompt,
+      attachments: verifiedAttachments,
+      includeLocalImages: !session.materialized
+    });
+    const profileResponse = await this.resumeSessionWithProfile(
+      session,
+      session.providerSessionId,
+      settings,
+      verifiedAttachments.map((attachment) => attachment.path)
+    );
+    const observedSettings = settingsFromThreadResponse(profileResponse);
+    await this.assertResponseSettingsSafe(
+      observedSettings,
+      'Turn permission profile observed settings'
+    );
+    session = await this.store.updateAgentSession(session.id, {
+      requestedSettings: settings,
+      observedSettings,
+      lastAttachedAt: new Date().toISOString()
+    });
+    await this.recordSettingsObservation(
+      session,
+      'THREAD_RESUME_RESPONSE',
+      observedSettings,
+      input.localRunId
+    );
     await this.store.updateRun(input.localRunId, {
       serverInstanceId: server.id,
       status: 'STARTING',
@@ -388,13 +459,18 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     let response;
     try {
       response = await client.requestMutation('turn/start', {
-        threadId: session.providerSessionId,
+        threadId: profileResponse.thread.id,
         clientUserMessageId: input.localRunId,
-        input: [{ type: 'text', text: input.prompt, text_elements: [] }],
+        input: [
+          { type: 'text', text: attachmentDelivery.prompt, text_elements: [] },
+          ...attachmentDelivery.localImagePaths.map((imagePath) => ({
+            type: 'localImage' as const,
+            path: imagePath
+          }))
+        ],
         cwd: session.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        sandboxPolicy: toSandboxPolicy(settings, session.worktreePath),
         model: settings.model ?? null,
         serviceTier: settings.serviceTier ?? null,
         effort: settings.reasoningEffort ?? null,
@@ -406,18 +482,33 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       throw mapMutationError('turn/start', error);
     }
 
-    await this.store.updateRun(input.localRunId, {
-      providerTurnId: response.turn.id,
-      serverInstanceId: server.id,
-      status: 'RUNNING',
-      lastEventAt: new Date().toISOString()
-    });
-    await this.store.updateAgentSession(session.id, {
-      status: 'ACTIVE',
-      materialized: true,
-      requestedSettings: settings,
-      lastAttachedAt: new Date().toISOString()
-    });
+    try {
+      await this.store.updateRun(input.localRunId, {
+        providerTurnId: response.turn.id,
+        serverInstanceId: server.id,
+        status: 'RUNNING',
+        ...(attachmentDelivery.submissionCandidates.length > 0
+          ? {
+              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+                (submission) => ({
+                  ...submission,
+                  providerTurnId: response.turn.id,
+                  submittedAt: new Date().toISOString()
+                })
+              )
+            }
+          : {}),
+        lastEventAt: new Date().toISOString()
+      });
+      await this.store.updateAgentSession(session.id, {
+        status: 'ACTIVE',
+        materialized: true,
+        requestedSettings: settings,
+        lastAttachedAt: new Date().toISOString()
+      });
+    } catch {
+      throw postAcknowledgementPersistenceError('turn/start', response.turn.id);
+    }
     void this.syncGoalIfNeeded(session.id, input.authoritativeGoal).catch((error) => {
       this.preflightState = {
         ...this.preflightState,
@@ -565,31 +656,41 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         cwd: target.worktreePath,
         approvalPolicy: toApprovalPolicy(input.settings),
         approvalsReviewer: toApprovalsReviewer(input.settings),
-        sandbox: toSandboxMode(input.settings),
-        config: toThreadConfig(input.settings),
+        config: codexPermissionProfileConfig({
+          sessionId: target.id,
+          settings: input.settings,
+          worktreePath: target.worktreePath
+        }),
         ephemeral: false
       });
     } catch (error) {
       throw mapMutationError('thread/fork', error);
     }
+    assertProviderPermissionProfile(target.id, target.worktreePath, response);
+    const observedSettings = settingsFromThreadResponse(response);
+    await this.assertResponseSettingsSafe(
+      observedSettings,
+      'Forked session observed settings'
+    );
     const stored = await this.store.updateAgentSession(target.id, {
       providerSessionId: response.thread.id,
       providerSessionTreeId: response.thread.sessionId,
       status: mapThreadStatus(response.thread.status),
       materialized: true,
       requestedSettings: input.settings,
-      observedSettings: settingsFromThreadResponse(response),
+      observedSettings,
       lastAttachedAt: new Date().toISOString()
     });
     await this.recordSettingsObservation(
       stored,
       'THREAD_FORK_RESPONSE',
-      settingsFromThreadResponse(response)
+      observedSettings
     );
     return stored;
   }
 
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
+    const attachments = input.attachments ?? [];
     const source = await this.requireSession(input.sourceSession.localSessionId);
     const reviewSession = await this.requireSession(input.reviewSessionId);
     const providerSessionId =
@@ -608,9 +709,26 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       lastEventAt: new Date().toISOString()
     });
     const settings = reviewSession.requestedSettings;
-    let response;
+    assertAttachmentSandboxSupportsDelivery(settings, attachments);
+    assertCodexAttachmentExternalToolsDisabled(this.externalToolSettings, attachments.length > 0);
+    if (attachments.length > 0) {
+      const selectedModel =
+        this.models.find((candidate) => candidate.model === settings.model) ??
+        this.models.find((candidate) => candidate.id === settings.model) ??
+        this.models.find((candidate) => candidate.isDefault);
+      if (!selectedModel) {
+        throw new Error('Codex did not report an available model for attachment delivery.');
+      }
+      assertModelSupportsAttachments(selectedModel, attachments);
+    }
+    const attachmentDelivery = prepareAgentAttachmentDelivery({
+      prompt: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
+      attachments: await verifyAgentTurnAttachments(attachments),
+      includeLocalImages: false
+    });
+    let reviewBase;
     try {
-      const reviewBase = await client.requestMutation('thread/fork', {
+      reviewBase = await client.requestMutation('thread/fork', {
         threadId: providerSessionId,
         model: settings.model ?? null,
         modelProvider: settings.modelProvider ?? null,
@@ -618,16 +736,54 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         cwd: reviewSession.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        sandbox: toSandboxMode(settings),
-        config: toThreadConfig(settings),
-        developerInstructions: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
+        config: codexPermissionProfileConfig({
+          sessionId: reviewSession.id,
+          settings,
+          worktreePath: reviewSession.worktreePath,
+          attachmentPaths: attachmentDelivery.attachments.map(
+            (attachment) => attachment.path
+          )
+        }),
+        developerInstructions: attachmentDelivery.prompt,
         ephemeral: false
       });
+    } catch (error) {
+      throw mapMutationError('thread/fork', error);
+    }
+    assertProviderPermissionProfile(
+      reviewSession.id,
+      reviewSession.worktreePath,
+      reviewBase
+    );
+    const observedSettings = settingsFromThreadResponse(reviewBase);
+    await this.assertResponseSettingsSafe(
+      observedSettings,
+      'Review fork observed settings'
+    );
+    let storedReviewBase: AgentSessionRecord;
+    try {
+      storedReviewBase = await this.store.updateAgentSession(reviewSession.id, {
+        providerSessionId: reviewBase.thread.id,
+        providerSessionTreeId: reviewBase.thread.sessionId,
+        status: mapThreadStatus(reviewBase.thread.status),
+        materialized: true,
+        requestedSettings: settings,
+        observedSettings,
+        lastAttachedAt: new Date().toISOString()
+      });
       await this.recordSettingsObservation(
-        reviewSession,
+        storedReviewBase,
         'THREAD_FORK_RESPONSE',
-        settingsFromThreadResponse(reviewBase)
+        observedSettings
       );
+    } catch {
+      throw postAcknowledgementPersistenceError(
+        'thread/fork',
+        reviewBase.thread.id
+      );
+    }
+    let response;
+    try {
       response = await client.requestMutation('review/start', {
         threadId: reviewBase.thread.id,
         target: toReviewTarget(input.target),
@@ -636,19 +792,34 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     } catch (error) {
       throw mapMutationError('review/start', error);
     }
-    await this.store.updateAgentSession(reviewSession.id, {
-      providerSessionId: response.reviewThreadId,
-      providerSessionTreeId: response.reviewThreadId,
-      status: 'ACTIVE',
-      materialized: true,
-      lastAttachedAt: new Date().toISOString()
-    });
-    await this.store.updateRun(input.localRunId, {
-      providerTurnId: response.turn.id,
-      serverInstanceId: server.id,
-      status: 'RUNNING',
-      lastEventAt: new Date().toISOString()
-    });
+    try {
+      await this.store.updateAgentSession(reviewSession.id, {
+        providerSessionId: response.reviewThreadId,
+        providerSessionTreeId: response.reviewThreadId,
+        status: 'ACTIVE',
+        materialized: true,
+        lastAttachedAt: new Date().toISOString()
+      });
+      await this.store.updateRun(input.localRunId, {
+        providerTurnId: response.turn.id,
+        serverInstanceId: server.id,
+        status: 'RUNNING',
+        ...(attachmentDelivery.submissionCandidates.length > 0
+          ? {
+              attachmentSubmissions: attachmentDelivery.submissionCandidates.map(
+                (submission) => ({
+                  ...submission,
+                  providerTurnId: response.turn.id,
+                  submittedAt: new Date().toISOString()
+                })
+              )
+            }
+          : {}),
+        lastEventAt: new Date().toISOString()
+      });
+    } catch {
+      throw postAcknowledgementPersistenceError('review/start', response.turn.id);
+    }
     return {
       localRunId: input.localRunId,
       providerTurnId: response.turn.id
@@ -744,7 +915,15 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   async reconcile(): Promise<AgentReconciliationResult> {
-    const runs = await this.store.getRunsRequiringRecovery();
+    return this.reconcileRuns(false);
+  }
+
+  private async reconcileRuns(
+    includePersistedQueuedRuns: boolean
+  ): Promise<AgentReconciliationResult> {
+    const runs = await this.store.getRunsRequiringRecovery({
+      includeQueued: includePersistedQueuedRuns
+    });
     const reconciledSessionIds = new Set<string>();
     const recoveryRequiredSessionIds = new Set<string>();
     if (runs.length === 0) {
@@ -771,23 +950,30 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       }
 
       try {
-        const response = await client.request('thread/resume', {
-          threadId: session.providerSessionId,
-          cwd: session.worktreePath,
-          approvalPolicy: toApprovalPolicy(session.requestedSettings),
-          approvalsReviewer: toApprovalsReviewer(session.requestedSettings),
-          sandbox: toSandboxMode(session.requestedSettings)
-        });
+        const attachments = toAgentTurnAttachments(
+          await this.store.verifyRunAttachments(run.id, run.taskId)
+        );
+        const response = await this.resumeSessionWithProfile(
+          session,
+          session.providerSessionId,
+          session.requestedSettings,
+          attachments.map((attachment) => attachment.path)
+        );
+        const observedSettings = settingsFromThreadResponse(response);
+        await this.assertResponseSettingsSafe(
+          observedSettings,
+          'Recovery resume observed settings'
+        );
         await this.store.updateAgentSession(session.id, {
           status: mapThreadStatus(response.thread.status),
           materialized: true,
-          observedSettings: settingsFromThreadResponse(response),
+          observedSettings,
           lastAttachedAt: new Date().toISOString()
         });
         await this.recordSettingsObservation(
           session,
           'RECOVERY_RESUME_RESPONSE',
-          settingsFromThreadResponse(response),
+          observedSettings,
           run.id
         );
         const providerTurn = response.thread.turns.find(
@@ -819,7 +1005,10 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         } else {
           recoveryRequiredSessionIds.add(run.sessionId);
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof BrowserDevBoundaryViolationError) {
+          throw error;
+        }
         await this.recordReconciliation(
           run,
           'RECOVERY_REQUIRED',
@@ -874,6 +1063,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (this.shuttingDown) {
       throw new Error('Codex App Server is shutting down.');
     }
+    this.externalToolSettings = normalizeCodexExternalToolSettings(input.toolSettings);
     this.supervisor.setExecutable(input.executable);
     this.supervisor.setToolSettings(input.toolSettings);
     if (!this.initialized) {
@@ -922,7 +1112,25 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     };
   }
 
+  private async assertResponseSettingsSafe(
+    observedSettings: AgentExecutionSettings,
+    subject: string
+  ): Promise<void> {
+    if (!this.enforceBrowserDevBoundary) return;
+    try {
+      assertBrowserDevSettingsSafe(observedSettings, subject);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.latchSecurityBoundary(reason);
+      await this.supervisor.terminateForSecurityBoundary(reason);
+      throw new BrowserDevBoundaryViolationError(reason);
+    }
+  }
+
   private async ensureClient(): Promise<CodexRpcClient> {
+    if (this.securityBoundaryViolation) {
+      throw new Error(this.securityBoundaryViolation);
+    }
     this.assertRuntimeActive();
     const client = await this.supervisor.start();
     this.assertRuntimeActive();
@@ -1017,6 +1225,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     notification: ServerNotification,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
+    if (this.securityBoundaryViolation) {
+      return;
+    }
     switch (notification.method) {
       case 'thread/started':
         await this.handleThreadStarted(notification.params.thread, raw);
@@ -1337,6 +1548,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     request: ServerRequest,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
+    if (this.securityBoundaryViolation) {
+      return;
+    }
     const mapped = mapCodexInteractionRequest(request);
     if (!mapped) {
       await client.respondError(request.id, {
@@ -1377,11 +1591,18 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     const item = params.itemId
       ? await this.store.getAgentItemByProviderId(run.id, params.itemId)
       : undefined;
-    const interactionRequest = withProviderItemContext(
+    const providerInteractionRequest = withProviderItemContext(
       mapped.type,
       mapped.request,
       item?.payload
     );
+    const interactionRequest =
+      mapped.type === 'PERMISSION_APPROVAL'
+        ? redactExternalPermissionPaths(
+            providerInteractionRequest as AgentPermissionApprovalRequest,
+            session.worktreePath
+          )
+        : providerInteractionRequest;
     const policy = buildInteractionPolicy({
       type: mapped.type,
       request: interactionRequest,
@@ -1414,7 +1635,6 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       payload: { type: mapped.type, status: 'PENDING' },
       at: new Date().toISOString()
     });
-
     if (mapped.type === 'DYNAMIC_TOOL') {
       await this.rejectUnregisteredDynamicTool(interaction);
     }
@@ -1424,6 +1644,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     client: CodexRpcClient,
     request: UnsupportedCodexServerRequest
   ): Promise<void> {
+    if (this.securityBoundaryViolation) {
+      return;
+    }
     await client.respondError(request.id, {
       code: -32601,
       message: `Task Monki does not support server request ${request.method}.`
@@ -1730,11 +1953,70 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     settings: ThreadSettings,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
+    const observed = settingsFromThreadSettings(settings);
     const session = await this.store.getAgentSessionByProviderId(threadId);
+    if (session) {
+      try {
+        assertCodexActivePermissionProfile(
+          session.id,
+          settings.activePermissionProfile
+        );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.latchSecurityBoundary(reason);
+        await this.supervisor.terminateForSecurityBoundary(reason);
+        await this.persistSettingsObservation(session, observed, raw).catch(
+          () => undefined
+        );
+        await this.terminalizeRunsForSecurityBoundary(
+          reason,
+          'CODEX_PERMISSION_PROFILE'
+        );
+        return;
+      }
+    }
+    if (this.enforceBrowserDevBoundary) {
+      try {
+        assertBrowserDevSettingsSafe(observed, 'Live session observed settings');
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        // No lookup or durable write may precede this latch. Unknown/stale
+        // thread IDs are process-wide failures too because the notification
+        // proves this App Server can leave the requested security profile.
+        this.latchSecurityBoundary(reason);
+        await this.supervisor.terminateForSecurityBoundary(reason);
+
+        let persistenceError: unknown;
+        if (session) {
+          try {
+            await this.persistSettingsObservation(
+              session,
+              observed,
+              raw
+            );
+          } catch (caught) {
+            persistenceError = caught;
+          }
+        }
+        await this.terminalizeRunsForSecurityBoundary(
+          reason,
+          'BROWSER_DEV_LIVE_SETTINGS'
+        );
+        if (persistenceError) throw persistenceError;
+        return;
+      }
+    }
     if (!session) {
       return;
     }
-    const observed = settingsFromThreadSettings(settings);
+    await this.persistSettingsObservation(session, observed, raw);
+  }
+
+  private async persistSettingsObservation(
+    session: AgentSessionRecord,
+    observed: AgentExecutionSettings,
+    raw: AgentProtocolMessageReference
+  ): Promise<void> {
     await this.store.updateAgentSession(session.id, {
       observedSettings: observed
     });
@@ -1745,6 +2027,78 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       undefined,
       raw
     );
+  }
+
+  private latchSecurityBoundary(reason: string): void {
+    if (this.securityBoundaryViolation) return;
+    this.securityBoundaryViolation = reason;
+    this.preflightState = {
+      ...this.preflightState,
+      ready: false,
+      problems: [reason]
+    };
+    this.emitProviderUpdate();
+  }
+
+  private async terminalizeRunsForSecurityBoundary(
+    reason: string,
+    boundary: 'BROWSER_DEV_LIVE_SETTINGS' | 'CODEX_PERMISSION_PROFILE'
+  ): Promise<void> {
+    const snapshot = await this.store.snapshot();
+    const affectedRuns = snapshot.runs.filter((run) =>
+      ACTIVE_RUN_STATES.includes(run.status)
+    );
+    for (const run of affectedRuns) {
+      const finalArtifact = await this.store.writeFinalArtifact(
+        run.taskId,
+        run.id,
+        `# Agent turn blocked by provider security boundary\n\n${reason}\n`
+      );
+      await this.store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_RUN_FAILED',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'provider',
+          payload: {
+            error: reason,
+            terminalReason: reason,
+            finalArtifactId: finalArtifact.id,
+            securityBoundary: boundary
+          }
+        })
+      );
+      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+      this.appEvents.emit({
+        type: 'run.terminal',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        payload: { status: 'failed', error: reason, finalArtifactId: finalArtifact.id },
+        at: new Date().toISOString()
+      });
+    }
+    for (const interaction of snapshot.interactionRequests.filter(
+      (request) =>
+        affectedRuns.some((run) => run.id === request.runId) &&
+        (request.status === 'PENDING' || request.status === 'RESPONDING')
+    )) {
+      const stale = await this.store.transitionInteractionRequest(
+        interaction.id,
+        interaction.status,
+        {
+          status: 'STALE',
+          resolution: { reason },
+          resolvedAt: new Date().toISOString()
+        }
+      );
+      this.emitInteractionUpdate(stale);
+    }
   }
 
   private async handleThreadWarning(
@@ -2270,6 +2624,32 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     });
   }
 
+  private async resumeSessionWithProfile(
+    session: AgentSessionRecord,
+    providerSessionId: string,
+    settings: AgentExecutionSettings,
+    attachmentPaths: readonly string[]
+  ) {
+    const client = await this.ensureClient();
+    const response = await client.request('thread/resume', {
+      threadId: providerSessionId,
+      model: settings.model ?? null,
+      modelProvider: settings.modelProvider ?? null,
+      serviceTier: settings.serviceTier ?? null,
+      cwd: session.worktreePath,
+      approvalPolicy: toApprovalPolicy(settings),
+      approvalsReviewer: toApprovalsReviewer(settings),
+      config: codexPermissionProfileConfig({
+        sessionId: session.id,
+        settings,
+        worktreePath: session.worktreePath,
+        attachmentPaths
+      })
+    });
+    assertProviderPermissionProfile(session.id, session.worktreePath, response);
+    return response;
+  }
+
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
     const session = await this.store.getAgentSession(sessionId);
     if (!session) {
@@ -2377,6 +2757,28 @@ function mapMutationError(operation: string, error: unknown): Error {
     return new AgentProviderSessionMissingError(operation, mapped.message);
   }
   return mapped;
+}
+
+function postAcknowledgementPersistenceError(
+  operation: string,
+  providerReference: string
+): AgentMutationAmbiguousError {
+  return new AgentMutationAmbiguousError(
+    operation,
+    `Codex acknowledged ${operation} (${providerReference}), but Task Monki could not persist the acknowledgement. The provider mutation requires recovery and must not be resubmitted automatically.`
+  );
+}
+
+function assertProviderPermissionProfile(
+  sessionId: string,
+  worktreePath: string,
+  response: unknown
+): void {
+  assertCodexPermissionProfileEvidence({
+    sessionId,
+    worktreePath,
+    response: response as CodexPermissionProfileEvidence
+  });
 }
 
 function activeTurnIdFromInterruptMismatch(error: Error): string | undefined {

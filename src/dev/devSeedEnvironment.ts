@@ -5,7 +5,7 @@ export const DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON =
 export function deterministicDevSeedProviderDisabledReason(
   env: NodeJS.ProcessEnv
 ): string | undefined {
-  return env[DETERMINISTIC_DEV_SEED_ENV_VAR] === '1'
+  return env[DETERMINISTIC_DEV_SEED_ENV_VAR] === '1' || env.TASK_MANAGER_DEV_SEED_MODE === '1'
     ? DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
     : undefined;
 }

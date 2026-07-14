@@ -147,6 +147,22 @@ describe('Codex runtime resolution', () => {
     ).rejects.toThrow('review/start');
   });
 
+  it('rejects thread/start when the requested permission profile is not attested', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-profile-probe-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      invalidPermissionProfileEvidence: true
+    });
+
+    await expect(
+      resolveCodexRuntime({
+        cwd: dir,
+        pathEntries: [path.dirname(executable)],
+        appBundleCandidates: [],
+        extensionRoots: []
+      })
+    ).rejects.toThrow('did not activate the requested Task Monki permission profile');
+  });
+
   it('uses the documented listen stdio launch form when --stdio is unavailable', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-listen-'));
     const codex = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
@@ -176,6 +192,7 @@ async function writeFakeCodex(
     version?: string;
     appServer?: 'stdio' | 'listen' | 'default' | 'none';
     missingMethods?: TaskMonkiCodexAppServerMethod[];
+    invalidPermissionProfileEvidence?: boolean;
   } = {}
 ): Promise<string> {
   return writeNodeExecutable(directory, name, fakeCodexScript(options));
@@ -184,15 +201,18 @@ async function writeFakeCodex(
 function fakeCodexScript({
   version = '0.141.0',
   appServer = 'stdio',
-  missingMethods = []
+  missingMethods = [],
+  invalidPermissionProfileEvidence = false
 }: {
   version?: string;
   appServer?: 'stdio' | 'listen' | 'default' | 'none';
   missingMethods?: TaskMonkiCodexAppServerMethod[];
+  invalidPermissionProfileEvidence?: boolean;
 }): string {
   return `#!/usr/bin/env node
 const appServer = ${JSON.stringify(appServer)};
 const missingMethods = new Set(${JSON.stringify(missingMethods)});
+const invalidPermissionProfileEvidence = ${JSON.stringify(invalidPermissionProfileEvidence)};
 
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli ${version}\\n');
@@ -247,6 +267,19 @@ rl.on('line', (line) => {
   }
   if (missingMethods.has(message.method)) {
     send({ id: message.id, error: { code: -32601, message: 'Method not found' } });
+    return;
+  }
+  if (message.method === 'thread/start') {
+    const cwd = message.params.cwd;
+    send({ id: message.id, result: {
+      activePermissionProfile: {
+        id: invalidPermissionProfileEvidence
+          ? ':workspace'
+          : message.params.config.default_permissions,
+        extends: null
+      },
+      runtimeWorkspaceRoots: [cwd]
+    } });
     return;
   }
   send({ id: message.id, error: { code: -32602, message: 'Invalid params for ' + message.method } });

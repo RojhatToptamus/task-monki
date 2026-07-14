@@ -307,9 +307,10 @@ function commandActionActivityRows(
   const action = objectPayload(value);
   const type = stringValue(action.type);
   const command = stringValue(action.command) ?? stringValue(payload.command);
+  const cwd = stringValue(payload.cwd) ?? stringValue(action.cwd);
   if (type === 'read') {
     const path = stringValue(action.path) ?? extractPath(command ?? '');
-    const detail = shortPath(path) ?? compactValue(stringValue(action.name) ?? 'file', 72);
+    const detail = shortPath(path, cwd) ?? compactValue(stringValue(action.name) ?? 'file', 72);
     return [
       rowFromItem(item, {
         category: 'read',
@@ -324,7 +325,7 @@ function commandActionActivityRows(
     ];
   }
   if (type === 'listFiles') {
-    const detail = shortPath(stringValue(action.path)) ?? 'project files';
+    const detail = shortPath(stringValue(action.path), cwd) ?? 'project files';
     return [
       rowFromItem(item, {
         category: 'list',
@@ -340,7 +341,8 @@ function commandActionActivityRows(
   if (type === 'search') {
     const detail = searchActivityDetail(
       stringValue(action.query),
-      stringValue(action.path)
+      stringValue(action.path),
+      cwd
     );
     return [
       rowFromItem(item, {
@@ -705,9 +707,13 @@ function activityToneForStatus(
   return verified ? 'success' : 'neutral';
 }
 
-function searchActivityDetail(query: string | undefined, path: string | undefined): string {
+function searchActivityDetail(
+  query: string | undefined,
+  path: string | undefined,
+  cwd?: string
+): string {
   const compactQuery = query ? compactValue(query, 56) : undefined;
-  const compactPath = shortPath(path);
+  const compactPath = shortPath(path, cwd);
   if (compactQuery && compactPath) {
     return `${compactQuery} · ${compactPath}`;
   }
@@ -947,7 +953,7 @@ function cleanOverviewText(text: string | undefined): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/(^|\s)(\/[^\s'")]+(?:\/[^\s'")]+){2,})/g, (_match, prefix: string, value: string) => {
-      return `${prefix}${shortPath(value) ?? value}`;
+      return `${prefix}${shortPath(value, undefined, true) ?? value}`;
     });
 }
 
@@ -990,15 +996,42 @@ function extractPath(text: string): string | undefined {
   return text.match(/(?:^|\s)([./~\w-]+(?:\/[\w.-]+)+)(?=$|\s|[.,;:)])/u)?.[1];
 }
 
-function shortPath(path: string | undefined): string | undefined {
+function shortPath(
+  path: string | undefined,
+  cwd?: string,
+  allowAnchoredAbsolute = false
+): string | undefined {
   if (!path) {
     return undefined;
   }
   const cleaned = path.replace(/^[`'"]+|[`'".,;:]+$/g, '');
-  const segments = cleaned.split('/').filter(Boolean);
+  const normalized = cleaned.replace(/\\/g, '/');
+  if (portableAbsolutePath(normalized)) {
+    const relative = cwd
+      ? relativePortablePath(cwd.replace(/\\/g, '/'), normalized)
+      : undefined;
+    if (relative) return relative;
+    if (allowAnchoredAbsolute) {
+      const anchored = anchoredRelativePath(normalized);
+      if (anchored) return anchored;
+    }
+    return compactAbsolutePath(normalized);
+  }
+  return compactRelativePath(normalized);
+}
+
+function compactRelativePath(normalized: string): string | undefined {
+  const segments = normalized.split('/').filter(Boolean);
   if (segments.length === 0) {
     return undefined;
   }
+  const anchored = anchoredRelativePath(normalized);
+  if (anchored) return anchored;
+  return segments.length <= 5 ? segments.join('/') : segments.slice(-5).join('/');
+}
+
+function anchoredRelativePath(normalized: string): string | undefined {
+  const segments = normalized.split('/').filter(Boolean);
   const anchor = ['src', 'tests', 'test', 'docs', 'scripts'].find((candidate) =>
     segments.includes(candidate)
   );
@@ -1012,10 +1045,65 @@ function shortPath(path: string | undefined): string | undefined {
     const repoRelative = segments.slice(repoIndex + 1);
     return repoRelative.length <= 5 ? repoRelative.join('/') : repoRelative.slice(-5).join('/');
   }
-  if (!cleaned.startsWith('/') && segments.length <= 5) {
-    return segments.join('/');
+  return undefined;
+}
+
+function portableAbsolutePath(value: string): boolean {
+  return /^(?:[A-Za-z]:\/|\/)/u.test(value);
+}
+
+function relativePortablePath(
+  basePath: string,
+  candidatePath: string
+): string | undefined {
+  if (!portableAbsolutePath(basePath) || !portableAbsolutePath(candidatePath)) {
+    return undefined;
   }
-  return segments.slice(-3).join('/');
+  const windowsStyle =
+    /^[A-Za-z]:\//u.test(candidatePath) || candidatePath.startsWith('//');
+  const baseWindowsStyle = /^[A-Za-z]:\//u.test(basePath) || basePath.startsWith('//');
+  if (windowsStyle !== baseWindowsStyle) return undefined;
+
+  const baseSegments = portablePathSegments(basePath);
+  const candidateSegments = portablePathSegments(candidatePath);
+  if (candidateSegments.length <= baseSegments.length) return undefined;
+  const equal = windowsStyle
+    ? (left: string, right: string) =>
+        left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+    : (left: string, right: string) => left === right;
+  if (
+    !baseSegments.every((segment, index) =>
+      equal(segment, candidateSegments[index] ?? '')
+    )
+  ) {
+    return undefined;
+  }
+  return compactRelativePath(candidateSegments.slice(baseSegments.length).join('/'));
+}
+
+function portablePathSegments(value: string): string[] {
+  const output: string[] = [];
+  for (const segment of value.split('/').filter(Boolean)) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      output.pop();
+      continue;
+    }
+    output.push(segment);
+  }
+  return output;
+}
+
+function compactAbsolutePath(value: string): string {
+  const segments = portablePathSegments(value);
+  if (segments.length <= 4) return value;
+  if (/^[A-Za-z]:\//u.test(value)) {
+    return `${segments[0]}/…/${segments.slice(-3).join('/')}`;
+  }
+  if (value.startsWith('//')) {
+    return `//${segments.slice(0, 2).join('/')}/…/${segments.slice(-3).join('/')}`;
+  }
+  return `/…/${segments.slice(-3).join('/')}`;
 }
 
 function plural(count: number, word: string): string {

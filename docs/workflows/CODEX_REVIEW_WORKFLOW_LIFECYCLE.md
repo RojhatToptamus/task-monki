@@ -1,6 +1,6 @@
 # Codex Review Workflow Lifecycle
 
-Date: 2026-07-02
+Date: 2026-07-11
 
 Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
@@ -319,7 +319,7 @@ When the UI shows the wrong state:
    `turn/started` events. A mismatch means interruption must retarget or
    reconcile.
 
-## UI rules for future changes
+## UI rules
 
 - Do not show Request changes for a stale review.
 - Do not show review completion actions while any implementation-side run is

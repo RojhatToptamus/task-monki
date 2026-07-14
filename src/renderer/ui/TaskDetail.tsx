@@ -42,6 +42,7 @@ import type {
   WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
+import type { TaskAttachmentRecord } from '../../shared/attachments';
 import {
   canCreateDeliveryCommit,
   canPrepareWorktree,
@@ -100,6 +101,7 @@ import {
   projectOverviewTaskActivity
 } from '../model/taskActivity';
 import { buildRunProgressViewModel } from '../model/runProgress';
+import { formatAttachmentBytes } from '../model/taskAttachmentDraft';
 import { buildReviewActivityViewModel } from '../model/reviewActivity';
 import {
   formatAgentNetworkAccess,
@@ -142,6 +144,7 @@ interface TaskDetailProps {
   providerState?: AgentProviderState;
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
+  attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
   previewPlans: PreviewPlanRecord[];
   previewApprovals: PreviewApprovalRecord[];
@@ -877,9 +880,16 @@ export function TaskDetail(props: TaskDetailProps) {
               <RequestCard
                 prompt={task.prompt}
                 promptLineCount={promptLineCount}
+                attachments={props.attachments}
                 summaryLine={`${model}/${effort} · ${formatAgentPermissionMode(
                   displayedAgentSettings
-                )} · ${promptLineCount}-line prompt`}
+                )} · ${promptLineCount}-line prompt${
+                  props.attachments.length > 0
+                    ? ` · ${props.attachments.length} ${
+                        props.attachments.length === 1 ? 'attachment' : 'attachments'
+                      }`
+                    : ''
+                }`}
                 hasRun={Boolean(run)}
                 config={
                   <>
@@ -1150,15 +1160,17 @@ function ConfigRow({ k, v }: { k: string; v: string }) {
  * run exists it collapses to a one-line summary and expands on demand; before a
  * run it stays open as the primary thing on the page.
  */
-function RequestCard({
+export function RequestCard({
   prompt,
   promptLineCount,
+  attachments,
   summaryLine,
   config,
   hasRun
 }: {
   prompt: string;
   promptLineCount: number;
+  attachments: TaskAttachmentRecord[];
   summaryLine: string;
   config: ReactNode;
   hasRun: boolean;
@@ -1178,6 +1190,25 @@ function RequestCard({
         <summary>Prompt · {promptLineCount} lines</summary>
         <pre>{prompt}</pre>
       </details>
+      {attachments.length > 0 ? (
+        <div className="tm-requestcard__attachments" aria-label="Task attachments">
+          <div className="tm-requestcard__attachments-head">
+            <span>Attachments</span>
+            <span>{attachments.length}</span>
+          </div>
+          <ul>
+            {attachments.map((attachment) => (
+              <li key={attachment.id}>
+                <span title={attachment.displayName}>{attachment.displayName}</span>
+                <span>
+                  {attachment.kind === 'image' ? 'Image' : 'Text'} ·{' '}
+                  {formatAttachmentBytes(attachment.byteCount)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <div className="tm-config" style={{ marginTop: 14 }}>
         {config}
       </div>

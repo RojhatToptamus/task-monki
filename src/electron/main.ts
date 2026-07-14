@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   safeStorage,
@@ -51,9 +52,21 @@ import type {
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import {
+  ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS,
+  ATTACHMENT_MAX_IMAGE_BYTES,
+  type ClipboardAttachmentImage,
+  type DiscardTaskAttachmentDraftRequest,
+  type ReadTaskAttachmentRequest,
+  type StageTaskAttachmentBatchRequest
+} from '../shared/attachments';
+import {
   rendererContentSecurityPolicy,
   VITE_REACT_REFRESH_PREAMBLE_SOURCE
 } from '../shared/rendererSecurity';
+import {
+  AttachmentIpcOperationGate,
+  assertAttachmentIpcBatch
+} from './attachmentIpcSecurity';
 import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
@@ -68,7 +81,6 @@ import {
   isTrustedRendererPermissionRequest,
   type RendererTrustPolicy
 } from './rendererTrust';
-
 const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
@@ -78,6 +90,7 @@ let ipcHandlersInstalled = false;
 let quitAfterShutdown = false;
 let shutdownPromise: Promise<void> | undefined;
 let rendererTrustPolicy: RendererTrustPolicy | undefined;
+const attachmentIpcGate = new AttachmentIpcOperationGate();
 
 const appId = 'dev.taskmonki.desktop';
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
@@ -87,12 +100,16 @@ if (!ownsSingleInstanceLock) {
 } else {
   app.on('second-instance', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
       mainWindow.show();
       mainWindow.focus();
       return;
     }
-    if (app.isReady() && serviceCreated && ipcHandlersInstalled) createWindow();
+    if (app.isReady() && serviceCreated && ipcHandlersInstalled) {
+      createWindow();
+    }
   });
 }
 
@@ -135,6 +152,7 @@ function createWindow(): void {
   });
   mainWindow = window;
   rendererTrustPolicy = trustPolicy;
+
   hardenRendererWindow(window, trustPolicy);
   window.once('closed', () => {
     if (mainWindow === window) {
@@ -143,9 +161,14 @@ function createWindow(): void {
     }
   });
 
-  window.webContents.on('did-finish-load', () => syncWindowChrome(window));
-  window.webContents.on('zoom-changed', () => {
-    setTimeout(() => syncWindowChrome(window), 0);
+  const createdWindow = mainWindow;
+  createdWindow.webContents.on('did-finish-load', () => {
+    syncWindowChrome(createdWindow);
+  });
+  createdWindow.webContents.on('zoom-changed', () => {
+    setTimeout(() => {
+      syncWindowChrome(createdWindow);
+    }, 0);
   });
 
   if (trustPolicy.kind === 'development-server') {
@@ -160,13 +183,19 @@ function hardenRendererWindow(
   trustPolicy: RendererTrustPolicy
 ): void {
   window.webContents.on('will-navigate', (event) => {
-    if (!trustPolicy.isTrustedUrl(event.url)) event.preventDefault();
+    if (!trustPolicy.isTrustedUrl(event.url)) {
+      event.preventDefault();
+    }
   });
   window.webContents.on('will-frame-navigate', (event) => {
-    if (!event.isMainFrame || !trustPolicy.isTrustedUrl(event.url)) event.preventDefault();
+    if (!event.isMainFrame || !trustPolicy.isTrustedUrl(event.url)) {
+      event.preventDefault();
+    }
   });
   window.webContents.on('will-redirect', (event) => {
-    if (!event.isMainFrame || !trustPolicy.isTrustedUrl(event.url)) event.preventDefault();
+    if (!event.isMainFrame || !trustPolicy.isTrustedUrl(event.url)) {
+      event.preventDefault();
+    }
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (
@@ -179,7 +208,9 @@ function hardenRendererWindow(
     }
     return { action: 'deny' };
   });
-  window.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  window.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
+  });
 
   const rendererSession = window.webContents.session;
   rendererSession.webRequest.onHeadersReceived(
@@ -312,6 +343,33 @@ function installIpcHandlers(): void {
     return service.listTasks();
   });
 
+  handleTrustedIpc(
+    'attachment:stage-batch',
+    async (_, input: StageTaskAttachmentBatchRequest) => {
+      const byteCount = assertAttachmentIpcBatch(input);
+      return attachmentIpcGate.run(byteCount, () =>
+        service.stageTaskAttachmentBatch(input)
+      );
+    }
+  );
+
+  handleTrustedIpc(
+    'attachment:draft:discard',
+    async (_, input: DiscardTaskAttachmentDraftRequest) =>
+      service.discardTaskAttachmentDraft(input)
+  );
+
+  handleTrustedIpc(
+    'attachment:read',
+    async (_, input: ReadTaskAttachmentRequest) =>
+      attachmentIpcGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () =>
+        service.readTaskAttachment(input)
+      )
+  );
+
+  handleTrustedIpc('attachment:clipboard:readImage', () =>
+    attachmentIpcGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () => readClipboardImage())
+  );
   handleTrustedIpc('task:create', async (_, input: CreateTaskRequest) => {
     const task = await service.createTask(input);
     broadcast({
@@ -467,7 +525,6 @@ function installIpcHandlers(): void {
       }
     } catch { return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' }; }
   });
-
   handleTrustedIpc('task:transition', async (_, input: TransitionTaskRequest) => {
     return service.transitionTask(input);
   });
@@ -489,6 +546,32 @@ function installIpcHandlers(): void {
   ipcHandlersInstalled = true;
 }
 
+function readClipboardImage(): ClipboardAttachmentImage | undefined {
+  const image = clipboard.readImage();
+  if (image.isEmpty()) {
+    return undefined;
+  }
+  const size = image.getSize();
+  if (
+    !Number.isSafeInteger(size.width) ||
+    !Number.isSafeInteger(size.height) ||
+    size.width <= 0 ||
+    size.height <= 0 ||
+    size.width * size.height > ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS
+  ) {
+    throw new Error('The clipboard image is too large to attach.');
+  }
+  const png = image.toPNG();
+  if (png.byteLength === 0 || png.byteLength > ATTACHMENT_MAX_IMAGE_BYTES) {
+    throw new Error('The clipboard image is too large to attach.');
+  }
+  const copy = Uint8Array.from(png);
+  return {
+    displayName: 'Pasted image.png',
+    mediaType: 'image/png',
+    bytes: copy.buffer
+  };
+}
 type TrustedIpcHandler<TArgs extends unknown[], TResult> = (
   event: IpcMainInvokeEvent,
   ...args: TArgs
@@ -565,19 +648,23 @@ function resolveDefaultRepositoryPath(): string {
 }
 
 void app.whenReady().then(async () => {
-  if (!ownsSingleInstanceLock) return;
+  if (!ownsSingleInstanceLock) {
+    return;
+  }
   app.setAppUserModelId(appId);
   configureDesktopCliPath();
   configureMacDockIcon();
   const defaultRepositoryPath = resolveDefaultRepositoryPath();
+  const userDataDir = app.getPath('userData');
+  const taskStoreDir = path.join(userDataDir, 'task-store');
   service = new TaskManagerService(
-    new FileTaskStore(path.join(app.getPath('userData'), 'task-store')),
+    new FileTaskStore(taskStoreDir),
     defaultRepositoryPath,
     undefined,
     {
       agentCwd: defaultRepositoryPath || app.getPath('home'),
       appSettingsStore: new AppSettingsStore(
-        path.join(app.getPath('userData'), 'app-settings.json')
+        path.join(userDataDir, 'app-settings.json')
       ),
       openTargetHost: createElectronOpenTargetHost(),
       previewEnabled: true,

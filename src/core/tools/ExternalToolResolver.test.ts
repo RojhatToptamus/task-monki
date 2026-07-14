@@ -30,10 +30,27 @@ describe('ExternalToolResolver', () => {
       tool: 'git',
       source: 'auto',
       executable: 'git',
-      resolvedPath: git,
       status: 'ok',
       version: 'git version 9.9.9'
     });
+    expect(result.resolvedPath).toBe(await expectedDiscoveredPath(git));
+  });
+
+  it('auto-detects tools without discarding the full process environment', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-tools-full-env-'));
+    const git = await writeOutputExecutable(dir, 'git', 'git version full-env');
+    const resolver = new ExternalToolResolver({
+      cwd: dir,
+      env: {
+        ...process.env,
+        PATH: `${dir}${path.delimiter}${process.env.PATH ?? ''}`
+      }
+    });
+
+    const result = await resolver.probe('git', autoSettings);
+
+    expect(result).toMatchObject({ status: 'ok', version: 'git version full-env' });
+    expect(result.resolvedPath).toBe(await expectedDiscoveredPath(git));
   });
 
   it('uses explicit custom settings paths', async () => {
@@ -146,3 +163,7 @@ describe('ExternalToolResolver', () => {
     expect(result.error).toMatch(/ENOENT|no such file/i);
   });
 });
+
+async function expectedDiscoveredPath(candidate: string): Promise<string> {
+  return process.platform === 'win32' ? fs.realpath(candidate) : candidate;
+}

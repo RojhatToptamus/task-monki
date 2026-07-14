@@ -78,7 +78,6 @@ describe('secure filesystem platform boundaries', () => {
       ).resolves.toBeUndefined();
     }
   );
-
   it('publishes private files atomically and supports bounded descriptor reads', async () => {
     const directory = await temporaryDirectory();
     const filePath = path.join(directory, 'private.txt');

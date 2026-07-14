@@ -1,4 +1,3 @@
-import os from 'node:os';
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
@@ -28,8 +27,9 @@ const rendererPort = parseDevPort(
   'TASK_MANAGER_RENDERER_PORT'
 );
 const defaultRepositoryPath = process.env.TASK_MANAGER_REPO_PATH ?? process.cwd();
+const defaultDevDataDir = path.join(process.cwd(), '.local', 'task-monki-dev');
 const storeDir =
-  process.env.TASK_MANAGER_STORE_DIR ?? path.join(os.tmpdir(), 'task-monki-dev-store');
+  process.env.TASK_MANAGER_STORE_DIR ?? path.join(defaultDevDataDir, 'dev-store');
 const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
 const previewRoot =
@@ -46,6 +46,12 @@ const service = new TaskManagerService(
     appSettingsStore: new AppSettingsStore(appSettingsPath),
     previewEnabled: true,
     previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
+    // A same-user provider process can read ordinary filesystem secrets. Keep
+    // the browser-only HTTP development surface unreachable from agent commands
+    // by requiring non-escalatable, network-disabled turns. Startup also makes
+    // unsafe persisted runs terminal before Codex initialization/recovery;
+    // external tools are forced off with fail-closed MCP discovery. Packaged
+    // Electron uses guarded IPC and does not enable this restriction.
     allowAgentNetworkAccess: false,
     agentProviderStartupDisabledReason,
     previewRoot,
@@ -66,20 +72,24 @@ let tokenLease: DevApiTokenLease | undefined;
 const lifecycle = new DevProcessLifecycle();
 
 async function start(): Promise<void> {
-  tokenLease = await createDevApiTokenLease(port);
-  if (lifecycle.isStopping) return;
-  security.token = tokenLease.token;
-
   await service.init();
-  if (lifecycle.isStopping) return;
-
+  if (lifecycle.isStopping) {
+    return;
+  }
   devServer = createDevHttpServer({
     service,
     security,
     chooseRepositoryFolder
   });
   await listen(devServer.server, port);
-  if (lifecycle.isStopping) return;
+  if (lifecycle.isStopping) {
+    return;
+  }
+  tokenLease = await createDevApiTokenLease(port);
+  if (lifecycle.isStopping) {
+    return;
+  }
+  security.token = tokenLease.token;
 
   console.log(`Task Monki dev API listening on http://${security.expectedHost}`);
   console.log(`Renderer origin: ${security.expectedOrigin}`);
@@ -112,7 +122,9 @@ async function cleanupResources(): Promise<void> {
   }
   await serviceCleanup;
 
-  if (cleanupErrors.length > 0) throw cleanupErrors[0];
+  if (cleanupErrors.length > 0) {
+    throw cleanupErrors[0];
+  }
 }
 
 function handleSignal(signal: NodeJS.Signals): void {

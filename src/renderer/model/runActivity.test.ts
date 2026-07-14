@@ -10,15 +10,33 @@ describe('run activity projection', () => {
   it('groups consecutive context reads and keeps the group key stable when appended', () => {
     const run = runFixture();
     const firstTwo = [
-      readItem('read-a', '/Users/rojhat/project/src/a.ts', '2026-07-07T10:01:00.000Z'),
-      readItem('read-b', '/Users/rojhat/project/src/b.ts', '2026-07-07T10:02:00.000Z')
+      readItem(
+        'read-a',
+        '/Users/rojhat/project/src/a.ts',
+        '2026-07-07T10:01:00.000Z',
+        'run-1',
+        '/Users/rojhat/project'
+      ),
+      readItem(
+        'read-b',
+        '/Users/rojhat/project/src/b.ts',
+        '2026-07-07T10:02:00.000Z',
+        'run-1',
+        '/Users/rojhat/project'
+      )
     ];
     const projection = buildRunActivityProjection({ run, items: firstTwo });
     const appended = buildRunActivityProjection({
       run,
       items: [
         ...firstTwo,
-        readItem('read-c', '/Users/rojhat/project/src/c.ts', '2026-07-07T10:03:00.000Z')
+        readItem(
+          'read-c',
+          '/Users/rojhat/project/src/c.ts',
+          '2026-07-07T10:03:00.000Z',
+          'run-1',
+          '/Users/rojhat/project'
+        )
       ]
     });
 
@@ -275,13 +293,43 @@ describe('run activity projection', () => {
     ]);
     expect(JSON.stringify(projection.rows)).not.toContain('old-read');
   });
+
+  it('shortens Windows repository paths without disguising external paths', () => {
+    const run = runFixture();
+    const projection = buildRunActivityProjection({
+      run,
+      groupContext: false,
+      items: [
+        readItem(
+          'repository-read',
+          'C:\\Users\\runner\\project\\repo\\README.md',
+          '2026-07-07T10:01:00.000Z',
+          'run-1',
+          'C:\\Users\\runner\\project\\repo'
+        ),
+        readItem(
+          'external-read',
+          'D:\\external\\src\\secrets.txt',
+          '2026-07-07T10:02:00.000Z',
+          'run-1',
+          'C:\\Users\\runner\\project\\repo'
+        )
+      ]
+    });
+
+    expect(projection.rows).toMatchObject([
+      { category: 'read', detail: 'README.md' },
+      { category: 'read', detail: 'D:/external/src/secrets.txt' }
+    ]);
+  });
 });
 
 function readItem(
   id: string,
   path: string,
   at: string,
-  runId = 'run-1'
+  runId = 'run-1',
+  cwd?: string
 ): AgentItemRecord {
   return commandItem({
     id,
@@ -289,7 +337,8 @@ function readItem(
     providerCompletedAt: at,
     payload: {
       command: `sed -n 1,10p ${path}`,
-      commandActions: [{ type: 'read', path }]
+      commandActions: [{ type: 'read', path }],
+      ...(cwd ? { cwd } : {})
     }
   });
 }

@@ -85,9 +85,7 @@ export function readDevApiToken(port: number): string | undefined {
     assertPrivateTokenDirectorySync(path.dirname(tokenPath));
     const descriptor = fs.openSync(
       tokenPath,
-      fs.constants.O_RDONLY |
-        (fs.constants.O_NOFOLLOW ?? 0) |
-        (fs.constants.O_NONBLOCK ?? 0)
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)
     );
     try {
       const stat = fs.fstatSync(descriptor);
@@ -242,9 +240,7 @@ function assertPrivateTokenDirectorySync(tokenDir: string): void {
 async function readPrivateTokenFile(tokenPath: string): Promise<string | undefined> {
   const handle = await fsPromises.open(
     tokenPath,
-    fs.constants.O_RDONLY |
-      (fs.constants.O_NOFOLLOW ?? 0) |
-      (fs.constants.O_NONBLOCK ?? 0)
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)
   );
   try {
     const stat = await handle.stat();
@@ -343,6 +339,23 @@ export async function readBoundedJson(
   }
 }
 
+export async function readBoundedBinary(
+  request: http.IncomingMessage,
+  maxBytes: number
+): Promise<Uint8Array> {
+  const contentType = singleHeader(request.headers['content-type'])
+    ?.split(';', 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== 'application/octet-stream') {
+    throw new DevApiHttpError(
+      415,
+      'UNSUPPORTED_MEDIA_TYPE',
+      'Attachment uploads require an application/octet-stream request body.'
+    );
+  }
+  return readBoundedBody(request, maxBytes);
+}
 async function readBoundedBody(
   request: http.IncomingMessage,
   maxBytes: number

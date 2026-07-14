@@ -12,12 +12,16 @@ describe('TaskManagerService shutdown coordination', () => {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
       activeControlActions: Set<Promise<unknown>>;
+      previewEnabled: boolean;
+      store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
     };
     internals.lifecycleState = 'READY';
     internals.taskActionLocks = new Map();
     internals.activeControlActions = new Set();
+    internals.previewEnabled = true;
+    internals.store = { close: () => Promise.resolve() };
     internals.agents = {
       async shutdown() {
         events.push('agent-started');
@@ -57,7 +61,8 @@ describe('TaskManagerService shutdown coordination', () => {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
       activeControlActions: Set<Promise<unknown>>;
-      store: { init(): Promise<void> };
+      previewEnabled: boolean;
+      store: { init(): Promise<void>; close(): Promise<void> };
       appSettingsStore: { get(): Promise<never> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
@@ -65,12 +70,14 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.lifecycleState = 'NEW';
     internals.taskActionLocks = new Map();
     internals.activeControlActions = new Set();
+    internals.previewEnabled = true;
     internals.store = {
       async init() {
         calls.push('store-init');
         markStoreInitStarted();
         await storeInitGate;
-      }
+      },
+      close: () => Promise.resolve()
     };
     internals.appSettingsStore = {
       async get(): Promise<never> {
@@ -115,6 +122,8 @@ describe('TaskManagerService shutdown coordination', () => {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
       activeControlActions: Set<Promise<unknown>>;
+      previewEnabled: boolean;
+      store: { close(): Promise<void> };
       agents: { shutdown(): Promise<void> };
       previews: { shutdown(): Promise<void> };
       withTaskAction<T>(
@@ -126,6 +135,8 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.lifecycleState = 'READY';
     internals.taskActionLocks = new Map();
     internals.activeControlActions = new Set();
+    internals.previewEnabled = true;
+    internals.store = { close: () => Promise.resolve() };
     internals.agents = { shutdown: () => Promise.resolve() };
     internals.previews = { shutdown: () => Promise.resolve() };
 
@@ -168,6 +179,8 @@ describe('TaskManagerService shutdown coordination', () => {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
       activeControlActions: Set<Promise<unknown>>;
+      previewEnabled: boolean;
+      store: { close(): Promise<void> };
       browserDevAgentBoundary: boolean;
       appSettings: typeof DEFAULT_TASK_MANAGER_APP_SETTINGS;
       appSettingsStore: {
@@ -185,6 +198,8 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.lifecycleState = 'READY';
     internals.taskActionLocks = new Map();
     internals.activeControlActions = new Set();
+    internals.previewEnabled = true;
+    internals.store = { close: () => Promise.resolve() };
     internals.browserDevAgentBoundary = false;
     internals.appSettings = structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS);
     internals.appSettingsStore = {

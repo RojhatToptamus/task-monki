@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import type http from 'node:http';
 import { describe, expect, it } from 'vitest';
 import {
   authorizeDevApiRequest,
@@ -12,6 +14,7 @@ import {
   devRendererOrigin,
   isAllowedDevRendererRequest,
   parseDevPort,
+  readBoundedBinary,
   readDevApiToken
 } from './devApiSecurity';
 
@@ -152,4 +155,44 @@ describe('development API security', () => {
     ).toBe(false);
   });
 
+  it('reads only bounded uncompressed binary attachment bodies', async () => {
+    const accepted = requestBody(Buffer.from([1, 2, 3]), {
+      'content-type': 'application/octet-stream',
+      'content-length': '3'
+    });
+    await expect(readBoundedBinary(accepted, 3).then(Array.from)).resolves.toEqual([1, 2, 3]);
+
+    await expect(
+      readBoundedBinary(
+        requestBody(Buffer.from([1]), { 'content-type': 'text/plain' }),
+        3
+      )
+    ).rejects.toMatchObject({ statusCode: 415, code: 'UNSUPPORTED_MEDIA_TYPE' });
+    await expect(
+      readBoundedBinary(
+        requestBody(Buffer.from([1, 2, 3, 4]), {
+          'content-type': 'application/octet-stream'
+        }),
+        3
+      )
+    ).rejects.toMatchObject({ statusCode: 413, code: 'REQUEST_BODY_TOO_LARGE' });
+    await expect(
+      readBoundedBinary(
+        requestBody(Buffer.from([1]), {
+          'content-type': 'application/octet-stream',
+          'content-encoding': 'gzip'
+        }),
+        3
+      )
+    ).rejects.toMatchObject({ statusCode: 415, code: 'UNSUPPORTED_CONTENT_ENCODING' });
+  });
 });
+
+function requestBody(
+  bytes: Buffer,
+  headers: http.IncomingHttpHeaders
+): http.IncomingMessage {
+  const request = Readable.from([bytes]) as http.IncomingMessage;
+  Object.defineProperty(request, 'headers', { value: headers });
+  return request;
+}

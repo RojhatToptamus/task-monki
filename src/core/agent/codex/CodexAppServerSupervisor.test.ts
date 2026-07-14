@@ -285,6 +285,13 @@ lines.on('line', (line) => {
     } }) + '\\n');
     return;
   }
+  if (message.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({ id: message.id, result: {
+      activePermissionProfile: { id: 'task_monki_capability_probe', extends: null },
+      runtimeWorkspaceRoots: [message.params.cwd]
+    } }) + '\\n');
+    return;
+  }
   process.stdout.write(JSON.stringify({ id: message.id, error: {
     code: -32602, message: 'capability exists; test params are intentionally invalid'
   } }) + '\\n');

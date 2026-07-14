@@ -1,4 +1,4 @@
-# AGENTS.md — Task Monki
+# Task Monki Interface Guide
 
 Guidance for any AI/coding agent doing **design or frontend work** in this repo.
 Read this file **before** you write UI, add a component, or change a screen. The
@@ -19,7 +19,7 @@ day. Respect their attention.
 
 ## 2. The source of truth (read before styling anything)
 
-- Global styles live in **`<path/to/global.css>`**. It defines the real color
+- Global styles live in **`src/renderer/styles.css`**. It defines the real color
   tokens, type scale, spacing, radii, tone colors, and component classes.
 - **Use those tokens and classes. Do not invent a parallel system.** No new
   color hexes, no new font, no ad-hoc spacing values, no bespoke button.
@@ -66,7 +66,7 @@ every yes."
 
 Every status color must answer exactly one question. Pick the color by what the
 state is asking of the reader, never by which hue "feels" right. Named aliases
-live in `styles.css` (`--state-*`) and resolve to the raw tone tokens; use the
+live in `src/renderer/styles.css` (`--state-*`) and resolve to the raw tone tokens; use the
 alias so the meaning is legible at the call site.
 
 | Token             | Raw       | Means                    | Covers                                                       |

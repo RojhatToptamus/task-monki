@@ -17,13 +17,17 @@
 
 You write a task prompt, Task Monki gives it an isolated branch and Git worktree, and Codex implements inside it. You watch the work happen, inspect the diff, review local Git evidence, and open a draft pull request when it's ready — all from one board on your machine.
 
-It runs entirely locally. Codex work is delegated to your own installed, authenticated [Codex CLI](https://github.com/openai/codex); Task Monki tracks the Git and GitHub delivery evidence itself. It never merges a pull request for you.
+Task Monki keeps its task records, worktrees, attachments, and evidence store
+on your machine. Codex work is delegated to your installed, authenticated
+[Codex CLI](https://github.com/openai/codex), which communicates with its
+configured model provider. Task Monki observes Git and GitHub delivery evidence
+independently. It never merges a pull request for you.
 
 A key principle: Task Monki keeps what **Codex reports** separate from what it has **verified locally**. Provider plans, usage, and completion claims are always marked as such — only Task Monki's own Git inspection and GitHub sync count as verified delivery evidence.
 
 ## How it works
 
-1. **Create a task** — pick a repository, write a prompt, and choose Codex settings.
+1. **Create a task** — pick a repository, write a prompt, optionally attach supported images or text-like files, and choose Codex settings.
 2. **Prepare the worktree** — creates an isolated `codex/task-*` branch.
 3. **Start implementation** — Codex runs with write access scoped to that worktree.
 4. **Inspect** — review the diff, commands, file changes, and approvals.
@@ -32,6 +36,17 @@ A key principle: Task Monki keeps what **Codex reports** separate from what it h
 7. **Ship** — open a draft pull request once the branch and GitHub evidence are ready.
 
 You can steer or interrupt a run mid-turn, follow up in the same session, retry, or fork an alternative attempt.
+
+### Attachments
+
+New tasks can include PNG, JPEG, or still WebP images and allowlisted UTF-8
+text, data, configuration, and source-code files. Task Monki stores private
+task-owned copies outside the repository worktree and reuses them for retries,
+follow-ups, recovery, and review. Attachment runs require a managed Codex
+sandbox and disable network access, web search, MCP servers, and apps. PDFs,
+Office files, media, archives, databases, and arbitrary binaries are not
+accepted. See the [attachment lifecycle](docs/architecture/ATTACHMENT_LIFECYCLE.md)
+for storage, delivery, cleanup, and privacy behavior.
 
 ## Install
 
@@ -42,7 +57,8 @@ Builds are currently unsigned, so macOS and Windows may show a security warning 
 **Prerequisites** (Task Monki does not bundle these):
 
 - Git
-- [Codex CLI](https://github.com/openai/codex) 0.141.0+, installed and authenticated
+- [Codex CLI](https://github.com/openai/codex), installed and authenticated;
+  Task Monki probes the runtime for the App Server capabilities it uses
 - Optional — [GitHub CLI](https://cli.github.com/), authenticated, for branch and pull-request features (`gh auth login`)
 
 Packaged apps look for these on your PATH. If one is installed somewhere unusual, set a custom path in Settings.
@@ -69,6 +85,10 @@ npm run dev:renderer   # renderer on http://127.0.0.1:5173
 ```
 
 Then open [http://127.0.0.1:5173](http://127.0.0.1:5173).
+The renderer reaches the API through Vite's same-origin `/api` proxy. Start the
+API before making requests; it rotates a private proxy token on each launch.
+The token stays outside renderer JavaScript and direct browser access to port
+3099 is rejected.
 
 **Checks:**
 

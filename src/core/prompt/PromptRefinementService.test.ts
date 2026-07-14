@@ -104,4 +104,27 @@ describe('PromptRefinementService', () => {
 
     expect(command.argv).toContain('gpt-5.3-codex-spark');
   });
+
+  it('propagates fail-closed MCP discovery to browser-dev refinement runners', async () => {
+    let observed = false;
+    const service = new PromptRefinementService(async ({ failClosedMcpDiscovery }) => {
+      observed = failClosedMcpDiscovery === true;
+      return JSON.stringify({ titleSuggestion: 'Safe refinement', prompt: 'Safe prompt' });
+    });
+
+    await service.refine(
+      '/tmp/example repo',
+      'refine safely',
+      undefined,
+      undefined,
+      {
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      },
+      true
+    );
+
+    expect(observed).toBe(true);
+  });
 });

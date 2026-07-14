@@ -224,6 +224,41 @@ export class CodexAppServerSupervisor {
     await this.disposeCurrentClient();
   }
 
+  /**
+   * Security-boundary failures must stop the child before waiting on storage.
+   * The ordinary graceful shutdown records STOPPING first, which is the right
+   * lifecycle order for normal exits but leaves a permissions violation live
+   * while that write is pending.
+   */
+  async terminateForSecurityBoundary(reason: string): Promise<void> {
+    this.shuttingDown = true;
+    const child = this.child;
+    this.closeClient(reason);
+    if (child && child.exitCode === null && child.signalCode === null) {
+      await terminatePortableProcessTree(child, 'SIGTERM');
+    }
+
+    if (this.server) {
+      const stored = await this.store.getAgentServer(this.server.id).catch(() => undefined);
+      if (stored) {
+        this.server = stored;
+      }
+      if (!['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
+        await this.store
+          .updateAgentServer(this.server.id, { status: 'STOPPING', exitReason: reason })
+          .catch(() => undefined);
+      }
+    }
+    if (child && child.exitCode === null && child.signalCode === null) {
+      if (!(await waitForClose(child, 1_000))) {
+        await terminatePortableProcessTree(child, 'SIGKILL');
+        await waitForClose(child, 2_000);
+      }
+    }
+    await this.closePromise;
+    await this.disposeCurrentClient();
+  }
+
   async terminateUnresponsive(reason: string): Promise<void> {
     const child = this.child;
     if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
@@ -246,12 +281,18 @@ export class CodexAppServerSupervisor {
   }
 
   private async startInternal(): Promise<CodexRpcClient> {
-    const runtime = await resolveCodexRuntime({
-      executable: this.options.executable,
-      cwd: this.options.cwd,
-      environment: this.options.environment,
-      requestTimeoutMs: this.options.requestTimeoutMs
-    });
+    let runtime: ResolvedCodexRuntime;
+    try {
+      runtime = await resolveCodexRuntime({
+        executable: this.options.executable,
+        cwd: this.options.cwd,
+        environment: this.options.environment,
+        requestTimeoutMs: this.options.requestTimeoutMs
+      });
+    } catch (error) {
+      this.assertStartupAllowed();
+      throw error;
+    }
     const executable = runtime.executable;
     const runtimeVersion = runtime.version;
     this.runtimeDiagnostics = runtime.diagnostics;
@@ -391,6 +432,9 @@ export class CodexAppServerSupervisor {
   }
 
   private async failProtocol(error: Error): Promise<void> {
+    // Once an intentional shutdown owns the lifecycle, EOF or a final partial
+    // frame must not race the close handler and reclassify that exit as a
+    // protocol failure.
     if (this.shuttingDown) return;
     if (this.server) {
       const stored = await this.store.getAgentServer(this.server.id);

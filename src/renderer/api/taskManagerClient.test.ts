@@ -39,7 +39,7 @@ describe('createBrowserTaskManagerApi updates', () => {
   it('polls for updates when EventSource is unavailable', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('EventSource', undefined);
-    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    const api = createBrowserTaskManagerApi('');
     const events: AppUpdateEvent[] = [];
 
     const unsubscribe = api.onUpdate((event) => events.push(event));
@@ -58,7 +58,7 @@ describe('createBrowserTaskManagerApi updates', () => {
 
   it('delivers server-sent update events when EventSource is available', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
-    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    const api = createBrowserTaskManagerApi('');
     const events: AppUpdateEvent[] = [];
 
     const unsubscribe = api.onUpdate((event) => events.push(event));
@@ -72,7 +72,7 @@ describe('createBrowserTaskManagerApi updates', () => {
       data: JSON.stringify(event)
     } as MessageEvent);
 
-    expect(FakeEventSource.instances[0]?.url).toBe('http://127.0.0.1:3099/api/events');
+    expect(FakeEventSource.instances[0]?.url).toBe('/api/events');
     expect(events).toEqual([event]);
 
     unsubscribe();
@@ -105,7 +105,7 @@ describe('createBrowserTaskManagerApi settings', () => {
       })
     );
 
-    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    const api = createBrowserTaskManagerApi('');
     await expect(api.getAppSettings()).resolves.toEqual(stored);
     await expect(
       api.updateAppSettings({
@@ -118,9 +118,9 @@ describe('createBrowserTaskManagerApi settings', () => {
     ).resolves.toEqual(stored);
 
     expect(calls[0]).toMatchObject({
-      url: 'http://127.0.0.1:3099/api/settings'
+      url: '/api/settings'
     });
-    expect(calls[1]?.url).toBe('http://127.0.0.1:3099/api/settings');
+    expect(calls[1]?.url).toBe('/api/settings');
     expect(calls[1]?.init).toMatchObject({
       method: 'POST',
       headers: { 'content-type': 'application/json' }
@@ -131,6 +131,37 @@ describe('createBrowserTaskManagerApi settings', () => {
         mcpServers: 'all',
         apps: 'enabled'
       }
+    });
+  });
+
+  it('preserves structured server error details for actionable UI handling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: false,
+          status: 413,
+          json: async () => ({
+            error: {
+              code: 'REQUEST_BODY_TOO_LARGE',
+              message: 'The request is too large.',
+              retryable: false,
+              requestId: 'request-1'
+            }
+          })
+        }) as Response
+      )
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    const error = await api.getAppSettings().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(TaskManagerApiError);
+    expect(error).toMatchObject({
+      message: 'The request is too large.',
+      status: 413,
+      code: 'REQUEST_BODY_TOO_LARGE',
+      retryable: false,
+      requestId: 'request-1'
     });
   });
 });

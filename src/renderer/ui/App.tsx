@@ -86,7 +86,8 @@ const emptySnapshot: TaskSnapshot = {
   previewNodeAttempts: [],
   previewResources: [],
   events: [],
-  artifacts: []
+  artifacts: [],
+  attachments: []
 };
 
 type NotificationTone = 'info' | 'success' | 'error';
@@ -462,6 +463,15 @@ export function App() {
           )
         : [],
     [selectedTask, snapshot.gitSnapshots]
+  );
+  const selectedTaskAttachments = useMemo(
+    () =>
+      selectedTask
+        ? snapshot.attachments
+            .filter((attachment) => attachment.taskId === selectedTask.id)
+            .sort((left, right) => left.ordinal - right.ordinal)
+        : [],
+    [selectedTask, snapshot.attachments]
   );
   const selectedWorktree = selectedTask ? selectCurrentWorktree(snapshot, selectedTask) : undefined;
   const selectedGitSnapshot = selectedTask
@@ -1168,6 +1178,7 @@ export function App() {
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}
             artifacts={snapshot.artifacts}
+            attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
             previewPlans={selectedPreviewPlans}
             previewApprovals={selectedPreviewApprovals}
@@ -1242,6 +1253,9 @@ export function App() {
           disabled={!canCreateTask}
           onCreate={createTask}
           onRefinePrompt={refinePrompt}
+          onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
+          onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
+          onReadClipboardImage={taskManagerApi.readClipboardImage}
           onClose={closeNewTask}
         />
       ) : null}
@@ -1324,8 +1338,8 @@ function DeleteTaskModal({
           <div>
             <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
             <p>
-              Permanently removes this task and its stored evidence. Fork alternatives and the
-              repository stay in place.
+              Removes this task, its Task Monki records, and managed attachments. Codex history
+              and shared protocol-journal traces may remain.
             </p>
           </div>
         </div>
@@ -1335,8 +1349,8 @@ function DeleteTaskModal({
             <h4>Deleted</h4>
             <ul>
               <li>Task record and workflow state</li>
-              <li>Runs, events, and provider sessions</li>
-              <li>Stored Git, test, and GitHub evidence</li>
+              <li>Local run, event, and session records</li>
+              <li>Managed attachments, artifacts, and evidence records</li>
             </ul>
           </section>
           <section className="tm-delete-modal__col tm-delete-modal__col--keep">
@@ -1345,6 +1359,7 @@ function DeleteTaskModal({
               <li>Repository and Git history</li>
               <li>Remote branch, PR, and commits</li>
               <li>Fork alternatives and source tasks</li>
+              <li>Codex history and shared protocol-journal traces</li>
             </ul>
           </section>
         </div>

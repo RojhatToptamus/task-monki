@@ -119,6 +119,7 @@ describe('run progress model', () => {
           status: 'COMPLETED',
           payload: {
             command: "/bin/zsh -lc 'sed -n 1,3p src/renderer/pages/Settings.tsx'",
+            cwd: '/Users/rojhat/project',
             commandActions: [
               {
                 type: 'read',

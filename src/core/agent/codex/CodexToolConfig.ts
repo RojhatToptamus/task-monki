@@ -33,6 +33,23 @@ export function normalizeCodexExternalToolSettings(
   };
 }
 
+export function assertCodexAttachmentExternalToolsDisabled(
+  settings: CodexExternalToolSettings | undefined,
+  hasAttachments: boolean
+): void {
+  if (!hasAttachments) return;
+  const normalized = normalizeCodexExternalToolSettings(settings);
+  if (
+    normalized.webSearchMode !== 'disabled' ||
+    normalized.mcpServers !== 'disabled' ||
+    normalized.apps !== 'disabled'
+  ) {
+    throw new Error(
+      'Attachments require Codex web search, MCP servers, and apps to be disabled.'
+    );
+  }
+}
+
 export function codexExternalToolConfigOverrides(
   settings: CodexExternalToolSettings = DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
 ): string[] {

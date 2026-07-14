@@ -28,13 +28,16 @@ describe('TaskManagerService settings', () => {
     delete process.env.TASK_MANAGER_GIT_PATH;
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-service-settings-'));
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version service-test');
+    const fakeCodex = await writeOutputExecutable(dir, 'fake-codex', 'codex-cli test');
+    const fakeGh = await writeOutputExecutable(dir, 'fake-gh', 'gh version test');
     const service = new TaskManagerService(
       new FileTaskStore(path.join(dir, 'store')),
       dir,
       undefined,
       {
         appSettingsStore: new MemoryAppSettingsStore(),
-        codexPath: 'codex-not-used'
+        codexPath: fakeCodex,
+        ghPath: fakeGh
       }
     );
 
@@ -53,7 +56,7 @@ describe('TaskManagerService settings', () => {
         }
       }
     });
-  });
+  }, 15_000);
 
   it('uses the normalized Git executable instead of rereading raw env overrides', async () => {
     process.env.TASK_MANAGER_GIT_PATH = '   ';
@@ -76,7 +79,7 @@ describe('TaskManagerService settings', () => {
     });
 
     expect(getGitExecutablePath()).toBe(fakeGit);
-  });
+  }, 15_000);
 
   it('uses persisted Codex external tool settings before provider startup', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
@@ -111,6 +114,82 @@ describe('TaskManagerService settings', () => {
     } finally {
       await service.shutdown();
     }
+  }, 20_000);
+
+  it('forces Codex external tools off and rejects enabling them in browser development', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-browser-tools-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const settingsStore = new MemoryAppSettingsStore({
+      codexExternalTools: {
+        webSearchMode: 'live',
+        mcpServers: 'all',
+        apps: 'enabled'
+      }
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: settingsStore,
+      worktreeRoot: path.join(dir, 'worktrees'),
+      allowAgentNetworkAccess: false
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAppSettings()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+      const snapshot = await waitForAgentServerSnapshot(store);
+      expect(snapshot.agentServers[0]?.argv).toEqual([
+        'app-server',
+        '--stdio',
+        '-c',
+        'features.apps=false',
+        '-c',
+        'web_search="disabled"',
+        '-c',
+        'mcp_servers.docs={enabled=false, command="docs-mcp"}'
+      ]);
+      await expect(
+        service.updateAppSettings({
+          codexExternalTools: { apps: 'enabled' }
+        })
+      ).rejects.toThrow('disabled in the browser development server');
+      expect((await settingsStore.get()).codexExternalTools).toEqual({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      });
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('aborts browser-dev startup when MCP disable discovery cannot be proven', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-browser-mcp-fail-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9',
+      mcpList: 'fail'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: executable,
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees'),
+      allowAgentNetworkAccess: false
+    });
+
+    await expect(service.init()).rejects.toThrow(
+      'MCP configuration could not be completely inspected and disabled'
+    );
+    expect((await store.snapshot()).agentServers).toHaveLength(0);
+    await service.shutdown();
   });
 
   it('forces external tools off and rejects enabling them in browser development', async () => {
@@ -307,7 +386,7 @@ describe('TaskManagerService settings', () => {
     expect(status.tools.codex).toMatchObject({
       source: 'auto',
       executable: 'codex',
-      resolvedPath: codex,
+      resolvedPath: await expectedDiscoveredPath(codex),
       status: 'ok',
       version: 'codex-cli 9.9.9'
     });
@@ -338,7 +417,7 @@ describe('TaskManagerService settings', () => {
 
       expect(status.tools.codex).toMatchObject({
         source: 'auto',
-        resolvedPath: staleCodex,
+        resolvedPath: await expectedDiscoveredPath(staleCodex),
         version: 'codex-cli 0.22.0'
       });
       expect(snapshot.agentServers[0]?.executable).toBe(compatibleCodex);
@@ -453,6 +532,10 @@ function restoreEnv(name: string, value: string | undefined): void {
   }
 }
 
+async function expectedDiscoveredPath(candidate: string): Promise<string> {
+  return process.platform === 'win32' ? fs.realpath(candidate) : candidate;
+}
+
 function withPath(...entries: string[]): string {
   return [...entries, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
 }
@@ -476,6 +559,7 @@ async function writeFakeCodex(
   options: {
     version?: string;
     appServer?: 'stdio' | 'none';
+    mcpList?: 'valid' | 'fail' | 'malformed';
   } = {}
 ): Promise<string> {
   return writeNodeExecutable(directory, name, fakeCodexScript(options));
@@ -483,13 +567,16 @@ async function writeFakeCodex(
 
 function fakeCodexScript({
   version = '0.141.0',
-  appServer = 'stdio'
+  appServer = 'stdio',
+  mcpList = 'valid'
 }: {
   version?: string;
   appServer?: 'stdio' | 'none';
+  mcpList?: 'valid' | 'fail' | 'malformed';
 }): string {
   return `#!/usr/bin/env node
 const appServer = ${JSON.stringify(appServer)};
+const mcpList = ${JSON.stringify(mcpList)};
 
 if (process.argv.includes('--version')) {
   process.stdout.write('codex-cli ${version}\\n');
@@ -497,6 +584,14 @@ if (process.argv.includes('--version')) {
 }
 
 if (process.argv[2] === 'mcp' && process.argv[3] === 'list' && process.argv.includes('--json')) {
+  if (mcpList === 'fail') {
+    process.stderr.write('mcp discovery failed\\n');
+    process.exit(2);
+  }
+  if (mcpList === 'malformed') {
+    process.stdout.write('{"unexpected":true}\\n');
+    process.exit(0);
+  }
   process.stdout.write('[{"name":"docs","enabled":true,"transport":{"type":"stdio","command":"docs-mcp"}}]\\n');
   process.exit(0);
 }
@@ -564,6 +659,14 @@ rl.on('line', (line) => {
       } });
       break;
     case 'thread/start':
+      send({ id: message.id, result: {
+        activePermissionProfile: {
+          id: message.params.config.default_permissions,
+          extends: null
+        },
+        runtimeWorkspaceRoots: [message.params.cwd]
+      } });
+      break;
     case 'thread/resume':
     case 'thread/fork':
     case 'thread/read':

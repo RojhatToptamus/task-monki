@@ -22,6 +22,12 @@ import {
 } from './AgentProviderAdapter';
 import { AgentInteractionService } from './AgentInteractionService';
 import {
+  assertAttachmentSandboxSupportsDelivery,
+  assertModelSupportsAttachments,
+  toAgentTurnAttachments,
+  type AgentTurnAttachment
+} from './AgentAttachmentDelivery';
+import {
   assertBrowserDevSettingsSafe,
   BROWSER_DEV_BOUNDARY_MESSAGE,
   browserDevSettingsViolations
@@ -40,7 +46,6 @@ const RECOVERABLE_RUN_STATUSES: RunRecord['status'][] = [
   ...ACTIVE_RUN_STATUSES,
   'RECOVERY_REQUIRED'
 ];
-
 export interface StartOrchestratedTurn {
   task: Task;
   iteration: TaskIteration;
@@ -83,10 +88,14 @@ export class AgentOrchestrator {
   }
 
   async initialize(): Promise<void> {
-    if (this.options.providerStartupDisabledReason) return;
+    if (this.options.providerStartupDisabledReason) {
+      await this.store.reconcileRunAttachments();
+      return;
+    }
     if (this.options.allowNetworkAccess === false) {
       await this.terminalizeUnsafePersistedRuns();
     }
+    await this.store.reconcileRunAttachments();
     try {
       await this.adapter.initialize();
     } catch (error) {
@@ -98,8 +107,9 @@ export class AgentOrchestrator {
       // local task/evidence application from opening.
     }
     if (this.options.allowNetworkAccess === false) {
-      const terminalized = await this.terminalizeUnsafePersistedRuns();
-      if (terminalized > 0) {
+      const terminalizedAfterProviderInitialization =
+        await this.terminalizeUnsafePersistedRuns();
+      if (terminalizedAfterProviderInitialization > 0) {
         await this.adapter.shutdown().catch(() => undefined);
         throw new Error(
           `${BROWSER_DEV_BOUNDARY_MESSAGE} Provider recovery reported unsafe observed settings, so Codex was stopped before the development API credential was published.`
@@ -146,7 +156,11 @@ export class AgentOrchestrator {
 
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    const settings = await this.validateSettings(input.settings);
+    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const settings = await this.validateSettings(
+      input.settings,
+      taskAttachments
+    );
     await this.assertCapacity();
 
     let session = input.sessionId
@@ -166,7 +180,7 @@ export class AgentOrchestrator {
     ) {
       throw new Error('Selected agent session does not belong to this task iteration.');
     }
-    this.assertBrowserDevSessionSafe(session, 'Selected session');
+    await this.assertBrowserDevSessionHistory(session, 'Selected session');
     await this.assertNoPendingInteractions(session.id);
 
     const activeSessionRun = await this.store.getActiveRunForSession(session.id);
@@ -185,7 +199,7 @@ export class AgentOrchestrator {
         worktreePath: input.worktree.worktreePath,
         settings
       });
-      this.assertBrowserDevSessionSafe(session, 'Created session');
+      await this.assertBrowserDevSessionHistory(session, 'Created session');
     }
 
     const run = await this.store.createRun({
@@ -200,8 +214,12 @@ export class AgentOrchestrator {
       continuedFromRunId: input.continuedFromRunId
     });
 
+    let attachments: AgentTurnAttachment[] = [];
     try {
-      await this.startProviderTurn(run, session, input, settings);
+      attachments = toAgentTurnAttachments(
+        await this.store.prepareRunAttachments(run.id, input.task.id)
+      );
+      await this.startProviderTurn(run, session, input, settings, attachments);
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
       if (error instanceof AgentProviderSessionMissingError) {
@@ -211,8 +229,8 @@ export class AgentOrchestrator {
             settings,
             error
           );
-          this.assertBrowserDevSessionSafe(recovered, 'Recreated session');
-          await this.startProviderTurn(run, recovered, input, settings);
+          await this.assertBrowserDevSessionHistory(recovered, 'Recreated session');
+          await this.startProviderTurn(run, recovered, input, settings, attachments);
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
           await this.recordStartFailure(run, retryError);
@@ -240,7 +258,8 @@ export class AgentOrchestrator {
     if (!this.adapter.startReview) {
       throw new Error('This provider does not support detached review.');
     }
-    const settings = await this.validateSettings(input.settings);
+    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const settings = await this.validateSettings(input.settings, taskAttachments);
     await this.assertCapacity();
     const sourceSession = await this.requireSession(input.sourceRun.sessionId);
     this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
@@ -250,7 +269,7 @@ export class AgentOrchestrator {
         'Review source run observed settings'
       );
     }
-    this.assertBrowserDevSessionSafe(sourceSession, 'Review source session');
+    await this.assertBrowserDevSessionHistory(sourceSession, 'Review source session');
     await this.assertNoPendingInteractions(sourceSession.id);
     const reviewSession = await this.store.createAgentSession({
       task: input.task,
@@ -272,8 +291,18 @@ export class AgentOrchestrator {
       beforeGitSnapshotId: input.beforeGitSnapshotId,
       continuedFromRunId: input.sourceRun.id
     });
+    let attachments: AgentTurnAttachment[] = [];
     try {
-      await this.startProviderReview(run, sourceSession, reviewSession, input.target);
+      attachments = toAgentTurnAttachments(
+        await this.store.prepareRunAttachments(run.id, input.task.id)
+      );
+      await this.startProviderReview(
+        run,
+        sourceSession,
+        reviewSession,
+        input.target,
+        attachments
+      );
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
       if (error instanceof AgentProviderSessionMissingError) {
@@ -283,8 +312,17 @@ export class AgentOrchestrator {
             settings,
             error
           );
-          this.assertBrowserDevSessionSafe(recovered, 'Recreated review source session');
-          await this.startProviderReview(run, recovered, reviewSession, input.target);
+          await this.assertBrowserDevSessionHistory(
+            recovered,
+            'Recreated review source session'
+          );
+          await this.startProviderReview(
+            run,
+            recovered,
+            reviewSession,
+            input.target,
+            attachments
+          );
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
           await this.recordStartFailure(run, retryError);
@@ -331,9 +369,17 @@ export class AgentOrchestrator {
   async interruptRun(runId: string): Promise<void> {
     this.assertProviderStartupAvailable();
     const run = await this.store.getRun(runId);
-    if (!run || !run.providerTurnId) {
+    if (!run) {
       return;
     }
+    if (run.status === 'RECOVERY_REQUIRED') {
+      await this.resolveRecoveryRun(
+        run,
+        'Recovery-required run was explicitly abandoned by the user.'
+      );
+      return;
+    }
+    if (!run.providerTurnId) return;
     const session = await this.store.getAgentSession(run.sessionId);
     if (!session?.providerSessionId || !this.adapter.interruptTurn) {
       throw new Error('This provider session cannot interrupt the active turn.');
@@ -376,9 +422,7 @@ export class AgentOrchestrator {
       input.decision.action !== 'DECLINE' &&
       input.decision.action !== 'CANCEL'
     ) {
-      const interaction = await this.store.getInteractionRequest(
-        input.interactionRequestId
-      );
+      const interaction = await this.store.getInteractionRequest(input.interactionRequestId);
       if (
         interaction?.taskId === input.taskId &&
         interaction.runId === input.runId &&
@@ -390,6 +434,16 @@ export class AgentOrchestrator {
       }
     }
     return this.interactions.respond(input);
+  }
+
+  async resolveRecoveryRunForReplacement(runId: string): Promise<void> {
+    this.assertProviderStartupAvailable();
+    const run = await this.store.getRun(runId);
+    if (!run || run.status !== 'RECOVERY_REQUIRED') return;
+    await this.resolveRecoveryRun(
+      run,
+      'Recovery-required run was superseded by an explicit continue or retry action.'
+    );
   }
 
   async syncGoal(
@@ -414,15 +468,16 @@ export class AgentOrchestrator {
     });
   }
 
-  shutdown(): Promise<void> {
-    return this.adapter.shutdown();
+  async shutdown(): Promise<void> {
+    await this.adapter.shutdown();
   }
 
   private async startProviderTurn(
     run: RunRecord,
     session: AgentSessionRecord,
     input: StartOrchestratedTurn,
-    settings: AgentExecutionSettings
+    settings: AgentExecutionSettings,
+    attachments: AgentTurnAttachment[]
   ): Promise<void> {
     await this.adapter.startTurn({
       localRunId: run.id,
@@ -433,6 +488,7 @@ export class AgentOrchestrator {
       mode: input.mode,
       prompt: input.prompt,
       authoritativeGoal: input.task.prompt,
+      attachments,
       settings
     });
   }
@@ -441,7 +497,8 @@ export class AgentOrchestrator {
     run: RunRecord,
     sourceSession: AgentSessionRecord,
     reviewSession: AgentSessionRecord,
-    target: AgentReviewTarget
+    target: AgentReviewTarget,
+    attachments: AgentTurnAttachment[]
   ): Promise<void> {
     if (!this.adapter.startReview) {
       throw new Error('This provider does not support detached review.');
@@ -453,7 +510,8 @@ export class AgentOrchestrator {
         providerSessionId: sourceSession.providerSessionId
       },
       reviewSessionId: reviewSession.id,
-      target
+      target,
+      attachments
     });
   }
 
@@ -486,7 +544,8 @@ export class AgentOrchestrator {
   }
 
   private async validateSettings(
-    settings: AgentExecutionSettings
+    settings: AgentExecutionSettings,
+    attachments: readonly Pick<AgentTurnAttachment, 'kind'>[] = []
   ): Promise<AgentExecutionSettings> {
     const models = await this.adapter.listModels();
     const model =
@@ -496,6 +555,7 @@ export class AgentOrchestrator {
     if (!model) {
       throw new Error('Codex did not report an available model.');
     }
+    assertModelSupportsAttachments(model, attachments);
     const effort =
       settings.reasoningEffort ?? model.defaultReasoningEffort;
     if (
@@ -517,68 +577,84 @@ export class AgentOrchestrator {
       reasoningEffort: effort,
       serviceTier: settings.serviceTier ?? model.defaultServiceTier
     };
-    this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    if (this.options.allowNetworkAccess === false) {
+      this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
+    }
+    assertAttachmentSandboxSupportsDelivery(resolvedSettings, attachments);
     return resolvedSettings;
   }
 
+  /**
+   * Browser development publishes a loopback credential after service
+   * initialization. Persisted turns must therefore be made terminal before
+   * the provider starts or resumes any thread; checking only newly submitted
+   * turns leaves a cold-start recovery bypass.
+   */
   private async terminalizeUnsafePersistedRuns(): Promise<number> {
     const snapshot = await this.store.snapshot();
-    const sessions = new Map(
-      snapshot.agentSessions.map((session) => [session.id, session])
-    );
-    const latestObservations = new Map<
+    let terminalized = 0;
+    const sessions = new Map(snapshot.agentSessions.map((session) => [session.id, session]));
+    const latestSettingsObservations = new Map<
       string,
       (typeof snapshot.agentSettingsObservations)[number]
     >();
     for (const observation of snapshot.agentSettingsObservations) {
-      const current = latestObservations.get(observation.sessionId);
-      if (!current || observation.observedAt > current.observedAt) {
-        latestObservations.set(observation.sessionId, observation);
+      const current = latestSettingsObservations.get(observation.sessionId);
+      if (
+        !current ||
+        observation.observedAt > current.observedAt
+      ) {
+        latestSettingsObservations.set(observation.sessionId, observation);
       }
     }
-
-    let terminalized = 0;
     for (const run of snapshot.runs.filter((candidate) =>
       RECOVERABLE_RUN_STATUSES.includes(candidate.status)
     )) {
-      const session = sessions.get(run.sessionId);
-      const violations = [
-        ...browserDevSettingsViolations(run.requestedSettings).map(
-          (violation) => `run ${violation}`
-        ),
-        ...(run.observedSettings
-          ? browserDevSettingsViolations(run.observedSettings).map(
-              (violation) => `run observed settings ${violation}`
-            )
-          : []),
-        ...(session
-          ? browserDevSettingsViolations(session.requestedSettings).map(
-              (violation) => `session ${violation}`
-            )
-          : []),
-        ...(session?.observedSettings
-          ? browserDevSettingsViolations(session.observedSettings).map(
-              (violation) => `session observed settings ${violation}`
-            )
-          : []),
-        ...(latestObservations.get(run.sessionId)
-          ? browserDevSettingsViolations(
-              latestObservations.get(run.sessionId)!.settings
-            ).map((violation) => `latest settings observation ${violation}`)
-          : []),
-        ...(snapshot.interactionRequests.some(
+      const runViolations = browserDevSettingsViolations(run.requestedSettings).map(
+        (violation) => `run ${violation}`
+      );
+      if (run.observedSettings) {
+        runViolations.push(
+          ...browserDevSettingsViolations(run.observedSettings).map(
+            (violation) => `run observed settings ${violation}`
+          )
+        );
+      }
+      if (
+        snapshot.interactionRequests.some(
           (interaction) =>
             interaction.runId === run.id &&
             interaction.type !== 'USER_INPUT' &&
-            ['PENDING', 'RESPONDING'].includes(interaction.status)
+            (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
         )
-          ? ['run has a persisted provider approval request']
-          : [])
+      ) {
+        runViolations.push('run has a persisted provider approval request');
+      }
+      const session = sessions.get(run.sessionId);
+      const sessionViolations = session
+        ? [
+            ...browserDevSettingsViolations(session.requestedSettings).map(
+              (violation) => `session ${violation}`
+            ),
+            ...(session.observedSettings
+              ? browserDevSettingsViolations(session.observedSettings).map(
+                  (violation) => `session observed settings ${violation}`
+                )
+              : [])
+          ]
+        : [];
+      const latestObservation = latestSettingsObservations.get(run.sessionId);
+      const observationViolations = latestObservation
+        ? browserDevSettingsViolations(latestObservation.settings).map(
+            (violation) => `latest settings observation ${violation}`
+          )
+        : [];
+      const violations = [
+        ...new Set([...runViolations, ...sessionViolations, ...observationViolations])
       ];
-      const uniqueViolations = [...new Set(violations)];
-      if (uniqueViolations.length === 0) continue;
+      if (violations.length === 0) continue;
 
-      const reason = `${BROWSER_DEV_BOUNDARY_MESSAGE} The persisted run was not resumed because of: ${uniqueViolations.join(', ')}.`;
+      const reason = `${BROWSER_DEV_BOUNDARY_MESSAGE} The persisted run was not resumed because of: ${violations.join(', ')}.`;
       const finalArtifact = await this.store.writeFinalArtifact(
         run.taskId,
         run.id,
@@ -605,17 +681,13 @@ export class AgentOrchestrator {
       for (const interaction of snapshot.interactionRequests.filter(
         (candidate) =>
           candidate.runId === run.id &&
-          ['PENDING', 'RESPONDING'].includes(candidate.status)
+          (candidate.status === 'PENDING' || candidate.status === 'RESPONDING')
       )) {
-        await this.store.transitionInteractionRequest(
-          interaction.id,
-          interaction.status,
-          {
-            status: 'STALE',
-            resolution: { reason },
-            resolvedAt: new Date().toISOString()
-          }
-        );
+        await this.store.transitionInteractionRequest(interaction.id, interaction.status, {
+          status: 'STALE',
+          resolution: { reason },
+          resolvedAt: new Date().toISOString()
+        });
       }
       if (session) {
         await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
@@ -626,22 +698,12 @@ export class AgentOrchestrator {
         iterationId: run.iterationId,
         runId: run.id,
         worktreeId: run.worktreeId,
-        payload: {
-          status: 'failed',
-          error: reason,
-          finalArtifactId: finalArtifact.id
-        },
+        payload: { status: 'failed', error: reason, finalArtifactId: finalArtifact.id },
         at: new Date().toISOString()
       });
       terminalized += 1;
     }
     return terminalized;
-  }
-
-  private assertProviderStartupAvailable(): void {
-    if (this.options.providerStartupDisabledReason) {
-      throw new Error(this.options.providerStartupDisabledReason);
-    }
   }
 
   private assertBrowserDevSettings(
@@ -652,15 +714,29 @@ export class AgentOrchestrator {
     assertBrowserDevSettingsSafe(settings, subject);
   }
 
-  private assertBrowserDevSessionSafe(
+  private assertProviderStartupAvailable(): void {
+    if (this.options.providerStartupDisabledReason) {
+      throw new Error(this.options.providerStartupDisabledReason);
+    }
+  }
+
+  private async assertBrowserDevSessionHistory(
     session: AgentSessionRecord,
     subject: string
-  ): void {
+  ): Promise<void> {
+    if (this.options.allowNetworkAccess !== false) return;
     this.assertBrowserDevSettings(session.requestedSettings, subject);
     if (session.observedSettings) {
+      this.assertBrowserDevSettings(session.observedSettings, `${subject} observed settings`);
+    }
+    const snapshot = await this.store.snapshot();
+    const latestObservation = snapshot.agentSettingsObservations.find(
+      (observation) => observation.sessionId === session.id
+    );
+    if (latestObservation) {
       this.assertBrowserDevSettings(
-        session.observedSettings,
-        `${subject} observed settings`
+        latestObservation.settings,
+        `${subject} latest settings observation`
       );
     }
   }
@@ -729,6 +805,36 @@ export class AgentOrchestrator {
       runId: run.id,
       worktreeId: run.worktreeId,
       payload: { status: 'failed', error: message },
+      at: new Date().toISOString()
+    });
+  }
+
+  private async resolveRecoveryRun(run: RunRecord, terminalReason: string): Promise<void> {
+    const finalArtifact = await this.store.writeFinalArtifact(
+      run.taskId,
+      run.id,
+      `# Recovery run closed\n\n${terminalReason}\n`
+    );
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_INTERRUPTED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        serverInstanceId: run.serverInstanceId,
+        source: 'ui',
+        payload: { terminalReason, finalArtifactId: finalArtifact.id }
+      })
+    );
+    this.events.emit({
+      type: 'run.terminal',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: { status: 'interrupted', terminalReason },
       at: new Date().toISOString()
     });
   }

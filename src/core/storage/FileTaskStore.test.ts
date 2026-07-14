@@ -13,6 +13,54 @@ import { FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
 describe('FileTaskStore', () => {
+  it.runIf(process.platform === 'win32')(
+    'accepts the existing managed artifact directory with different Windows casing',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-case-'));
+      await fs.mkdir(path.join(dir, 'Artifacts'));
+      const store = new FileTaskStore(dir);
+
+      await expect(store.snapshot()).resolves.toMatchObject({ artifacts: [] });
+      await store.close();
+    }
+  );
+
+  it('surfaces a crash-persisted queued run for startup recovery', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-queued-recovery-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Recover queued run',
+      prompt: 'Start safely.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/queued-recovery',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      provider: 'codex'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+
+    expect(run.status).toBe('QUEUED');
+    await expect(store.getRunsRequiringRecovery()).resolves.toEqual([]);
+    await expect(
+      store.getRunsRequiringRecovery({ includeQueued: true })
+    ).resolves.toEqual([
+      expect.objectContaining({ id: run.id, status: 'QUEUED' })
+    ]);
+  });
+
   it('persists tasks, runs, events, and artifacts', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-'));
     const store = new FileTaskStore(dir);
@@ -98,6 +146,110 @@ describe('FileTaskStore', () => {
     }
   );
 
+  it.runIf(process.platform !== 'win32')(
+    'reconciles managed artifact orphans after a published delete survives restart',
+    async () => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-manager-artifact-reconcile-')
+      );
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Artifact crash cleanup',
+        prompt: 'Leave artifacts until restart can resolve publication.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/artifact-crash-cleanup',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        provider: 'codex'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      const final = await store.writeFinalArtifact(task.id, run.id, 'final output');
+      const artifactPaths = (await store.snapshot()).artifacts
+        .filter((artifact) => artifact.taskId === task.id)
+        .map((artifact) => artifact.path);
+      expect(artifactPaths).toContain(final.path);
+
+      const artifactsDir = path.join(dir, 'artifacts');
+      const unknownFile = path.join(artifactsDir, 'user-notes.txt');
+      const unknownDirectory = path.join(artifactsDir, 'user-folder');
+      const almostManaged = path.join(
+        artifactsDir,
+        `${task.id}-task-agent-final-not-a-managed-uuid.log`
+      );
+      await fs.writeFile(unknownFile, 'preserve me', 'utf8');
+      await fs.mkdir(unknownDirectory);
+      await fs.writeFile(almostManaged, 'also preserve me', 'utf8');
+
+      const originalOpen = fs.open.bind(fs);
+      let injectedFailure = false;
+      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args);
+        if (!injectedFailure && String(args[0]) === dir) {
+          injectedFailure = true;
+          vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+            new Error('Injected post-publication directory sync failure.')
+          );
+        }
+        return handle;
+      });
+      try {
+        await store.deleteTask(task.id);
+      } finally {
+        open.mockRestore();
+      }
+      for (const artifactPath of artifactPaths) {
+        await expect(fs.access(artifactPath)).resolves.toBeUndefined();
+      }
+      await store.close();
+
+      const restarted = new FileTaskStore(dir);
+      await restarted.snapshot();
+      for (const artifactPath of artifactPaths) {
+        await expect(fs.access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await expect(fs.readFile(unknownFile, 'utf8')).resolves.toBe('preserve me');
+      await expect(fs.readFile(almostManaged, 'utf8')).resolves.toBe('also preserve me');
+      expect((await fs.stat(unknownDirectory)).isDirectory()).toBe(true);
+      await restarted.close();
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed on unsafe artifact entries without following or removing them',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-unsafe-'));
+      const first = new FileTaskStore(dir);
+      await first.snapshot();
+      await first.close();
+      const outside = path.join(dir, 'outside.txt');
+      await fs.writeFile(outside, 'outside', 'utf8');
+      const unsafeName =
+        '00000000-0000-4000-8000-000000000001-task-agent-final-' +
+        '00000000-0000-4000-8000-000000000002.log';
+      const unsafePath = path.join(dir, 'artifacts', unsafeName);
+      await fs.symlink(outside, unsafePath);
+
+      await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+        'artifact directory contains an unsafe entry'
+      );
+      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
+      expect((await fs.lstat(unsafePath)).isSymbolicLink()).toBe(true);
+    }
+  );
+
   it('rejects a durable artifact record that claims a path outside the managed directory', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-path-'));
     const store = new FileTaskStore(dir);
@@ -118,13 +270,21 @@ describe('FileTaskStore', () => {
       worktree,
       provider: 'codex'
     });
-    await store.createRun({ task, session, mode: 'ANALYSIS', prompt: task.prompt });
+    await store.createRun({
+      task,
+      session,
+      mode: 'ANALYSIS',
+      prompt: task.prompt
+    });
+    await store.close();
 
+    const outside = path.join(dir, 'outside-artifact.log');
+    await fs.writeFile(outside, 'outside', 'utf8');
     const storePath = path.join(dir, 'store.json');
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
       artifacts: Array<{ path: string }>;
     };
-    persisted.artifacts[0]!.path = path.join(dir, 'outside-artifact.log');
+    persisted.artifacts[0]!.path = outside;
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
       mode: 0o600
     });
@@ -132,6 +292,7 @@ describe('FileTaskStore', () => {
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
       'artifact path failed its managed-path integrity check'
     );
+    await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
   });
 
   it('fails closed instead of recursively deleting a temporary-path directory', async () => {
@@ -189,6 +350,9 @@ describe('FileTaskStore', () => {
     }
 
     expect(injectedFailure).toBe(true);
+    expect((await store.snapshot()).tasks.map((task) => task.title)).toEqual([
+      'Initial task'
+    ]);
     expect(
       (await fs.readdir(dir)).filter(
         (entry) => entry.startsWith('store.json.') && entry.endsWith('.tmp')
@@ -203,6 +367,10 @@ describe('FileTaskStore', () => {
 
     const reloaded = new FileTaskStore(dir);
     const snapshot = await reloaded.snapshot();
+    expect(snapshot.tasks.map((task) => task.title)).toContain('Initial task');
+    expect(snapshot.tasks.map((task) => task.title)).not.toContain(
+      'Fails while store write is unavailable'
+    );
     expect(snapshot.tasks.map((task) => task.title)).toContain('Persists after recovery');
   });
 
@@ -226,6 +394,58 @@ describe('FileTaskStore', () => {
         completionPolicy: 'NOT_A_POLICY' as never
       })
     ).rejects.toThrow('Invalid completion policy');
+  });
+
+  it('rejects malformed persisted task-creation retry metadata', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-create-key-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({
+      title: 'Idempotent task',
+      prompt: 'Persist the retry key.',
+      repositoryPath: dir,
+      creationToken: 'task-create-persisted-shape-0001'
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      tasks: Array<{ creationRequestFingerprint?: string }>;
+    };
+    persisted.tasks[0]!.creationRequestFingerprint = 'not-a-sha256';
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'tasks contains invalid creation retry metadata'
+    );
+  });
+
+  it('rejects duplicate persisted task-creation retry tokens', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-create-duplicate-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({
+      title: 'First idempotent task',
+      prompt: 'Persist the first retry key.',
+      repositoryPath: dir,
+      creationToken: 'task-create-persisted-first-0001'
+    });
+    await store.createTask({
+      title: 'Second idempotent task',
+      prompt: 'Persist the second retry key.',
+      repositoryPath: dir,
+      creationToken: 'task-create-persisted-second-0001'
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      tasks: Array<{ creationToken?: string }>;
+    };
+    persisted.tasks[1]!.creationToken = persisted.tasks[0]!.creationToken;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'tasks contains invalid creation retry metadata'
+    );
   });
 
   it('migrates schema 8 stores by dropping the legacy testRuns collection', async () => {
@@ -340,9 +560,29 @@ describe('FileTaskStore', () => {
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
 
     const snapshot = await new FileTaskStore(dir).snapshot();
-    expect(snapshot.schemaVersion).toBe(15);
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(snapshot.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
     expect(snapshot.previewComposeProjects).toEqual([]);
+  });
+
+  it('migrates schema 15 by adding the attachment collection without changing preview data', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema15-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Phase 5 task',
+      prompt: 'Preserve preview authority',
+      repositoryPath: dir
+    });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 15;
+    delete persisted.attachments;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(snapshot.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(snapshot.attachments).toEqual([]);
   });
 
   it('repairs schema 13 stores by removing obsolete generation-owned OCI duplicates', async () => {

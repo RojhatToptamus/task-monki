@@ -304,7 +304,6 @@ function assertReadLimit(maxBytes: number): void {
     throw new Error('Private file size limit is invalid.');
   }
 }
-
 function posixMode(stat: { mode: number | bigint }): number {
   return typeof stat.mode === 'bigint'
     ? Number(stat.mode & BigInt(0o777))

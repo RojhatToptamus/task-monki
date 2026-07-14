@@ -25,14 +25,16 @@ npm run dev:api
 npm run dev:renderer
 ```
 
-The development renderer uses Vite's same-origin `/api` proxy to the local
-control API on `127.0.0.1:3099`. The API creates a short-lived private token
-lease that Vite consumes into proxy memory before agent work can run. The
-control API also verifies the exact Host, renderer Origin, and Fetch Metadata.
+The browser renderer uses the Vite same-origin `/api` proxy. `dev:api` writes a
+short-lived private proxy token outside the repository, and Vite reads it on
+each request, so restart the API without copying credentials into the browser
+or an environment file. Use the printed `127.0.0.1` renderer URL; other origins
+are rejected. If the default ports must change, export the same
+`TASK_MANAGER_API_PORT` and `TASK_MANAGER_RENDERER_PORT` values in both
+terminals.
 
-`npm run dev:seed` resets only the seed-owned root and prints the non-sensitive
-environment variables written to `dev-api.env`. Both the seed manifest and
-environment file are forced to mode `0600`:
+`npm run dev:seed` resets only the seed-owned root and then prints the same
+environment variables written to `dev-api.env`:
 
 - `TASK_MANAGER_STORE_DIR`
 - `TASK_MANAGER_APP_SETTINGS_PATH`
@@ -43,6 +45,8 @@ environment file are forced to mode `0600`:
   normal product/dev runs reconcile by default)
 - `TASK_MANAGER_DETERMINISTIC_SEED=1` (keeps the live Codex provider inert so
   synthetic provider records cannot start or recover real agent work)
+
+The seed manifest and environment file are forced to mode `0600`.
 
 The browser development host always forces agent network access and external
 Codex tools off. When the deterministic seed flag is present, it also skips

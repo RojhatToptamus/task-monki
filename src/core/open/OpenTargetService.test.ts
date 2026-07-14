@@ -665,7 +665,8 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     previewNodeAttempts: [],
     previewResources: [],
     events: [],
-    artifacts: []
+    artifacts: [],
+    attachments: []
   };
 }
 

@@ -3,13 +3,58 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
 
 describe('TaskManagerService task deletion', () => {
+  it('serializes deletion against a concurrent run start before materialization', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-delete-start-race'
+    });
+    const task = await scenario.createTask({
+      title: 'Delete versus start',
+      prompt: 'Exercise the per-task action boundary.'
+    });
+    const originalDelete = scenario.store.deleteTask.bind(scenario.store);
+    let signalDeleteEntered!: () => void;
+    const deleteEntered = new Promise<void>((resolve) => {
+      signalDeleteEntered = resolve;
+    });
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    const deleteTask = vi
+      .spyOn(scenario.store, 'deleteTask')
+      .mockImplementation(async (taskId) => {
+        signalDeleteEntered();
+        await deleteGate;
+        return originalDelete(taskId);
+      });
+
+    const deletion = scenario.service.deleteTask({ taskId: task.id });
+    await deleteEntered;
+    try {
+      await expect(
+        scenario.service.startRun({ taskId: task.id })
+      ).rejects.toThrow('Task deletion is already running for this task.');
+      expect(scenario.agent.startedTurns).toHaveLength(0);
+    } finally {
+      releaseDelete();
+    }
+
+    await expect(deletion).resolves.toEqual({
+      taskId: task.id,
+      removedWorktree: false
+    });
+    expect(await scenario.store.getTask(task.id)).toBeUndefined();
+    deleteTask.mockRestore();
+  });
+
   it('blocks deletion while an agent run is active', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-active-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
