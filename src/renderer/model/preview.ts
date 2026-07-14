@@ -36,6 +36,8 @@ export interface PreviewViewModel {
 
 export interface PreviewOverviewProjection {
   recommendedAction?: PreviewActionModel;
+  secondaryAction?: PreviewActionModel;
+  summary: string;
   primaryRoute?: {
     generation: PreviewGenerationRecord;
     route: PreviewGenerationRecord['routes'][number];
@@ -89,23 +91,95 @@ export function selectPreviewOverviewProjection(
   const openGeneration = view.activeGeneration ?? (
     view.generation?.state === 'READY' ? view.generation : undefined
   );
-  const runningCurrent =
-    view.status === 'Running' &&
-    !view.failedReplacementGeneration &&
-    !view.recoveryGeneration;
-  const recommendedAction = runningCurrent
-    ? view.actions.find((action) => action.id === 'OPEN')
-    : view.status === 'Replacing'
-      ? view.actions.find((action) => action.id === 'OPEN')
-      : ['APPROVE', 'RETRY_SETUP', 'START', 'RESOLVE', 'OPEN']
-          .map((id) => view.actions.find((action) => action.id === id))
-          .find((action): action is PreviewActionModel => Boolean(action));
+  const openAction = view.actions.find((action) => action.id === 'OPEN');
+  const startAction = view.actions.find((action) => action.id === 'START');
+  const hasServingGeneration = Boolean(openGeneration && openAction);
+  const recommendedAction = hasServingGeneration
+    ? openAction
+    : ['APPROVE', 'RETRY_SETUP', 'START', 'RESOLVE', 'OPEN']
+        .map((id) => view.actions.find((action) => action.id === id))
+        .find((action): action is PreviewActionModel => Boolean(action));
+  const secondaryAction = hasServingGeneration && (
+    view.status === 'Running · stale' || Boolean(view.failedReplacementGeneration)
+  ) ? startAction : undefined;
   const route = openGeneration?.routes.find((candidate) => candidate.state === 'ATTACHED');
 
   return {
     recommendedAction,
+    secondaryAction,
+    summary: previewOverviewSummary(view),
     primaryRoute: openGeneration && route ? { generation: openGeneration, route } : undefined
   };
+}
+
+function previewOverviewSummary(view: PreviewViewModel): string {
+  const activeId = view.activeGeneration ? shortPreviewId(view.activeGeneration.id) : undefined;
+  const candidateId = view.replacementGeneration
+    ? shortPreviewId(view.replacementGeneration.id)
+    : view.failedReplacementGeneration
+      ? shortPreviewId(view.failedReplacementGeneration.id)
+      : undefined;
+  if (view.status === 'Approval required' && view.plan) {
+    return summarizePreviewPlan(view.plan);
+  }
+  if (view.status === 'Ready to start') return 'Plan approved · nothing is running yet';
+  if (view.status === 'Starting') {
+    return view.latestAttempt
+      ? `Starting ${view.latestAttempt.nodeId} · attempt ${view.latestAttempt.attempt}`
+      : 'Capturing source and preparing the preview';
+  }
+  if (view.status === 'Replacing') {
+    return `${candidateId ?? 'Candidate'} starting · ${activeId ?? 'current preview'} serves until cutover`;
+  }
+  if (view.failedReplacementGeneration && activeId) {
+    return `Replacement ${candidateId ?? 'candidate'} failed · ${activeId} is still serving`;
+  }
+  if (view.status === 'Running · stale' && activeId) {
+    return `Source changed after ${activeId} · still serving captured code`;
+  }
+  if (view.status === 'Running' && activeId) {
+    return `Serving ${activeId} · source current`;
+  }
+  if (view.status === 'Stopped') return summarizeStoppedPreview(view.plan, true);
+  return view.summary;
+}
+
+function summarizePreviewPlan(plan: PreviewPlanRecord): string {
+  if (plan.executionPlan.adapter === 'COMPOSE') {
+    const services = plan.executionPlan.compose?.inspection?.services.length ?? 0;
+    return [
+      services > 0 ? `${services} Compose ${services === 1 ? 'service' : 'services'}` : undefined,
+      plan.executionPlan.routes.length > 0
+        ? `${plan.executionPlan.routes.length} ${plan.executionPlan.routes.length === 1 ? 'route' : 'routes'}`
+        : undefined
+    ].filter(Boolean).join(' · ') || 'Docker Compose project';
+  }
+  const scenario = plan.executionPlan.scenarios.find(
+    (candidate) => candidate.id === plan.executionPlan.selectedScenarioId
+  );
+  const setupJobs = plan.executionPlan.jobs.filter(
+    (job) => job.role === 'generic' || scenario?.jobs.includes(job.id)
+  ).length;
+  const managedResources = plan.executionPlan.resources.filter(
+    (resource) => scenario?.resources.includes(resource.id)
+  ).length;
+  const applicationNodes = plan.executionPlan.services.length + plan.executionPlan.workers.length;
+  return [
+    applicationNodes > 0
+      ? `${applicationNodes} application ${applicationNodes === 1 ? 'node' : 'nodes'}`
+      : undefined,
+    setupJobs > 0 ? `${setupJobs} setup ${setupJobs === 1 ? 'job' : 'jobs'}` : undefined,
+    managedResources > 0
+      ? `${managedResources} managed ${managedResources === 1 ? 'resource' : 'resources'}`
+      : undefined,
+    plan.executionPlan.routes.length > 0
+      ? `${plan.executionPlan.routes.length} ${plan.executionPlan.routes.length === 1 ? 'route' : 'routes'}`
+      : undefined
+  ].filter(Boolean).join(' · ') || 'Execution plan ready for review';
+}
+
+function shortPreviewId(value: string): string {
+  return value.slice(0, 8);
 }
 
 export function buildPreviewPlanGroups(plan: PreviewPlanRecord): PreviewPlanGroup[] {
@@ -602,7 +676,7 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     return {
       status: 'Stopped',
       tone: 'neutral',
-      summary: 'Runtime files and preview-managed data were deleted; compact manifest and log evidence is retained.',
+      summary: summarizeStoppedPreview(plan, false),
       plan,
       approval,
       generation,
@@ -620,6 +694,31 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     latestAttempt,
     actions: [{ id: 'STOP', label: 'Cancel and clean up', kind: 'secondary' }]
   };
+}
+
+function summarizeStoppedPreview(plan: PreviewPlanRecord | undefined, compact: boolean): string {
+  if (plan?.executionPlan.adapter === 'COMPOSE') {
+    const ownedVolumes = plan.executionPlan.compose?.inspection?.volumes
+      .filter((volume) => !volume.external)
+      .map((volume) => volume.name) ?? [];
+    if (ownedVolumes.length === 0) {
+      return compact
+        ? 'Nothing is running · no Task Monki-owned volumes existed'
+        : 'The Task Monki-owned Compose runtime was removed; compact manifest and log evidence is retained. This plan had no owned volumes.';
+    }
+    return compact
+      ? `Nothing is running · owned volumes ${ownedVolumes.join(', ')} were deleted`
+      : `The Task Monki-owned Compose runtime and volumes ${ownedVolumes.join(', ')} were deleted; compact manifest and log evidence is retained.`;
+  }
+  const resources = plan?.executionPlan.resources.map((resource) => resource.id) ?? [];
+  if (resources.length > 0) {
+    return compact
+      ? `Nothing is running · managed data for ${resources.join(', ')} was deleted`
+      : `Preview runtime and managed data for ${resources.join(', ')} were deleted; compact manifest and log evidence is retained.`;
+  }
+  return compact
+    ? 'Nothing is running · no managed data existed'
+    : 'Preview runtime was removed; compact manifest and log evidence is retained. This plan had no managed data.';
 }
 
 export function selectPreviewResetResources(

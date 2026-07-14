@@ -71,7 +71,9 @@ describe('preview view model', () => {
     expect(view.status).toContain('stale');
     expect(view.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
     expect(selectPreviewOverviewProjection(view)).toMatchObject({
-      recommendedAction: { id: 'START', label: 'Replace' }
+      recommendedAction: { id: 'OPEN', label: 'Open preview' },
+      secondaryAction: { id: 'START', label: 'Replace' },
+      summary: 'Source changed after generati · still serving captured code'
     });
   });
 
@@ -120,7 +122,9 @@ describe('preview view model', () => {
     expect(preserved.failedReplacementGeneration?.id).toBe(failed.id);
     expect(preserved.actions.map((action) => action.id)).toEqual(['OPEN', 'START', 'STOP']);
     expect(selectPreviewOverviewProjection(preserved)).toMatchObject({
-      recommendedAction: { id: 'START' }
+      recommendedAction: { id: 'OPEN' },
+      secondaryAction: { id: 'START' },
+      summary: 'Replacement candidat failed · active is still serving'
     });
     expect(selectPreviewActionGeneration(preserved, 'OPEN')?.id).toBe(active.id);
     expect(selectPreviewActionGeneration(preserved, 'STOP')?.id).toBe(active.id);
@@ -247,6 +251,13 @@ describe('preview view model', () => {
         generations: [{ ...baseGeneration, state }]
       }).status).toBe(expected);
     }
+    const stopped = buildPreviewViewModel({
+      ...input,
+      generations: [{ ...baseGeneration, state: 'STOPPED' }]
+    });
+    expect(stopped.summary).toContain('This plan had no managed data');
+    expect(selectPreviewOverviewProjection(stopped).summary)
+      .toBe('Nothing is running · no managed data existed');
     expect(buildPreviewViewModel({
       ...input,
       generations: [{

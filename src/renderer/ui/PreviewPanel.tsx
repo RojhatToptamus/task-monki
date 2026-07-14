@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type {
   PreviewApprovalRecord,
   PreviewComposeProjectRecord,
@@ -16,6 +16,8 @@ import type {
 } from '../../shared/contracts';
 import type {
   PreviewAttachmentPlan,
+  PreviewExecutionBlocker,
+  PreviewExecutionReadiness,
   PreviewPrivateInputOperationResult,
   PreviewResolvedAttachmentTarget
 } from '../../shared/preview';
@@ -23,7 +25,6 @@ import {
   buildPreviewPlanGroups,
   buildPreviewViewModel,
   selectPreviewActionGeneration,
-  selectPreviewDiagnosticAttempts,
   selectPreviewOverviewProjection,
   selectPreviewResetResources,
   type PreviewActionId,
@@ -44,6 +45,7 @@ export interface PreviewPanelProps {
   composeProjects: PreviewComposeProjectRecord[];
   localBindings: PreviewLocalAttachmentBindingRecord[];
   runtimeResources: PreviewResourceRecord[];
+  executionReadiness?: PreviewExecutionReadiness;
   onResolve(taskId: string, scenarioId?: string): Promise<void>;
   onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
   onStart(taskId: string, scenarioId?: string): Promise<void>;
@@ -59,6 +61,12 @@ interface PreviewConfirmation {
   body: string;
   confirmLabel: string;
   danger: boolean;
+  impacts?: Array<{
+    tone: 'deleted' | 'kept' | 'untouched';
+    label: string;
+    detail: string;
+  }>;
+  requireText?: string;
   returnFocus?: HTMLElement;
   run(): Promise<void>;
 }
@@ -83,15 +91,40 @@ export function PreviewOverviewCard(
   const controller = usePreviewController(props);
   const projection = selectPreviewOverviewProjection(controller.view);
   const action = projection.recommendedAction;
+  const secondaryAction = projection.secondaryAction;
   const tone = previewTone(controller.view);
+  const hasPrivateInputs = Boolean(controller.view.plan?.executionPlan.inputs?.length);
+  const privateInputsNeedCheck = (candidate?: PreviewActionModel) => Boolean(
+    candidate?.id === 'START' &&
+    hasPrivateInputs &&
+    props.executionReadiness?.status !== 'READY'
+  );
+  const overviewStatus = controller.view.status === 'Ready to start' && privateInputsNeedCheck(action)
+    ? props.executionReadiness?.status === 'BLOCKED'
+      ? 'Configuration required'
+      : 'Inputs unchecked'
+    : controller.view.status;
+  const overviewTone = overviewStatus === 'Configuration required' || overviewStatus === 'Inputs unchecked'
+    ? 'action'
+    : tone;
+  const overviewSummary = overviewStatus === 'Configuration required'
+    ? describeExecutionBlockers(props.executionReadiness?.blockers ?? [])
+    : overviewStatus === 'Inputs unchecked'
+      ? 'Required private inputs must be checked before startup.'
+      : projection.summary;
+  const actionLabel = (candidate: PreviewActionModel) => privateInputsNeedCheck(candidate)
+    ? props.executionReadiness?.status === 'BLOCKED'
+      ? 'Configure inputs'
+      : 'Check inputs'
+    : overviewActionLabel(candidate, controller.view);
 
   return (
     <section className="tm-panel tm-preview-card" aria-label="Preview summary">
       <div className="tm-preview-card__head">
         <h3 className="tm-panel__title">Preview</h3>
-        <Chip label={controller.view.status} tone={tone} />
+        <Chip label={overviewStatus} tone={overviewTone} />
       </div>
-      <p className="tm-preview-card__summary">{controller.view.summary}</p>
+      <p className="tm-preview-card__summary">{overviewSummary}</p>
       {projection.primaryRoute ? (
         action?.id === 'OPEN' ? (
           <code className="tm-preview-card__route">{projection.primaryRoute.route.hostname}</code>
@@ -116,19 +149,33 @@ export function PreviewOverviewCard(
             type="button"
             className="primary-button"
             disabled={isActionDisabled(controller, action.id)}
-            onClick={action.id === 'APPROVE'
+            onClick={action.id === 'APPROVE' || privateInputsNeedCheck(action)
               ? props.onShowDetails
               : () => void controller.runAction(action.id)}
           >
             {controller.busy.has(action.id)
               ? 'Working…'
-              : action.id === 'APPROVE' ? 'Review plan' : action.label}
+              : actionLabel(action)}
           </button>
         ) : (
           <button type="button" className="primary-button" onClick={props.onShowDetails}>
             View Preview
           </button>
         )}
+        {secondaryAction ? (
+          <button
+            type="button"
+            className="outline-button"
+            disabled={isActionDisabled(controller, secondaryAction.id)}
+            onClick={privateInputsNeedCheck(secondaryAction)
+              ? props.onShowDetails
+              : () => void controller.runAction(secondaryAction.id)}
+          >
+            {controller.busy.has(secondaryAction.id)
+              ? 'Working…'
+              : actionLabel(secondaryAction)}
+          </button>
+        ) : null}
         {action ? (
           <button type="button" className="tm-preview-card__details" onClick={props.onShowDetails}>
             Details
@@ -142,13 +189,36 @@ export function PreviewOverviewCard(
 export function PreviewWorkspace(props: PreviewPanelProps) {
   const controller = usePreviewController(props);
   const logs = usePreviewLogs(props, controller.view);
+  const readinessRequestRef = useRef<string | undefined>(undefined);
+  const [requestedInputId, setRequestedInputId] = useState<string>();
+  const [readinessCheckFailed, setReadinessCheckFailed] = useState(false);
   const projection = selectPreviewOverviewProjection(controller.view);
-  const primaryAction = selectWorkspacePrimaryAction(controller.view, projection.recommendedAction);
-  const openAction = controller.view.actions.find((action) => action.id === 'OPEN');
+  const workspaceActions = selectWorkspaceActions(controller.view, projection.recommendedAction);
+  const primaryAction = workspaceActions.primary;
+  const secondaryAction = workspaceActions.secondary;
   const plan = controller.view.plan;
-  const diagnosticAttempts = selectPreviewDiagnosticAttempts(props.attempts, controller.view);
   const approvalRequired = controller.view.status === 'Approval required';
   const readyToStart = controller.view.status === 'Ready to start';
+  const readinessPending = readyToStart && Boolean(plan?.executionPlan.inputs?.length) &&
+    !props.executionReadiness;
+  const configurationRequired = readyToStart &&
+    props.executionReadiness?.status === 'BLOCKED';
+  const presentation = workspacePresentation(
+    controller.view,
+    props.executionReadiness,
+    readinessPending,
+    readinessCheckFailed
+  );
+  const relevantLogGenerationIds = new Set(uniqueGenerations([
+    controller.view.activeGeneration,
+    controller.view.replacementGeneration,
+    controller.view.failedReplacementGeneration,
+    controller.view.recoveryGeneration,
+    controller.view.generation
+  ]).map((generation) => generation.id));
+  const diagnosticAttempts = props.attempts
+    .filter((attempt) => relevantLogGenerationIds.has(attempt.generationId))
+    .sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''));
   const showOperationalEvidence = Boolean(plan) && !approvalRequired && !readyToStart &&
     controller.view.status !== 'Stopped';
   const attachmentReadiness = (
@@ -160,43 +230,124 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
     ['Starting', 'Replacing', 'Running', 'Running · stale'].includes(controller.view.status) ||
     attachmentReadiness.length > 0
   );
+  const showHeaderLogs = Boolean(controller.view.latestAttempt) && (
+    controller.view.status === 'Failed' ||
+    controller.view.status === 'Recovery required' ||
+    controller.view.status === 'Cleanup incomplete' ||
+    Boolean(controller.view.failedReplacementGeneration)
+  );
+
+  useEffect(() => {
+    if (!readinessPending || !plan) return;
+    const requestKey = `${props.task.id}:${plan.id}:${plan.executionPlan.selectedScenarioId}`;
+    if (readinessRequestRef.current === requestKey) return;
+    readinessRequestRef.current = requestKey;
+    setReadinessCheckFailed(false);
+    void props.onResolve(props.task.id, plan.executionPlan.selectedScenarioId)
+      .catch(() => setReadinessCheckFailed(true));
+  }, [plan, props.onResolve, props.task.id, readinessPending]);
 
   return (
     <section className="tm-preview-workspace" aria-label="Preview">
       <header className="tm-preview-workspace__head">
         <div className="tm-preview-workspace__decision">
-          <Chip label={controller.view.status} tone={previewTone(controller.view)} />
-          <p>{controller.view.summary}</p>
+          <div className={`tm-preview-statusline tm-preview-statusline--${presentation.tone}`}>
+            <span aria-hidden="true" />
+            <strong>{presentation.status}</strong>
+            {presentation.meta ? <small>{presentation.meta}</small> : null}
+            {plan?.executionPlan.adapter === 'COMPOSE' ? (
+              <span className="tm-preview-adapter">Docker Compose</span>
+            ) : null}
+          </div>
+          {presentation.detail ? <p>{presentation.detail}</p> : null}
         </div>
         <div className="tm-preview-workspace__actions">
+          {plan && plan.executionPlan.scenarios.length > 1 ? (
+            <label className="tm-preview-scenario-control">
+              <span>Scenario</span>
+              <select
+                aria-label="Preview data scenario"
+                value={plan.executionPlan.selectedScenarioId}
+                disabled={controller.busy.size > 0 || Boolean(controller.resetBusy)}
+                onChange={(event) => void props.onResolve(props.task.id, event.target.value)}
+              >
+                {plan.executionPlan.scenarios.map((scenario) => (
+                  <option key={scenario.id} value={scenario.id}>{scenario.label ?? scenario.id}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {configurationRequired ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => setRequestedInputId(
+                props.executionReadiness?.blockers[0]?.inputId ??
+                plan?.executionPlan.inputs?.[0]?.id
+              )}
+            >
+              Configure inputs
+            </button>
+          ) : null}
+          {readinessPending && readinessCheckFailed && plan ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                const requestKey = `${props.task.id}:${plan.id}:${plan.executionPlan.selectedScenarioId}`;
+                readinessRequestRef.current = requestKey;
+                setReadinessCheckFailed(false);
+                void props.onResolve(props.task.id, plan.executionPlan.selectedScenarioId)
+                  .catch(() => setReadinessCheckFailed(true));
+              }}
+            >
+              Retry check
+            </button>
+          ) : null}
           {primaryAction ? (
             <button
               type="button"
               className={primaryAction.id === 'STOP' ? 'outline-button' : 'primary-button'}
-              disabled={isActionDisabled(controller, primaryAction.id)}
+              disabled={isActionDisabled(controller, primaryAction.id) || (
+                (configurationRequired || readinessPending) && primaryAction.id === 'START'
+              )}
+              title={(configurationRequired || readinessPending) && primaryAction.id === 'START'
+                ? readinessPending && !readinessCheckFailed
+                  ? 'Checking required private inputs.'
+                  : readinessCheckFailed
+                    ? 'The private-input check failed. Retry it before starting.'
+                    : describeExecutionBlockers(props.executionReadiness?.blockers ?? [])
+                : undefined}
               onClick={() => void controller.runAction(primaryAction.id)}
             >
-              {controller.busy.has(primaryAction.id) ? 'Working…' : primaryAction.label}
+              {controller.busy.has(primaryAction.id)
+                ? 'Working…'
+                : workspaceActionLabel(primaryAction, controller.view)}
             </button>
           ) : null}
-          {openAction && primaryAction?.id !== 'OPEN' ? (
+          {secondaryAction ? (
             <button
               type="button"
               className="outline-button"
-              disabled={isActionDisabled(controller, 'OPEN')}
-              onClick={() => void controller.runAction('OPEN')}
+              disabled={isActionDisabled(controller, secondaryAction.id)}
+              onClick={() => void controller.runAction(secondaryAction.id)}
             >
-              {openAction.label}
+              {controller.busy.has(secondaryAction.id)
+                ? 'Working…'
+                : workspaceActionLabel(secondaryAction, controller.view)}
             </button>
           ) : null}
-          {controller.view.latestAttempt ? (
+          {showHeaderLogs ? (
             <button type="button" className="tm-preview-workspace__quiet" onClick={logs.open}>
               View logs
             </button>
           ) : null}
           <PreviewActionMenu
             actions={controller.view.actions.filter(
-              (action) => action.id !== primaryAction?.id && action.id !== 'OPEN'
+              (action) =>
+                action.id !== primaryAction?.id &&
+                action.id !== secondaryAction?.id &&
+                action.id !== 'OPEN'
             )}
             resetResources={controller.resettableResources}
             isActionDisabled={(action) => isActionDisabled(controller, action.id)}
@@ -207,43 +358,50 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
         </div>
       </header>
 
-      {plan && plan.executionPlan.scenarios.length > 1 ? (
-        <label className="tm-field tm-preview-workspace__scenario">
-          <span>Data scenario</span>
-          <select
-            value={plan.executionPlan.selectedScenarioId}
-            disabled={controller.busy.size > 0 || Boolean(controller.resetBusy)}
-            onChange={(event) => void props.onResolve(props.task.id, event.target.value)}
-          >
-            {plan.executionPlan.scenarios.map((scenario) => (
-              <option key={scenario.id} value={scenario.id}>{scenario.label ?? scenario.id}</option>
-            ))}
-          </select>
-        </label>
+      {plan && approvalRequired ? (
+        <PreviewPlanAuthority plan={plan} approval={controller.view.approval} />
       ) : null}
 
-      {controller.view.activeGeneration && (
-        controller.view.replacementGeneration ||
-        controller.view.failedReplacementGeneration ||
-        controller.view.recoveryGeneration
-      ) ? (
-        <PreviewGenerationComparison view={controller.view} />
-      ) : null}
-
-      {plan ? <div className="tm-preview-workspace__columns">
+      {plan && configurationRequired ? (
+        <PreviewConfigurationRequired
+          taskId={props.task.id}
+          plan={plan}
+          approval={controller.view.approval}
+          readiness={props.executionReadiness!}
+          localBindings={props.localBindings}
+          requestedInputId={requestedInputId}
+          onInputRequestHandled={() => setRequestedInputId(undefined)}
+          onChanged={() => props.onResolve(
+            props.task.id,
+            plan.executionPlan.selectedScenarioId
+          )}
+        />
+      ) : plan && !approvalRequired ? <div className="tm-preview-workspace__columns">
         <div className="tm-preview-workspace__column">
-          {approvalRequired ? (
-            <PreviewPlanAuthority plan={plan} approval={controller.view.approval} />
-          ) : null}
           {showOperationalEvidence ? (
             <PreviewApplicationSection
               plan={plan}
               view={controller.view}
               attempts={props.attempts}
-              runtimeResources={props.runtimeResources}
               composeProjects={props.composeProjects}
+              onOpenLog={logs.openAttempt}
             />
           ) : null}
+          {logs.value !== undefined ? (
+            <PreviewLogDock
+              attempts={diagnosticAttempts}
+              selectedAttempt={logs.selectedAttempt}
+              selectedStream={logs.selectedStream}
+              value={logs.value}
+              onAttemptChange={logs.setSelectedAttemptId}
+              onStreamChange={logs.setSelectedStream}
+              onClose={logs.close}
+            />
+          ) : null}
+          <PreviewPlanAuthority plan={plan} approval={controller.view.approval} />
+        </div>
+
+        <div className="tm-preview-workspace__column tm-preview-workspace__column--side">
           {showOperationalEvidence ? (
             <PreviewRoutesSection
               view={controller.view}
@@ -252,12 +410,6 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
               }
             />
           ) : null}
-          {!approvalRequired ? (
-            <PreviewPlanAuthority plan={plan} approval={controller.view.approval} />
-          ) : null}
-        </div>
-
-        <div className="tm-preview-workspace__column tm-preview-workspace__column--side">
           {showOperationalEvidence ? (
             <PreviewDataSection
               view={controller.view}
@@ -274,45 +426,25 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
             />
           ) : null}
           {controller.view.approval && plan.executionPlan.inputs?.length ? (
-            <section className="tm-preview-workspace__section" aria-labelledby="preview-private-inputs">
-              <SectionHeading
-                id="preview-private-inputs"
-                title="Private inputs"
-                detail="Encrypted local values are delivered only to declared recipients."
-              />
-              <div className="tm-preview-inputs">
-                {plan.executionPlan.inputs.map((input) => (
-                  <PrivateInputControl
-                    key={input.id}
-                    taskId={props.task.id}
-                    inputId={input.id}
-                    label={input.label ?? input.id}
-                    onChanged={() => props.onResolve(
-                      props.task.id,
-                      plan.executionPlan.selectedScenarioId
-                    )}
-                  />
-                ))}
-              </div>
-            </section>
+            <PreviewPrivateInputsSection
+              taskId={props.task.id}
+              plan={plan}
+              readiness={props.executionReadiness}
+              onChanged={() => props.onResolve(
+                props.task.id,
+                plan.executionPlan.selectedScenarioId
+              )}
+            />
           ) : null}
           {controller.view.generation && !approvalRequired ? (
-            <PreviewTechnicalDetails view={controller.view} generations={props.generations} />
+            <PreviewTechnicalDetails
+              view={controller.view}
+              generations={props.generations}
+              runtimeResources={props.runtimeResources}
+            />
           ) : null}
         </div>
       </div> : null}
-
-      {logs.value !== undefined ? (
-        <PreviewLogDock
-          attempts={diagnosticAttempts}
-          selectedAttempt={logs.selectedAttempt}
-          selectedStream={logs.selectedStream}
-          value={logs.value}
-          onAttemptChange={logs.setSelectedAttemptId}
-          onStreamChange={logs.setSelectedStream}
-          onClose={logs.close}
-        />
-      ) : null}
 
       {controller.confirmation ? (
         <PreviewConfirmationModal
@@ -394,18 +526,45 @@ function usePreviewController(props: PreviewPanelProps): PreviewController {
     }
     const destructive = action.label.includes('Delete Data');
     const adapter = view.plan?.executionPlan.adapter;
+    const managedResourceIds = view.plan?.executionPlan.resources.map((resource) => resource.id) ?? [];
+    const hasManagedData = managedResourceIds.length > 0;
+    const managedResourceSummary = managedResourceIds.join(', ');
     const body = destructive
       ? adapter === 'COMPOSE'
         ? 'Stops the stable Compose preview and permanently deletes every active or retained Task Monki-owned volume. External resources, images, and build cache are not changed.'
-        : 'Stops this preview and permanently deletes its Task Monki-managed PostgreSQL or Redis data. Attached dependencies are never changed.'
+        : hasManagedData
+          ? `Stops this preview and permanently deletes Task Monki-managed data for ${managedResourceSummary}. Attached dependencies are never changed.`
+          : 'Stops this preview and permanently removes its Task Monki-owned runtime. This plan has no managed database or cache data.'
       : action.label === 'Cancel replacement'
         ? 'Stops and verifies only the candidate generation. The current active preview stays available and its managed data is preserved.'
         : 'Cancels startup and runs the recorded exact cleanup path. Preview-owned runtime and managed data covered by this generation may be deleted.';
     setConfirmation(() => ({
-      title: action.label,
+      title: destructive ? 'Stop preview & delete data?' : action.label,
       body,
-      confirmLabel: action.label,
+      confirmLabel: destructive ? 'Stop & delete' : action.label,
       danger: destructive || action.label !== 'Cancel replacement',
+      impacts: destructive ? [
+        {
+          tone: 'deleted',
+          label: 'Deleted',
+          detail: adapter === 'COMPOSE'
+            ? 'Task-scoped project containers, owned networks, owned volumes, and their data'
+            : hasManagedData
+              ? `Preview runtime plus managed data for ${managedResourceSummary}`
+              : 'Preview processes, routes, ports, and captured workspace'
+        },
+        {
+          tone: 'kept',
+          label: 'Kept',
+          detail: 'Worktree, branch, approved plan, public bindings, and retained evidence'
+        },
+        {
+          tone: 'untouched',
+          label: 'Never touched',
+          detail: 'Attached dependencies and resources owned outside this preview'
+        }
+      ] : undefined,
+      requireText: destructive ? 'delete' : undefined,
       returnFocus,
       run: () => runAction('STOP')
     }));
@@ -413,10 +572,15 @@ function usePreviewController(props: PreviewPanelProps): PreviewController {
 
   const requestReset = (resourceId: string, returnFocus?: HTMLElement) => {
     setConfirmation(() => ({
-      title: `Reset ${resourceId} data`,
+      title: `Reset ${resourceId}?`,
       body: `Stops the complete preview, permanently deletes only ${resourceId}'s Task Monki-managed data, and cannot restore it if recreation or setup fails. Attached dependencies are never changed.`,
       confirmLabel: `Reset ${resourceId}`,
       danger: true,
+      impacts: [
+        { tone: 'deleted', label: 'Deleted', detail: `${resourceId} managed data` },
+        { tone: 'kept', label: 'Kept', detail: 'Other managed data, worktree, stable route identities, and approval' },
+        { tone: 'untouched', label: 'Never touched', detail: 'Attached dependencies' }
+      ],
       returnFocus,
       run: () => runReset(resourceId)
     }));
@@ -510,35 +674,13 @@ function usePreviewLogs(props: PreviewPanelProps, view: PreviewViewModel) {
       setSelectedStream('stdout');
       setValue('');
     },
+    openAttempt: (attemptId: string) => {
+      setSelectedAttemptId(attemptId);
+      setSelectedStream('stdout');
+      setValue('');
+    },
     close: () => setValue(undefined)
   };
-}
-
-function PreviewGenerationComparison({ view }: { view: PreviewViewModel }) {
-  const candidate = view.replacementGeneration ?? view.failedReplacementGeneration ?? view.recoveryGeneration;
-  if (!view.activeGeneration || !candidate) return null;
-  return (
-    <section className="tm-preview-generations" aria-label="Active and candidate generations">
-      <GenerationSummary generation={view.activeGeneration} label="Active" />
-      <span className="tm-preview-generations__arrow" aria-hidden="true">→</span>
-      <GenerationSummary generation={candidate} label="Candidate" />
-    </section>
-  );
-}
-
-function GenerationSummary({ generation, label }: { generation: PreviewGenerationRecord; label: string }) {
-  return (
-    <div className="tm-preview-generation">
-      <div className="tm-preview-generation__head">
-        <strong>{label}</strong>
-        <span className={`tm-preview-state tm-preview-state--${toneForRecordState(generation.state)}`}>
-          {humanize(generation.state)}
-        </span>
-      </div>
-      <code>{shortId(generation.id)}</code>
-      <span>{generation.freshness === 'STALE' ? 'Captured source is stale' : 'Captured source is current'}</span>
-    </div>
-  );
 }
 
 function PreviewPlanAuthority({
@@ -549,53 +691,7 @@ function PreviewPlanAuthority({
   approval?: PreviewApprovalRecord;
 }) {
   const groups = buildPreviewPlanGroups(plan);
-  const composeServiceCount = plan.executionPlan.compose?.inspection?.services.length ?? 0;
-  const applicationSummary = plan.executionPlan.adapter === 'COMPOSE'
-    ? composeServiceCount > 0
-      ? `${composeServiceCount} Compose ${composeServiceCount === 1 ? 'service' : 'services'}`
-      : undefined
-    : [
-        plan.executionPlan.services.length > 0
-          ? `${plan.executionPlan.services.length} ${plan.executionPlan.services.length === 1 ? 'service' : 'services'}`
-          : undefined,
-        plan.executionPlan.workers.length > 0
-          ? `${plan.executionPlan.workers.length} ${plan.executionPlan.workers.length === 1 ? 'worker' : 'workers'}`
-          : undefined
-      ].filter(Boolean).join(' · ') || undefined;
-  const setupCount = groups.find((group) => group.id === 'setup')?.lines.filter(
-    (line) => line.label.startsWith('Job ·')
-  ).length ?? 0;
-  const managedDataCount = plan.executionPlan.adapter === 'COMPOSE'
-    ? plan.executionPlan.compose?.inspection?.volumes.filter((volume) => !volume.external).length ?? 0
-    : groups.find((group) => group.id === 'data')?.lines.filter(
-        (line) => line.label.startsWith('Resource ·')
-      ).length ?? 0;
-  const summaries = [
-    applicationSummary
-      ? { label: 'Application', value: applicationSummary }
-      : undefined,
-    setupCount > 0
-      ? { label: 'Setup', value: `${setupCount} ${setupCount === 1 ? 'job' : 'jobs'}` }
-      : undefined,
-    managedDataCount > 0
-      ? { label: 'Managed data', value: `${managedDataCount} owned ${managedDataCount === 1 ? 'resource' : 'resources'}` }
-      : undefined,
-    plan.executionPlan.routes.length > 0
-      ? { label: 'Routes', value: `${plan.executionPlan.routes.length} stable ${plan.executionPlan.routes.length === 1 ? 'route' : 'routes'}` }
-      : undefined,
-    plan.executionPlan.inputs?.length
-      ? { label: 'Private inputs', value: `${plan.executionPlan.inputs.length} ${plan.executionPlan.inputs.length === 1 ? 'input' : 'inputs'} · recipient-scoped` }
-      : undefined,
-    plan.executionPlan.attachments?.length
-      ? { label: 'Attachments', value: `${plan.executionPlan.attachments.length} non-owned ${plan.executionPlan.attachments.length === 1 ? 'dependency' : 'dependencies'}` }
-      : undefined,
-    {
-      label: 'Cleanup',
-      value: plan.executionPlan.adapter === 'COMPOSE'
-        ? 'Stops the task-scoped project and deletes only its owned volumes'
-        : 'Stops preview processes and deletes only preview-managed data'
-    }
-  ].filter((summary): summary is { label: string; value: string } => Boolean(summary));
+  const topology = buildPlanTopology(plan);
   const warnings = plan.executionPlan.adapter === 'COMPOSE'
     ? plan.warnings.filter((warning) => !warning.startsWith('Native preview commands run'))
     : plan.warnings;
@@ -616,7 +712,7 @@ function PreviewPlanAuthority({
 
   if (approval) {
     return (
-      <section className="tm-preview-workspace__section" aria-label="Approved plan">
+      <section className="tm-preview-approved-plan" aria-label="Approved plan">
         <details className="tm-preview-disclosure">
           <summary>Approved plan details</summary>
           {exactDetails}
@@ -627,44 +723,287 @@ function PreviewPlanAuthority({
   }
 
   return (
-    <section className="tm-preview-workspace__section" aria-labelledby="preview-plan-authority">
-      <SectionHeading
-        id="preview-plan-authority"
-        title="Review execution plan"
-      />
-      <div className="tm-preview-plan-summary">
-        {summaries.map((summary) => (
-          <PlanSummaryRow key={summary.label} label={summary.label} value={summary.value} />
+    <div className="tm-preview-approval" aria-labelledby="preview-plan-authority">
+      <section className="tm-preview-surface tm-preview-plan-topology">
+        <h3 id="preview-plan-authority" className="tm-preview-surface__title">Execution plan</h3>
+        {topology.map((group) => (
+          <div key={group.id} className="tm-preview-topology-group">
+            <div className="tm-preview-topology-group__head">
+              <span>{group.label}</span>
+              {group.summary ? <small>{group.summary}</small> : null}
+            </div>
+            <div className="tm-preview-topology-group__rows">
+              {group.rows.map((row) => <PlanTopologyRow key={`${group.id}-${row.id}`} {...row} />)}
+            </div>
+          </div>
         ))}
+        <details className="tm-preview-disclosure tm-preview-plan-topology__exact">
+          <summary>Exact commands, recipients, readiness, and cleanup</summary>
+          {exactDetails}
+        </details>
+      </section>
+      <aside className="tm-preview-approval__side" aria-label="Plan authority and advisories">
+        <PlanAuthorityCard plan={plan} />
+        {warnings.length > 0 ? <PlanAdvisories warnings={warnings} /> : null}
+        <PlanCleanupCard plan={plan} />
+      </aside>
+    </div>
+  );
+}
+
+interface PlanTopologyRowModel {
+  id: string;
+  title: string;
+  value: string;
+  meta?: string;
+}
+
+interface PlanTopologyGroupModel {
+  id: string;
+  label: string;
+  summary?: string;
+  rows: PlanTopologyRowModel[];
+}
+
+function buildPlanTopology(plan: PreviewPlanRecord): PlanTopologyGroupModel[] {
+  const execution = plan.executionPlan;
+  const result: PlanTopologyGroupModel[] = [];
+  if (execution.adapter === 'COMPOSE') {
+    const services = execution.compose?.inspection?.services ?? [];
+    if (services.length > 0) {
+      result.push({
+        id: 'application',
+        label: 'Compose services',
+        summary: `${services.length} ${services.length === 1 ? 'service' : 'services'}`,
+        rows: services.map((service) => ({
+          id: service.id,
+          title: service.id,
+          value: service.image ?? 'Local build',
+          meta: service.dependsOn.length > 0 ? `${service.dependsOn.length} dependencies` : 'root service'
+        }))
+      });
+    }
+  } else {
+    const application = [
+      ...execution.services.map((node) => ({
+        id: `service-${node.id}`,
+        title: node.label ?? node.id,
+        value: formatPlanCommand(node.command),
+        meta: execution.routes.some((route) => route.service === node.id) ? 'service · routed' : 'service'
+      })),
+      ...execution.workers.map((node) => ({
+        id: `worker-${node.id}`,
+        title: node.label ?? node.id,
+        value: formatPlanCommand(node.command),
+        meta: node.overlap === 'exclusive' ? 'worker · exclusive' : 'worker · overlap safe'
+      }))
+    ];
+    if (application.length > 0) {
+      result.push({
+        id: 'application',
+        label: 'Application',
+        summary: [
+          execution.services.length > 0 ? `${execution.services.length} ${execution.services.length === 1 ? 'service' : 'services'}` : undefined,
+          execution.workers.length > 0 ? `${execution.workers.length} ${execution.workers.length === 1 ? 'worker' : 'workers'}` : undefined
+        ].filter(Boolean).join(' · '),
+        rows: application
+      });
+    }
+    const scenario = execution.scenarios.find((candidate) => candidate.id === execution.selectedScenarioId);
+    const activeJobs = execution.jobs.filter(
+      (job) => job.role === 'generic' || scenario?.jobs.includes(job.id)
+    );
+    if (activeJobs.length > 0) {
+      result.push({
+        id: 'setup',
+        label: 'Setup jobs',
+        summary: 'First start only',
+        rows: activeJobs.map((job) => ({
+          id: job.id,
+          title: job.label ?? job.id,
+          value: formatPlanCommand(job.command),
+          meta: `${humanize(job.role)} · ${job.retrySafe ? 'retry-safe' : 'not retry-safe'}`
+        }))
+      });
+    }
+  }
+  if (execution.routes.length > 0) {
+    result.push({
+      id: 'routes',
+      label: 'Routes',
+      summary: 'Stable across replacements',
+      rows: execution.routes.map((route) => ({
+        id: route.id,
+        title: route.id,
+        value: `→ ${route.service}.${route.port}`,
+        meta: route.primary ? 'primary' : undefined
+      }))
+    });
+  }
+  if (execution.adapter === 'COMPOSE') {
+    const volumes = execution.compose?.inspection?.volumes.filter((volume) => !volume.external) ?? [];
+    if (volumes.length > 0) {
+      result.push({
+        id: 'data',
+        label: 'Managed data',
+        summary: 'Project-owned · persistent',
+        rows: volumes.map((volume) => ({
+          id: volume.name,
+          title: volume.name,
+          value: 'Compose volume',
+          meta: 'owned by this preview'
+        }))
+      });
+    }
+  } else {
+    const scenario = execution.scenarios.find((candidate) => candidate.id === execution.selectedScenarioId);
+    const resources = execution.resources.filter((resource) => scenario?.resources.includes(resource.id));
+    if (resources.length > 0) {
+      result.push({
+        id: 'data',
+        label: 'Managed data',
+        summary: 'Preview-owned · persistent',
+        rows: resources.map((resource) => ({
+          id: resource.id,
+          title: resource.id,
+          value: `${resource.type === 'postgres' ? 'PostgreSQL' : 'Redis'} · ${resource.image}`,
+          meta: 'generated credentials'
+        }))
+      });
+    }
+  }
+  if (execution.inputs?.length) {
+    result.push({
+      id: 'inputs',
+      label: 'Private inputs',
+      summary: 'Values excluded from approval',
+      rows: execution.inputs.map((input) => ({
+        id: input.id,
+        title: input.label ?? input.id,
+        value: input.id,
+        meta: 'encrypted · recipient-scoped'
+      }))
+    });
+  }
+  if (execution.attachments?.length) {
+    result.push({
+      id: 'attachments',
+      label: 'Attached dependencies',
+      summary: 'External · never managed',
+      rows: execution.attachments.map((attachment) => ({
+        id: attachment.id,
+        title: attachment.label ?? attachment.id,
+        value: formatAttachmentTarget(attachment),
+        meta: `${attachment.type.toUpperCase()} · non-owned`
+      }))
+    });
+  }
+  return result;
+}
+
+function PlanTopologyRow({ title, value, meta }: PlanTopologyRowModel) {
+  return (
+    <div className="tm-preview-topology-row">
+      <span aria-hidden="true">›</span>
+      <code>{title}</code>
+      <code>{value}</code>
+      {meta ? <small>{meta}</small> : <span />}
+    </div>
+  );
+}
+
+function PlanAuthorityCard({ plan }: { plan: PreviewPlanRecord }) {
+  const identity = plan.ociCapability?.identity;
+  const rows = plan.executionPlan.adapter === 'COMPOSE'
+    ? [
+        { label: 'Engine', value: identity ? `${identity.contextName} · ${identity.operatingSystem}/${identity.architecture}` : 'Selected local OCI engine' },
+        { label: 'Configuration', value: plan.executionPlan.compose?.files.join(', ') ?? 'compose.yaml' },
+        { label: 'Project', value: 'One task-scoped serialized project' },
+        { label: 'Environment', value: 'Repository Compose configuration · approved as inspected' }
+      ]
+    : [
+        { label: 'Engine', value: identity ? `${identity.contextName} · ${identity.operatingSystem}/${identity.architecture}` : 'Native host' },
+        { label: 'Runs as', value: 'Your local user · not sandboxed' },
+        { label: 'Network', value: 'Unrestricted for launched processes' },
+        { label: 'Environment', value: 'Repository literals + generated and private bindings' }
+      ];
+  return (
+    <section className="tm-preview-surface tm-preview-authority-card">
+      <h3 className="tm-preview-surface__title">Authority</h3>
+      <div className="tm-preview-authority-card__rows">
+        {rows.map((row) => <AuthorityRow key={row.label} {...row} />)}
       </div>
-      {warnings.length > 0 ? (
-        <p className="tm-preview-authority__warning-summary">
-          {plan.executionPlan.adapter === 'COMPOSE'
-            ? 'Compose may build or pull images on the selected local engine.'
-            : 'Native commands run unsandboxed and may access the network.'}
-        </p>
-      ) : null}
-      <PlanWarnings warnings={warnings} />
-      <details className="tm-preview-disclosure">
-        <summary>Exact commands, recipients, and cleanup details</summary>
-        {exactDetails}
-      </details>
     </section>
   );
+}
+
+function PlanAdvisories({ warnings }: { warnings: string[] }) {
+  return (
+    <section className="tm-preview-surface tm-preview-advisories">
+      <h3 className="tm-preview-surface__title">Advisories</h3>
+      <div className="tm-preview-advisories__list">
+        {warnings.map((warning) => (
+          <p key={warning}><span aria-hidden="true" />{warning}</p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PlanCleanupCard({ plan }: { plan: PreviewPlanRecord }) {
+  const managedResourceIds = plan.executionPlan.resources.map((resource) => resource.id);
+  const rows = [
+    {
+      label: 'Stop preview',
+      value: plan.executionPlan.adapter === 'COMPOSE'
+        ? 'Deletes the exact task-scoped project and its owned volumes'
+        : managedResourceIds.length > 0
+          ? `Deletes exact preview runtime and managed data for ${managedResourceIds.join(', ')}`
+          : 'Deletes exact preview runtime; this plan has no managed data'
+    },
+    ...(plan.executionPlan.resources.length > 0
+      ? [{ label: 'Reset', value: 'Deletes one selected managed resource and preserves the rest' }]
+      : []),
+    {
+      label: 'Replace',
+      value: plan.executionPlan.adapter === 'COMPOSE'
+        ? 'Serializes project activation after build and inspection'
+        : managedResourceIds.length > 0
+          ? `Keeps managed data for ${managedResourceIds.join(', ')} and cuts routes over only after readiness`
+          : 'Cuts routes over only after readiness; no managed data is involved'
+    },
+    { label: 'Attached', value: 'Never stopped, reset, deleted, or otherwise managed' }
+  ];
+  return (
+    <section className="tm-preview-surface tm-preview-authority-card">
+      <h3 className="tm-preview-surface__title">Cleanup contract</h3>
+      <div className="tm-preview-authority-card__rows">
+        {rows.map((row) => <AuthorityRow key={row.label} {...row} />)}
+      </div>
+    </section>
+  );
+}
+
+function AuthorityRow({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><p>{value}</p></div>;
+}
+
+function formatPlanCommand(argv: string[]): string {
+  return argv.map((argument) => JSON.stringify(argument)).join(' ');
 }
 
 function PreviewApplicationSection({
   plan,
   view,
   attempts,
-  runtimeResources,
-  composeProjects
+  composeProjects,
+  onOpenLog
 }: {
   plan: PreviewPlanRecord;
   view: PreviewViewModel;
   attempts: PreviewNodeAttemptRecord[];
-  runtimeResources: PreviewResourceRecord[];
   composeProjects: PreviewComposeProjectRecord[];
+  onOpenLog(attemptId: string): void;
 }) {
   const diagnosticGeneration = view.replacementGeneration ??
     view.failedReplacementGeneration ?? view.generation;
@@ -676,73 +1015,148 @@ function PreviewApplicationSection({
     if (!latestByNode.has(attempt.nodeId)) latestByNode.set(attempt.nodeId, attempt);
   }
   const nativeNodes = [
-    ...plan.executionPlan.jobs.map((node) => ({ ...node, kind: 'Job' })),
-    ...plan.executionPlan.services.map((node) => ({ ...node, kind: 'Service' })),
-    ...plan.executionPlan.workers.map((node) => ({ ...node, kind: 'Worker' }))
+    ...plan.executionPlan.services.map((node) => ({ ...node, kind: 'Service', group: 'application' as const })),
+    ...plan.executionPlan.workers.map((node) => ({ ...node, kind: 'Worker', group: 'application' as const })),
+    ...plan.executionPlan.jobs.map((node) => ({ ...node, kind: 'Job', group: 'setup' as const }))
   ];
   const composeServices = plan.executionPlan.compose?.inspection?.services ?? [];
   const composeProject = [...composeProjects].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-  const observedNativeNodes = nativeNodes.flatMap((node) => {
+  const includeQueuedNodes = view.status === 'Starting' || view.status === 'Replacing';
+  const visibleNativeNodes = nativeNodes.flatMap((node) => {
     const attempt = latestByNode.get(node.id);
-    return attempt ? [{ node, attempt }] : [];
+    return attempt || includeQueuedNodes ? [{ node, attempt }] : [];
   });
   const observedComposeServices = composeProject && composeProject.state !== 'STOPPED'
     ? composeServices
     : [];
-  const currentRuntime = runtimeResources
-    .filter((resource) => resource.generationId === diagnosticGeneration?.id)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const activeAttempts = view.activeGeneration && view.activeGeneration.id !== diagnosticGeneration?.id
+    ? latestAttemptsByNode(attempts.filter((attempt) => attempt.generationId === view.activeGeneration?.id))
+    : [];
+  const applicationNodes = visibleNativeNodes.filter(({ node }) => node.group === 'application');
+  const setupNodes = visibleNativeNodes.filter(({ node }) => node.group === 'setup');
 
-  if (observedNativeNodes.length === 0 && observedComposeServices.length === 0 && currentRuntime.length === 0) {
+  if (visibleNativeNodes.length === 0 && observedComposeServices.length === 0 && activeAttempts.length === 0) {
     return null;
   }
 
   return (
-    <section className="tm-preview-workspace__section" aria-labelledby="preview-application">
-      <SectionHeading
-        id="preview-application"
-        title="Application"
-        detail={plan.executionPlan.adapter === 'COMPOSE'
-          ? `Task-scoped Compose project · ${humanize(composeProject?.state ?? 'Starting')}.`
-          : undefined}
-      />
-      <div className="tm-preview-rows">
-        {plan.executionPlan.adapter === 'COMPOSE'
-          ? observedComposeServices.map((service) => (
+    <div className="tm-preview-application-stack">
+      <section className="tm-preview-surface" aria-labelledby="preview-application">
+        {plan.executionPlan.adapter === 'COMPOSE' ? (
+          <PreviewOperationalGroup
+            id="preview-application"
+            title="Compose services"
+            summary={`${observedComposeServices.length} ${observedComposeServices.length === 1 ? 'service' : 'services'} · task-scoped project`}
+          >
+            {observedComposeServices.map((service) => (
               <OperationalRow
                 key={service.id}
                 title={service.id}
-                kind="Compose service"
+                kind={service.image ? `Compose service · ${service.image}` : 'Compose service · local build'}
                 state={composeProject?.state ?? 'STARTING'}
               />
-            ))
-          : observedNativeNodes.map(({ node, attempt }) => (
-                <OperationalRow
-                  key={`${node.kind}-${node.id}`}
-                  title={node.label ?? node.id}
-                  kind={node.kind}
-                  state={attempt.state}
-                />
-              ))}
-      </div>
-      {currentRuntime.length > 0 ? (
-        <details className="tm-preview-disclosure">
-          <summary>Runtime ownership records · {currentRuntime.length}</summary>
-          <div className="tm-preview-rows">
-            {currentRuntime.map((resource) => (
-              <OperationalRow
-                key={resource.id}
-                title={resource.logicalNodeId}
-                kind="Native process"
-                detail="Verified preview-owned runtime"
-                state={resource.state}
-              />
             ))}
-          </div>
-        </details>
+          </PreviewOperationalGroup>
+        ) : (
+          <>
+            {applicationNodes.length > 0 ? (
+              <PreviewOperationalGroup
+                id="preview-application"
+                title={view.activeGeneration && diagnosticGeneration?.id !== view.activeGeneration.id
+                  ? `Candidate · ${shortId(diagnosticGeneration?.id ?? '')}`
+                  : 'Application'}
+                summary={view.activeGeneration && diagnosticGeneration?.id !== view.activeGeneration.id
+                  ? 'Routes stay on the active generation until readiness'
+                  : `${applicationNodes.length} ${applicationNodes.length === 1 ? 'node' : 'nodes'}`}
+              >
+                {applicationNodes.map(({ node, attempt }) => (
+                  <OperationalRow
+                    key={`${node.kind}-${node.id}`}
+                    title={node.label ?? node.id}
+                    kind={attempt ? node.kind : `${node.kind} · waiting for dependencies`}
+                    state={attempt?.state ?? 'QUEUED'}
+                    onLogs={attempt ? () => onOpenLog(attempt.id) : undefined}
+                  />
+                ))}
+              </PreviewOperationalGroup>
+            ) : null}
+            {setupNodes.length > 0 ? (
+              <PreviewOperationalGroup
+                id="preview-setup-jobs"
+                title="Setup jobs"
+                summary="First start only · replacements do not rerun completed setup"
+              >
+                {setupNodes.map(({ node, attempt }) => (
+                  <OperationalRow
+                    key={`${node.kind}-${node.id}`}
+                    title={node.label ?? node.id}
+                    kind={attempt ? node.kind : `${node.kind} · waiting for dependencies`}
+                    state={attempt?.state ?? 'QUEUED'}
+                    onLogs={attempt ? () => onOpenLog(attempt.id) : undefined}
+                  />
+                ))}
+              </PreviewOperationalGroup>
+            ) : null}
+          </>
+        )}
+      </section>
+      {view.activeGeneration && diagnosticGeneration?.id !== view.activeGeneration.id ? (
+        <section className="tm-preview-surface tm-preview-active-generation" aria-label="Active generation">
+          <PreviewOperationalGroup
+            id="preview-active-generation"
+            title={`Active · ${shortId(view.activeGeneration.id)}`}
+            summary="Keeps serving until the candidate is ready"
+          >
+            {activeAttempts.length > 0 ? activeAttempts.map((attempt) => (
+              <OperationalRow
+                key={attempt.id}
+                title={attempt.nodeId}
+                kind={humanize(attempt.kind)}
+                state={attempt.state}
+                onLogs={() => onOpenLog(attempt.id)}
+              />
+            )) : (
+              <OperationalRow
+                title="Current application"
+                kind="Routes remain attached"
+                state="READY"
+              />
+            )}
+          </PreviewOperationalGroup>
+        </section>
       ) : null}
-    </section>
+    </div>
   );
+}
+
+function PreviewOperationalGroup({
+  id,
+  title,
+  summary,
+  children
+}: {
+  id: string;
+  title: string;
+  summary?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="tm-preview-operational-group">
+      <div className="tm-preview-operational-group__head">
+        <h3 id={id}>{title}</h3>
+        {summary ? <span>{summary}</span> : null}
+      </div>
+      <div className="tm-preview-rows">{children}</div>
+    </div>
+  );
+}
+
+function latestAttemptsByNode(attempts: PreviewNodeAttemptRecord[]): PreviewNodeAttemptRecord[] {
+  const byNode = new Map<string, PreviewNodeAttemptRecord>();
+  for (const attempt of [...attempts].sort((a, b) => b.attempt - a.attempt)) {
+    if (!byNode.has(attempt.nodeId)) byNode.set(attempt.nodeId, attempt);
+  }
+  return [...byNode.values()];
 }
 
 function PreviewRoutesSection({
@@ -765,7 +1179,7 @@ function PreviewRoutesSection({
   );
   if (routes.length === 0) return null;
   return (
-    <section className="tm-preview-workspace__section" aria-labelledby="preview-routes">
+    <section className="tm-preview-surface" aria-labelledby="preview-routes">
       <SectionHeading
         id="preview-routes"
         title="Routes"
@@ -779,8 +1193,14 @@ function PreviewRoutesSection({
               <code>{route.url}</code>
               <span>{generation.routingState.toLowerCase()} generation</span>
             </div>
-            <button type="button" className="tm-preview-workspace__quiet" onClick={() => void onOpen(generation, route)}>
-              Open
+            <button
+              type="button"
+              className="tm-preview-icon-button"
+              aria-label={`Open ${route.id} route`}
+              title={`Open ${route.hostname}`}
+              onClick={() => void onOpen(generation, route)}
+            >
+              <OpenIcon />
             </button>
           </div>
         ))}
@@ -791,18 +1211,23 @@ function PreviewRoutesSection({
 
 function PreviewTechnicalDetails({
   view,
-  generations
+  generations,
+  runtimeResources
 }: {
   view: PreviewViewModel;
   generations: PreviewGenerationRecord[];
+  runtimeResources: PreviewResourceRecord[];
 }) {
   const current = view.replacementGeneration ?? view.failedReplacementGeneration ?? view.generation;
   const history = [...generations]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, 8);
+  const currentRuntime = runtimeResources
+    .filter((resource) => resource.generationId === current?.id)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   if (!current) return null;
   return (
-    <details className="tm-preview-disclosure tm-preview-technical-details">
+    <details className="tm-preview-surface tm-preview-disclosure tm-preview-technical-details">
       <summary>Technical details</summary>
       <div className="tm-preview-technical-details__body">
         <p>Captured {formatDate(current.createdAt)}.</p>
@@ -812,6 +1237,21 @@ function PreviewTechnicalDetails({
           <div><dt>Source</dt><dd><code>{shortId(current.sourceHeadSha)}</code></dd></div>
           <div><dt>Routing</dt><dd>{humanize(current.routingState)}</dd></div>
         </dl>
+        {currentRuntime.length > 0 ? (
+          <details className="tm-preview-disclosure">
+            <summary>Runtime ownership · {currentRuntime.length}</summary>
+            <div className="tm-preview-rows">
+              {currentRuntime.map((resource) => (
+                <OperationalRow
+                  key={resource.id}
+                  title={resource.logicalNodeId}
+                  kind="Verified native process group"
+                  state={resource.state}
+                />
+              ))}
+            </div>
+          </details>
+        ) : null}
         {history.length > 1 ? (
           <details className="tm-preview-disclosure">
             <summary>Generation history · {history.length}</summary>
@@ -865,7 +1305,7 @@ function PreviewDataSection({
   if (resources.length === 0 && ownedComposeVolumes.length === 0) return null;
 
   return (
-    <section className="tm-preview-workspace__section" aria-labelledby="preview-data">
+    <section className="tm-preview-surface" aria-labelledby="preview-data">
       <SectionHeading
         id="preview-data"
         title="Managed data"
@@ -898,17 +1338,19 @@ function PreviewDataSection({
 function PreviewBindingsSection({
   plan,
   localBindings,
-  readiness
+  readiness,
+  startupPending = false
 }: {
   plan: PreviewPlanRecord;
   localBindings: PreviewLocalAttachmentBindingRecord[];
   readiness: NonNullable<PreviewGenerationRecord['attachmentReadiness']>;
+  startupPending?: boolean;
 }) {
   const attachments = plan.executionPlan.attachments ?? [];
   if (attachments.length === 0) return null;
   const readinessById = new Map(readiness.map((evidence) => [evidence.attachmentId, evidence]));
   return (
-    <section className="tm-preview-workspace__section" aria-labelledby="preview-bindings">
+    <section className="tm-preview-surface" aria-labelledby="preview-bindings">
       <SectionHeading
         id="preview-bindings"
         title="Attached dependencies"
@@ -926,10 +1368,163 @@ function PreviewBindingsSection({
               detail={formatAttachmentTarget(attachment, localBinding?.target)}
               state={evidence
                 ? evidence.status === 'PASSED' ? 'Startup check passed' : humanize(evidence.failureCode ?? 'Check failed')
-                : attachment.check ? 'Not checked this generation' : 'No check declared'}
+                : attachment.check
+                  ? startupPending ? 'Checks once at startup' : 'Not checked this generation'
+                  : 'No check declared'}
             />
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+function PreviewConfigurationRequired({
+  taskId,
+  plan,
+  approval,
+  readiness,
+  localBindings,
+  requestedInputId,
+  onInputRequestHandled,
+  onChanged
+}: {
+  taskId: string;
+  plan: PreviewPlanRecord;
+  approval?: PreviewApprovalRecord;
+  readiness: PreviewExecutionReadiness;
+  localBindings: PreviewLocalAttachmentBindingRecord[];
+  requestedInputId?: string;
+  onInputRequestHandled(): void;
+  onChanged(): Promise<void>;
+}) {
+  return (
+    <div className="tm-preview-workspace__columns tm-preview-configuration">
+      <div className="tm-preview-workspace__column">
+        <PreviewPrivateInputsSection
+          taskId={taskId}
+          plan={plan}
+          readiness={readiness}
+          wide
+          requestedInputId={requestedInputId}
+          onInputRequestHandled={onInputRequestHandled}
+          onChanged={onChanged}
+        />
+        <PreviewBindingsSection
+          plan={plan}
+          localBindings={localBindings}
+          readiness={[]}
+          startupPending
+        />
+        <PreviewPlanAuthority plan={plan} approval={approval} />
+      </div>
+      <aside className="tm-preview-workspace__column tm-preview-workspace__column--side">
+        <PreviewStartBlockers blockers={readiness.blockers} />
+        <PreviewOwnershipCard plan={plan} />
+      </aside>
+    </div>
+  );
+}
+
+function PreviewPrivateInputsSection({
+  taskId,
+  plan,
+  readiness,
+  wide = false,
+  requestedInputId,
+  onInputRequestHandled,
+  onChanged
+}: {
+  taskId: string;
+  plan: PreviewPlanRecord;
+  readiness?: PreviewExecutionReadiness;
+  wide?: boolean;
+  requestedInputId?: string;
+  onInputRequestHandled?(): void;
+  onChanged(): Promise<void>;
+}) {
+  const inputs = plan.executionPlan.inputs ?? [];
+  const blockers = new Map(
+    (readiness?.blockers ?? []).map((blocker) => [blocker.inputId, blocker])
+  );
+  if (inputs.length === 0) return null;
+  return (
+    <section
+      className={`tm-preview-surface tm-preview-private-inputs${wide ? ' tm-preview-private-inputs--wide' : ''}`}
+      aria-labelledby="preview-private-inputs"
+    >
+      <SectionHeading
+        id="preview-private-inputs"
+        title={wide ? 'Inputs' : 'Private inputs'}
+        detail="Values stay encrypted on this Mac and are never shown after entry."
+      />
+      <div className="tm-preview-inputs">
+        {inputs.map((input) => (
+          <PrivateInputControl
+            key={input.id}
+            taskId={taskId}
+            inputId={input.id}
+            label={input.label ?? input.id}
+            blocker={blockers.get(input.id)}
+            recipients={privateInputRecipients(plan, input.id)}
+            wide={wide}
+            openRequested={requestedInputId === input.id}
+            onOpenHandled={onInputRequestHandled}
+            onChanged={onChanged}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PreviewStartBlockers({ blockers }: { blockers: PreviewExecutionBlocker[] }) {
+  return (
+    <section className="tm-preview-surface tm-preview-blockers">
+      <h3 className="tm-preview-surface__title">Blocking start</h3>
+      <div className="tm-preview-advisories__list">
+        {blockers.map((blocker) => (
+          <p key={`${blocker.kind}-${blocker.inputId}`}>
+            <span aria-hidden="true" />
+            <span><code>{blocker.inputId}</code> {executionBlockerDescription(blocker)} — required</span>
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PreviewOwnershipCard({ plan }: { plan: PreviewPlanRecord }) {
+  const attachments = plan.executionPlan.attachments ?? [];
+  const managed = plan.executionPlan.adapter === 'COMPOSE'
+    ? plan.executionPlan.compose?.inspection?.volumes.filter((volume) => !volume.external).map((volume) => volume.name) ?? []
+    : plan.executionPlan.resources.map((resource) => resource.id);
+  const crossTask = attachments.filter(
+    (attachment) => attachment.target.type === 'task-preview-route'
+  ).map((attachment) => attachment.id);
+  const rows = [
+    {
+      label: 'Managed',
+      value: managed.length > 0
+        ? `${managed.join(', ')} — created, reset, and deleted only by this preview`
+        : 'None in this plan'
+    },
+    {
+      label: 'Attached',
+      value: attachments.length > 0
+        ? `${attachments.map((attachment) => attachment.id).join(', ')} — checked or used, never managed`
+        : 'None in this plan'
+    },
+    ...(crossTask.length > 0 ? [{
+      label: 'Cross-task',
+      value: `${crossTask.join(', ')} — remains owned by its producer task`
+    }] : [])
+  ];
+  return (
+    <section className="tm-preview-surface tm-preview-authority-card">
+      <h3 className="tm-preview-surface__title">Ownership</h3>
+      <div className="tm-preview-authority-card__rows">
+        {rows.map((row) => <AuthorityRow key={row.label} {...row} />)}
       </div>
     </section>
   );
@@ -939,6 +1534,11 @@ function PrivateInputControl(props: {
   taskId: string;
   inputId: string;
   label: string;
+  blocker?: PreviewExecutionBlocker;
+  recipients: string[];
+  wide?: boolean;
+  openRequested?: boolean;
+  onOpenHandled?(): void;
   onChanged(): Promise<void>;
 }) {
   const valueRef = useRef<HTMLInputElement>(null);
@@ -947,6 +1547,7 @@ function PrivateInputControl(props: {
   const menuRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error' | 'neutral'; message: string }>();
   const run = async (action: () => Promise<PreviewPrivateInputOperationResult>) => {
@@ -998,11 +1599,43 @@ function PrivateInputControl(props: {
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [menuOpen]);
+  useEffect(() => {
+    if (!props.openRequested) return;
+    setFeedback(undefined);
+    setEditorOpen(true);
+    props.onOpenHandled?.();
+  }, [props.openRequested, props.onOpenHandled]);
+  const inputStatus = props.blocker
+    ? `private · ${executionBlockerDescription(props.blocker)}${
+        props.recipients.length > 0 ? ` — required by ${props.recipients.join(', ')}` : ''
+      }`
+    : `private · configured${
+        props.recipients.length > 0 ? ` for ${props.recipients.join(', ')}` : ''
+      } · value hidden`;
   return (
-    <div className="tm-preview-input">
-      <div className="tm-preview-input__head">
-        <div><strong>{props.label}</strong><code>{props.inputId}</code></div>
-        <div className="tm-taskmenu" ref={menuRef}>
+    <div className={`tm-preview-private-input${props.wide ? ' tm-preview-private-input--wide' : ''}`}>
+      <span
+        className={`tm-preview-private-input__dot tm-preview-private-input__dot--${
+          props.blocker ? blockerTone(props.blocker) : 'success'
+        }`}
+        aria-hidden="true"
+      />
+      <code className="tm-preview-private-input__id">{props.inputId}</code>
+      <span className="tm-preview-private-input__status" title={props.label}>{inputStatus}</span>
+      <div className="tm-preview-private-input__actions">
+        <button
+          data-preview-input-trigger
+          type="button"
+          className="outline-button"
+          disabled={busy}
+          onClick={() => {
+            setFeedback(undefined);
+            setEditorOpen(true);
+          }}
+        >
+          {props.blocker?.kind === 'PRIVATE_INPUT_MISSING' ? 'Set value…' : 'Replace…'}
+        </button>
+        {props.blocker?.kind === 'PRIVATE_INPUT_MISSING' ? null : <div className="tm-taskmenu" ref={menuRef}>
           <button
             ref={triggerRef}
             type="button"
@@ -1030,26 +1663,9 @@ function PrivateInputControl(props: {
               </button>
             </div>
           ) : null}
-        </div>
+        </div>}
       </div>
-      <div className="tm-preview-input__entry">
-        <label className="tm-field">
-          <span>New value</span>
-          <input ref={valueRef} type="password" autoComplete="off" disabled={busy} />
-        </label>
-        <button type="button" className="outline-button" disabled={busy} onClick={() => void run(async () => {
-          const api = window.previewPrivateInputs;
-          if (!api) throw new Error('Private input API unavailable.');
-          return api.set({
-            taskId: props.taskId,
-            inputId: props.inputId,
-            value: valueRef.current?.value ?? ''
-          });
-        })}>
-          {busy ? 'Saving…' : 'Save value'}
-        </button>
-      </div>
-      {feedback ? (
+      {feedback && !editorOpen ? (
         <p
           className={`tm-preview-input__feedback tm-preview-input__feedback--${feedback.tone}`}
           role={feedback.tone === 'error' ? 'alert' : 'status'}
@@ -1057,26 +1673,41 @@ function PrivateInputControl(props: {
           {feedback.message}
         </p>
       ) : null}
-      <details className="tm-preview-disclosure tm-preview-input__import">
-        <summary>Import one .env key</summary>
-        <div className="tm-preview-input__entry">
-          <label className="tm-field">
-            <span>Selected key</span>
-            <input ref={keyRef} type="text" autoComplete="off" disabled={busy} />
-          </label>
-          <button type="button" className="outline-button" disabled={busy} onClick={() => void run(async () => {
-            const api = window.previewPrivateInputs;
-            if (!api) throw new Error('Private input API unavailable.');
-            return api.import({
-              taskId: props.taskId,
-              inputId: props.inputId,
-              key: keyRef.current?.value ?? ''
+      {editorOpen ? (
+        <PreviewPrivateInputEditorModal
+          label={props.label}
+          inputId={props.inputId}
+          valueRef={valueRef}
+          keyRef={keyRef}
+          busy={busy}
+          feedback={feedback}
+          onCancel={() => setEditorOpen(false)}
+          onSave={() => void (async () => {
+            const saved = await run(async () => {
+              const api = window.previewPrivateInputs;
+              if (!api) throw new Error('Private input API unavailable.');
+              return api.set({
+                taskId: props.taskId,
+                inputId: props.inputId,
+                value: valueRef.current?.value ?? ''
+              });
             });
-          })}>
-            Choose file and import
-          </button>
-        </div>
-      </details>
+            if (saved) setEditorOpen(false);
+          })()}
+          onImport={() => void (async () => {
+            const imported = await run(async () => {
+              const api = window.previewPrivateInputs;
+              if (!api) throw new Error('Private input API unavailable.');
+              return api.import({
+                taskId: props.taskId,
+                inputId: props.inputId,
+                key: keyRef.current?.value ?? ''
+              });
+            });
+            if (imported) setEditorOpen(false);
+          })()}
+        />
+      ) : null}
       {confirmDelete ? (
         <PreviewConfirmationModal
           confirmation={{
@@ -1098,6 +1729,99 @@ function PrivateInputControl(props: {
           })()}
         />
       ) : null}
+    </div>
+  );
+}
+
+function PreviewPrivateInputEditorModal({
+  label,
+  inputId,
+  valueRef,
+  keyRef,
+  busy,
+  feedback,
+  onCancel,
+  onSave,
+  onImport
+}: {
+  label: string;
+  inputId: string;
+  valueRef: RefObject<HTMLInputElement | null>;
+  keyRef: RefObject<HTMLInputElement | null>;
+  busy: boolean;
+  feedback?: { tone: 'success' | 'error' | 'neutral'; message: string };
+  onCancel(): void;
+  onSave(): void;
+  onImport(): void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const busyRef = useRef(busy);
+  const cancelRef = useRef(onCancel);
+  busyRef.current = busy;
+  cancelRef.current = onCancel;
+  useEffect(() => {
+    valueRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyRef.current) cancelRef.current();
+      if (event.key !== 'Tab') return;
+      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      ) ?? [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [valueRef]);
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="preview-private-input-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <div ref={panelRef} className="tm-modal__panel tm-preview-private-editor">
+        <div>
+          <h3 id="preview-private-input-title">Set {label}</h3>
+          <p>
+            Encrypted on this Mac and delivered only to declared recipients. The value cannot be viewed again—only replaced or deleted.
+          </p>
+        </div>
+        <label className="tm-field">
+          <span>Private value</span>
+          <input ref={valueRef} type="password" autoComplete="off" disabled={busy} />
+        </label>
+        {feedback?.tone === 'error' ? (
+          <p className="tm-preview-input__feedback tm-preview-input__feedback--error" role="alert">
+            {feedback.message}
+          </p>
+        ) : null}
+        <details className="tm-preview-disclosure tm-preview-private-editor__import">
+          <summary>Import one .env key</summary>
+          <div className="tm-preview-input__entry">
+            <label className="tm-field">
+              <span>Selected key</span>
+              <input ref={keyRef} type="text" autoComplete="off" disabled={busy} />
+            </label>
+            <button type="button" className="outline-button" disabled={busy} onClick={onImport}>
+              Choose file and import
+            </button>
+          </div>
+          <p className="tm-preview-private-editor__note">
+            Only the explicitly named key is imported for <code>{inputId}</code>. File contents and paths never return to this window.
+          </p>
+        </details>
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button type="button" className="primary-button" disabled={busy} onClick={onSave}>
+            {busy ? 'Saving…' : 'Save encrypted value'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1206,10 +1930,12 @@ function PreviewConfirmationModal({
   onConfirm(): void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const [confirmationText, setConfirmationText] = useState('');
   const busyRef = useRef(busy);
   const onCancelRef = useRef(onCancel);
   busyRef.current = busy;
   onCancelRef.current = onCancel;
+  useEffect(() => setConfirmationText(''), [confirmation.requireText]);
   useEffect(() => {
     panelRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1239,6 +1965,29 @@ function PreviewConfirmationModal({
       <div ref={panelRef} className="tm-modal__panel tm-preview-confirmation">
         <h3 id="preview-confirmation-title">{confirmation.title}</h3>
         <p>{confirmation.body}</p>
+        {confirmation.impacts?.length ? (
+          <div className="tm-preview-confirmation__impacts">
+            {confirmation.impacts.map((impact) => (
+              <div key={impact.label}>
+                <span className={`tm-preview-confirmation__dot tm-preview-confirmation__dot--${impact.tone}`} aria-hidden="true" />
+                <strong>{impact.label}</strong>
+                <p>{impact.detail}</p>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {confirmation.requireText ? (
+          <label className="tm-field tm-preview-confirmation__phrase">
+            <span>Type <code>{confirmation.requireText}</code> to confirm</span>
+            <input
+              type="text"
+              autoComplete="off"
+              value={confirmationText}
+              disabled={busy}
+              onChange={(event) => setConfirmationText(event.target.value)}
+            />
+          </label>
+        ) : null}
         <div className="tm-modal__actions">
           <button type="button" className="outline-button" autoFocus disabled={busy} onClick={onCancel}>
             Cancel
@@ -1246,7 +1995,9 @@ function PreviewConfirmationModal({
           <button
             type="button"
             className={confirmation.danger ? 'danger-button' : 'primary-button'}
-            disabled={busy}
+            disabled={busy || Boolean(
+              confirmation.requireText && confirmationText !== confirmation.requireText
+            )}
             onClick={onConfirm}
           >
             {busy ? 'Working…' : confirmation.confirmLabel}
@@ -1277,9 +2028,9 @@ function PreviewLogDock({
   return (
     <section className="tm-preview-logdock" aria-label="Preview logs">
       <div className="tm-preview-logdock__head">
-        <strong>Generation logs</strong>
         <div className="tm-preview-logdock__controls">
           <select
+            className="tm-preview-logdock__attempt"
             aria-label="Preview node attempt"
             value={selectedAttempt?.id ?? ''}
             onChange={(event) => onAttemptChange(event.target.value)}
@@ -1291,6 +2042,7 @@ function PreviewLogDock({
             ))}
           </select>
           <select
+            className="tm-preview-logdock__stream"
             aria-label="Preview log stream"
             value={selectedStream}
             onChange={(event) => onStreamChange(event.target.value as 'stdout' | 'stderr')}
@@ -1315,15 +2067,6 @@ function SectionHeading({ id, title, detail }: { id: string; title: string; deta
   );
 }
 
-function PlanSummaryRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="tm-preview-plan-summary__row">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 function PlanWarnings({ warnings }: { warnings: string[] }) {
   if (warnings.length === 0) return null;
   return (
@@ -1340,23 +2083,38 @@ function OperationalRow({
   title,
   kind,
   detail,
-  state
+  state,
+  onLogs
 }: {
   title: string;
   kind: string;
   detail?: string;
   state: string;
+  onLogs?: () => void;
 }) {
   return (
     <div className="tm-preview-row">
+      <span
+        className={`tm-preview-row__dot tm-preview-row__dot--${toneForRecordState(state)}`}
+        aria-hidden="true"
+      />
       <div className="tm-preview-row__copy">
         <strong>{title}</strong>
         <span>{kind}</span>
         {detail ? <code>{detail}</code> : null}
       </div>
-      <span className={`tm-preview-state tm-preview-state--${toneForRecordState(state)}`}>
-        {humanize(state)}
-      </span>
+      <span className="tm-preview-row__state">{humanize(state)}</span>
+      {onLogs ? (
+        <button
+          type="button"
+          className="tm-preview-icon-button"
+          aria-label={`${title} logs`}
+          title={`Open ${title} logs`}
+          onClick={onLogs}
+        >
+          <TerminalIcon />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1380,22 +2138,147 @@ function KebabIcon() {
   );
 }
 
+function OpenIcon() {
+  return (
+    <svg aria-hidden="true" width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M4 10 10 4M5.5 4H10v4.5" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+      <path d="m2.5 4.5 3 2.5-3 2.5M7 10.5h4.5" />
+    </svg>
+  );
+}
+
 function previewTone(view: PreviewViewModel): 'neutral' | 'info' | 'action' | 'success' | 'error' {
   if (view.status === 'Starting' || view.status === 'Replacing') return 'info';
   return view.tone === 'warning' ? 'action' : view.tone;
 }
 
-function selectWorkspacePrimaryAction(
+function workspacePresentation(
+  view: PreviewViewModel,
+  executionReadiness?: PreviewExecutionReadiness,
+  readinessPending = false,
+  readinessCheckFailed = false
+): {
+  status: string;
+  tone: 'neutral' | 'info' | 'action' | 'success' | 'error';
+  meta?: string;
+  detail?: string;
+} {
+  const activeId = view.activeGeneration ? shortId(view.activeGeneration.id) : undefined;
+  const candidate = view.replacementGeneration ?? view.failedReplacementGeneration;
+  const candidateId = candidate ? shortId(candidate.id) : undefined;
+  if (view.status === 'Ready to start' && readinessPending && readinessCheckFailed) {
+    return {
+      status: 'Configuration check failed',
+      tone: 'error',
+      detail: 'Required private inputs could not be verified. Retry the check before starting.'
+    };
+  }
+  if (view.status === 'Ready to start' && readinessPending) {
+    return {
+      status: 'Checking configuration',
+      tone: 'info',
+      detail: 'Verifying required private inputs before Start becomes available.'
+    };
+  }
+  if (view.status === 'Ready to start' && executionReadiness?.status === 'BLOCKED') {
+    const count = executionReadiness.blockers.length;
+    return {
+      status: 'Configuration required',
+      tone: 'action',
+      meta: `· ${count} private ${count === 1 ? 'input' : 'inputs'} unavailable`,
+      detail: 'Start is blocked until every required private input resolves.'
+    };
+  }
+  if (view.failedReplacementGeneration && view.activeGeneration) {
+    const readinessFailure = view.latestAttempt?.readiness?.status === 'FAILED'
+      ? `${view.latestAttempt.nodeId} did not pass its readiness check. `
+      : '';
+    return {
+      status: 'Replacement failed',
+      tone: 'error',
+      meta: candidateId ? `· candidate ${candidateId}` : undefined,
+      detail: `${readinessFailure}${activeId ?? 'The current preview'} is still serving; stable routes never moved.`
+    };
+  }
+  if (view.status === 'Replacing') {
+    return {
+      status: 'Replacing',
+      tone: 'info',
+      meta: candidateId ? `· candidate ${candidateId}` : undefined,
+      detail: `${activeId ?? 'The current preview'} stays routed until the full candidate reaches readiness.`
+    };
+  }
+  if (view.status === 'Running' || view.status === 'Running · stale') {
+    return {
+      status: 'Running',
+      tone: 'success',
+      meta: activeId ? `· serving ${activeId}` : undefined,
+      detail: view.status === 'Running · stale'
+        ? 'Source changed after capture. The running preview still serves its captured code.'
+        : 'Source current · stable routes attached'
+    };
+  }
+  if (view.status === 'Starting') {
+    return {
+      status: 'Starting',
+      tone: 'info',
+      meta: view.latestAttempt ? `· running ${view.latestAttempt.nodeId}` : undefined,
+      detail: 'Captured source is moving through the approved startup graph.'
+    };
+  }
+  return {
+    status: view.status,
+    tone: previewTone(view),
+    detail: view.summary
+  };
+}
+
+function selectWorkspaceActions(
   view: PreviewViewModel,
   recommendedAction?: PreviewActionModel
-): PreviewActionModel | undefined {
+): { primary?: PreviewActionModel; secondary?: PreviewActionModel } {
+  const open = view.actions.find((action) => action.id === 'OPEN');
+  const start = view.actions.find((action) => action.id === 'START');
+  const stop = view.actions.find((action) => action.id === 'STOP');
   if (view.status === 'Starting') {
-    return view.actions.find((action) => action.id === 'STOP');
+    return { primary: stop };
   }
   if (view.status === 'Cleanup incomplete') {
-    return view.actions.find((action) => action.id === 'STOP' && action.label === 'Retry cleanup');
+    return {
+      primary: view.actions.find((action) => action.id === 'STOP' && action.label === 'Retry cleanup')
+    };
   }
-  return recommendedAction;
+  if (view.status === 'Replacing') {
+    return { primary: open, secondary: stop };
+  }
+  if (view.failedReplacementGeneration && view.activeGeneration) {
+    return { primary: open, secondary: start };
+  }
+  if (view.status === 'Running · stale') {
+    return { primary: open, secondary: start };
+  }
+  return { primary: recommendedAction };
+}
+
+function overviewActionLabel(action: PreviewActionModel, view: PreviewViewModel): string {
+  if (action.id === 'APPROVE') return 'Review & approve';
+  if (action.id === 'START' && view.failedReplacementGeneration) return 'Retry replace';
+  return action.label;
+}
+
+function workspaceActionLabel(action: PreviewActionModel, view: PreviewViewModel): string {
+  if (action.id === 'APPROVE') return 'Approve plan';
+  if (action.id === 'STOP' && view.status === 'Starting') return 'Cancel start';
+  if (action.id === 'STOP' && view.status === 'Replacing') return 'Cancel replace';
+  if (action.id === 'START' && view.failedReplacementGeneration) return 'Retry replace';
+  return action.label;
 }
 
 function isActionDisabled(controller: PreviewController, action: PreviewActionId): boolean {
@@ -1427,6 +2310,61 @@ function formatAttachmentTarget(
     return `${prefix}${target.host}:${target.port}${database}`;
   }
   return 'Local public target required';
+}
+
+function privateInputRecipients(plan: PreviewPlanRecord, inputId: string): string[] {
+  const recipients = new Set<string>();
+  for (const job of plan.executionPlan.jobs) {
+    if (environmentUsesPrivateInput(job.env, inputId)) recipients.add(job.id);
+  }
+  for (const node of [...plan.executionPlan.services, ...plan.executionPlan.workers]) {
+    const readinessEnv = node.ready.type === 'argv' ? node.ready.env : undefined;
+    const livenessEnv = node.liveness?.probe.type === 'argv'
+      ? node.liveness.probe.env
+      : undefined;
+    if (
+      environmentUsesPrivateInput(node.env, inputId) ||
+      environmentUsesPrivateInput(readinessEnv, inputId) ||
+      environmentUsesPrivateInput(livenessEnv, inputId)
+    ) recipients.add(node.id);
+  }
+  for (const attachment of plan.executionPlan.attachments ?? []) {
+    if ('passwordInput' in attachment && attachment.passwordInput === inputId) {
+      recipients.add(`${attachment.id} check`);
+    }
+  }
+  return [...recipients];
+}
+
+function environmentUsesPrivateInput(
+  environment: Record<string, unknown> | undefined,
+  inputId: string
+): boolean {
+  return Object.values(environment ?? {}).some((value) => (
+    typeof value === 'object' && value !== null &&
+    'type' in value && value.type === 'private-input' &&
+    'input' in value && value.input === inputId
+  ));
+}
+
+function executionBlockerDescription(blocker: PreviewExecutionBlocker): string {
+  if (blocker.kind === 'PRIVATE_INPUT_MISSING') return 'missing';
+  if (blocker.kind === 'PRIVATE_INPUT_LOCKED') return 'locked in Keychain';
+  if (blocker.kind === 'PRIVATE_INPUT_CORRUPT') return 'encrypted value unavailable';
+  return 'secure encryption unavailable';
+}
+
+function blockerTone(blocker: PreviewExecutionBlocker): 'action' | 'error' {
+  return blocker.kind === 'PRIVATE_INPUT_MISSING' || blocker.kind === 'PRIVATE_INPUT_LOCKED'
+    ? 'action'
+    : 'error';
+}
+
+function describeExecutionBlockers(blockers: PreviewExecutionBlocker[]): string {
+  if (blockers.length === 0) return 'Required private inputs are unavailable.';
+  return blockers.map(
+    (blocker) => `${blocker.inputId} is ${executionBlockerDescription(blocker)}.`
+  ).join(' ');
 }
 
 function uniqueGenerations(

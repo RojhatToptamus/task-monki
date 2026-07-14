@@ -115,6 +115,7 @@ import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
+import type { PreviewExecutionReadiness } from '../../shared/preview';
 
 interface TaskDetailProps {
   error?: string;
@@ -151,6 +152,7 @@ interface TaskDetailProps {
   previewComposeProjects: PreviewComposeProjectRecord[];
   previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
   previewRuntimeResources: PreviewResourceRecord[];
+  previewExecutionReadiness?: PreviewExecutionReadiness;
   showMascot: boolean;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
@@ -702,6 +704,7 @@ export function TaskDetail(props: TaskDetailProps) {
     composeProjects: props.previewComposeProjects,
     localBindings: props.previewLocalBindings,
     runtimeResources: props.previewRuntimeResources,
+    executionReadiness: props.previewExecutionReadiness,
     onResolve: props.onResolvePreview,
     onApprove: props.onApprovePreview,
     onStart: props.onStartPreview,

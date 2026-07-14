@@ -17,6 +17,7 @@ import {
   type WorkflowPhase,
   type WorktreeRecord
 } from '../../shared/contracts';
+import type { PreviewExecutionReadiness } from '../../shared/preview';
 import { taskManagerApi } from '../api/taskManagerClient';
 import {
   selectActiveRun,
@@ -125,6 +126,9 @@ export function App() {
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
+    Record<string, PreviewExecutionReadiness>
+  >({});
   const windowChromePlatform = resolveWindowChromePlatform();
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
@@ -178,6 +182,13 @@ export function App() {
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
     setSnapshot(next);
+    setPreviewExecutionReadiness((current) => {
+      const liveTaskIds = new Set(next.tasks.map((task) => task.id));
+      const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
+      return retainedEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(retainedEntries);
+    });
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
     const next = await taskManagerApi.getExternalToolStatus();
@@ -586,9 +597,10 @@ export function App() {
     try {
       const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
       if (result.status === 'UNAVAILABLE' || result.status === 'CONFIGURATION_REQUIRED') throw new Error(result.reason);
-      if (result.executionReadiness.status === 'BLOCKED') {
-        notify(`Preview needs ${result.executionReadiness.blockers.map((blocker) => blocker.inputId).join(', ')} before Start. The capability plan can still be approved.`, 'info');
-      }
+      setPreviewExecutionReadiness((current) => ({
+        ...current,
+        [taskId]: result.executionReadiness
+      }));
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not resolve preview configuration.');
@@ -615,8 +627,8 @@ export function App() {
       notify('Preview is ready.', 'success');
       await refresh();
     } catch (caught) {
-      reportActionError(caught, 'Could not start preview.');
       await refresh();
+      notify('Preview start did not complete. Review its status and logs.', 'error');
       throw caught;
     }
   };
@@ -1166,6 +1178,9 @@ export function App() {
             previewLocalBindings={selectedPreviewLocalBindings}
             previewRuntimeResources={selectedPreviewRuntimeResources}
             previewNodeAttempts={selectedPreviewNodeAttempts}
+            previewExecutionReadiness={selectedTask
+              ? previewExecutionReadiness[selectedTask.id]
+              : undefined}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}

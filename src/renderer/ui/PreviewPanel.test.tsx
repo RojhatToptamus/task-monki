@@ -21,7 +21,8 @@ describe('Preview surfaces', () => {
     );
 
     expect(html).toContain('Approval required');
-    expect(html).toContain('Review plan');
+    expect(html).toContain('1 application node · 1 setup job · 1 route');
+    expect(html).toContain('Review &amp; approve');
     expect(html).toContain('Details');
     expect(html).not.toContain('Currentness');
     expect(html).not.toContain('No attached route');
@@ -48,10 +49,39 @@ describe('Preview surfaces', () => {
     expect(html).not.toContain('Data scenario');
   });
 
+  it('routes private-input checks through Preview before allowing Overview to start', () => {
+    const unchecked = renderToStaticMarkup(
+      <PreviewOverviewCard
+        {...previewProps({ approved: true })}
+        executionReadiness={undefined}
+        onShowDetails={() => {}}
+      />
+    );
+    expect(unchecked).toContain('Inputs unchecked');
+    expect(unchecked).toContain('Required private inputs must be checked before startup.');
+    expect(unchecked).toContain('Check inputs');
+    expect(unchecked).not.toContain('Start preview');
+
+    const blocked = renderToStaticMarkup(
+      <PreviewOverviewCard
+        {...previewProps({ approved: true })}
+        executionReadiness={{
+          status: 'BLOCKED',
+          blockers: [{ kind: 'PRIVATE_INPUT_MISSING', inputId: 'api-token' }]
+        }}
+        onShowDetails={() => {}}
+      />
+    );
+    expect(blocked).toContain('Configuration required');
+    expect(blocked).toContain('Configure inputs');
+    expect(blocked).toContain('api-token is missing');
+    expect(blocked).not.toContain('Start preview');
+  });
+
   it('makes approval the focus and keeps exact authority behind disclosure', () => {
     const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps()} />);
 
-    expect(html).toContain('Review execution plan');
+    expect(html).toContain('Execution plan');
     expect(html).toContain('Approve plan');
     expect(html).toContain('Application');
     expect(html).toContain('Setup jobs');
@@ -59,7 +89,9 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Data and dependencies');
     expect(html).toContain('Private inputs');
     expect(html).toContain('Runtime authority');
-    expect(html).toContain('Exact commands, recipients, and cleanup details');
+    expect(html).toContain('Advisories');
+    expect(html).toContain('Cleanup contract');
+    expect(html).toContain('Exact commands, recipients, readiness, and cleanup');
     expect(html).toContain('accounts.internal:443');
     expect(html).not.toContain('id="preview-application"');
     expect(html).not.toContain('id="preview-routes"');
@@ -84,7 +116,30 @@ describe('Preview surfaces', () => {
     expect(html).not.toContain('Not created');
   });
 
-  it('shows only observed nodes while startup is in progress', () => {
+  it('turns safe private-input blockers into a configuration workspace', () => {
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace
+        {...previewProps({ approved: true })}
+        executionReadiness={{
+          status: 'BLOCKED',
+          blockers: [{ kind: 'PRIVATE_INPUT_MISSING', inputId: 'api-token' }]
+        }}
+      />
+    );
+
+    expect(html).toContain('Configuration required');
+    expect(html).toContain('Configure inputs');
+    expect(html).toContain('Blocking start');
+    expect(html).toContain('<code>api-token</code> missing — required');
+    expect(html).toContain('private · missing — required by web');
+    expect(html).toContain('Set value…');
+    expect(html).toContain('Checks once at startup');
+    expect(html).toContain('Ownership');
+    expect(html).toContain('accounts — checked or used, never managed');
+    expect(html).not.toContain('type="password"');
+  });
+
+  it('shows the startup pipeline without implying queued nodes have run', () => {
     const generation = generationFixture({ state: 'RUNNING_GRAPH', routingState: 'CANDIDATE' });
     const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
       approved: true,
@@ -93,9 +148,11 @@ describe('Preview surfaces', () => {
     })} />);
 
     expect(html).toContain('Starting');
-    expect(html).toContain('Cancel and clean up');
+    expect(html).toContain('Cancel start');
     expect(html).toContain('id="preview-application"');
     expect(html).toContain('web');
+    expect(html).toContain('prepare');
+    expect(html).toContain('Queued');
     expect(html).not.toContain('Not run');
     expect(html).not.toContain('id="preview-routes"');
     expect((html.match(/Starting/g) ?? [])).toHaveLength(1);
@@ -124,7 +181,37 @@ describe('Preview surfaces', () => {
     expect(html).toContain('Candidate');
     expect(html).toContain('Waiting ready');
     expect(html).toContain('Open current');
-    expect(html).toContain('Preview options');
+    expect(html).toContain('Cancel replace');
+    expect(html).toContain('Routes stay on the active generation until readiness');
+  });
+
+  it('explains failed replacement readiness without exposing raw failure text', () => {
+    const active = activeGeneration();
+    const failed = generationFixture({
+      id: 'failed-candidate',
+      state: 'FAILED',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: active.id,
+      failureReason: 'curl http://internal-token@127.0.0.1/ready'
+    });
+    const failedAttempt = {
+      ...attemptFixture(failed.id, 'FAILED'),
+      readiness: {
+        status: 'FAILED' as const,
+        lastError: 'internal-token',
+        observedAt: '2026-07-13T10:00:02.000Z'
+      }
+    };
+    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
+      approved: true,
+      attempts: [failedAttempt]
+    })} generations={[failed, active]} />);
+
+    expect(html).toContain('Replacement failed');
+    expect(html).toContain('web did not pass its readiness check');
+    expect(html).toContain('is still serving; stable routes never moved');
+    expect(html).not.toContain('curl http');
+    expect(html).not.toContain('internal-token');
   });
 
   it('keeps failure copy safe, concise, and free of empty sections', () => {
@@ -150,15 +237,33 @@ describe('Preview surfaces', () => {
   });
 
   it('keeps destructive and attached-resource actions out of the normal running surface', () => {
-    const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps({
-      approved: true,
-      generation: activeGeneration(),
-      attempts: [attemptFixture('active-generation', 'RUNNING')]
-    })} />);
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace
+        {...previewProps({
+          approved: true,
+          generation: activeGeneration(),
+          attempts: [attemptFixture('active-generation', 'RUNNING')]
+        })}
+        runtimeResources={[{
+          id: 'runtime-web',
+          taskId: 'task-1',
+          generationId: 'active-generation',
+          logicalNodeId: 'web',
+          state: 'RUNNING',
+          ownershipMarkerDigest: 'ownership',
+          adapterKind: 'NATIVE_PROCESS',
+          updatedAt: '2026-07-13T10:00:01.000Z'
+        }]}
+      />
+    );
 
     expect(html).toContain('Open preview');
     expect(html).toContain('app.task.preview.localhost');
     expect(html).toContain('Preview options');
+    expect(html).toContain('Replace…');
+    expect(html).toContain('Runtime ownership · 1');
+    expect(html).toContain('Verified native process group');
+    expect(html).not.toContain('type="password"');
     expect(html).not.toContain('Stop Preview &amp; Delete Data');
     expect(html).not.toContain('Reset accounts');
     expect(html).not.toContain('plaintext-canary');
@@ -239,7 +344,8 @@ describe('Preview surfaces', () => {
       <PreviewWorkspace {...props} plans={[plan]} />
     );
 
-    expect(html).toContain('Review execution plan');
+    expect(html).toContain('Execution plan');
+    expect(html).toContain('Docker Compose');
     expect(html).toContain('cache-data');
     expect(html).toContain('Compose networks remain task-scoped.');
     expect(html).not.toContain('Native preview commands run');
@@ -275,6 +381,7 @@ function previewProps(options: {
     composeProjects: [],
     localBindings: [],
     runtimeResources: [],
+    executionReadiness: options.approved ? { status: 'READY', blockers: [] } : undefined,
     onResolve: async () => {},
     onApprove: async () => {},
     onStart: async () => {},
