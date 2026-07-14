@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type {
   AgentGoalSnapshotRecord,
-  AgentProviderState,
+  AgentRuntimeState,
   AgentServerInstance,
   AgentSessionRecord,
   AgentSettingsObservationRecord,
@@ -23,7 +23,7 @@ interface ProviderOverviewPanelProps {
   goalSnapshots: AgentGoalSnapshotRecord[];
   usageSnapshots: AgentUsageSnapshotRecord[];
   settingsObservations: AgentSettingsObservationRecord[];
-  providerState?: AgentProviderState;
+  runtimeState?: AgentRuntimeState;
   server?: AgentServerInstance;
   onSyncGoal(taskId: string, sessionId: string): Promise<void>;
 }
@@ -35,11 +35,12 @@ export function ProviderOverviewPanel({
   goalSnapshots,
   usageSnapshots,
   settingsObservations,
-  providerState,
+  runtimeState,
   server,
   onSyncGoal
 }: ProviderOverviewPanelProps) {
   const [syncing, setSyncing] = useState(false);
+  const runtime = runtimeState?.preflight.runtime;
   const goal = latestForSession(goalSnapshots, session?.id);
   const usage = latestForSession(usageSnapshots, session?.id);
   const observations = useMemo(
@@ -54,7 +55,13 @@ export function ProviderOverviewPanel({
     runtimeResolution?.probes.filter((probe) => !probe.compatible) ?? [];
   const showGoalDiagnostics = shouldShowProviderGoalDiagnostics(goal, Boolean(session));
   const hasProviderSignal = Boolean(
-    server || run || session || usage || observations.length > 0 || showGoalDiagnostics
+    runtimeState ||
+      server ||
+      run ||
+      session ||
+      usage ||
+      observations.length > 0 ||
+      showGoalDiagnostics
   );
 
   const sync = async () => {
@@ -77,28 +84,42 @@ export function ProviderOverviewPanel({
     <section className="card provider-overview">
       <div className="card__header">
         <div>
-          <h3>Reported by Codex</h3>
+          <h3>Reported by {runtime?.displayName ?? server?.runtimeId ?? task.runtimeId}</h3>
         </div>
       </div>
 
       <div className="provider-section">
         <h4>Runtime</h4>
         <dl className="provider-kv">
-          <dt>App Server</dt>
+          <dt>Status</dt>
           <dd>
             <span>
               {humanizeEnum(
-                server?.status ?? (providerState?.preflight.ready ? 'READY' : 'NOT_READY')
+                server?.status ??
+                  (runtimeState
+                    ? runtimeState.preflight.ready
+                      ? 'READY'
+                      : 'NOT_READY'
+                    : 'UNKNOWN')
               )}
             </span>
           </dd>
+          <dt>Integration</dt>
+          <dd>
+            <span>{runtime?.displayName ?? server?.runtimeId ?? task.runtimeId}</span>
+            <small>
+              {runtime
+                ? `${humanizeEnum(runtime.kind)} · ${humanizeEnum(runtime.transport)}`
+                : '—'}
+            </small>
+          </dd>
           <dt>Account</dt>
           <dd>
-            <span>{providerState?.preflight.accountLabel ?? '—'}</span>
+            <span>{runtimeState?.preflight.accountLabel ?? '—'}</span>
           </dd>
-          <dt>Runtime</dt>
+          <dt>Version</dt>
           <dd>
-            <span>{providerState?.preflight.runtimeVersion ?? '—'}</span>
+            <span>{runtimeState?.preflight.runtimeVersion ?? '—'}</span>
           </dd>
           <dt>Executable</dt>
           <dd>
@@ -113,7 +134,7 @@ export function ProviderOverviewPanel({
             <span>{server?.schemaVersion ?? '—'}</span>
             <small>{server?.schemaHash ?? '—'}</small>
           </dd>
-          <dt>Thread</dt>
+          <dt>Session</dt>
           <dd>
             <span>{session?.providerSessionId ?? '—'}</span>
           </dd>
@@ -241,6 +262,12 @@ export function ProviderOverviewPanel({
             );
           })}
         </div>
+        {runtimeState?.native !== undefined ? (
+          <details className="raw-provider-event">
+            <summary>Show runtime-native metadata</summary>
+            <pre>{JSON.stringify(runtimeState.native, null, 2)}</pre>
+          </details>
+        ) : null}
       </div>
 
       <div className="provider-section">
@@ -303,6 +330,9 @@ function formatSetting(value: unknown): string {
   }
   if (typeof value === 'boolean') {
     return value ? 'enabled' : 'disabled';
+  }
+  if (value !== null && typeof value === 'object') {
+    return JSON.stringify(value);
   }
   return String(value);
 }

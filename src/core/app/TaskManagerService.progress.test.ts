@@ -2,7 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { buildRunProgressViewModel } from '../../renderer/model/runProgress';
-import type { AgentProtocolMessageReference, RunRecord } from '../../shared/contracts';
+import type { RunRecord } from '../../shared/contracts';
 
 describe('TaskManagerService progress harness', () => {
   it('starts a throwaway-repo run with progress guidance and projects useful fallback progress', async () => {
@@ -127,19 +127,34 @@ describe('TaskManagerService progress harness', () => {
         activityOutputSummary: 'show full output · 1 line'
       });
 
+      const server = await scenario.store.createAgentServer({
+        runtimeId: 'codex',
+        runtimeKind: 'APP_SERVER',
+        transport: 'STDIO',
+        executable: 'scenario-agent',
+        argv: ['serve']
+      });
+      await scenario.store.updateRun(startedRun.id, {
+        serverInstanceId: server.id
+      });
+      const planMessage = await scenario.store.appendProtocolMessage(
+        server.id,
+        'INBOUND',
+        '{"method":"turn/plan/updated"}'
+      );
       await scenario.store.recordAgentPlanRevision({
         taskId: task.id,
         iterationId: startedRun.iterationId,
         runId: startedRun.id,
         sessionId: startedRun.sessionId,
-        provider: 'codex',
+        runtimeId: 'codex',
         explanation: 'Implementation in progress',
         steps: [
           { step: 'Inspect repository state', status: 'COMPLETED' },
           { step: 'Add hello file', status: 'IN_PROGRESS' },
           { step: 'Verify repository status', status: 'PENDING' }
         ],
-        rawMessage: rawMessageFixture()
+        rawMessage: planMessage
       });
 
       snapshot = await scenario.store.snapshot();
@@ -190,16 +205,4 @@ async function requireRun(run: Promise<RunRecord | undefined>): Promise<RunRecor
     throw new Error('Expected scenario run to exist.');
   }
   return resolved;
-}
-
-function rawMessageFixture(): AgentProtocolMessageReference {
-  return {
-    serverInstanceId: 'scenario-server',
-    sequence: 1,
-    direction: 'INBOUND',
-    recordedAt: '2026-07-07T10:00:00.000Z',
-    byteOffset: 0,
-    byteLength: 1,
-    sha256: 'hash'
-  };
 }

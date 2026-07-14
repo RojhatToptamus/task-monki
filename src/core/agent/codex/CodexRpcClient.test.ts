@@ -14,7 +14,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -43,7 +43,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-events-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -91,7 +91,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-unsupported-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -127,7 +127,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-response-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -159,7 +159,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-mutation-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -187,7 +187,7 @@ describe('CodexRpcClient', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-rpc-late-response-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',

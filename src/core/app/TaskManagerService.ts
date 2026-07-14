@@ -33,6 +33,8 @@ import type {
   AgentRunMode,
   TaskManagerAppSettings,
   UpdateAppSettingsRequest,
+  UpdateAgentNativeSessionRequest,
+  UpdateAgentNativeSessionResult,
   ExternalToolStatusReport,
   TestExternalToolRequest,
   ExternalToolProbeResult,
@@ -62,7 +64,6 @@ import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
-import { PromptRefinementService } from '../prompt/PromptRefinementService';
 import {
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
@@ -75,8 +76,12 @@ import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
+import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
+import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
+import { OpenCodeAdapter } from '../agent/opencode/OpenCodeAdapter';
+import { AcpRuntimeAdapter } from '../agent/acp/AcpRuntimeAdapter';
+import { ACP_RUNTIME_PROFILES } from '../agent/acp/AcpRuntimeProfiles';
 import {
   MemoryAppSettingsStore,
   type AppSettingsStorage
@@ -85,27 +90,30 @@ import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
 import {
   assertAttachmentSandboxSupportsDelivery,
-  AgentAttachmentDeliveryError,
-  assertModelSupportsAttachments
+  type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
 import { AttachmentStoreError } from '../storage/AttachmentFileStore';
+import {
+  assertBrowserDevRuntimeIsolation,
+  hasBrowserDevRuntimeIsolation
+} from '../agent/BrowserDevAgentBoundary';
 
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
-  private readonly codexAdapter: CodexAppServerAdapter;
+  private readonly runtimeRegistry: AgentRuntimeRegistry;
+  private readonly codexAdapter?: CodexAppServerAdapter;
   private readonly worktrees: WorktreeService;
   private readonly github: GitHubService;
-  private readonly promptRefiner = new PromptRefinementService();
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
   private readonly browserDevAgentBoundary: boolean;
+  private readonly runtimeExecutableOverrides: Readonly<Record<string, string | undefined>>;
   private readonly taskActionLocks = new Map<string, string>();
   private readonly activeAttachmentDrafts = new Set<string>();
   private readonly agentProviderStartupDisabledReason?: string;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
-  private codexExecutable: string | undefined;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -116,9 +124,13 @@ export class TaskManagerService {
       gitPath?: string;
       ghPath?: string;
       codexPath?: string;
+      openCodePath?: string;
+      acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
-      agentProviderAdapter?: AgentProviderAdapter;
+      agentProviderAdapter?: AgentRuntimeAdapter;
+      agentRuntimeAdapters?: readonly AgentRuntimeAdapter[];
+      defaultAgentRuntimeId?: string;
       openTargetHost?: OpenTargetHost;
       allowAgentNetworkAccess?: boolean;
       agentProviderStartupDisabledReason?: string;
@@ -128,6 +140,17 @@ export class TaskManagerService {
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
     this.agentProviderStartupDisabledReason =
       options.agentProviderStartupDisabledReason;
+    this.runtimeExecutableOverrides = {
+      opencode:
+        options.openCodePath ?? process.env.TASK_MONKI_OPENCODE_BIN,
+      ...Object.fromEntries(
+        ACP_RUNTIME_PROFILES.map((profile) => [
+          profile.descriptor.id,
+          options.acpExecutablePaths?.[profile.descriptor.id] ??
+            process.env[ACP_RUNTIME_EXECUTABLE_ENV[profile.descriptor.id]]
+        ])
+      )
+    };
     this.events = events;
     this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
     this.externalToolResolver = new ExternalToolResolver({
@@ -139,17 +162,29 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
-    this.codexAdapter = new CodexAppServerAdapter(store, events, {
-      cwd: agentCwd,
-      executable: options.codexPath,
-      toolSettings: this.appSettings.codexExternalTools,
-      failClosedMcpDiscovery: this.browserDevAgentBoundary,
-      enforceBrowserDevBoundary: this.browserDevAgentBoundary
-    });
+    const runtimeAdapters = options.agentRuntimeAdapters ??
+      (options.agentProviderAdapter
+        ? [options.agentProviderAdapter]
+        : createBuiltInAgentRuntimes(store, events, {
+            cwd: agentCwd,
+            codexExecutable: options.codexPath,
+            openCodeExecutable: options.openCodePath,
+            acpExecutablePaths: options.acpExecutablePaths,
+            browserDevBoundary: this.browserDevAgentBoundary,
+            codexToolSettings: this.appSettings.codexExternalTools
+          }));
+    this.codexAdapter = runtimeAdapters.find(
+      (adapter): adapter is CodexAppServerAdapter =>
+        adapter instanceof CodexAppServerAdapter
+    );
+    this.runtimeRegistry = new AgentRuntimeRegistry(
+      runtimeAdapters,
+      options.defaultAgentRuntimeId ?? runtimeAdapters[0].descriptor.id
+    );
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ?? this.codexAdapter,
+      this.runtimeRegistry,
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
         providerStartupDisabledReason: options.agentProviderStartupDisabledReason
@@ -171,8 +206,17 @@ export class TaskManagerService {
   async init(): Promise<void> {
     await this.store.init();
     this.appSettings = await this.loadBoundarySafeAppSettings();
-    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
-    await this.agents.initialize();
+    await this.applyRuntimeSettings({
+      restartCodex: false,
+      updateCodex: true,
+      updateAgentRuntimes: true,
+      restartAgentRuntimes: false
+    });
+    await this.agents.initialize([
+      this.runtimeRegistry.has(this.appSettings.defaultRuntimeId)
+        ? this.appSettings.defaultRuntimeId
+        : this.runtimeRegistry.defaultRuntimeId
+    ]);
     if (this.agentProviderStartupDisabledReason) {
       return;
     }
@@ -201,6 +245,42 @@ export class TaskManagerService {
   async updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
+    for (const runtimeId of [
+      input.defaultRuntimeId,
+      input.promptRefinementRuntimeId,
+      input.reviewRuntimeId
+    ]) {
+      if (runtimeId) {
+        const adapter = this.runtimeRegistry.require(runtimeId);
+        if (this.browserDevAgentBoundary) {
+          assertBrowserDevRuntimeIsolation(
+            adapter.descriptor,
+            await adapter.capabilities()
+          );
+        }
+      }
+    }
+    if (input.promptRefinementRuntimeId) {
+      const adapter = this.runtimeRegistry.require(input.promptRefinementRuntimeId);
+      const capabilities = await adapter.capabilities();
+      if (capabilities.promptRefinement.maturity === 'unsupported') {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not support prompt refinement.`
+        );
+      }
+    }
+    if (input.reviewRuntimeId) {
+      const adapter = this.runtimeRegistry.require(input.reviewRuntimeId);
+      const capabilities = await adapter.capabilities();
+      const supportsReview =
+        capabilities.review.maturity !== 'unsupported' ||
+        capabilities.extensions.genericDetachedReview?.maturity === 'stable';
+      if (!supportsReview) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not support an isolated review workflow.`
+        );
+      }
+    }
     if (
       this.browserDevAgentBoundary &&
       input.codexExternalTools &&
@@ -220,22 +300,29 @@ export class TaskManagerService {
         }
       : input;
     this.appSettings = await this.appSettingsStore.update(safeInput);
-    const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
+    const affectsExternalTools = Boolean(
+      input.codexExternalTools ||
+      input.externalExecutables ||
+      input.runtimeExecutablePaths
+    );
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
+      const hasActiveAgentRun = await this.hasActiveAgentRun();
       try {
         await this.applyRuntimeSettings({
-          restartCodex: affectsCodexRuntime && !(await this.hasActiveAgentRun()),
-          updateCodex: affectsCodexRuntime
+          restartCodex: affectsCodexRuntime && !hasActiveAgentRun,
+          updateCodex: affectsCodexRuntime,
+          updateAgentRuntimes: Boolean(input.runtimeExecutablePaths),
+          restartAgentRuntimes: !hasActiveAgentRun
         });
       } catch {
         // The setting is still saved; provider/tool status reports the runtime failure.
       }
-      if (affectsCodexRuntime) {
+      if (affectsCodexRuntime || input.runtimeExecutablePaths) {
         this.events.emit({
-          type: 'provider.updated',
+          type: 'runtime.updated',
           taskId: 'settings',
-          payload: await this.getAgentProviderState(),
+          payload: await this.getAgentRuntimeCatalog(),
           at: new Date().toISOString()
         });
       }
@@ -281,8 +368,106 @@ export class TaskManagerService {
     return validateRepositoryPath(repositoryPath);
   }
 
-  getAgentProviderState() {
-    return this.agents.getProviderState();
+  getAgentRuntimeCatalog() {
+    return this.agents.getRuntimeCatalog();
+  }
+
+  async updateAgentNativeSession(
+    input: UpdateAgentNativeSessionRequest
+  ): Promise<UpdateAgentNativeSessionResult> {
+    if (
+      !input ||
+      typeof input.taskId !== 'string' ||
+      !input.taskId ||
+      typeof input.sessionId !== 'string' ||
+      !input.sessionId ||
+      typeof input.runtimeId !== 'string' ||
+      !input.runtimeId
+    ) {
+      throw new Error(
+        'A task, session, and runtime are required for native session updates.'
+      );
+    }
+    const session = await this.store.getAgentSession(input.sessionId);
+    if (!session || session.taskId !== input.taskId) {
+      throw new Error('Agent session ownership does not match the selected task.');
+    }
+    if (session.runtimeId !== input.runtimeId) {
+      throw new Error(
+        `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
+      );
+    }
+    const snapshot = await this.store.snapshot();
+    if (
+      snapshot.runs.some(
+        (run) =>
+          run.sessionId === session.id &&
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT',
+            'INTERRUPTING',
+            'RECOVERY_REQUIRED'
+          ].includes(run.status)
+      )
+    ) {
+      throw new Error(
+        'Provider-native session settings cannot change during an active or recovery-required run.'
+      );
+    }
+    if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
+      throw new Error(
+        `Agent session ${session.id} is ${session.status} and cannot be configured.`
+      );
+    }
+
+    const adapter = this.runtimeRegistry.require(input.runtimeId);
+    await this.assertAgentRuntimeAvailable();
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    let updateNative: () => Promise<import('../../shared/agent').AgentJsonValue>;
+    if (input.operation === 'SET_MODE') {
+      if (typeof input.modeId !== 'string' || !input.modeId || !adapter.setSessionMode) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not expose native session modes.`
+        );
+      }
+      const setMode = adapter.setSessionMode.bind(adapter);
+      updateNative = () => setMode(session.id, input.modeId);
+    } else if (input.operation === 'SET_CONFIG_OPTION') {
+      if (
+        typeof input.configId !== 'string' ||
+        !input.configId ||
+        !['string', 'boolean'].includes(typeof input.value) ||
+        !adapter.setSessionConfigOption
+      ) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not expose this native configuration option.`
+        );
+      }
+      const setConfigOption = adapter.setSessionConfigOption.bind(adapter);
+      updateNative = () => setConfigOption(session.id, input.configId, input.value);
+    } else {
+      throw new Error('Unknown provider-native session operation.');
+    }
+    if (session.status === 'NOT_LOADED') {
+      if (!session.providerSessionId) {
+        throw new Error(`Agent session ${session.id} has no provider session ID.`);
+      }
+      await adapter.attachSession({
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      });
+    }
+
+    const native = await updateNative();
+    return {
+      taskId: session.taskId,
+      sessionId: session.id,
+      runtimeId: session.runtimeId,
+      native
+    };
   }
 
   listTasks(): Promise<TaskSnapshot> {
@@ -357,64 +542,100 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
-    const acknowledgedTask = await this.store.resolveTaskCreationRetry(input);
+    if (
+      input.runtimeId &&
+      input.agentSettings?.runtimeId &&
+      input.runtimeId !== input.agentSettings.runtimeId
+    ) {
+      throw new Error('Task runtime and execution settings runtime must match.');
+    }
+    const configuredDefaultRuntime = this.runtimeRegistry.has(
+      this.appSettings.defaultRuntimeId
+    )
+      ? this.appSettings.defaultRuntimeId
+      : this.runtimeRegistry.defaultRuntimeId;
+    const runtimeId =
+      input.runtimeId ?? input.agentSettings?.runtimeId ?? configuredDefaultRuntime;
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    const requestedInput: CreateTaskRequest = {
+      ...input,
+      runtimeId,
+      agentSettings: { ...input.agentSettings, runtimeId }
+    };
+    const acknowledgedTask = await this.store.resolveTaskCreationRetry(requestedInput);
     if (acknowledgedTask) {
       return acknowledgedTask;
     }
-    if (!input.attachmentDraftId) {
-      return this.store.createTask(input);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    if (!requestedInput.attachmentDraftId) {
+      const settings = await prepareTaskCreationSettings(
+        adapter,
+        requestedInput.agentSettings ?? { runtimeId },
+        []
+      );
+      return this.store.createTask({
+        ...requestedInput,
+        agentSettings: settings,
+        creationFingerprintInput: requestedInput
+      });
     }
-    return this.withAttachmentDraft(input.attachmentDraftId, async () => {
+    return this.withAttachmentDraft(requestedInput.attachmentDraftId, async () => {
       // The first request may complete between the initial lookup and entry to
       // this critical section. Resolve it before reading a draft that successful
       // task creation has intentionally consumed.
-      const acknowledgedInsideLock = await this.store.resolveTaskCreationRetry(input);
+      const acknowledgedInsideLock = await this.store.resolveTaskCreationRetry(requestedInput);
       if (acknowledgedInsideLock) {
         return acknowledgedInsideLock;
       }
-      const draft = await this.store.listAttachmentDraft(input.attachmentDraftId!);
-      if (input.agentSettings?.networkAccess === true) {
-        throw new Error('Network access must be disabled for tasks with attachments.');
-      }
-      if (!codexExternalToolsAreDisabled(this.appSettings.codexExternalTools)) {
-        throw new Error(
-          'Disable Codex web search, MCP servers, and apps before creating a task with attachments.'
-        );
-      }
-      assertAttachmentSandboxSupportsDelivery(
-        input.agentSettings ?? {},
+      const draft = await this.store.listAttachmentDraft(requestedInput.attachmentDraftId!);
+      const settings = await prepareTaskCreationSettings(
+        adapter,
+        requestedInput.agentSettings ?? { runtimeId },
         draft.attachments
       );
-      if (draft.attachments.some((attachment) => attachment.kind === 'image')) {
-        const provider = await this.agents.getProviderState();
-        const requestedModel = input.agentSettings?.model;
-        const model =
-          provider.models.find((candidate) => candidate.model === requestedModel) ??
-          provider.models.find((candidate) => candidate.id === requestedModel) ??
-          provider.models.find((candidate) => candidate.isDefault) ??
-          provider.models[0];
-        if (!model) {
-          throw new AgentAttachmentDeliveryError(
-            'MODEL_DOES_NOT_SUPPORT_IMAGES',
-            'Codex must report an image-capable model before this task can be created with images.'
-          );
-        }
-        assertModelSupportsAttachments(model, draft.attachments);
-      }
-      return this.store.createTask(input);
+      return this.store.createTask({
+        ...requestedInput,
+        agentSettings: settings,
+        creationFingerprintInput: requestedInput
+      });
     });
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
-    await this.assertAttachmentProviderBoundaryAvailable();
-    const refined = await this.promptRefiner.refine(
-      input.repositoryPath,
-      input.input,
-      input.model,
-      this.codexExecutable,
-      this.appSettings.codexExternalTools,
-      this.browserDevAgentBoundary
-    );
+    await this.assertAgentRuntimeAvailable();
+    const configuredRuntimeId =
+      this.appSettings.promptRefinementRuntimeId ??
+      this.appSettings.defaultRuntimeId;
+    const runtimeId =
+      input.runtimeId ??
+      configuredRuntimeId;
+    const useConfiguredModel = runtimeId === configuredRuntimeId;
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    if (!adapter.refinePrompt) {
+      throw new Error(
+        `${adapter.descriptor.displayName} does not expose native prompt refinement.`
+      );
+    }
+    const refined = await adapter.refinePrompt({
+      repositoryPath: input.repositoryPath,
+      input: input.input,
+      settings: {
+        runtimeId,
+        model:
+          input.model ??
+          (useConfiguredModel ? this.appSettings.promptRefinementModel : undefined),
+        modelProvider:
+          input.modelProvider ??
+          (useConfiguredModel
+            ? this.appSettings.promptRefinementModelProvider
+            : undefined),
+        sandbox: 'READ_ONLY',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      }
+    });
     this.events.emit({
       type: 'prompt.refined',
       taskId: 'prompt-preview',
@@ -481,7 +702,7 @@ export class TaskManagerService {
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent run', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
+      await this.assertAgentRuntimeAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
@@ -501,7 +722,7 @@ export class TaskManagerService {
     mode?: AgentRunMode;
     settings?: AgentExecutionSettings;
   }): Promise<RunRecord> {
-    await this.assertAttachmentProviderBoundaryAvailable();
+    await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
@@ -550,7 +771,7 @@ export class TaskManagerService {
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
+      await this.assertAgentRuntimeAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -587,7 +808,7 @@ export class TaskManagerService {
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent retry', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
+      await this.assertAgentRuntimeAvailable();
       const { task, run, iteration, worktree } = await this.requireContinuationContext(
         input.taskId,
         input.runId
@@ -641,6 +862,20 @@ export class TaskManagerService {
   }): Promise<RunRecord> {
     const sourceTask = await this.requireTask(input.sourceTaskId);
     const alternativeNumber = (sourceTask.forkedAlternativeTaskIds?.length ?? 0) + 1;
+    const runtimeId = input.settings?.runtimeId ?? sourceTask.runtimeId;
+    const alternativeSettings: AgentExecutionSettings = {
+      ...sourceTask.agentSettings,
+      ...input.settings,
+      runtimeId
+    };
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    const sourceAttachments = await this.store.getTaskAttachments(sourceTask.id);
+    const resolvedAlternativeSettings = await prepareTaskCreationSettings(
+      adapter,
+      alternativeSettings,
+      sourceAttachments
+    );
     const alternativeTask = await this.store.createForkedAlternativeTask({
       title: `Alternative #${alternativeNumber}: ${sourceTask.title}`,
       prompt: buildForkAlternativeTaskPrompt({
@@ -650,7 +885,8 @@ export class TaskManagerService {
         instruction: input.instruction
       }),
       repositoryPath: sourceTask.repositoryPath,
-      agentSettings: sourceTask.agentSettings,
+      runtimeId,
+      agentSettings: resolvedAlternativeSettings,
       sourceTaskId: sourceTask.id,
       sourceRunId: input.sourceRun.id
     });
@@ -664,7 +900,7 @@ export class TaskManagerService {
         task: alternativeTask,
         worktree: alternativeWorktree,
         mode: 'IMPLEMENTATION',
-        settings: input.settings
+        settings: resolvedAlternativeSettings
       });
     } catch (error) {
       await this.markForkedAlternativeSetupFailed(alternativeTask.id, error);
@@ -687,19 +923,45 @@ export class TaskManagerService {
   private async applyRuntimeSettings(input: {
     restartCodex: boolean;
     updateCodex: boolean;
+    updateAgentRuntimes?: boolean;
+    restartAgentRuntimes?: boolean;
   }): Promise<ExternalToolStatusReport> {
     const status = await this.externalToolResolver.getStatus(
       this.appSettings.externalExecutables
     );
     configureGitExecutablePath(executableForRuntime(status.tools.git));
     this.github.setExecutable(executableForRuntime(status.tools.gh));
-    if (input.updateCodex) {
-      this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
+    if (input.updateCodex && this.codexAdapter) {
+      const codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
       await this.codexAdapter.updateRuntimeConfig({
-        executable: this.codexExecutable,
+        executable: codexExecutable,
         toolSettings: this.appSettings.codexExternalTools,
         restart: input.restartCodex
       });
+    }
+    if (input.updateAgentRuntimes) {
+      await Promise.all(
+        this.runtimeRegistry.list().map(async (adapter) => {
+          if (!adapter.configureRuntime || adapter.descriptor.id === 'codex') {
+            return;
+          }
+          if (
+            this.browserDevAgentBoundary &&
+            !hasBrowserDevRuntimeIsolation(await adapter.capabilities())
+          ) {
+            return;
+          }
+          const configured = this.appSettings.runtimeExecutablePaths[adapter.descriptor.id];
+          const startupOverride =
+            this.runtimeExecutableOverrides[adapter.descriptor.id];
+          const executable =
+            startupOverride ?? (configured === null ? undefined : configured);
+          await adapter.configureRuntime({
+            executable,
+            restart: input.restartAgentRuntimes === true
+          });
+        })
+      );
     }
     return status;
   }
@@ -723,8 +985,8 @@ export class TaskManagerService {
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Codex review', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
+    return this.withTaskAction(input.taskId, 'Agent review', async () => {
+      await this.assertAgentRuntimeAvailable();
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
@@ -750,7 +1012,36 @@ export class TaskManagerService {
         throw new Error('The source run no longer has a valid task iteration.');
       }
       const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, true);
+      const configuredReviewRuntimeId =
+        this.appSettings.reviewRuntimeId ?? task.runtimeId;
+      const reviewRuntimeId =
+        input.settings?.runtimeId ?? configuredReviewRuntimeId;
+      this.runtimeRegistry.require(reviewRuntimeId);
+      const useConfiguredReviewModel =
+        reviewRuntimeId === configuredReviewRuntimeId;
+      const configuredReviewSettings: AgentExecutionSettings = {
+        ...(useConfiguredReviewModel && this.appSettings.reviewModel
+          ? { model: this.appSettings.reviewModel }
+          : {}),
+        ...(useConfiguredReviewModel && this.appSettings.reviewModelProvider
+          ? { modelProvider: this.appSettings.reviewModelProvider }
+          : {}),
+        ...(useConfiguredReviewModel && this.appSettings.reviewReasoningEffort
+          ? { reasoningEffort: this.appSettings.reviewReasoningEffort }
+          : {}),
+        ...input.settings,
+        runtimeId: reviewRuntimeId
+      };
+      const settings =
+        reviewRuntimeId === run.runtimeId
+          ? followUpSettings(task, run, configuredReviewSettings, true)
+          : mergeRunSettings({
+              readOnly: true,
+              settings: [
+                portableSecuritySettings(run.requestedSettings),
+                configuredReviewSettings
+              ]
+            });
       return this.agents.startReview({
         task,
         iteration,
@@ -765,7 +1056,7 @@ export class TaskManagerService {
   }
 
   async syncAgentGoal(input: SyncAgentGoalRequest) {
-    await this.assertAttachmentProviderBoundaryAvailable();
+    await this.assertAgentRuntimeAvailable();
     const task = await this.requireTask(input.taskId);
     return this.agents.syncGoal(task, input.sessionId);
   }
@@ -782,10 +1073,22 @@ export class TaskManagerService {
     }
   }
 
-  private async assertAttachmentProviderBoundaryAvailable(): Promise<void> {
+  private async assertAgentRuntimeAvailable(): Promise<void> {
     if (this.agentProviderStartupDisabledReason) {
       throw new Error(this.agentProviderStartupDisabledReason);
     }
+  }
+
+  private async assertRuntimeAllowedInCurrentSurface(
+    adapter: AgentRuntimeAdapter
+  ): Promise<void> {
+    if (!this.browserDevAgentBoundary) {
+      return;
+    }
+    assertBrowserDevRuntimeIsolation(
+      adapter.descriptor,
+      await adapter.capabilities()
+    );
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
@@ -1039,6 +1342,8 @@ export class TaskManagerService {
         throw new Error(blockedReason);
       }
 
+      await this.agents.releaseTask(task.id);
+
       let removedWorktree = false;
       if (input.removeWorktree) {
         const worktrees = snapshot.worktrees.filter(
@@ -1247,7 +1552,7 @@ export class TaskManagerService {
       return;
     }
     if (activeRun.mode === 'REVIEW') {
-      throw new Error(`Wait for the Codex review to finish before ${action}.`);
+      throw new Error(`Wait for the agent review to finish before ${action}.`);
     }
     throw new Error(`Stop or let the active agent run finish before ${action}.`);
   }
@@ -1263,6 +1568,17 @@ function followUpSettings(
     readOnly,
     settings: [run.requestedSettings, task.agentSettings, overrides]
   });
+}
+
+function portableSecuritySettings(
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  return {
+    sandbox: settings.sandbox,
+    networkAccess: settings.networkAccess,
+    approvalPolicy: settings.approvalPolicy,
+    approvalsReviewer: settings.approvalsReviewer
+  };
 }
 
 export function mergeRunSettings(input: {
@@ -1318,6 +1634,102 @@ function assertRetryable(run: RunRecord): void {
 
 function executableForRuntime(result: ExternalToolProbeResult): string {
   return result.resolvedPath ?? result.executable;
+}
+
+function createBuiltInAgentRuntimes(
+  store: FileTaskStore,
+  events: AppEventBus,
+  options: {
+    cwd: string;
+    codexExecutable?: string;
+    openCodeExecutable?: string;
+    acpExecutablePaths?: Partial<Record<string, string>>;
+    browserDevBoundary: boolean;
+    codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
+  }
+): AgentRuntimeAdapter[] {
+  const codex = new CodexAppServerAdapter(store, events, {
+    cwd: options.cwd,
+    executable: options.codexExecutable,
+    toolSettings: options.codexToolSettings,
+    failClosedMcpDiscovery: options.browserDevBoundary,
+    enforceBrowserDevBoundary: options.browserDevBoundary
+  });
+  const openCode = new OpenCodeAdapter(store, events, {
+    cwd: options.cwd,
+    executable:
+      options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN
+  });
+  const acp = ACP_RUNTIME_PROFILES.map(
+    (profile) =>
+      new AcpRuntimeAdapter(store, events, profile, {
+        cwd: options.cwd,
+        executable:
+          options.acpExecutablePaths?.[profile.descriptor.id] ??
+          process.env[ACP_RUNTIME_EXECUTABLE_ENV[profile.descriptor.id]]
+      })
+  );
+  return [codex, openCode, ...acp];
+}
+
+const ACP_RUNTIME_EXECUTABLE_ENV: Record<string, string> = {
+  'gemini-acp': 'TASK_MONKI_GEMINI_ACP_BIN',
+  'grok-acp': 'TASK_MONKI_GROK_ACP_BIN',
+  'cursor-agent-acp': 'TASK_MONKI_CURSOR_AGENT_ACP_BIN',
+  'claude-agent-acp': 'TASK_MONKI_CLAUDE_AGENT_ACP_BIN'
+};
+
+async function prepareTaskCreationSettings(
+  adapter: AgentRuntimeAdapter,
+  requestedSettings: AgentExecutionSettings,
+  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
+): Promise<AgentExecutionSettings> {
+  const capabilities = await adapter.capabilities();
+  const policy = capabilities.executionPolicy;
+  const preset = policy.presets.find(
+    (candidate) => candidate.id === policy.defaultPresetId
+  );
+  if (!preset) {
+    throw new Error(
+      `${adapter.descriptor.displayName} does not expose a valid default execution policy.`
+    );
+  }
+  if (
+    attachments.length > 0 &&
+    capabilities.attachmentDelivery.maturity === 'unsupported'
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} does not support managed task attachments.`
+    );
+  }
+  const explicitSettings = Object.fromEntries(
+    Object.entries(requestedSettings).filter(([, value]) => value !== undefined)
+  ) as AgentExecutionSettings;
+  const settings: AgentExecutionSettings = {
+    sandbox: preset.sandbox,
+    approvalPolicy: preset.approvalPolicy,
+    approvalsReviewer: preset.approvalsReviewer,
+    networkAccess: preset.networkAccess === 'REQUIRED',
+    ...explicitSettings,
+    runtimeId: adapter.descriptor.id
+  };
+  assertAttachmentSandboxSupportsDelivery(settings, attachments);
+  if (attachments.length === 0) {
+    // Task capture is local and must remain available while a runtime is
+    // offline. Model/catalog resolution is definitive at turn start.
+    return settings;
+  }
+  const resolved = await adapter.resolveExecution({ settings, attachments });
+  if (
+    resolved.settings.runtimeId !== adapter.descriptor.id ||
+    resolved.model.runtimeId !== adapter.descriptor.id
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} returned execution settings for another runtime.`
+    );
+  }
+  assertAttachmentSandboxSupportsDelivery(resolved.settings, attachments);
+  return resolved.settings;
 }
 
 function explicitExecutableForCodexRuntime(

@@ -63,6 +63,28 @@ describe('AppSettingsStore', () => {
     });
   });
 
+  it('merges runtime-owned executable paths without resetting other runtimes', async () => {
+    const store = new MemoryAppSettingsStore({
+      runtimeExecutablePaths: {
+        opencode: '/opt/opencode',
+        'gemini-acp': '/opt/gemini'
+      }
+    });
+
+    const settings = await store.update({
+      runtimeExecutablePaths: {
+        opencode: null,
+        'grok-acp': '/opt/grok'
+      }
+    });
+
+    expect(settings.runtimeExecutablePaths).toEqual({
+      opencode: null,
+      'gemini-acp': '/opt/gemini',
+      'grok-acp': '/opt/grok'
+    });
+  });
+
   it('preserves explicit mascot visibility and defaults legacy settings to enabled', async () => {
     expect(normalizeAppSettings({}).showMascot).toBe(true);
     expect(normalizeAppSettings({ showMascot: false }).showMascot).toBe(false);
@@ -140,6 +162,22 @@ describe('AppSettingsStore', () => {
       gitExecutablePath: null,
       codexExecutablePath: null,
       ghExecutablePath: null
+    });
+  });
+
+  it('scopes legacy refinement and review models to Codex instead of a later default runtime', () => {
+    expect(
+      normalizeAppSettings({
+        defaultRuntimeId: 'opencode',
+        promptRefinementModel: 'gpt-refine',
+        reviewModel: 'gpt-review'
+      })
+    ).toMatchObject({
+      defaultRuntimeId: 'opencode',
+      promptRefinementRuntimeId: 'codex',
+      promptRefinementModel: 'gpt-refine',
+      reviewRuntimeId: 'codex',
+      reviewModel: 'gpt-review'
     });
   });
 

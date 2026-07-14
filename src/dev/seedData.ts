@@ -156,33 +156,33 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('interaction-stale', 'agent', 'Stale interaction', 'An approval request became stale.', [
     'interaction:STALE'
   ]),
-  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without Codex review.', [
+  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without an agent review.', [
     'codex-review:NOT_RUN'
   ]),
-  scenario('review-running', 'review', 'Review running', 'Codex review run is active.', [
+  scenario('review-running', 'review', 'Review running', 'Agent review run is active.', [
     'codex-review:RUNNING'
   ]),
-  scenario('review-passed', 'review', 'Review passed', 'Codex review passed with structured result.', [
+  scenario('review-passed', 'review', 'Review passed', 'Agent review passed with structured result.', [
     'codex-review:PASSED'
   ]),
   scenario(
     'review-needs-changes',
     'review',
     'Review needs changes',
-    'Codex review found actionable issues.',
+    'Agent review found actionable issues.',
     ['codex-review:NEEDS_CHANGES']
   ),
   scenario(
     'review-inconclusive',
     'review',
     'Review inconclusive',
-    'Codex review completed without a definitive verdict.',
+    'Agent review completed without a definitive verdict.',
     ['codex-review:INCONCLUSIVE']
   ),
-  scenario('review-failed', 'review', 'Review failed', 'Codex review failed before completion.', [
+  scenario('review-failed', 'review', 'Review failed', 'Agent review failed before completion.', [
     'codex-review:FAILED'
   ]),
-  scenario('review-canceled', 'review', 'Review canceled', 'Codex review was canceled.', [
+  scenario('review-canceled', 'review', 'Review canceled', 'Agent review was canceled.', [
     'codex-review:CANCELED'
   ]),
   scenario(
@@ -459,7 +459,7 @@ export async function seedTaskMonkiDevelopmentData(
   });
 
   const server = await store.createAgentServer({
-    provider: 'codex',
+    runtimeId: 'codex',
     runtimeKind: 'APP_SERVER',
     transport: 'STDIO',
     executable: 'codex-seed-runtime',
@@ -884,7 +884,7 @@ async function seedActiveRunProgress(
     iterationId: run.iterationId,
     runId: run.id,
     sessionId: run.sessionId,
-    provider: 'codex',
+    runtimeId: 'codex',
     explanation: input.explanation ?? 'Implementation is in progress.',
     steps,
     rawMessage: await rawMessage(ctx, 'INBOUND', {
@@ -1316,7 +1316,7 @@ async function createRun(
     task,
     iteration: state.iteration,
     worktree: state.worktree,
-    provider: 'codex',
+    runtimeId: 'codex',
     role: options.role ?? (mode === 'REVIEW' ? 'REVIEW' : 'PRIMARY'),
     requestedSettings: DEFAULT_AGENT_SETTINGS
   });
@@ -1374,6 +1374,7 @@ async function createInteraction(
 ): Promise<InteractionRequestRecord> {
   const requestRawMessage = await rawMessage(ctx, 'INBOUND', { type, runId: run.id });
   return ctx.store.createInteractionRequest({
+    runtimeId: run.runtimeId,
     serverInstanceId: ctx.serverInstanceId,
     providerRequestId: `seed-request-${++ctx.protocolCounter}`,
     taskId: run.taskId,

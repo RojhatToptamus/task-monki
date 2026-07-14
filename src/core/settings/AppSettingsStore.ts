@@ -8,6 +8,7 @@ import type {
   TaskManagerThemePreference
 } from '../../shared/agent';
 import {
+  CODEX_RUNTIME_ID,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
@@ -117,6 +118,8 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
   const record = isRecord(value) ? value : {};
   const repositories = normalizeRepositories(record.repositories);
+  const promptRefinementModel = normalizeOptionalString(record.promptRefinementModel);
+  const reviewModel = normalizeOptionalString(record.reviewModel);
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: normalizeTheme(record.theme),
@@ -132,13 +135,26 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
       record.firstLaunchSetupCompleted,
       repositories
     ),
+    defaultRuntimeId: normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
     defaultModel: normalizeOptionalString(record.defaultModel),
+    defaultModelProvider: normalizeOptionalString(record.defaultModelProvider),
     defaultReasoningEffort: normalizeOptionalString(record.defaultReasoningEffort),
-    promptRefinementModel: normalizeOptionalString(record.promptRefinementModel),
-    reviewModel: normalizeOptionalString(record.reviewModel),
+    promptRefinementModel,
+    promptRefinementRuntimeId:
+      normalizeOptionalString(record.promptRefinementRuntimeId) ??
+      (promptRefinementModel ? CODEX_RUNTIME_ID : undefined),
+    promptRefinementModelProvider: normalizeOptionalString(record.promptRefinementModelProvider),
+    reviewModel,
+    reviewRuntimeId:
+      normalizeOptionalString(record.reviewRuntimeId) ??
+      (reviewModel ? CODEX_RUNTIME_ID : undefined),
+    reviewModelProvider: normalizeOptionalString(record.reviewModelProvider),
     reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
+    runtimeExecutablePaths: normalizeRuntimeExecutablePaths(
+      record.runtimeExecutablePaths
+    ),
     repositories
   };
 }
@@ -160,8 +176,14 @@ export function mergeAppSettings(
   if (input.firstLaunchSetupCompleted !== undefined) {
     patch.firstLaunchSetupCompleted = input.firstLaunchSetupCompleted === true;
   }
+  if (input.defaultRuntimeId !== undefined) {
+    patch.defaultRuntimeId = normalizeOptionalString(input.defaultRuntimeId) ?? CODEX_RUNTIME_ID;
+  }
   if ('defaultModel' in input) {
     patch.defaultModel = normalizeOptionalString(input.defaultModel);
+  }
+  if ('defaultModelProvider' in input) {
+    patch.defaultModelProvider = normalizeOptionalString(input.defaultModelProvider);
   }
   if ('defaultReasoningEffort' in input) {
     patch.defaultReasoningEffort = normalizeOptionalString(input.defaultReasoningEffort);
@@ -169,8 +191,22 @@ export function mergeAppSettings(
   if ('promptRefinementModel' in input) {
     patch.promptRefinementModel = normalizeOptionalString(input.promptRefinementModel);
   }
+  if ('promptRefinementRuntimeId' in input) {
+    patch.promptRefinementRuntimeId = normalizeOptionalString(input.promptRefinementRuntimeId);
+  }
+  if ('promptRefinementModelProvider' in input) {
+    patch.promptRefinementModelProvider = normalizeOptionalString(
+      input.promptRefinementModelProvider
+    );
+  }
   if ('reviewModel' in input) {
     patch.reviewModel = normalizeOptionalString(input.reviewModel);
+  }
+  if ('reviewRuntimeId' in input) {
+    patch.reviewRuntimeId = normalizeOptionalString(input.reviewRuntimeId);
+  }
+  if ('reviewModelProvider' in input) {
+    patch.reviewModelProvider = normalizeOptionalString(input.reviewModelProvider);
   }
   if ('reviewReasoningEffort' in input) {
     patch.reviewReasoningEffort = normalizeOptionalString(input.reviewReasoningEffort);
@@ -185,6 +221,12 @@ export function mergeAppSettings(
     patch.externalExecutables = normalizeExternalExecutables({
       ...current.externalExecutables,
       ...input.externalExecutables
+    });
+  }
+  if (input.runtimeExecutablePaths) {
+    patch.runtimeExecutablePaths = normalizeRuntimeExecutablePaths({
+      ...current.runtimeExecutablePaths,
+      ...input.runtimeExecutablePaths
     });
   }
   if (input.repositories) {
@@ -222,6 +264,21 @@ function normalizeExternalExecutables(value: unknown): ExternalExecutablePathSet
     codexExecutablePath: normalizeExecutablePath(record.codexExecutablePath),
     ghExecutablePath: normalizeExecutablePath(record.ghExecutablePath)
   };
+}
+
+function normalizeRuntimeExecutablePaths(
+  value: unknown
+): TaskManagerAppSettings['runtimeExecutablePaths'] {
+  const record = isRecord(value) ? value : {};
+  return Object.fromEntries(
+    Object.entries(record).flatMap(([runtimeId, executable]) => {
+      const normalizedRuntimeId = normalizeOptionalString(runtimeId);
+      if (!normalizedRuntimeId || normalizedRuntimeId !== runtimeId) {
+        return [];
+      }
+      return [[runtimeId, normalizeExecutablePath(executable)]];
+    })
+  );
 }
 
 function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {

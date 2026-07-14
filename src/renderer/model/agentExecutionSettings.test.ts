@@ -26,6 +26,46 @@ describe('resolveModelExecutionSettings', () => {
       reasoningEffort: 'medium'
     });
   });
+
+  it('keeps duplicate model names scoped to the selected runtime and model provider', () => {
+    const duplicateModels: AgentModel[] = [
+      ...models,
+      {
+        ...models[0]!,
+        id: 'opencode:anthropic/spark',
+        runtimeId: 'opencode',
+        modelProvider: 'anthropic',
+        displayName: 'Spark via OpenCode'
+      }
+    ];
+
+    expect(
+      resolveModelExecutionSettings(
+        duplicateModels,
+        'spark',
+        'high',
+        'opencode',
+        'anthropic'
+      )
+    ).toMatchObject({
+      runtimeId: 'opencode',
+      model: 'spark',
+      modelProvider: 'anthropic',
+      reasoningEffort: 'high'
+    });
+  });
+
+  it('never falls back to a model owned by another runtime', () => {
+    expect(
+      resolveModelExecutionSettings(models, 'missing', undefined, 'opencode', 'anthropic')
+    ).toBeUndefined();
+  });
+
+  it('never falls back to a model owned by another model provider', () => {
+    expect(
+      resolveModelExecutionSettings(models, 'spark', undefined, 'codex', 'anthropic')
+    ).toBeUndefined();
+  });
 });
 
 describe('resolveReasoningEffort', () => {
@@ -38,7 +78,8 @@ describe('resolveReasoningEffort', () => {
 const models: AgentModel[] = [
   {
     id: 'spark',
-    provider: 'codex',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'spark',
     displayName: 'Spark',
     hidden: false,
@@ -50,7 +91,8 @@ const models: AgentModel[] = [
   },
   {
     id: 'reviewer',
-    provider: 'codex',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'reviewer',
     displayName: 'Reviewer',
     hidden: false,

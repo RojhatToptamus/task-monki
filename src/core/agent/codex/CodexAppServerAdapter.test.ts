@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentOrchestrator } from '../AgentOrchestrator';
-import { AgentMutationAmbiguousError } from '../AgentProviderAdapter';
+import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
@@ -29,10 +29,11 @@ describe('CodexAppServerAdapter', () => {
     });
     await orchestrator.initialize();
 
-    const provider = await orchestrator.getProviderState();
-    expect(provider.preflight.ready, JSON.stringify(provider.preflight.problems)).toBe(true);
-    expect(provider.models[0]?.model).toBe('fake-model');
-    expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
+    const catalog = await orchestrator.getRuntimeCatalog();
+    const runtime = catalog.runtimes[0]!;
+    expect(runtime.preflight.ready, JSON.stringify(runtime.preflight.problems)).toBe(true);
+    expect(runtime.models[0]?.model).toBe('fake-model');
+    expect(runtime.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
     const initializedServer = (await store.snapshot()).agentServers[0];
     expect(initializedServer.runtimeResolution).toMatchObject({
       selectedExecutable: executable,
@@ -1013,7 +1014,7 @@ describe('CodexAppServerAdapter', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: safeSettings
     });
     await store.updateAgentSession(session.id, {

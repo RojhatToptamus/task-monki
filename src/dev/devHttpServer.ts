@@ -253,8 +253,18 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'GET' && url.pathname === '/api/agent/provider') {
-        sendJson(response, requestId, 200, await options.service.getAgentProviderState());
+      if (request.method === 'GET' && url.pathname === '/api/agent/runtimes') {
+        sendJson(response, requestId, 200, await options.service.getAgentRuntimeCatalog());
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/agent/session/native') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.updateAgentNativeSession((await readJson()) as never)
+        );
         return;
       }
 

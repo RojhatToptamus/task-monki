@@ -122,6 +122,34 @@ describe('development HTTP server', () => {
     expect(updateAppSettings).toHaveBeenCalledTimes(1);
   });
 
+  it('routes only typed native-session operations through the authenticated API', async () => {
+    const updateAgentNativeSession = vi.fn(async (input: unknown) => ({
+      ...(input as Record<string, unknown>),
+      native: { modes: { currentModeId: 'plan' } }
+    }));
+    const running = await startServer({ updateAgentNativeSession });
+    const request = {
+      operation: 'SET_MODE',
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'gemini-acp',
+      modeId: 'plan'
+    };
+
+    const response = await fetch(`${running.baseUrl}/api/agent/session/native`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify(request)
+    });
+
+    expect(response.status).toBe(200);
+    expect(updateAgentNativeSession).toHaveBeenCalledWith(request);
+    await expect(response.json()).resolves.toMatchObject({
+      runtimeId: 'gemini-acp',
+      native: { modes: { currentModeId: 'plan' } }
+    });
+  });
+
   it('accepts one bounded attachment batch and preserves no source path', async () => {
     const stageTaskAttachmentBatch = vi.fn(async (input: { attachments: Array<{ bytes: ArrayBuffer }> }) => ({
       id: 'draft-1',

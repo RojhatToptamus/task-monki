@@ -122,10 +122,11 @@ Smoke test only against a throwaway local Git repository:
 
 1. Launch the unpacked app.
 2. Confirm the renderer loads.
-3. Open Settings and confirm Git and Codex CLI report available tool status.
-4. Confirm Auto-detect shows resolved paths and live versions.
+3. Open Settings and confirm Git and at least one configured agent runtime are ready.
+4. Confirm the runtime catalog shows unavailable runtimes independently, with
+   resolved versions or actionable probe failures where supported.
 5. Confirm a custom invalid GitHub CLI path reports `gh` as unavailable without
-   blocking Git or Codex, then reset it to Auto-detect.
+   blocking Git or agent runtimes, then reset it to Auto-detect.
 6. Add the throwaway repository.
 7. Validate the repository.
 8. Create a smoke task and prepare a worktree.

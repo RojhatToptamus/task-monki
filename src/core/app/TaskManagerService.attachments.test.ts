@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel } from '../../shared/agent';
 import { ATTACHMENT_MAX_IMAGE_BYTES } from '../../shared/attachments';
-import { ScriptedAgentProviderAdapter } from '../../testSupport/taskMonkiScenario';
+import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
@@ -13,7 +13,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentProviderAdapter(store),
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-service-0001', 'notes.txt', 'same bytes'),
@@ -29,7 +29,7 @@ describe('TaskManagerService attachments', () => {
   it('keeps the draft when an image is incompatible with the selected model', async () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentProviderAdapter(store);
+    const adapter = new ScriptedAgentRuntimeAdapter(store);
     const service = new TaskManagerService(store, dir, undefined, {
       agentProviderAdapter: adapter,
     });
@@ -58,7 +58,7 @@ describe('TaskManagerService attachments', () => {
   it('adopts an image only after the provider reports image input support', async () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const adapter = new ScriptedAgentProviderAdapter(store);
+    const adapter = new ScriptedAgentRuntimeAdapter(store);
     vi.spyOn(adapter, 'listModels').mockResolvedValue([imageModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
       agentProviderAdapter: adapter,
@@ -90,7 +90,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentProviderAdapter(store),
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-create-retry-0001', 'context.json', '{"safe":true}')
@@ -122,7 +122,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentProviderAdapter(store),
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
     });
 
     await expect(
@@ -143,7 +143,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentProviderAdapter(store),
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-full-access-0001', 'notes.txt', 'private context')
@@ -179,7 +179,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentProviderAdapter(store),
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
     });
     await expect(
       service.stageTaskAttachmentBatch({ attachments: [{
@@ -223,8 +223,9 @@ function onePixelPng(): Uint8Array {
 
 function imageModel(): AgentModel {
   return {
-    id: 'vision-model',
-    provider: 'codex',
+    id: 'codex:openai/vision-model',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'vision-model',
     displayName: 'Vision model',
     hidden: false,

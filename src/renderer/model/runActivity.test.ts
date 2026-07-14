@@ -356,6 +356,7 @@ function commandItem(
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
@@ -398,6 +399,7 @@ function interactionFixture(
 ): InteractionRequestRecord {
   return {
     id: 'interaction-1',
+    runtimeId: 'codex',
     serverInstanceId: 'server-1',
     providerRequestId: 'request-1',
     taskId: 'task-1',

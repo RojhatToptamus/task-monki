@@ -7,7 +7,7 @@ import type {
   AgentItemStatus,
   AgentModel,
   AgentPreflight,
-  AgentProviderCapabilities,
+  AgentRuntimeCapabilities,
   AgentGoalSnapshotRecord,
   AgentReviewTarget,
   AgentSessionRecord,
@@ -21,7 +21,7 @@ import { createDomainEvent } from '../../storage/domainEvent';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import type {
   AgentInteractionResponse,
-  AgentProviderAdapter,
+  AgentRuntimeAdapter,
   AgentReconciliationResult,
   AgentSessionRef,
   AgentTurn,
@@ -31,12 +31,15 @@ import type {
   StartAgentReview,
   StartAgentTurn,
   SyncAgentGoal,
-  SteerAgentTurn
-} from '../AgentProviderAdapter';
+  SteerAgentTurn,
+  ResolveAgentExecution,
+  ResolvedAgentExecution,
+  RefineAgentPrompt
+} from '../AgentRuntimeAdapter';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError
-} from '../AgentProviderAdapter';
+} from '../AgentRuntimeAdapter';
 import { assertBrowserDevSettingsSafe } from '../BrowserDevAgentBoundary';
 import {
   assertAttachmentSandboxSupportsDelivery,
@@ -46,7 +49,7 @@ import {
   verifyAgentTurnAttachments
 } from '../AgentAttachmentDelivery';
 import { redactExternalPermissionPaths } from '../AgentPermissionRedaction';
-import { codexCapabilities } from './codexCapabilities';
+import { CODEX_RUNTIME_DESCRIPTOR, codexCapabilities } from './codexCapabilities';
 import {
   assertCodexActivePermissionProfile,
   assertCodexPermissionProfileEvidence,
@@ -113,6 +116,7 @@ import {
   codexReviewStatusFromResult,
   parseCodexReviewResult
 } from '../../review/CodexReviewContract';
+import { PromptRefinementService } from '../../prompt/PromptRefinementService';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
@@ -157,13 +161,14 @@ export interface CodexAppServerAdapterOptions
   enforceBrowserDevBoundary?: boolean;
 }
 
-export class CodexAppServerAdapter implements AgentProviderAdapter {
+export class CodexAppServerAdapter implements AgentRuntimeAdapter {
+  readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   private readonly supervisor: CodexAppServerSupervisor;
   private readonly restartDelaysMs: number[];
   private boundClient?: CodexRpcClient;
   private models: AgentModel[] = [];
   private preflightState: AgentPreflight = {
-    provider: 'codex',
+    runtime: CODEX_RUNTIME_DESCRIPTOR,
     ready: false,
     capabilities: codexCapabilities(),
     problems: ['Codex App Server has not been initialized.'],
@@ -176,6 +181,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private readonly interruptCompletionTimeoutMs: number;
   private readonly enforceBrowserDevBoundary: boolean;
   private externalToolSettings: CodexExternalToolSettings;
+  private promptRefinementExecutable?: string;
+  private readonly promptRefiner = new PromptRefinementService();
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
   private runtimeConfigRestartPending = false;
@@ -191,6 +198,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.interruptCompletionTimeoutMs = options.interruptCompletionTimeoutMs ?? 15_000;
     this.enforceBrowserDevBoundary = options.enforceBrowserDevBoundary === true;
     this.externalToolSettings = normalizeCodexExternalToolSettings(options.toolSettings);
+    this.promptRefinementExecutable = options.executable;
     this.supervisor = new CodexAppServerSupervisor(store, {
       ...options,
       appVersion: options.appVersion ?? '0.1.0'
@@ -230,7 +238,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       await this.refreshPreflight();
     } catch (error) {
       this.preflightState = {
-        provider: 'codex',
+        runtime: CODEX_RUNTIME_DESCRIPTOR,
         ready: false,
         capabilities: codexCapabilities(),
         problems: [error instanceof Error ? error.message : String(error)],
@@ -240,7 +248,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     return structuredClone(this.preflightState);
   }
 
-  capabilities(): Promise<AgentProviderCapabilities> {
+  capabilities(): Promise<AgentRuntimeCapabilities> {
     return Promise.resolve(codexCapabilities());
   }
 
@@ -250,6 +258,46 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       await this.refreshModels();
     }
     return structuredClone(this.models);
+  }
+
+  async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
+    const models = await this.listModels();
+    const model =
+      models.find((candidate) => candidate.id === input.settings.model) ??
+      models.find((candidate) => candidate.model === input.settings.model) ??
+      models.find((candidate) => candidate.isDefault);
+    if (!model) {
+      throw new Error('Codex did not report an available model.');
+    }
+    assertModelSupportsAttachments(model, input.attachments);
+    const effort = input.settings.reasoningEffort ?? model.defaultReasoningEffort;
+    if (effort && !model.supportedReasoningEfforts.includes(effort)) {
+      throw new Error(`Reasoning effort ${effort} is not supported by ${model.displayName}.`);
+    }
+    const settings: AgentExecutionSettings = {
+      ...input.settings,
+      runtimeId: this.descriptor.id,
+      model: model.model,
+      modelProvider:
+        input.settings.modelProvider && input.settings.modelProvider !== 'codex'
+          ? input.settings.modelProvider
+          : model.modelProvider,
+      reasoningEffort: effort,
+      serviceTier: input.settings.serviceTier ?? model.defaultServiceTier
+    };
+    assertAttachmentSandboxSupportsDelivery(settings, input.attachments);
+    return { settings, model };
+  }
+
+  refinePrompt(input: RefineAgentPrompt) {
+    return this.promptRefiner.refine(
+      input.repositoryPath,
+      input.input,
+      input.settings.model,
+      this.promptRefinementExecutable,
+      this.externalToolSettings,
+      this.enforceBrowserDevBoundary
+    );
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -368,6 +416,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     let session = await this.requireSession(input.session.localSessionId);
     if (!session.providerSessionId) {
       session = await this.createSession({
+        runtimeId: this.descriptor.id,
         localSessionId: session.id,
         taskId: session.taskId,
         iterationId: session.iterationId,
@@ -519,7 +568,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     } catch (error) {
       throw mapMutationError('turn/steer', error);
     }
-    const run = await this.store.getRunByProviderTurnId(input.providerTurnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
     if (run) {
       await this.recordRunActivity(run, 'turn/steered', {
         clientMessageId: input.clientMessageId
@@ -551,7 +600,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       if (!isNoActiveTurnToInterrupt(error)) {
         return false;
       }
-      const run = await this.store.getRunByProviderTurnId(providerTurnId);
+      const run = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
       if (!run || !canRetargetReviewTurn(run, session)) {
         return false;
       }
@@ -576,7 +625,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       }
       const activeTurnId = activeTurnIdFromInterruptMismatch(mapped);
       if (activeTurnId && activeTurnId !== input.providerTurnId) {
-        const run = await this.store.getRunByProviderTurnId(input.providerTurnId);
+        const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
         if (run && canRetargetReviewTurn(run, session)) {
           const updatedRun = await this.store.updateRun(run.id, {
             providerTurnId: activeTurnId,
@@ -835,7 +884,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         taskId: session.taskId,
         iterationId: session.iterationId,
         sessionId: session.id,
-        provider: session.provider,
+        runtimeId: session.runtimeId,
         taskGoalHash,
         lastSynchronizedTaskGoalHash: latest?.lastSynchronizedTaskGoalHash,
         providerObjective: latest?.providerObjective,
@@ -894,7 +943,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     includePersistedQueuedRuns: boolean
   ): Promise<AgentReconciliationResult> {
     const runs = await this.store.getRunsRequiringRecovery({
-      includeQueued: includePersistedQueuedRuns
+      includeQueued: includePersistedQueuedRuns,
+      runtimeId: this.descriptor.id
     });
     const reconciledSessionIds = new Set<string>();
     const recoveryRequiredSessionIds = new Set<string>();
@@ -1015,6 +1065,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     restart: boolean;
   }): Promise<void> {
     this.externalToolSettings = normalizeCodexExternalToolSettings(input.toolSettings);
+    this.promptRefinementExecutable = input.executable;
     this.supervisor.setExecutable(input.executable);
     this.supervisor.setToolSettings(input.toolSettings);
     if (!this.initialized) {
@@ -1041,7 +1092,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     this.models = [];
     this.initialized = false;
     this.preflightState = {
-      provider: 'codex',
+      runtime: CODEX_RUNTIME_DESCRIPTOR,
       ready: false,
       capabilities: codexCapabilities(),
       problems: ['Codex App Server is restarting with updated settings.'],
@@ -1131,7 +1182,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     }
 
     this.preflightState = {
-      provider: 'codex',
+      runtime: CODEX_RUNTIME_DESCRIPTOR,
       ready: problems.length === 0,
       capabilities: codexCapabilities(),
       runtimeVersion: this.supervisor.currentServer?.runtimeVersion,
@@ -1300,7 +1351,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
         await this.handleThreadStatus(notification.params.threadId, notification.params.status);
         return;
       case 'thread/closed': {
-        const session = await this.store.getAgentSessionByProviderId(
+        const session = await this.store.getAgentSessionByProviderId(this.descriptor.id,
           notification.params.threadId
         );
         if (session) {
@@ -1320,7 +1371,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     thread: Thread,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const existing = await this.store.getAgentSessionByProviderId(thread.id);
+    const existing = await this.store.getAgentSessionByProviderId(this.descriptor.id, thread.id);
     const sourceMetadata = getSubagentThreadMetadata(thread);
     const providerParentSessionId =
       thread.parentThreadId ??
@@ -1328,7 +1379,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       (sourceMetadata.isSpawnedSubagent ? thread.forkedFromId : null);
 
     if (providerParentSessionId) {
-      const parent = await this.store.getAgentSessionByProviderId(
+      const parent = await this.store.getAgentSessionByProviderId(this.descriptor.id,
         providerParentSessionId
       );
       if (parent) {
@@ -1399,7 +1450,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   ): Promise<void> {
     if (item.type === 'collabAgentToolCall') {
       const parent =
-        (await this.store.getAgentSessionByProviderId(item.senderThreadId)) ??
+        (await this.store.getAgentSessionByProviderId(this.descriptor.id, item.senderThreadId)) ??
         (item.senderThreadId === session.providerSessionId ? session : undefined);
       if (!parent) {
         return;
@@ -1455,7 +1506,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     session: AgentSessionRecord,
     providerTurnId: string
   ): Promise<RunRecord | undefined> {
-    const existing = await this.store.getRunByProviderTurnId(providerTurnId);
+    const existing = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
     if (existing) {
       return existing;
     }
@@ -1511,7 +1562,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       });
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(params.threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, params.threadId);
     const run =
       session && params.turnId
         ? await this.ensureRunForSession(session, params.turnId)
@@ -1550,6 +1601,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       providerItemPayload: item?.payload
     });
     const interaction = await this.store.createInteractionRequest({
+      runtimeId: this.descriptor.id,
       serverInstanceId: server.id,
       providerRequestId: request.id,
       taskId: run.taskId,
@@ -1574,8 +1626,11 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       payload: { type: mapped.type, status: 'PENDING' },
       at: new Date().toISOString()
     });
-    if (mapped.type === 'DYNAMIC_TOOL') {
-      await this.rejectUnregisteredDynamicTool(interaction);
+    if (
+      mapped.type === 'DYNAMIC_TOOL' ||
+      (mapped.type === 'USER_INPUT' && policy.allowedActions.length === 0)
+    ) {
+      await this.resolveBlockedInteraction(interaction);
     }
   }
 
@@ -1628,7 +1683,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private async handleTurnStarted(threadId: string, turn: Turn): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
@@ -1688,7 +1743,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       clearTimeout(interruptTimer);
       this.interruptTimers.delete(turn.id);
     }
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     const run = session
       ? await this.ensureRunForSession(session, turn.id)
       : undefined;
@@ -1720,7 +1775,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     startedAtMs?: number,
     completedAtMs?: number
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     const run = session
       ? await this.ensureRunForSession(session, turnId)
       : undefined;
@@ -1764,7 +1819,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     threadId: string,
     status: ThreadStatus
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
@@ -1785,7 +1840,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     plan: TurnPlanStep[],
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(turnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
     if (!run) {
       return;
     }
@@ -1794,7 +1849,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       iterationId: run.iterationId,
       runId: run.id,
       sessionId: run.sessionId,
-      provider: 'codex',
+      runtimeId: this.descriptor.id,
       explanation,
       steps: mapPlanSteps(plan),
       rawMessage: raw
@@ -1811,17 +1866,17 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     usage: ThreadTokenUsage,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
-    const run = await this.store.getRunByProviderTurnId(turnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
     const stored = await this.store.recordAgentUsageSnapshot({
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
       runId: run?.id,
-      provider: session.provider,
+      runtimeId: session.runtimeId,
       total: mapTokenUsage(usage.total),
       last: mapTokenUsage(usage.last),
       modelContextWindow: usage.modelContextWindow ?? undefined,
@@ -1840,7 +1895,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     goal: ThreadGoal,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
@@ -1862,7 +1917,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     threadId: string,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (!session) {
       return;
     }
@@ -1877,7 +1932,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       taskId: session.taskId,
       iterationId: session.iterationId,
       sessionId: session.id,
-      provider: session.provider,
+      runtimeId: session.runtimeId,
       taskGoalHash: hashGoal(task.prompt),
       lastSynchronizedTaskGoalHash: latest?.lastSynchronizedTaskGoalHash,
       syncState: 'CLEARED',
@@ -1893,7 +1948,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     const observed = settingsFromThreadSettings(settings);
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     if (session) {
       try {
         assertCodexActivePermissionProfile(
@@ -1985,7 +2040,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   ): Promise<void> {
     const snapshot = await this.store.snapshot();
     const affectedRuns = snapshot.runs.filter((run) =>
-      ACTIVE_RUN_STATES.includes(run.status)
+      run.runtimeId === this.descriptor.id && ACTIVE_RUN_STATES.includes(run.status)
     );
     for (const run of affectedRuns) {
       const finalArtifact = await this.store.writeFinalArtifact(
@@ -2048,7 +2103,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (!threadId) {
       return;
     }
-    const session = await this.store.getAgentSessionByProviderId(threadId);
+    const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, threadId);
     const run = session
       ? await this.store.getActiveRunForSession(session.id)
       : undefined;
@@ -2067,7 +2122,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     reason: unknown,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(turnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
     if (!run) {
       return;
     }
@@ -2097,7 +2152,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     source: string,
     text: string
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(turnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
     if (!run) {
       return;
     }
@@ -2118,7 +2173,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     eventType: string,
     payload: Record<string, unknown>
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(turnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, turnId);
     if (run) {
       await this.recordRunActivity(run, eventType, payload);
     }
@@ -2148,7 +2203,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     providerTurnId: string,
     reason: string
   ): Promise<void> {
-    const run = await this.store.getRunByProviderTurnId(providerTurnId);
+    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId);
     if (!run) {
       return;
     }
@@ -2339,8 +2394,10 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
     const snapshot = await this.store.snapshot();
-    const orphaned = snapshot.agentServers.filter((server) =>
-      ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status)
+    const orphaned = snapshot.agentServers.filter(
+      (server) =>
+        server.runtimeId === this.descriptor.id &&
+        ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status)
     );
     for (const server of orphaned) {
       await this.store.updateAgentServer(server.id, {
@@ -2360,7 +2417,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     }
     const timer = setTimeout(() => {
       this.interruptTimers.delete(providerTurnId);
-      void this.store.getRunByProviderTurnId(providerTurnId).then(async (run) => {
+      void this.store.getRunByProviderTurnId(this.descriptor.id, providerTurnId).then(async (run) => {
         if (
           run &&
           ['INTERRUPTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
@@ -2452,7 +2509,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       taskId: input.session.taskId,
       iterationId: input.session.iterationId,
       sessionId: input.session.id,
-      provider: input.session.provider,
+      runtimeId: input.session.runtimeId,
       taskGoalHash,
       lastSynchronizedTaskGoalHash:
         input.source === 'TASK_MONKI_SYNC' || providerGoalHash === taskGoalHash
@@ -2484,7 +2541,7 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       iterationId: session.iterationId,
       sessionId: session.id,
       runId,
-      provider: session.provider,
+      runtimeId: session.runtimeId,
       source,
       settings,
       detail,
@@ -2550,20 +2607,27 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
 
   private emitProviderUpdate(): void {
     this.appEvents.emit({
-      type: 'provider.updated',
-      taskId: 'provider:codex',
+      type: 'runtime.updated',
+      taskId: 'runtime:codex',
       payload: this.getProviderState(),
       at: new Date().toISOString()
     });
   }
 
-  private async rejectUnregisteredDynamicTool(
+  private async resolveBlockedInteraction(
     interaction: InteractionRequestRecord
   ): Promise<void> {
-    const decision: AgentInteractionDecision = {
-      interactionType: 'DYNAMIC_TOOL',
-      action: 'REJECT_UNREGISTERED'
-    };
+    const decision: AgentInteractionDecision =
+      interaction.type === 'DYNAMIC_TOOL'
+        ? {
+            interactionType: 'DYNAMIC_TOOL',
+            action: 'REJECT_UNREGISTERED'
+          }
+        : {
+            interactionType: 'USER_INPUT',
+            action: 'ANSWER',
+            answers: {}
+          };
     const responding = await this.store.transitionInteractionRequest(
       interaction.id,
       'PENDING',
@@ -2591,6 +2655,45 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
           }
         );
         this.emitInteractionUpdate(stale);
+        const run = await this.store.getRun(interaction.runId);
+        if (run) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await this.store.appendEvent(
+            createDomainEvent({
+              type: 'AGENT_MUTATION_AMBIGUOUS',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              agentSessionId: run.sessionId,
+              serverInstanceId: run.serverInstanceId,
+              source: 'provider',
+              payload: {
+                operation:
+                  interaction.type === 'DYNAMIC_TOOL'
+                    ? 'dynamic-tool/reject'
+                    : 'user-input/empty-response',
+                reason,
+                automaticResubmission: false
+              }
+            })
+          );
+          this.appEvents.emit({
+            type: 'run.activity',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            payload: {
+              eventType: 'mutation/ambiguous',
+              operation:
+                interaction.type === 'DYNAMIC_TOOL'
+                  ? 'dynamic-tool/reject'
+                  : 'user-input/empty-response'
+            },
+            at: new Date().toISOString()
+          });
+        }
       }
       throw error;
     }

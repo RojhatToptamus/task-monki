@@ -272,7 +272,7 @@ export class CodexAppServerSupervisor {
     });
 
     const server = await this.store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable,

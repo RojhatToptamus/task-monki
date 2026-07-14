@@ -158,7 +158,16 @@ export interface AttachmentDraftSnapshot {
   updatedAt: string;
 }
 
-export type AttachmentSubmissionMode = 'localImage' | 'prompt-file-reference';
+/**
+ * Exact provider delivery mechanism retained as evidence.
+ *
+ * `nativeFile` means the runtime received a structured file input (for
+ * example an OpenCode file part), not merely a path mentioned in prompt text.
+ */
+export type AttachmentSubmissionMode =
+  | 'localImage'
+  | 'nativeFile'
+  | 'prompt-file-reference';
 
 /** Durable evidence recorded after the provider accepted a turn or review start. */
 export interface AttachmentSubmissionRecord {

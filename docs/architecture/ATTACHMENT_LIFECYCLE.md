@@ -18,9 +18,9 @@ key, package-registry credential, and service-account filenames even when their
 contents are text. SVG is accepted only as UTF-8 text, not as an image input.
 
 PDFs, Office documents, video, audio, archives, databases, and arbitrary
-binaries are unsupported. Codex App Server provides `text`, `image`, and
-`localImage` inputs but no generic file or PDF input. Supporting those formats
-requires a separately secured extraction or rendering pipeline.
+binaries are unsupported. Runtime-native generic file parts do not make an
+unsupported format safe to parse; those formats still require a separately
+secured extraction or rendering pipeline.
 
 The renderer performs inexpensive filename and size checks. Before submission,
 Chromium's native image decoder bounds dimensions and re-encodes images so
@@ -128,25 +128,44 @@ identity, size, and hash checks while relying on the inherited per-user ACL
 boundary described above. No run cache or second physical representation
 exists.
 
-Images are sent as Codex `localImage`. Text-like files are listed by exact
-managed read-only path in a compact prompt manifest that labels their contents
-as untrusted task data. The selected model must report image support.
+Delivery is selected by the owning runtime:
 
-After Codex acknowledges a turn, Task Monki records path-free submission
+- Codex sends supported images as `localImage` and lists text-like files by
+  exact managed read-only path in an untrusted-data prompt manifest.
+- Other runtimes must advertise and negotiate the required content type before
+  the composer enables attachments.
+
+OpenCode native file parts are intentionally not a Task Monki managed delivery
+mode. Its provider, plugin, MCP, and tool execution share a credential-bearing
+process without an attested network or filesystem confinement boundary.
+Task Monki therefore reports attachment delivery as unsupported for OpenCode
+and rejects attachments before starting or mutating provider state.
+
+The selected model must report image support whenever images are present.
+
+After the owning runtime acknowledges a turn, Task Monki records path-free submission
 evidence: attachment id, ordinal, kind, media type, size, hash, submission mode,
 verification time, provider turn id, and submission time. This proves what Task
 Monki submitted, not that the model read or used it. Raw protocol journals can
 still contain provider-visible paths and belong only in Debug.
 
+Submission modes are truthful transport evidence: `localImage` for a native
+image input, `prompt-file-reference` for a managed path described in text, and
+`nativeFile` only for a future runtime whose native file-part boundary is
+explicitly supported and attested. OpenCode does not produce `nativeFile`
+submission evidence.
+
 ## Confidentiality boundary
 
-An attachment task requires a managed Codex sandbox. Full access remains
-available for attachment-free tasks but is rejected when attachments are
-present. Attachment task profiles grant only the runtime minimum, the exact
-worktree, and the exact verified files. Network is forced off.
+An attachment task requires a runtime-supported restricted execution mode.
+Full access remains available for attachment-free tasks but is rejected when
+attachments are present. Network is forced off. Codex additionally attests a
+complete permission profile containing only the runtime minimum, exact
+worktree, and exact verified files. Other runtimes must enforce and document
+their own native tool/permission boundary truthfully.
 
-Codex web search, external MCP servers, and apps must also all be disabled
-before an attachment task is created or submitted. Filesystem read rules do not
+For Codex submission, web search, external MCP servers, and apps must also all
+be disabled. Filesystem read rules do not
 confine a same-user MCP process and do not prevent an allowed network tool from
 transmitting content. This restriction is fail-closed until Task Monki has a
 stronger external-tool isolation or explicit trust model.
@@ -170,7 +189,8 @@ backup or export must keep `store.json` and `attachments/tasks` together while
 Task Monki is closed. Staging is disposable and is removed on restart. Task
 attachments last for the task lifetime.
 
-Codex conversation history and Task Monki protocol journals may retain image
+Runtime conversation history and Task Monki protocol journals may retain image
 bytes, managed paths, hashes, or derived discussion after local task deletion.
-Task Monki must not claim that deleting its task directory erases provider
-history.
+Journal data remains only until its bounded per-server segment retention prunes
+it; a pruned raw-message reference fails closed. Task Monki must not claim that
+deleting its task directory erases provider history.

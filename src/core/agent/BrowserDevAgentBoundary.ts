@@ -1,4 +1,11 @@
-import type { AgentExecutionSettings } from '../../shared/contracts';
+import type {
+  AgentExecutionSettings,
+  AgentRuntimeCapabilities,
+  AgentRuntimeDescriptor
+} from '../../shared/contracts';
+
+export const BROWSER_DEV_ISOLATION_CAPABILITY =
+  'task-monki.browser-dev-isolation';
 
 export const BROWSER_DEV_BOUNDARY_MESSAGE =
   'The browser development server only permits non-escalatable agent runs: use a managed or read-only sandbox, disable network access, set approval policy to never, and use the user approval reviewer. Use the Electron app for other permission modes.';
@@ -35,4 +42,24 @@ export function assertBrowserDevSettingsSafe(
       `${BROWSER_DEV_BOUNDARY_MESSAGE} ${subject} is unsafe: ${violations.join(', ')}.`
     );
   }
+}
+
+export function assertBrowserDevRuntimeIsolation(
+  runtime: AgentRuntimeDescriptor,
+  capabilities: AgentRuntimeCapabilities
+): void {
+  if (!hasBrowserDevRuntimeIsolation(capabilities)) {
+    throw new Error(
+      `${BROWSER_DEV_BOUNDARY_MESSAGE} ${runtime.displayName} does not attest the process, filesystem, and network isolation required before the browser API credential is published.`
+    );
+  }
+}
+
+export function hasBrowserDevRuntimeIsolation(
+  capabilities: AgentRuntimeCapabilities
+): boolean {
+  return (
+    capabilities.extensions[BROWSER_DEV_ISOLATION_CAPABILITY]?.maturity ===
+    'stable'
+  );
 }

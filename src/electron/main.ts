@@ -38,6 +38,7 @@ import type {
   ReadProtocolMessageRequest,
   TestExternalToolRequest,
   TransitionTaskRequest,
+  UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import {
@@ -304,7 +305,13 @@ function installIpcHandlers(): void {
       : await dialog.showOpenDialog(options);
     return result.canceled ? undefined : result.filePaths[0];
   });
-  handleTrustedIpc('agent:providerState', () => service.getAgentProviderState());
+  handleTrustedIpc('agent:runtimeCatalog', () => service.getAgentRuntimeCatalog());
+  handleTrustedIpc(
+    'agent:updateNativeSession',
+    async (_, input: UpdateAgentNativeSessionRequest) => {
+      return service.updateAgentNativeSession(input);
+    }
+  );
   handleTrustedIpc('settings:get', () => service.getAppSettings());
   handleTrustedIpc('settings:update', async (_, input: UpdateAppSettingsRequest) => {
     return service.updateAppSettings(input);
@@ -375,23 +382,23 @@ function installIpcHandlers(): void {
     return service.prepareWorktree(input);
   });
 
-  handleTrustedIpc('codex:startRun', async (_, input: StartRunRequest) => {
+  handleTrustedIpc('agent:startRun', async (_, input: StartRunRequest) => {
     return service.startRun(input);
   });
 
-  handleTrustedIpc('codex:steerRun', async (_, input: SteerRunRequest) => {
+  handleTrustedIpc('agent:steerRun', async (_, input: SteerRunRequest) => {
     return service.steerRun(input);
   });
 
-  handleTrustedIpc('codex:continueRun', async (_, input: ContinueRunRequest) => {
+  handleTrustedIpc('agent:continueRun', async (_, input: ContinueRunRequest) => {
     return service.continueRun(input);
   });
 
-  handleTrustedIpc('codex:retryRun', async (_, input: RetryRunRequest) => {
+  handleTrustedIpc('agent:retryRun', async (_, input: RetryRunRequest) => {
     return service.retryRun(input);
   });
 
-  handleTrustedIpc('codex:startReview', async (_, input: StartReviewRequest) => {
+  handleTrustedIpc('agent:startReview', async (_, input: StartReviewRequest) => {
     return service.startReview(input);
   });
 
@@ -399,7 +406,7 @@ function installIpcHandlers(): void {
     return service.syncAgentGoal(input);
   });
 
-  handleTrustedIpc('codex:cancelRun', async (_, { runId }: { runId: string }) => {
+  handleTrustedIpc('agent:cancelRun', async (_, { runId }: { runId: string }) => {
     await service.cancelRun({ runId });
   });
 

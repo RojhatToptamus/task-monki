@@ -6,7 +6,7 @@ import type {
   AgentModel,
   AgentExecutionSettings,
   AgentPreflight,
-  AgentProviderCapabilities,
+  AgentRuntimeCapabilities,
   AgentSessionRecord,
   AgentSessionSnapshot
 } from '../../shared/agent';
@@ -16,18 +16,30 @@ import { FileTaskStore } from '../storage/FileTaskStore';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
-  type AgentProviderAdapter,
+  type AgentRuntimeAdapter,
   type AgentReconciliationResult,
   type AgentSessionRef,
   type AgentTurn,
   type CreateAgentSession,
   type InterruptAgentTurn,
+  type ForkAgentSession,
   type StartAgentReview,
   type StartAgentTurn,
-  type SteerAgentTurn
-} from './AgentProviderAdapter';
+  type SteerAgentTurn,
+  type SyncAgentGoal,
+  type ResolveAgentExecution,
+  type ResolvedAgentExecution
+} from './AgentRuntimeAdapter';
 import { AgentOrchestrator } from './AgentOrchestrator';
-import { codexCapabilities } from './codex/codexCapabilities';
+import { assertModelSupportsAttachments } from './AgentAttachmentDelivery';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from './codex/codexCapabilities';
+import {
+  OPENCODE_RUNTIME_DESCRIPTOR,
+  opencodeCapabilities
+} from './opencode/opencodeCapabilities';
 
 describe('AgentOrchestrator Phase 4', () => {
   it('rejects image delivery before creating a run when the selected model is text-only', async () => {
@@ -368,7 +380,7 @@ describe('AgentOrchestrator Phase 4', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: {
         model: 'test-model',
         sandbox: 'WORKSPACE_WRITE',
@@ -431,7 +443,7 @@ describe('AgentOrchestrator Phase 4', () => {
       taskId: task.id,
       iterationId: iteration.id,
       sessionId: legacySession.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: { ...safeSettings, sandbox: 'DANGER_FULL_ACCESS' }
     });
@@ -449,7 +461,7 @@ describe('AgentOrchestrator Phase 4', () => {
       taskId: task.id,
       iterationId: iteration.id,
       sessionId: legacySession.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: safeSettings
     });
@@ -471,6 +483,54 @@ describe('AgentOrchestrator Phase 4', () => {
         approvalsReviewer: 'user'
       }
     });
+  });
+
+  it('rejects an unattested runtime before browser development can resolve provider state', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-boundary-'));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    Object.defineProperty(adapter, 'descriptor', {
+      value: OPENCODE_RUNTIME_DESCRIPTOR
+    });
+    vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
+    const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter, {
+      allowNetworkAccess: false
+    });
+    const task = await store.createTask({
+      runtimeId: 'opencode',
+      title: 'Reject unattested runtime',
+      prompt: 'Do not probe the provider.',
+      repositoryPath: repositoryDir,
+      agentSettings: {
+        runtimeId: 'opencode',
+        sandbox: 'WORKSPACE_WRITE',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'task-monki/runtime-boundary',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('browser development');
+    expect(resolveExecution).not.toHaveBeenCalled();
+    expect((await store.snapshot()).runs).toEqual([]);
   });
 
   it('rechecks provider-observed settings after creating a session and before turn/start', async () => {
@@ -586,7 +646,7 @@ describe('AgentOrchestrator Phase 4', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: safeSettings
     });
     const run = await store.createRun({
@@ -606,7 +666,7 @@ describe('AgentOrchestrator Phase 4', () => {
     });
 
     await expect(orchestrator.initialize()).rejects.toThrow(
-      'Provider recovery reported unsafe observed settings'
+      'Runtime recovery reported unsafe observed settings'
     );
 
     expect(adapter.initializeCount).toBe(1);
@@ -620,7 +680,7 @@ describe('AgentOrchestrator Phase 4', () => {
     await fs.mkdir(repositoryDir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -676,7 +736,7 @@ describe('AgentOrchestrator Phase 4', () => {
         task,
         iteration,
         worktree,
-        provider: 'codex',
+        runtimeId: 'codex',
         requestedSettings: input.sessionSettings ?? input.runSettings
       });
       if (input.sessionObservedSettings) {
@@ -708,7 +768,7 @@ describe('AgentOrchestrator Phase 4', () => {
           iterationId: iteration.id,
           sessionId: session.id,
           runId: run.id,
-          provider: 'codex',
+          runtimeId: 'codex',
           source: 'THREAD_SETTINGS_NOTIFICATION',
           settings: input.latestSettingsObservation
         });
@@ -788,6 +848,7 @@ describe('AgentOrchestrator Phase 4', () => {
       { method: 'item/commandExecution/requestApproval' }
     );
     const pendingInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
       serverInstanceId: server.id,
       providerRequestId: 71,
       taskId: pendingApprovalWithSafeSettings.task.id,
@@ -872,13 +933,14 @@ describe('AgentOrchestrator Phase 4', () => {
     ).toHaveLength(persisted.filter((expected) => expected.unsafe).length);
     await orchestrator.shutdown();
     await electronOrchestrator.shutdown();
-  });
+  }, 20_000);
 
   it('rejects unexpected provider approval acceptance in browser-dev mode', async () => {
     const getInteractionRequest = vi.fn().mockResolvedValue({
       id: 'interaction-one',
       taskId: 'task-one',
       runId: 'run-one',
+      runtimeId: 'codex',
       type: 'COMMAND_APPROVAL'
     });
     const store = { getInteractionRequest } as unknown as FileTaskStore;
@@ -902,7 +964,8 @@ describe('AgentOrchestrator Phase 4', () => {
   });
 });
 
-class Phase4Adapter implements AgentProviderAdapter {
+class Phase4Adapter implements AgentRuntimeAdapter {
+  readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   ambiguousStart = false;
   missingProviderSessionOnStart?: string;
   createdSessionObservedSettings?: AgentExecutionSettings;
@@ -936,23 +999,24 @@ class Phase4Adapter implements AgentProviderAdapter {
 
   preflight(): Promise<AgentPreflight> {
     return Promise.resolve({
-      provider: 'codex',
+      runtime: this.descriptor,
       ready: true,
-      capabilities: codexCapabilities(),
+      capabilities: phase4Capabilities(),
       problems: [],
       warnings: []
     });
   }
 
-  capabilities(): Promise<AgentProviderCapabilities> {
-    return Promise.resolve(codexCapabilities());
+  capabilities(): Promise<AgentRuntimeCapabilities> {
+    return Promise.resolve(phase4Capabilities());
   }
 
   listModels(): Promise<AgentModel[]> {
     return Promise.resolve([
       {
-        id: 'test-model',
-        provider: 'codex',
+        id: 'codex:openai/test-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'test-model',
         displayName: 'Test model',
         hidden: false,
@@ -963,6 +1027,21 @@ class Phase4Adapter implements AgentProviderAdapter {
         isDefault: true
       }
     ]);
+  }
+
+  async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
+    const model = (await this.listModels())[0]!;
+    assertModelSupportsAttachments(model, input.attachments);
+    return {
+      model,
+      settings: {
+        ...input.settings,
+        runtimeId: this.descriptor.id,
+        model: model.model,
+        modelProvider: model.modelProvider,
+        reasoningEffort: input.settings.reasoningEffort ?? model.defaultReasoningEffort
+      }
+    };
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -1025,6 +1104,14 @@ class Phase4Adapter implements AgentProviderAdapter {
     return Promise.resolve();
   }
 
+  forkSession(_input: ForkAgentSession): Promise<AgentSessionRecord> {
+    return Promise.reject(new Error('Session fork is not exercised by this fake.'));
+  }
+
+  syncGoal(_input: SyncAgentGoal): ReturnType<NonNullable<AgentRuntimeAdapter['syncGoal']>> {
+    return Promise.reject(new Error('Goal sync is not exercised by this fake.'));
+  }
+
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
     this.threadCounter += 1;
     this.turnCounter += 1;
@@ -1056,6 +1143,16 @@ class Phase4Adapter implements AgentProviderAdapter {
     this.shutdownCount += 1;
     return Promise.resolve();
   }
+}
+
+function phase4Capabilities(): AgentRuntimeCapabilities {
+  return {
+    ...codexCapabilities(),
+    promptRefinement: {
+      maturity: 'unsupported',
+      detail: 'The phase-four test adapter does not implement prompt refinement.'
+    }
+  };
 }
 
 async function createPhase4TaskContext(

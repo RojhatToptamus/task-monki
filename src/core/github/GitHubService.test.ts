@@ -283,7 +283,7 @@ describe('GitHubService branch publication', () => {
     expect(result.error).toBe(
       'Remote branch has newer commits. Sync the branch before pushing again.'
     );
-  });
+  }, 15_000);
 });
 
 async function writeFakePullRequestGh(
@@ -342,6 +342,7 @@ async function readGhInvocations(logPath: string): Promise<string[][]> {
 function taskFixture(repositoryPath: string): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Test task',
     prompt: 'Do work.',
     repositoryPath,

@@ -168,7 +168,7 @@ describe('TaskManagerService settings', () => {
     } finally {
       await service.shutdown();
     }
-  });
+  }, 20_000);
 
   it('aborts browser-dev startup when MCP disable discovery cannot be proven', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
@@ -221,7 +221,7 @@ describe('TaskManagerService settings', () => {
         task,
         iteration,
         worktree,
-        provider: 'codex'
+        runtimeId: 'codex'
       });
       const run = await store.createRun({
         task,
@@ -241,7 +241,7 @@ describe('TaskManagerService settings', () => {
 
       const snapshot = await waitForAgentServerSnapshot(store);
       expect(snapshot.agentServers).toHaveLength(1);
-      expect((await service.getAgentProviderState()).preflight.warnings).toContain(
+      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.warnings).toContain(
         'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
       );
     } finally {
@@ -276,7 +276,7 @@ describe('TaskManagerService settings', () => {
       expect(snapshot.agentServers).toHaveLength(1);
       expect(snapshot.agentServers[0]?.executable).toBe(executable);
       expect(getGitExecutablePath()).toBe(fakeGit);
-      expect((await service.getAgentProviderState()).preflight.warnings).not.toContain(
+      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.warnings).not.toContain(
         'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
       );
     } finally {

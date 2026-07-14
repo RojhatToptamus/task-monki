@@ -6,6 +6,7 @@ import type {
   AgentReviewTarget,
   AgentRetryStrategy,
   AgentRecoveryState,
+  AgentRuntimeId,
   AgentRunMode,
   AgentRunStatus,
   AgentServerInstance,
@@ -30,7 +31,7 @@ import type {
 export * from './agent';
 export * from './attachments';
 
-export const TASK_STORE_SCHEMA_VERSION = 11 as const;
+export const TASK_STORE_SCHEMA_VERSION = 12 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -224,7 +225,7 @@ export type ReviewStatus =
   | 'STALE'
   | 'UNKNOWN';
 
-export type CodexReviewGateStatus =
+export type AgentReviewGateStatus =
   | 'NOT_RUN'
   | 'RUNNING'
   | 'PASSED'
@@ -234,11 +235,11 @@ export type CodexReviewGateStatus =
   | 'CANCELED'
   | 'STALE';
 
-export type CodexReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
+export type AgentReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
 
-export interface CodexReviewFinding {
+export interface AgentReviewFinding {
   id: string;
-  severity: CodexReviewFindingSeverity;
+  severity: AgentReviewFindingSeverity;
   title: string;
   explanation: string;
   path?: string;
@@ -247,15 +248,16 @@ export interface CodexReviewFinding {
   recommendation?: string;
 }
 
-export interface CodexReviewResult {
+export interface AgentReviewResult {
+  /** Legacy wire value retained so schema-12 review artifacts remain readable. */
   schemaVersion: 'codex-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
-  findings: CodexReviewFinding[];
+  findings: AgentReviewFinding[];
 }
 
-export interface CodexReviewGateProjection {
-  status: CodexReviewGateStatus;
+export interface AgentReviewGateProjection {
+  status: AgentReviewGateStatus;
   runId?: string;
   sourceRunId?: string;
   reviewedGitSnapshotId?: string;
@@ -263,9 +265,20 @@ export interface CodexReviewGateProjection {
   reviewedDirtyFingerprint?: string;
   finalArtifactId?: string;
   summary?: string;
-  result?: CodexReviewResult;
+  result?: AgentReviewResult;
   updatedAt?: string;
 }
+
+/** @deprecated Use the provider-neutral agent-review type. */
+export type CodexReviewGateStatus = AgentReviewGateStatus;
+/** @deprecated Use the provider-neutral agent-review type. */
+export type CodexReviewFindingSeverity = AgentReviewFindingSeverity;
+/** @deprecated Use the provider-neutral agent-review type. */
+export type CodexReviewFinding = AgentReviewFinding;
+/** @deprecated Use the provider-neutral agent-review type. */
+export type CodexReviewResult = AgentReviewResult;
+/** @deprecated The persisted projection field retains this legacy name in schema 12. */
+export type CodexReviewGateProjection = AgentReviewGateProjection;
 
 export type MergeStatus =
   | 'NOT_APPLICABLE'
@@ -368,8 +381,8 @@ export interface StatusProjection {
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
   /**
-   * Local Codex diff-review gate. This is intentionally separate from
-   * GitHub PR review rollups above and is additive for older local stores.
+   * Local agent diff-review gate. The legacy field name is retained for
+   * durable-store compatibility and is independent from GitHub PR reviews.
    */
   codexReview?: CodexReviewGateProjection;
   merge: MergeStatus;
@@ -382,6 +395,8 @@ export interface StatusProjection {
 
 export interface Task {
   id: string;
+  /** Immutable agent-runtime binding for this task. */
+  runtimeId: AgentRuntimeId;
   title: string;
   prompt: string;
   repositoryPath: string;
@@ -473,6 +488,8 @@ export interface GitSnapshotRecord {
 
 export interface RunRecord {
   id: string;
+  /** Copied from the owning session so recovery never depends on a default runtime. */
+  runtimeId: AgentRuntimeId;
   taskId: string;
   iterationId: string;
   worktreeId: string;
@@ -688,6 +705,7 @@ export interface CreateTaskRequest {
   /** Stable across retries of one logical create action. */
   creationToken?: string;
   completionPolicy?: CompletionPolicy;
+  runtimeId?: AgentRuntimeId;
   agentSettings?: AgentExecutionSettings;
   attachmentDraftId?: string;
 }
@@ -733,6 +751,30 @@ export interface StartReviewRequest {
 export interface SyncAgentGoalRequest {
   taskId: string;
   sessionId: string;
+}
+
+export type UpdateAgentNativeSessionRequest =
+  | {
+      operation: 'SET_MODE';
+      taskId: string;
+      sessionId: string;
+      runtimeId: AgentRuntimeId;
+      modeId: string;
+    }
+  | {
+      operation: 'SET_CONFIG_OPTION';
+      taskId: string;
+      sessionId: string;
+      runtimeId: AgentRuntimeId;
+      configId: string;
+      value: string | boolean;
+    };
+
+export interface UpdateAgentNativeSessionResult {
+  taskId: string;
+  sessionId: string;
+  runtimeId: AgentRuntimeId;
+  native: import('./agent').AgentJsonValue;
 }
 
 export interface RespondToInteractionRequest {
@@ -785,7 +827,9 @@ export interface ProtocolMessageRecord {
 export interface RefinePromptRequest {
   repositoryPath: string;
   input: string;
+  runtimeId?: AgentRuntimeId;
   model?: string;
+  modelProvider?: import('./agent').AgentModelProviderId;
 }
 
 export interface RefinePromptResponse {
@@ -799,13 +843,20 @@ export interface UpdateAppSettingsRequest {
   sidebarCollapsed?: boolean;
   showMascot?: boolean;
   firstLaunchSetupCompleted?: boolean;
+  defaultRuntimeId?: import('./agent').AgentRuntimeId;
   defaultModel?: string | null;
+  defaultModelProvider?: import('./agent').AgentModelProviderId | null;
   defaultReasoningEffort?: string | null;
   promptRefinementModel?: string | null;
+  promptRefinementRuntimeId?: import('./agent').AgentRuntimeId | null;
+  promptRefinementModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewModel?: string | null;
+  reviewRuntimeId?: import('./agent').AgentRuntimeId | null;
+  reviewModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewReasoningEffort?: string | null;
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
+  runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;
   repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
 }
 
@@ -943,7 +994,7 @@ export interface AppUpdateEvent {
     | 'git.updated'
     | 'github.updated'
     | 'prompt.refined'
-    | 'provider.updated'
+    | 'runtime.updated'
     | 'projection.updated'
     | 'finding.updated'
     | 'task.deleted';
@@ -969,7 +1020,10 @@ export interface TaskManagerApi {
   executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult>;
-  getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
+  getAgentRuntimeCatalog(): Promise<import('./agent').AgentRuntimeCatalog>;
+  updateAgentNativeSession(
+    input: UpdateAgentNativeSessionRequest
+  ): Promise<UpdateAgentNativeSessionResult>;
   listTasks(): Promise<TaskSnapshot>;
   stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;

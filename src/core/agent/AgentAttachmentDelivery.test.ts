@@ -137,10 +137,16 @@ describe('agent attachment delivery', () => {
     ).toThrow('Full access cannot safely protect attachment copies');
     expect(() =>
       assertAttachmentSandboxSupportsDelivery(
-        { sandbox: 'WORKSPACE_WRITE' },
+        { sandbox: 'WORKSPACE_WRITE', networkAccess: false },
         [attachment()]
       )
     ).not.toThrow();
+    expect(() =>
+      assertAttachmentSandboxSupportsDelivery(
+        { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
+        [attachment()]
+      )
+    ).toThrow('Network access must be disabled');
   });
 
   it('rechecks read-only managed bytes immediately before delivery', async () => {
@@ -244,7 +250,8 @@ function attachment(
 function model(inputModalities: string[]): AgentModel {
   return {
     id: 'model-1',
-    provider: 'codex',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'model-1',
     displayName: 'Model One',
     hidden: false,

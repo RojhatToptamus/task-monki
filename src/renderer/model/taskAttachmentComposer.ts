@@ -93,7 +93,7 @@ export function imageAttachmentModelError(
   if (!hasImageAttachments || modelAcceptsImageAttachments(selectedModel)) return undefined;
   return selectedModel
     ? 'Selected model does not accept images. Choose an image-capable model or remove them.'
-    : 'Codex has not reported an image-capable model yet. Wait for models to load or remove the images.';
+    : 'The selected runtime has not reported an image-capable model yet. Wait for models to load or remove the images.';
 }
 
 export function ensurePastedFileName(file: File, index: number): File {

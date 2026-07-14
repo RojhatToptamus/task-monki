@@ -20,7 +20,7 @@ import type {
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
   AgentUsageSnapshotRecord,
-  AgentProviderState,
+  AgentRuntimeState,
   AgentServerInstance,
   CodexReviewFinding,
   CodexReviewGateStatus,
@@ -130,12 +130,13 @@ interface TaskDetailProps {
   usageSnapshots: AgentUsageSnapshotRecord[];
   settingsObservations: AgentSettingsObservationRecord[];
   subagentObservations: AgentSubagentObservationRecord[];
-  providerState?: AgentProviderState;
+  runtimeState?: AgentRuntimeState;
   server?: AgentServerInstance;
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
   showMascot: boolean;
+  reviewDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
   onStart(taskId: string): Promise<void>;
   onCancel(runId: string): Promise<void>;
@@ -553,8 +554,14 @@ export function TaskDetail(props: TaskDetailProps) {
       case 'run-review':
       case 'run-review-again':
         return {
-          disabled: !reviewSourceRun || reviewActionsPaused || busy,
-          title: reviewActionsPaused ? 'Review actions are paused.' : undefined
+          disabled:
+            !reviewSourceRun ||
+            reviewActionsPaused ||
+            busy ||
+            Boolean(props.reviewDisabledReason),
+          title:
+            props.reviewDisabledReason ??
+            (reviewActionsPaused ? 'Review actions are paused.' : undefined)
         };
       case 'request-changes':
         return { disabled: reviewActionsPaused || reviewActionBusy };
@@ -933,7 +940,7 @@ export function TaskDetail(props: TaskDetailProps) {
               goalSnapshots={props.goalSnapshots}
               usageSnapshots={props.usageSnapshots}
               settingsObservations={props.settingsObservations}
-              providerState={props.providerState}
+              runtimeState={props.runtimeState}
               server={props.server}
               onSyncGoal={props.onSyncAgentGoal}
             />

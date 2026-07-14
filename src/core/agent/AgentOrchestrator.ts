@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
-  AgentProviderState,
+  AgentRuntimeCatalog,
   AgentReviewTarget,
   AgentRunMode,
   AgentSessionRecord,
@@ -15,19 +15,17 @@ import type {
 import type { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import type { FileTaskStore } from '../storage/FileTaskStore';
+import { buildAgentReviewPrompt } from '../../shared/promptTemplates';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
-  type AgentProviderAdapter
-} from './AgentProviderAdapter';
+  type AgentRuntimeAdapter
+} from './AgentRuntimeAdapter';
+import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
 import { AgentInteractionService } from './AgentInteractionService';
+import { toAgentTurnAttachments, type AgentTurnAttachment } from './AgentAttachmentDelivery';
 import {
-  assertAttachmentSandboxSupportsDelivery,
-  assertModelSupportsAttachments,
-  toAgentTurnAttachments,
-  type AgentTurnAttachment
-} from './AgentAttachmentDelivery';
-import {
+  assertBrowserDevRuntimeIsolation,
   assertBrowserDevSettingsSafe,
   BROWSER_DEV_BOUNDARY_MESSAGE,
   browserDevSettingsViolations
@@ -60,6 +58,29 @@ export interface StartOrchestratedTurn {
   continuedFromRunId?: string;
 }
 
+function assertSessionPostcondition(
+  actual: AgentSessionRecord,
+  expected: AgentSessionRecord,
+  subject: string
+): void {
+  if (
+    actual.id !== expected.id ||
+    actual.taskId !== expected.taskId ||
+    actual.iterationId !== expected.iterationId ||
+    actual.worktreeId !== expected.worktreeId ||
+    actual.worktreePath !== expected.worktreePath ||
+    actual.runtimeId !== expected.runtimeId ||
+    actual.role !== expected.role
+  ) {
+    throw new Error(
+      `${subject} returned by the runtime does not match its Task Monki ownership record.`
+    );
+  }
+  if (!actual.providerSessionId) {
+    throw new Error(`${subject} did not return a provider session id.`);
+  }
+}
+
 export interface StartOrchestratedReview {
   task: Task;
   iteration: TaskIteration;
@@ -74,75 +95,152 @@ export interface StartOrchestratedReview {
 export class AgentOrchestrator {
   private startQueue: Promise<void> = Promise.resolve();
   private readonly interactions: AgentInteractionService;
+  private readonly runtimes: AgentRuntimeRegistry;
 
   constructor(
     private readonly store: FileTaskStore,
     private readonly events: AppEventBus,
-    private readonly adapter: AgentProviderAdapter,
+    runtimes: AgentRuntimeRegistry | AgentRuntimeAdapter,
     private readonly options: {
       allowNetworkAccess?: boolean;
       providerStartupDisabledReason?: string;
     } = {}
   ) {
-    this.interactions = new AgentInteractionService(store, events, adapter);
+    this.runtimes =
+      runtimes instanceof AgentRuntimeRegistry
+        ? runtimes
+        : new AgentRuntimeRegistry([runtimes], runtimes.descriptor.id);
+    this.interactions = new AgentInteractionService(store, events, (runtimeId) =>
+      this.runtimes.require(runtimeId)
+    );
   }
 
-  async initialize(): Promise<void> {
+  async initialize(
+    requiredRuntimeIds: readonly string[] = [this.runtimes.defaultRuntimeId]
+  ): Promise<void> {
     if (this.options.providerStartupDisabledReason) {
       await this.store.reconcileRunAttachments();
       return;
     }
+    const persisted = await this.store.snapshot();
+    const recoveryRuntimeIds = new Set(
+      persisted.runs
+        .filter((run) => RECOVERABLE_RUN_STATUSES.includes(run.status))
+        .map((run) => run.runtimeId)
+    );
+    let runtimeIdsToInitialize = this.runtimes
+      .list()
+      .filter(
+        (adapter) =>
+          adapter.descriptor.startupPolicy !== 'ON_DEMAND' ||
+          requiredRuntimeIds.includes(adapter.descriptor.id) ||
+          recoveryRuntimeIds.has(adapter.descriptor.id)
+      )
+      .map((adapter) => adapter.descriptor.id);
+    let browserUnsafeRuntimeIds = new Set<string>();
     if (this.options.allowNetworkAccess === false) {
-      await this.terminalizeUnsafePersistedRuns();
+      const classification = await this.classifyBrowserRuntimeIsolation();
+      runtimeIdsToInitialize = runtimeIdsToInitialize.filter((runtimeId) =>
+        classification.safeRuntimeIds.includes(runtimeId)
+      );
+      browserUnsafeRuntimeIds = classification.unsafeRuntimeIds;
+      for (const runtimeId of requiredRuntimeIds) {
+        if (browserUnsafeRuntimeIds.has(runtimeId)) {
+          const adapter = this.runtimes.require(runtimeId);
+          assertBrowserDevRuntimeIsolation(
+            adapter.descriptor,
+            await adapter.capabilities()
+          );
+        }
+      }
+      await this.terminalizeUnsafePersistedRuns(browserUnsafeRuntimeIds);
     }
     await this.store.reconcileRunAttachments();
-    try {
-      await this.adapter.initialize();
-    } catch (error) {
-      if (this.options.allowNetworkAccess === false) {
-        await this.adapter.shutdown().catch(() => undefined);
+    const initializationFailures = await this.runtimes.initialize(
+      runtimeIdsToInitialize
+    );
+    if (this.options.allowNetworkAccess === false) {
+      const requiredFailure = initializationFailures.find((failure) =>
+        requiredRuntimeIds.includes(failure.runtimeId)
+      );
+      if (requiredFailure) {
+        await this.runtimes.shutdownAll().catch(() => undefined);
+        throw requiredFailure.error;
+      }
+      try {
+        await Promise.all(
+          requiredRuntimeIds.map(async (runtimeId) => {
+            const adapter = this.runtimes.require(runtimeId);
+            assertBrowserDevRuntimeIsolation(
+              adapter.descriptor,
+              await adapter.capabilities()
+            );
+          })
+        );
+      } catch (error) {
+        await this.runtimes.shutdownAll().catch(() => undefined);
         throw error;
       }
-      // Provider readiness is exposed through preflight and should not prevent the
-      // local task/evidence application from opening.
     }
     if (this.options.allowNetworkAccess === false) {
       const terminalizedAfterProviderInitialization =
         await this.terminalizeUnsafePersistedRuns();
       if (terminalizedAfterProviderInitialization > 0) {
-        await this.adapter.shutdown().catch(() => undefined);
+        await this.runtimes.shutdownAll().catch(() => undefined);
         throw new Error(
-          `${BROWSER_DEV_BOUNDARY_MESSAGE} Provider recovery reported unsafe observed settings, so Codex was stopped before the development API credential was published.`
+          `${BROWSER_DEV_BOUNDARY_MESSAGE} Runtime recovery reported unsafe observed settings, so agent runtimes were stopped before the development API credential was published.`
         );
       }
     }
   }
 
-  async getProviderState(): Promise<AgentProviderState> {
+  async getRuntimeCatalog(): Promise<AgentRuntimeCatalog> {
     if (this.options.providerStartupDisabledReason) {
+      const refreshedAt = new Date().toISOString();
+      const runtimes = await Promise.all(
+        this.runtimes.list().map(async (adapter) => ({
+          preflight: {
+            runtime: adapter.descriptor,
+            ready: false,
+            capabilities: await adapter.capabilities(),
+            problems: [this.options.providerStartupDisabledReason!],
+            warnings: []
+          },
+          models: [],
+          refreshedAt
+        }))
+      );
       return {
-        preflight: {
-          provider: 'codex',
-          ready: false,
-          capabilities: await this.adapter.capabilities(),
-          problems: [this.options.providerStartupDisabledReason],
-          warnings: []
-        },
+        runtimes,
         models: [],
-        refreshedAt: new Date().toISOString()
+        defaultRuntimeId: this.runtimes.defaultRuntimeId,
+        refreshedAt
       };
     }
-    const preflight = await this.adapter.preflight();
-    let models: AgentProviderState['models'] = [];
-    if (preflight.ready) {
-      try {
-        models = await this.adapter.listModels();
-      } catch (error) {
-        preflight.ready = false;
-        preflight.problems.push(error instanceof Error ? error.message : String(error));
-      }
+    if (this.options.allowNetworkAccess !== false) {
+      return this.runtimes.getCatalog();
     }
-    return { preflight, models, refreshedAt: new Date().toISOString() };
+    const { unsafeRuntimeIds } = await this.classifyBrowserRuntimeIsolation();
+    return this.runtimes.getCatalog({
+      excludedRuntimeIds: unsafeRuntimeIds,
+      exclusionReason:
+        'This runtime is unavailable in browser development because it does not attest the required process, filesystem, and network isolation.'
+    });
+  }
+
+  async releaseTask(taskId: string): Promise<void> {
+    const results = await Promise.allSettled(
+      this.runtimes.list().map((adapter) => adapter.releaseTask?.(taskId))
+    );
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'One or more agent runtimes could not release the task.'
+      );
+    }
   }
 
   startTurn(input: StartOrchestratedTurn): Promise<RunRecord> {
@@ -157,20 +255,33 @@ export class AgentOrchestrator {
   private async startTurnSerially(input: StartOrchestratedTurn): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
     const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    let session = input.sessionId
+      ? await this.requireSession(input.sessionId)
+      : await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id);
+    const runtimeId = session?.runtimeId ?? input.task.runtimeId;
+    if (input.settings.runtimeId && input.settings.runtimeId !== runtimeId) {
+      throw new Error(
+        `Task runtime ${runtimeId} cannot start work through ${input.settings.runtimeId}.`
+      );
+    }
+    if (input.task.runtimeId !== runtimeId) {
+      throw new Error('Selected agent session runtime does not match its task.');
+    }
+    const adapter = this.runtimes.require(runtimeId);
     const settings = await this.validateSettings(
-      input.settings,
+      adapter,
+      { ...input.settings, runtimeId },
       taskAttachments
     );
     await this.assertCapacity();
 
-    let session = input.sessionId
-      ? await this.requireSession(input.sessionId)
-      : (await this.store.getPrimaryAgentSession(input.task.id, input.iteration.id)) ??
+    session =
+      session ??
         (await this.store.createAgentSession({
           task: input.task,
           iteration: input.iteration,
           worktree: input.worktree,
-          provider: 'codex',
+          runtimeId,
           requestedSettings: settings
         }));
     if (
@@ -190,8 +301,13 @@ export class AgentOrchestrator {
       );
     }
 
+    if (session.runtimeId !== runtimeId) {
+      throw new Error('Selected agent session runtime changed unexpectedly.');
+    }
     if (!session.providerSessionId) {
-      session = await this.adapter.createSession({
+      const localSession = session;
+      session = await adapter.createSession({
+        runtimeId,
         localSessionId: session.id,
         taskId: input.task.id,
         iterationId: input.iteration.id,
@@ -199,6 +315,7 @@ export class AgentOrchestrator {
         worktreePath: input.worktree.worktreePath,
         settings
       });
+      assertSessionPostcondition(session, localSession, 'Created session');
       await this.assertBrowserDevSessionHistory(session, 'Created session');
     }
 
@@ -219,18 +336,19 @@ export class AgentOrchestrator {
       attachments = toAgentTurnAttachments(
         await this.store.prepareRunAttachments(run.id, input.task.id)
       );
-      await this.startProviderTurn(run, session, input, settings, attachments);
+      await this.startProviderTurn(adapter, run, session, input, settings, attachments);
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
       if (error instanceof AgentProviderSessionMissingError) {
         try {
           const recovered = await this.recreateMissingProviderSession(
+            adapter,
             session,
             settings,
             error
           );
           await this.assertBrowserDevSessionHistory(recovered, 'Recreated session');
-          await this.startProviderTurn(run, recovered, input, settings, attachments);
+          await this.startProviderTurn(adapter, run, recovered, input, settings, attachments);
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
           await this.recordStartFailure(run, retryError);
@@ -255,37 +373,80 @@ export class AgentOrchestrator {
     input: StartOrchestratedReview
   ): Promise<RunRecord> {
     this.assertProviderStartupAvailable();
-    if (!this.adapter.startReview) {
-      throw new Error('This provider does not support detached review.');
-    }
-    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
-    const settings = await this.validateSettings(input.settings, taskAttachments);
-    await this.assertCapacity();
     const sourceSession = await this.requireSession(input.sourceRun.sessionId);
-    this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
-    if (input.sourceRun.observedSettings) {
-      this.assertBrowserDevSettings(
-        input.sourceRun.observedSettings,
-        'Review source run observed settings'
+    if (input.sourceRun.runtimeId !== sourceSession.runtimeId) {
+      throw new Error('Review source runtime ownership is inconsistent.');
+    }
+    const reviewRuntimeId = input.settings.runtimeId ?? sourceSession.runtimeId;
+    const adapter = this.runtimes.require(reviewRuntimeId);
+    const capabilities = await adapter.capabilities();
+    const useNativeReview =
+      reviewRuntimeId === sourceSession.runtimeId &&
+      capabilities.review.maturity !== 'unsupported' &&
+      typeof adapter.startReview === 'function';
+    const supportsGenericDetachedReview =
+      capabilities.extensions.genericDetachedReview?.maturity === 'stable';
+    if (!useNativeReview && !supportsGenericDetachedReview) {
+      throw new Error(
+        `${adapter.descriptor.displayName} cannot run a detached review because it does not attest stable read-only review isolation.`
       );
     }
-    await this.assertBrowserDevSessionHistory(sourceSession, 'Review source session');
-    await this.assertNoPendingInteractions(sourceSession.id);
-    const reviewSession = await this.store.createAgentSession({
+    const taskAttachments = await this.store.getTaskAttachments(input.task.id);
+    const settings = await this.validateSettings(
+      adapter,
+      { ...input.settings, runtimeId: reviewRuntimeId },
+      taskAttachments
+    );
+    await this.assertCapacity();
+    if (useNativeReview) {
+      this.assertBrowserDevSettings(input.sourceRun.requestedSettings, 'Review source run');
+      if (input.sourceRun.observedSettings) {
+        this.assertBrowserDevSettings(
+          input.sourceRun.observedSettings,
+          'Review source run observed settings'
+        );
+      }
+      await this.assertBrowserDevSessionHistory(sourceSession, 'Review source session');
+      await this.assertNoPendingInteractions(sourceSession.id);
+    }
+    let reviewSession = await this.store.createAgentSession({
       task: input.task,
       iteration: input.iteration,
       worktree: input.worktree,
-      provider: sourceSession.provider,
+      runtimeId: reviewRuntimeId,
       role: 'REVIEW',
       requestedSettings: settings,
       parentSessionId: sourceSession.id,
-      forkedFromSessionId: sourceSession.id
+      forkedFromSessionId: useNativeReview ? sourceSession.id : undefined
+    });
+    if (!useNativeReview && !reviewSession.providerSessionId) {
+      const localReviewSession = reviewSession;
+      reviewSession = await adapter.createSession({
+        runtimeId: reviewRuntimeId,
+        localSessionId: reviewSession.id,
+        taskId: input.task.id,
+        iterationId: input.iteration.id,
+        worktreeId: input.worktree.id,
+        worktreePath: input.worktree.worktreePath,
+        settings
+      });
+      assertSessionPostcondition(
+        reviewSession,
+        localReviewSession,
+        'Created review session'
+      );
+      await this.assertBrowserDevSessionHistory(reviewSession, 'Created review session');
+    }
+    const prompt = buildAgentReviewPrompt({
+      task: input.task,
+      worktree: input.worktree,
+      target: input.target
     });
     const run = await this.store.createRun({
       task: input.task,
       session: reviewSession,
       mode: 'REVIEW',
-      prompt: describeReviewTarget(input.target),
+      prompt,
       generationKey: input.generationKey,
       requestedSettings: settings,
       beforeGitSnapshotId: input.beforeGitSnapshotId,
@@ -296,19 +457,36 @@ export class AgentOrchestrator {
       attachments = toAgentTurnAttachments(
         await this.store.prepareRunAttachments(run.id, input.task.id)
       );
-      await this.startProviderReview(
-        run,
-        sourceSession,
-        reviewSession,
-        input.target,
-        attachments
-      );
+      if (useNativeReview) {
+        await this.startProviderReview(
+          adapter,
+          run,
+          sourceSession,
+          reviewSession,
+          input.target,
+          attachments
+        );
+      } else {
+        await adapter.startTurn({
+          localRunId: run.id,
+          session: {
+            localSessionId: reviewSession.id,
+            providerSessionId: reviewSession.providerSessionId
+          },
+          mode: 'REVIEW',
+          prompt,
+          authoritativeGoal: input.task.prompt,
+          attachments,
+          settings
+        });
+      }
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
       if (error instanceof AgentProviderSessionMissingError) {
         try {
           const recovered = await this.recreateMissingProviderSession(
-            sourceSession,
+            adapter,
+            useNativeReview ? sourceSession : reviewSession,
             settings,
             error
           );
@@ -316,13 +494,29 @@ export class AgentOrchestrator {
             recovered,
             'Recreated review source session'
           );
-          await this.startProviderReview(
-            run,
-            recovered,
-            reviewSession,
-            input.target,
-            attachments
-          );
+          if (useNativeReview) {
+            await this.startProviderReview(
+              adapter,
+              run,
+              recovered,
+              reviewSession,
+              input.target,
+              attachments
+            );
+          } else {
+            await adapter.startTurn({
+              localRunId: run.id,
+              session: {
+                localSessionId: recovered.id,
+                providerSessionId: recovered.providerSessionId
+              },
+              mode: 'REVIEW',
+              prompt,
+              authoritativeGoal: input.task.prompt,
+              attachments,
+              settings
+            });
+          }
           return (await this.store.getRun(run.id)) ?? run;
         } catch (retryError) {
           await this.recordStartFailure(run, retryError);
@@ -345,11 +539,21 @@ export class AgentOrchestrator {
       throw new Error('Only the current running turn can accept an instruction.');
     }
     const session = await this.requireSession(run.sessionId);
-    if (!session.providerSessionId || !this.adapter.steerTurn) {
+    this.assertRunRuntimeOwnership(run, session);
+    const adapter = this.runtimes.require(session.runtimeId);
+    const capabilities = await adapter.capabilities();
+    if (this.options.allowNetworkAccess === false) {
+      assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
+    }
+    if (
+      !session.providerSessionId ||
+      capabilities.activeTurnSteering.maturity === 'unsupported' ||
+      !adapter.steerTurn
+    ) {
       throw new Error('This provider session cannot steer the active turn.');
     }
     try {
-      await this.adapter.steerTurn({
+      await adapter.steerTurn({
         session: {
           localSessionId: session.id,
           providerSessionId: session.providerSessionId
@@ -381,7 +585,20 @@ export class AgentOrchestrator {
     }
     if (!run.providerTurnId) return;
     const session = await this.store.getAgentSession(run.sessionId);
-    if (!session?.providerSessionId || !this.adapter.interruptTurn) {
+    if (!session) {
+      throw new Error(`Agent session not found: ${run.sessionId}`);
+    }
+    this.assertRunRuntimeOwnership(run, session);
+    const adapter = this.runtimes.require(session.runtimeId);
+    const capabilities = await adapter.capabilities();
+    if (this.options.allowNetworkAccess === false) {
+      assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
+    }
+    if (
+      !session.providerSessionId ||
+      capabilities.turnInterruption.maturity === 'unsupported' ||
+      !adapter.interruptTurn
+    ) {
       throw new Error('This provider session cannot interrupt the active turn.');
     }
     await this.store.appendEvent(
@@ -398,7 +615,7 @@ export class AgentOrchestrator {
       })
     );
     try {
-      await this.adapter.interruptTurn({
+      await adapter.interruptTurn({
         session: {
           localSessionId: session.id,
           providerSessionId: session.providerSessionId
@@ -417,16 +634,22 @@ export class AgentOrchestrator {
     input: RespondToInteractionRequest
   ): Promise<InteractionRequestRecord> {
     this.assertProviderStartupAvailable();
-    if (
-      this.options.allowNetworkAccess === false &&
-      input.decision.action !== 'DECLINE' &&
-      input.decision.action !== 'CANCEL'
-    ) {
+    if (this.options.allowNetworkAccess === false) {
       const interaction = await this.store.getInteractionRequest(input.interactionRequestId);
+      if (interaction?.taskId === input.taskId && interaction.runId === input.runId) {
+        const adapter = this.runtimes.require(interaction.runtimeId);
+        assertBrowserDevRuntimeIsolation(
+          adapter.descriptor,
+          await adapter.capabilities()
+        );
+      }
       if (
         interaction?.taskId === input.taskId &&
         interaction.runId === input.runId &&
-        interaction.type !== 'USER_INPUT'
+        interaction.type !== 'USER_INPUT' &&
+        input.decision.action !== 'DECLINE' &&
+        input.decision.action !== 'DECLINE_FOR_SESSION' &&
+        input.decision.action !== 'CANCEL'
       ) {
         throw new Error(
           `${BROWSER_DEV_BOUNDARY_MESSAGE} Unexpected provider approval requests can only be declined or canceled.`
@@ -455,10 +678,22 @@ export class AgentOrchestrator {
     if (session.taskId !== task.id) {
       throw new Error('Agent session does not belong to the selected task.');
     }
-    if (!session.providerSessionId || !this.adapter.syncGoal) {
+    if (session.runtimeId !== task.runtimeId) {
+      throw new Error('Agent session runtime does not match the selected task.');
+    }
+    const adapter = this.runtimes.require(session.runtimeId);
+    const capabilities = await adapter.capabilities();
+    if (this.options.allowNetworkAccess === false) {
+      assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
+    }
+    if (
+      !session.providerSessionId ||
+      capabilities.goals.maturity === 'unsupported' ||
+      !adapter.syncGoal
+    ) {
       throw new Error('This provider session cannot synchronize goals.');
     }
-    return this.adapter.syncGoal({
+    return adapter.syncGoal({
       session: {
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
@@ -469,17 +704,18 @@ export class AgentOrchestrator {
   }
 
   async shutdown(): Promise<void> {
-    await this.adapter.shutdown();
+    await this.runtimes.shutdownAll();
   }
 
   private async startProviderTurn(
+    adapter: AgentRuntimeAdapter,
     run: RunRecord,
     session: AgentSessionRecord,
     input: StartOrchestratedTurn,
     settings: AgentExecutionSettings,
     attachments: AgentTurnAttachment[]
   ): Promise<void> {
-    await this.adapter.startTurn({
+    await adapter.startTurn({
       localRunId: run.id,
       session: {
         localSessionId: session.id,
@@ -494,16 +730,17 @@ export class AgentOrchestrator {
   }
 
   private async startProviderReview(
+    adapter: AgentRuntimeAdapter,
     run: RunRecord,
     sourceSession: AgentSessionRecord,
     reviewSession: AgentSessionRecord,
     target: AgentReviewTarget,
     attachments: AgentTurnAttachment[]
   ): Promise<void> {
-    if (!this.adapter.startReview) {
+    if (!adapter.startReview) {
       throw new Error('This provider does not support detached review.');
     }
-    await this.adapter.startReview({
+    await adapter.startReview({
       localRunId: run.id,
       sourceSession: {
         localSessionId: sourceSession.id,
@@ -516,6 +753,7 @@ export class AgentOrchestrator {
   }
 
   private async recreateMissingProviderSession(
+    adapter: AgentRuntimeAdapter,
     session: AgentSessionRecord,
     settings: AgentExecutionSettings,
     error: AgentProviderSessionMissingError
@@ -531,9 +769,10 @@ export class AgentOrchestrator {
       materialized: false,
       observedSettings: undefined,
       lastAttachedAt: undefined,
-      relationshipDetail: `Codex provider thread ${previousProviderSessionId} was missing during ${error.operation}; Task Monki recreated the provider session.`
+      relationshipDetail: `${adapter.descriptor.displayName} session ${previousProviderSessionId} was missing during ${error.operation}; Task Monki recreated the provider session.`
     });
-    return this.adapter.createSession({
+    const recreated = await adapter.createSession({
+      runtimeId: reset.runtimeId,
       localSessionId: reset.id,
       taskId: reset.taskId,
       iterationId: reset.iterationId,
@@ -541,46 +780,30 @@ export class AgentOrchestrator {
       worktreePath: reset.worktreePath,
       settings
     });
+    assertSessionPostcondition(recreated, reset, 'Recreated session');
+    return recreated;
   }
 
   private async validateSettings(
+    adapter: AgentRuntimeAdapter,
     settings: AgentExecutionSettings,
     attachments: readonly Pick<AgentTurnAttachment, 'kind'>[] = []
   ): Promise<AgentExecutionSettings> {
-    const models = await this.adapter.listModels();
-    const model =
-      models.find((candidate) => candidate.model === settings.model) ??
-      models.find((candidate) => candidate.id === settings.model) ??
-      models.find((candidate) => candidate.isDefault);
-    if (!model) {
-      throw new Error('Codex did not report an available model.');
-    }
-    assertModelSupportsAttachments(model, attachments);
-    const effort =
-      settings.reasoningEffort ?? model.defaultReasoningEffort;
-    if (
-      effort &&
-      !model.supportedReasoningEfforts.includes(effort)
-    ) {
-      throw new Error(
-        `Reasoning effort ${effort} is not supported by ${model.displayName}.`
+    if (this.options.allowNetworkAccess === false) {
+      assertBrowserDevRuntimeIsolation(
+        adapter.descriptor,
+        await adapter.capabilities()
       );
     }
-    const modelProvider =
-      settings.modelProvider && settings.modelProvider !== 'codex'
-        ? settings.modelProvider
-        : 'openai';
-    const resolvedSettings: AgentExecutionSettings = {
-      ...settings,
-      model: model.model,
-      modelProvider,
-      reasoningEffort: effort,
-      serviceTier: settings.serviceTier ?? model.defaultServiceTier
-    };
+    const resolvedSettings = (await adapter.resolveExecution({ settings, attachments })).settings;
+    if (resolvedSettings.runtimeId !== adapter.descriptor.id) {
+      throw new Error(
+        `Runtime ${adapter.descriptor.id} returned execution settings for ${String(resolvedSettings.runtimeId)}.`
+      );
+    }
     if (this.options.allowNetworkAccess === false) {
       this.assertBrowserDevSettings(resolvedSettings, 'Requested run');
     }
-    assertAttachmentSandboxSupportsDelivery(resolvedSettings, attachments);
     return resolvedSettings;
   }
 
@@ -590,7 +813,9 @@ export class AgentOrchestrator {
    * the provider starts or resumes any thread; checking only newly submitted
    * turns leaves a cold-start recovery bypass.
    */
-  private async terminalizeUnsafePersistedRuns(): Promise<number> {
+  private async terminalizeUnsafePersistedRuns(
+    unsafeRuntimeIds: ReadonlySet<string> = new Set()
+  ): Promise<number> {
     const snapshot = await this.store.snapshot();
     let terminalized = 0;
     const sessions = new Map(snapshot.agentSessions.map((session) => [session.id, session]));
@@ -650,7 +875,14 @@ export class AgentOrchestrator {
           )
         : [];
       const violations = [
-        ...new Set([...runViolations, ...sessionViolations, ...observationViolations])
+        ...new Set([
+          ...(unsafeRuntimeIds.has(run.runtimeId)
+            ? [`runtime ${run.runtimeId} does not attest the browser development isolation boundary`]
+            : []),
+          ...runViolations,
+          ...sessionViolations,
+          ...observationViolations
+        ])
       ];
       if (violations.length === 0) continue;
 
@@ -704,6 +936,28 @@ export class AgentOrchestrator {
       terminalized += 1;
     }
     return terminalized;
+  }
+
+  private async classifyBrowserRuntimeIsolation(): Promise<{
+    safeRuntimeIds: string[];
+    unsafeRuntimeIds: Set<string>;
+  }> {
+    const safeRuntimeIds: string[] = [];
+    const unsafeRuntimeIds = new Set<string>();
+    await Promise.all(
+      this.runtimes.list().map(async (adapter) => {
+        try {
+          assertBrowserDevRuntimeIsolation(
+            adapter.descriptor,
+            await adapter.capabilities()
+          );
+          safeRuntimeIds.push(adapter.descriptor.id);
+        } catch {
+          unsafeRuntimeIds.add(adapter.descriptor.id);
+        }
+      })
+    );
+    return { safeRuntimeIds, unsafeRuntimeIds };
   }
 
   private assertBrowserDevSettings(
@@ -773,6 +1027,15 @@ export class AgentOrchestrator {
       throw new Error(`Agent session not found: ${sessionId}`);
     }
     return session;
+  }
+
+  private assertRunRuntimeOwnership(
+    run: RunRecord,
+    session: AgentSessionRecord
+  ): void {
+    if (run.sessionId !== session.id || run.runtimeId !== session.runtimeId) {
+      throw new Error('Agent run runtime ownership is inconsistent.');
+    }
   }
 
   private async recordStartFailure(run: RunRecord, error: unknown): Promise<void> {
@@ -873,18 +1136,5 @@ export class AgentOrchestrator {
       },
       at: new Date().toISOString()
     });
-  }
-}
-
-function describeReviewTarget(target: AgentReviewTarget): string {
-  switch (target.type) {
-    case 'UNCOMMITTED_CHANGES':
-      return 'Detached provider review of uncommitted changes.';
-    case 'BASE_BRANCH':
-      return `Detached provider review against base branch ${target.branch}.`;
-    case 'COMMIT':
-      return `Detached provider review of commit ${target.sha}.`;
-    case 'CUSTOM':
-      return `Detached provider review: ${target.instructions}`;
   }
 }

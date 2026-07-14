@@ -540,6 +540,7 @@ function event(
 function taskFixture(input: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Add task activity',
     prompt: 'Build a useful overview history.',
     repositoryPath: '/repo',
@@ -563,6 +564,7 @@ function run(input: {
 }): RunRecord {
   return {
     id: input.id,
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',

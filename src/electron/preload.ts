@@ -26,6 +26,7 @@ import type {
   TestExternalToolRequest,
   TaskManagerApi,
   TransitionTaskRequest,
+  UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
 import {
@@ -68,7 +69,9 @@ const api: TaskManagerApi = {
     ipcRenderer.invoke('openTarget:inspect', input),
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     ipcRenderer.invoke('openTarget:execute', input),
-  getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
+  getAgentRuntimeCatalog: () => ipcRenderer.invoke('agent:runtimeCatalog'),
+  updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
+    ipcRenderer.invoke('agent:updateNativeSession', input),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),
   stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
@@ -90,16 +93,16 @@ const api: TaskManagerApi = {
   createTask: (input: CreateTaskRequest) => ipcRenderer.invoke('task:create', input),
   refinePrompt: (input: RefinePromptRequest) => ipcRenderer.invoke('prompt:refine', input),
   prepareWorktree: (input: PrepareWorktreeRequest) => ipcRenderer.invoke('worktree:prepare', input),
-  startRun: (input: StartRunRequest) => ipcRenderer.invoke('codex:startRun', input),
-  steerRun: (input: SteerRunRequest) => ipcRenderer.invoke('codex:steerRun', input),
+  startRun: (input: StartRunRequest) => ipcRenderer.invoke('agent:startRun', input),
+  steerRun: (input: SteerRunRequest) => ipcRenderer.invoke('agent:steerRun', input),
   continueRun: (input: ContinueRunRequest) =>
-    ipcRenderer.invoke('codex:continueRun', input),
-  retryRun: (input: RetryRunRequest) => ipcRenderer.invoke('codex:retryRun', input),
+    ipcRenderer.invoke('agent:continueRun', input),
+  retryRun: (input: RetryRunRequest) => ipcRenderer.invoke('agent:retryRun', input),
   startReview: (input: StartReviewRequest) =>
-    ipcRenderer.invoke('codex:startReview', input),
+    ipcRenderer.invoke('agent:startReview', input),
   syncAgentGoal: (input: SyncAgentGoalRequest) =>
     ipcRenderer.invoke('agent:syncGoal', input),
-  cancelRun: (input: CancelRunRequest) => ipcRenderer.invoke('codex:cancelRun', input),
+  cancelRun: (input: CancelRunRequest) => ipcRenderer.invoke('agent:cancelRun', input),
   respondToInteraction: (input: RespondToInteractionRequest) =>
     ipcRenderer.invoke('agent:respondToInteraction', input),
   refreshEvidence: (input: RefreshEvidenceRequest) => ipcRenderer.invoke('evidence:refresh', input),

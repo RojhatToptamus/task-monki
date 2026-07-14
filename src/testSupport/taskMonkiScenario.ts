@@ -4,7 +4,7 @@ import path from 'node:path';
 import type {
   AgentModel,
   AgentPreflight,
-  AgentProviderCapabilities,
+  AgentRuntimeCapabilities,
   AgentSessionRecord,
   AgentSessionSnapshot,
   AppUpdateEvent,
@@ -13,9 +13,9 @@ import type {
   Task,
   TaskSnapshot
 } from '../shared/contracts';
-import { AgentMutationAmbiguousError } from '../core/agent/AgentProviderAdapter';
+import { AgentMutationAmbiguousError } from '../core/agent/AgentRuntimeAdapter';
 import type {
-  AgentProviderAdapter,
+  AgentRuntimeAdapter,
   AgentReconciliationResult,
   AgentSessionRef,
   AgentTurn,
@@ -23,14 +23,20 @@ import type {
   InterruptAgentTurn,
   StartAgentReview,
   StartAgentTurn,
-  SteerAgentTurn
-} from '../core/agent/AgentProviderAdapter';
-import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
+  SteerAgentTurn,
+  ResolveAgentExecution,
+  ResolvedAgentExecution
+} from '../core/agent/AgentRuntimeAdapter';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../core/agent/codex/codexCapabilities';
 import { git } from '../core/git/gitCli';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
 
 interface ScenarioOptions {
   name?: string;
@@ -49,7 +55,7 @@ export interface TaskMonkiScenario {
   worktreeRoot: string;
   store: FileTaskStore;
   events: AppEventBus;
-  agent: ScriptedAgentProviderAdapter;
+  agent: ScriptedAgentRuntimeAdapter;
   service: TaskManagerService;
   createTask(input?: CreateScenarioTaskInput): Promise<Task>;
   commitFile(relativePath: string, content: string, message?: string): Promise<string>;
@@ -77,7 +83,7 @@ export async function createTaskMonkiScenario(
 
   const store = new FileTaskStore(path.join(rootDir, 'store'));
   const events = new AppEventBus();
-  const agent = new ScriptedAgentProviderAdapter(store);
+  const agent = new ScriptedAgentRuntimeAdapter(store);
   const service = new TaskManagerService(store, repositoryPath, events, {
     worktreeRoot,
     ghPath: options.ghPath,
@@ -143,7 +149,8 @@ export function commandLine(...argv: string[]): string {
   return argv.map(quoteCommandLineArg).join(' ');
 }
 
-export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
+export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
+  readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   readonly startedTurns: StartAgentTurn[] = [];
   readonly startedReviews: StartAgentReview[] = [];
   readonly steeredTurns: SteerAgentTurn[] = [];
@@ -160,7 +167,7 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
 
   preflight(): Promise<AgentPreflight> {
     return Promise.resolve({
-      provider: 'codex',
+      runtime: this.descriptor,
       ready: true,
       capabilities: codexCapabilities(),
       problems: [],
@@ -168,15 +175,16 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
     });
   }
 
-  capabilities(): Promise<AgentProviderCapabilities> {
+  capabilities(): Promise<AgentRuntimeCapabilities> {
     return Promise.resolve(codexCapabilities());
   }
 
   listModels(): Promise<AgentModel[]> {
     return Promise.resolve([
       {
-        id: 'scenario-model',
-        provider: 'codex',
+        id: 'codex:openai/scenario-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'scenario-model',
         displayName: 'Scenario model',
         hidden: false,
@@ -187,6 +195,21 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
         isDefault: true
       }
     ]);
+  }
+
+  async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
+    const model = (await this.listModels())[0];
+    assertModelSupportsAttachments(model, input.attachments);
+    return {
+      model,
+      settings: {
+        ...input.settings,
+        runtimeId: this.descriptor.id,
+        model: model.model,
+        modelProvider: model.modelProvider,
+        reasoningEffort: input.settings.reasoningEffort ?? model.defaultReasoningEffort
+      }
+    };
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -246,7 +269,10 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
         'Scenario provider lost the interrupt response.'
       );
     }
-    const run = await this.store.getRunByProviderTurnId(input.providerTurnId);
+    const run = await this.store.getRunByProviderTurnId(
+      this.descriptor.id,
+      input.providerTurnId
+    );
     if (run) {
       await appendRunEvent(this.store, run, 'AGENT_RUN_INTERRUPTED', {
         terminalReason: 'interrupted'

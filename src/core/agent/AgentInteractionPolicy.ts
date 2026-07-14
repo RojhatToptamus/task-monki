@@ -76,7 +76,7 @@ export function buildInteractionPolicy(input: {
       return {
         allowedActions: ['ANSWER'],
         warnings: [
-          'User-input requests are experimental in the current Codex protocol.'
+          'User-input requests are runtime-controlled and may interrupt an active agent turn.'
         ]
       };
     }
@@ -149,7 +149,10 @@ export function validateInteractionDecision(
 export function interactionTerminalStatus(
   decision: AgentInteractionDecision
 ): InteractionRequestRecord['status'] {
-  if (decision.action === 'DECLINE') {
+  if (
+    decision.action === 'DECLINE' ||
+    decision.action === 'DECLINE_FOR_SESSION'
+  ) {
     return 'DECLINED';
   }
   if (decision.action === 'CANCEL') {

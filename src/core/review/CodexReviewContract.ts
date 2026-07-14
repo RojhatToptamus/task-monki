@@ -44,6 +44,10 @@ export function codexReviewStatusFromResult(
   return 'INCONCLUSIVE';
 }
 
+/** Provider-neutral names for new runtime integrations. */
+export const parseAgentReviewResult = parseCodexReviewResult;
+export const agentReviewStatusFromResult = codexReviewStatusFromResult;
+
 export function normalizeReviewResult(value: unknown): CodexReviewResult | undefined {
   if (!isRecord(value)) {
     return undefined;
@@ -278,12 +282,12 @@ function defaultSummary(
   findings: CodexReviewFinding[]
 ): string {
   if (findings.length === 0 && verdict === 'PASSED') {
-    return 'Codex review passed with no findings.';
+    return 'Agent review passed with no findings.';
   }
   if (findings.length > 0) {
-    return `Codex review found ${findings.length} finding${findings.length === 1 ? '' : 's'}.`;
+    return `Agent review found ${findings.length} finding${findings.length === 1 ? '' : 's'}.`;
   }
-  return 'Codex review completed without a structured summary.';
+  return 'Agent review completed without a structured summary.';
 }
 
 function stableFindingId(

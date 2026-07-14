@@ -61,6 +61,7 @@ describe('InteractionPanel', () => {
 function commandInteraction(): InteractionRequestRecord {
   return {
     id: 'interaction-1',
+    runtimeId: 'codex',
     serverInstanceId: 'server-1',
     providerRequestId: 5,
     taskId: 'task-1',
@@ -102,10 +103,10 @@ function commandInteraction(): InteractionRequestRecord {
 function sessionFixture(): AgentSessionRecord {
   return {
     id: 'session-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
-    provider: 'openai',
     role: 'PRIMARY',
     relationshipState: 'ROOT',
     worktreePath: '/tmp/task',

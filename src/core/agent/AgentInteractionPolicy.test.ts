@@ -290,7 +290,7 @@ function sessionFixture(
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
-    provider: 'codex',
+    runtimeId: 'codex',
     role: 'PRIMARY',
     relationshipState: 'ROOT',
     worktreePath: '/tmp/worktree',
@@ -311,6 +311,7 @@ function sessionFixture(
 function runFixture(): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
@@ -363,6 +364,7 @@ function interactionFixture(
       sha256: 'hash'
     },
     requestedAt: '2026-06-22T00:00:00.000Z',
-    ...overrides
+    ...overrides,
+    runtimeId: overrides.runtimeId ?? 'codex'
   };
 }

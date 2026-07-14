@@ -14,6 +14,7 @@ function interaction(
 ): InteractionRequestRecord {
   return {
     id: 'i1',
+    runtimeId: 'codex',
     serverInstanceId: 's',
     providerRequestId: 1,
     taskId: 't1',

@@ -24,7 +24,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     await store.updateAgentSession(parent.id, {
       providerSessionId: 'thread-parent',
@@ -38,7 +38,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       prompt: task.prompt
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -125,13 +125,13 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const secondParent = await store.createAgentSession({
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'ALTERNATIVE'
     });
     await store.updateAgentSession(firstParent.id, {
@@ -141,7 +141,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       providerSessionId: 'thread-parent-b'
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',

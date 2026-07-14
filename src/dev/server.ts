@@ -48,7 +48,7 @@ const service = new TaskManagerService(
     // Electron uses guarded IPC and does not enable this restriction.
     allowAgentNetworkAccess: false,
     agentProviderStartupDisabledReason: inertSeedMode
-      ? 'Codex is disabled while deterministic development seed scenarios are loaded. Regenerate or use a normal development store to run agent work.'
+      ? 'Agent runtimes are disabled while deterministic development seed scenarios are loaded. Regenerate or use a normal development store to run agent work.'
       : undefined
   }
 );

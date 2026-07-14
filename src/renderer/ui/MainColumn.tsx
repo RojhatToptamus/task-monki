@@ -7,6 +7,7 @@ import type {
 import {
   DEFAULT_PROMPT_REFINEMENT_MODEL,
   type AgentModel,
+  type AgentRuntimeState,
   type ExternalToolId,
   type ExternalToolProbeResult,
   type ExternalToolStatusReport,
@@ -14,10 +15,9 @@ import {
   type TestExternalToolRequest,
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
-import { resolveReasoningEffort } from '../model/agentExecutionSettings';
+import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import {
-  areRequiredExternalToolsReady,
   buildExecutableTestRequest,
   selectExecutableDisplayStatus,
   shouldShowExecutablePathControls
@@ -53,6 +53,7 @@ interface MainColumnProps {
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
   activeRepositoryPath: string;
   repositorySetupState: RepositorySetupState;
   addingRepository: boolean;
@@ -92,7 +93,7 @@ const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): str
   },
   settings: {
     title: 'Settings',
-    subtitle: () => 'Workspace defaults and provider configuration'
+    subtitle: () => 'Workspace defaults and runtime configuration'
   }
 };
 
@@ -127,6 +128,7 @@ export function MainColumn({
   onTestExternalTool,
   error,
   models,
+  runtimes,
   activeRepositoryPath,
   repositorySetupState,
   addingRepository,
@@ -164,6 +166,7 @@ export function MainColumn({
           appSettings={appSettings}
           externalToolStatus={externalToolStatus}
           models={models}
+          runtimes={runtimes}
           activeRepositoryPath={activeRepositoryPath}
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
@@ -207,6 +210,7 @@ export function MainColumn({
           onRefreshExternalTools={onRefreshExternalTools}
           onTestExternalTool={onTestExternalTool}
           models={models}
+          runtimes={runtimes}
           activeRepositoryPath={activeRepositoryPath}
         />
       ) : null}
@@ -220,6 +224,7 @@ function FirstLaunchSetup({
   appSettings,
   externalToolStatus,
   models,
+  runtimes,
   activeRepositoryPath,
   onAddRepository,
   onFinishSetup,
@@ -232,6 +237,7 @@ function FirstLaunchSetup({
   appSettings: TaskManagerAppSettings;
   externalToolStatus?: ExternalToolStatusReport;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
   activeRepositoryPath: string;
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
@@ -241,8 +247,12 @@ function FirstLaunchSetup({
 }) {
   const [isRefreshingTools, setIsRefreshingTools] = useState(false);
   const [isFinishingSetup, setIsFinishingSetup] = useState(false);
-  const selectedModels = selectSettingsModels(models, appSettings);
-  const requiredToolsReady = areRequiredExternalToolsReady(externalToolStatus);
+  const selectedModels = selectSettingsModels(models, runtimes, appSettings);
+  const selectedRuntime = runtimes.find(
+    (runtime) => runtime.preflight.runtime.id === selectedModels.defaultRuntimeId
+  );
+  const gitReady = externalToolStatus?.tools.git.status === 'ok';
+  const requiredToolsReady = Boolean(gitReady && selectedRuntime?.preflight.ready);
   const isLoading = state === 'loading';
   const hasRepository = Boolean(activeRepositoryPath);
   const addRepositoryDisabled = isLoading || addingRepository;
@@ -254,8 +264,12 @@ function FirstLaunchSetup({
   const repositoryStepTone = isLoading ? 'pending' : hasRepository ? 'complete' : 'active';
   const repositoryActionLabel = hasRepository ? 'Change repository' : 'Add repository';
   const toolsDetail = externalToolStatus
-    ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and Codex are required.`
-    : 'Git and Codex are required before task runs can start.';
+    ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and ${
+        selectedRuntime?.preflight.runtime.displayName ?? 'an agent runtime'
+      } are required.`
+    : `Git and ${
+        selectedRuntime?.preflight.runtime.displayName ?? 'an agent runtime'
+      } are required before task runs can start.`;
 
   const refreshTools = async () => {
     setIsRefreshingTools(true);
@@ -326,6 +340,7 @@ function FirstLaunchSetup({
             <SetupToolList
               appSettings={appSettings}
               externalToolStatus={externalToolStatus}
+              selectedRuntime={selectedRuntime}
               onSetAppSettings={onSetAppSettings}
               onTestExternalTool={onTestExternalTool}
             />
@@ -333,20 +348,33 @@ function FirstLaunchSetup({
 
           <SetupStep
             title="Defaults"
-            detail="Default model for new implementation tasks."
-            tone={models.length > 0 ? 'complete' : 'pending'}
+            detail="Default runtime and model for new implementation tasks."
+            tone={selectedModels.selectedDefaultModel ? 'complete' : 'pending'}
           >
             <div className="tm-setup__model">
               <ModelSettingRow
                 label="Default task model"
                 hint="Used for new implementation tasks"
-                value={selectedModels.selectedDefaultModel?.model ?? ''}
+                runtimeId={selectedModels.defaultRuntimeId}
+                value={selectedModels.selectedDefaultModel?.id ?? ''}
                 effortValue={selectedModels.selectedDefaultEffort}
                 models={models}
-                onModelChange={(model) => {
-                  const nextModel = models.find((candidate) => candidate.model === model);
+                runtimes={runtimes}
+                onRuntimeChange={(runtimeId) => {
+                  const nextModel = selectModel(models, undefined, runtimeId);
                   onSetAppSettings({
-                    defaultModel: model || null,
+                    defaultRuntimeId: runtimeId,
+                    defaultModel: nextModel?.model ?? null,
+                    defaultModelProvider: nextModel?.modelProvider ?? null,
+                    defaultReasoningEffort:
+                      resolveReasoningEffort(nextModel, undefined) ?? null
+                  });
+                }}
+                onModelChange={(modelId) => {
+                  const nextModel = models.find((candidate) => candidate.id === modelId);
+                  onSetAppSettings({
+                    defaultModel: nextModel?.model ?? null,
+                    defaultModelProvider: nextModel?.modelProvider ?? null,
                     defaultReasoningEffort:
                       resolveReasoningEffort(
                         nextModel,
@@ -413,11 +441,13 @@ function SetupStep({
 function SetupToolList({
   appSettings,
   externalToolStatus,
+  selectedRuntime,
   onSetAppSettings,
   onTestExternalTool
 }: {
   appSettings: TaskManagerAppSettings;
   externalToolStatus?: ExternalToolStatusReport;
+  selectedRuntime?: AgentRuntimeState;
   onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
 }) {
@@ -440,17 +470,21 @@ function SetupToolList({
           externalExecutables: { gitExecutablePath }
         })
     },
-    {
-      key: 'codex',
-      label: 'Codex',
-      hint: 'Required for agent runs',
-      value: appSettings.externalExecutables.codexExecutablePath,
-      status: externalToolStatus?.tools.codex,
-      onSetPath: (codexExecutablePath) =>
-        onSetAppSettings({
-          externalExecutables: { codexExecutablePath }
-        })
-    },
+    ...(selectedRuntime?.preflight.runtime.id === 'codex'
+      ? [
+          {
+            key: 'codex' as const,
+            label: 'Codex',
+            hint: 'Required by the selected agent runtime',
+            value: appSettings.externalExecutables.codexExecutablePath,
+            status: externalToolStatus?.tools.codex,
+            onSetPath: (codexExecutablePath: string | null) =>
+              onSetAppSettings({
+                externalExecutables: { codexExecutablePath }
+              })
+          }
+        ]
+      : []),
     {
       key: 'gh',
       label: 'GitHub CLI',
@@ -466,6 +500,25 @@ function SetupToolList({
 
   return (
     <div className="tm-setup-tools">
+      <div className="tm-setup-tools__row">
+        <span
+          className={`tm-setup-tools__dot tm-setup-tools__dot--${
+            selectedRuntime?.preflight.ready ? 'ok' : 'error'
+          }`}
+        />
+        <div className="tm-setup-tools__copy">
+          <strong>{selectedRuntime?.preflight.runtime.displayName ?? 'Agent runtime'}</strong>
+          <span>Required for agent runs</span>
+        </div>
+        <div className="tm-setup-tools__meta">
+          <strong>{selectedRuntime?.preflight.ready ? 'Ready' : 'Unavailable'}</strong>
+          <span>
+            {selectedRuntime?.preflight.runtimeVersion ??
+              selectedRuntime?.preflight.problems[0] ??
+              'Not checked'}
+          </span>
+        </div>
+      </div>
       {rows.map((row) => {
         const badge = describeToolStatus(row.status);
         const shouldConfigure = shouldShowExecutablePathControls(row.status, row.value);
@@ -830,6 +883,9 @@ function InboxDecisionCard({
 }
 
 interface SelectedSettingsModels {
+  defaultRuntimeId: string;
+  promptRefinementRuntimeId: string;
+  reviewRuntimeId: string;
   selectedDefaultModel?: AgentModel;
   selectedPromptRefinementModel?: AgentModel;
   selectedReviewModel?: AgentModel;
@@ -839,23 +895,85 @@ interface SelectedSettingsModels {
 
 function selectSettingsModels(
   models: AgentModel[],
+  runtimes: AgentRuntimeState[],
   appSettings: TaskManagerAppSettings
 ): SelectedSettingsModels {
-  const defaultModel = models.find((model) => model.isDefault) ?? models[0];
-  const selectedDefaultModel =
-    models.find((model) => model.model === appSettings.defaultModel) ?? defaultModel;
-  const selectedReviewModel =
-    models.find((model) => model.model === appSettings.reviewModel) ?? selectedDefaultModel;
-  const selectedPromptRefinementModel =
-    models.find((model) => model.model === appSettings.promptRefinementModel) ??
-    models.find((model) => model.model === DEFAULT_PROMPT_REFINEMENT_MODEL) ??
-    selectedDefaultModel;
+  const availableRuntimeIds = new Set([
+    ...runtimes.map((runtime) => runtime.preflight.runtime.id),
+    ...models.map((model) => model.runtimeId)
+  ]);
+  const firstRuntimeId =
+    runtimes.find((runtime) => runtime.preflight.ready)?.preflight.runtime.id ??
+    runtimes[0]?.preflight.runtime.id ??
+    models[0]?.runtimeId ??
+    appSettings.defaultRuntimeId;
+  const defaultRuntimeId = availableRuntimeIds.has(appSettings.defaultRuntimeId)
+    ? appSettings.defaultRuntimeId
+    : firstRuntimeId;
+  const promptRefinementRuntimeIds = new Set(
+    runtimes
+      .filter(
+        (runtime) =>
+          runtime.preflight.ready &&
+          runtime.preflight.capabilities.promptRefinement.maturity !==
+          'unsupported'
+      )
+      .map((runtime) => runtime.preflight.runtime.id)
+  );
+  const reviewRuntimeIds = new Set(
+    runtimes
+      .filter(
+        (runtime) =>
+          runtime.preflight.ready &&
+          (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
+            runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
+              'stable')
+      )
+      .map((runtime) => runtime.preflight.runtime.id)
+  );
+  const firstPromptRefinementRuntimeId =
+    [...promptRefinementRuntimeIds][0] ?? defaultRuntimeId;
+  const firstReviewRuntimeId = [...reviewRuntimeIds][0] ?? defaultRuntimeId;
+  const promptRefinementRuntimeId =
+    appSettings.promptRefinementRuntimeId &&
+    promptRefinementRuntimeIds.has(appSettings.promptRefinementRuntimeId)
+      ? appSettings.promptRefinementRuntimeId
+      : promptRefinementRuntimeIds.has(defaultRuntimeId)
+        ? defaultRuntimeId
+        : firstPromptRefinementRuntimeId;
+  const reviewRuntimeId =
+    appSettings.reviewRuntimeId && reviewRuntimeIds.has(appSettings.reviewRuntimeId)
+      ? appSettings.reviewRuntimeId
+      : reviewRuntimeIds.has(defaultRuntimeId)
+        ? defaultRuntimeId
+        : firstReviewRuntimeId;
+  const selectedDefaultModel = selectModel(
+    models,
+    appSettings.defaultModel,
+    defaultRuntimeId,
+    appSettings.defaultModelProvider
+  );
+  const selectedReviewModel = selectModel(
+    models,
+    appSettings.reviewModel,
+    reviewRuntimeId,
+    appSettings.reviewModelProvider
+  );
+  const selectedPromptRefinementModel = selectModel(
+    models,
+    appSettings.promptRefinementModel ?? DEFAULT_PROMPT_REFINEMENT_MODEL,
+    promptRefinementRuntimeId,
+    appSettings.promptRefinementModelProvider
+  );
   const selectedDefaultEffort =
     resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
   const selectedReviewEffort =
     resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '';
 
   return {
+    defaultRuntimeId,
+    promptRefinementRuntimeId,
+    reviewRuntimeId,
     selectedDefaultModel,
     selectedPromptRefinementModel,
     selectedReviewModel,
@@ -873,6 +991,7 @@ function Settings({
   onRefreshExternalTools,
   onTestExternalTool,
   models,
+  runtimes,
   activeRepositoryPath
 }: {
   theme: ThemePreference;
@@ -883,9 +1002,22 @@ function Settings({
   onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
   activeRepositoryPath: string;
 }) {
-  const selectedModels = selectSettingsModels(models, appSettings);
+  const selectedModels = selectSettingsModels(models, runtimes, appSettings);
+  const promptRefinementRuntimes = runtimes.filter(
+    (runtime) =>
+      runtime.preflight.ready &&
+      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+  );
+  const reviewRuntimes = runtimes.filter(
+    (runtime) =>
+      runtime.preflight.ready &&
+      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
+        runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
+          'stable')
+  );
   const rows: Array<{ k: string; hint: string; v: string }> = [
     {
       k: 'Repository',
@@ -937,13 +1069,25 @@ function Settings({
         <ModelSettingRow
           label="Default task model"
           hint="Used for new implementation tasks"
-          value={selectedModels.selectedDefaultModel?.model ?? ''}
+          runtimeId={selectedModels.defaultRuntimeId}
+          value={selectedModels.selectedDefaultModel?.id ?? ''}
           effortValue={selectedModels.selectedDefaultEffort}
           models={models}
-          onModelChange={(model) => {
-            const nextModel = models.find((candidate) => candidate.model === model);
+          runtimes={runtimes}
+          onRuntimeChange={(runtimeId) => {
+            const nextModel = selectModel(models, undefined, runtimeId);
             onSetAppSettings({
-              defaultModel: model || null,
+              defaultRuntimeId: runtimeId,
+              defaultModel: nextModel?.model ?? null,
+              defaultModelProvider: nextModel?.modelProvider ?? null,
+              defaultReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
+            });
+          }}
+          onModelChange={(modelId) => {
+            const nextModel = models.find((candidate) => candidate.id === modelId);
+            onSetAppSettings({
+              defaultModel: nextModel?.model ?? null,
+              defaultModelProvider: nextModel?.modelProvider ?? null,
               defaultReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.defaultReasoningEffort
@@ -959,24 +1103,48 @@ function Settings({
         <ModelSettingRow
           label="Prompt refinement model"
           hint="Used when improving task descriptions"
-          value={selectedModels.selectedPromptRefinementModel?.model ?? ''}
+          runtimeId={selectedModels.promptRefinementRuntimeId}
+          value={selectedModels.selectedPromptRefinementModel?.id ?? ''}
           models={models}
-          onModelChange={(model) =>
+          runtimes={promptRefinementRuntimes}
+          onRuntimeChange={(runtimeId) => {
+            const nextModel = selectModel(models, undefined, runtimeId);
             onSetAppSettings({
-              promptRefinementModel: model || null
-            })
-          }
+              promptRefinementRuntimeId: runtimeId,
+              promptRefinementModel: nextModel?.model ?? null,
+              promptRefinementModelProvider: nextModel?.modelProvider ?? null
+            });
+          }}
+          onModelChange={(modelId) => {
+            const nextModel = models.find((candidate) => candidate.id === modelId);
+            onSetAppSettings({
+              promptRefinementModel: nextModel?.model ?? null,
+              promptRefinementModelProvider: nextModel?.modelProvider ?? null
+            });
+          }}
         />
         <ModelSettingRow
           label="Review model"
           hint="Used for AI quality-gate reviews"
-          value={selectedModels.selectedReviewModel?.model ?? ''}
+          runtimeId={selectedModels.reviewRuntimeId}
+          value={selectedModels.selectedReviewModel?.id ?? ''}
           effortValue={selectedModels.selectedReviewEffort}
           models={models}
-          onModelChange={(model) => {
-            const nextModel = models.find((candidate) => candidate.model === model);
+          runtimes={reviewRuntimes}
+          onRuntimeChange={(runtimeId) => {
+            const nextModel = selectModel(models, undefined, runtimeId);
             onSetAppSettings({
-              reviewModel: model || null,
+              reviewRuntimeId: runtimeId,
+              reviewModel: nextModel?.model ?? null,
+              reviewModelProvider: nextModel?.modelProvider ?? null,
+              reviewReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
+            });
+          }}
+          onModelChange={(modelId) => {
+            const nextModel = models.find((candidate) => candidate.id === modelId);
+            onSetAppSettings({
+              reviewModel: nextModel?.model ?? null,
+              reviewModelProvider: nextModel?.modelProvider ?? null,
               reviewReasoningEffort: resolveReasoningEffort(
                 nextModel,
                 appSettings.reviewReasoningEffort
@@ -989,6 +1157,29 @@ function Settings({
             })
           }
         />
+      </SettingsGroup>
+
+      <SettingsGroup title="Agent runtimes">
+        {runtimes
+          .filter((runtime) => runtime.preflight.runtime.id !== 'codex')
+          .map((runtime) => (
+            <RuntimeExecutableSettingRow
+              key={runtime.preflight.runtime.id}
+              runtime={runtime}
+              value={
+                appSettings.runtimeExecutablePaths[
+                  runtime.preflight.runtime.id
+                ] ?? null
+              }
+              onSetPath={(executablePath) =>
+                onSetAppSettings({
+                  runtimeExecutablePaths: {
+                    [runtime.preflight.runtime.id]: executablePath
+                  }
+                })
+              }
+            />
+          ))}
       </SettingsGroup>
 
       <SettingsGroup title="Codex tools">
@@ -1183,6 +1374,86 @@ function ExternalToolSettingRow<Value extends string>({
             </option>
           ))}
         </select>
+      </div>
+    </div>
+  );
+}
+
+function RuntimeExecutableSettingRow({
+  runtime,
+  value,
+  onSetPath
+}: {
+  runtime: AgentRuntimeState;
+  value: string | null;
+  onSetPath(path: string | null): void;
+}) {
+  const savedPath = value ?? '';
+  const [mode, setMode] = useState<'auto' | 'custom'>(
+    savedPath ? 'custom' : 'auto'
+  );
+  const [draftPath, setDraftPath] = useState(savedPath);
+
+  useEffect(() => {
+    setMode(savedPath ? 'custom' : 'auto');
+    setDraftPath(savedPath);
+  }, [savedPath]);
+
+  const normalizedDraft = draftPath.trim();
+  const canSave =
+    mode === 'auto'
+      ? value !== null
+      : Boolean(normalizedDraft) && normalizedDraft !== savedPath;
+  const statusLabel = runtime.preflight.ready ? 'Ready' : 'Unavailable';
+  const statusDetail = runtime.preflight.runtimeVersion
+    ? `Version ${runtime.preflight.runtimeVersion}`
+    : runtime.preflight.problems[0] ?? runtime.preflight.capabilities.executionPolicy.detail;
+
+  return (
+    <div className="tm-settings__row">
+      <div style={{ minWidth: 0 }}>
+        <div className="tm-settings__k">
+          {runtime.preflight.runtime.displayName}
+        </div>
+        <div className="tm-settings__hint">
+          {statusLabel} · {compactSettingsText(statusDetail, 88)}
+        </div>
+      </div>
+      <div className="tm-settings__controls">
+        <select
+          className="tm-settings__select tm-settings__select--effort"
+          value={mode}
+          aria-label={`${runtime.preflight.runtime.displayName} executable mode`}
+          onChange={(event) => {
+            const nextMode = event.target.value as 'auto' | 'custom';
+            setMode(nextMode);
+            if (nextMode === 'auto') {
+              setDraftPath('');
+            }
+          }}
+        >
+          <option value="auto">Auto-detect</option>
+          <option value="custom">Custom path</option>
+        </select>
+        {mode === 'custom' ? (
+          <input
+            className="tm-settings__input"
+            value={draftPath}
+            placeholder="/path/to/executable"
+            aria-label={`${runtime.preflight.runtime.displayName} executable path`}
+            onChange={(event) => setDraftPath(event.target.value)}
+          />
+        ) : null}
+        <button
+          type="button"
+          className="outline-button"
+          disabled={!canSave}
+          onClick={() =>
+            onSetPath(mode === 'auto' ? null : normalizedDraft)
+          }
+        >
+          Save
+        </button>
       </div>
     </div>
   );
@@ -1435,21 +1706,28 @@ function formatSettingsTime(value: string): string {
 function ModelSettingRow({
   label,
   hint,
+  runtimeId,
   value,
   effortValue = '',
   models,
+  runtimes,
+  onRuntimeChange,
   onModelChange,
   onEffortChange
 }: {
   label: string;
   hint: string;
+  runtimeId: string;
   value: string;
   effortValue?: string;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
+  onRuntimeChange(value: string): void;
   onModelChange(value: string): void;
   onEffortChange?(value: string): void;
 }) {
-  const selected = models.find((model) => model.model === value);
+  const runtimeModels = models.filter((model) => model.runtimeId === runtimeId);
+  const selected = runtimeModels.find((model) => model.id === value);
   const efforts = [
     ...new Set(
       [
@@ -1460,7 +1738,7 @@ function ModelSettingRow({
     )
   ];
   return (
-    <div className="tm-settings__row">
+    <div className="tm-settings__row tm-settings__row--models">
       <div style={{ minWidth: 0 }}>
         <div className="tm-settings__k">{label}</div>
         <div className="tm-settings__hint">
@@ -1471,15 +1749,32 @@ function ModelSettingRow({
       <div className="tm-settings__controls">
         <select
           className="tm-settings__select tm-settings__select--model"
+          value={runtimeId}
+          onChange={(event) => onRuntimeChange(event.target.value)}
+          disabled={runtimes.length === 0}
+          aria-label={`${label} runtime`}
+        >
+          {runtimes.map((runtime) => (
+            <option
+              key={runtime.preflight.runtime.id}
+              value={runtime.preflight.runtime.id}
+            >
+              {runtime.preflight.runtime.displayName}
+              {runtime.preflight.ready ? '' : ' (unavailable)'}
+            </option>
+          ))}
+        </select>
+        <select
+          className="tm-settings__select tm-settings__select--model"
           value={value}
           onChange={(event) => onModelChange(event.target.value)}
-          disabled={models.length === 0}
+          disabled={runtimeModels.length === 0}
           aria-label={`${label} model`}
         >
-          {models
-            .filter((model) => !model.hidden || model.model === value)
+          {runtimeModels
+            .filter((model) => !model.hidden || model.id === value)
             .map((model) => (
-              <option key={model.id} value={model.model}>
+              <option key={model.id} value={model.id}>
                 {model.displayName}
               </option>
             ))}

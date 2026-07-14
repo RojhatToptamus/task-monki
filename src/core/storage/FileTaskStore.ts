@@ -45,13 +45,17 @@ import type {
 } from '../../shared/contracts';
 import {
   TASK_STORE_SCHEMA_VERSION,
+  CODEX_RUNTIME_ID,
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
   isTaskCreationToken,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
-import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
+import {
+  AgentProtocolJournal,
+  DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS
+} from '../agent/journal/AgentProtocolJournal';
 import {
   enforcePosixMode,
   hasNoGroupOrOtherPosixAccess,
@@ -77,11 +81,19 @@ export interface CreateAgentSessionInput {
   task: Task;
   iteration: TaskIteration;
   worktree: WorktreeRecord;
-  provider: string;
+  runtimeId: string;
   role?: AgentSessionRecord['role'];
   requestedSettings?: AgentExecutionSettings;
   parentSessionId?: string;
   forkedFromSessionId?: string;
+}
+
+export interface CreateTaskStoreInput extends CreateTaskRequest {
+  /**
+   * Internal idempotency source retained when the service persists runtime-
+   * resolved settings. It is never copied into the durable task record.
+   */
+  creationFingerprintInput?: CreateTaskRequest;
 }
 
 export interface CreateRunInput {
@@ -130,7 +142,7 @@ export interface ObserveSubagentInput {
 }
 
 export interface CreateAgentServerInput {
-  provider: string;
+  runtimeId: string;
   runtimeKind: AgentServerInstance['runtimeKind'];
   transport: AgentServerInstance['transport'];
   executable: string;
@@ -139,6 +151,13 @@ export interface CreateAgentServerInput {
   schemaVersion?: string;
   schemaHash?: string;
   runtimeResolution?: AgentServerInstance['runtimeResolution'];
+}
+
+export const DEFAULT_UNREFERENCED_TERMINAL_AGENT_SERVER_LIMIT = 8;
+
+export interface FileTaskStoreOptions {
+  /** Newest unreferenced terminal server diagnostics retained across runtimes. */
+  maxUnreferencedTerminalAgentServers?: number;
 }
 
 interface PrSyncInput {
@@ -235,12 +254,23 @@ interface TaskCreationMetadata {
 }
 
 function taskCreationMetadata(
-  input: CreateTaskRequest
+  input: CreateTaskStoreInput
 ): TaskCreationMetadata | undefined {
-  if (input.creationToken === undefined) {
+  const fingerprintInput = input.creationFingerprintInput ?? input;
+  if (
+    input.creationFingerprintInput &&
+    input.creationToken !== fingerprintInput.creationToken
+  ) {
+    throw new TaskCreationRequestError(
+      'TASK_CREATION_INVALID_REQUEST',
+      'Task creation retry metadata is inconsistent.',
+      400
+    );
+  }
+  if (fingerprintInput.creationToken === undefined) {
     return undefined;
   }
-  if (!isTaskCreationToken(input.creationToken)) {
+  if (!isTaskCreationToken(fingerprintInput.creationToken)) {
     throw new TaskCreationRequestError(
       'TASK_CREATION_INVALID_REQUEST',
       'Task creation retry token is invalid.',
@@ -250,13 +280,25 @@ function taskCreationMetadata(
 
   let canonicalRequest: string | undefined;
   try {
+    const requestedRuntimeId =
+      fingerprintInput.runtimeId ??
+      fingerprintInput.agentSettings?.runtimeId ??
+      CODEX_RUNTIME_ID;
+    const { runtimeId: _runtimeId, ...portableAgentSettings } =
+      fingerprintInput.agentSettings ?? {};
+    const isLegacyDefaultRuntime = requestedRuntimeId === CODEX_RUNTIME_ID;
     canonicalRequest = stableJsonStringify({
-      title: input.title.trim(),
-      prompt: input.prompt.trim(),
-      repositoryPath: input.repositoryPath.trim(),
-      completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
-      agentSettings: input.agentSettings ?? {},
-      attachmentDraftId: input.attachmentDraftId ?? null
+      title: fingerprintInput.title.trim(),
+      prompt: fingerprintInput.prompt.trim(),
+      repositoryPath: fingerprintInput.repositoryPath.trim(),
+      completionPolicy: normalizeCreateTaskCompletionPolicy(
+        fingerprintInput.completionPolicy
+      ),
+      runtimeId: isLegacyDefaultRuntime ? undefined : requestedRuntimeId,
+      agentSettings: isLegacyDefaultRuntime
+        ? portableAgentSettings
+        : { ...portableAgentSettings, runtimeId: requestedRuntimeId },
+      attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
     throw new TaskCreationRequestError(
@@ -274,7 +316,7 @@ function taskCreationMetadata(
   }
 
   return {
-    token: input.creationToken,
+    token: fingerprintInput.creationToken,
     fingerprint: createHash('sha256').update(canonicalRequest).digest('hex')
   };
 }
@@ -372,8 +414,25 @@ export class FileTaskStore {
   private loaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
   private taskCreationQueue: Promise<unknown> = Promise.resolve();
+  private readonly maxUnreferencedTerminalAgentServers: number;
 
-  constructor(private readonly baseDir: string) {
+  constructor(
+    private readonly baseDir: string,
+    options: FileTaskStoreOptions = {}
+  ) {
+    const maxUnreferencedTerminalAgentServers =
+      options.maxUnreferencedTerminalAgentServers ??
+      DEFAULT_UNREFERENCED_TERMINAL_AGENT_SERVER_LIMIT;
+    if (
+      !Number.isSafeInteger(maxUnreferencedTerminalAgentServers) ||
+      maxUnreferencedTerminalAgentServers < 0
+    ) {
+      throw new Error(
+        'Unreferenced terminal agent server retention must be a non-negative integer.'
+      );
+    }
+    this.maxUnreferencedTerminalAgentServers =
+      maxUnreferencedTerminalAgentServers;
     this.storePath = path.join(baseDir, 'store.json');
     this.artifactsDir = path.join(baseDir, 'artifacts');
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
@@ -411,11 +470,18 @@ export class FileTaskStore {
       }
       await this.attachmentFiles.reconcile(this.state.attachments);
       await this.reconcileArtifacts();
-      if (migrated.changed || normalized.changed || attachmentsMigrated) {
+      const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
+      if (
+        migrated.changed ||
+        normalized.changed ||
+        attachmentsMigrated ||
+        prunedServerIds.length > 0
+      ) {
         await this.persist();
       }
       if (
         persisted.schemaVersion === 10 ||
+        persisted.schemaVersion === 11 ||
         persisted.schemaVersion === TASK_STORE_SCHEMA_VERSION
       ) {
         await this.attachmentFiles.cleanupLegacyStorage();
@@ -429,6 +495,9 @@ export class FileTaskStore {
       await this.reconcileArtifacts();
       await this.persist();
     }
+    await this.protocolJournal.reconcileServers(
+      this.state.agentServers.map((server) => server.id)
+    );
     this.loaded = true;
   }
 
@@ -436,6 +505,7 @@ export class FileTaskStore {
     try {
       await this.taskCreationQueue.catch(() => undefined);
       await this.writeQueue.catch(() => undefined);
+      await this.protocolJournal.close();
     } finally {
       this.loaded = false;
     }
@@ -629,9 +699,16 @@ export class FileTaskStore {
     return clone(this.state.runs.find((run) => run.id === runId));
   }
 
-  async getRunByProviderTurnId(providerTurnId: string): Promise<RunRecord | undefined> {
+  async getRunByProviderTurnId(
+    runtimeId: string,
+    providerTurnId: string
+  ): Promise<RunRecord | undefined> {
     await this.init();
-    return clone(this.state.runs.find((run) => run.providerTurnId === providerTurnId));
+    return clone(
+      this.state.runs.find(
+        (run) => run.runtimeId === runtimeId && run.providerTurnId === providerTurnId
+      )
+    );
   }
 
   async getActiveRunForSession(sessionId: string): Promise<RunRecord | undefined> {
@@ -680,6 +757,27 @@ export class FileTaskStore {
       throw new Error(`Run not found: ${runId}`);
     }
     const stored = { ...existing, ...update };
+    if (stored.serverInstanceId) {
+      assertServerRuntime(
+        this.state,
+        stored.runtimeId,
+        stored.serverInstanceId,
+        'Run'
+      );
+    }
+    if (
+      stored.providerTurnId &&
+      this.state.runs.some(
+        (run) =>
+          run.id !== stored.id &&
+          run.runtimeId === stored.runtimeId &&
+          run.providerTurnId === stored.providerTurnId
+      )
+    ) {
+      throw new Error(
+        `Provider turn ${stored.providerTurnId} is already owned by another ${stored.runtimeId} run.`
+      );
+    }
     this.state = {
       ...this.state,
       runs: this.state.runs.map((run) => (run.id === runId ? stored : run))
@@ -699,12 +797,14 @@ export class FileTaskStore {
   }
 
   async getAgentSessionByProviderId(
+    runtimeId: string,
     providerSessionId: string
   ): Promise<AgentSessionRecord | undefined> {
     await this.init();
     return clone(
       this.state.agentSessions.find(
-        (session) => session.providerSessionId === providerSessionId
+        (session) =>
+          session.runtimeId === runtimeId && session.providerSessionId === providerSessionId
       )
     );
   }
@@ -753,6 +853,7 @@ export class FileTaskStore {
 
   async getRunsRequiringRecovery(options: {
     includeQueued?: boolean;
+    runtimeId?: string;
   } = {}): Promise<RunRecord[]> {
     await this.init();
     const statuses: RunRecord['status'][] = [
@@ -763,7 +864,11 @@ export class FileTaskStore {
     ];
     if (options.includeQueued) statuses.push('QUEUED');
     return clone(
-      this.state.runs.filter((run) => statuses.includes(run.status))
+      this.state.runs.filter(
+        (run) =>
+          statuses.includes(run.status) &&
+          (!options.runtimeId || run.runtimeId === options.runtimeId)
+      )
     );
   }
 
@@ -825,7 +930,7 @@ export class FileTaskStore {
     );
   }
 
-  async createTask(input: CreateTaskRequest): Promise<Task> {
+  async createTask(input: CreateTaskStoreInput): Promise<Task> {
     return this.enqueueTaskCreation(() => this.createTaskRecord(input, 'ui'));
   }
 
@@ -879,6 +984,7 @@ export class FileTaskStore {
     const now = new Date().toISOString();
     const previousState = this.state;
     let publishedWithoutDirectorySync = false;
+    let prunedServerIds: string[] = [];
 
     try {
       this.state = {
@@ -951,6 +1057,7 @@ export class FileTaskStore {
           (attachment) => attachment.taskId !== taskId
         )
       };
+      prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
 
       await this.persistQueued();
     } catch (error) {
@@ -966,12 +1073,13 @@ export class FileTaskStore {
     // transaction; startup reconciliation retries any failed cleanup.
     await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
     if (!publishedWithoutDirectorySync) {
+      await this.cleanupPrunedServerJournals(prunedServerIds);
       await Promise.all(artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path)));
     }
   }
 
   private async createTaskRecord(
-    input: CreateTaskRequest,
+    input: CreateTaskStoreInput,
     source: DomainEvent['source'],
     fork?: { sourceTaskId: string; sourceRunId: string }
   ): Promise<Task> {
@@ -998,8 +1106,14 @@ export class FileTaskStore {
       throw new Error('Fork source task or run was not found.');
     }
     const creationMetadata = fork ? undefined : taskCreationMetadata(input);
+    const runtimeId =
+      input.runtimeId ?? input.agentSettings?.runtimeId ?? sourceTask?.runtimeId ?? CODEX_RUNTIME_ID;
+    if (input.agentSettings?.runtimeId && input.agentSettings.runtimeId !== runtimeId) {
+      throw new Error('Task runtime and execution settings runtime must match.');
+    }
     const task: Task = {
       id: randomUUID(),
+      runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),
       repositoryPath: input.repositoryPath.trim(),
@@ -1012,7 +1126,7 @@ export class FileTaskStore {
       forkedAlternativeTaskIds: [],
       forkedFromTaskId: fork?.sourceTaskId,
       forkedFromRunId: fork?.sourceRunId,
-      agentSettings: input.agentSettings ?? {},
+      agentSettings: { ...input.agentSettings, runtimeId },
       createdAt: now,
       updatedAt: now,
       projection: createInitialProjection(now)
@@ -1134,7 +1248,7 @@ export class FileTaskStore {
   }
 
   private resolveTaskCreationRetryFromState(
-    input: CreateTaskRequest
+    input: CreateTaskStoreInput
   ): Task | undefined {
     const metadata = taskCreationMetadata(input);
     if (!metadata) {
@@ -1164,12 +1278,15 @@ export class FileTaskStore {
 
   async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
     await this.init();
+    if (!isRuntimeId(input.runtimeId)) {
+      throw new Error('Agent server runtime id is invalid.');
+    }
 
     const now = new Date().toISOString();
     const id = randomUUID();
     const server: AgentServerInstance = {
       id,
-      provider: input.provider,
+      runtimeId: input.runtimeId,
       runtimeKind: input.runtimeKind,
       transport: input.transport,
       status: 'STARTING',
@@ -1224,16 +1341,22 @@ export class FileTaskStore {
         server.id === serverInstanceId ? stored : server
       )
     };
+    const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
     await this.persistQueued();
+    await this.cleanupPrunedServerJournals(prunedServerIds);
     return clone(stored);
   }
 
-  appendProtocolMessage(
+  async appendProtocolMessage(
     serverInstanceId: string,
     direction: AgentProtocolMessageReference['direction'],
     raw: string,
     metadata?: Record<string, unknown>
   ): Promise<AgentProtocolMessageReference> {
+    await this.init();
+    if (!this.state.agentServers.some((server) => server.id === serverInstanceId)) {
+      throw new Error('Protocol journal server instance is not owned by this store.');
+    }
     return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
   }
 
@@ -1246,7 +1369,9 @@ export class FileTaskStore {
       reference.byteOffset < 0 ||
       !Number.isInteger(reference.byteLength) ||
       reference.byteLength <= 0 ||
-      reference.byteLength > 10 * 1024 * 1024
+      reference.byteLength > DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS.maxEntryBytes ||
+      (reference.segment !== undefined &&
+        (!Number.isSafeInteger(reference.segment) || reference.segment < 0))
     ) {
       throw new Error('Protocol journal reference is invalid.');
     }
@@ -1271,6 +1396,7 @@ export class FileTaskStore {
     record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
   ): Promise<AgentGoalSnapshotRecord> {
     await this.init();
+    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent goal snapshot');
     const stored: AgentGoalSnapshotRecord = {
       ...record,
       id: randomUUID(),
@@ -1308,6 +1434,7 @@ export class FileTaskStore {
     record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
   ): Promise<AgentPlanRevisionRecord> {
     await this.init();
+    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent plan revision', true);
     const revision =
       this.state.agentPlanRevisions.filter((item) => item.runId === record.runId)
         .length + 1;
@@ -1341,6 +1468,7 @@ export class FileTaskStore {
     record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
   ): Promise<AgentUsageSnapshotRecord> {
     await this.init();
+    assertRuntimeOwnedAgentRecord(this.state, record, 'Agent usage snapshot');
     const stored: AgentUsageSnapshotRecord = {
       ...record,
       id: randomUUID(),
@@ -1373,8 +1501,17 @@ export class FileTaskStore {
     record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
   ): Promise<AgentSettingsObservationRecord> {
     await this.init();
-    const stored: AgentSettingsObservationRecord = {
+    const normalizedRecord = {
       ...record,
+      settings: { ...record.settings, runtimeId: record.runtimeId }
+    };
+    assertRuntimeOwnedAgentRecord(
+      this.state,
+      normalizedRecord,
+      'Agent settings observation'
+    );
+    const stored: AgentSettingsObservationRecord = {
+      ...normalizedRecord,
       id: randomUUID(),
       observedAt: new Date().toISOString()
     };
@@ -1409,8 +1546,10 @@ export class FileTaskStore {
     if (input.worktree.iterationId !== input.iteration.id) {
       throw new Error('Agent session worktree must belong to the selected iteration.');
     }
-
     const role = input.role ?? 'PRIMARY';
+    if (role !== 'REVIEW' && input.runtimeId !== input.task.runtimeId) {
+      throw new Error('Primary task work must use the task runtime.');
+    }
     const existing =
       role === 'PRIMARY'
         ? this.state.agentSessions.find(
@@ -1421,6 +1560,9 @@ export class FileTaskStore {
           )
         : undefined;
     if (existing) {
+      if (existing.runtimeId !== input.runtimeId) {
+        throw new Error('Existing primary session runtime does not match its task.');
+      }
       return clone(existing);
     }
 
@@ -1430,7 +1572,7 @@ export class FileTaskStore {
       taskId: input.task.id,
       iterationId: input.iteration.id,
       worktreeId: input.worktree.id,
-      provider: input.provider,
+      runtimeId: input.runtimeId,
       role,
       parentSessionId: input.parentSessionId,
       forkedFromSessionId: input.forkedFromSessionId,
@@ -1445,7 +1587,7 @@ export class FileTaskStore {
       worktreePath: input.worktree.worktreePath,
       status: 'NOT_MATERIALIZED',
       materialized: false,
-      requestedSettings: input.requestedSettings ?? {},
+      requestedSettings: { ...input.requestedSettings, runtimeId: input.runtimeId },
       ownership: 'TASK_MONKI',
       createdAt: now,
       updatedAt: now
@@ -1470,7 +1612,7 @@ export class FileTaskStore {
         agentSessionId: session.id,
         source: 'provider',
         payload: {
-          provider: session.provider,
+          runtimeId: session.runtimeId,
           role: session.role,
           worktreePath: session.worktreePath
         }
@@ -1516,8 +1658,29 @@ export class FileTaskStore {
     const stored: AgentSessionRecord = {
       ...existing,
       ...update,
+      requestedSettings: update.requestedSettings
+        ? { ...update.requestedSettings, runtimeId: existing.runtimeId }
+        : existing.requestedSettings,
+      observedSettings: update.observedSettings
+        ? { ...update.observedSettings, runtimeId: existing.runtimeId }
+        : update.observedSettings === undefined && 'observedSettings' in update
+          ? undefined
+          : existing.observedSettings,
       updatedAt: new Date().toISOString()
     };
+    if (
+      stored.providerSessionId &&
+      this.state.agentSessions.some(
+        (session) =>
+          session.id !== stored.id &&
+          session.runtimeId === stored.runtimeId &&
+          session.providerSessionId === stored.providerSessionId
+      )
+    ) {
+      throw new Error(
+        `Provider session ${stored.providerSessionId} is already owned by another ${stored.runtimeId} session.`
+      );
+    }
     this.state = {
       ...this.state,
       agentSessions: this.state.agentSessions.map((session) =>
@@ -1541,9 +1704,27 @@ export class FileTaskStore {
     if (!parent) {
       throw new Error(`Parent agent session not found: ${input.parentSessionId}`);
     }
+    assertProtocolReferenceRuntime(
+      this.state,
+      parent.runtimeId,
+      input.rawMessage,
+      'Subagent observation'
+    );
+    if (input.parentRunId) {
+      const parentRun = this.state.runs.find((run) => run.id === input.parentRunId);
+      if (
+        !parentRun ||
+        parentRun.sessionId !== parent.id ||
+        parentRun.runtimeId !== parent.runtimeId
+      ) {
+        throw new Error('Subagent observation parent run ownership is inconsistent.');
+      }
+    }
 
     const existing = this.state.agentSessions.find(
-      (session) => session.providerSessionId === input.providerChildSessionId
+      (session) =>
+        session.runtimeId === parent.runtimeId &&
+        session.providerSessionId === input.providerChildSessionId
     );
     if (existing && existing.taskId !== parent.taskId) {
       throw new Error(
@@ -1619,7 +1800,7 @@ export class FileTaskStore {
           taskId: parent.taskId,
           iterationId: parent.iterationId,
           worktreeId: parent.worktreeId,
-          provider: parent.provider,
+          runtimeId: parent.runtimeId,
           role: 'SUBAGENT',
           providerSessionId: input.providerChildSessionId,
           providerSessionTreeId: input.providerSessionTreeId,
@@ -1651,6 +1832,7 @@ export class FileTaskStore {
 
     const observation: AgentSubagentObservationRecord = {
       id: randomUUID(),
+      runtimeId: parent.runtimeId,
       taskId: stored.taskId,
       iterationId: stored.iterationId,
       sessionId: stored.id,
@@ -1717,8 +1899,35 @@ export class FileTaskStore {
   async createRun(input: CreateRunInput): Promise<RunRecord> {
     await this.init();
 
+    const persistedSession = this.state.agentSessions.find(
+      (session) => session.id === input.session.id
+    );
+    if (
+      !persistedSession ||
+      persistedSession.taskId !== input.session.taskId ||
+      persistedSession.iterationId !== input.session.iterationId ||
+      persistedSession.worktreeId !== input.session.worktreeId ||
+      persistedSession.runtimeId !== input.session.runtimeId ||
+      persistedSession.role !== input.session.role
+    ) {
+      throw new Error('Run session does not match its durable ownership record.');
+    }
     if (input.session.taskId !== input.task.id) {
       throw new Error('Run session must belong to the task.');
+    }
+    if (
+      input.session.runtimeId !== input.task.runtimeId &&
+      !(input.mode === 'REVIEW' && input.session.role === 'REVIEW')
+    ) {
+      throw new Error('Only detached review runs may use a runtime other than the task runtime.');
+    }
+    if (input.serverInstanceId) {
+      assertServerRuntime(
+        this.state,
+        input.session.runtimeId,
+        input.serverInstanceId,
+        'Run'
+      );
     }
 
     const now = new Date().toISOString();
@@ -1737,6 +1946,7 @@ export class FileTaskStore {
 
     const run: RunRecord = {
       id: runId,
+      runtimeId: input.session.runtimeId,
       taskId: input.task.id,
       iterationId: input.session.iterationId,
       worktreeId: input.session.worktreeId,
@@ -1749,7 +1959,10 @@ export class FileTaskStore {
       continuedFromRunId: input.continuedFromRunId,
       status: 'QUEUED',
       recoveryState: 'NONE',
-      requestedSettings: input.requestedSettings ?? input.session.requestedSettings,
+      requestedSettings: {
+        ...(input.requestedSettings ?? input.session.requestedSettings),
+        runtimeId: input.session.runtimeId
+      },
       promptArtifactId: promptArtifact.id,
       outputArtifactId: outputArtifact.id,
       diagnosticArtifactId: diagnosticArtifact.id,
@@ -1841,14 +2054,37 @@ export class FileTaskStore {
   ): Promise<RunRecord> {
     await this.init();
     const existing = this.state.runs.find(
-      (run) => run.providerTurnId === input.providerTurnId
+      (run) =>
+        run.runtimeId === input.session.runtimeId &&
+        run.providerTurnId === input.providerTurnId
     );
     if (existing) {
+      if (existing.sessionId !== input.session.id) {
+        throw new Error(
+          `Provider turn ${input.providerTurnId} is already owned by another ${input.session.runtimeId} session.`
+        );
+      }
       return clone(existing);
     }
     if (input.session.role !== 'SUBAGENT') {
       throw new Error('Only observed subagent sessions may create observed child runs.');
     }
+    const persistedSession = this.state.agentSessions.find(
+      (session) => session.id === input.session.id
+    );
+    if (
+      !persistedSession ||
+      persistedSession.runtimeId !== input.session.runtimeId ||
+      persistedSession.taskId !== input.session.taskId
+    ) {
+      throw new Error('Observed subagent run session ownership is inconsistent.');
+    }
+    assertServerRuntime(
+      this.state,
+      input.session.runtimeId,
+      input.serverInstanceId,
+      'Observed subagent run'
+    );
 
     const now = new Date().toISOString();
     const runId = randomUUID();
@@ -1880,6 +2116,7 @@ export class FileTaskStore {
 
     const run: RunRecord = {
       id: runId,
+      runtimeId: input.session.runtimeId,
       taskId: input.session.taskId,
       iterationId: input.session.iterationId,
       worktreeId: input.session.worktreeId,
@@ -1892,7 +2129,10 @@ export class FileTaskStore {
       status: 'RUNNING',
       recoveryState: 'NONE',
       requestedSettings:
-        input.requestedSettings ?? input.session.requestedSettings,
+        {
+          ...(input.requestedSettings ?? input.session.requestedSettings),
+          runtimeId: input.session.runtimeId
+        },
       promptArtifactId: promptArtifact.id,
       outputArtifactId: outputArtifact.id,
       diagnosticArtifactId: diagnosticArtifact.id,
@@ -1947,6 +2187,14 @@ export class FileTaskStore {
       run.sessionId !== item.sessionId
     ) {
       throw new Error('Agent item ownership does not match its run.');
+    }
+    if (item.rawMessage) {
+      assertProtocolReferenceRuntime(
+        this.state,
+        run.runtimeId,
+        item.rawMessage,
+        'Agent item'
+      );
     }
 
     const existing = this.state.agentItems.find(
@@ -2013,17 +2261,51 @@ export class FileTaskStore {
       run.taskId !== input.taskId ||
       run.iterationId !== input.iterationId ||
       run.sessionId !== input.sessionId ||
-      run.serverInstanceId !== input.serverInstanceId
+      run.serverInstanceId !== input.serverInstanceId ||
+      run.runtimeId !== input.runtimeId
     ) {
       throw new Error('Interaction request ownership does not match its run.');
     }
+    assertServerRuntime(
+      this.state,
+      input.runtimeId,
+      input.serverInstanceId,
+      'Interaction request'
+    );
+    assertProtocolReferenceRuntime(
+      this.state,
+      input.runtimeId,
+      input.requestRawMessage,
+      'Interaction request'
+    );
     const duplicate = this.state.interactionRequests.find(
       (request) =>
         request.serverInstanceId === input.serverInstanceId &&
         request.providerRequestId === input.providerRequestId
     );
     if (duplicate) {
-      return clone(duplicate);
+      const sameOccurrence =
+        duplicate.requestRawMessage.sequence === input.requestRawMessage.sequence;
+      if (sameOccurrence) {
+        if (
+          duplicate.runtimeId !== input.runtimeId ||
+          duplicate.taskId !== input.taskId ||
+          duplicate.iterationId !== input.iterationId ||
+          duplicate.runId !== input.runId ||
+          duplicate.sessionId !== input.sessionId ||
+          duplicate.type !== input.type
+        ) {
+          throw new Error(
+            'Duplicate interaction request does not match its original ownership.'
+          );
+        }
+        return clone(duplicate);
+      }
+      if (duplicate.status === 'PENDING' || duplicate.status === 'RESPONDING') {
+        throw new Error(
+          'Provider reused an interaction request id while its previous occurrence is still active.'
+        );
+      }
     }
 
     const stored: InteractionRequestRecord = {
@@ -2084,6 +2366,14 @@ export class FileTaskStore {
     }
     const nextStatus = update.status ?? existing.status;
     validateInteractionTransition(existing.status, nextStatus);
+    if (update.responseRawMessage) {
+      assertProtocolReferenceRuntime(
+        this.state,
+        existing.runtimeId,
+        update.responseRawMessage,
+        'Interaction response'
+      );
+    }
     const stored: InteractionRequestRecord = { ...existing, ...update, status: nextStatus };
     this.state = {
       ...this.state,
@@ -2665,6 +2955,38 @@ export class FileTaskStore {
     return artifact.path;
   }
 
+  private pruneUnreferencedTerminalAgentServers(): string[] {
+    const referencedServerIds = collectReferencedAgentServerIds(this.state);
+    const unreferencedTerminalServers = this.state.agentServers
+      .filter(
+        (server) =>
+          isTerminalAgentServerStatus(server.status) &&
+          !referencedServerIds.has(server.id)
+      )
+      .sort(compareAgentServerDiagnosticsNewestFirst);
+    const prunedServerIds = unreferencedTerminalServers
+      .slice(this.maxUnreferencedTerminalAgentServers)
+      .map((server) => server.id);
+    if (prunedServerIds.length === 0) return [];
+    const pruned = new Set(prunedServerIds);
+    this.state = {
+      ...this.state,
+      agentServers: this.state.agentServers.filter((server) => !pruned.has(server.id))
+    };
+    return prunedServerIds;
+  }
+
+  private async cleanupPrunedServerJournals(serverInstanceIds: string[]): Promise<void> {
+    // The record removal was already published. Cleanup failure leaves an
+    // orphan that startup reconciliation can retry without risking a dangling
+    // durable reference.
+    await Promise.allSettled(
+      serverInstanceIds.map((serverInstanceId) =>
+        this.protocolJournal.removeServer(serverInstanceId)
+      )
+    );
+  }
+
   private async createArtifactRecord(
     taskId: string,
     kind: ArtifactKind,
@@ -2693,6 +3015,9 @@ export class FileTaskStore {
   }
 
   private async persist(): Promise<void> {
+    // A durable store record must never be published ahead of the raw protocol
+    // entry it references. High-volume unmaterialized input remains batch-synced.
+    await this.protocolJournal.flush();
     await fs.mkdir(this.baseDir, { recursive: true });
     const tmpPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
     let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
@@ -2978,9 +3303,281 @@ function requireCurrentState(state: PersistedState): StoreState {
     }
   }
   const current = state as StoreState;
+  validatePersistedRuntimeIdentity(current);
   validatePersistedTaskCreationMetadata(current);
   validatePersistedAttachments(current);
   return current;
+}
+
+function validatePersistedRuntimeIdentity(state: StoreState): void {
+  const tasks = new Map(state.tasks.map((task) => [task.id, task]));
+  const sessions = new Map(state.agentSessions.map((session) => [session.id, session]));
+  const runs = new Map(state.runs.map((run) => [run.id, run]));
+  const providerSessionOwners = new Set<string>();
+  const providerTurnOwners = new Set<string>();
+  const serverIds = new Set<string>();
+  for (const server of state.agentServers) {
+    if (
+      !isRuntimeId(server.runtimeId) ||
+      !server.id ||
+      serverIds.has(server.id)
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: agent server runtime identity is inconsistent.`
+      );
+    }
+    serverIds.add(server.id);
+  }
+  for (const task of state.tasks) {
+    if (!isRuntimeId(task.runtimeId) || task.agentSettings.runtimeId !== task.runtimeId) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: task runtime ownership is inconsistent.`
+      );
+    }
+  }
+  for (const session of state.agentSessions) {
+    const task = tasks.get(session.taskId);
+    if (
+      !task ||
+      !isRuntimeId(session.runtimeId) ||
+      (session.role !== 'REVIEW' && session.runtimeId !== task.runtimeId) ||
+      session.requestedSettings.runtimeId !== session.runtimeId ||
+      (session.observedSettings?.runtimeId !== undefined &&
+        session.observedSettings.runtimeId !== session.runtimeId)
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: session runtime ownership is inconsistent.`
+      );
+    }
+    if (session.providerSessionId) {
+      const providerKey = `${session.runtimeId}\u0000${session.providerSessionId}`;
+      if (providerSessionOwners.has(providerKey)) {
+        throw new Error(
+          `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: provider session identity is duplicated within a runtime.`
+        );
+      }
+      providerSessionOwners.add(providerKey);
+    }
+  }
+  for (const run of state.runs) {
+    const task = tasks.get(run.taskId);
+    const session = sessions.get(run.sessionId);
+    if (
+      !task ||
+      !session ||
+      !isRuntimeId(run.runtimeId) ||
+      run.runtimeId !== session.runtimeId ||
+      (run.runtimeId !== task.runtimeId &&
+        !(run.mode === 'REVIEW' && session.role === 'REVIEW')) ||
+      run.requestedSettings.runtimeId !== run.runtimeId ||
+      (run.observedSettings?.runtimeId !== undefined &&
+        run.observedSettings.runtimeId !== run.runtimeId)
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: run runtime ownership is inconsistent.`
+      );
+    }
+    if (run.serverInstanceId) {
+      assertServerRuntime(state, run.runtimeId, run.serverInstanceId, 'Persisted run');
+    }
+    if (run.providerTurnId) {
+      const providerKey = `${run.runtimeId}\u0000${run.providerTurnId}`;
+      if (providerTurnOwners.has(providerKey)) {
+        throw new Error(
+          `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: provider turn identity is duplicated within a runtime.`
+        );
+      }
+      providerTurnOwners.add(providerKey);
+    }
+  }
+  for (const interaction of state.interactionRequests) {
+    const run = runs.get(interaction.runId);
+    const session = sessions.get(interaction.sessionId);
+    if (
+      !run ||
+      !session ||
+      interaction.runtimeId !== run.runtimeId ||
+      interaction.runtimeId !== session.runtimeId
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: interaction runtime ownership is inconsistent.`
+      );
+    }
+    assertServerRuntime(
+      state,
+      interaction.runtimeId,
+      interaction.serverInstanceId,
+      'Persisted interaction'
+    );
+    assertProtocolReferenceRuntime(
+      state,
+      interaction.runtimeId,
+      interaction.requestRawMessage,
+      'Persisted interaction request'
+    );
+    if (interaction.responseRawMessage) {
+      assertProtocolReferenceRuntime(
+        state,
+        interaction.runtimeId,
+        interaction.responseRawMessage,
+        'Persisted interaction response'
+      );
+    }
+  }
+  for (const record of state.agentGoalSnapshots) {
+    assertRuntimeOwnedAgentRecord(state, record, 'Persisted agent goal snapshot');
+  }
+  for (const record of state.agentPlanRevisions) {
+    assertRuntimeOwnedAgentRecord(
+      state,
+      record,
+      'Persisted agent plan revision',
+      true
+    );
+  }
+  for (const record of state.agentUsageSnapshots) {
+    assertRuntimeOwnedAgentRecord(state, record, 'Persisted agent usage snapshot');
+  }
+  for (const record of state.agentSettingsObservations) {
+    assertRuntimeOwnedAgentRecord(
+      state,
+      record,
+      'Persisted agent settings observation'
+    );
+    if (record.settings.runtimeId !== record.runtimeId) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: settings observation runtime is inconsistent.`
+      );
+    }
+  }
+  for (const item of state.agentItems) {
+    const run = runs.get(item.runId);
+    if (
+      !run ||
+      run.taskId !== item.taskId ||
+      run.iterationId !== item.iterationId ||
+      run.sessionId !== item.sessionId
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: agent item ownership is inconsistent.`
+      );
+    }
+    if (item.rawMessage) {
+      assertProtocolReferenceRuntime(
+        state,
+        run.runtimeId,
+        item.rawMessage,
+        'Persisted agent item'
+      );
+    }
+  }
+  for (const observation of state.agentSubagentObservations) {
+    const child = sessions.get(observation.sessionId);
+    const parent = sessions.get(observation.parentSessionId);
+    const parentRun = observation.parentRunId
+      ? runs.get(observation.parentRunId)
+      : undefined;
+    if (
+      !child ||
+      !parent ||
+      child.role !== 'SUBAGENT' ||
+      observation.runtimeId !== child.runtimeId ||
+      observation.runtimeId !== parent.runtimeId ||
+      observation.taskId !== child.taskId ||
+      observation.taskId !== parent.taskId ||
+      observation.iterationId !== child.iterationId ||
+      observation.iterationId !== parent.iterationId ||
+      (observation.parentRunId &&
+        (!parentRun || parentRun.sessionId !== parent.id))
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: subagent observation ownership is inconsistent.`
+      );
+    }
+    assertProtocolReferenceRuntime(
+      state,
+      observation.runtimeId,
+      observation.rawMessage,
+      'Persisted subagent observation'
+    );
+  }
+}
+
+function assertRuntimeOwnedAgentRecord(
+  state: StoreState,
+  record: {
+    taskId: string;
+    iterationId: string;
+    sessionId: string;
+    runId?: string;
+    runtimeId: string;
+    rawMessage?: AgentProtocolMessageReference;
+  },
+  label: string,
+  requireRun = false
+): void {
+  const session = state.agentSessions.find(
+    (candidate) => candidate.id === record.sessionId
+  );
+  if (
+    !session ||
+    !isRuntimeId(record.runtimeId) ||
+    session.taskId !== record.taskId ||
+    session.iterationId !== record.iterationId ||
+    session.runtimeId !== record.runtimeId
+  ) {
+    throw new Error(`${label} ownership does not match its agent session.`);
+  }
+  if (requireRun && !record.runId) {
+    throw new Error(`${label} must belong to an agent run.`);
+  }
+  if (record.runId) {
+    const run = state.runs.find((candidate) => candidate.id === record.runId);
+    if (
+      !run ||
+      run.taskId !== record.taskId ||
+      run.iterationId !== record.iterationId ||
+      run.sessionId !== record.sessionId ||
+      run.runtimeId !== record.runtimeId
+    ) {
+      throw new Error(`${label} ownership does not match its agent run.`);
+    }
+  }
+  if (record.rawMessage) {
+    assertProtocolReferenceRuntime(
+      state,
+      record.runtimeId,
+      record.rawMessage,
+      label
+    );
+  }
+}
+
+function assertServerRuntime(
+  state: StoreState,
+  runtimeId: string,
+  serverInstanceId: string,
+  label: string
+): void {
+  const server = state.agentServers.find(
+    (candidate) => candidate.id === serverInstanceId
+  );
+  if (!server || server.runtimeId !== runtimeId) {
+    throw new Error(`${label} server runtime ownership is inconsistent.`);
+  }
+}
+
+function assertProtocolReferenceRuntime(
+  state: StoreState,
+  runtimeId: string,
+  reference: AgentProtocolMessageReference,
+  label: string
+): void {
+  assertServerRuntime(state, runtimeId, reference.serverInstanceId, label);
+}
+
+function isRuntimeId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value;
 }
 
 function validatePersistedTaskCreationMetadata(state: StoreState): void {
@@ -3042,37 +3639,168 @@ function migratePersistedState(state: PersistedState): {
   state: PersistedState;
   changed: boolean;
 } {
-  if (state.schemaVersion === 10) {
-    return {
-      state: { ...state, schemaVersion: TASK_STORE_SCHEMA_VERSION },
-      changed: true
-    };
-  }
-  if (state.schemaVersion === 9) {
-    return {
-      state: {
-        ...state,
-        schemaVersion: TASK_STORE_SCHEMA_VERSION,
-        attachments: []
-      },
-      changed: true
-    };
-  }
-
-  if (state.schemaVersion !== 8) {
+  let schema11: PersistedState;
+  if (state.schemaVersion === 11) {
+    schema11 = state;
+  } else if (state.schemaVersion === 10) {
+    schema11 = { ...state, schemaVersion: 11 };
+  } else if (state.schemaVersion === 9) {
+    schema11 = { ...state, schemaVersion: 11, attachments: [] };
+  } else if (state.schemaVersion === 8) {
+    // Schema 8 differs from schema 9 only by this retired collection.
+    const { testRuns: _legacyTestRuns, ...currentState } = state;
+    schema11 = { ...currentState, schemaVersion: 11, attachments: [] };
+  } else {
     return { state, changed: false };
   }
 
-  // Schema 8 differs from schema 9 only by this retired collection.
-  const { testRuns: _legacyTestRuns, ...currentState } = state;
-  return {
-    state: {
-      ...currentState,
-      schemaVersion: TASK_STORE_SCHEMA_VERSION,
-      attachments: []
-    },
-    changed: true
+  return { state: migrateSchema11RuntimeIdentity(schema11), changed: true };
+}
+
+function migrateSchema11RuntimeIdentity(state: PersistedState): PersistedState {
+  const legacySessions = recordArray(state.agentSessions, 'agentSessions');
+  const sessions: Record<string, unknown>[] = legacySessions.map((session) => {
+    const runtimeId = legacyRuntimeId(session);
+    return withoutLegacyProvider({
+      ...session,
+      runtimeId,
+      requestedSettings: settingsWithRuntime(session.requestedSettings, runtimeId),
+      observedSettings: optionalSettingsWithRuntime(session.observedSettings, runtimeId)
+    });
+  });
+  const runtimeBySessionId = new Map(
+    sessions.flatMap((session) =>
+      typeof session.id === 'string' && typeof session.runtimeId === 'string'
+        ? [[session.id, session.runtimeId] as const]
+        : []
+    )
+  );
+  const tasks: Record<string, unknown>[] = recordArray(state.tasks, 'tasks').map((task) => {
+    const settings = recordOrEmpty(task.agentSettings);
+    const runtimeId =
+      stringValue(task.runtimeId) ??
+      stringValue(settings.runtimeId) ??
+      (typeof task.currentAgentSessionId === 'string'
+        ? runtimeBySessionId.get(task.currentAgentSessionId)
+        : undefined) ??
+      CODEX_RUNTIME_ID;
+    return {
+      ...task,
+      runtimeId,
+      agentSettings: settingsWithRuntime(settings, runtimeId)
+    };
+  });
+  const runtimeByTaskId = new Map(
+    tasks.flatMap((task) =>
+      typeof task.id === 'string' && typeof task.runtimeId === 'string'
+        ? [[task.id, task.runtimeId] as const]
+        : []
+    )
+  );
+  const runs: Record<string, unknown>[] = recordArray(state.runs, 'runs').map((run) => {
+    const runtimeId =
+      stringValue(run.runtimeId) ??
+      (typeof run.sessionId === 'string' ? runtimeBySessionId.get(run.sessionId) : undefined) ??
+      (typeof run.taskId === 'string' ? runtimeByTaskId.get(run.taskId) : undefined) ??
+      CODEX_RUNTIME_ID;
+    return {
+      ...run,
+      runtimeId,
+      requestedSettings: settingsWithRuntime(run.requestedSettings, runtimeId),
+      observedSettings: optionalSettingsWithRuntime(run.observedSettings, runtimeId)
+    };
+  });
+  const runtimeByRunId = new Map(
+    runs.flatMap((run) =>
+      typeof run.id === 'string' && typeof run.runtimeId === 'string'
+        ? [[run.id, run.runtimeId] as const]
+        : []
+    )
+  );
+  const migrateRuntimeRecord = (record: Record<string, unknown>) =>
+    withoutLegacyProvider({ ...record, runtimeId: legacyRuntimeId(record) });
+  const migrateSessionOwnedRecord = (record: Record<string, unknown>) => {
+    const runtimeId =
+      stringValue(record.runtimeId) ??
+      (typeof record.sessionId === 'string'
+        ? runtimeBySessionId.get(record.sessionId)
+        : undefined) ??
+      legacyRuntimeId(record);
+    return withoutLegacyProvider({ ...record, runtimeId });
   };
+  const interactions = recordArray(state.interactionRequests, 'interactionRequests').map((request) => ({
+    ...request,
+    runtimeId:
+      stringValue(request.runtimeId) ??
+      (typeof request.runId === 'string' ? runtimeByRunId.get(request.runId) : undefined) ??
+      (typeof request.sessionId === 'string'
+        ? runtimeBySessionId.get(request.sessionId)
+        : undefined) ??
+      CODEX_RUNTIME_ID
+  }));
+
+  return {
+    ...state,
+    schemaVersion: TASK_STORE_SCHEMA_VERSION,
+    tasks: tasks as unknown as Task[],
+    runs: runs as unknown as RunRecord[],
+    agentServers: recordArray(state.agentServers, 'agentServers').map(migrateRuntimeRecord) as unknown as AgentServerInstance[],
+    agentSessions: sessions as unknown as AgentSessionRecord[],
+    agentGoalSnapshots: recordArray(state.agentGoalSnapshots, 'agentGoalSnapshots').map(migrateSessionOwnedRecord) as unknown as AgentGoalSnapshotRecord[],
+    agentPlanRevisions: recordArray(state.agentPlanRevisions, 'agentPlanRevisions').map(migrateSessionOwnedRecord) as unknown as AgentPlanRevisionRecord[],
+    agentUsageSnapshots: recordArray(state.agentUsageSnapshots, 'agentUsageSnapshots').map(migrateSessionOwnedRecord) as unknown as AgentUsageSnapshotRecord[],
+    agentSettingsObservations: recordArray(state.agentSettingsObservations, 'agentSettingsObservations').map(migrateSessionOwnedRecord) as unknown as AgentSettingsObservationRecord[],
+    agentSubagentObservations: recordArray(state.agentSubagentObservations, 'agentSubagentObservations').map(migrateSessionOwnedRecord) as unknown as AgentSubagentObservationRecord[],
+    interactionRequests: interactions as unknown as InteractionRequestRecord[]
+  };
+}
+
+function recordArray(value: unknown, collection: string): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `Task Monki store schema migration is invalid: ${collection} is missing.`
+    );
+  }
+  if (
+    value.some(
+      (item) => !item || typeof item !== 'object' || Array.isArray(item)
+    )
+  ) {
+    throw new Error(
+      `Task Monki store schema migration is invalid: ${collection} contains a malformed record.`
+    );
+  }
+  return value as Record<string, unknown>[];
+}
+
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function legacyRuntimeId(record: Record<string, unknown>): string {
+  return stringValue(record.runtimeId) ?? stringValue(record.provider) ?? CODEX_RUNTIME_ID;
+}
+
+function withoutLegacyProvider(record: Record<string, unknown>): Record<string, unknown> {
+  const { provider: _legacyProvider, ...current } = record;
+  return current;
+}
+
+function settingsWithRuntime(value: unknown, runtimeId: string): Record<string, unknown> {
+  return { ...recordOrEmpty(value), runtimeId };
+}
+
+function optionalSettingsWithRuntime(
+  value: unknown,
+  runtimeId: string
+): Record<string, unknown> | undefined {
+  return value === undefined ? undefined : settingsWithRuntime(value, runtimeId);
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
@@ -3094,7 +3822,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
         recoveryState: 'REQUIRES_USER_ACTION' as const,
         terminalReason:
           run.terminalReason ??
-          'Codex review stopped sending updates before Task Monki received a terminal event.'
+          'Agent review stopped sending updates before Task Monki received a terminal event.'
       };
     }
     if (!isStaleInterruptingReviewRun(run, state.agentSessions)) {
@@ -3108,7 +3836,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       endedAt: run.endedAt ?? run.lastEventAt ?? run.startedAt,
       terminalReason:
         run.terminalReason ??
-        'Codex review stop was reconciled after the provider reported no active turn.'
+        'Agent review stop was reconciled after the provider reported no active turn.'
     };
   });
   const tasks = state.tasks.map((task) => {
@@ -3212,12 +3940,12 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
               ? currentReview?.summary
               : (reviewResult?.summary ??
                 (reviewStatus === 'RUNNING'
-                  ? 'Codex is reviewing the current diff.'
+                  ? 'An agent is reviewing the current diff.'
                   : reviewStatus === 'CANCELED'
-                    ? 'Codex review was stopped before completion.'
+                    ? 'Agent review was stopped before completion.'
                     : reviewStatus === 'FAILED'
                       ? currentRun.terminalReason ??
-                        'Codex review needs attention before it can be accepted.'
+                        'Agent review needs attention before it can be accepted.'
                       : currentReview?.summary)),
           updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? currentReview?.updatedAt
         }
@@ -3407,6 +4135,62 @@ function validateAgentServerTransition(
   }
 }
 
+function isTerminalAgentServerStatus(status: AgentServerStatus): boolean {
+  return status === 'EXITED' || status === 'FAILED' || status === 'LOST';
+}
+
+function collectReferencedAgentServerIds(state: StoreState): Set<string> {
+  const knownServerIds = new Set(state.agentServers.map((server) => server.id));
+  const referencedServerIds = new Set<string>();
+  const visited = new WeakSet<object>();
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') {
+      if (knownServerIds.has(value)) referencedServerIds.add(value);
+      return;
+    }
+    if (!value || typeof value !== 'object' || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    for (const item of Object.values(value)) visit(item);
+  };
+
+  for (const [collection, value] of Object.entries(state)) {
+    if (collection !== 'agentServers') visit(value);
+  }
+  for (const server of state.agentServers) {
+    const { id: _selfIdentity, ...serverMetadata } = server;
+    visit(serverMetadata);
+  }
+  return referencedServerIds;
+}
+
+function compareAgentServerDiagnosticsNewestFirst(
+  left: AgentServerInstance,
+  right: AgentServerInstance
+): number {
+  const timestampDifference =
+    agentServerDiagnosticTimestamp(right) - agentServerDiagnosticTimestamp(left);
+  return timestampDifference || right.id.localeCompare(left.id);
+}
+
+function agentServerDiagnosticTimestamp(server: AgentServerInstance): number {
+  for (const value of [
+    server.exitedAt,
+    server.disconnectedAt,
+    server.lastHealthAt,
+    server.initializedAt,
+    server.startedAt
+  ]) {
+    if (!value) continue;
+    const timestamp = Date.parse(value);
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return 0;
+}
+
 function branchPublicationEventType(
   status: BranchPublicationRecord['status']
 ): Extract<
@@ -3438,6 +4222,7 @@ function validateInteractionTransition(
       'STALE'
     ],
     RESPONDING: [
+      'PENDING',
       'RESOLVED',
       'DECLINED',
       'CANCELED',

@@ -27,12 +27,16 @@ On first launch, when no repository has been configured, the main workflow area
 shows setup instead of an empty board. Adding a repository completes only the
 repository step. The setup surface remains open so the user can review required
 tool status and defaults, then explicitly finish setup before entering the
-board and creating tasks. Finishing setup re-checks required Git and Codex
-tool availability before the completion flag is saved; GitHub CLI remains
+board and creating tasks. Finishing setup re-checks required Git and the
+selected default agent runtime before the completion flag is saved; GitHub CLI remains
 optional because it only affects PR delivery.
 
 New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
+Capturing a text-only task is a local operation and remains available when the
+selected agent runtime is unavailable; live model resolution is deferred until
+Start. Attachment-backed creation still requires a ready runtime/model because
+Task Monki must validate modality and isolation before adopting the draft.
 
 The new-task attachment flow accepts a bounded set of PNG,
 JPEG, and still WebP images plus UTF-8 text, data, configuration, and source-code
@@ -41,17 +45,19 @@ task directory only when Create is pressed; Task Monki never stores their
 original paths or places them in the repository worktree. The composer uses
 Chromium's native decoder to re-encode images before submission so embedded
 metadata is not copied. PDFs, Office files, video, audio,
-archives, databases, and arbitrary binaries are not supported: the current
-Codex App Server protocol has no generic file or PDF turn input, and Task Monki
-does not yet provide a separately secured extraction pipeline.
+archives, databases, and arbitrary binaries are not supported. Codex uses
+verified local-image inputs and managed path references. OpenCode retains
+native file parts for provider-owned integrations, but Task Monki managed
+attachments are disabled because that process cannot attest attachment
+confinement. Every runtime must advertise attachment delivery before the
+composer enables it, and Task Monki does not provide a generic extraction
+pipeline.
 
-Provider delivery uses a complete thread-local Codex permission profile. It
-grants the runtime minimum, the exact worktree, and exact verified current-run
-task attachment files. Runtime probing and every session lifecycle path require
-active-profile and workspace-root evidence. Multi-agent and memories are
-disabled by the profile. Attachment runs also force network off and require
-web search, MCP servers, and apps to be disabled. Full access remains available
-for attachment-free tasks but is rejected when attachments are present.
+Provider delivery is runtime-specific and fail-closed. Codex uses a complete
+thread-local permission profile for the exact worktree and verified files.
+Attachment runs force network off, so runtimes such as OpenCode whose network
+is provider-controlled cannot accept them. Full access remains available for
+attachment-free tasks but is rejected when attachments are present.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one
@@ -115,7 +121,7 @@ such as the exact failed GitHub check that blocks PR readiness.
 Main-history items should be consequence-bearing: terminal implementation or
 review outcomes, current active runs, Git state changes, delivery commits,
 branch publication results, first PR availability, check verdict changes,
-GitHub review decisions, merge outcomes, blocked transitions, stale Codex
+GitHub review decisions, merge outcomes, blocked transitions, stale agent
 review state, and recovery risks.
 
 No-op refreshes, repeated unchanged evidence captures, provider protocol
@@ -161,7 +167,7 @@ flowchart LR
   Start --> Progress["In Progress"]
   Progress --> Terminal{"Run terminal?"}
   Terminal --> Review["Review phase"]
-  Review --> Gate["Run Codex review"]
+  Review --> Gate["Run agent review"]
   Gate --> Passed["Review passed"]
   Gate --> Changes["Needs changes"]
   Changes --> FollowUp["Request changes"]
@@ -176,12 +182,12 @@ There are two separate review concepts:
 
 - Review phase
   - Board workflow state. The work is ready to inspect or ship.
-- Codex review gate
+- Agent review gate
   - Detached AI quality check on the current diff.
 
 Rules:
 
-- Running Codex review keeps the task in Review.
+- Running agent review keeps the task in Review.
 - Requesting changes starts follow-up implementation work and moves the task to
   In Progress.
 - The previous review becomes stale as soon as implementation changes continue.
@@ -191,7 +197,7 @@ Rules:
 - After follow-up completes, the task returns to Review and needs a fresh review.
 
 The detailed source of truth is
-`docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`.
+`docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
 
 ## Action rules
 
@@ -217,7 +223,7 @@ Review:
 
 - Show verified evidence prominently, with PR Status as the primary delivery
   surface.
-- Allow Run Codex review when no implementation-side run is active.
+- Allow Run agent review when no implementation-side run is active.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -323,7 +329,7 @@ history, or provider remote thread data.
 A Task Monki delivery commit records the current task worktree into Git. It is
 delivery progress, not follow-up implementation work. If the reviewed diff was
 still current immediately before the delivery commit, the commit does not make
-the Codex review stale by itself.
+the agent review stale by itself.
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.

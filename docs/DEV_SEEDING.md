@@ -53,7 +53,7 @@ states:
 - board setup: backlog, ready, clean/missing/error worktrees
 - agent lifecycle: running, approval, user input, interrupted, runtime lost,
   ambiguous mutation, stale interaction
-- Codex review: not run, running, passed, needs changes, inconclusive, failed,
+- agent review: not run, running, passed, needs changes, inconclusive, failed,
   canceled, stale after follow-up, active follow-up
 - delivery without PR: Git not inspected, clean, dirty, conflicted,
   unavailable, unknown, branch publish in progress, retryable failure,

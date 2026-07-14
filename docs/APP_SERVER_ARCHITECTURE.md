@@ -2,13 +2,14 @@
 
 Date: 2026-07-11
 
-This document describes the current runtime architecture and responsibility
-boundaries.
+This document describes the Codex runtime adapter. The provider-neutral runtime
+registry and cross-runtime invariants live in
+`docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`.
 
 ## Goal
 
-Task Monki runs AI coding work through a long-lived Codex App Server while
-keeping Task Monki authoritative for local evidence and workflow state.
+The Codex integration runs AI coding work through a long-lived Codex App Server
+while Task Monki remains authoritative for local evidence and workflow state.
 
 Task Monki owns:
 
@@ -34,7 +35,7 @@ flowchart LR
   UI["Renderer"] --> IPC["Typed IPC / API client"]
   IPC --> Service["TaskManagerService"]
   Service --> Orchestrator["AgentOrchestrator"]
-  Orchestrator --> Adapter["AgentProviderAdapter"]
+  Orchestrator --> Adapter["AgentRuntimeAdapter"]
   Adapter --> Codex["CodexAppServerAdapter"]
   Codex --> RPC["CodexRpcClient"]
   RPC --> Server["resolved codex app-server stdio transport"]
@@ -51,6 +52,13 @@ Reasons:
 - Per-turn working directory, sandbox, approval, network, model, and reasoning
   settings keep task execution scoped.
 - One process makes request correlation and recovery easier.
+
+The integration follows the public
+[Codex App Server contract](https://learn.chatgpt.com/docs/app-server): initialize
+once per connection, use version-matched generated schemas, stream thread/turn/item
+notifications, and gate experimental methods through negotiated capability. The
+stdio transport remains the production default; unsupported experimental
+WebSocket transport is not used.
 
 ## Important records
 
@@ -70,7 +78,14 @@ Reasons:
 - `AgentServerInstance`
   - Codex App Server process state, runtime version, schema hash, and status.
 - `AgentProtocolJournal`
-  - Append-only raw protocol messages for debugging and reconstruction.
+  - Bounded append-only NDJSON segments for raw protocol debugging. Segment
+    zero keeps the legacy server journal path; rotated references carry an
+    explicit segment. Complete old segments are pruned at the per-server
+    retention bound. Across every runtime, only the eight newest unreferenced
+    terminal server records are retained; referenced and nonterminal servers
+    are protected. The store removes a collected server record durably before
+    its serialized journal cleanup, and startup reconciles safe orphan
+    segments. Raw debug history is therefore not a permanent audit log.
 - `StatusProjection`
   - Compact UI-facing state derived from Task Monki domain events.
 - `TaskAttachmentRecord`
@@ -82,7 +97,7 @@ Reasons:
     the verified bytes and submission mode, but does not assert that the model
     read or used them.
 
-## Provider adapter responsibilities
+## Codex adapter responsibilities
 
 The adapter must:
 
@@ -108,7 +123,7 @@ The adapter must:
   use as verified evidence;
 - discover account, models, supported reasoning efforts, and settings;
 - create, attach, and read provider sessions;
-- fork provider sessions only for detached Codex review when supported;
+- fork Codex sessions only when the Codex runtime supplies the detached-review path;
 - start implementation, follow-up, retry, and review turns;
 - correlate provider thread IDs, turn IDs, item IDs, and request IDs;
 - materialize useful provider events into Task Monki records;
@@ -197,7 +212,7 @@ If worktree or run startup fails after the alternative task is stored, Task
 Monki leaves the alternative visible and blocked rather than silently hiding the
 partial candidate.
 
-Read `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
+Read `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.
 
 ## Settings
@@ -225,11 +240,13 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - default implementation, review, and prompt-refinement models;
 - selected and known repositories;
 - Codex external tool modes for web search, MCP servers, and apps;
-- external executable path preferences for Git, Codex CLI, and GitHub CLI.
+- external executable path preferences for Git, Codex CLI, and GitHub CLI;
+  other registered runtimes use PATH or their documented environment override.
 
 Empty executable paths mean Auto-detect. The main process resolves and probes
 executables live; resolved paths and detected versions are not persisted. Git
-and Codex CLI are required, while GitHub CLI is optional. Environment variables
+and at least one ready agent runtime are required, while GitHub CLI is optional.
+The executable environment variables
 `TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
 act as debug overrides ahead of saved settings.
 

@@ -1,0 +1,396 @@
+import type {
+  AgentItemStatus,
+  AgentItemType,
+  AgentModel,
+  AgentPlanStep,
+  AgentSessionStatus,
+  AgentTokenUsageBreakdown
+} from '../../../shared/agent';
+import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
+
+export interface OpenCodeHealth {
+  healthy: true;
+  version: string;
+}
+
+export interface OpenCodeSession {
+  id: string;
+  directory: string;
+  parentID?: string;
+  title: string;
+  version: string;
+  model?: { providerID: string; modelID?: string; id?: string; variant?: string };
+  metadata?: Record<string, unknown>;
+  time?: { created?: number; updated?: number };
+}
+
+export interface OpenCodeMessageInfo {
+  id: string;
+  sessionID: string;
+  role: 'user' | 'assistant';
+  parentID?: string;
+  providerID?: string;
+  modelID?: string;
+  model?: { providerID?: string; modelID?: string; id?: string };
+  variant?: string;
+  finish?: string;
+  error?: unknown;
+  tokens?: {
+    total?: number;
+    input?: number;
+    output?: number;
+    reasoning?: number;
+    cache?: { read?: number; write?: number };
+  };
+  time?: { created?: number; completed?: number };
+}
+
+export interface OpenCodePart {
+  id: string;
+  sessionID: string;
+  messageID: string;
+  type: string;
+  text?: string;
+  tool?: string;
+  callID?: string;
+  state?: {
+    status?: string;
+    input?: Record<string, unknown>;
+    output?: string;
+    error?: string;
+    title?: string;
+    metadata?: Record<string, unknown>;
+    time?: { start?: number; end?: number };
+  };
+  [key: string]: unknown;
+}
+
+export interface OpenCodeMessage {
+  info: OpenCodeMessageInfo;
+  parts: OpenCodePart[];
+}
+
+export interface OpenCodePermissionRequest {
+  id: string;
+  sessionID: string;
+  action?: string;
+  permission?: string;
+  resources?: string[];
+  patterns?: string[];
+  save?: string[];
+  always?: string[];
+  metadata?: Record<string, unknown>;
+  source?: { type?: string; messageID?: string; callID?: string };
+  tool?: { messageID?: string; callID?: string };
+  title?: string;
+  time?: { created?: number };
+}
+
+export interface OpenCodeQuestionRequest {
+  id: string;
+  sessionID: string;
+  questions: Array<{
+    question: string;
+    header: string;
+    options?: Array<{ label: string; description?: string }>;
+    multiple?: boolean;
+    custom?: boolean;
+  }>;
+  tool?: { messageID?: string; callID?: string };
+}
+
+export interface OpenCodeEvent {
+  id?: string;
+  type: string;
+  properties: Record<string, unknown>;
+}
+
+export interface OpenCodeProvider {
+  id: string;
+  name?: string;
+  models: Record<string, OpenCodeProviderModel>;
+}
+
+export interface OpenCodeProviderModel {
+  id: string;
+  providerID?: string;
+  name?: string;
+  status?: 'alpha' | 'beta' | 'deprecated' | 'active' | string;
+  capabilities?: {
+    reasoning?: boolean;
+    attachment?: boolean;
+    input?: Record<string, boolean>;
+  };
+  variants?: Record<string, unknown>;
+  family?: string;
+  limit?: Record<string, unknown>;
+  cost?: Record<string, unknown>;
+  release_date?: string;
+}
+
+export interface OpenCodeProviderCatalog {
+  providers: OpenCodeProvider[];
+  connected?: string[];
+  defaults: Record<string, string>;
+}
+
+export function parseOpenCodeHealth(value: unknown): OpenCodeHealth {
+  const record = asRecord(value);
+  if (record?.healthy !== true || typeof record.version !== 'string') {
+    throw new Error('OpenCode health response is incompatible.');
+  }
+  return { healthy: true, version: record.version };
+}
+
+export function parseOpenCodeSession(value: unknown): OpenCodeSession {
+  const record = asRecord(value);
+  if (
+    !record ||
+    typeof record.id !== 'string' ||
+    typeof record.directory !== 'string' ||
+    typeof record.title !== 'string' ||
+    typeof record.version !== 'string'
+  ) {
+    throw new Error('OpenCode returned an incompatible session record.');
+  }
+  return record as unknown as OpenCodeSession;
+}
+
+export function parseOpenCodeSessions(value: unknown): OpenCodeSession[] {
+  if (!Array.isArray(value)) throw new Error('OpenCode session list is incompatible.');
+  return value.map(parseOpenCodeSession);
+}
+
+export function parseOpenCodeMessages(value: unknown): OpenCodeMessage[] {
+  if (!Array.isArray(value)) throw new Error('OpenCode message history is incompatible.');
+  return value.map((entry) => {
+    const record = asRecord(entry);
+    const info = asRecord(record?.info);
+    if (
+      !record ||
+      !info ||
+      typeof info.id !== 'string' ||
+      typeof info.sessionID !== 'string' ||
+      (info.role !== 'user' && info.role !== 'assistant') ||
+      !Array.isArray(record.parts)
+    ) {
+      throw new Error('OpenCode returned an incompatible message record.');
+    }
+    return record as unknown as OpenCodeMessage;
+  });
+}
+
+export function parseOpenCodePermissions(value: unknown): OpenCodePermissionRequest[] {
+  if (!Array.isArray(value)) throw new Error('OpenCode permission queue is incompatible.');
+  return value.map((entry) => {
+    const record = asRecord(entry);
+    if (!record || typeof record.id !== 'string' || typeof record.sessionID !== 'string') {
+      throw new Error('OpenCode returned an incompatible permission request.');
+    }
+    return record as unknown as OpenCodePermissionRequest;
+  });
+}
+
+export function parseOpenCodeQuestions(value: unknown): OpenCodeQuestionRequest[] {
+  if (!Array.isArray(value)) throw new Error('OpenCode question queue is incompatible.');
+  return value.map((entry) => {
+    const record = asRecord(entry);
+    if (
+      !record ||
+      typeof record.id !== 'string' ||
+      typeof record.sessionID !== 'string' ||
+      !Array.isArray(record.questions)
+    ) {
+      throw new Error('OpenCode returned an incompatible question request.');
+    }
+    return record as unknown as OpenCodeQuestionRequest;
+  });
+}
+
+export function normalizeOpenCodeEvent(value: unknown): OpenCodeEvent {
+  let record = asRecord(value);
+  if (record && asRecord(record.payload)) record = asRecord(record.payload);
+  if (!record || typeof record.type !== 'string') {
+    throw new Error('OpenCode emitted an incompatible event.');
+  }
+  const properties = asRecord(record.properties) ?? asRecord(record.data) ?? {};
+  return {
+    id: typeof record.id === 'string' ? record.id : undefined,
+    type: record.type,
+    properties
+  };
+}
+
+export function parseOpenCodeProviderCatalog(value: unknown): OpenCodeProviderCatalog {
+  const record = asRecord(value);
+  const all = Array.isArray(record?.all)
+    ? record.all
+    : Array.isArray(record?.providers)
+      ? record.providers
+      : Array.isArray(value)
+        ? value
+        : undefined;
+  if (!all) throw new Error('OpenCode provider catalog is incompatible.');
+  const providers = all.map((entry) => {
+    const provider = asRecord(entry);
+    if (!provider || typeof provider.id !== 'string' || !asRecord(provider.models)) {
+      throw new Error('OpenCode returned an incompatible provider record.');
+    }
+    return provider as unknown as OpenCodeProvider;
+  });
+  const connected = Array.isArray(record?.connected)
+    ? record.connected.filter((entry): entry is string => typeof entry === 'string')
+    : undefined;
+  const defaults = asRecord(record?.default) ?? {};
+  return {
+    providers,
+    connected,
+    defaults: Object.fromEntries(
+      Object.entries(defaults).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+    )
+  };
+}
+
+export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[] {
+  const connected = catalog.connected ? new Set(catalog.connected) : undefined;
+  return catalog.providers
+    .filter((provider) => !connected || connected.has(provider.id))
+    .flatMap((provider) =>
+      Object.values(provider.models).map((model): AgentModel => {
+        const modelId = model.id;
+        const modalities = Object.entries(model.capabilities?.input ?? { text: true })
+          .filter(([, supported]) => supported)
+          .map(([modality]) => modality);
+        const variants = Object.keys(model.variants ?? {});
+        return {
+          id: `${OPENCODE_RUNTIME_ID}:${provider.id}/${modelId}`,
+          runtimeId: OPENCODE_RUNTIME_ID,
+          modelProvider: provider.id,
+          model: modelId,
+          displayName: model.name ?? `${provider.name ?? provider.id} ${modelId}`,
+          description: `${provider.name ?? provider.id} via OpenCode`,
+          hidden: model.status === 'deprecated',
+          supportedReasoningEfforts: variants,
+          defaultReasoningEffort: undefined,
+          serviceTiers: [],
+          inputModalities: modalities.length > 0 ? modalities : ['text'],
+          isDefault: catalog.defaults[provider.id] === modelId,
+          native: jsonValue({
+            providerName: provider.name ?? provider.id,
+            status: model.status,
+            family: model.family,
+            capabilities: model.capabilities,
+            variants: model.variants,
+            limit: model.limit,
+            cost: model.cost,
+            releaseDate: model.release_date
+          })
+        };
+      })
+    )
+    .sort((left, right) => {
+      if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
+      return left.displayName.localeCompare(right.displayName);
+    });
+}
+
+export function mapOpenCodeSessionStatus(value: unknown): AgentSessionStatus {
+  const type = typeof value === 'string' ? value : asRecord(value)?.type;
+  if (type === 'busy' || type === 'active') return 'ACTIVE';
+  if (type === 'idle') return 'IDLE';
+  if (type === 'retry' || type === 'error') return 'SYSTEM_ERROR';
+  return 'UNKNOWN';
+}
+
+export function mapOpenCodePartType(part: OpenCodePart): AgentItemType {
+  switch (part.type) {
+    case 'text':
+      return 'AGENT_MESSAGE';
+    case 'reasoning':
+      return 'REASONING_SUMMARY';
+    case 'compaction':
+      return 'CONTEXT_COMPACTION';
+    case 'subtask':
+    case 'agent':
+      return 'SUBAGENT';
+    case 'patch':
+      return 'FILE_CHANGE';
+    case 'tool': {
+      const tool = part.tool?.toLowerCase() ?? '';
+      if (['bash', 'shell', 'terminal'].some((name) => tool.includes(name))) return 'COMMAND_EXECUTION';
+      if (['edit', 'write', 'patch', 'apply'].some((name) => tool.includes(name))) return 'FILE_CHANGE';
+      if (tool.includes('web')) return 'WEB_SEARCH';
+      if (tool.includes('mcp')) return 'MCP_TOOL_CALL';
+      if (tool.includes('task') || tool.includes('agent')) return 'SUBAGENT';
+      return 'OTHER';
+    }
+    default:
+      return 'OTHER';
+  }
+}
+
+export function mapOpenCodePartStatus(part: OpenCodePart): AgentItemStatus {
+  const status = part.state?.status;
+  if (status === 'pending') return 'STARTED';
+  if (status === 'running') return 'IN_PROGRESS';
+  if (status === 'completed') return 'COMPLETED';
+  if (status === 'error') return 'FAILED';
+  if (part.type === 'text' || part.type === 'reasoning') return 'IN_PROGRESS';
+  return 'UNKNOWN';
+}
+
+export function mapOpenCodeTodoSteps(value: unknown): AgentPlanStep[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const todo = asRecord(entry);
+    if (!todo || typeof todo.content !== 'string') return [];
+    const status = todo.status === 'completed'
+      ? 'COMPLETED'
+      : todo.status === 'in_progress'
+        ? 'IN_PROGRESS'
+        : 'PENDING';
+    return [{ step: todo.content, status }];
+  });
+}
+
+export function mapOpenCodeUsage(info: OpenCodeMessageInfo): AgentTokenUsageBreakdown {
+  const input = finiteToken(info.tokens?.input);
+  const cached = finiteToken(info.tokens?.cache?.read);
+  const cacheWrite = finiteToken(info.tokens?.cache?.write);
+  const output = finiteToken(info.tokens?.output);
+  const reasoning = finiteToken(info.tokens?.reasoning);
+  return {
+    totalTokens:
+      finiteToken(info.tokens?.total) || input + cached + cacheWrite + output + reasoning,
+    inputTokens: input,
+    cachedInputTokens: cached,
+    outputTokens: output,
+    reasoningOutputTokens: reasoning
+  };
+}
+
+export function openCodeMessageError(info: OpenCodeMessageInfo): string | undefined {
+  if (!info.error) return undefined;
+  if (typeof info.error === 'string') return info.error;
+  const record = asRecord(info.error);
+  const data = asRecord(record?.data);
+  if (typeof data?.message === 'string') return data.message;
+  if (typeof record?.message === 'string') return record.message;
+  return 'OpenCode reported an assistant message error.';
+}
+
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function finiteToken(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+}
+
+function jsonValue(value: unknown): import('../../../shared/agent').AgentJsonValue {
+  return JSON.parse(JSON.stringify(value)) as import('../../../shared/agent').AgentJsonValue;
+}

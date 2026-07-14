@@ -2,8 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { AgentProviderAdapter } from '../core/agent/AgentProviderAdapter';
-import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
+import type { AgentRuntimeAdapter } from '../core/agent/AgentRuntimeAdapter';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
@@ -301,10 +304,11 @@ describe('Task Monki development seed data', () => {
     const before = await store.snapshot();
     const initialize = vi.fn(async () => undefined);
     const adapter = {
+      descriptor: CODEX_RUNTIME_DESCRIPTOR,
       initialize,
       capabilities: vi.fn(async () => codexCapabilities()),
       shutdown: vi.fn(async () => undefined)
-    } as unknown as AgentProviderAdapter;
+    } as unknown as AgentRuntimeAdapter;
     const disabledReason =
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
@@ -319,8 +323,13 @@ describe('Task Monki development seed data', () => {
     try {
       const after = await store.snapshot();
       expect(initialize).not.toHaveBeenCalled();
-      await expect(service.getAgentProviderState()).resolves.toMatchObject({
-        preflight: { ready: false, problems: [disabledReason] },
+      await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
+        runtimes: [
+          {
+            preflight: { ready: false, problems: [disabledReason] },
+            models: []
+          }
+        ],
         models: []
       });
       expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));

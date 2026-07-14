@@ -6,7 +6,10 @@ import type {
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import type { FileTaskStore } from '../storage/FileTaskStore';
-import type { AgentProviderAdapter } from './AgentProviderAdapter';
+import {
+  AgentMutationAmbiguousError,
+  type AgentRuntimeAdapter
+} from './AgentRuntimeAdapter';
 import { AgentInteractionService } from './AgentInteractionService';
 
 describe('AgentInteractionService permission decisions', () => {
@@ -30,8 +33,15 @@ describe('AgentInteractionService permission decisions', () => {
     } as unknown as FileTaskStore;
     const adapter = {
       respondToInteraction: vi.fn().mockResolvedValue(undefined)
-    } as unknown as AgentProviderAdapter;
-    const service = new AgentInteractionService(store, new AppEventBus(), adapter);
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(
+      store,
+      new AppEventBus(),
+      (runtimeId) => {
+        expect(runtimeId).toBe('codex');
+        return adapter;
+      }
+    );
 
     await expect(
       service.respond({
@@ -47,11 +57,103 @@ describe('AgentInteractionService permission decisions', () => {
 
     expect(adapter.respondToInteraction).toHaveBeenCalledOnce();
   });
+
+  it('restores a retryable interaction when delivery definitively fails before acknowledgement', async () => {
+    const run = runFixture();
+    const session = sessionFixture();
+    let interaction = interactionFixture('/tmp/worktree/file.txt');
+    interaction = { ...interaction, allowedActions: ['DECLINE'] };
+    const transitionInteractionRequest = vi.fn().mockImplementation(async (
+      _id: string,
+      _status: string,
+      update: Partial<InteractionRequestRecord>
+    ) => {
+      interaction = { ...interaction, ...update } as InteractionRequestRecord;
+      return interaction;
+    });
+    const store = {
+      getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockRejectedValue(new Error('connection not opened'))
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: { interactionType: 'PERMISSION_APPROVAL', action: 'DECLINE' }
+      })
+    ).rejects.toThrow('connection not opened');
+
+    expect(interaction.status).toBe('PENDING');
+    expect(interaction.decision).toBeUndefined();
+    expect(transitionInteractionRequest).toHaveBeenLastCalledWith(
+      interaction.id,
+      'RESPONDING',
+      expect.objectContaining({ status: 'PENDING' })
+    );
+  });
+
+  it('moves ambiguous interaction delivery into recovery instead of allowing a duplicate reply', async () => {
+    const run = runFixture();
+    const session = sessionFixture();
+    let interaction = interactionFixture('/tmp/worktree/file.txt');
+    interaction = { ...interaction, allowedActions: ['DECLINE'] };
+    const appendEvent = vi.fn().mockResolvedValue(undefined);
+    const store = {
+      getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest: vi.fn().mockImplementation(async (
+        _id: string,
+        _status: string,
+        update: Partial<InteractionRequestRecord>
+      ) => {
+        interaction = { ...interaction, ...update } as InteractionRequestRecord;
+        return interaction;
+      }),
+      appendEvent
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockRejectedValue(
+        new AgentMutationAmbiguousError(
+          'permission/reply',
+          'reply may have reached the runtime'
+        )
+      )
+    } as unknown as AgentRuntimeAdapter;
+    const updates: string[] = [];
+    const events = new AppEventBus();
+    events.on((event) => updates.push(event.type));
+    const service = new AgentInteractionService(store, events, () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: { interactionType: 'PERMISSION_APPROVAL', action: 'DECLINE' }
+      })
+    ).rejects.toThrow('reply may have reached the runtime');
+
+    expect(interaction.status).toBe('STALE');
+    expect(appendEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id })
+    );
+    expect(updates).toContain('run.activity');
+  });
 });
 
 function interactionFixture(deliveryPath: string): InteractionRequestRecord {
   return {
     id: 'interaction-one',
+    runtimeId: 'codex',
     serverInstanceId: 'server-one',
     providerRequestId: 1,
     taskId: 'task-one',
@@ -74,6 +176,7 @@ function interactionFixture(deliveryPath: string): InteractionRequestRecord {
 function runFixture(): RunRecord {
   return {
     id: 'run-one',
+    runtimeId: 'codex',
     taskId: 'task-one',
     iterationId: 'iteration-one',
     worktreeId: 'worktree-one',
@@ -95,7 +198,7 @@ function runFixture(): RunRecord {
 function sessionFixture(): AgentSessionRecord {
   return {
     id: 'session-one',
-    provider: 'codex',
+    runtimeId: 'codex',
     providerSessionId: 'thread-one',
     taskId: 'task-one',
     iterationId: 'iteration-one',

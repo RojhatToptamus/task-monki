@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from '../storage/FileTaskStore';
-import { ScriptedAgentProviderAdapter } from '../../testSupport/taskMonkiScenario';
+import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -19,7 +19,7 @@ describe('TaskManagerService fork alternatives', () => {
     const baseSha = await initRepository(repositoryPath);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const agent = new ScriptedAgentProviderAdapter(store);
+    const agent = new ScriptedAgentRuntimeAdapter(store);
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
       agentProviderAdapter: agent
@@ -40,7 +40,7 @@ describe('TaskManagerService fork alternatives', () => {
       task: sourceTask,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const sourceRun = await store.createRun({
       task: sourceTask,
@@ -111,7 +111,7 @@ describe('TaskManagerService fork alternatives', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      codexPath: 'codex-not-used'
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
     });
 
     const sourceTask = await store.createTask({
@@ -129,7 +129,7 @@ describe('TaskManagerService fork alternatives', () => {
       task: sourceTask,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const sourceRun = await store.createRun({
       task: sourceTask,

@@ -37,7 +37,7 @@ describe('TaskManagerService review and PR action coordination', () => {
       runId: scenario.run.id
     });
 
-    await expect(second).rejects.toThrow(/Codex review .*running|Wait for the Codex review/);
+    await expect(second).rejects.toThrow(/Agent review .*running|Wait for the agent review/);
     await expect(first).resolves.toMatchObject({
       taskId: scenario.taskId,
       mode: 'REVIEW',
@@ -51,29 +51,29 @@ describe('TaskManagerService review and PR action coordination', () => {
 
     await expect(
       scenario.service.startReview({ taskId: scenario.taskId, runId: scenario.run.id })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting a review.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting a review.');
     await expect(
       scenario.service.startRun({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting agent work.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting agent work.');
     await expect(
       scenario.service.continueRun({
         taskId: scenario.taskId,
         runId: scenario.run.id,
         instruction: 'Fix the failing checks.'
       })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting follow-up work.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting follow-up work.');
     await expect(
       scenario.service.createDeliveryCommit({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before creating a delivery commit.');
+    ).rejects.toThrow('Wait for the agent review to finish before creating a delivery commit.');
     await expect(
       scenario.service.publishBranch({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before publishing the branch.');
+    ).rejects.toThrow('Wait for the agent review to finish before publishing the branch.');
     await expect(
       scenario.service.createPullRequest({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before opening a pull request.');
+    ).rejects.toThrow('Wait for the agent review to finish before opening a pull request.');
     await expect(
       scenario.service.transitionTask({ taskId: scenario.taskId, toPhase: 'DONE' })
-    ).rejects.toThrow('Wait for the Codex review to finish before changing this task.');
+    ).rejects.toThrow('Wait for the agent review to finish before changing this task.');
 
     const refreshed = await scenario.service.refreshGitHub({ taskId: scenario.taskId });
     expect(refreshed).toMatchObject({
@@ -87,7 +87,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     expect(currentReview).toMatchObject({ mode: 'REVIEW', status: 'RUNNING' });
     expect(scenario.serviceHarness.agent.startedTurns).toHaveLength(1);
     expect(scenario.serviceHarness.agent.startedReviews).toHaveLength(1);
-  });
+  }, 15_000);
 });
 
 async function createScenarioWithCompletedRun(

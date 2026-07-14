@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { AgentModel } from '../../shared/contracts';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../../core/agent/codex/codexCapabilities';
+import {
   capAttachmentValidationFailures,
   getOrCreateTaskCreationToken,
   imageAttachmentModelError,
@@ -52,9 +56,10 @@ describe('NewTaskPanel', () => {
     expect(
       imageAttachmentModelError(true, {
         id: 'text-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'text-model',
         displayName: 'Text model',
-        provider: 'openai',
         hidden: false,
         isDefault: true,
         supportedReasoningEfforts: [],
@@ -65,9 +70,10 @@ describe('NewTaskPanel', () => {
     expect(
       imageAttachmentModelError(true, {
         id: 'vision-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'vision-model',
         displayName: 'Vision model',
-        provider: 'openai',
         hidden: false,
         isDefault: true,
         supportedReasoningEfforts: [],
@@ -130,13 +136,26 @@ describe('NewTaskPanel', () => {
     const models: AgentModel[] = [
       {
         id: 'model-1',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'fake-model',
         displayName: 'Fake model',
-        provider: 'openai',
         hidden: false,
         isDefault: true,
         supportedReasoningEfforts: ['medium'],
         defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+        inputModalities: ['text']
+      },
+      {
+        id: 'opencode:anthropic/claude-sonnet',
+        runtimeId: 'opencode',
+        modelProvider: 'anthropic',
+        model: 'claude-sonnet',
+        displayName: 'OpenCode-only model',
+        hidden: false,
+        isDefault: true,
+        supportedReasoningEfforts: [],
         serviceTiers: [],
         inputModalities: ['text']
       }
@@ -146,6 +165,36 @@ describe('NewTaskPanel', () => {
       <NewTaskPanel
         defaultRepositoryPath="/tmp/project"
         models={models}
+        runtimes={[
+          {
+            preflight: {
+              runtime: CODEX_RUNTIME_DESCRIPTOR,
+              ready: true,
+              capabilities: codexCapabilities(),
+              problems: [],
+              warnings: []
+            },
+            models: models.filter((model) => model.runtimeId === 'codex'),
+            refreshedAt: '2026-07-10T00:00:00.000Z'
+          },
+          {
+            preflight: {
+              runtime: {
+                id: 'opencode',
+                displayName: 'OpenCode',
+                kind: 'HTTP_AGENT',
+                transport: 'HTTP_SSE',
+                lifecycleScope: 'SESSION'
+              },
+              ready: true,
+              capabilities: { ...codexCapabilities(), runtimeId: 'opencode' },
+              problems: [],
+              warnings: []
+            },
+            models: models.filter((model) => model.runtimeId === 'opencode'),
+            refreshedAt: '2026-07-10T00:00:00.000Z'
+          }
+        ]}
         attachmentsEnabled={attachmentsEnabled}
         onCreate={async () => undefined}
         onRefinePrompt={async () => ({
@@ -167,7 +216,7 @@ describe('NewTaskPanel', () => {
 
     expect(html).toContain('Permission mode');
     expect(html).toContain('Sandboxed');
-    expect(html).toContain('<option value="SANDBOXED" selected="">Sandboxed</option>');
+    expect(html).toContain('<option value="sandboxed" selected="">Sandboxed</option>');
     expect(html).toContain('Ask for approval');
     expect(html).toContain('Approve for me');
     expect(html).toContain('Full access');
@@ -181,6 +230,9 @@ describe('NewTaskPanel', () => {
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details class="newtask-settings">');
+    expect(html).toContain('Agent runtime');
+    expect(html).toContain('OpenCode');
+    expect(html).not.toContain('OpenCode-only model');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
 

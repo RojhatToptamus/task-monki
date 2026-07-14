@@ -38,6 +38,7 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   TestExternalToolRequest,
+  UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest
 } from '../../shared/contracts';
 import type {
@@ -148,7 +149,9 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
-    getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
+    getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
+    updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
+      post(baseUrl, '/api/agent/session/native', input),
     validateRepository: (path) =>
       post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),

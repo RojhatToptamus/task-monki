@@ -12,6 +12,7 @@ export interface ProviderSettingField {
 }
 
 export const PROVIDER_SETTING_FIELDS: ProviderSettingField[] = [
+  { key: 'runtimeId', label: 'Runtime' },
   { key: 'model', label: 'Model' },
   { key: 'modelProvider', label: 'Model provider' },
   { key: 'reasoningEffort', label: 'Reasoning effort' },
@@ -19,7 +20,8 @@ export const PROVIDER_SETTING_FIELDS: ProviderSettingField[] = [
   { key: 'sandbox', label: 'Sandbox' },
   { key: 'networkAccess', label: 'Network' },
   { key: 'approvalPolicy', label: 'Approval policy' },
-  { key: 'approvalsReviewer', label: 'Approval reviewer' }
+  { key: 'approvalsReviewer', label: 'Approval reviewer' },
+  { key: 'runtimeOptions', label: 'Runtime options' }
 ];
 
 export function compareProviderSetting(
@@ -44,6 +46,9 @@ export function isProviderSettingDifference(state: ProviderSettingState): boolea
 function normalizeSettingValue(value: unknown): string {
   if (typeof value === 'boolean') {
     return value ? 'true' : 'false';
+  }
+  if (value !== null && typeof value === 'object') {
+    return JSON.stringify(value);
   }
   return String(value);
 }

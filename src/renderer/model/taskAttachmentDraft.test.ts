@@ -88,9 +88,10 @@ function candidate(name: string, size: number) {
 function model(inputModalities: string[]) {
   return {
     id: 'model',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'model',
     displayName: 'Model',
-    provider: 'openai',
     hidden: false,
     isDefault: true,
     supportedReasoningEfforts: [],

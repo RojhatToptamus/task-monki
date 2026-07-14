@@ -144,6 +144,7 @@ describe('repository selection model', () => {
 function taskFixture(id: string, repositoryPath: string): Task {
   return {
     id,
+    runtimeId: 'codex',
     title: id,
     prompt: 'Do the work.',
     repositoryPath,

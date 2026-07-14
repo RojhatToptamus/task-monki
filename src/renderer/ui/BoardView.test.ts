@@ -41,6 +41,7 @@ function taskFixture(overrides: Partial<Task> = {}): Task {
   const now = '2026-01-01T00:00:00.000Z';
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Do the work.',
     repositoryPath: '/tmp/repo',

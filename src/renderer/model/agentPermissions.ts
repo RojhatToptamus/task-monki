@@ -1,6 +1,7 @@
 import {
   normalizeAgentApprovalsReviewer,
   type AgentApprovalsReviewer,
+  type AgentExecutionPolicyPreset,
   type AgentExecutionSettings
 } from '../../shared/contracts';
 
@@ -11,21 +12,6 @@ export type AgentPermissionMode =
   | 'FULL_ACCESS'
   | 'CUSTOM';
 
-export type SelectableAgentPermissionMode = Exclude<
-  AgentPermissionMode,
-  'CUSTOM'
->;
-
-export const AGENT_PERMISSION_MODE_OPTIONS: Array<{
-  value: SelectableAgentPermissionMode;
-  label: string;
-}> = [
-  { value: 'SANDBOXED', label: 'Sandboxed' },
-  { value: 'ASK_FOR_APPROVAL', label: 'Ask for approval' },
-  { value: 'APPROVE_FOR_ME', label: 'Approve for me' },
-  { value: 'FULL_ACCESS', label: 'Full access' }
-];
-
 export interface AgentPermissionSettings {
   sandbox: NonNullable<AgentExecutionSettings['sandbox']>;
   networkAccess: boolean;
@@ -33,44 +19,21 @@ export interface AgentPermissionSettings {
   approvalsReviewer: AgentApprovalsReviewer;
 }
 
-export function settingsForPermissionMode(
-  mode: SelectableAgentPermissionMode,
+export function settingsForExecutionPolicyPreset(
+  preset: AgentExecutionPolicyPreset,
   options: { networkAccess?: boolean } = {}
 ): AgentPermissionSettings {
-  const networkAccess =
-    mode === 'SANDBOXED'
-        ? false
-        : (options.networkAccess ?? false);
-  switch (mode) {
-    case 'SANDBOXED':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess: false,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      };
-    case 'APPROVE_FOR_ME':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess,
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review'
-      };
-    case 'ASK_FOR_APPROVAL':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess,
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'user'
-      };
-    case 'FULL_ACCESS':
-      return {
-        sandbox: 'DANGER_FULL_ACCESS',
-        networkAccess: true,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      };
-  }
+  return {
+    sandbox: preset.sandbox,
+    networkAccess:
+      preset.networkAccess === 'REQUIRED'
+        ? true
+        : preset.networkAccess === 'DISABLED'
+          ? false
+          : options.networkAccess === true,
+    approvalPolicy: preset.approvalPolicy,
+    approvalsReviewer: preset.approvalsReviewer
+  };
 }
 
 export function inferAgentPermissionMode(

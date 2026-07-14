@@ -5600,6 +5600,22 @@ textarea:focus-visible {
   text-transform: capitalize;
 }
 
+@media (max-width: 960px) {
+  .tm-settings__row--models {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tm-settings__row--models .tm-settings__controls {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .tm-settings__row--models .tm-settings__select--model {
+    min-width: 0;
+  }
+}
+
 .tm-settings__button--primary {
   border-color: transparent;
   background: var(--accent);
@@ -6890,7 +6906,7 @@ textarea:focus-visible {
   }
 }
 
-/* Codex review gate */
+/* Agent review gate */
 .tm-reviewcard {
   border: 1px solid var(--border);
   border-radius: 13px;

@@ -741,6 +741,7 @@ describe('buildBoardDeliveryLine', () => {
 function taskFixture(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
     repositoryPath: '/tmp/repo',

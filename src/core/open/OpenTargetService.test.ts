@@ -16,6 +16,7 @@ import {
 
 const defaultSettings: TaskManagerAppSettings = {
   schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+  defaultRuntimeId: 'codex',
   theme: 'device',
   sidebarCollapsed: false,
   showMascot: true,
@@ -30,6 +31,7 @@ const defaultSettings: TaskManagerAppSettings = {
     codexExecutablePath: null,
     ghExecutablePath: null
   },
+  runtimeExecutablePaths: {},
   repositories: {
     knownPaths: ['/repo'],
     selectedPath: '/repo'
@@ -599,6 +601,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     tasks: [
       {
         id: 'task-1',
+        runtimeId: 'codex',
         title: 'Task',
         prompt: 'Do it',
         repositoryPath,

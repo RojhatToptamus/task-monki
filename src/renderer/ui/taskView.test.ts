@@ -803,6 +803,7 @@ describe('task card view model', () => {
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
     repositoryPath: '/tmp/repo',

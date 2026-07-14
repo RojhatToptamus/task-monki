@@ -418,7 +418,7 @@ export function reduceProjection(
           getString(event.payload, 'mode') === 'IMPLEMENTATION'
             ? 'Starting an implementation turn in the task worktree.'
             : getString(event.payload, 'mode') === 'REVIEW'
-              ? 'Starting a Codex review of the current diff.'
+              ? 'Starting an agent review of the current diff.'
             : 'Starting an agent turn.',
         findings,
         updatedAt: event.receivedAt
@@ -816,21 +816,21 @@ function reduceReviewProjection(
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         ...base,
-        summary: `Latest Codex review event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
+        summary: `Latest agent review event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
         findings,
         updatedAt: event.receivedAt
       };
     case 'CANCEL_REQUESTED':
       return {
         ...base,
-        summary: 'Codex review stop requested; waiting for the review turn to end.',
+        summary: 'Agent review stop requested; waiting for the review turn to end.',
         findings,
         updatedAt: event.receivedAt
       };
     case 'PROCESS_STARTED':
       return {
         ...base,
-        summary: 'Codex review process is active.',
+        summary: 'Agent review process is active.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -845,7 +845,7 @@ function reduceReviewProjection(
     case 'AGENT_INTERACTION_RESOLVED':
       return {
         ...base,
-        summary: 'Codex review interaction state changed.',
+        summary: 'Agent review interaction state changed.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -888,7 +888,7 @@ function reduceCodexReview(
             getString(event.payload, 'beforeGitSnapshotId') ?? run?.beforeGitSnapshotId,
           reviewedHeadSha: getString(event.payload, 'reviewedHeadSha'),
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
-          summary: 'Codex is reviewing the current diff.',
+          summary: 'An agent is reviewing the current diff.',
           updatedAt: event.receivedAt
         };
       }
@@ -896,7 +896,7 @@ function reduceCodexReview(
         return {
           ...base,
           status: 'STALE',
-          summary: 'Implementation changed after this Codex review.',
+          summary: 'Implementation changed after this agent review.',
           updatedAt: event.receivedAt
         };
       }
@@ -917,7 +917,7 @@ function reduceCodexReview(
         result,
         summary:
           result?.summary ??
-          'Codex review completed, but no structured pass/fail verdict was provided.',
+          'Agent review completed, but no structured pass/fail verdict was provided.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_FAILED':
@@ -934,7 +934,7 @@ function reduceCodexReview(
           getString(event.payload, 'error') ??
           getString(event.payload, 'terminalReason') ??
           getString(event.payload, 'reason') ??
-          'Codex review did not complete.',
+          'Agent review did not complete.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_INTERRUPTED':
@@ -944,7 +944,7 @@ function reduceCodexReview(
       return {
         ...base,
         status: 'CANCELED',
-        summary: 'Codex review was stopped before it produced a final result.',
+        summary: 'Agent review was stopped before it produced a final result.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUNTIME_RECONCILED':
@@ -959,7 +959,7 @@ function reduceCodexReview(
             : getString(event.payload, 'status') === 'INTERRUPTED'
               ? 'CANCELED'
               : 'FAILED',
-        summary: 'Codex review state was reconciled after runtime restart.',
+        summary: 'Agent review state was reconciled after runtime restart.',
         updatedAt: event.receivedAt
       };
     case 'GIT_SNAPSHOT_CAPTURED':
@@ -969,7 +969,7 @@ function reduceCodexReview(
       return {
         ...base,
         status: 'STALE',
-        summary: 'The current diff changed after this Codex review.',
+        summary: 'The current diff changed after this agent review.',
         updatedAt: event.receivedAt
       };
     case 'DELIVERY_COMMIT_CREATED': {

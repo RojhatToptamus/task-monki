@@ -8,7 +8,7 @@ describe('ProviderOverviewPanel', () => {
     const task = { id: 'task-1', prompt: 'Investigate Codex runtime.' } as Task;
     const server: AgentServerInstance = {
       id: 'server-1',
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       status: 'READY',

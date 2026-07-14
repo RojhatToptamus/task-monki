@@ -704,6 +704,22 @@ function RejectButtons({
           {declineLabel}
         </button>
       ) : null}
+      {interactionType === 'COMMAND_APPROVAL' &&
+      hasAction(interaction, 'DECLINE_FOR_SESSION') ? (
+        <button
+          type="button"
+          className="outline-button"
+          disabled={disabled}
+          onClick={() =>
+            void onRespond({
+              interactionType: 'COMMAND_APPROVAL',
+              action: 'DECLINE_FOR_SESSION'
+            })
+          }
+        >
+          Deny for session
+        </button>
+      ) : null}
       {showCancel && hasAction(interaction, 'CANCEL') ? (
         <button
           type="button"

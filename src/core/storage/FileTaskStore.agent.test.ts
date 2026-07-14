@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { FileTaskStore } from './FileTaskStore';
 
 describe('FileTaskStore agent persistence', () => {
@@ -23,11 +24,11 @@ describe('FileTaskStore agent persistence', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: { model: 'model-a', reasoningEffort: 'high' }
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -103,6 +104,7 @@ describe('FileTaskStore agent persistence', () => {
       })
     ).rejects.toThrow('Invalid agent item transition');
     const interaction = await store.createInteractionRequest({
+      runtimeId: 'codex',
       serverInstanceId: server.id,
       providerRequestId: 7,
       taskId: task.id,
@@ -165,7 +167,7 @@ describe('FileTaskStore agent persistence', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-journal-'));
     const store = new FileTaskStore(dir);
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -188,6 +190,258 @@ describe('FileTaskStore agent persistence', () => {
     if (process.platform !== 'win32') {
       expect((await fs.stat(server.protocolJournalPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it('flushes protocol journal data when the store closes', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-close-'));
+    const store = new FileTaskStore(dir);
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const reference = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"event":"before-close"}'
+    );
+
+    await store.close();
+
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.readProtocolMessage(reference)).resolves.toEqual({
+      raw: '{"event":"before-close"}'
+    });
+    await restarted.close();
+  });
+
+  it('scopes provider session and turn identifiers by runtime', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-scope-'));
+    const store = new FileTaskStore(dir);
+    const createRuntimeContext = async (runtimeId: string) => {
+      const task = await store.createTask({
+        runtimeId,
+        title: `${runtimeId} task`,
+        prompt: 'Exercise scoped provider identifiers.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/${runtimeId}-scope`,
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId
+      });
+      await store.updateAgentSession(session.id, { providerSessionId: 'shared-session-id' });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.updateRun(run.id, { providerTurnId: 'shared-turn-id' });
+      return { session, run };
+    };
+
+    const codex = await createRuntimeContext('codex');
+    const opencode = await createRuntimeContext('opencode');
+
+    await expect(store.getAgentSessionByProviderId('codex', 'shared-session-id')).resolves
+      .toMatchObject({ id: codex.session.id, runtimeId: 'codex' });
+    await expect(store.getAgentSessionByProviderId('opencode', 'shared-session-id')).resolves
+      .toMatchObject({ id: opencode.session.id, runtimeId: 'opencode' });
+    await expect(store.getRunByProviderTurnId('codex', 'shared-turn-id')).resolves
+      .toMatchObject({ id: codex.run.id, runtimeId: 'codex' });
+    await expect(store.getRunByProviderTurnId('opencode', 'shared-turn-id')).resolves
+      .toMatchObject({ id: opencode.run.id, runtimeId: 'opencode' });
+  });
+
+  it('allows a distinct runtime only for detached review sessions and review runs', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-review-runtime-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      runtimeId: 'codex',
+      title: 'Review with another runtime',
+      prompt: 'Implement with Codex, then review with OpenCode.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/cross-runtime-review',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+
+    await expect(
+      store.createAgentSession({ task, iteration, worktree, runtimeId: 'opencode' })
+    ).rejects.toThrow('Primary task work must use the task runtime');
+
+    const reviewSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'opencode',
+      role: 'REVIEW'
+    });
+    expect(reviewSession).toMatchObject({ runtimeId: 'opencode', role: 'REVIEW' });
+    await expect(
+      store.createRun({
+        task,
+        session: reviewSession,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      })
+    ).rejects.toThrow('Only detached review runs may use a runtime other than the task runtime');
+    await expect(
+      store.createRun({
+        task,
+        session: reviewSession,
+        mode: 'REVIEW',
+        prompt: 'Review the implementation.'
+      })
+    ).resolves.toMatchObject({ runtimeId: 'opencode', mode: 'REVIEW' });
+  });
+
+  it('migrates schema 11 provider identity into runtime-owned records and settings', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-schema11-runtime-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Legacy runtime identity',
+      prompt: 'Preserve the owning runtime.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/schema11-runtime',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex'
+    });
+    const server = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'legacy-agent',
+      argv: ['serve']
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    const rawRequest = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"method":"permission","id":1}'
+    );
+    await store.createInteractionRequest({
+      runtimeId: 'codex',
+      serverInstanceId: server.id,
+      providerRequestId: 1,
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: 1 },
+      allowedActions: ['ACCEPT', 'DECLINE'],
+      policyWarnings: [],
+      requestRawMessage: rawRequest
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      schemaVersion: number;
+      tasks: Array<Record<string, unknown>>;
+      runs: Array<Record<string, unknown>>;
+      agentServers: Array<Record<string, unknown>>;
+      agentSessions: Array<Record<string, unknown>>;
+      interactionRequests: Array<Record<string, unknown>>;
+    };
+    persisted.schemaVersion = 11;
+    for (const record of [
+      persisted.tasks[0]!,
+      persisted.runs[0]!,
+      persisted.agentServers[0]!,
+      persisted.agentSessions[0]!
+    ]) {
+      delete record.runtimeId;
+    }
+    persisted.agentSessions[0]!.provider = 'opencode';
+    persisted.agentServers[0]!.provider = 'opencode';
+    delete persisted.interactionRequests[0]!.runtimeId;
+    delete (persisted.tasks[0]!.agentSettings as Record<string, unknown>).runtimeId;
+    delete (persisted.runs[0]!.requestedSettings as Record<string, unknown>).runtimeId;
+    delete (persisted.agentSessions[0]!.requestedSettings as Record<string, unknown>).runtimeId;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+
+    const migrated = await new FileTaskStore(dir).snapshot();
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(migrated.tasks[0]).toMatchObject({
+      runtimeId: 'opencode',
+      agentSettings: { runtimeId: 'opencode' }
+    });
+    expect(migrated.agentSessions[0]).toMatchObject({
+      runtimeId: 'opencode',
+      requestedSettings: { runtimeId: 'opencode' }
+    });
+    expect(migrated.runs[0]).toMatchObject({
+      runtimeId: 'opencode',
+      requestedSettings: { runtimeId: 'opencode' }
+    });
+    expect(migrated.agentServers[0]).toMatchObject({ runtimeId: 'opencode' });
+    expect(migrated.interactionRequests[0]).toMatchObject({ runtimeId: 'opencode' });
+    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      schemaVersion: number;
+      agentSessions: Array<Record<string, unknown>>;
+    };
+    expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(rewritten.agentSessions[0]).not.toHaveProperty('provider');
+  });
+
+  it('rejects malformed schema 11 collections instead of dropping durable records', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-schema11-malformed-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({
+      title: 'Do not lose records',
+      prompt: 'Reject corrupt migration input.',
+      repositoryPath: dir
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    persisted.schemaVersion = 11;
+    persisted.agentSessions = [null];
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+
+    await expect(new FileTaskStore(dir).init()).rejects.toThrow(
+      'agentSessions contains a malformed record'
+    );
   });
 
   it('rejects old store formats instead of maintaining compatibility code', async () => {

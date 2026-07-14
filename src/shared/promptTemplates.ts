@@ -9,7 +9,7 @@ import type {
 export const TASK_MONKI_CONTEXT_LINE =
   'Task Monki is a local task board for running AI coding work in isolated Git worktrees.';
 
-export const CODEX_REVIEW_DEVELOPER_INSTRUCTIONS = `You are performing a Task Monki Codex review.
+export const AGENT_REVIEW_DEVELOPER_INSTRUCTIONS = `You are performing a detached Task Monki review.
 
 ${TASK_MONKI_CONTEXT_LINE}
 
@@ -51,6 +51,10 @@ Use verdict NEEDS_CHANGES when any BLOCKER or MAJOR finding exists.
 Use verdict PASSED when there are no blocker or major findings.
 Use verdict INCONCLUSIVE only when the diff cannot be reviewed confidently.
 If there are no findings, return an empty findings array.`;
+
+/** @deprecated Use the provider-neutral review contract. */
+export const CODEX_REVIEW_DEVELOPER_INSTRUCTIONS =
+  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS;
 
 export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract:
 - For non-trivial implementation, follow-up, retry, or alternative work, maintain a concise provider plan as progress telemetry.
@@ -186,6 +190,35 @@ export function buildSteerInstruction(input: {
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');
+}
+
+export function buildAgentReviewPrompt(input: {
+  task: Task;
+  worktree: WorktreeRecord;
+  target: import('./agent').AgentReviewTarget;
+}): string {
+  const target = (() => {
+    switch (input.target.type) {
+      case 'UNCOMMITTED_CHANGES':
+        return 'Review the current uncommitted changes in the worktree.';
+      case 'BASE_BRANCH':
+        return `Review the current worktree changes against base branch ${input.target.branch}.`;
+      case 'COMMIT':
+        return `Review commit ${input.target.sha}${input.target.title ? ` (${input.target.title})` : ''}.`;
+      case 'CUSTOM':
+        return `Review target instructions:\n${input.target.instructions}`;
+    }
+  })();
+  return [
+    AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
+    '',
+    `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    '',
+    target,
+    `Repository root: ${input.worktree.worktreePath}`,
+    'Do not modify repository files. Do not commit, push, merge, or change repository settings.',
+    'Reinspect the repository and Git state directly. Provider output is review telemetry; Task Monki verifies the diff independently.'
+  ].join('\n');
 }
 
 export function buildPromptRefinementInstruction(input: string): string {

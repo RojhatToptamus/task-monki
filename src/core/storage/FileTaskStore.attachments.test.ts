@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { AttachmentFileStore } from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
 
@@ -295,7 +296,7 @@ describe('FileTaskStore attachments', () => {
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 
     const migrated = await createStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(11);
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(migrated.attachments).toEqual([]);
   });
 
@@ -304,7 +305,7 @@ describe('FileTaskStore attachments', () => {
 
     const migrated = createStore(fixture.dir);
     const snapshot = await migrated.snapshot();
-    expect(snapshot.schemaVersion).toBe(11);
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(snapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(
@@ -347,7 +348,7 @@ describe('FileTaskStore attachments', () => {
 
     const restarted = createStore(fixture.dir);
     const restartedSnapshot = await restarted.snapshot();
-    expect(restartedSnapshot.schemaVersion).toBe(11);
+    expect(restartedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(restartedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(
@@ -359,7 +360,7 @@ describe('FileTaskStore attachments', () => {
 
     const repeated = createStore(fixture.dir);
     const repeatedSnapshot = await repeated.snapshot();
-    expect(repeatedSnapshot.schemaVersion).toBe(11);
+    expect(repeatedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(repeatedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(
@@ -448,7 +449,7 @@ async function createRun(
     task,
     iteration,
     worktree,
-    provider: 'codex'
+    runtimeId: 'codex'
   });
   return store.createRun({
     task,

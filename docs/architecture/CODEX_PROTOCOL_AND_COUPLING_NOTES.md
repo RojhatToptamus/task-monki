@@ -55,6 +55,7 @@ as normal workflow warnings.
 
 Task Monki should depend on a provider-neutral orchestration model:
 
+- immutable task runtime identity and runtime-scoped provider IDs;
 - sessions;
 - runs;
 - interactions;
@@ -68,7 +69,8 @@ materializer, and raw journal.
 Do not spread Codex protocol terms into product workflow decisions unless the
 term is part of a provider-neutral Task Monki concept. For example:
 
-- Good: `RunRecord.mode === "REVIEW"` and `projection.codexReview.status`.
+- Good: `RunRecord.mode === "REVIEW"` and the local review-gate projection
+  (`projection.codexReview` retains its legacy schema-12 field name).
 - Risky: UI decisions based directly on a raw `thread/status/changed` payload.
 
 ## Generated bindings

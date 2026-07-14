@@ -117,7 +117,7 @@ describe('projection reducer', () => {
     );
 
     expect(next.codexReview?.status).toBe('STALE');
-    expect(next.summary).toBe('The current diff changed after this Codex review.');
+    expect(next.summary).toBe('The current diff changed after this agent review.');
   });
 
   it('records non-zero process exits as errors', () => {
@@ -141,6 +141,7 @@ describe('projection reducer', () => {
   it('does not let an old iteration event overwrite the current task projection', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -173,6 +174,7 @@ describe('projection reducer', () => {
   it('keeps Codex review runs in Review and records an inconclusive review result', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -249,6 +251,7 @@ describe('projection reducer', () => {
   it('stores structured Codex review findings and derives needs-changes status', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -310,6 +313,7 @@ describe('projection reducer', () => {
   it('marks review results stale when the diff changes or follow-up work starts', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -385,6 +389,7 @@ describe('projection reducer', () => {
   it('keeps a current review result fresh when a delivery commit records the reviewed diff', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -450,6 +455,7 @@ describe('projection reducer', () => {
   it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {
     const staleTask: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -496,6 +502,7 @@ describe('projection reducer', () => {
   it('keeps provider plans, usage, and goals separate from workflow evidence', () => {
     const task: Task = {
       id: 'task-1',
+      runtimeId: 'codex',
       title: 'Task',
       prompt: 'Prompt',
       repositoryPath: '/tmp/repo',
@@ -658,7 +665,8 @@ function createRun(overrides: Partial<RunRecord> = {}): RunRecord {
     diagnosticArtifactId: 'diagnostic',
     startedAt: now,
     eventCount: 0,
-    ...overrides
+    ...overrides,
+    runtimeId: overrides.runtimeId ?? 'codex'
   };
 }
 
@@ -678,7 +686,8 @@ function createTask(overrides: Partial<Task> = {}): Task {
     createdAt: now,
     updatedAt: now,
     projection: createInitialProjection(now),
-    ...overrides
+    ...overrides,
+    runtimeId: overrides.runtimeId ?? 'codex'
   };
 }
 

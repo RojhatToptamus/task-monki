@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 
 const exec = promisify(execFile);
 
@@ -77,7 +78,7 @@ describe('TaskManagerService task deletion', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     await store.createRun({
       task,
@@ -102,7 +103,7 @@ describe('TaskManagerService task deletion', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      codexPath: 'codex-not-used'
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
     });
     const task = await service.createTask({
       title: 'Dirty delete guard',
@@ -129,7 +130,7 @@ describe('TaskManagerService task deletion', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      codexPath: 'codex-not-used'
+      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
     });
     const task = await service.createTask({
       title: 'Clean delete removal',

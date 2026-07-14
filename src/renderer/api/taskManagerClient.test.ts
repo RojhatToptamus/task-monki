@@ -165,3 +165,52 @@ describe('createBrowserTaskManagerApi settings', () => {
     });
   });
 });
+
+describe('createBrowserTaskManagerApi provider-native session configuration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the narrow typed native-session endpoint', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const result = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'gemini-acp',
+      native: { modes: { currentModeId: 'plan' } }
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => result } as Response;
+      })
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(
+      api.updateAgentNativeSession({
+        operation: 'SET_MODE',
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        runtimeId: 'gemini-acp',
+        modeId: 'plan'
+      })
+    ).resolves.toEqual(result);
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/session/native',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            operation: 'SET_MODE',
+            taskId: 'task-1',
+            sessionId: 'session-1',
+            runtimeId: 'gemini-acp',
+            modeId: 'plan'
+          })
+        })
+      }
+    ]);
+  });
+});

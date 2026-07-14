@@ -23,7 +23,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const run = await store.createRun({
       task,
@@ -32,7 +32,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       prompt: task.prompt
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -54,7 +54,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       iterationId: iteration.id,
       runId: run.id,
       sessionId: session.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       explanation: 'First plan',
       steps: [{ step: 'Inspect', status: 'IN_PROGRESS' }],
       rawMessage: reference
@@ -64,7 +64,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       iterationId: iteration.id,
       runId: run.id,
       sessionId: session.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       explanation: 'Revised plan',
       steps: [{ step: 'Inspect', status: 'COMPLETED' }],
       rawMessage: reference
@@ -74,7 +74,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       iterationId: iteration.id,
       sessionId: session.id,
       runId: run.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       total: usage(100),
       last: usage(40),
       modelContextWindow: 200_000,
@@ -85,7 +85,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
       iterationId: iteration.id,
       sessionId: session.id,
       runId: run.id,
-      provider: 'codex',
+      runtimeId: 'codex',
       source: 'MODEL_REROUTED_NOTIFICATION',
       settings: { model: 'gpt-observed' },
       rawMessage: reference

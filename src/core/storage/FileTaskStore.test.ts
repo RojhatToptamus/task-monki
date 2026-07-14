@@ -43,7 +43,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const run = await store.createRun({
       task,
@@ -80,7 +80,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const run = await store.createRun({
       task,
@@ -125,7 +125,7 @@ describe('FileTaskStore', () => {
         task,
         iteration,
         worktree,
-        provider: 'codex'
+        runtimeId: 'codex'
       });
       const run = await store.createRun({
         task,
@@ -225,7 +225,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     await store.createRun({
       task,
@@ -449,7 +449,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const run = await store.createRun({
       task,
@@ -783,7 +783,7 @@ describe('FileTaskStore', () => {
       task: sourceTask,
       iteration: sourceIteration,
       worktree: sourceWorktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const sourceRun = await store.createRun({
       task: sourceTask,
@@ -810,7 +810,7 @@ describe('FileTaskStore', () => {
       task: alternativeTask,
       iteration: alternativeIteration,
       worktree: alternativeWorktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const alternativeRun = await store.createRun({
       task: alternativeTask,
@@ -987,7 +987,7 @@ describe('FileTaskStore', () => {
       task: sourceTask,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const run = await store.createRun({
       task: sourceTask,
@@ -1060,7 +1060,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1086,7 +1086,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1144,7 +1144,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1159,7 +1159,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1198,7 +1198,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1212,7 +1212,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1287,7 +1287,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1301,7 +1301,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1371,7 +1371,7 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
     expect(repairedTask?.projection.codexReview?.status).toBe('CANCELED');
     expect(repairedTask?.projection.codexReview?.summary).toBe(
-      'Codex review was stopped before completion.'
+      'Agent review was stopped before completion.'
     );
   });
 
@@ -1396,7 +1396,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1410,7 +1410,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1477,7 +1477,7 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
     expect(repairedTask?.projection.codexReview?.status).toBe('FAILED');
     expect(repairedTask?.projection.codexReview?.summary).toBe(
-      'Codex review stopped sending updates before Task Monki received a terminal event.'
+      'Agent review stopped sending updates before Task Monki received a terminal event.'
     );
   });
 
@@ -1500,7 +1500,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1514,7 +1514,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
@@ -1614,7 +1614,7 @@ describe('FileTaskStore', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const implementationRun = await store.createRun({
       task,
@@ -1628,7 +1628,7 @@ describe('FileTaskStore', () => {
       task: reviewTask,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'REVIEW',
       parentSessionId: implementationSession.id,
       forkedFromSessionId: implementationSession.id
