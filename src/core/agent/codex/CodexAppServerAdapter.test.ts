@@ -9,10 +9,118 @@ import { FileTaskStore } from '../../storage/FileTaskStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
+import type { CodexRpcClient } from './CodexRpcClient';
 
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
-describe('CodexAppServerAdapter', () => {
+describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
+  it('does not report ready when the live Codex model catalog is empty', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-empty-models-'));
+    const executable = await writeFakeCodexExecutable(dir, 'empty-models');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: {
+          status: 'FAILED',
+          canStart: false,
+          checks: { modelCatalog: 'FAILED' },
+          diagnostics: [
+            expect.objectContaining({
+              code: 'MODEL_CATALOG_FAILED',
+              stage: 'MODEL_CATALOG'
+            })
+          ]
+        }
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('preserves an explicit Codex model provider that model/list cannot identify', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-app-server-model-provider-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    try {
+      await adapter.initialize();
+      const resolved = await adapter.resolveExecution({
+        settings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'azure-openai',
+          reasoningEffort: 'high',
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'on-request'
+        },
+        attachments: []
+      });
+
+      expect(resolved.settings.modelProvider).toBe('azure-openai');
+      expect(resolved.model).toMatchObject({
+        id: 'codex:azure-openai/fake-model',
+        runtimeId: 'codex',
+        modelProvider: 'azure-openai',
+        model: 'fake-model'
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('replaces a one-way supervisor for an explicit safe runtime restart', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    await adapter.initialize();
+    await adapter.updateRuntimeConfig({
+      executable,
+      toolSettings: {
+        webSearchMode: 'cached',
+        mcpServers: 'all',
+        apps: 'disabled'
+      },
+      restart: true
+    });
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    expect(servers).toHaveLength(2);
+    expect(servers.map((server) => server.status).sort()).toEqual(['EXITED', 'READY']);
+    expect(
+      servers.find((server) => server.status === 'READY')?.argv
+    ).toContain('web_search="cached"');
+    await expect(adapter.listModels()).resolves.toEqual([
+      expect.objectContaining({ model: 'fake-model' })
+    ]);
+    await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
@@ -31,7 +139,10 @@ describe('CodexAppServerAdapter', () => {
 
     const catalog = await orchestrator.getRuntimeCatalog();
     const runtime = catalog.runtimes[0]!;
-    expect(runtime.preflight.ready, JSON.stringify(runtime.preflight.problems)).toBe(true);
+    expect(
+      runtime.preflight.readiness.canStart,
+      JSON.stringify(runtime.preflight.readiness.diagnostics)
+    ).toBe(true);
     expect(runtime.models[0]?.model).toBe('fake-model');
     expect(runtime.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
     const initializedServer = (await store.snapshot()).agentServers[0];
@@ -200,21 +311,21 @@ describe('CodexAppServerAdapter', () => {
     expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
     // The parsed raw protocol journal is the explicit debug-only exception to
     // the path-free durable-record rule because Codex receives managed paths.
-    expect(outbound.find((message) => message.method === 'thread/start')?.params)
-      .toMatchObject({
+    const firstThreadStart = outbound.find((message) => message.method === 'thread/start');
+    expect(firstThreadStart?.params).toMatchObject({
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review'
       });
-    const turnStart = outbound.find((message) => message.method === 'turn/start');
+    const turnStarts = outbound.filter((message) => message.method === 'turn/start');
+    expect(turnStarts).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    const turnStart = turnStarts[0];
     expect(turnStart?.params).toMatchObject({
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review'
     });
     expect(turnStart?.params).not.toHaveProperty('sandboxPolicy');
-    const profileResume = outbound
-      .filter((message) => message.method === 'thread/resume')
-      .at(-1);
-    const profileConfig = (profileResume?.params as { config?: unknown } | undefined)?.config as {
+    const profileConfig = (firstThreadStart?.params as { config?: unknown } | undefined)?.config as {
       default_permissions?: string;
       permissions?: Record<string, {
         filesystem?: Record<string, string>;
@@ -247,6 +358,757 @@ describe('CodexAppServerAdapter', () => {
     expect(manifestPaths).toContain(canonicalTextPath);
     await expect(fs.access(deliveryImagePath!)).resolves.toBeUndefined();
     await expect(fs.access(deliveryTextPath!)).resolves.toBeUndefined();
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('reconciles a terminal notification after one materialization failure without replaying the prompt', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-terminal-materialization-recovery-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'recovery-notification-echo'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const appendEvent = store.appendEvent.bind(store);
+    const updateAgentSession = store.updateAgentSession.bind(store);
+    let rejectedTerminalEvent = false;
+    let rejectedRecoveryEcho = false;
+    vi.spyOn(store, 'appendEvent').mockImplementation(async (event, persist) => {
+      if (!rejectedTerminalEvent && event.type === 'AGENT_RUN_COMPLETED') {
+        rejectedTerminalEvent = true;
+        throw new Error('injected terminal event persistence failure');
+      }
+      await appendEvent(event, persist);
+    });
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, update) => {
+      if (
+        rejectedTerminalEvent &&
+        !rejectedRecoveryEcho &&
+        update.status === 'IDLE' &&
+        update.materialized === true &&
+        update.observedSettings === undefined
+      ) {
+        rejectedRecoveryEcho = true;
+        throw new Error('injected recovery notification echo persistence failure');
+      }
+      return updateAgentSession(sessionId, update);
+    });
+
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal;
+    const completed = await waitForRunStatus(store, run.id, 'COMPLETED');
+    await waitForSnapshot(
+      store,
+      () => rejectedRecoveryEcho,
+      'recovery notification echo failure'
+    );
+    const snapshot = await store.snapshot();
+    const server = snapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    )!;
+    const outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+
+    expect(rejectedTerminalEvent).toBe(true);
+    expect(rejectedRecoveryEcho).toBe(true);
+    expect(completed.providerTerminalSource).toBe('RECOVERY_RESUME_RESPONSE');
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
+      )
+    ).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+    expect(adapter.getProviderState().preflight).toMatchObject({
+      readiness: {
+        status: 'DEGRADED',
+        canStart: true,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_FAILED' })
+        ])
+      }
+    });
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('fences the App Server when terminal materialization cannot be reconciled durably', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-terminal-materialization-fence-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [5, 10]
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const appendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, 'appendEvent').mockImplementation(async (event, persist) => {
+      if (
+        event.type === 'AGENT_RUN_COMPLETED' ||
+        event.type === 'AGENT_RUNTIME_RECONCILED'
+      ) {
+        throw new Error(`injected persistent ${event.type} persistence failure`);
+      }
+      await appendEvent(event, persist);
+    });
+
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const fenced = await waitForSnapshot(
+      store,
+      (snapshot) =>
+        snapshot.runs.some(
+          (candidate) => candidate.id === run.id && candidate.status === 'RECOVERY_REQUIRED'
+        ) &&
+        snapshot.agentServers.some(
+          (server) => server.runtimeId === 'codex' && server.status === 'EXITED'
+        ),
+      'terminal materialization recovery fence'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    expect(servers).toHaveLength(1);
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: {
+        status: 'FAILED',
+        canStart: false,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_FAILED' }),
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_RECOVERY_FAILED' })
+        ])
+      }
+    });
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'RETRY',
+        prompt: 'Do not replay the prompt while terminal persistence is uncertain.',
+        settings: task.agentSettings,
+        retryOfRunId: run.id
+      })
+    ).rejects.toThrow();
+
+    const journal = await fs.readFile(
+      fenced.agentServers.find((server) => server.runtimeId === 'codex')!
+        .protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('replaces an unmaterialized empty thread after App Server restart without resuming or replaying a prompt', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-empty-thread-restart-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const firstAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    await firstAdapter.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const localSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    const emptySession = await firstAdapter.createSession({
+      runtimeId: 'codex',
+      localSessionId: localSession.id,
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath,
+      settings: task.agentSettings,
+      attachments: []
+    });
+    expect(emptySession).toMatchObject({
+      providerSessionId: 'thread-1',
+      materialized: false
+    });
+    await firstAdapter.shutdown();
+
+    const secondAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, secondAdapter);
+    await orchestrator.initialize();
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await waitForRunStatus(store, run.id, 'COMPLETED');
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    const replacement = servers.find((server) => server.status === 'READY');
+    expect(replacement).toBeDefined();
+    const journal = await fs.readFile(replacement!.protocolJournalPath, 'utf8');
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps an empty thread unmaterialized when run startup persistence fails before provider input', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-pre-submit-failure-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateRun = store.updateRun.bind(store);
+    let rejectedStartingPersistence = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (!rejectedStartingPersistence && patch.status === 'STARTING') {
+        rejectedStartingPersistence = true;
+        throw new Error('injected pre-submit run persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('injected pre-submit run persistence failure');
+
+    let snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false });
+    await expect(
+      adapter.attachSession({
+        localSessionId: failedRun.sessionId,
+        providerSessionId: snapshot.agentSessions.find(
+          (session) => session.id === failedRun.sessionId
+        )?.providerSessionId
+      })
+    ).rejects.toThrow('has no resumable rollout');
+    await expect(
+      adapter.readSession({ localSessionId: failedRun.sessionId })
+    ).resolves.toMatchObject({
+      session: { materialized: false },
+      runs: [expect.objectContaining({ id: failedRun.id, status: 'FAILED' })]
+    });
+    const server = snapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    )!;
+    let outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(0);
+
+    const retry = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'RETRY',
+      prompt: 'Retry after the local pre-submit persistence failure.',
+      settings: task.agentSettings,
+      retryOfRunId: failedRun.id
+    });
+    await waitForRunStatus(store, retry.id, 'COMPLETED');
+    snapshot = await store.snapshot();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === retry.sessionId)
+    ).toMatchObject({ materialized: true });
+    outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('reuses an attested empty thread after a definitive first-turn rejection', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-definite-rejection-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-once'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('injected definitive turn/start rejection');
+
+    let snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(failedRun.providerTurnId).toBeUndefined();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false, providerSessionId: 'thread-1' });
+    await expect(
+      adapter.readSession({ localSessionId: failedRun.sessionId })
+    ).resolves.toMatchObject({ session: { materialized: false } });
+
+    const retry = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'RETRY',
+      prompt: 'Retry after the provider definitively rejected the first request.',
+      settings: task.agentSettings,
+      retryOfRunId: failedRun.id
+    });
+    await waitForRunStatus(store, retry.id, 'COMPLETED');
+
+    snapshot = await store.snapshot();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === retry.sessionId)
+    ).toMatchObject({ materialized: true, providerSessionId: 'thread-1' });
+    const journal = await fs.readFile(
+      snapshot.agentServers.find((server) => server.status === 'READY')!
+        .protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps the no-resend fence when turn evidence precedes a definitive error response', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-error-with-evidence-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-with-evidence'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find(
+      (candidate) => candidate.taskId === task.id
+    )!;
+    expect(recoveryRun).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      providerTurnId: 'turn-error-evidence'
+    });
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps the no-resend fence when first-turn evidence fails to materialize', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-evidence-store-failure-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-with-evidence'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateRun = store.updateRun.bind(store);
+    let rejectedTurnEvidence = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (
+        !rejectedTurnEvidence &&
+        patch.providerTurnId === 'turn-error-evidence' &&
+        patch.status === 'RUNNING'
+      ) {
+        rejectedTurnEvidence = true;
+        throw new Error('injected turn evidence persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find(
+      (candidate) => candidate.taskId === task.id
+    )!;
+    expect(rejectedTurnEvidence).toBe(true);
+    expect(recoveryRun.status).toBe('RECOVERY_REQUIRED');
+    expect(recoveryRun.providerTurnId).toBe('turn-error-evidence');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'RETRY',
+        prompt: 'Do not resend provider input while first-turn evidence is uncertain.',
+        settings: task.agentSettings,
+        retryOfRunId: recoveryRun.id
+      })
+    ).rejects.toThrow(/active run|unresolved recovery/u);
+
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('retains the no-resend fence and binds a late turn/started after an ambiguous first turn', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-late-evidence-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-ambiguous-late'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await adapter.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const client = (
+      adapter as unknown as { boundClient?: CodexRpcClient }
+    ).boundClient!;
+
+    const ambiguousError = await orchestrator
+      .startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error
+      );
+    expect(ambiguousError).toBeInstanceOf(AgentMutationAmbiguousError);
+
+    let snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(recoveryRun.status).toBe('RECOVERY_REQUIRED');
+    expect(recoveryRun.providerTurnId).toBeUndefined();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+
+    const raw = await store.appendProtocolMessage(
+      client.serverInstanceId,
+      'INBOUND',
+      JSON.stringify({
+        method: 'turn/started',
+        params: { threadId: 'thread-1', turnId: 'turn-late' }
+      })
+    );
+    client.events.emit(
+      'notification',
+      {
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-1',
+          turn: {
+            id: 'turn-late',
+            items: [],
+            itemsView: 'full',
+            status: 'inProgress',
+            error: null,
+            startedAt: 1,
+            completedAt: null,
+            durationMs: null
+          }
+        }
+      },
+      raw
+    );
+    await (
+      adapter as unknown as { inboundQueue: Promise<void> }
+    ).inboundQueue;
+
+    expect(await store.getRun(recoveryRun.id)).toMatchObject({
+      status: 'RUNNING',
+      recoveryState: 'NONE',
+      providerTurnId: 'turn-late',
+      serverInstanceId: client.serverInstanceId
+    });
+    snapshot = await store.snapshot();
+    const journal = await fs.readFile(
+      snapshot.agentServers.find(
+        (server) => server.id === client.serverInstanceId
+      )!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('drains permission-profile drift before submitting the first turn', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-profile-drift-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateAgentSession = store.updateAgentSession.bind(store);
+    let injectedDrift = false;
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(
+      async (sessionId, patch) => {
+        const stored = await updateAgentSession(sessionId, patch);
+        if (!injectedDrift && patch.materialized === true) {
+          injectedDrift = true;
+          const client = (
+            adapter as unknown as { boundClient?: CodexRpcClient }
+          ).boundClient!;
+          const raw = await store.appendProtocolMessage(
+            client.serverInstanceId,
+            'INBOUND',
+            JSON.stringify({
+              method: 'thread/settings/updated',
+              params: {
+                threadId: 'thread-1',
+                activePermissionProfile: ':workspace'
+              }
+            })
+          );
+          client.events.emit(
+            'notification',
+            {
+              method: 'thread/settings/updated',
+              params: {
+                threadId: 'thread-1',
+                threadSettings: {
+                  cwd: worktree.worktreePath,
+                  approvalPolicy: 'on-request',
+                  approvalsReviewer: 'user',
+                  sandboxPolicy: {
+                    type: 'workspaceWrite',
+                    writableRoots: [worktree.worktreePath],
+                    networkAccess: false,
+                    excludeTmpdirEnvVar: true,
+                    excludeSlashTmp: true
+                  },
+                  activePermissionProfile: { id: ':workspace', extends: null },
+                  model: 'fake-model',
+                  modelProvider: 'openai',
+                  serviceTier: null,
+                  effort: 'low',
+                  summary: null,
+                  collaborationMode: {
+                    mode: 'default',
+                    settings: {
+                      model: 'fake-model',
+                      reasoning_effort: 'low',
+                      developer_instructions: null
+                    }
+                  },
+                  personality: null
+                }
+              }
+            },
+            raw
+          );
+        }
+        return stored;
+      }
+    );
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('changed or removed the Task Monki permission profile');
+
+    const snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(0);
+    expect(snapshot.agentServers[0]).toMatchObject({ status: 'EXITED' });
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -297,12 +1159,22 @@ describe('CodexAppServerAdapter', () => {
 
     const snapshot = await store.snapshot();
     const run = snapshot.runs.find((candidate) => candidate.taskId === task.id);
-    expect(run?.status).toBe('RECOVERY_REQUIRED');
+    expect(run).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      providerTurnId: 'turn-1'
+    });
+    expect(
+      snapshot.agentSessions.find((session) => session.id === run?.sessionId)
+    ).toMatchObject({ materialized: true });
     const server = snapshot.agentServers[0]!;
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const turnStart = readOutboundMessages(journal).find(
+    const firstOutbound = readOutboundMessages(journal);
+    const turnStart = firstOutbound.find(
       (message) => message.method === 'turn/start'
     );
+    expect(firstOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(firstOutbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(firstOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
     const manifest = (
       turnStart?.params as { input?: Array<{ type?: string; text?: string }> } | undefined
     )?.input?.find((item) => item.type === 'text')?.text;
@@ -311,7 +1183,151 @@ describe('CodexAppServerAdapter', () => {
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
+
+    const replacementAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const replacementOrchestrator = new AgentOrchestrator(
+      store,
+      events,
+      replacementAdapter
+    );
+    await replacementOrchestrator.initialize();
+    await expect(store.getRun(run!.id)).resolves.toMatchObject({
+      status: 'COMPLETED',
+      providerTurnId: 'turn-1',
+      providerTerminalSource: 'RECOVERY_RESUME_RESPONSE'
+    });
+    const replacementSnapshot = await store.snapshot();
+    const replacementServer = replacementSnapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    );
+    expect(replacementServer).toBeDefined();
+    const replacementJournal = await fs.readFile(
+      replacementServer!.protocolJournalPath,
+      'utf8'
+    );
+    const replacementOutbound = readOutboundMessages(replacementJournal);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'thread/start')
+    ).toHaveLength(0);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'thread/resume')
+    ).toHaveLength(1);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'turn/start')
+    ).toHaveLength(0);
+    await replacementOrchestrator.shutdown();
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('records recovery before a provider-acknowledged thread/start can be retried', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-thread-start-post-ack-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'ack-only');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateSession = store.updateAgentSession.bind(store);
+    let rejectedAcknowledgement = false;
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
+      if (!rejectedAcknowledgement && patch.providerSessionId === 'thread-1') {
+        rejectedAcknowledgement = true;
+        throw new Error('injected thread ownership persistence failure');
+      }
+      return updateSession(sessionId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toMatchObject({ operation: 'thread/start' });
+
+    const snapshot = await store.snapshot();
+    const run = snapshot.runs.find((candidate) => candidate.taskId === task.id);
+    expect(run).toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    expect(
+      readOutboundMessages(journal).filter((message) => message.method === 'thread/start')
+    ).toHaveLength(1);
+    expect(readOutboundMethods(journal)).not.toContain('turn/start');
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'FOLLOW_UP',
+        prompt: 'Do not duplicate the provider session.',
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('unresolved recovery run');
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('fences App Server when thread/start returns an unattested permission profile', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-thread-start-profile-mismatch-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'profile-mismatch-create');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toMatchObject({ operation: 'thread/start' });
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.runs.find((candidate) => candidate.taskId === task.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED'
+    });
+    expect(snapshot.agentServers.at(-1)).toMatchObject({ status: 'EXITED' });
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: {
+        status: 'FAILED',
+        diagnostics: [
+          expect.objectContaining({ code: 'SECURITY_BOUNDARY_FAILED' })
+        ]
+      }
+    });
+    await expect(adapter.listModels()).rejects.toThrow('unattested permission profile');
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('submits one typed approval response and waits for server resolution', async () => {
@@ -343,6 +1359,9 @@ describe('CodexAppServerAdapter', () => {
     expect(interaction.providerRequestId).toBe(41);
     expect(interaction.allowedActions).toContain('ACCEPT');
     expect((await store.getRun(run.id))?.status).toBe('AWAITING_APPROVAL');
+    expect((await store.getAgentSession(interaction.sessionId))?.status).toBe(
+      'AWAITING_APPROVAL'
+    );
 
     await expect(
       orchestrator.respondToInteraction({
@@ -393,6 +1412,227 @@ describe('CodexAppServerAdapter', () => {
     expect(response?.id).toBe(41);
 
     await orchestrator.shutdown();
+  });
+
+  it('rebinds a recovered running turn before accepting approval on a replacement server', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-recovered-approval-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'recovery-approval');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const priorServer = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable,
+      argv: ['app-server', '--stdio']
+    });
+    await store.updateAgentServer(priorServer.id, { status: 'RUNNING', pid: 41 });
+    let session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    session = await store.updateAgentSession(session.id, {
+      providerSessionId: 'thread-1',
+      providerSessionTreeId: 'session-tree-1',
+      status: 'NOT_LOADED',
+      materialized: true
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      serverInstanceId: priorServer.id,
+      requestedSettings: task.agentSettings
+    });
+    await store.updateRun(run.id, {
+      providerTurnId: 'turn-1',
+      status: 'RUNNING'
+    });
+    await store.updateAgentServer(priorServer.id, {
+      status: 'LOST',
+      disconnectedAt: new Date().toISOString(),
+      exitedAt: new Date().toISOString(),
+      exitReason: 'Injected prior App Server crash.'
+    });
+
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const recoveredRun = await store.getRun(run.id);
+    expect(interaction.runId).toBe(run.id);
+    expect(interaction.serverInstanceId).not.toBe(priorServer.id);
+    expect(recoveredRun).toMatchObject({
+      serverInstanceId: interaction.serverInstanceId,
+      providerTurnId: 'turn-1',
+      status: 'AWAITING_APPROVAL'
+    });
+    expect((await store.getAgentSession(interaction.sessionId))?.status).toBe(
+      'AWAITING_APPROVAL'
+    );
+
+    await orchestrator.respondToInteraction({
+      taskId: task.id,
+      runId: run.id,
+      interactionRequestId: interaction.id,
+      decision: {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT'
+      }
+    });
+    const completed = await waitForRunStatus(store, run.id, 'COMPLETED');
+    expect(completed.serverInstanceId).toBe(interaction.serverInstanceId);
+    expect((await store.getInteractionRequest(interaction.id))?.status).toBe('RESOLVED');
+
+    await orchestrator.shutdown();
+  });
+
+  it('ignores late notifications and requests from a replaced App Server generation', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-stale-codex-generation-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'stale-generation');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [0]
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+
+    try {
+      await orchestrator.initialize();
+      const { task, iteration, worktree } = await createTaskContext(store, dir);
+      const run = await orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      });
+      const oldClient = (
+        adapter as unknown as { boundClient?: CodexRpcClient }
+      ).boundClient!;
+      const oldServerId = oldClient.serverInstanceId;
+
+      const recovered = await waitForSnapshot(
+        store,
+        (snapshot) => {
+          const current = snapshot.runs.find((candidate) => candidate.id === run.id);
+          return (
+            current?.status === 'RECOVERY_REQUIRED' &&
+            typeof current.serverInstanceId === 'string' &&
+            current.serverInstanceId !== oldServerId
+          );
+        },
+        'replacement App Server to own the recovered turn'
+      );
+      const recoveredRun = recovered.runs.find((candidate) => candidate.id === run.id)!;
+      const replacementClient = (
+        adapter as unknown as { boundClient?: CodexRpcClient }
+      ).boundClient!;
+      expect(replacementClient).not.toBe(oldClient);
+      expect(replacementClient.serverInstanceId).toBe(recoveredRun.serverInstanceId);
+
+      const staleTurnRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1' } })
+      );
+      const staleThreadRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({ method: 'thread/closed', params: { threadId: 'thread-1' } })
+      );
+      const staleRequestRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({
+          method: 'item/commandExecution/requestApproval',
+          id: 901,
+          params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'stale-command' }
+        })
+      );
+      const staleResponse = vi
+        .spyOn(oldClient, 'respondError')
+        .mockResolvedValue(undefined);
+
+      oldClient.events.emit(
+        'notification',
+        {
+          method: 'turn/completed',
+          params: {
+            threadId: 'thread-1',
+            turn: {
+              id: 'turn-1',
+              items: [],
+              itemsView: 'full',
+              status: 'completed',
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+              durationMs: 1
+            }
+          }
+        },
+        staleTurnRaw
+      );
+      oldClient.events.emit(
+        'notification',
+        { method: 'thread/closed', params: { threadId: 'thread-1' } },
+        staleThreadRaw
+      );
+      oldClient.events.emit(
+        'serverRequest',
+        {
+          method: 'item/commandExecution/requestApproval',
+          id: 901,
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'stale-command',
+            startedAtMs: Date.now(),
+            command: 'npm test',
+            cwd: worktree.worktreePath,
+            commandActions: []
+          }
+        },
+        staleRequestRaw
+      );
+      await (
+        adapter as unknown as { inboundQueue: Promise<void> }
+      ).inboundQueue;
+
+      expect(await store.getRun(run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        serverInstanceId: replacementClient.serverInstanceId
+      });
+      expect((await store.getAgentSession(run.sessionId))?.status).not.toBe('NOT_LOADED');
+      expect(staleResponse).not.toHaveBeenCalled();
+      expect(
+        (await store.snapshot()).interactionRequests.some(
+          (interaction) => interaction.providerRequestId === 901
+        )
+      ).toBe(false);
+    } finally {
+      await orchestrator.shutdown();
+    }
   });
 
   it('redacts and declines redundant attachment path permission requests', async () => {
@@ -576,7 +1816,8 @@ describe('CodexAppServerAdapter', () => {
       delegatedPrompt: 'Inspect the repository tests.',
       providerNickname: 'Scout',
       providerRole: 'explorer',
-      relationshipState: 'RESOLVED'
+      relationshipState: 'RESOLVED',
+      status: 'AWAITING_APPROVAL'
     });
     expect(interaction.providerTurnId).toBe('turn-child');
 
@@ -1536,7 +2777,7 @@ async function waitForInteraction(
   store: FileTaskStore,
   status: 'PENDING' | 'ABORTED_SERVER_LOST' | 'STALE'
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const interaction = (await store.snapshot()).interactionRequests.find(
       (candidate) => candidate.status === status
     );
@@ -1553,7 +2794,7 @@ async function waitForRunStatus(
   runId: string,
   status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED'
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const run = await store.getRun(runId);
     if (run?.status === status) {
       return run;
@@ -1568,7 +2809,7 @@ async function waitForSnapshot(
   predicate: (snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>) => boolean,
   description: string
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const snapshot = await store.snapshot();
     if (predicate(snapshot)) {
       return snapshot;
@@ -1583,7 +2824,7 @@ async function waitForRunProviderTurnId(
   runId: string,
   providerTurnId: string
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const run = await store.getRun(runId);
     if (run?.providerTurnId === providerTurnId) {
       return run;
@@ -1600,7 +2841,7 @@ async function waitForAgentItem(
   runId: string,
   providerItemId: string
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const item = (await store.snapshot()).agentItems.find(
       (candidate) =>
         candidate.runId === runId && candidate.providerItemId === providerItemId
@@ -1677,14 +2918,22 @@ async function writeFakeCodexExecutable(
 function fakeCodexScript(
   mode:
     | 'normal'
+    | 'empty-models'
     | 'ack-only'
+    | 'recovery-notification-echo'
+    | 'turn-start-rejected-once'
+    | 'turn-start-rejected-with-evidence'
+    | 'turn-start-ambiguous-late'
     | 'approval'
+    | 'recovery-approval'
+    | 'stale-generation'
     | 'permission'
     | 'exit'
     | 'clear'
     | 'subagent'
     | 'unsafe-review-fork'
     | 'unsafe-live-settings'
+    | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
     | 'review-turn-start-mismatch'
@@ -1716,7 +2965,7 @@ const reviewMode = mode === 'review-turn-start-mismatch' || mode === 'review-int
 const reviewInterruptTimeoutMode = mode === 'review-interrupt-ambiguous-no-terminal';
 const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
-const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent';
+const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const reviewResponseTurnId = 'review-response-turn';
 const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
@@ -1780,6 +3029,7 @@ const reviewThread = () => ({
 });
 let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
+let turnStartAttempts = 0;
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
   currentProfileNetworkAccess =
@@ -1795,8 +3045,12 @@ const threadResponse = (request = {}) => {
   serviceTier: null,
   cwd: request.cwd ?? process.cwd(),
   runtimeWorkspaceRoots: [request.cwd ?? process.cwd()],
-  activePermissionProfile: {
-    id: currentProfileId,
+    activePermissionProfile: {
+      id:
+        mode === 'profile-mismatch-create' &&
+        currentProfileId !== 'task_monki_capability_probe'
+          ? ':workspace'
+          : currentProfileId,
     extends: null
   },
   instructionSources: [],
@@ -1829,6 +3083,34 @@ rl.on('line', (line) => {
         item: {
           type: 'commandExecution',
           id: 'command-1',
+          command: 'npm test',
+          cwd: process.cwd(),
+          processId: null,
+          source: 'agent',
+          status: 'completed',
+          commandActions: [],
+          aggregatedOutput: 'passed',
+          exitCode: 0,
+          durationMs: 10
+        }
+      } });
+      send({ method: 'turn/completed', params: {
+        threadId: 'thread-1',
+        turn: turn('completed')
+      } });
+    }
+    if (mode === 'recovery-approval' && message.id === 71) {
+      send({ method: 'serverRequest/resolved', params: {
+        threadId: 'thread-1',
+        requestId: 71
+      } });
+      send({ method: 'item/completed', params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: Date.now(),
+        item: {
+          type: 'commandExecution',
+          id: 'recovered-command',
           command: 'npm test',
           cwd: process.cwd(),
           processId: null,
@@ -1944,7 +3226,7 @@ rl.on('line', (line) => {
       break;
     case 'model/list':
       send({ id: message.id, result: {
-        data: [{
+        data: mode === 'empty-models' ? [] : [{
           id: 'fake-model',
           model: 'fake-model',
           upgrade: null,
@@ -1973,11 +3255,57 @@ rl.on('line', (line) => {
       break;
     case 'thread/resume':
       {
-        const response = { ...threadResponse(message.params), thread: thread([turn('completed')]) };
+        const recoveringApproval =
+          mode === 'recovery-approval' && message.params.threadId === 'thread-1';
+        const recoveringTurn =
+          (recoveringApproval || mode === 'stale-generation') &&
+          message.params.threadId === 'thread-1';
+        const response = {
+          ...threadResponse(message.params),
+          thread: thread([turn(recoveringTurn ? 'inProgress' : 'completed')])
+        };
         if (mode === 'unsafe-recovery-resume') {
           response.sandbox = { type: 'dangerFullAccess' };
         }
         send({ id: message.id, result: response });
+        if (mode === 'recovery-notification-echo') {
+          send({ method: 'turn/completed', params: {
+            threadId: 'thread-1',
+            turn: turn('completed')
+          } });
+        }
+        if (recoveringApproval) {
+          setTimeout(() => {
+            send({ method: 'item/started', params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              startedAtMs: Date.now(),
+              item: {
+                type: 'commandExecution',
+                id: 'recovered-command',
+                command: 'npm test',
+                cwd: message.params.cwd,
+                processId: null,
+                source: 'agent',
+                status: 'inProgress',
+                commandActions: [],
+                aggregatedOutput: null,
+                exitCode: null,
+                durationMs: null
+              }
+            } });
+            send({ method: 'item/commandExecution/requestApproval', id: 71, params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'recovered-command',
+              startedAtMs: Date.now(),
+              reason: 'Verify the recovered turn',
+              command: 'npm test',
+              cwd: message.params.cwd,
+              commandActions: []
+            } });
+          }, 20);
+        }
       }
       break;
     case 'thread/read':
@@ -2056,6 +3384,34 @@ rl.on('line', (line) => {
       }
       break;
     case 'turn/start':
+      turnStartAttempts += 1;
+      if (mode === 'turn-start-rejected-once' && turnStartAttempts === 1) {
+        send({ id: message.id, error: {
+          code: -32602,
+          message: 'injected definitive turn/start rejection'
+        } });
+        return;
+      }
+      if (
+        mode === 'turn-start-rejected-with-evidence' &&
+        message.params.threadId === 'thread-1'
+      ) {
+        send({ method: 'turn/started', params: {
+          threadId: 'thread-1',
+          turn: { ...turn('inProgress'), id: 'turn-error-evidence' }
+        } });
+        send({ id: message.id, error: {
+          code: -32602,
+          message: 'injected turn/start error after turn evidence'
+        } });
+        return;
+      }
+      if (
+        mode === 'turn-start-ambiguous-late' &&
+        message.params.threadId === 'thread-1'
+      ) {
+        process.exit(17);
+      }
       send({ id: message.id, result: { turn: turn('inProgress') } });
       if (mode === 'ack-only') return;
       setTimeout(() => {
@@ -2230,7 +3586,7 @@ rl.on('line', (line) => {
             cwd: message.params.cwd,
             commandActions: []
           } });
-          if (mode === 'exit') {
+          if (mode === 'exit' || mode === 'stale-generation') {
             setTimeout(() => process.exit(17), 50);
           } else if (mode === 'clear') {
             setTimeout(() => {

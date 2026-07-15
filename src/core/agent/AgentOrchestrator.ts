@@ -22,6 +22,10 @@ import {
   type AgentRuntimeAdapter
 } from './AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
+import {
+  createRuntimeReadiness,
+  errorDiagnostic
+} from './AgentRuntimeReadiness';
 import { AgentInteractionService } from './AgentInteractionService';
 import { toAgentTurnAttachments, type AgentTurnAttachment } from './AgentAttachmentDelivery';
 import {
@@ -61,7 +65,8 @@ export interface StartOrchestratedTurn {
 function assertSessionPostcondition(
   actual: AgentSessionRecord,
   expected: AgentSessionRecord,
-  subject: string
+  subject: string,
+  providerSessionRequired: boolean
 ): void {
   if (
     actual.id !== expected.id ||
@@ -76,8 +81,11 @@ function assertSessionPostcondition(
       `${subject} returned by the runtime does not match its Task Monki ownership record.`
     );
   }
-  if (!actual.providerSessionId) {
+  if (providerSessionRequired && !actual.providerSessionId) {
     throw new Error(`${subject} did not return a provider session id.`);
+  }
+  if (!providerSessionRequired && actual.providerSessionId) {
+    throw new Error(`${subject} unexpectedly returned a provider session id.`);
   }
 }
 
@@ -201,10 +209,20 @@ export class AgentOrchestrator {
         this.runtimes.list().map(async (adapter) => ({
           preflight: {
             runtime: adapter.descriptor,
-            ready: false,
+            readiness: createRuntimeReadiness(
+              'DISABLED',
+              this.options.providerStartupDisabledReason!,
+              {
+                diagnostics: [
+                  errorDiagnostic(
+                    'RUNTIME_DISABLED',
+                    'SECURITY',
+                    this.options.providerStartupDisabledReason!
+                  )
+                ]
+              }
+            ),
             capabilities: await adapter.capabilities(),
-            problems: [this.options.providerStartupDisabledReason!],
-            warnings: []
           },
           models: [],
           refreshedAt
@@ -300,25 +318,21 @@ export class AgentOrchestrator {
         `Agent session ${session.id} already has active run ${activeSessionRun.id}.`
       );
     }
+    const unresolvedRecoveryRun = (await this.store.snapshot()).runs.find(
+      (run) => run.sessionId === session!.id && run.status === 'RECOVERY_REQUIRED'
+    );
+    if (
+      unresolvedRecoveryRun &&
+      input.continuedFromRunId !== unresolvedRecoveryRun.id
+    ) {
+      throw new Error(
+        `Agent session ${session.id} has unresolved recovery run ${unresolvedRecoveryRun.id}; close it or explicitly continue from it before another provider mutation.`
+      );
+    }
 
     if (session.runtimeId !== runtimeId) {
       throw new Error('Selected agent session runtime changed unexpectedly.');
     }
-    if (!session.providerSessionId) {
-      const localSession = session;
-      session = await adapter.createSession({
-        runtimeId,
-        localSessionId: session.id,
-        taskId: input.task.id,
-        iterationId: input.iteration.id,
-        worktreeId: input.worktree.id,
-        worktreePath: input.worktree.worktreePath,
-        settings
-      });
-      assertSessionPostcondition(session, localSession, 'Created session');
-      await this.assertBrowserDevSessionHistory(session, 'Created session');
-    }
-
     const run = await this.store.createRun({
       task: input.task,
       session,
@@ -336,6 +350,26 @@ export class AgentOrchestrator {
       attachments = toAgentTurnAttachments(
         await this.store.prepareRunAttachments(run.id, input.task.id)
       );
+      if (!session.providerSessionId) {
+        const localSession = session;
+        session = await adapter.createSession({
+          runtimeId,
+          localSessionId: session.id,
+          taskId: input.task.id,
+          iterationId: input.iteration.id,
+          worktreeId: input.worktree.id,
+          worktreePath: input.worktree.worktreePath,
+          settings,
+          attachments
+        });
+        assertSessionPostcondition(
+          session,
+          localSession,
+          'Created session',
+          adapter.descriptor.lifecycleScope !== 'TURN'
+        );
+        await this.assertBrowserDevSessionHistory(session, 'Created session');
+      }
       await this.startProviderTurn(adapter, run, session, input, settings, attachments);
       return (await this.store.getRun(run.id)) ?? run;
     } catch (error) {
@@ -345,7 +379,8 @@ export class AgentOrchestrator {
             adapter,
             session,
             settings,
-            error
+            error,
+            attachments
           );
           await this.assertBrowserDevSessionHistory(recovered, 'Recreated session');
           await this.startProviderTurn(adapter, run, recovered, input, settings, attachments);
@@ -419,24 +454,6 @@ export class AgentOrchestrator {
       parentSessionId: sourceSession.id,
       forkedFromSessionId: useNativeReview ? sourceSession.id : undefined
     });
-    if (!useNativeReview && !reviewSession.providerSessionId) {
-      const localReviewSession = reviewSession;
-      reviewSession = await adapter.createSession({
-        runtimeId: reviewRuntimeId,
-        localSessionId: reviewSession.id,
-        taskId: input.task.id,
-        iterationId: input.iteration.id,
-        worktreeId: input.worktree.id,
-        worktreePath: input.worktree.worktreePath,
-        settings
-      });
-      assertSessionPostcondition(
-        reviewSession,
-        localReviewSession,
-        'Created review session'
-      );
-      await this.assertBrowserDevSessionHistory(reviewSession, 'Created review session');
-    }
     const prompt = buildAgentReviewPrompt({
       task: input.task,
       worktree: input.worktree,
@@ -457,6 +474,29 @@ export class AgentOrchestrator {
       attachments = toAgentTurnAttachments(
         await this.store.prepareRunAttachments(run.id, input.task.id)
       );
+      if (!useNativeReview && !reviewSession.providerSessionId) {
+        const localReviewSession = reviewSession;
+        reviewSession = await adapter.createSession({
+          runtimeId: reviewRuntimeId,
+          localSessionId: reviewSession.id,
+          taskId: input.task.id,
+          iterationId: input.iteration.id,
+          worktreeId: input.worktree.id,
+          worktreePath: input.worktree.worktreePath,
+          settings,
+          attachments
+        });
+        assertSessionPostcondition(
+          reviewSession,
+          localReviewSession,
+          'Created review session',
+          adapter.descriptor.lifecycleScope !== 'TURN'
+        );
+        await this.assertBrowserDevSessionHistory(
+          reviewSession,
+          'Created review session'
+        );
+      }
       if (useNativeReview) {
         await this.startProviderReview(
           adapter,
@@ -488,7 +528,8 @@ export class AgentOrchestrator {
             adapter,
             useNativeReview ? sourceSession : reviewSession,
             settings,
-            error
+            error,
+            attachments
           );
           await this.assertBrowserDevSessionHistory(
             recovered,
@@ -595,7 +636,7 @@ export class AgentOrchestrator {
       assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
     }
     if (
-      !session.providerSessionId ||
+      (adapter.descriptor.lifecycleScope !== 'TURN' && !session.providerSessionId) ||
       capabilities.turnInterruption.maturity === 'unsupported' ||
       !adapter.interruptTurn
     ) {
@@ -756,7 +797,8 @@ export class AgentOrchestrator {
     adapter: AgentRuntimeAdapter,
     session: AgentSessionRecord,
     settings: AgentExecutionSettings,
-    error: AgentProviderSessionMissingError
+    error: AgentProviderSessionMissingError,
+    attachments: AgentTurnAttachment[]
   ): Promise<AgentSessionRecord> {
     const previousProviderSessionId = session.providerSessionId;
     if (!previousProviderSessionId) {
@@ -778,9 +820,15 @@ export class AgentOrchestrator {
       iterationId: reset.iterationId,
       worktreeId: reset.worktreeId,
       worktreePath: reset.worktreePath,
-      settings
+      settings,
+      attachments
     });
-    assertSessionPostcondition(recreated, reset, 'Recreated session');
+    assertSessionPostcondition(
+      recreated,
+      reset,
+      'Recreated session',
+      adapter.descriptor.lifecycleScope !== 'TURN'
+    );
     return recreated;
   }
 
@@ -1043,31 +1091,55 @@ export class AgentOrchestrator {
       await this.recordAmbiguousMutation(run, error);
       return;
     }
+    const current = await this.store.getRun(run.id);
+    if (!current || !ACTIVE_RUN_STATUSES.includes(current.status)) {
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
-    const finalArtifact = await this.store.writeFinalArtifact(
-      run.taskId,
-      run.id,
-      `# Agent turn failed to start\n\n${message}\n`
-    );
-    await this.store.appendEvent(
+    const recorded = await this.store.appendRunEventIfStatus(
       createDomainEvent({
         type: 'AGENT_RUN_FAILED',
-        taskId: run.taskId,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
+        taskId: current.taskId,
+        iterationId: current.iterationId,
+        runId: current.id,
+        worktreeId: current.worktreeId,
+        agentSessionId: current.sessionId,
         source: 'provider',
-        payload: { error: message, finalArtifactId: finalArtifact.id }
-      })
+        payload: { error: message }
+      }),
+      ACTIVE_RUN_STATUSES
     );
+    if (!recorded) return;
+    let finalArtifactId: string | undefined;
+    try {
+      finalArtifactId = (
+        await this.store.writeFinalArtifact(
+          current.taskId,
+          current.id,
+          `# Agent turn failed to start\n\n${message}\n`
+        )
+      ).id;
+    } catch (artifactError) {
+      const artifactMessage =
+        artifactError instanceof Error ? artifactError.message : String(artifactError);
+      await this.store
+        .appendArtifact(
+          current.diagnosticArtifactId,
+          `\n[task-monki/start-failure-artifact]\n${artifactMessage}\n`
+        )
+        .catch(() => undefined);
+    }
     this.events.emit({
       type: 'run.terminal',
-      taskId: run.taskId,
-      iterationId: run.iterationId,
-      runId: run.id,
-      worktreeId: run.worktreeId,
-      payload: { status: 'failed', error: message },
+      taskId: current.taskId,
+      iterationId: current.iterationId,
+      runId: current.id,
+      worktreeId: current.worktreeId,
+      payload: {
+        status: 'failed',
+        error: message,
+        ...(finalArtifactId ? { finalArtifactId } : {})
+      },
       at: new Date().toISOString()
     });
   }
@@ -1107,7 +1179,7 @@ export class AgentOrchestrator {
     error: AgentMutationAmbiguousError
   ): Promise<void> {
     const current = (await this.store.getRun(run.id)) ?? run;
-    await this.store.appendEvent(
+    const recorded = await this.store.appendRunEventIfStatus(
       createDomainEvent({
         type: 'AGENT_MUTATION_AMBIGUOUS',
         taskId: current.taskId,
@@ -1122,8 +1194,10 @@ export class AgentOrchestrator {
           reason: error.message,
           automaticResubmission: false
         }
-      })
+      }),
+      ACTIVE_RUN_STATUSES
     );
+    if (!recorded) return;
     this.events.emit({
       type: 'run.activity',
       taskId: current.taskId,

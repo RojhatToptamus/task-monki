@@ -43,6 +43,9 @@ Task Monki probes candidate Codex executables in this order:
 The probe records `--version`, detects the supported stdio App Server launch
 form from `codex app-server --help`, starts the candidate with a temporary
 `CODEX_HOME`, initializes JSON-RPC, and verifies the methods Task Monki uses.
+`CODEX_HOME` is admitted by the explicit
+`task-monki/codex-environment@v1` contract rather than the portable child
+environment, so other runtimes cannot inherit Codex state.
 Automatic discovery picks a compatible runtime instead of failing on an older
 incompatible candidate that appears earlier on `PATH`. Explicit configuration is
 treated as intentional and must be compatible.

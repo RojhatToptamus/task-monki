@@ -6,7 +6,11 @@ import type {
   AgentSessionStatus,
   AgentTokenUsageBreakdown
 } from '../../../shared/agent';
+import { redactCredentialText } from '../AgentCredentialRedaction';
 import { OPENCODE_RUNTIME_ID } from './OpenCodeRuntimeResolver';
+
+const MAX_ERROR_DIAGNOSTIC_BYTES = 4 * 1024;
+const ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX = '… [OpenCode diagnostic truncated]';
 
 export interface OpenCodeHealth {
   healthy: true;
@@ -130,7 +134,7 @@ export interface OpenCodeProviderModel {
 
 export interface OpenCodeProviderCatalog {
   providers: OpenCodeProvider[];
-  connected?: string[];
+  connected: string[];
   defaults: Record<string, string>;
 }
 
@@ -238,9 +242,12 @@ export function parseOpenCodeProviderCatalog(value: unknown): OpenCodeProviderCa
     }
     return provider as unknown as OpenCodeProvider;
   });
-  const connected = Array.isArray(record?.connected)
-    ? record.connected.filter((entry): entry is string => typeof entry === 'string')
-    : undefined;
+  if (!Array.isArray(record?.connected) || record.connected.some((entry) => typeof entry !== 'string')) {
+    throw new Error(
+      'OpenCode provider catalog is missing authoritative connected-provider state.'
+    );
+  }
+  const connected = record.connected as string[];
   const defaults = asRecord(record?.default) ?? {};
   return {
     providers,
@@ -252,9 +259,9 @@ export function parseOpenCodeProviderCatalog(value: unknown): OpenCodeProviderCa
 }
 
 export function mapOpenCodeModels(catalog: OpenCodeProviderCatalog): AgentModel[] {
-  const connected = catalog.connected ? new Set(catalog.connected) : undefined;
+  const connected = new Set(catalog.connected);
   return catalog.providers
-    .filter((provider) => !connected || connected.has(provider.id))
+    .filter((provider) => connected.has(provider.id))
     .flatMap((provider) =>
       Object.values(provider.models).map((model): AgentModel => {
         const modelId = model.id;
@@ -369,14 +376,72 @@ export function mapOpenCodeUsage(info: OpenCodeMessageInfo): AgentTokenUsageBrea
   };
 }
 
-export function openCodeMessageError(info: OpenCodeMessageInfo): string | undefined {
-  if (!info.error) return undefined;
-  if (typeof info.error === 'string') return info.error;
-  const record = asRecord(info.error);
+/**
+ * Maps OpenCode's provider-owned error envelope to a safe durable diagnostic.
+ *
+ * Error envelopes may contain response bodies, headers, request metadata, and
+ * credentials. Only the small scalar contract below is eligible for a user-
+ * visible diagnostic. The structurally redacted envelope remains available in
+ * the bounded protocol journal for debugging.
+ */
+export function openCodeErrorDiagnostic(
+  value: unknown,
+  sensitiveValues: readonly string[] = []
+): string {
+  const record = asRecord(value);
   const data = asRecord(record?.data);
-  if (typeof data?.message === 'string') return data.message;
-  if (typeof record?.message === 'string') return record.message;
-  return 'OpenCode reported an assistant message error.';
+  const nestedError = asRecord(record?.error);
+  const dataError = asRecord(data?.error);
+  const cause = asRecord(record?.cause);
+  const message = firstNonEmptyString(
+    typeof value === 'string' ? value : undefined,
+    record?.message,
+    data?.message,
+    nestedError?.message,
+    dataError?.message,
+    cause?.message
+  );
+  const name = firstNonEmptyString(
+    record?.name,
+    data?.name,
+    nestedError?.name,
+    dataError?.name,
+    cause?.name
+  );
+  const status = firstDiagnosticScalar(
+    record?.statusCode,
+    data?.statusCode,
+    nestedError?.statusCode,
+    dataError?.statusCode,
+    record?.status,
+    data?.status
+  );
+  const code = firstDiagnosticScalar(
+    record?.code,
+    data?.code,
+    nestedError?.code,
+    dataError?.code
+  );
+  const retryable = firstBoolean(
+    record?.isRetryable,
+    data?.isRetryable,
+    nestedError?.isRetryable,
+    dataError?.isRetryable
+  );
+  const details = [
+    status === undefined ? undefined : `status ${status}`,
+    code === undefined || code === status ? undefined : `code ${code}`,
+    retryable === undefined ? undefined : retryable ? 'retryable' : 'not retryable'
+  ].filter((entry): entry is string => entry !== undefined);
+  const summary = message
+    ? `${name ? `${name}: ` : ''}${message}${details.length > 0 ? ` (${details.join('; ')})` : ''}`
+    : name
+      ? `${name}${details.length > 0 ? ` (${details.join('; ')})` : ''}`
+      : details.length > 0
+        ? `OpenCode reported a provider error (${details.join('; ')}).`
+        : 'OpenCode reported a structured provider error.';
+  const redacted = redactCredentialText(normalizeDiagnosticText(summary), sensitiveValues);
+  return boundDiagnostic(redacted);
 }
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -389,6 +454,43 @@ function finiteToken(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
     : 0;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0
+  );
+}
+
+function firstDiagnosticScalar(...values: unknown[]): string | undefined {
+  const value = values.find(
+    (candidate): candidate is string | number =>
+      (typeof candidate === 'string' && candidate.trim().length > 0) ||
+      (typeof candidate === 'number' && Number.isFinite(candidate))
+  );
+  return typeof value === 'number' ? String(value) : value?.trim();
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  return values.find((value): value is boolean => typeof value === 'boolean');
+}
+
+function normalizeDiagnosticText(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function boundDiagnostic(value: string): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.byteLength <= MAX_ERROR_DIAGNOSTIC_BYTES) return value;
+  const suffix = Buffer.from(ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX, 'utf8');
+  const head = bytes
+    .subarray(0, MAX_ERROR_DIAGNOSTIC_BYTES - suffix.byteLength)
+    .toString('utf8')
+    .replace(/\uFFFD+$/gu, '');
+  return `${head}${ERROR_DIAGNOSTIC_TRUNCATION_SUFFIX}`;
 }
 
 function jsonValue(value: unknown): import('../../../shared/agent').AgentJsonValue {

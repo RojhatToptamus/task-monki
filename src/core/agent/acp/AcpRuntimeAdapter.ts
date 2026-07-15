@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   AgentCommandApprovalDecision,
   AgentExecutionSettings,
@@ -5,7 +6,11 @@ import type {
   AgentModel,
   AgentPreflight,
   AgentProtocolMessageReference,
+  AgentRuntimeDiagnostic,
   AgentRuntimeCapabilities,
+  AgentSessionControl,
+  AgentSessionControlSet,
+  AgentSessionControlValue,
   AgentSessionRecord,
   AgentSessionSnapshot,
   InteractionRequestRecord,
@@ -29,6 +34,18 @@ import {
   type StartAgentTurn
 } from '../AgentRuntimeAdapter';
 import {
+  redactCredentialText,
+  redactCredentialValue
+} from '../AgentCredentialRedaction';
+import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
+import {
+  appendRuntimeDiagnostic,
+  createRuntimeReadiness,
+  errorDiagnostic,
+  infoDiagnostic,
+  warningDiagnostic
+} from '../AgentRuntimeReadiness';
+import {
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
 import { interactionTerminalStatus } from '../AgentInteractionPolicy';
@@ -37,16 +54,20 @@ import {
   parseAgentReviewResult
 } from '../../review/CodexReviewContract';
 import {
+  ACP_CLIENT_CAPABILITIES,
+  flattenSelectOptions,
   parseConfigOptions,
   parseNewSessionResponse,
   parsePermissionRequest,
   parsePromptResponse,
+  parseSessionModelExtension,
   parseSessionNotification,
   parseSessionSetupResponse,
   type AcpInitializeResponse,
   type AcpJsonRpcRequest,
   type AcpPermissionOption,
   type AcpSessionConfigOption,
+  type AcpSessionModelState,
   type AcpSessionModeState,
   type AcpSessionUpdate,
   type AcpToolCallUpdate
@@ -61,7 +82,6 @@ import {
   mapAcpPlanEntries,
   mapAcpToolKind,
   mapAcpToolStatus,
-  modelsFromAcpConfig,
   observedSettingsFromAcpState,
   permissionOutcomeForDecision,
   promptInputModalities,
@@ -75,6 +95,7 @@ import {
   type AcpRuntimeProfile
 } from './AcpRuntimeProfiles';
 import {
+  AcpRuntimeResolutionError,
   resolveAcpRuntime,
   type ResolveAcpRuntimeOptions,
   type ResolvedAcpRuntime
@@ -89,13 +110,27 @@ import {
   sanitizeAcpNativeSession
 } from './AcpNativeRedaction';
 
-const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
+/** A provider initialized ACP but violated the negotiated session contract. */
+export class AcpSessionContractError extends Error {
+  constructor(
+    readonly operation: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'AcpSessionContractError';
+  }
+}
+
+const PROMPT_OWNED_RUN_STATUSES: RunRecord['status'][] = [
   'QUEUED',
   'STARTING',
   'RUNNING',
   'AWAITING_APPROVAL',
   'AWAITING_USER_INPUT',
-  'INTERRUPTING',
+  'INTERRUPTING'
+];
+const ACTIVE_RUN_STATUSES: RunRecord['status'][] = [
+  ...PROMPT_OWNED_RUN_STATUSES,
   'RECOVERY_REQUIRED'
 ];
 const INTERRUPT_COMPLETION_TIMEOUT_MS = 15_000;
@@ -137,6 +172,16 @@ interface AcpRunStreamBuffer {
   timer?: NodeJS.Timeout;
 }
 
+interface AppliedAcpSessionSettings {
+  state: AcpNativeSessionState;
+  /**
+   * The final provider response that acknowledged a requested configuration
+   * mutation. This remains evidence for a Task Monki resolution; ACP does not
+   * define that response as an authoritative settings observation.
+   */
+  finalMutationResponse?: AgentProtocolMessageReference;
+}
+
 export interface AcpRuntimeAdapterOptions
   extends Omit<ResolveAcpRuntimeOptions, 'cwd'> {
   cwd: string;
@@ -160,7 +205,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private resolvedRuntime?: ResolvedAcpRuntime;
   private resolutionPromise?: Promise<ResolvedAcpRuntime>;
   private boundClient?: AcpRpcClient;
+  private clientGeneration = 0;
+  private boundClientGeneration = 0;
   private initializeResponse?: AcpInitializeResponse;
+  private profileModelState?: AcpSessionModelState;
   private initialized = false;
   private nativeSessions = new Map<string, AcpNativeSessionState>();
   private models: AgentModel[];
@@ -176,6 +224,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private configuredExecutable?: string;
   private runtimeReconfigurationPending = false;
   private runtimeResetTimer?: NodeJS.Timeout;
+  private runtimeQuarantinePromise?: Promise<void>;
+  private runtimeSafetyFence?: Error;
+  private readonly sensitiveValues: readonly string[];
 
   constructor(
     private readonly store: FileTaskStore,
@@ -184,18 +235,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     private readonly options: AcpRuntimeAdapterOptions
   ) {
     this.descriptor = profile.descriptor;
+    this.sensitiveValues = sensitiveEnvironmentValues(
+      profile.environmentPolicy,
+      options.environment ?? process.env
+    );
     this.interruptCompletionTimeoutMs =
       options.interruptCompletionTimeoutMs ?? INTERRUPT_COMPLETION_TIMEOUT_MS;
     this.configuredExecutable = normalizeExecutableOverride(options.executable);
     this.models = [defaultAcpModel(profile)];
     this.preflightState = {
       runtime: profile.descriptor,
-      ready: false,
+      readiness: createRuntimeReadiness(
+        'INITIALIZING',
+        `${profile.descriptor.displayName} has not been initialized.`,
+        { checks: { initialization: 'NOT_STARTED' } }
+      ),
       capabilities: acpCapabilities(profile),
-      problems: [`${profile.descriptor.displayName} has not been initialized.`],
-      warnings: [
-        'ACP client filesystem and terminal capabilities are disabled; the agent must use its own tools.'
-      ]
     };
   }
 
@@ -220,16 +275,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async preflight(): Promise<AgentPreflight> {
     try {
       const runtime = await this.ensureResolvedRuntime();
-      if (!this.supervisor?.currentClient) this.setDiscoveryPreflight(runtime);
+      if (
+        !this.supervisor?.currentClient &&
+        ![
+          'FAILED',
+          'INCOMPATIBLE',
+          'AUTHENTICATION_REQUIRED',
+          'ACCOUNT_UNSUPPORTED'
+        ].includes(this.preflightState.readiness.status)
+      ) {
+        this.setDiscoveryPreflight(runtime);
+      }
     } catch (cause) {
       this.preflightState = {
         runtime: this.descriptor,
-        ready: false,
+        readiness: acpFailureReadiness(this.profile, cause, this.sensitiveValues),
         capabilities: this.currentCapabilities(),
-        problems: [errorMessage(cause)],
-        warnings: [
-          'ACP client filesystem and terminal capabilities are disabled; the agent must use its own tools.'
-        ]
       };
     }
     return structuredClone(this.preflightState);
@@ -240,7 +301,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async listModels(): Promise<AgentModel[]> {
+    if (!this.initialized) await this.initialize();
     await this.ensureResolvedRuntime();
+    const modelExtension = this.profile.sessionModelExtension;
+    if (modelExtension?.initializeResponseMetaField && !this.profileModelState) {
+      await this.ensureClient();
+    }
     return structuredClone(this.models);
   }
 
@@ -248,29 +314,154 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const snapshot = await this.store.snapshot();
     const persistedSessions = snapshot.agentSessions
       .filter((session) => session.runtimeId === this.descriptor.id)
-      .map((session) => ({
-        localSessionId: session.id,
-        providerSessionId: session.providerSessionId,
-        runtimeOptions: session.observedSettings?.runtimeOptions?.[this.descriptor.id]
-      }));
-    return redactAcpNativeValue({
+      .map((session) =>
+        persistedNativeSessionView(
+          session.id,
+          session.providerSessionId,
+          session.observedSettings?.runtimeOptions?.[this.descriptor.id]
+        )
+      );
+    const liveSessions = [...this.nativeSessions.values()].flatMap((state) => {
+      if (!isSafeProviderIdentifier(state.sessionId, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+        return [];
+      }
+      if (hasUnsafeAcpActionableIdentifier(state, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+      }
+      return [sanitizeAcpNativeSession(state, this.sensitiveValues)];
+    });
+    const safePersistedSessions = persistedSessions.flatMap((session) => {
+      if (containsSensitiveProviderValue(session, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+        return [];
+      }
+      return [session];
+    });
+    return this.redactProviderValue(redactAcpNativeValue({
       protocol: { wireVersion: 1, schemaArtifactVersion: '1.19.0' },
       initialize: acpInitializeNativeView(this.initializeResponse),
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false
-      },
+      clientCapabilities: ACP_CLIENT_CAPABILITIES,
       sessions: [
-        ...[...this.nativeSessions.values()].map(sanitizeAcpNativeSession),
-        ...persistedSessions.filter(
+        ...liveSessions,
+        ...safePersistedSessions.filter(
           (session) =>
             !session.providerSessionId || !this.nativeSessions.has(session.providerSessionId)
         )
       ]
-    });
+    }));
+  }
+
+  async listSessionControls(): Promise<AgentSessionControlSet[]> {
+    const snapshot = await this.store.snapshot();
+    return snapshot.agentSessions
+      .filter(
+        (session) =>
+          session.runtimeId === this.descriptor.id &&
+          session.providerSessionId &&
+          this.nativeSessions.has(session.providerSessionId)
+      )
+      .flatMap((session) => {
+        const state = this.nativeSessions.get(session.providerSessionId!);
+        if (!state) return [];
+        const controls = acpSessionControlSet(
+          session.id,
+          state,
+          this.sensitiveValues
+        );
+        if (!controls) {
+          this.noteSensitiveIdentifierOmission();
+          return [];
+        }
+        if (hasUnsafeAcpActionableIdentifier(state, this.sensitiveValues)) {
+          this.noteSensitiveIdentifierOmission();
+        }
+        return [controls];
+      });
+  }
+
+  async applySessionControl(input: {
+    localSessionId: string;
+    controlId: string;
+    value: AgentSessionControlValue;
+    revision: string;
+  }): Promise<{
+    native: import('../../../shared/agent').AgentJsonValue;
+    controls: AgentSessionControlSet;
+  }> {
+    const session = await this.requireSession(input.localSessionId);
+    this.assertSessionOwnership(session);
+    if (!session.providerSessionId) {
+      throw new Error(`Agent session ${session.id} has no provider session ID.`);
+    }
+    const state = this.nativeSessions.get(session.providerSessionId);
+    if (!state) {
+      throw new Error(`ACP session ${session.providerSessionId} is not loaded.`);
+    }
+    const currentControls = acpSessionControlSet(
+      session.id,
+      state,
+      this.sensitiveValues
+    );
+    if (!currentControls) {
+      this.noteSensitiveIdentifierOmission();
+      throw new Error('Provider session controls contain a sensitive operational identifier.');
+    }
+    if (input.revision !== currentControls.revision) {
+      throw new Error(
+        'Provider session controls changed before this update. Refresh and choose again.'
+      );
+    }
+    const control = currentControls.controls.find(
+      (candidate) => candidate.id === input.controlId
+    );
+    if (!control || !control.mutable) {
+      throw new Error(`Provider session control ${input.controlId} is unavailable.`);
+    }
+    if (control.kind === 'BOOLEAN' && typeof input.value !== 'boolean') {
+      throw new Error(`Provider session control ${input.controlId} requires a boolean value.`);
+    }
+    if (
+      control.kind === 'SELECT' &&
+      (typeof input.value !== 'string' ||
+        !control.choices.some((choice) => choice.value === input.value))
+    ) {
+      throw new Error(`Provider session control ${input.controlId} received an invalid choice.`);
+    }
+
+    let native: import('../../../shared/agent').AgentJsonValue;
+    if (input.controlId === 'model') {
+      native = await this.applyNativeSessionModel(session.id, input.value as string);
+    } else if (input.controlId === 'mode') {
+      native = await this.applyNativeSessionMode(session.id, input.value as string);
+    } else if (input.controlId.startsWith('config:')) {
+      native = await this.applyNativeSessionConfigOption(
+        session.id,
+        input.controlId.slice('config:'.length),
+        input.value
+      );
+    } else {
+      throw new Error(`Unknown provider session control ${input.controlId}.`);
+    }
+    const updated = this.nativeSessions.get(session.providerSessionId);
+    if (!updated) throw new Error(`ACP session ${session.providerSessionId} was unloaded.`);
+    const updatedControls = acpSessionControlSet(
+      session.id,
+      updated,
+      this.sensitiveValues
+    );
+    if (!updatedControls) {
+      this.noteSensitiveIdentifierOmission();
+      throw new Error('Updated provider controls contain a sensitive operational identifier.');
+    }
+    return {
+      native: this.redactProviderValue(native),
+      controls: updatedControls
+    };
   }
 
   async configureRuntime(input: { executable?: string; restart: boolean }): Promise<void> {
+    await this.waitForRuntimeQuarantine();
     const executable = normalizeExecutableOverride(input.executable);
     const changed = executable !== this.configuredExecutable;
     this.configuredExecutable = executable;
@@ -278,15 +469,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
     if (await this.hasUnsafeRuntimeWork()) {
       this.runtimeReconfigurationPending = true;
-      this.preflightState = {
-        ...this.preflightState,
-        warnings: [
-          ...new Set([
-            ...this.preflightState.warnings,
-            'The ACP executable change is saved and will be applied after the current provider turn reaches a definitive terminal state.'
-          ])
-        ]
-      };
+      this.preflightState = appendRuntimeDiagnostic(
+        this.preflightState,
+        warningDiagnostic(
+          'RUNTIME_RESTART_REQUIRED',
+          'CONFIGURATION',
+          'The ACP executable change is saved and will be applied after the current provider turn reaches a definitive terminal state.'
+        )
+      );
       this.emitRuntimeUpdate();
       return;
     }
@@ -296,13 +486,69 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
     assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments);
     assertAcpExecutionPolicy(this.profile, input.settings);
+    if (
+      (input.settings.model &&
+        !isSafeProviderIdentifier(input.settings.model, this.sensitiveValues)) ||
+      (input.settings.modelProvider &&
+        !isSafeProviderIdentifier(input.settings.modelProvider, this.sensitiveValues))
+    ) {
+      throw new Error(
+        'ACP rejected a model selection whose operational identifier matches a runtime credential.'
+      );
+    }
     await this.ensureResolvedRuntime();
+    const modelExtension = this.profile.sessionModelExtension;
+    if (
+      modelExtension?.initializeResponseMetaField &&
+      !this.profileModelState
+    ) {
+      // A profile-owned initialize catalog is authoritative. Resolve execution
+      // only after it has replaced the provisional profile model so a missing
+      // or malformed provider catalog can never become an executable fallback.
+      await this.ensureClient();
+    }
     const requestedModel = input.settings.model;
+    const requestedProvider = input.settings.modelProvider;
+    const authoritativeModelContract =
+      modelExtension?.initializeResponseMetaField && this.profileModelState
+        ? modelExtension
+        : undefined;
+    const authoritativeModels = authoritativeModelContract
+      ? this.models
+      : undefined;
+    const providerModels =
+      authoritativeModels && requestedProvider
+        ? authoritativeModels.filter(
+            (candidate) => candidate.modelProvider === requestedProvider
+          )
+        : authoritativeModels ?? this.models;
+    if (
+      authoritativeModelContract &&
+      requestedProvider &&
+      providerModels.length === 0
+    ) {
+      throw new Error(
+        `${this.descriptor.displayName} did not advertise model provider ${requestedProvider} in its ${authoritativeModelContract.contractId} initialize catalog.`
+      );
+    }
+    if (
+      authoritativeModelContract &&
+      requestedModel &&
+      requestedModel !== 'default' &&
+      !providerModels.some(
+        (candidate) =>
+          candidate.id === requestedModel || candidate.model === requestedModel
+      )
+    ) {
+      throw new Error(
+        `${this.descriptor.displayName} did not advertise model ${requestedModel} in its ${authoritativeModelContract.contractId} initialize catalog.`
+      );
+    }
     let model =
-      this.models.find((candidate) => candidate.id === requestedModel) ??
-      this.models.find((candidate) => candidate.model === requestedModel) ??
-      this.models.find((candidate) => candidate.isDefault) ??
-      this.models[0];
+      providerModels.find((candidate) => candidate.id === requestedModel) ??
+      providerModels.find((candidate) => candidate.model === requestedModel) ??
+      providerModels.find((candidate) => candidate.isDefault) ??
+      providerModels[0];
     if (!model) throw new Error(`${this.descriptor.displayName} has no selectable model.`);
     if (
       requestedModel &&
@@ -325,12 +571,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ...input.settings,
       runtimeId: this.descriptor.id,
       model: model.model,
-      modelProvider: input.settings.modelProvider ?? model.modelProvider
+      modelProvider: authoritativeModelContract
+        ? model.modelProvider
+        : input.settings.modelProvider ?? model.modelProvider
     };
     return { settings, model };
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
+    await this.waitForRuntimeQuarantine();
     const local = await this.requireSession(input.localSessionId);
     this.assertSessionOwnership(local);
     assertAcpExecutionPolicy(this.profile, input.settings);
@@ -363,20 +612,53 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const client = await this.ensureClient();
     let response: AcpRpcResult<unknown>;
     try {
-      response = await client.requestMutation('session/new', {
-        cwd: input.worktreePath,
-        mcpServers: []
-      });
+      response = await this.requestBoundedMutation(
+        client,
+        'session/new',
+        { cwd: input.worktreePath, mcpServers: [] },
+        'The provider may have created a session, but its identity was not confirmed.'
+      );
     } catch (cause) {
-      throw mapMutationError('session/new', cause);
+      const error = mapMutationError('session/new', cause);
+      this.setSessionFailurePreflight(error);
+      throw error;
     }
-    const setup = parseNewSessionResponse(response.result);
+    let setup: ReturnType<typeof parseNewSessionResponse>;
+    let models: AcpNativeSessionState['models'];
+    try {
+      setup = parseNewSessionResponse(response.result);
+      models = this.parseSessionModels(response.result);
+    } catch (cause) {
+      const error = new AcpSessionContractError(
+        'session/new',
+        `${this.descriptor.displayName} returned an invalid ACP session/new response: ${errorMessage(cause)}`
+      );
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/new',
+        'The provider created an unreadable session, so this ACP process is incompatible and cannot be reused.'
+      );
+      this.setSessionFailurePreflight(error);
+      throw error;
+    }
     let state: AcpNativeSessionState = {
       sessionId: setup.sessionId,
       modes: setup.modes ?? null,
+      models,
       configOptions: setup.configOptions ?? []
     };
     state = normalizeAcpOperationalSession(state);
+    if (!isSafeProviderIdentifier(state.sessionId, this.sensitiveValues)) {
+      const error = new AcpSessionContractError(
+        'session/new',
+        'The ACP agent returned a session identifier matching a runtime credential.'
+      );
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/new',
+        'The provider created a session whose identifier cannot be persisted safely.'
+      );
+      this.setSessionFailurePreflight(error);
+      throw error;
+    }
     this.nativeSessions.set(state.sessionId, state);
     return this.completeCreatedSession(local, state, input.settings, client, response.raw);
   }
@@ -390,16 +672,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<AgentSessionRecord> {
     let state = initialState;
     this.provisionalProviderSessionIds.set(local.id, state.sessionId);
-    const initialObservedSettings = observedSettingsFromAcpState(
-      this.profile,
-      state,
-      settings
-    );
+    const initialObservedSettings = this.projectObservedSettings(state, settings);
+    let initialStored: AgentSessionRecord;
     try {
       // Persist provider ownership before issuing follow-up configuration
       // mutations. A failed mode/model update can then resume this exact
       // session instead of creating an orphan or duplicating it on retry.
-      await this.store.updateAgentSession(local.id, {
+      initialStored = await this.store.updateAgentSession(local.id, {
         providerSessionId: state.sessionId,
         status: 'NOT_LOADED',
         materialized: false,
@@ -408,37 +687,76 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         lastAttachedAt: new Date().toISOString()
       });
     } catch (cause) {
-      throw new AgentMutationAmbiguousError(
+      const ambiguity = new AgentMutationAmbiguousError(
         'session/new',
         `ACP created session ${state.sessionId}, but Task Monki could not persist its ownership: ${errorMessage(cause)}`
       );
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/new',
+        `Provider session ${state.sessionId} was created, but its ownership was not durably recorded.`
+      );
+      throw ambiguity;
     }
-    state = await this.applyRequestedNativeSettings(client, state, settings);
-    const observedSettings = observedSettingsFromAcpState(
-      this.profile,
-      state,
-      settings
-    );
-    const stored = await this.store.updateAgentSession(local.id, {
-      status: 'IDLE',
-      materialized: false,
-      requestedSettings: settings,
-      observedSettings,
-      lastAttachedAt: new Date().toISOString()
-    });
+    if (raw) {
+      try {
+        await this.recordSettingsObservation(
+          initialStored,
+          'THREAD_START_RESPONSE',
+          initialObservedSettings,
+          raw,
+          'ACP session/new reported the provider-selected state before Task Monki applied requested session configuration.'
+        );
+      } catch (cause) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/new',
+          `Provider session ${state.sessionId} was created, but its initial observed state was not durably recorded.`
+        );
+        throw new AgentMutationAmbiguousError(
+          'session/new',
+          `ACP created session ${state.sessionId}, but Task Monki could not persist its initial observed state: ${errorMessage(cause)}`
+        );
+      }
+    }
+    const applied = await this.applyRequestedNativeSettings(client, state, settings);
+    state = applied.state;
+    const observedSettings = this.projectObservedSettings(state, settings);
+    let stored: AgentSessionRecord;
+    try {
+      stored = await this.store.updateAgentSession(local.id, {
+        status: 'IDLE',
+        materialized: false,
+        requestedSettings: settings,
+        observedSettings,
+        lastAttachedAt: new Date().toISOString()
+      });
+      await this.recordSettingsObservation(
+        stored,
+        'TASK_MONKI_RESOLUTION',
+        observedSettings,
+        applied.finalMutationResponse,
+        applied.finalMutationResponse
+          ? 'Task Monki projected the requested ACP settings after the provider acknowledged the final session configuration mutation. The cited response is mutation evidence, not a provider settings observation.'
+          : 'Task Monki resolved the requested ACP settings after session setup without a provider settings response.'
+      );
+    } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/configure',
+        `Provider session ${state.sessionId} was configured, but its observed state was not durably recorded.`
+      );
+      throw new AgentMutationAmbiguousError(
+        'session/configure',
+        `ACP configured session ${state.sessionId}, but Task Monki could not persist its observed state: ${errorMessage(cause)}`
+      );
+    }
     this.provisionalProviderSessionIds.delete(local.id);
-    await this.recordSettingsObservation(
-      stored,
-      'THREAD_START_RESPONSE',
-      observedSettings,
-      raw
-    );
     this.refreshModels();
+    this.setOperationalPreflight(state);
     this.emitRuntimeUpdate();
     return stored;
   }
 
   async attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord> {
+    await this.waitForRuntimeQuarantine();
     const session = await this.requireSession(ref.localSessionId);
     this.assertSessionOwnership(session);
     const providerSessionId = ref.providerSessionId ?? session.providerSessionId;
@@ -448,19 +766,26 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         `ACP session ${session.id} has no provider session ID.`
       );
     }
+    if (!isSafeProviderIdentifier(providerSessionId, this.sensitiveValues)) {
+      this.noteSensitiveIdentifierOmission();
+      throw new Error(
+        'The persisted ACP session identifier matches a runtime credential and cannot be attached safely.'
+      );
+    }
     const existing = this.nativeSessions.get(providerSessionId);
     if (existing) {
       const stored = await this.store.updateAgentSession(session.id, {
         providerSessionId,
         status: 'IDLE',
-        observedSettings: observedSettingsFromAcpState(
-          this.profile,
+        observedSettings: this.projectObservedSettings(
           existing,
           session.requestedSettings
         ),
         lastAttachedAt: new Date().toISOString()
       });
       this.provisionalProviderSessionIds.delete(session.id);
+      this.setOperationalPreflight(existing);
+      this.emitRuntimeUpdate();
       return stored;
     }
 
@@ -480,13 +805,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     let response: AcpRpcResult<unknown>;
     if (method === 'session/load') this.replayingProviderSessionIds.add(providerSessionId);
     try {
-      response = await client.requestMutation(method, {
+      response = await this.requestBoundedMutation(client, method, {
         sessionId: providerSessionId,
         cwd: session.worktreePath,
         mcpServers: []
-      });
+      }, `The outcome of loading provider session ${providerSessionId} could not be confirmed.`);
     } catch (cause) {
-      throw mapMutationError(method, cause);
+      const error = mapMutationError(method, cause);
+      this.setSessionFailurePreflight(error);
+      throw error;
     } finally {
       // session/load streams historical session/update records before its
       // response. Drain already-enqueued updates while the replay guard is set
@@ -494,15 +821,31 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await this.inboundQueue;
       this.replayingProviderSessionIds.delete(providerSessionId);
     }
-    const setup = parseSessionSetupResponse(response.result);
+    let setup: ReturnType<typeof parseSessionSetupResponse>;
+    let models: AcpNativeSessionState['models'];
+    try {
+      setup = parseSessionSetupResponse(response.result);
+      models = this.parseSessionModels(response.result);
+    } catch (cause) {
+      const error = new AcpSessionContractError(
+        method,
+        `${this.descriptor.displayName} returned an invalid ACP ${method} response: ${errorMessage(cause)}`
+      );
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        method,
+        `Provider session ${providerSessionId} could not be authoritatively loaded from the response.`
+      );
+      this.setSessionFailurePreflight(error);
+      throw error;
+    }
     const state = normalizeAcpOperationalSession({
       sessionId: providerSessionId,
       modes: setup.modes ?? null,
+      models,
       configOptions: setup.configOptions ?? []
     });
     this.nativeSessions.set(providerSessionId, state);
-    const observedSettings = observedSettingsFromAcpState(
-      this.profile,
+    const observedSettings = this.projectObservedSettings(
       state,
       session.requestedSettings
     );
@@ -521,10 +864,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       response.raw
     );
     this.refreshModels();
+    this.setOperationalPreflight(state);
+    this.emitRuntimeUpdate();
     return stored;
   }
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {
+    await this.waitForRuntimeQuarantine();
     // A terminal run projection can become visible before its serialized
     // inbound handler finishes the corresponding session update. Drain that
     // queue so release state cannot be overwritten by a late terminal write.
@@ -565,11 +911,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       supportsClose &&
       this.nativeSessions.has(providerSessionId)
     ) {
-      try {
-        await client.requestMutation('session/close', { sessionId: providerSessionId });
-      } catch (cause) {
-        throw mapMutationError('session/close', cause);
-      }
+      await this.requestBoundedMutation(
+        client,
+        'session/close',
+        { sessionId: providerSessionId },
+        `The outcome of closing provider session ${providerSessionId} could not be confirmed.`
+      );
     }
 
     if (providerSessionId) {
@@ -617,6 +964,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
+    await this.waitForRuntimeQuarantine();
     assertAcpManagedAttachmentsUnsupported(this.profile, input.attachments ?? []);
     let session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
@@ -647,7 +995,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const settings = input.settings ?? session.requestedSettings;
     assertAcpExecutionPolicy(this.profile, settings);
     const prompt = [acpTextBlock(input.prompt)];
-    const client = await this.ensureClient();
+    let client = await this.ensureClient();
+    // A quarantine can begin after the initial native-session check but before
+    // the client is acquired. Never submit a prompt on a relaunched process
+    // until that process has authoritatively resumed or loaded the session.
+    if (!this.nativeSessions.has(session.providerSessionId)) {
+      session = await this.attachSession({
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      });
+      client = await this.ensureClient();
+    }
     const server = this.supervisor?.currentServer;
     if (!server) throw new Error('ACP runtime is not ready.');
     await this.store.updateRun(input.localRunId, {
@@ -662,7 +1020,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       started = await client.startMutation<unknown>('session/prompt', {
         sessionId: session.providerSessionId,
         prompt
-      });
+      }, { timeoutMs: null });
     } catch (cause) {
       this.activePromptRunIds.delete(input.localRunId);
       throw mapMutationError('session/prompt', cause);
@@ -687,9 +1045,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
       await this.supervisor?.markRunning();
     } catch (cause) {
-      this.activePromptRunIds.delete(input.localRunId);
-      await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' })
-        .catch(() => undefined);
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/prompt',
+        `Task Monki could not persist acknowledgement for prompt ${providerTurnId}.`
+      );
       throw new AgentMutationAmbiguousError(
         'session/prompt',
         `ACP accepted prompt request ${providerTurnId}, but Task Monki could not persist the acknowledgement: ${errorMessage(cause)}`
@@ -729,13 +1088,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await client.notify('session/cancel', { sessionId: session.providerSessionId });
       await this.cancelPendingPermissions(run, client);
     } catch (cause) {
-      this.activePromptRunIds.delete(run.id);
       await this.staleRunInteractions(
         run,
         `ACP cancellation is ambiguous: ${errorMessage(cause)}`
       ).catch(() => undefined);
-      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' })
-        .catch(() => undefined);
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/cancel',
+        `Cancellation delivery could not be confirmed for run ${run.id}.`
+      );
       throw new AgentMutationAmbiguousError(
         'session/cancel',
         `ACP cancellation delivery is ambiguous: ${errorMessage(cause)}`
@@ -778,6 +1138,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       );
     } catch (cause) {
       if (responseEvidencePersisted) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/request_permission',
+          `Permission response delivery could not be confirmed for interaction ${interaction.id}.`
+        );
         throw new AgentMutationAmbiguousError(
           'session/request_permission',
           `ACP permission response delivery is ambiguous after durable submission: ${errorMessage(cause)}`
@@ -798,6 +1162,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
       );
     } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/request_permission',
+        `The provider accepted interaction ${interaction.id}, but local completion persistence failed.`
+      );
       throw new AgentMutationAmbiguousError(
         'session/request_permission',
         `ACP permission response was delivered, but local completion persistence failed: ${errorMessage(cause)}`
@@ -866,27 +1234,55 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async shutdown(): Promise<void> {
+    const failures: unknown[] = [];
+    const quarantine = this.runtimeQuarantinePromise;
+    if (quarantine) {
+      try {
+        await quarantine;
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
     for (const timer of this.interruptTimers.values()) clearTimeout(timer);
     this.interruptTimers.clear();
     if (this.runtimeResetTimer) clearTimeout(this.runtimeResetTimer);
     this.runtimeResetTimer = undefined;
     // Stop the producer first, then drain every line and terminal rejection it
     // emitted. This prevents shutdown from racing a final stream chunk.
-    await this.supervisor?.shutdown();
-    await this.inboundQueue;
-    await this.flushAllContent(true);
+    try {
+      await this.supervisor?.shutdown();
+    } catch (cause) {
+      failures.push(cause);
+    }
+    try {
+      await this.inboundQueue;
+    } catch (cause) {
+      failures.push(cause);
+    }
+    try {
+      await this.flushAllContent(true);
+    } catch (cause) {
+      failures.push(cause);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'ACP runtime shutdown was incomplete.');
+    }
   }
 
-  /** Runtime-specific seam for dedicated ACP configuration UI. */
-  async setSessionConfigOption(
+  private async applyNativeSessionConfigOption(
     localSessionId: string,
     configId: string,
     value: string | boolean
   ): Promise<import('../../../shared/agent').AgentJsonValue> {
-    const session = await this.requireSession(localSessionId);
+    await this.waitForRuntimeQuarantine();
+    let session = await this.requireSession(localSessionId);
     this.assertSessionOwnership(session);
     if (!session.providerSessionId) throw new Error('ACP session is not materialized.');
-    const current = this.nativeSessions.get(session.providerSessionId);
+    const client = await this.ensureClient();
+    session = await this.requireSession(localSessionId);
+    const current = session.providerSessionId
+      ? this.nativeSessions.get(session.providerSessionId)
+      : undefined;
     if (!current) throw new Error('ACP session native configuration is not loaded.');
     const advertised = current.configOptions.find((option) => option.id === configId);
     if (!advertised) {
@@ -898,72 +1294,169 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (advertised.type === 'select' && !selectHasValue(advertised, String(value))) {
       throw new Error(`ACP config option ${configId} does not offer value ${String(value)}.`);
     }
-    const client = await this.ensureClient();
-    let response: AcpRpcResult<unknown>;
-    try {
-      response = await client.requestMutation<unknown>('session/set_config_option', {
+    const response = await this.requestBoundedMutation<unknown>(
+      client,
+      'session/set_config_option',
+      {
         sessionId: session.providerSessionId,
         configId,
         ...(typeof value === 'boolean' ? { type: 'boolean', value } : { value })
-      });
-    } catch (cause) {
-      throw mapMutationError('session/set_config_option', cause);
-    }
-    const record = requireRecord(response.result, 'ACP config response');
-    const configOptions = parseConfigOptions(record.configOptions) ?? [];
-    const state = { ...current, configOptions };
+      },
+      `The outcome of changing config option ${configId} could not be confirmed.`
+    );
+    let configOptions: AcpNativeSessionState['configOptions'];
     try {
-      await this.persistNativeState(session, state, response.raw);
+      const record = requireRecord(response.result, 'ACP config response');
+      configOptions = parseConfigOptions(record.configOptions) ?? [];
     } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/set_config_option',
+        `The provider replied after changing ${configId}, but its resulting state was invalid.`
+      );
       throw new AgentMutationAmbiguousError(
         'session/set_config_option',
-        `ACP applied config option ${configId}, but Task Monki could not persist the observed state: ${errorMessage(cause)}`
+        `ACP may have applied config option ${configId}, but its resulting state could not be read: ${errorMessage(cause)}`
       );
     }
-    return redactAcpNativeValue(sanitizeAcpNativeSession(state));
+    const state = { ...current, configOptions };
+    await this.persistNativeState(
+      session,
+      state,
+      response.raw,
+      'session/set_config_option',
+      `ACP applied config option ${configId}`
+    );
+    return redactAcpNativeValue(
+      sanitizeAcpNativeSession(state, this.sensitiveValues)
+    );
   }
 
-  /** Runtime-specific seam for provider modes such as plan/ask/code. */
-  async setSessionMode(
+  private async applyNativeSessionModel(
+    localSessionId: string,
+    modelId: string
+  ): Promise<import('../../../shared/agent').AgentJsonValue> {
+    const extension = this.profile.sessionModelExtension;
+    if (!extension) {
+      throw new Error(
+        `${this.descriptor.displayName} does not enable a provider-native session model extension.`
+      );
+    }
+    await this.waitForRuntimeQuarantine();
+    let session = await this.requireSession(localSessionId);
+    this.assertSessionOwnership(session);
+    if (!session.providerSessionId) throw new Error('ACP session is not materialized.');
+    const client = await this.ensureClient();
+    session = await this.requireSession(localSessionId);
+    const current = session.providerSessionId
+      ? this.nativeSessions.get(session.providerSessionId)
+      : undefined;
+    if (!current?.models?.availableModels.some((model) => model.modelId === modelId)) {
+      throw new Error(`ACP session did not advertise model ${modelId}.`);
+    }
+    const response = await this.requestBoundedMutation<unknown>(
+      client,
+      extension.setModelMethod,
+      {
+        sessionId: session.providerSessionId,
+        modelId
+      },
+      `The outcome of changing the session model to ${modelId} could not be confirmed.`
+    );
+    const state = {
+      ...current,
+      models: { ...current.models, currentModelId: modelId }
+    };
+    await this.persistNativeState(
+      session,
+      state,
+      response.raw,
+      extension.setModelMethod,
+      `ACP applied model ${modelId}`
+    );
+    return redactAcpNativeValue(
+      sanitizeAcpNativeSession(state, this.sensitiveValues)
+    );
+  }
+
+  private async applyNativeSessionMode(
     localSessionId: string,
     modeId: string
   ): Promise<import('../../../shared/agent').AgentJsonValue> {
-    const session = await this.requireSession(localSessionId);
+    await this.waitForRuntimeQuarantine();
+    let session = await this.requireSession(localSessionId);
     this.assertSessionOwnership(session);
     if (!session.providerSessionId) throw new Error('ACP session is not materialized.');
-    const current = this.nativeSessions.get(session.providerSessionId);
+    const client = await this.ensureClient();
+    session = await this.requireSession(localSessionId);
+    const current = session.providerSessionId
+      ? this.nativeSessions.get(session.providerSessionId)
+      : undefined;
     if (!current?.modes?.availableModes.some((mode) => mode.id === modeId)) {
       throw new Error(`ACP session did not advertise mode ${modeId}.`);
     }
-    const client = await this.ensureClient();
-    let response: AcpRpcResult<unknown>;
-    try {
-      response = await client.requestMutation<unknown>('session/set_mode', {
+    const response = await this.requestBoundedMutation<unknown>(
+      client,
+      'session/set_mode',
+      {
         sessionId: session.providerSessionId,
         modeId
-      });
-    } catch (cause) {
-      throw mapMutationError('session/set_mode', cause);
-    }
+      },
+      `The outcome of changing the session mode to ${modeId} could not be confirmed.`
+    );
     const state = {
       ...current,
       modes: { ...current.modes, currentModeId: modeId }
     };
-    try {
-      await this.persistNativeState(session, state, response.raw);
-    } catch (cause) {
-      throw new AgentMutationAmbiguousError(
-        'session/set_mode',
-        `ACP applied mode ${modeId}, but Task Monki could not persist the observed state: ${errorMessage(cause)}`
-      );
+    await this.persistNativeState(
+      session,
+      state,
+      response.raw,
+      'session/set_mode',
+      `ACP applied mode ${modeId}`
+    );
+    return redactAcpNativeValue(
+      sanitizeAcpNativeSession(state, this.sensitiveValues)
+    );
+  }
+
+  private async waitForRuntimeQuarantine(): Promise<void> {
+    if (this.runtimeSafetyFence) throw this.runtimeSafetyFence;
+    const pending = this.runtimeQuarantinePromise;
+    if (pending) await pending;
+    if (this.runtimeSafetyFence) throw this.runtimeSafetyFence;
+    const supervisorFence = this.supervisor?.safetyFenceReason;
+    if (supervisorFence) {
+      throw this.latchRuntimeSafetyFence(supervisorFence);
     }
-    return redactAcpNativeValue(sanitizeAcpNativeSession(state));
+  }
+
+  /**
+   * Bounded ACP mutations can time out only after their request was durably
+   * submitted. If that happens, the application-scoped process is no longer a
+   * trustworthy source of session state and must be fenced before reuse.
+   */
+  private async requestBoundedMutation<T>(
+    client: AcpRpcClient,
+    operation: string,
+    params: unknown,
+    ambiguityDetail: string
+  ): Promise<AcpRpcResult<T>> {
+    try {
+      return await client.requestMutation<T>(operation, params);
+    } catch (cause) {
+      const error = mapMutationError(operation, cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(operation, ambiguityDetail);
+      }
+      throw error;
+    }
   }
 
   private async ensureClient(): Promise<AcpRpcClient> {
+    await this.waitForRuntimeQuarantine();
     if (!this.supervisor) {
       const runtime = await this.ensureResolvedRuntime();
-      this.supervisor = new AcpStdioSupervisor(this.store, {
+      const supervisor = new AcpStdioSupervisor(this.store, {
         profile: this.profile,
         runtime,
         cwd: this.options.cwd,
@@ -971,39 +1464,116 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         appVersion: this.options.appVersion,
         requestTimeoutMs: this.options.requestTimeoutMs
       });
-      this.supervisor.events.on('exit', (server, unexpected) => {
-        if (unexpected) this.enqueueInbound(() => this.handleRuntimeLoss(server.id));
+      this.supervisor = supervisor;
+      supervisor.events.on('exit', (server, unexpected) => {
+        if (supervisor.safetyFenceReason) {
+          this.latchRuntimeSafetyFence(supervisor.safetyFenceReason);
+        }
+        if (unexpected && !this.runtimeQuarantinePromise) {
+          this.enqueueInbound(() => this.handleRuntimeLoss(server.id));
+        }
       });
-      this.supervisor.events.on('protocolError', (error) => {
+      supervisor.events.on('protocolError', (error) => {
+        this.latchRuntimeSafetyFence(
+          `ACP protocol failure requires an app restart before this runtime can be launched again: ${error.message}`
+        );
         this.preflightState = {
           ...this.preflightState,
-          ready: false,
-          problems: [`ACP protocol failure: ${error.message}`]
+          readiness: createRuntimeReadiness(
+            'FAILED',
+            'The ACP connection violated the negotiated protocol.',
+            {
+              checks: {
+                ...this.preflightState.readiness.checks,
+                initialization: 'FAILED'
+              },
+              diagnostics: [
+                ...this.preflightState.readiness.diagnostics,
+                errorDiagnostic(
+                  'ACP_PROTOCOL_FAILURE',
+                  'COMPATIBILITY',
+                  `ACP protocol failure: ${error.message}`
+                )
+              ],
+              nextAction: { kind: 'CONFIGURE', label: 'Choose a compatible executable' }
+            }
+          )
         };
         this.emitRuntimeUpdate();
       });
     }
-    const running = await this.supervisor.start();
+    let running: Awaited<ReturnType<AcpStdioSupervisor['start']>>;
+    try {
+      running = await this.supervisor.start();
+    } catch (cause) {
+      if (this.supervisor.safetyFenceReason) {
+        this.latchRuntimeSafetyFence(this.supervisor.safetyFenceReason);
+      }
+      const detail =
+        this.supervisor.currentServer?.exitReason ?? errorMessage(cause);
+      this.preflightState = {
+        ...this.preflightState,
+        readiness: createRuntimeReadiness(
+          /protocol negotiation selected|protocol violation/iu.test(detail)
+            ? 'INCOMPATIBLE'
+            : 'FAILED',
+          detail,
+          {
+            checks: {
+              discovery: 'FOUND',
+              compatibility: /protocol negotiation selected|protocol violation/iu.test(detail)
+                ? 'INCOMPATIBLE'
+                : 'UNKNOWN',
+              initialization: 'FAILED'
+            },
+            diagnostics: [
+              errorDiagnostic(
+                'ACP_INITIALIZATION_FAILED',
+                'INITIALIZATION',
+                detail
+              )
+            ],
+            nextAction: { kind: 'CONFIGURE', label: 'Review executable details' }
+          }
+        )
+      };
+      this.emitRuntimeUpdate();
+      throw cause;
+    }
     this.initializeResponse = running.initialize;
+    this.profileModelState = running.profileModelState;
     this.bindClient(running.client);
+    this.refreshModels();
+    const hasProfileCatalog = Boolean(
+      this.profile.sessionModelExtension?.initializeResponseMetaField &&
+      this.profileModelState &&
+      this.models.length > 0
+    );
     this.preflightState = {
       runtime: this.descriptor,
-      ready: true,
+      readiness: createRuntimeReadiness(
+        'DISCOVERED',
+        'ACP v1 is connected. The first provider session will verify account and model access.',
+        {
+          summary: 'Connected; session pending',
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'COMPATIBLE',
+            initialization: 'INITIALIZED',
+            authentication: running.initialize.authMethods.length > 0
+              ? 'PROVIDER_MANAGED'
+              : 'UNKNOWN',
+            modelCatalog: hasProfileCatalog ? 'AVAILABLE' : 'UNKNOWN'
+          },
+          diagnostics: acpRuntimeDiagnostics(running.initialize.authMethods.length > 0)
+        }
+      ),
       capabilities: this.currentCapabilities(),
       runtimeVersion: running.server.runtimeVersion,
-      accountLabel: redactNativeString(
+      accountLabel: this.redactProviderText(
         running.initialize.agentInfo?.title ?? running.initialize.agentInfo?.name ?? ''
-      ) || undefined,
-      problems: [],
-      warnings: [
-        'Task Monki advertises fs.readTextFile=false, fs.writeTextFile=false, and terminal=false. Agent-native tools remain inside the provider process.',
-        'ACP agents currently lack a Task Monki-attested workspace/network sandbox. Restricted runs fail closed; only explicit full-access, network-enabled runs are accepted.',
-        ...(running.initialize.authMethods.length > 0
-          ? ['The agent advertises native authentication methods; authentication remains provider-owned.']
-          : [])
-      ]
+      ) || undefined
     };
-    this.refreshModels();
     return running.client;
   }
 
@@ -1051,8 +1621,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.inboundQueue;
     await this.flushAllContent(true);
     this.supervisor = undefined;
-    this.boundClient = undefined;
+    this.invalidateBoundClient();
     this.initializeResponse = undefined;
+    this.profileModelState = undefined;
     this.resolvedRuntime = undefined;
     this.resolutionPromise = undefined;
     this.nativeSessions.clear();
@@ -1061,12 +1632,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.runtimeReconfigurationPending = false;
     this.preflightState = {
       runtime: this.descriptor,
-      ready: false,
+      readiness: createRuntimeReadiness(
+        'INITIALIZING',
+        `${this.descriptor.displayName} executable discovery must be refreshed.`,
+        {
+          checks: { initialization: 'NOT_STARTED' },
+          nextAction: { kind: 'RETRY', label: 'Refresh runtime' }
+        }
+      ),
       capabilities: this.currentCapabilities(),
-      problems: [`${this.descriptor.displayName} executable discovery must be refreshed.`],
-      warnings: [
-        'ACP capability negotiation will run lazily when the configured runtime is next selected.'
-      ]
     };
     this.emitRuntimeUpdate();
   }
@@ -1084,8 +1658,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.inboundQueue;
     await this.flushAllContent(true);
     this.supervisor = undefined;
-    this.boundClient = undefined;
+    this.invalidateBoundClient();
     this.initializeResponse = undefined;
+    this.profileModelState = undefined;
     this.models = [defaultAcpModel(this.profile)];
     if (this.resolvedRuntime) this.setDiscoveryPreflight(this.resolvedRuntime);
     this.emitRuntimeUpdate();
@@ -1107,9 +1682,25 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }).catch((cause) => {
         this.preflightState = {
           ...this.preflightState,
-          problems: [
-            ...new Set([...this.preflightState.problems, errorMessage(cause)])
-          ]
+          readiness: createRuntimeReadiness(
+            'FAILED',
+            'The saved ACP executable configuration could not be applied.',
+            {
+              checks: {
+                ...this.preflightState.readiness.checks,
+                initialization: 'FAILED'
+              },
+              diagnostics: [
+                ...this.preflightState.readiness.diagnostics,
+                errorDiagnostic(
+                  'RUNTIME_RECONFIGURATION_FAILED',
+                  'CONFIGURATION',
+                  errorMessage(cause)
+                )
+              ],
+              nextAction: { kind: 'CONFIGURE', label: 'Review executable path' }
+            }
+          )
         };
         this.emitRuntimeUpdate();
       });
@@ -1120,35 +1711,136 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private setDiscoveryPreflight(runtime: ResolvedAcpRuntime): void {
     this.preflightState = {
       runtime: this.descriptor,
-      ready: true,
+      readiness: createRuntimeReadiness(
+        'DISCOVERED',
+        'The executable and ACP launch command were found. Live protocol, account, and model access are checked when the first session starts.',
+        {
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'UNKNOWN',
+            initialization: 'NOT_STARTED',
+            authentication: 'UNKNOWN',
+            modelCatalog: 'UNKNOWN'
+          },
+          diagnostics: [
+            infoDiagnostic(
+              'ACP_LAUNCH_CONTRACT_FOUND',
+              'DISCOVERY',
+              'The provider-specific ACP launch contract was found.'
+            ),
+            ...acpRuntimeDiagnostics(false)
+          ]
+        }
+      ),
       capabilities: this.currentCapabilities(),
       runtimeVersion: runtime.version,
-      problems: [],
-      warnings: [
-        'Executable discovery succeeded. ACP capabilities, authentication, native models, and session configuration will be negotiated lazily when the first session starts.',
-        'Task Monki advertises fs.readTextFile=false, fs.writeTextFile=false, and terminal=false.',
-        'ACP agents currently lack a Task Monki-attested workspace/network sandbox. Restricted runs fail closed; only the provider-controlled full-access preset is accepted.'
-      ]
     };
+  }
+
+  private setOperationalPreflight(state: AcpNativeSessionState): void {
+    this.refreshModels();
+    const hasNativeModels = Boolean(
+      state.models?.availableModels.length ||
+        state.configOptions.some(
+          (option) => option.type === 'select' && option.category === 'model'
+        )
+    );
+    this.preflightState = {
+      runtime: this.descriptor,
+      readiness: createRuntimeReadiness(
+        'READY',
+        `${this.descriptor.displayName} created or resumed a provider session successfully.`,
+        {
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'COMPATIBLE',
+            initialization: 'INITIALIZED',
+            authentication: 'PROVIDER_MANAGED',
+            modelCatalog: hasNativeModels ? 'AVAILABLE' : 'EMPTY'
+          },
+          diagnostics: acpRuntimeDiagnostics(
+            Boolean(this.initializeResponse?.authMethods.length)
+          )
+        }
+      ),
+      capabilities: this.currentCapabilities(),
+      runtimeVersion:
+        this.supervisor?.currentServer?.runtimeVersion ?? this.resolvedRuntime?.version,
+      accountLabel:
+        this.redactProviderText(
+          this.initializeResponse?.agentInfo?.title ??
+            this.initializeResponse?.agentInfo?.name ??
+            ''
+        ) || undefined
+    };
+  }
+
+  private setSessionFailurePreflight(cause: unknown): void {
+    this.preflightState = {
+      ...this.preflightState,
+      readiness: acpSessionFailureReadiness(
+        this.profile,
+        cause,
+        this.preflightState.readiness.checks,
+        Boolean(this.supervisor?.currentClient),
+        this.sensitiveValues
+      )
+    };
+    this.emitRuntimeUpdate();
   }
 
   private bindClient(client: AcpRpcClient): void {
     if (this.boundClient === client) return;
     this.boundClient = client;
+    const generation = ++this.clientGeneration;
+    this.boundClientGeneration = generation;
     client.events.on('notification', (method, params, raw) => {
-      this.enqueueInbound(() => this.handleNotification(method, params, raw));
+      this.enqueueInbound(() =>
+        this.handleNotification(client, generation, method, params, raw)
+      );
     });
     client.events.on('request', (request, raw) => {
-      this.enqueueInbound(() => this.handleServerRequest(request, raw));
+      this.enqueueInbound(() => this.handleServerRequest(client, generation, request, raw));
     });
+  }
+
+  /**
+   * ACP callbacks can remain queued after their stdio process has exited. A
+   * generation token makes every queued callback fail closed once quarantine
+   * invalidates that client, even if a replacement process is already bound.
+   */
+  private isCurrentClientEvent(
+    client: AcpRpcClient,
+    generation: number,
+    raw: AgentProtocolMessageReference
+  ): boolean {
+    return (
+      this.boundClient === client &&
+      this.boundClientGeneration === generation &&
+      raw.serverInstanceId === client.serverInstanceId
+    );
+  }
+
+  private invalidateBoundClient(client?: AcpRpcClient): void {
+    if (client && this.boundClient !== client) return;
+    this.boundClient = undefined;
+    this.boundClientGeneration = ++this.clientGeneration;
+  }
+
+  private parseSessionModels(value: unknown): AcpNativeSessionState['models'] {
+    const extension = this.profile.sessionModelExtension;
+    return extension
+      ? parseSessionModelExtension(value, extension.setupResponseField)
+      : null;
   }
 
   private async applyRequestedNativeSettings(
     client: AcpRpcClient,
     initial: AcpNativeSessionState,
     settings: AgentExecutionSettings
-  ): Promise<AcpNativeSessionState> {
+  ): Promise<AppliedAcpSessionSettings> {
     let state = initial;
+    let finalMutationResponse: AgentProtocolMessageReference | undefined;
     const native = settings.runtimeOptions?.[this.descriptor.id];
     const nativeRecord = isRecord(native) ? native : {};
     const requestedMode = typeof nativeRecord.modeId === 'string' ? nativeRecord.modeId : undefined;
@@ -1157,10 +1849,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         throw new Error(`ACP session did not advertise requested mode ${requestedMode}.`);
       }
       try {
-        await client.requestMutation('session/set_mode', {
-          sessionId: state.sessionId,
-          modeId: requestedMode
-        });
+        const response = await this.requestBoundedMutation(
+          client,
+          'session/set_mode',
+          { sessionId: state.sessionId, modeId: requestedMode },
+          `The requested mode ${requestedMode} may have been applied during session setup.`
+        );
+        finalMutationResponse = response.raw;
       } catch (cause) {
         throw mapMutationError('session/set_mode', cause);
       }
@@ -1172,12 +1867,41 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       (option) => option.type === 'select' && option.category === 'model'
     );
     if (settings.model && settings.model !== 'default') {
-      if (!modelOption) {
+      if (state.models) {
+        const extension = this.profile.sessionModelExtension;
+        if (!extension) {
+          throw new Error(
+            `${this.descriptor.displayName} returned session models without an enabled provider extension.`
+          );
+        }
+        if (!state.models.availableModels.some((model) => model.modelId === settings.model)) {
+          throw new Error(`ACP session did not advertise requested model ${settings.model}.`);
+        }
+        if (state.models.currentModelId !== settings.model) {
+          try {
+            const response = await this.requestBoundedMutation(
+              client,
+              extension.setModelMethod,
+              { sessionId: state.sessionId, modelId: settings.model },
+              `The requested model ${settings.model} may have been applied during session setup.`
+            );
+            finalMutationResponse = response.raw;
+          } catch (cause) {
+            throw mapMutationError(extension.setModelMethod, cause);
+          }
+        }
+        state = normalizeAcpOperationalSession({
+          ...state,
+          models: { ...state.models, currentModelId: settings.model }
+        });
+        this.nativeSessions.set(state.sessionId, state);
+      } else if (!modelOption) {
         throw new Error(
-          `${this.descriptor.displayName} did not expose an ACP model configuration selector.`
+          `${this.descriptor.displayName} did not expose provider-native session models or an ACP model configuration selector.`
         );
+      } else {
+        values[modelOption.id] = settings.model;
       }
-      values[modelOption.id] = settings.model;
     }
     for (const [configId, value] of Object.entries(values)) {
       const option = state.configOptions.find((candidate) => candidate.id === configId);
@@ -1190,32 +1914,52 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }
       let response: AcpRpcResult<unknown>;
       try {
-        response = await client.requestMutation<unknown>('session/set_config_option', {
-          sessionId: state.sessionId,
-          configId,
-          ...(typeof value === 'boolean' ? { type: 'boolean', value } : { value })
-        });
+        response = await this.requestBoundedMutation<unknown>(
+          client,
+          'session/set_config_option',
+          {
+            sessionId: state.sessionId,
+            configId,
+            ...(typeof value === 'boolean' ? { type: 'boolean', value } : { value })
+          },
+          `The requested config option ${configId} may have been applied during session setup.`
+        );
       } catch (cause) {
         throw mapMutationError('session/set_config_option', cause);
       }
-      const record = requireRecord(response.result, 'ACP config response');
-      state = {
-        ...state,
-        configOptions: parseConfigOptions(record.configOptions) ?? state.configOptions
-      };
+      finalMutationResponse = response.raw;
+      try {
+        const record = requireRecord(response.result, 'ACP config response');
+        state = {
+          ...state,
+          configOptions: parseConfigOptions(record.configOptions) ?? state.configOptions
+        };
+      } catch (cause) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/set_config_option',
+          `The provider replied after changing ${configId}, but its resulting state was invalid.`
+        );
+        throw new AgentMutationAmbiguousError(
+          'session/set_config_option',
+          `ACP may have applied config option ${configId}, but its resulting state could not be read: ${errorMessage(cause)}`
+        );
+      }
       state = normalizeAcpOperationalSession(state);
       this.nativeSessions.set(state.sessionId, state);
     }
     state = normalizeAcpOperationalSession(state);
     this.nativeSessions.set(state.sessionId, state);
-    return state;
+    return { state, finalMutationResponse };
   }
 
   private async handleNotification(
+    client: AcpRpcClient,
+    generation: number,
     method: string,
     params: unknown,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
+    if (!this.isCurrentClientEvent(client, generation, raw)) return;
     if (method !== 'session/update') {
       await this.recordExtensionTelemetry(method, params, raw);
       return;
@@ -1231,10 +1975,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.descriptor.id,
       notification.sessionId
     );
-    if (!session) return;
+    if (!session || !this.isCurrentClientEvent(client, generation, raw)) return;
     const activeRun = this.replayingProviderSessionIds.has(notification.sessionId)
       ? undefined
       : await this.store.getActiveRunForSession(session.id);
+    if (!this.isCurrentClientEvent(client, generation, raw)) return;
     // ACP session updates do not carry a prompt ID. Once a prompt mutation is
     // ambiguous, later traffic cannot safely be attributed to that recovered
     // run and must not move it forward.
@@ -1281,13 +2026,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async handleServerRequest(
+    client: AcpRpcClient,
+    generation: number,
     request: AcpJsonRpcRequest,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const client = this.supervisor?.currentClient;
-    if (!client) return;
+    if (!this.isCurrentClientEvent(client, generation, raw)) return;
     if (request.method !== 'session/request_permission') {
       await this.recordExtensionTelemetry(request.method, request.params, raw);
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respondError(
         request.id,
         -32601,
@@ -1300,6 +2047,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       permission = parsePermissionRequest(request.params);
     } catch (cause) {
       await this.recordProtocolIncident(errorMessage(cause), raw);
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respondError(request.id, -32602, errorMessage(cause));
       return;
     }
@@ -1312,12 +2060,39 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ? activeRun
       : undefined;
     const server = this.supervisor?.currentServer;
-    if (!session || !run || !server) {
+    if (
+      !this.isCurrentClientEvent(client, generation, raw) ||
+      !session ||
+      !run ||
+      !server ||
+      server.id !== raw.serverInstanceId
+    ) {
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
     if (request.id === null) {
       await this.recordProtocolIncident('ACP permission request used a null JSON-RPC id.', raw);
+      await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
+      return;
+    }
+    if (
+      [
+        typeof request.id === 'string' ? request.id : undefined,
+        permission.toolCall.toolCallId,
+        ...permission.options.map((option) => option.optionId)
+      ].some(
+        (value) =>
+          typeof value === 'string' &&
+          !isSafeProviderIdentifier(value, this.sensitiveValues)
+      )
+    ) {
+      this.noteSensitiveIdentifierOmission();
+      await this.recordProtocolIncident(
+        'ACP permission request contained an identifier matching a runtime credential and was cancelled.',
+        raw
+      );
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
       await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
@@ -1327,23 +2102,37 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       session,
       run
     });
-    const interaction = await this.store.createInteractionRequest({
-      runtimeId: this.descriptor.id,
-      serverInstanceId: server.id,
-      providerRequestId: request.id,
-      taskId: run.taskId,
-      iterationId: run.iterationId,
-      runId: run.id,
-      sessionId: session.id,
-      providerTurnId: run.providerTurnId,
-      providerItemId: permission.toolCall.toolCallId,
-      type: 'COMMAND_APPROVAL',
-      request: materialized.request,
-      allowedActions: materialized.allowedActions,
-      policyWarnings: materialized.warnings,
-      requestRawMessage: raw
-    });
-    await this.store.updateAgentSession(session.id, { status: 'AWAITING_APPROVAL' });
+    if (!this.isCurrentClientEvent(client, generation, raw)) return;
+    let interaction: InteractionRequestRecord;
+    try {
+      interaction = await this.store.createInteractionRequest({
+        runtimeId: this.descriptor.id,
+        serverInstanceId: server.id,
+        providerRequestId: request.id,
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        sessionId: session.id,
+        providerTurnId: run.providerTurnId,
+        providerItemId: permission.toolCall.toolCallId,
+        type: 'COMMAND_APPROVAL',
+        request: this.redactProviderValue(materialized.request),
+        allowedActions: materialized.allowedActions,
+        policyWarnings: materialized.warnings,
+        requestRawMessage: raw
+      });
+    } catch (cause) {
+      await this.recoverPermissionMaterializationFailure({
+        client,
+        generation,
+        request,
+        raw,
+        run,
+        session,
+        cause
+      });
+      return;
+    }
     this.emitInteractionUpdate(interaction);
   }
 
@@ -1352,7 +2141,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     update: AcpSessionUpdate,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
-    const text = textFromAcpContent(update.content);
+    const providerText = textFromAcpContent(update.content);
+    const text = providerText === undefined
+      ? undefined
+      : this.redactProviderText(providerText);
     if (text === undefined) return;
     const messageId = typeof update.messageId === 'string'
       ? update.messageId
@@ -1595,7 +2387,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       providerItemId: update.toolCallId,
       type: mapAcpToolKind(update.kind ?? (prior.kind as never)),
       status: mapAcpToolStatus(update.status),
-      payload: { ...prior, ...jsonSafeRecord(update) },
+      payload: this.redactProviderValue({ ...prior, ...jsonSafeRecord(update) }),
       rawMessage: raw
     });
   }
@@ -1611,7 +2403,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runId: run.id,
       sessionId: run.sessionId,
       runtimeId: this.descriptor.id,
-      steps: mapAcpPlanEntries(update.entries),
+      steps: this.redactProviderValue(mapAcpPlanEntries(update.entries)),
       rawMessage: raw
     });
   }
@@ -1646,13 +2438,21 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const current = this.nativeSessions.get(session.providerSessionId) ?? {
       sessionId: session.providerSessionId,
       modes: null,
+      models: null,
       configOptions: []
     };
     const state = {
       ...current,
       configOptions: parseConfigOptions(update.configOptions) ?? []
     };
-    await this.persistNativeState(session, state, raw);
+    await this.persistNativeState(
+      session,
+      state,
+      raw,
+      'session/update',
+      'ACP reported a native session setting change',
+      false
+    );
   }
 
   private async handleModeUpdate(
@@ -1666,29 +2466,46 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     await this.persistNativeState(
       session,
       { ...current, modes: { ...current.modes, currentModeId: update.currentModeId } },
-      raw
+      raw,
+      'session/update',
+      'ACP reported a native session setting change',
+      false
     );
   }
 
   private async persistNativeState(
     session: AgentSessionRecord,
     state: AcpNativeSessionState,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    operation = 'session/update',
+    appliedState = 'ACP reported a native session setting change',
+    drainInboundBeforeReplacement = true
   ): Promise<void> {
     state = normalizeAcpOperationalSession(state);
     this.nativeSessions.set(state.sessionId, state);
-    const observedSettings = observedSettingsFromAcpState(
-      this.profile,
+    const observedSettings = this.projectObservedSettings(
       state,
       session.requestedSettings
     );
-    await this.store.updateAgentSession(session.id, { observedSettings });
-    await this.recordSettingsObservation(
-      session,
-      'THREAD_SETTINGS_NOTIFICATION',
-      observedSettings,
-      raw
-    );
+    try {
+      await this.store.updateAgentSession(session.id, { observedSettings });
+      await this.recordSettingsObservation(
+        session,
+        'THREAD_SETTINGS_NOTIFICATION',
+        observedSettings,
+        raw
+      );
+    } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        operation,
+        `${appliedState}, but Task Monki could not durably record the observed state.`,
+        drainInboundBeforeReplacement
+      );
+      throw new AgentMutationAmbiguousError(
+        operation,
+        `${appliedState}, but Task Monki could not persist the observed state: ${errorMessage(cause)}`
+      );
+    }
     this.refreshModels();
     this.emitRuntimeUpdate();
   }
@@ -1701,85 +2518,127 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // marking it ambiguous. A late response must not reverse recovery.
     if (!this.activePromptRunIds.delete(runId)) return;
     const run = await this.store.getRun(runId);
-    if (!run || !ACTIVE_RUN_STATUSES.includes(run.status)) return;
+    if (!run || !PROMPT_OWNED_RUN_STATUSES.includes(run.status)) return;
+
     let prompt: ReturnType<typeof parsePromptResponse>;
     try {
       prompt = parsePromptResponse(response.result);
     } catch (cause) {
       const detail = `ACP prompt response violated the negotiated schema: ${errorMessage(cause)}`;
-      await this.store.appendEvent(
+      let finalArtifactId: string | undefined;
+      try {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'AGENT_PROTOCOL_INCIDENT',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            serverInstanceId: response.raw.serverInstanceId,
+            source: 'provider',
+            payload: { detail, rawMessage: response.raw }
+          })
+        );
+        finalArtifactId = await this.persistPromptFailure(
+          run,
+          new Error(detail),
+          response.raw
+        );
+      } catch (persistenceCause) {
+        await this.recoverDefinitivePromptFinalization(
+          run,
+          response.raw,
+          persistenceCause
+        );
+        return;
+      }
+      if (finalArtifactId) {
+        this.appEvents.emit({
+          type: 'run.terminal',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          payload: { status: 'failed', finalArtifactId },
+          at: new Date().toISOString()
+        });
+        this.schedulePendingRuntimeReset();
+      }
+      return;
+    }
+
+    let terminal: 'completed' | 'failed' | 'interrupted';
+    let finalArtifactId: string;
+    try {
+      await this.flushRunContent(run.id, true);
+      const items = await this.store.getAgentItemsForRun(run.id);
+      const finalMessage = items
+        .filter((item) => item.type === 'AGENT_MESSAGE')
+        .map(itemText)
+        .filter(Boolean)
+        .join('\n');
+      const finalArtifact = await this.store.writeFinalArtifact(
+        run.taskId,
+        run.id,
+        formatFinalArtifact(this.profile.descriptor.displayName, prompt.stopReason, finalMessage)
+      );
+      terminal =
+        prompt.stopReason === 'cancelled'
+          ? 'interrupted'
+          : prompt.stopReason === 'refusal'
+            ? 'failed'
+            : 'completed';
+      const type =
+        terminal === 'completed'
+          ? 'AGENT_RUN_COMPLETED'
+          : terminal === 'interrupted'
+            ? 'AGENT_RUN_INTERRUPTED'
+            : 'AGENT_RUN_FAILED';
+      const reviewResult = run.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
+      await this.store.updateRun(run.id, {
+        finalMessage: finalMessage || undefined,
+        providerTerminalRawMessage: response.raw
+      });
+      const terminalPublished = await this.store.appendRunEventIfStatus(
         createDomainEvent({
-          type: 'AGENT_PROTOCOL_INCIDENT',
+          type,
           taskId: run.taskId,
           iterationId: run.iterationId,
           runId: run.id,
           worktreeId: run.worktreeId,
           agentSessionId: run.sessionId,
-          serverInstanceId: response.raw.serverInstanceId,
+          serverInstanceId: run.serverInstanceId,
           source: 'provider',
-          payload: { detail, rawMessage: response.raw }
-        })
+          payload: {
+            terminalStatus: terminal,
+            terminalReason: prompt.stopReason,
+            finalArtifactId: finalArtifact.id,
+            codexReviewStatus: agentReviewStatusFromResult(reviewResult),
+            codexReviewResult: reviewResult
+          }
+        }),
+        PROMPT_OWNED_RUN_STATUSES
       );
-      await this.handlePromptFailure(runId, new Error(detail), true, response.raw);
+      if (!terminalPublished) {
+        throw new Error(
+          `ACP run ${run.id} no longer owned its prompt when terminal persistence completed.`
+        );
+      }
+      await this.store.updateAgentSession(run.sessionId, { status: 'IDLE' });
+      this.clearInterruptDeadline(run.id);
+      finalArtifactId = finalArtifact.id;
+    } catch (cause) {
+      await this.recoverDefinitivePromptFinalization(run, response.raw, cause);
       return;
     }
-    await this.flushRunContent(run.id, true);
-    const items = await this.store.getAgentItemsForRun(run.id);
-    const finalMessage = items
-      .filter((item) => item.type === 'AGENT_MESSAGE')
-      .map(itemText)
-      .filter(Boolean)
-      .join('\n');
-    const finalArtifact = await this.store.writeFinalArtifact(
-      run.taskId,
-      run.id,
-      formatFinalArtifact(this.profile.descriptor.displayName, prompt.stopReason, finalMessage)
-    );
-    const terminal =
-      prompt.stopReason === 'cancelled'
-        ? 'interrupted'
-        : prompt.stopReason === 'refusal'
-          ? 'failed'
-          : 'completed';
-    const type =
-      terminal === 'completed'
-        ? 'AGENT_RUN_COMPLETED'
-        : terminal === 'interrupted'
-          ? 'AGENT_RUN_INTERRUPTED'
-          : 'AGENT_RUN_FAILED';
-    const reviewResult = run.mode === 'REVIEW' ? parseAgentReviewResult(finalMessage) : undefined;
-    await this.store.updateRun(run.id, {
-      finalMessage: finalMessage || undefined,
-      providerTerminalRawMessage: response.raw
-    });
-    await this.store.appendEvent(
-      createDomainEvent({
-        type,
-        taskId: run.taskId,
-        iterationId: run.iterationId,
-        runId: run.id,
-        worktreeId: run.worktreeId,
-        agentSessionId: run.sessionId,
-        serverInstanceId: run.serverInstanceId,
-        source: 'provider',
-        payload: {
-          terminalStatus: terminal,
-          terminalReason: prompt.stopReason,
-          finalArtifactId: finalArtifact.id,
-          codexReviewStatus: agentReviewStatusFromResult(reviewResult),
-          codexReviewResult: reviewResult
-        }
-      })
-    );
-    await this.store.updateAgentSession(run.sessionId, { status: 'IDLE' });
-    this.clearInterruptDeadline(run.id);
     this.appEvents.emit({
       type: 'run.terminal',
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
       worktreeId: run.worktreeId,
-      payload: { status: terminal, finalArtifactId: finalArtifact.id },
+      payload: { status: terminal, finalArtifactId },
       at: new Date().toISOString()
     });
     this.schedulePendingRuntimeReset();
@@ -1794,11 +2653,46 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (!activeAlreadyClaimed && !this.activePromptRunIds.delete(runId)) return;
     this.clearInterruptDeadline(runId);
     const run = await this.store.getRun(runId);
-    if (!run || !ACTIVE_RUN_STATUSES.includes(run.status)) return;
+    if (!run || !PROMPT_OWNED_RUN_STATUSES.includes(run.status)) return;
+    let finalArtifactId: string | undefined;
+    try {
+      finalArtifactId = await this.persistPromptFailure(
+        run,
+        cause,
+        providerTerminalRawMessage
+      );
+    } catch (persistenceCause) {
+      await this.recoverDefinitivePromptFinalization(
+        run,
+        providerTerminalRawMessage,
+        persistenceCause
+      );
+      return;
+    }
+    if (finalArtifactId) {
+      this.appEvents.emit({
+        type: 'run.terminal',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        payload: { status: 'failed', finalArtifactId },
+        at: new Date().toISOString()
+      });
+      this.schedulePendingRuntimeReset();
+    }
+  }
+
+  private async persistPromptFailure(
+    run: RunRecord,
+    cause: unknown,
+    providerTerminalRawMessage?: AgentProtocolMessageReference
+  ): Promise<string | undefined> {
+    const failureMessage = this.redactProviderText(errorMessage(cause));
     await this.flushRunContent(run.id, true);
-    await this.staleRunInteractions(run, errorMessage(cause));
+    await this.staleRunInteractions(run, failureMessage);
     if (cause instanceof AcpAmbiguousMutationError) {
-      await this.store.appendEvent(
+      const recoveryPublished = await this.store.appendRunEventIfStatus(
         createDomainEvent({
           type: 'AGENT_MUTATION_AMBIGUOUS',
           taskId: run.taskId,
@@ -1808,9 +2702,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           agentSessionId: run.sessionId,
           serverInstanceId: run.serverInstanceId,
           source: 'provider',
-          payload: { operation: cause.method, reason: cause.message }
-        })
+          payload: { operation: cause.method, reason: failureMessage }
+        }),
+        PROMPT_OWNED_RUN_STATUSES
       );
+      if (!recoveryPublished) {
+        throw new Error(
+          `ACP run ${run.id} no longer owned its prompt when ambiguity persistence completed.`
+        );
+      }
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
       this.appEvents.emit({
         type: 'run.activity',
@@ -1820,22 +2720,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         worktreeId: run.worktreeId,
         payload: {
           eventType: 'session/prompt/ambiguous',
-          reason: cause.message,
+          reason: failureMessage,
           automaticReplay: false
         },
         at: new Date().toISOString()
       });
-      return;
+      return undefined;
     }
     const finalArtifact = await this.store.writeFinalArtifact(
       run.taskId,
       run.id,
-      `# ${this.profile.descriptor.displayName} turn failed\n\n${errorMessage(cause)}\n`
+      `# ${this.profile.descriptor.displayName} turn failed\n\n${failureMessage}\n`
     );
     if (providerTerminalRawMessage) {
       await this.store.updateRun(run.id, { providerTerminalRawMessage });
     }
-    await this.store.appendEvent(
+    const terminalPublished = await this.store.appendRunEventIfStatus(
       createDomainEvent({
         type: 'AGENT_RUN_FAILED',
         taskId: run.taskId,
@@ -1847,22 +2747,274 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         source: 'provider',
         payload: {
           terminalStatus: 'failed',
-          error: errorMessage(cause),
+          error: failureMessage,
           finalArtifactId: finalArtifact.id
         }
-      })
+      }),
+      PROMPT_OWNED_RUN_STATUSES
     );
+    if (!terminalPublished) {
+      throw new Error(
+        `ACP run ${run.id} no longer owned its prompt when failure persistence completed.`
+      );
+    }
     await this.store.updateAgentSession(run.sessionId, { status: 'SYSTEM_ERROR' });
+    return finalArtifact.id;
+  }
+
+  /**
+   * A provider permission request is already blocking its prompt when it
+   * reaches this boundary. If Task Monki cannot durably expose the request and
+   * its awaiting state together, cancel it when the same client generation is
+   * still writable, publish no-replay recovery, and fence the application-
+   * scoped process. The provider must never remain blocked behind an action the
+   * user cannot see.
+   */
+  private async recoverPermissionMaterializationFailure(input: {
+    client: AcpRpcClient;
+    generation: number;
+    request: AcpJsonRpcRequest;
+    raw: AgentProtocolMessageReference;
+    run: RunRecord;
+    session: AgentSessionRecord;
+    cause: unknown;
+  }): Promise<void> {
+    const { client, generation, request, raw, run, session, cause } = input;
+    this.activePromptRunIds.delete(run.id);
+    this.clearInterruptDeadline(run.id);
+
+    let cancellationRawMessage: AgentProtocolMessageReference | undefined;
+    let cancellationFailure: unknown;
+    if (this.isCurrentClientEvent(client, generation, raw)) {
+      try {
+        cancellationRawMessage = await client.respond(request.id, {
+          outcome: { outcome: 'cancelled' }
+        });
+      } catch (responseCause) {
+        cancellationFailure = responseCause;
+      }
+    } else {
+      cancellationFailure = new Error(
+        'The permission request belongs to a client generation that is no longer current.'
+      );
+    }
+
+    const materializationError = this.redactProviderText(errorMessage(cause));
+    const reason =
+      `ACP permission request could not be materialized durably: ${materializationError}. ` +
+      'Task Monki will not approve or replay the blocked prompt.';
+    let recoveryPublicationFailure: unknown;
+    try {
+      await this.store.appendRunEventIfStatus(
+        createDomainEvent({
+          type: 'AGENT_MUTATION_AMBIGUOUS',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          serverInstanceId: run.serverInstanceId,
+          source: 'provider',
+          payload: {
+            operation: 'session/request_permission/materialize',
+            reason,
+            automaticResubmission: false,
+            requestRawMessage: raw,
+            ...(cancellationRawMessage ? { cancellationRawMessage } : {})
+          }
+        }),
+        PROMPT_OWNED_RUN_STATUSES
+      );
+    } catch (recoveryCause) {
+      recoveryPublicationFailure = recoveryCause;
+    }
+
+    let sessionPublicationFailure: unknown;
+    try {
+      await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+    } catch (sessionCause) {
+      sessionPublicationFailure = sessionCause;
+    }
+
+    let interactionPublicationFailure: unknown;
+    try {
+      await this.staleRunInteractions(run, reason);
+    } catch (interactionCause) {
+      interactionPublicationFailure = interactionCause;
+    }
+
+    let quarantineFailure: unknown;
+    try {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/request_permission materialization',
+        `${reason} Cancellation delivery was ${
+          cancellationRawMessage ? 'submitted' : 'not confirmed'
+        }.`,
+        false
+      );
+    } catch (quarantineCause) {
+      quarantineFailure = quarantineCause;
+    }
+
+    const [currentRun, currentSession, snapshot] = await Promise.all([
+      this.store.getRun(run.id).catch(() => undefined),
+      this.store.getAgentSession(session.id).catch(() => undefined),
+      this.store.snapshot().catch(() => undefined)
+    ]);
+    const runIsSafe = Boolean(
+      currentRun &&
+        (currentRun.status === 'RECOVERY_REQUIRED' ||
+          ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(currentRun.status))
+    );
+    const sessionIsSafe = currentSession?.status === 'NOT_LOADED';
+    const interactionIsSafe =
+      snapshot?.interactionRequests.some(
+        (interaction) =>
+          interaction.runId === run.id &&
+          ['PENDING', 'RESPONDING'].includes(interaction.status)
+      ) !== true;
+    const processIsFenced =
+      this.boundClient !== client ||
+      Boolean(this.runtimeQuarantinePromise) ||
+      Boolean(this.runtimeSafetyFence);
+
+    if (
+      !runIsSafe ||
+      !sessionIsSafe ||
+      !interactionIsSafe ||
+      !processIsFenced ||
+      quarantineFailure
+    ) {
+      const failure = new AggregateError(
+        [
+          cause,
+          cancellationFailure,
+          recoveryPublicationFailure,
+          sessionPublicationFailure,
+          interactionPublicationFailure,
+          quarantineFailure
+        ].filter((value) => value !== undefined),
+        'ACP permission materialization failed and safe recovery ownership could not be established.'
+      );
+      throw this.latchRuntimeSafetyFence(failure);
+    }
+
+    this.preflightState = appendRuntimeDiagnostic(
+      this.preflightState,
+      warningDiagnostic(
+        'PERMISSION_MATERIALIZATION_FAILED',
+        'HEALTH',
+        'ACP permission request could not be exposed safely.',
+        `${reason} Cancellation delivery was ${
+          cancellationRawMessage ? 'submitted before quarantine' : 'not confirmed before quarantine'
+        }.`
+      )
+    );
+    this.emitRuntimeUpdate();
     this.appEvents.emit({
-      type: 'run.terminal',
+      type: 'run.activity',
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
       worktreeId: run.worktreeId,
-      payload: { status: 'failed', finalArtifactId: finalArtifact.id },
+      payload: {
+        eventType: 'session/request_permission/materialization-recovery',
+        recoveryState: currentRun?.recoveryState,
+        cancellationSubmitted: Boolean(cancellationRawMessage),
+        automaticReplay: false
+      },
       at: new Date().toISOString()
     });
-    this.schedulePendingRuntimeReset();
+  }
+
+  /**
+   * A prompt response is a one-shot ACP message. Once this adapter claims it,
+   * process restart cannot replay the response and prompt retry could duplicate
+   * provider work. If local finalization then fails, preserve any terminal run
+   * already projected; otherwise publish recovery-required, unload the session,
+   * and quarantine the application-scoped process before it can be reused.
+   */
+  private async recoverDefinitivePromptFinalization(
+    run: RunRecord,
+    raw: AgentProtocolMessageReference | undefined,
+    cause: unknown
+  ): Promise<void> {
+    this.clearInterruptDeadline(run.id);
+    const reason = this.redactProviderText(
+      `ACP received a definitive prompt response, but Task Monki could not persist its terminal state: ${errorMessage(cause)}`
+    );
+    let recoveryPublicationFailure: unknown;
+    try {
+      const current = await this.store.getRun(run.id);
+      if (current) {
+        await this.store.appendRunEventIfStatus(
+          createDomainEvent({
+            type: 'AGENT_MUTATION_AMBIGUOUS',
+            taskId: current.taskId,
+            iterationId: current.iterationId,
+            runId: current.id,
+            worktreeId: current.worktreeId,
+            agentSessionId: current.sessionId,
+            serverInstanceId: current.serverInstanceId,
+            source: 'provider',
+            payload: {
+              operation: 'session/prompt/finalize',
+              reason,
+              automaticResubmission: false,
+              rawMessage: raw
+            }
+          }),
+          PROMPT_OWNED_RUN_STATUSES
+        );
+      }
+      await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+    } catch (recoveryCause) {
+      recoveryPublicationFailure = recoveryCause;
+    }
+
+    let quarantineFailure: unknown;
+    try {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/prompt finalization',
+        `${reason} The consumed response will not be replayed.`,
+        false
+      );
+    } catch (quarantineCause) {
+      quarantineFailure = quarantineCause;
+    }
+
+    const [currentRun, currentSession] = await Promise.all([
+      this.store.getRun(run.id).catch(() => undefined),
+      this.store.getAgentSession(run.sessionId).catch(() => undefined)
+    ]);
+    const runIsSafe = Boolean(
+      currentRun &&
+        (currentRun.status === 'RECOVERY_REQUIRED' ||
+          ['COMPLETED', 'FAILED', 'INTERRUPTED', 'LOST'].includes(currentRun.status))
+    );
+    const sessionIsSafe = Boolean(currentSession && currentSession.status !== 'ACTIVE');
+    if (!runIsSafe || !sessionIsSafe || quarantineFailure) {
+      throw new AggregateError(
+        [cause, recoveryPublicationFailure, quarantineFailure].filter(
+          (failure) => failure !== undefined
+        ),
+        'ACP prompt terminal persistence failed and recovery ownership could not be established.'
+      );
+    }
+
+    this.appEvents.emit({
+      type: 'run.activity',
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      worktreeId: run.worktreeId,
+      payload: {
+        eventType: 'session/prompt/finalization-recovery',
+        recoveryState: currentRun?.recoveryState,
+        automaticReplay: false
+      },
+      at: new Date().toISOString()
+    });
   }
 
   private async staleRunInteractions(run: RunRecord, reason: string): Promise<void> {
@@ -1884,16 +3036,140 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  private async handleRuntimeLoss(serverInstanceId: string): Promise<void> {
+  /**
+   * ACP session updates do not carry a prompt ID. Once delivery or
+   * cancellation becomes ambiguous, keeping the application-scoped process
+   * alive could attribute late output from the old prompt to a replacement
+   * run. Stop and forget the whole process before any session can be reused.
+   */
+  private async quarantineRuntimeAfterAmbiguousMutation(
+    operation: string,
+    detail: string,
+    drainInboundBeforeReplacement = true
+  ): Promise<void> {
+    if (this.runtimeSafetyFence) throw this.runtimeSafetyFence;
+    if (this.runtimeQuarantinePromise) {
+      // An inbound callback can discover the same ambiguity while a foreground
+      // quarantine is draining this queue. Waiting from that callback would
+      // make the quarantine wait on itself.
+      if (drainInboundBeforeReplacement) await this.runtimeQuarantinePromise;
+      return;
+    }
+    const quarantine = this.quarantineRuntime(
+      operation,
+      detail,
+      drainInboundBeforeReplacement
+    );
+    this.runtimeQuarantinePromise = quarantine;
+    try {
+      await quarantine;
+    } catch (cause) {
+      throw this.latchRuntimeSafetyFence(
+        `ACP process quarantine failed and the runtime cannot be reused safely: ${errorMessage(cause)}`
+      );
+    } finally {
+      if (this.runtimeQuarantinePromise === quarantine) {
+        this.runtimeQuarantinePromise = undefined;
+      }
+    }
+  }
+
+  private async quarantineRuntime(
+    operation: string,
+    detail: string,
+    drainInboundBeforeReplacement: boolean
+  ): Promise<void> {
+    const supervisor = this.supervisor;
+    const server = supervisor?.currentServer;
+    if (!supervisor || !server) return;
+    const client = this.boundClient;
+    const inboundAtFence = this.inboundQueue;
+
+    // Invalidate synchronously, before process shutdown yields. Every already
+    // queued or subsequently delivered callback from this client is now a
+    // no-op, even if a replacement process is later bound.
+    this.invalidateBoundClient(client);
+    let shutdownFailure: unknown;
+    try {
+      await supervisor.shutdown();
+    } catch (cause) {
+      shutdownFailure = cause;
+    }
+    // Foreground mutations can safely wait for all work that was queued at the
+    // fence. An inbound callback cannot await its own queue tail; in that case
+    // generation invalidation provides the same logical drain and the callback
+    // must unwind before later queued work can execute.
+    if (drainInboundBeforeReplacement) await inboundAtFence;
+    const reason = `Task Monki quarantined the ACP process after ambiguous ${operation}. ${detail}`;
+    await this.handleRuntimeLoss(server.id, reason);
+    await this.reconcile();
+    const safetyFenceReason = supervisor.safetyFenceReason;
+    if (shutdownFailure || safetyFenceReason || supervisor.currentClient) {
+      const failureDetail = shutdownFailure
+        ? errorMessage(shutdownFailure)
+        : safetyFenceReason ?? 'The ACP client remained connected after quarantine.';
+      this.preflightState = appendRuntimeDiagnostic(
+        this.preflightState,
+        errorDiagnostic(
+          'RUNTIME_QUARANTINE_INCOMPLETE',
+          'SECURITY',
+          'ACP process quarantine reported an incomplete shutdown.',
+          failureDetail
+        ),
+        'FAILED'
+      );
+      this.emitRuntimeUpdate();
+      throw new Error(`ACP process quarantine failed: ${failureDetail}`, {
+        cause: shutdownFailure
+      });
+    }
+    if (this.supervisor === supervisor) this.supervisor = undefined;
+  }
+
+  private latchRuntimeSafetyFence(reason: unknown): Error {
+    if (!this.runtimeSafetyFence) {
+      this.runtimeSafetyFence = new Error(
+        `ACP runtime is safety-fenced until Task Monki restarts. ${this.redactProviderText(
+          errorMessage(reason)
+        )}`
+      );
+    }
+    return this.runtimeSafetyFence;
+  }
+
+  private async handleRuntimeLoss(
+    serverInstanceId: string,
+    reason = `${this.descriptor.displayName} exited unexpectedly.`
+  ): Promise<void> {
+    reason = this.redactProviderText(reason);
+    const loadedProviderSessionIds = new Set(this.nativeSessions.keys());
+    const provisionalLocalSessionIds = new Set(this.provisionalProviderSessionIds.keys());
     this.preflightState = {
       ...this.preflightState,
-      ready: false,
-      problems: [`${this.descriptor.displayName} exited unexpectedly.`]
+      readiness: createRuntimeReadiness(
+        'DEGRADED',
+        `${reason} Existing turns require recovery; a new session can relaunch the runtime.`,
+        {
+          checks: {
+            ...this.preflightState.readiness.checks,
+            initialization: 'FAILED'
+          },
+          diagnostics: [
+            ...this.preflightState.readiness.diagnostics,
+            errorDiagnostic(
+              'RUNTIME_EXITED',
+              'HEALTH',
+              reason
+            )
+          ],
+          nextAction: { kind: 'RETRY', label: 'Start a new provider session' }
+        }
+      )
     };
     this.nativeSessions.clear();
     this.activePromptRunIds.clear();
     this.initializeResponse = undefined;
-    this.boundClient = undefined;
+    this.invalidateBoundClient();
     const snapshot = await this.store.snapshot();
     const affectedRuns = snapshot.runs.filter(
       (candidate) =>
@@ -1914,7 +3190,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           serverInstanceId,
           source: 'provider',
           payload: {
-            reason: 'ACP process exited. Prompt outcome is ambiguous and will not be replayed.'
+            reason: `${reason} Prompt outcome is ambiguous and will not be replayed.`
           }
         })
       );
@@ -1933,21 +3209,46 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         at: new Date().toISOString()
       });
     }
+    // Every native session in an application-scoped ACP process becomes
+    // unloaded when that process is fenced, including idle sessions without an
+    // active run. Persist that boundary so UI and restart recovery cannot
+    // mistake an old provider session for a currently attached one.
+    for (const session of snapshot.agentSessions.filter(
+      (candidate) =>
+        candidate.runtimeId === this.descriptor.id &&
+        (provisionalLocalSessionIds.has(candidate.id) ||
+          (candidate.providerSessionId !== undefined &&
+            loadedProviderSessionIds.has(candidate.providerSessionId)))
+    )) {
+      if (session.status !== 'NOT_LOADED') {
+        await this.store.updateAgentSession(session.id, { status: 'NOT_LOADED' });
+      }
+    }
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) =>
         candidate.serverInstanceId === serverInstanceId &&
         ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const aborted = await this.store.transitionInteractionRequest(
-        interaction.id,
-        interaction.status,
-        {
-          status: 'ABORTED_SERVER_LOST',
-          resolution: { reason: 'ACP process exited.' },
-          resolvedAt: new Date().toISOString()
-        }
-      );
-      this.emitInteractionUpdate(aborted);
+      const latest = await this.store.getInteractionRequest(interaction.id);
+      if (!latest || !['PENDING', 'RESPONDING'].includes(latest.status)) continue;
+      try {
+        const aborted = await this.store.transitionInteractionRequest(
+          latest.id,
+          latest.status,
+          {
+            status: 'ABORTED_SERVER_LOST',
+            resolution: { reason },
+            resolvedAt: new Date().toISOString()
+          }
+        );
+        this.emitInteractionUpdate(aborted);
+      } catch (cause) {
+        // A terminal prompt handler can resolve or stale the interaction while
+        // process-loss reconciliation is running. That terminal state wins;
+        // only propagate a failure if the interaction is still unresolved.
+        const raced = await this.store.getInteractionRequest(interaction.id);
+        if (raced && ['PENDING', 'RESPONDING'].includes(raced.status)) throw cause;
+      }
     }
     this.emitRuntimeUpdate();
     this.schedulePendingRuntimeReset();
@@ -2031,8 +3332,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             }
           })
         );
-        this.activePromptRunIds.delete(run.id);
-        await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/cancel',
+          `The provider did not confirm cancellation for run ${run.id} before the deadline.`,
+          false
+        );
         this.appEvents.emit({
           type: 'run.activity',
           taskId: run.taskId,
@@ -2059,9 +3363,14 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private async recordSettingsObservation(
     session: AgentSessionRecord,
-    source: 'THREAD_START_RESPONSE' | 'THREAD_RESUME_RESPONSE' | 'THREAD_SETTINGS_NOTIFICATION',
+    source:
+      | 'TASK_MONKI_RESOLUTION'
+      | 'THREAD_START_RESPONSE'
+      | 'THREAD_RESUME_RESPONSE'
+      | 'THREAD_SETTINGS_NOTIFICATION',
     settings: AgentExecutionSettings,
-    rawMessage?: AgentProtocolMessageReference
+    rawMessage?: AgentProtocolMessageReference,
+    detail?: string
   ): Promise<void> {
     await this.store.recordAgentSettingsObservation({
       taskId: session.taskId,
@@ -2070,6 +3379,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       runtimeId: this.descriptor.id,
       source,
       settings,
+      detail,
       rawMessage
     });
   }
@@ -2080,7 +3390,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference,
     details: Record<string, unknown> = {}
   ): Promise<void> {
-    const payload = { eventType, ...details, rawMessage: raw };
+    const payload = this.redactProviderValue({ eventType, ...details, rawMessage: raw });
     await this.store.appendEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
@@ -2123,6 +3433,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     detail: string,
     raw: AgentProtocolMessageReference
   ): Promise<void> {
+    detail = this.redactProviderText(detail);
     const runs = await this.store.getRunsRequiringRecovery({ runtimeId: this.descriptor.id });
     const run = runs[0];
     if (!run) return;
@@ -2164,6 +3475,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       ...capabilities,
       extensions: {
         ...capabilities.extensions,
+        ...(this.profile.sessionModelExtension && [...this.nativeSessions.values()].some(
+          (session) => (session.models?.availableModels.length ?? 0) > 0
+        )
+          ? {
+              nativeSessionModels: {
+                maturity: 'experimental' as const,
+                detail: `The connected agent advertised exact session model IDs through the explicit ${this.profile.sessionModelExtension.contractId} provider extension.`
+              }
+            }
+          : {}),
         'task-monki.browser-dev-isolation': {
           maturity: 'unsupported',
           detail: 'ACP negotiation does not attest OS process, filesystem, and network isolation.'
@@ -2188,12 +3509,44 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const modalities = promptInputModalities(
       this.initializeResponse?.agentCapabilities.promptCapabilities
     );
-    const native = modelsFromAcpConfig(
-      this.profile,
-      [...this.nativeSessions.values()],
-      modalities
-    );
-    this.models = native.length > 0 ? native : [defaultAcpModel(this.profile, modalities)];
+    const extension = this.profile.sessionModelExtension;
+    const profileModels = this.profileModelState;
+    if (extension?.initializeResponseMetaField && profileModels) {
+      const models = profileModels.availableModels.flatMap((model): AgentModel[] => {
+        if (!isSafeProviderIdentifier(model.modelId, this.sensitiveValues)) return [];
+        return [{
+          id: `${this.descriptor.id}:${this.profile.defaultModelProvider}/${model.modelId}`,
+          runtimeId: this.descriptor.id,
+          modelProvider: this.profile.defaultModelProvider,
+          model: model.modelId,
+          displayName: this.redactProviderText(model.name),
+          description: model.description
+            ? this.redactProviderText(model.description)
+            : undefined,
+          hidden: false,
+          supportedReasoningEfforts: [],
+          serviceTiers: [],
+          inputModalities: modalities,
+          isDefault: model.modelId === profileModels.currentModelId,
+          native: {
+            source: 'provider-initialize-extension',
+            contractId: extension.contractId
+          }
+        }];
+      });
+      if (
+        models.length > 0 &&
+        models.some((model) => model.model === profileModels.currentModelId)
+      ) {
+        this.models = models;
+        return;
+      }
+      this.noteSensitiveIdentifierOmission();
+    }
+    // Stable ACP model selectors are scoped to a provider session and remain
+    // in its native controls. Only an explicit profile-owned initialize
+    // catalog can be promoted to application model selection.
+    this.models = [defaultAcpModel(this.profile, modalities)];
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
@@ -2212,23 +3565,40 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
 
   private enqueueInbound(operation: () => Promise<void>): void {
     this.inboundQueue = this.inboundQueue.then(operation, operation).catch((cause) => {
-      this.preflightState = {
-        ...this.preflightState,
-        warnings: [...new Set([...this.preflightState.warnings, errorMessage(cause)])]
-      };
+      this.preflightState = appendRuntimeDiagnostic(
+        this.preflightState,
+        warningDiagnostic(
+          'EVENT_MATERIALIZATION_FAILED',
+          'HEALTH',
+          'ACP event materialization failed.',
+          this.redactProviderText(errorMessage(cause))
+        ),
+        this.preflightState.readiness.status === 'READY' ? 'DEGRADED' : undefined
+      );
       this.emitRuntimeUpdate();
     });
   }
 
   private emitRuntimeUpdate(): void {
+    const nativeSessions = [...this.nativeSessions.values()].flatMap((state) => {
+      if (!isSafeProviderIdentifier(state.sessionId, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+        return [];
+      }
+      if (hasUnsafeAcpActionableIdentifier(state, this.sensitiveValues)) {
+        this.noteSensitiveIdentifierOmission();
+      }
+      return [sanitizeAcpNativeSession(state, this.sensitiveValues)];
+    });
+    const payload = this.redactProviderValue({
+      preflight: this.preflightState,
+      models: this.models,
+      nativeSessions
+    });
     this.appEvents.emit({
       type: 'runtime.updated',
       taskId: `runtime:${this.descriptor.id}`,
-      payload: {
-        preflight: this.preflightState,
-        models: this.models,
-        nativeSessions: [...this.nativeSessions.values()].map(sanitizeAcpNativeSession)
-      },
+      payload,
       at: new Date().toISOString()
     });
   }
@@ -2239,10 +3609,234 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       taskId: interaction.taskId,
       iterationId: interaction.iterationId,
       runId: interaction.runId,
-      payload: interaction,
+      payload: this.redactProviderValue(interaction),
       at: new Date().toISOString()
     });
   }
+
+  private redactProviderText(value: string): string {
+    return redactCredentialText(value, this.sensitiveValues);
+  }
+
+  private redactProviderValue<T>(value: T): T {
+    return redactCredentialValue(value, this.sensitiveValues);
+  }
+
+  private projectObservedSettings(
+    state: AcpNativeSessionState,
+    requested: AgentExecutionSettings
+  ): AgentExecutionSettings {
+    const observed = observedSettingsFromAcpState(this.profile, state, requested);
+    if (!hasUnsafeAcpActionableIdentifier(state, this.sensitiveValues)) {
+      return this.redactProviderValue(observed);
+    }
+    this.noteSensitiveIdentifierOmission();
+    const runtimeOptions = { ...observed.runtimeOptions };
+    delete runtimeOptions[this.descriptor.id];
+    return {
+      ...observed,
+      model:
+        observed.model && isSafeProviderIdentifier(observed.model, this.sensitiveValues)
+          ? observed.model
+          : undefined,
+      runtimeOptions: Object.keys(runtimeOptions).length > 0 ? runtimeOptions : undefined
+    };
+  }
+
+  private noteSensitiveIdentifierOmission(): void {
+    if (
+      this.preflightState.readiness.diagnostics.some(
+        (diagnostic) => diagnostic.code === 'SENSITIVE_PROVIDER_IDENTIFIER_OMITTED'
+      )
+    ) return;
+    this.preflightState = appendRuntimeDiagnostic(
+      this.preflightState,
+      warningDiagnostic(
+        'SENSITIVE_PROVIDER_IDENTIFIER_OMITTED',
+        'SECURITY',
+        'The ACP agent returned an operational identifier matching a runtime credential, so the affected native view or control was omitted.',
+        'Exact identifiers remain internal for protocol ownership and are never replaced with redacted placeholders in actionable views.'
+      )
+    );
+  }
+}
+
+function acpRuntimeDiagnostics(authenticationAdvertised: boolean): AgentRuntimeDiagnostic[] {
+  return [
+    infoDiagnostic(
+      'ACP_CLIENT_TOOLS_DISABLED',
+      'SECURITY',
+      'Task Monki exposes no filesystem or terminal client tools to the ACP agent.',
+      'Agent-native tools remain inside the provider process.'
+    ),
+    warningDiagnostic(
+      'PROVIDER_PROCESS_NOT_SANDBOXED',
+      'SECURITY',
+      'The ACP process has no Task Monki-attested workspace or network sandbox.',
+      'Restricted runs fail closed; only the provider-controlled full-access preset is accepted.'
+    ),
+    ...(authenticationAdvertised
+      ? [
+          infoDiagnostic(
+            'PROVIDER_AUTHENTICATION_MANAGED',
+            'AUTHENTICATION',
+            'Authentication remains owned by the provider runtime.'
+          )
+        ]
+      : [])
+  ];
+}
+
+function acpFailureReadiness(
+  profile: AcpRuntimeProfile,
+  cause: unknown,
+  sensitiveValues: readonly string[] = []
+) {
+  const message = redactCredentialText(errorMessage(cause), sensitiveValues);
+  if (cause instanceof AcpRuntimeResolutionError) {
+    const found = cause.code === 'ACP_RUNTIME_INCOMPATIBLE';
+    return createRuntimeReadiness(
+      found ? 'INCOMPATIBLE' : 'NOT_INSTALLED',
+      found
+        ? `${profile.descriptor.displayName} was found, but its ACP launch contract is incompatible.`
+        : `${profile.descriptor.displayName} was not found on this computer.`,
+      {
+        checks: {
+          discovery: found ? 'FOUND' : 'NOT_FOUND',
+          compatibility: found ? 'INCOMPATIBLE' : 'UNKNOWN',
+          initialization: 'NOT_STARTED'
+        },
+        diagnostics: [
+          errorDiagnostic(
+            cause.code,
+            found ? 'COMPATIBILITY' : 'DISCOVERY',
+            message
+          ),
+          ...cause.diagnostics.probes.map((probe) =>
+            errorDiagnostic(
+              'ACP_RUNTIME_PROBE_REJECTED',
+              'COMPATIBILITY',
+              `${probe.executable}: ${probe.detail}`
+            )
+          )
+        ],
+        nextAction: {
+          kind: found ? 'CONFIGURE' : 'INSTALL',
+          label: found ? 'Choose the correct executable' : `Install ${profile.descriptor.displayName}`
+        }
+      }
+    );
+  }
+  return createRuntimeReadiness('FAILED', message, {
+    checks: { initialization: 'FAILED' },
+    diagnostics: [
+      errorDiagnostic('ACP_RUNTIME_INITIALIZATION_FAILED', 'INITIALIZATION', message)
+    ],
+    nextAction: { kind: 'RETRY', label: 'Retry runtime discovery' }
+  });
+}
+
+export function acpSessionFailureReadiness(
+  profile: AcpRuntimeProfile,
+  cause: unknown,
+  checks: AgentPreflight['readiness']['checks'],
+  runtimeConnected = true,
+  sensitiveValues: readonly string[] = []
+) {
+  const message = redactCredentialText(errorMessage(cause), sensitiveValues);
+  if (cause instanceof AcpSessionContractError) {
+    return createRuntimeReadiness(
+      'INCOMPATIBLE',
+      `${profile.descriptor.displayName} initialized, but its session response is incompatible with the negotiated ACP contract.`,
+      {
+        checks: {
+          ...checks,
+          discovery: 'FOUND',
+          compatibility: 'INCOMPATIBLE',
+          initialization: runtimeConnected ? 'INITIALIZED' : 'FAILED',
+          authentication: 'UNKNOWN',
+          modelCatalog: 'FAILED'
+        },
+        diagnostics: [
+          ...acpRuntimeDiagnostics(true),
+          errorDiagnostic(
+            'ACP_SESSION_CONTRACT_INCOMPATIBLE',
+            'COMPATIBILITY',
+            message
+          )
+        ],
+        nextAction: {
+          kind: 'CONFIGURE',
+          label: 'Update or choose a compatible runtime'
+        }
+      }
+    );
+  }
+  if (cause instanceof AgentMutationAmbiguousError) {
+    return createRuntimeReadiness(
+      'DEGRADED',
+      `${profile.descriptor.displayName} returned an ambiguous session mutation. The old process was quarantined; a new session can relaunch it safely.`,
+      {
+        checks: {
+          ...checks,
+          discovery: 'FOUND',
+          compatibility: 'COMPATIBLE',
+          initialization: runtimeConnected ? 'INITIALIZED' : 'FAILED',
+          authentication: checks.authentication,
+          modelCatalog: 'UNKNOWN'
+        },
+        diagnostics: [
+          ...acpRuntimeDiagnostics(true),
+          warningDiagnostic(
+            'ACP_SESSION_MUTATION_AMBIGUOUS',
+            'HEALTH',
+            message,
+            'Automatic mutation replay is disabled.'
+          )
+        ],
+        nextAction: { kind: 'RETRY', label: 'Start a new provider session' }
+      }
+    );
+  }
+  const authenticationRequired =
+    /(?:authentication|authenticate|unauthorized|sign[ -]?in|log[ -]?in|credential|api key)/iu.test(
+      message
+    );
+  const status = authenticationRequired
+      ? 'AUTHENTICATION_REQUIRED'
+      : 'FAILED';
+  const detail = authenticationRequired
+      ? `Authenticate ${profile.descriptor.displayName} before starting a task.`
+      : `${profile.descriptor.displayName} could not create a provider session.`;
+  return createRuntimeReadiness(status, detail, {
+    checks: {
+      ...checks,
+      compatibility: 'COMPATIBLE',
+      initialization: runtimeConnected ? 'INITIALIZED' : 'FAILED',
+      authentication: authenticationRequired
+          ? 'REQUIRED'
+          : 'UNKNOWN',
+      modelCatalog: authenticationRequired ? 'UNKNOWN' : 'FAILED'
+    },
+    diagnostics: [
+      ...acpRuntimeDiagnostics(true),
+      errorDiagnostic(
+        authenticationRequired
+            ? 'PROVIDER_AUTHENTICATION_REQUIRED'
+            : 'PROVIDER_SESSION_CREATION_FAILED',
+        authenticationRequired
+          ? 'AUTHENTICATION'
+          : 'INITIALIZATION',
+        message
+      )
+    ],
+    nextAction: {
+      kind: authenticationRequired ? 'AUTHENTICATE' : 'RETRY',
+      label: authenticationRequired
+          ? `Sign in to ${profile.descriptor.displayName}`
+          : 'Retry provider session'
+    }
+  });
 }
 
 /**
@@ -2395,6 +3989,180 @@ function jsonSafeRecord(
   return isRecord(safe)
     ? (safe as { [key: string]: import('../../../shared/agent').AgentJsonValue })
     : {};
+}
+
+function persistedNativeSessionView(
+  localSessionId: string,
+  providerSessionId: string | undefined,
+  runtimeOptions: unknown
+): Record<string, unknown> & { providerSessionId?: string } {
+  const options = isRecord(runtimeOptions) ? runtimeOptions : {};
+  return {
+    localSessionId,
+    ...(providerSessionId ? { providerSessionId } : {}),
+    ...(isRecord(options.models) ? { models: options.models } : {}),
+    ...(isRecord(options.modes) ? { modes: options.modes } : {}),
+    ...(Array.isArray(options.configOptions)
+      ? { configOptions: options.configOptions }
+      : {})
+  };
+}
+
+function acpSessionControlSet(
+  localSessionId: string,
+  state: AcpNativeSessionState,
+  sensitiveValues: readonly string[] = []
+): AgentSessionControlSet | undefined {
+  if (!isSafeProviderIdentifier(state.sessionId, sensitiveValues)) return undefined;
+  const controls: AgentSessionControl[] = [];
+  const modelChoices = (state.models?.availableModels ?? []).flatMap((model) => {
+    if (!isSafeProviderIdentifier(model.modelId, sensitiveValues)) return [];
+    return [{
+      value: model.modelId,
+      label: redactCredentialText(model.name, sensitiveValues),
+      description: model.description
+        ? redactCredentialText(model.description, sensitiveValues)
+        : undefined
+    }];
+  });
+  if (
+    state.models?.currentModelId &&
+    modelChoices.some((choice) => choice.value === state.models?.currentModelId)
+  ) {
+    controls.push({
+      id: 'model',
+      label: 'Model',
+      group: 'Model',
+      kind: 'SELECT',
+      value: state.models.currentModelId,
+      choices: modelChoices,
+      mutable: true
+    });
+  }
+  if (
+    state.modes?.currentModeId &&
+    isSafeProviderIdentifier(state.modes.currentModeId, sensitiveValues) &&
+    state.modes.availableModes.some(
+      (mode) =>
+        mode.id === state.modes?.currentModeId &&
+        isSafeProviderIdentifier(mode.id, sensitiveValues)
+    )
+  ) {
+    controls.push({
+      id: 'mode',
+      label: 'Mode',
+      group: 'Mode',
+      kind: 'SELECT',
+      value: state.modes.currentModeId,
+      choices: state.modes.availableModes.flatMap((mode) =>
+        isSafeProviderIdentifier(mode.id, sensitiveValues)
+          ? [{
+              value: mode.id,
+              label: redactCredentialText(mode.name, sensitiveValues),
+              description: mode.description
+                ? redactCredentialText(mode.description, sensitiveValues)
+                : undefined
+            }]
+          : []
+      ),
+      mutable: true
+    });
+  }
+  for (const option of state.configOptions) {
+    if (
+      (option.category === 'model' && controls.some((control) => control.id === 'model')) ||
+      (option.category === 'mode' && controls.some((control) => control.id === 'mode'))
+    ) continue;
+    if (!isSafeProviderIdentifier(option.id, sensitiveValues)) continue;
+    const base = {
+      id: `config:${option.id}`,
+      label: redactCredentialText(option.name, sensitiveValues),
+      description: option.description
+        ? redactCredentialText(option.description, sensitiveValues)
+        : undefined,
+      group: option.category
+        ? redactCredentialText(option.category, sensitiveValues)
+        : 'Configuration',
+      mutable: true
+    } as const;
+    if (option.type === 'boolean') {
+      controls.push({ ...base, kind: 'BOOLEAN', value: option.currentValue });
+      continue;
+    }
+    const choices = flattenSelectOptions(option).flatMap((choice) => {
+      if (!isSafeProviderIdentifier(choice.value, sensitiveValues)) return [];
+      return [{
+        value: choice.value,
+        label: redactCredentialText(choice.name, sensitiveValues),
+        description: choice.description
+          ? redactCredentialText(choice.description, sensitiveValues)
+          : undefined
+      }];
+    });
+    if (choices.some((choice) => choice.value === option.currentValue)) {
+      controls.push({
+        ...base,
+        kind: 'SELECT',
+        value: option.currentValue,
+        choices
+      });
+    }
+  }
+  const safeControls = structuredClone(controls);
+  return {
+    localSessionId,
+    providerSessionId: state.sessionId,
+    revision: createHash('sha256')
+      .update(JSON.stringify({ providerSessionId: state.sessionId, controls: safeControls }))
+      .digest('hex'),
+    controls: safeControls
+  };
+}
+
+function isSafeProviderIdentifier(
+  value: string,
+  sensitiveValues: readonly string[]
+): boolean {
+  return redactCredentialText(value, sensitiveValues) === value;
+}
+
+function hasUnsafeAcpActionableIdentifier(
+  state: AcpNativeSessionState,
+  sensitiveValues: readonly string[]
+): boolean {
+  return [
+    state.sessionId,
+    state.models?.currentModelId,
+    ...(state.models?.availableModels.map((model) => model.modelId) ?? []),
+    state.modes?.currentModeId,
+    ...(state.modes?.availableModes.map((mode) => mode.id) ?? []),
+    ...state.configOptions.flatMap((option) => [
+      option.id,
+      ...(option.type === 'select'
+        ? flattenSelectOptions(option).map((choice) => choice.value)
+        : [])
+    ])
+  ].some(
+    (value) =>
+      typeof value === 'string' &&
+      !isSafeProviderIdentifier(value, sensitiveValues)
+  );
+}
+
+function containsSensitiveProviderValue(
+  value: unknown,
+  sensitiveValues: readonly string[]
+): boolean {
+  if (typeof value === 'string') {
+    return redactCredentialText(value, sensitiveValues) !== value;
+  }
+  if (Array.isArray(value)) {
+    return value.some((entry) => containsSensitiveProviderValue(entry, sensitiveValues));
+  }
+  if (!isRecord(value)) return false;
+  return Object.values(value).some((entry) =>
+    containsSensitiveProviderValue(entry, sensitiveValues)
+  );
 }
 
 function mapMutationError(operation: string, cause: unknown): Error {

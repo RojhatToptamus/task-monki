@@ -6,12 +6,36 @@ import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import {
   CodexRuntimeResolutionError,
   discoverCodexRuntimeCandidates,
+  probeCodexVersion,
   resolveCodexRuntime,
   TASK_MONKI_CODEX_BIN_ENV,
   type TaskMonkiCodexAppServerMethod
 } from './CodexRuntimeResolver';
 
 describe('Codex runtime resolution', () => {
+  it('forwards CODEX_HOME through the explicit Codex discovery contract', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-codex-environment-')
+    );
+    const codexHome = path.join(directory, 'codex-home');
+    const executable = await writeNodeExecutable(
+      directory,
+      'codex',
+      [
+        `if (process.env.CODEX_HOME !== ${JSON.stringify(codexHome)}) process.exit(12);`,
+        "process.stdout.write('codex-cli 0.141.0\\n');"
+      ].join('\n')
+    );
+
+    await expect(
+      probeCodexVersion(executable, directory, {
+        PATH: process.env.PATH,
+        CODEX_HOME: codexHome,
+        XAI_API_KEY: 'must-not-pass'
+      })
+    ).resolves.toBe('0.141.0');
+  });
+
   it('discovers explicit, environment, PATH, app bundle, and VS Code extension candidates in order', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-discover-'));
     const config = await writeFakeCodex(path.join(dir, 'config'), 'codex');

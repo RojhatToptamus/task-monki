@@ -117,6 +117,45 @@ describe('Phase 3 delivery guards', () => {
     ).toBeUndefined();
   });
 
+  it.each(['ANALYSIS', 'COMPACTION'] as const)(
+    'blocks REVIEW after a completed %s run',
+    (mode) => {
+      expect(
+        transitionBlocker(
+          {
+            currentRunId: 'current-run',
+            projection: { agentRun: 'COMPLETED' }
+          } as never,
+          'REVIEW',
+          {
+            hasWorktree: true,
+            currentRun: { id: 'current-run', mode, status: 'COMPLETED' }
+          }
+        )
+      ).toContain('implementation run');
+    }
+  );
+
+  it('allows REVIEW after the current implementation run completes', () => {
+    expect(
+      transitionBlocker(
+        {
+          currentRunId: 'current-run',
+          projection: { agentRun: 'COMPLETED' }
+        } as never,
+        'REVIEW',
+        {
+          hasWorktree: true,
+          currentRun: {
+            id: 'current-run',
+            mode: 'IMPLEMENTATION',
+            status: 'COMPLETED'
+          }
+        }
+      )
+    ).toBeUndefined();
+  });
+
   it('preserves explicit implementation run safety settings', () => {
     expect(
       mergeRunSettings({

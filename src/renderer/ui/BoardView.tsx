@@ -50,7 +50,7 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
     case 'FAILED':
       return {
         label: 'Run failed',
-        detail: 'A follow-up, retry, or review decision is needed.',
+        detail: 'Retry or continue the implementation before review.',
         tone: 'error'
       };
   }

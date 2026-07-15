@@ -13,7 +13,8 @@ import type {
 import {
   TASK_STORE_SCHEMA_VERSION,
   completionPolicyRequiresMerge,
-  createInitialProjection
+  createInitialProjection,
+  isImplementationRunMode
 } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
@@ -123,6 +124,7 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
 function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {
   return (
     eventType.startsWith('AGENT_') ||
+    eventType === 'ARTIFACT_CREATED' ||
     eventType === 'PROCESS_STARTED' ||
     eventType === 'PROCESS_EXITED' ||
     eventType === 'PROCESS_SIGNALED' ||
@@ -216,6 +218,13 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
           getString(event.payload, 'signal') ??
           'interrupted'
       };
+    case 'ARTIFACT_CREATED':
+      return getString(event.payload, 'kind') === 'agent-final'
+        ? {
+            ...run,
+            finalArtifactId: getString(event.payload, 'artifactId') ?? run.finalArtifactId
+          }
+        : run;
     case 'AGENT_MUTATION_AMBIGUOUS':
       return {
         ...run,
@@ -277,11 +286,21 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
     case 'PROCESS_STARTED':
       return isReviewRunEvent(task, event, run) ? task.workflowPhase : 'IN_PROGRESS';
     case 'AGENT_RUN_COMPLETED':
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        task.workflowPhase === 'IN_PROGRESS'
+        ? 'REVIEW'
+        : task.workflowPhase;
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
-      return task.workflowPhase === 'IN_PROGRESS' ? 'REVIEW' : task.workflowPhase;
+      // A stopped implementation is not review-ready. Keep it in the
+      // implementation phase so the next action remains retry or continue.
+      return task.workflowPhase;
     case 'AGENT_RUNTIME_RECONCILED':
-      return getBoolean(event.payload, 'terminal') === true &&
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        getBoolean(event.payload, 'terminal') === true &&
+        getString(event.payload, 'status') === 'COMPLETED' &&
         task.workflowPhase === 'IN_PROGRESS'
         ? 'REVIEW'
         : task.workflowPhase;
@@ -699,6 +718,15 @@ export function reduceProjection(
         findings,
         updatedAt: event.receivedAt
       };
+    case 'ARTIFACT_CREATED':
+      return getString(event.payload, 'kind') === 'agent-final'
+        ? {
+            ...base,
+            artifact: 'FINAL_MESSAGE_PRESENT',
+            findings,
+            updatedAt: event.receivedAt
+          }
+        : base;
     case 'AGENT_MUTATION_AMBIGUOUS':
       return {
         ...base,
@@ -801,6 +829,7 @@ function reduceReviewProjection(
     case 'AGENT_RUN_COMPLETED':
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
+    case 'ARTIFACT_CREATED':
     case 'AGENT_MUTATION_AMBIGUOUS':
     case 'AGENT_RUNTIME_LOST':
     case 'AGENT_RUNTIME_RECONCILED': {
@@ -935,6 +964,15 @@ function reduceCodexReview(
           getString(event.payload, 'terminalReason') ??
           getString(event.payload, 'reason') ??
           'Agent review did not complete.',
+        updatedAt: event.receivedAt
+      };
+    case 'ARTIFACT_CREATED':
+      if (!targetsReviewRun || getString(event.payload, 'kind') !== 'agent-final') {
+        return base;
+      }
+      return {
+        ...base,
+        finalArtifactId: getString(event.payload, 'artifactId') ?? base.finalArtifactId,
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_INTERRUPTED':

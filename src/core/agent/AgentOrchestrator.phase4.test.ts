@@ -30,6 +30,7 @@ import {
   type ResolveAgentExecution,
   type ResolvedAgentExecution
 } from './AgentRuntimeAdapter';
+import { createRuntimeReadiness } from './AgentRuntimeReadiness';
 import { AgentOrchestrator } from './AgentOrchestrator';
 import { assertModelSupportsAttachments } from './AgentAttachmentDelivery';
 import {
@@ -290,6 +291,242 @@ describe('AgentOrchestrator Phase 4', () => {
       recoveryState: 'NONE',
       terminalReason: 'Recovery-required run was explicitly abandoned by the user.'
     });
+  });
+
+  it('preserves recovery established by a provider before startup rejects', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-provider-start-recovery-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    adapter.recoveryThenRejectStart = true;
+    const appEvents = new AppEventBus();
+    const terminalEvents: unknown[] = [];
+    appEvents.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const orchestrator = new AgentOrchestrator(store, appEvents, adapter);
+    const task = await store.createTask({
+      title: 'Provider startup recovery',
+      prompt: 'Preserve provider recovery evidence.',
+      repositoryPath: repositoryDir,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/provider-start-recovery',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+
+    const getRun = store.getRun.bind(store);
+    let staleActiveRun: Awaited<ReturnType<typeof getRun>>;
+    let returnedStaleRun = false;
+    vi.spyOn(store, 'getRun').mockImplementation(async (runId) => {
+      const current = await getRun(runId);
+      if (current && current.status !== 'RECOVERY_REQUIRED' && !staleActiveRun) {
+        staleActiveRun = current;
+      }
+      if (
+        current?.status === 'RECOVERY_REQUIRED' &&
+        staleActiveRun &&
+        !returnedStaleRun
+      ) {
+        returnedStaleRun = true;
+        return staleActiveRun;
+      }
+      return current;
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('provider failed after publishing recovery');
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.runs[0]).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION',
+      terminalReason: 'Provider established recovery before rejecting startup.'
+    });
+    expect(
+      snapshot.events.filter((event) => event.type === 'AGENT_MUTATION_AMBIGUOUS')
+    ).toHaveLength(1);
+    expect(
+      snapshot.events.some((event) => event.type === 'AGENT_RUN_FAILED')
+    ).toBe(false);
+    expect(returnedStaleRun).toBe(true);
+    expect(terminalEvents).toEqual([]);
+
+    const recoveryRun = snapshot.runs[0]!;
+    expect(recoveryRun.finalArtifactId).toBeUndefined();
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) =>
+          artifact.runId === recoveryRun.id && artifact.kind === 'agent-final'
+      )
+    ).toEqual([]);
+
+    await orchestrator.interruptRun(recoveryRun.id);
+    const resolved = (await store.getRun(recoveryRun.id))!;
+    expect(resolved).toMatchObject({
+      status: 'INTERRUPTED',
+      recoveryState: 'NONE',
+      terminalReason: 'Recovery-required run was explicitly abandoned by the user.'
+    });
+    expect(resolved.finalArtifactId).toBeTruthy();
+    await expect(store.readArtifact(resolved.finalArtifactId!)).resolves.toContain(
+      '# Recovery run closed'
+    );
+    await expect(store.readArtifact(resolved.finalArtifactId!)).resolves.not.toContain(
+      'provider failed after publishing recovery'
+    );
+  });
+
+  it('links a winning startup failure artifact to its failed review projection', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-start-failure-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review startup failure',
+      prompt: 'Keep failed review evidence coherent.',
+      repositoryPath: repositoryDir,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-start-failure',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+    const implementation = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(store, implementation, 'AGENT_RUN_COMPLETED');
+    adapter.reviewStartFailure = 'provider review failed to start';
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun: (await store.getRun(implementation.id))!,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+      })
+    ).rejects.toThrow('provider review failed to start');
+
+    const snapshot = await store.snapshot();
+    const failedReview = snapshot.runs.find((run) => run.mode === 'REVIEW')!;
+    expect(failedReview).toMatchObject({
+      status: 'FAILED',
+      terminalReason: 'provider review failed to start'
+    });
+    expect(failedReview.finalArtifactId).toBeTruthy();
+    expect(snapshot.tasks[0]?.projection.codexReview).toMatchObject({
+      status: 'FAILED',
+      runId: failedReview.id,
+      finalArtifactId: failedReview.finalArtifactId,
+      summary: 'provider review failed to start'
+    });
+    const failureEvent = snapshot.events.find(
+      (event) => event.runId === failedReview.id && event.type === 'AGENT_RUN_FAILED'
+    );
+    const artifactEvent = snapshot.events.find(
+      (event) => event.runId === failedReview.id && event.type === 'ARTIFACT_CREATED'
+    );
+    expect(failureEvent?.payload).toEqual({
+      error: 'provider review failed to start'
+    });
+    expect(snapshot.events.indexOf(failureEvent!)).toBeLessThan(
+      snapshot.events.indexOf(artifactEvent!)
+    );
+    await expect(store.readArtifact(failedReview.finalArtifactId!)).resolves.toContain(
+      'provider review failed to start'
+    );
+  });
+
+  it('preserves the provider startup error when supplementary artifact creation fails', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-start-failure-artifact-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    adapter.startFailure = 'provider startup failed';
+    const appEvents = new AppEventBus();
+    const terminalEvents: unknown[] = [];
+    appEvents.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const orchestrator = new AgentOrchestrator(store, appEvents, adapter);
+    const task = await store.createTask({
+      title: 'Startup artifact failure',
+      prompt: 'Preserve the original provider error.',
+      repositoryPath: repositoryDir,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/start-failure-artifact',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+    vi.spyOn(store, 'writeFinalArtifact').mockRejectedValueOnce(
+      new Error('final artifact storage unavailable')
+    );
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('provider startup failed');
+
+    const snapshot = await store.snapshot();
+    const failedRun = snapshot.runs[0]!;
+    expect(failedRun).toMatchObject({
+      status: 'FAILED',
+      terminalReason: 'provider startup failed'
+    });
+    expect(failedRun.finalArtifactId).toBeUndefined();
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === failedRun.id && artifact.kind === 'agent-final'
+      )
+    ).toEqual([]);
+    expect(terminalEvents).toEqual([
+      expect.objectContaining({
+        runId: failedRun.id,
+        payload: { status: 'failed', error: 'provider startup failed' }
+      })
+    ]);
+    await expect(store.readArtifact(failedRun.diagnosticArtifactId)).resolves.toContain(
+      'final artifact storage unavailable'
+    );
   });
 
   it('refuses network-enabled turns when the browser development boundary disables them', async () => {
@@ -569,7 +806,9 @@ describe('AgentOrchestrator Phase 4', () => {
     ).rejects.toThrow('Created session observed settings is unsafe');
 
     expect(adapter.startCount).toBe(0);
-    expect((await store.snapshot()).runs).toHaveLength(0);
+    expect((await store.snapshot()).runs).toEqual([
+      expect.objectContaining({ status: 'FAILED' })
+    ]);
   });
 
   it('rechecks recreated session observations before retrying turn/start', async () => {
@@ -967,6 +1206,9 @@ describe('AgentOrchestrator Phase 4', () => {
 class Phase4Adapter implements AgentRuntimeAdapter {
   readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   ambiguousStart = false;
+  recoveryThenRejectStart = false;
+  startFailure?: string;
+  reviewStartFailure?: string;
   missingProviderSessionOnStart?: string;
   createdSessionObservedSettings?: AgentExecutionSettings;
   initializeObservedSettings?: {
@@ -1000,10 +1242,8 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   preflight(): Promise<AgentPreflight> {
     return Promise.resolve({
       runtime: this.descriptor,
-      ready: true,
+      readiness: createRuntimeReadiness('READY', 'Test runtime is ready.'),
       capabilities: phase4Capabilities(),
-      problems: [],
-      warnings: []
     });
   }
 
@@ -1070,6 +1310,9 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     this.lastStart = input;
     this.startCount += 1;
+    if (this.startFailure) {
+      throw new Error(this.startFailure);
+    }
     if (
       this.missingProviderSessionOnStart &&
       input.session.providerSessionId === this.missingProviderSessionOnStart
@@ -1079,6 +1322,27 @@ class Phase4Adapter implements AgentRuntimeAdapter {
         'turn/start',
         `thread not found: ${input.session.providerSessionId}`
       );
+    }
+    if (this.recoveryThenRejectStart) {
+      const run = await this.store.getRun(input.localRunId);
+      if (!run) throw new Error('Run not found.');
+      await this.store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_MUTATION_AMBIGUOUS',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          source: 'provider',
+          payload: {
+            operation: 'turn/start',
+            reason: 'Provider established recovery before rejecting startup.',
+            automaticResubmission: false
+          }
+        })
+      );
+      throw new Error('provider failed after publishing recovery');
     }
     if (this.ambiguousStart) {
       throw new AgentMutationAmbiguousError(
@@ -1113,6 +1377,9 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   }
 
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
+    if (this.reviewStartFailure) {
+      throw new Error(this.reviewStartFailure);
+    }
     this.threadCounter += 1;
     this.turnCounter += 1;
     const providerTurnId = `review-${this.turnCounter}`;

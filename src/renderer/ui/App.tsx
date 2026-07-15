@@ -13,6 +13,7 @@ import {
   type Task,
   type TaskManagerAppSettings,
   type TaskSnapshot,
+  type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorkflowPhase,
   type WorktreeRecord
@@ -457,7 +458,7 @@ export function App() {
   const readyPromptRefinementRuntimes =
     runtimeCatalog?.runtimes.filter(
       (runtime) =>
-        runtime.preflight.ready &&
+        runtime.preflight.readiness.canStart &&
         runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
     ) ?? [];
   const configuredPromptRefinementRuntimeId =
@@ -470,7 +471,7 @@ export function App() {
   const readyReviewRuntimes =
     runtimeCatalog?.runtimes.filter(
       (runtime) =>
-        runtime.preflight.ready &&
+        runtime.preflight.readiness.canStart &&
         (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
           runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
             'stable')
@@ -788,6 +789,24 @@ export function App() {
     }
   };
 
+  const updateAgentNativeSession = async (
+    input: UpdateAgentNativeSessionRequest
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.updateAgentNativeSession(input);
+      const [catalog] = await Promise.all([
+        taskManagerApi.getAgentRuntimeCatalog(),
+        refresh()
+      ]);
+      setRuntimeCatalog(catalog);
+      notify('Provider session updated.', 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Failed to update provider session.');
+      throw caught;
+    }
+  };
+
   const respondToInteraction = async (
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -894,7 +913,10 @@ export function App() {
       const selectedRuntime = latestRuntimeCatalog.runtimes.find(
         (runtime) => runtime.preflight.runtime.id === appSettings.defaultRuntimeId
       );
-      if (latestToolStatus.tools.git.status !== 'ok' || !selectedRuntime?.preflight.ready) {
+      if (
+        latestToolStatus.tools.git.status !== 'ok' ||
+        !selectedRuntime?.preflight.readiness.canStart
+      ) {
         throw new Error(
           `Git and ${selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent runtime'} must be available before setup can finish.`
         );
@@ -1120,6 +1142,7 @@ export function App() {
             onRetry={retryRun}
             onReview={startReview}
             onSyncAgentGoal={syncAgentGoal}
+            onUpdateAgentNativeSession={updateAgentNativeSession}
             onRespondToInteraction={respondToInteraction}
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}

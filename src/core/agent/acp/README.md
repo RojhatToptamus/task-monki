@@ -1,18 +1,22 @@
 # ACP runtime family
 
-This directory implements Task Monki's first-class Agent Client Protocol (ACP)
-runtime family. ACP is the transport and capability-negotiation boundary; each
-agent remains a distinct runtime with its own descriptor, launch command,
-credentials, native session modes, configuration selectors, models, and
-extension telemetry.
+This directory implements Task Monki's registered Agent Client Protocol (ACP)
+compatibility runtime family. ACP is the transport and capability-negotiation
+boundary; each agent has a first-class durable runtime identity with its own
+descriptor, launch command, credential contract, native session modes,
+configuration selectors, models, and extension telemetry. That identity does
+not imply a full native product integration: these adapters expose what stable
+ACP and explicitly profile-gated extensions can prove.
 
 ## Protocol boundary
 
 - Stable ACP wire protocol: `1`.
 - Pinned schema artifact used for the typed wire subset: `v1.19.0`.
 - Transport: newline-delimited JSON-RPC 2.0 over stdio.
-- Client capabilities: `fs.readTextFile=false`, `fs.writeTextFile=false`, and
-  `terminal=false`.
+- Client capabilities: `fs.readTextFile=false`, `fs.writeTextFile=false`,
+  `terminal=false`, and `session.configOptions.boolean={}`. The last capability
+  lets conforming agents expose stable boolean session options without enabling
+  any Task Monki filesystem or terminal tools.
 - Task Monki never executes an ACP agent's requested filesystem or terminal
   command. Unsupported client requests receive JSON-RPC `-32601`.
 - Every inbound and outbound message is appended before it is acted on or
@@ -20,7 +24,9 @@ extension telemetry.
   uses bounded byte/time sync batches, and durable Task Monki record
   publication flushes its referenced journal entries first. Messages,
   per-server journal retention, and diagnostic tails are bounded; known
-  credentials and credential-shaped stderr values are redacted.
+  credentials, authorization headers, named environment/header values, URL
+  userinfo, and credential-shaped stderr values are structurally redacted at
+  the durable journal boundary.
 
 The official `@agentclientprotocol/sdk` is ESM-only while Task Monki's main
 process is currently CommonJS. `AcpProtocol.ts` and `AcpRpcClient.ts` therefore
@@ -30,46 +36,109 @@ be revisited if the main process moves to ESM. Wire compatibility is determined
 by `initialize.protocolVersion`; optional behavior is enabled only from the
 negotiated capabilities, never from a CLI name or guessed version.
 
+The pinned stable schema defines session modes and configuration options, but
+it does not define initialize model metadata, a session `models` response
+field, or `session/set_model`. Grok Build's provider-specific model catalog is
+therefore isolated behind the profile-owned
+`grok-build-acp/session-models@v1` contract: initialize `_meta.modelState`
+supplies the pre-session catalog, session setup revalidates
+`currentModelId`/`availableModels` for the worktree, and selection uses
+`session/set_model({sessionId, modelId})`. Task Monki treats that captured
+vendor contract as experimental and never enables it for another ACP profile.
+
 ## Provider profiles
 
-| Runtime ID | Native launch form | Default model provider |
-| --- | --- | --- |
-| `gemini-acp` | `gemini --acp` | `google` |
-| `grok-acp` | `grok --no-auto-update agent stdio` | `xai` |
-| `cursor-agent-acp` | `cursor-agent acp` (with installed `agent` fallback) | `cursor` |
-| `claude-agent-acp` | `claude-agent-acp` | `anthropic` |
+| Runtime ID | Native launch form | Non-mutating discovery proof | Default model provider | Child environment contract |
+| --- | --- | --- | --- | --- |
+| `grok-acp` | `grok --no-auto-update agent stdio` | the matching `agent stdio --help` command identifies Grok's stdio agent | `xai` | `task-monki/grok-acp-environment@v1` |
+| `cursor-agent-acp` | `cursor-agent acp`; an explicitly configured `agent acp` is also accepted | `help acp` identifies Cursor Agent ACP | `cursor` | `task-monki/cursor-agent-acp-environment@v1` |
+| `claude-agent-acp` | `claude-agent-acp` | bridge-specific `--cli --help` delegation identifies the Claude bridge | `anthropic` | `task-monki/claude-agent-acp-environment@v1` |
 
 Profiles launch installed executables only. Task Monki does not run `npx`,
 download agents, self-update providers, or silently fall back to another
-runtime. Each profile has a narrow environment-variable allowlist for its own
-credentials. Authentication itself remains provider-owned. Catalog discovery,
-preflight, model listing, and execution resolution only probe and cache the
-installed executable; the long-lived ACP child starts lazily when the first
-session is created or attached. A persisted per-runtime executable override is
-passed through the same resolver. Changing it invalidates discovery and safely
-restarts an idle runtime; an active or recovery-ambiguous prompt is never
-terminated to apply a settings change.
+runtime. Each profile owns a versioned, exact environment-variable contract for
+its credentials and supported cloud configuration. Authentication itself
+remains provider-owned. The profile also owns its `TASK_MONKI_*_ACP_BIN`
+executable-override key, so adding a runtime does not require a second central
+runtime-to-environment mapping. Catalog discovery, preflight, and execution
+resolution first probe and cache the installed executable. The long-lived ACP
+child starts lazily when the first session is created or attached; Grok also
+starts it when its model catalog is requested because the profile-gated catalog
+is supplied by ACP initialize rather than a stable global ACP method. A persisted per-runtime executable override is
+passed through the same resolver. Every candidate, including an explicit
+override, must pass both its version command and its profile-owned launch-
+contract probe. Probe output is bounded and checked across both stdout and
+stderr. A successful `--version` response proves only that an executable ran;
+it never proves ACP support or provider identity. Stable ACP wire compatibility
+is still negotiated later by the live `initialize` exchange.
 
-The generic Cursor `agent` fallback is ambiguous on `PATH`, so a successful
-`--version` probe is insufficient. It is selected only when bounded
-`agent help acp` output proves Cursor ACP identity; otherwise discovery skips it
-and tries `cursor-agent` or fails closed. An explicit custom wrapper can still
-be configured through the per-runtime executable override.
+Environment contracts are exact key allowlists, never prefix or wildcard
+rules. The shared provider-key groups and sensitive-key classifications live in
+`../ProviderEnvironmentPolicy.ts`; each profile composes the exact keys it
+needs in `AcpRuntimeProfiles.ts`. Provider children also receive only the small
+portable base environment from `../../process/ProcessSupervisor.ts`. Sensitive
+values from the same contract are redacted from diagnostics, and executable
+override variables are resolver inputs rather than child environment entries.
+
+This distinction prevents an unrelated executable from being treated as an ACP
+agent. Antigravity is a separate dedicated turn-scoped runtime and never enters
+this ACP family. Task Monki never executes a generic PATH `agent` during
+discovery. That Cursor alias is accepted only when the user
+configures it explicitly and `agent help acp` proves the expected contract. Changing a saved
+executable invalidates discovery and safely restarts an idle runtime; an active
+or recovery-ambiguous prompt is never terminated to apply a settings change.
+
+## Readiness and setup diagnostics
+
+Executable discovery, live protocol initialization, provider authentication,
+account compatibility, and model access are separate checks:
+
+- `NOT_INSTALLED` means no candidate executable could be launched.
+- `INCOMPATIBLE` means an executable was found but failed its provider-specific
+  launch contract or live ACP negotiation.
+- `DISCOVERED` means the launch contract is present. It is startable, but a
+  provider session has not yet proved account and model access.
+- `READY` means a provider session was created or resumed successfully.
+- `AUTHENTICATION_REQUIRED` and `ACCOUNT_UNSUPPORTED` distinguish a missing
+  provider sign-in from a signed-in account path the runtime cannot use.
+- `FAILED` and `DEGRADED` retain bounded, redacted diagnostics and an explicit
+  next action instead of collapsing every failure into “not installed.”
+
+The Provider inspector shows readiness checks, stable diagnostic codes, the
+selected executable and launch form, and rejected discovery probes. Runtime
+readiness is separate from run recovery: `RECOVERY_REQUIRED` means a submitted
+mutation has an ambiguous outcome and must never be automatically replayed.
 
 ## Native capability preservation
 
 ACP session modes, configuration selectors, and model values required for
-operation retain their exact provider IDs. Renderer and persisted native-state
-views are schema-selected, bounded, and credential-redacted; sensitive config
-selectors and opaque `_meta` fields are never copied into those surfaces.
-Lossless wire data and extension notifications remain available only through
-the protected protocol journal. Model selectors create runtime-qualified model
-records, and dedicated ACP methods expose exact native mode and config updates
-without pretending those controls exist on every provider. Task Monki exposes
-those two operations through a discriminated service contract, Electron IPC,
-and the development HTTP/renderer client API. The service validates task,
-session, and runtime ownership and rejects changes during active or
-recovery-required runs; it does not expose arbitrary ACP RPC.
+operation retain their exact provider IDs. Persisted native-state views are
+schema-selected, bounded, and credential-redacted; sensitive config selectors
+and opaque `_meta` fields are never copied into those surfaces.
+Structurally complete, credential-redacted wire data and extension
+notifications remain available only through the protected protocol journal.
+Stable ACP agents may advertise a `category=model` config selector, which
+remains a native configuration path. The Grok profile additionally parses its
+versioned initialize and session model catalogs. The initialize catalog is safe
+for runtime selection and publishes its provider-selected default; the session
+response revalidates the exact ID before any prompt. Those IDs also remain in
+the session's typed control set and are changed through its provider-owned
+`session/set_model`. Other profiles ignore those non-standard fields. Stable
+ACP session-only catalogs remain scoped to the provider session that advertised
+them and do not leak into New Task selection.
+
+The Provider inspector renders only the safe semantic-neutral `BOOLEAN` and
+`SELECT` controls projected for the attached session. Each control retains its
+provider-owned ID, label, grouping, exact value/choices, and mutability, while
+the enclosing set carries local/provider session ownership and a revision of
+the catalog the user saw. The renderer never parses the opaque native blob to
+discover actions. Electron IPC and the authenticated development HTTP API send
+only `{controlId, value, revision}` plus durable ownership. The service rejects
+active or recovery-required runs; the adapter rejects stale revisions, wrong
+types, unknown controls, and choices the provider did not advertise before
+mapping the control internally to the exact ACP or profile-extension method.
+No arbitrary ACP RPC or opaque provider metadata is accepted from the
+renderer.
 
 Stable session features are negotiated independently:
 
@@ -78,22 +147,31 @@ Stable session features are negotiated independently:
 - `session/resume` is used only when advertised.
 - `session/load` is the fallback only when `loadSession` is advertised. Its
   replayed history is isolated from live run output.
-- Model configuration is applied only through an advertised `category=model`
-  selector. An explicit model fails clearly when the agent exposes no selector
-  or does not offer that value.
+- The stable `category=model` config selector remains the baseline model path.
+  Only the Grok profile may use its captured session `models` catalog and
+  `session/set_model` extension. An explicit model fails clearly when the
+  profile exposes neither path or did not offer that exact ID.
+
+Session setup preserves evidence at the boundary where it was observed.
+`session/new` is recorded as the provider-selected pre-configuration state
+with that response's journal reference. Requested mode, model, and config
+mutations are applied afterward; their projected final state is recorded as a
+`TASK_MONKI_RESOLUTION`, optionally citing the final mutation response, and is
+never relabeled as provider-reported settings. A later real settings update or
+resume response can independently provide provider-confirmed state.
 
 Streaming materializes agent text/thoughts, tool calls and diffs, plans, usage,
 native config updates, artifacts, and structured app events. Every text delta
-remains an individual raw journal entry. The normalized projection uses one
-ordered per-run buffer instead of rewriting the full item and run snapshot per
-token: output is appended at a 75 ms or 64 KiB boundary, while item records are
-materialized at prompt terminal, runtime loss, shutdown, or an explicit memory
-bound. A 256-transition output bound also flushes pathological streams that
-alternate text and reasoning on every delta. The adapter retains at most eight
-live text parts per run and 4 MiB of text across the runtime; capacity eviction
-materializes the oldest part without dropping its raw evidence. Buffered text
-is stored in bounded-size segments so tiny or empty deltas cannot create an
-unbounded chunk array. A coalesced item publishes one activity event, whose
+remains an individual protocol journal entry. The normalized projection uses
+one ordered per-run buffer instead of rewriting the full item and run snapshot
+per token: output is appended at a 75 ms or 64 KiB boundary, while item records
+are materialized at prompt terminal, runtime loss, shutdown, or an explicit
+memory bound. A 256-transition output bound also flushes pathological streams
+that alternate text and reasoning on every delta. The adapter retains at most
+eight live text parts per run and 4 MiB of text across the runtime; capacity
+eviction materializes the oldest part without dropping its journal evidence.
+Buffered text is stored in bounded-size segments so tiny or empty deltas cannot
+create an unbounded chunk array. A coalesced item publishes one activity event, whose
 `coalescedEvents` count makes the compaction visible. Permission choices retain
 the provider's opaque option IDs. Task Monki intersects the offered choices
 with its own command/path/network policy and sends back the exact ID;
@@ -122,14 +200,38 @@ serialization path.
 
 ## Recovery semantics
 
-ACP stable v1 has no prompt-status read method. If a submitted prompt times out,
-the process disconnects, or Task Monki restarts mid-turn, the run becomes
-`RECOVERY_REQUIRED`. Task Monki may resume/load the provider session when that
-capability exists, but it never automatically replays the ambiguous prompt.
-Pending interactions are made stale or aborted on terminal/runtime loss. Once
-an interrupt deadline or runtime loss makes a prompt ambiguous, late prompt
-responses, stream updates, and permission requests cannot silently reverse the
-recovery decision.
+ACP stable v1 has no prompt-status read method. `session/prompt` is a long-lived
+request whose response marks completion of the whole provider turn, so Task
+Monki deliberately gives it no generic RPC completion timeout. Setup and
+control requests remain bounded. A slow but healthy coding turn therefore does
+not enter recovery merely because it outlives the control-request deadline.
+
+If the process disconnects, Task Monki cannot durably acknowledge a submitted
+prompt, an interrupt deadline expires, or Task Monki restarts mid-turn, the run
+becomes `RECOVERY_REQUIRED`. Task Monki may resume/load the provider session
+when that capability exists, but it never automatically replays the ambiguous
+prompt. Pending interactions are made stale or aborted on terminal/runtime
+loss. Once an interrupt deadline or runtime loss makes a prompt ambiguous, late
+prompt responses, stream updates, and permission requests cannot silently
+reverse the recovery decision.
+
+All current ACP profiles use one application-scoped child process per runtime
+identity. Sessions are never shared across Grok, Cursor, and Claude,
+but several sessions belonging to one profile can be loaded in that profile's
+process. Stable ACP session updates do not identify a Task Monki prompt/run.
+Consequently, an ambiguous prompt, cancellation, permission response, or
+session-control update quarantines the entire profile process: Task Monki
+invalidates its client generation before shutdown, unloads every attached
+session, marks affected active work for explicit recovery, and never resends
+the uncertain mutation. Idle sessions may attach again through a newly started
+process. This application-wide blast radius is a documented ACP compatibility
+limitation, not native per-session lifecycle parity.
+
+Every inbound notification and permission request is tagged with the bound
+client generation and server instance. Once quarantine or replacement
+invalidates that generation, queued or late messages from the old process are
+ignored even after a new process starts. They cannot append output, complete a
+run, change a plan, or create an interaction on the replacement generation.
 
 Application startup passively reconciles persisted ACP runs independently of
 executable discovery. Stale process records become lost and ambiguous runs
@@ -150,18 +252,17 @@ session, or submitting any prompt.
   future dedicated surface. Runtime cleanup does use stable `session/close`
   when the connected agent advertises it; release never starts a process merely
   to close a session and never closes a session with active or ambiguous work.
-- A dedicated visual editor for native mode and configuration selectors. The
-  typed application and client APIs are available; the generic metadata debug
-  view remains read-only until a cohesive provider-settings UI is added.
 
-Focused tests include strict framing and bounds, schema parsing, profile
-identity, native model/config mapping, all opaque permission option kinds,
-policy intersection, supervised process negotiation, and an end-to-end fake
-ACP agent covering session creation, streaming, permission response, plans, and
-terminal completion, definitive and ambiguous failures, durable-response
-failure, runtime loss, and interrupt timeout with a late provider response. A
-high-volume regression verifies 512 ordered deltas remain 512 raw journal
-messages while producing one normalized item write and bounded output events.
+Focused tests include strict framing and bounds, stable-schema parsing, profile
+launch-contract identity, Grok extension gating and `session/set_model`, config
+mapping, all opaque permission option kinds, policy intersection, supervised
+process negotiation, and an end-to-end fake ACP agent covering session
+creation, streaming, permission response, plans, and terminal completion,
+definitive and ambiguous failures, durable-response failure, runtime loss, and
+interrupt timeout with a late provider response. A long-turn regression proves
+that `session/prompt` can outlive the bounded control timeout. A high-volume
+regression verifies 512 ordered deltas remain 512 protocol journal messages
+while producing one normalized item write and bounded output events.
 Real provider smoke tests still require each external CLI, provider
 credentials/account state, and explicit integration in application
 composition; tests never contact provider services.

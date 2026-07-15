@@ -55,6 +55,7 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
+  isImplementationRunMode,
   normalizeAgentApprovalsReviewer,
   normalizePullRequestTitle,
   verifiedChecksMatchMergeHead
@@ -80,6 +81,11 @@ import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import { OpenCodeAdapter } from '../agent/opencode/OpenCodeAdapter';
+import { AntigravityAdapter } from '../agent/antigravity/AntigravityAdapter';
+import {
+  ANTIGRAVITY_RUNTIME_ID,
+  TASK_MONKI_ANTIGRAVITY_BIN_ENV
+} from '../agent/antigravity/AntigravityCapabilities';
 import { AcpRuntimeAdapter } from '../agent/acp/AcpRuntimeAdapter';
 import { ACP_RUNTIME_PROFILES } from '../agent/acp/AcpRuntimeProfiles';
 import {
@@ -125,6 +131,7 @@ export class TaskManagerService {
       ghPath?: string;
       codexPath?: string;
       openCodePath?: string;
+      antigravityPath?: string;
       acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
@@ -143,11 +150,13 @@ export class TaskManagerService {
     this.runtimeExecutableOverrides = {
       opencode:
         options.openCodePath ?? process.env.TASK_MONKI_OPENCODE_BIN,
+      [ANTIGRAVITY_RUNTIME_ID]:
+        options.antigravityPath ?? process.env[TASK_MONKI_ANTIGRAVITY_BIN_ENV],
       ...Object.fromEntries(
         ACP_RUNTIME_PROFILES.map((profile) => [
           profile.descriptor.id,
           options.acpExecutablePaths?.[profile.descriptor.id] ??
-            process.env[ACP_RUNTIME_EXECUTABLE_ENV[profile.descriptor.id]]
+            process.env[profile.executableEnvironmentKey]
         ])
       )
     };
@@ -169,6 +178,7 @@ export class TaskManagerService {
             cwd: agentCwd,
             codexExecutable: options.codexPath,
             openCodeExecutable: options.openCodePath,
+            antigravityExecutable: options.antigravityPath,
             acpExecutablePaths: options.acpExecutablePaths,
             browserDevBoundary: this.browserDevAgentBoundary,
             codexToolSettings: this.appSettings.codexExternalTools
@@ -382,92 +392,85 @@ export class TaskManagerService {
       typeof input.sessionId !== 'string' ||
       !input.sessionId ||
       typeof input.runtimeId !== 'string' ||
-      !input.runtimeId
+      !input.runtimeId ||
+      typeof input.controlId !== 'string' ||
+      !input.controlId ||
+      typeof input.revision !== 'string' ||
+      !input.revision ||
+      !['string', 'boolean'].includes(typeof input.value)
     ) {
       throw new Error(
         'A task, session, and runtime are required for native session updates.'
       );
     }
-    const session = await this.store.getAgentSession(input.sessionId);
-    if (!session || session.taskId !== input.taskId) {
-      throw new Error('Agent session ownership does not match the selected task.');
-    }
-    if (session.runtimeId !== input.runtimeId) {
-      throw new Error(
-        `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
-      );
-    }
-    const snapshot = await this.store.snapshot();
-    if (
-      snapshot.runs.some(
-        (run) =>
-          run.sessionId === session.id &&
-          [
-            'QUEUED',
-            'STARTING',
-            'RUNNING',
-            'AWAITING_APPROVAL',
-            'AWAITING_USER_INPUT',
-            'INTERRUPTING',
-            'RECOVERY_REQUIRED'
-          ].includes(run.status)
-      )
-    ) {
-      throw new Error(
-        'Provider-native session settings cannot change during an active or recovery-required run.'
-      );
-    }
-    if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
-      throw new Error(
-        `Agent session ${session.id} is ${session.status} and cannot be configured.`
-      );
-    }
-
-    const adapter = this.runtimeRegistry.require(input.runtimeId);
-    await this.assertAgentRuntimeAvailable();
-    await this.assertRuntimeAllowedInCurrentSurface(adapter);
-    let updateNative: () => Promise<import('../../shared/agent').AgentJsonValue>;
-    if (input.operation === 'SET_MODE') {
-      if (typeof input.modeId !== 'string' || !input.modeId || !adapter.setSessionMode) {
+    return this.withTaskAction(input.taskId, 'Provider session update', async () => {
+      const session = await this.store.getAgentSession(input.sessionId);
+      if (!session || session.taskId !== input.taskId) {
+        throw new Error('Agent session ownership does not match the selected task.');
+      }
+      if (session.runtimeId !== input.runtimeId) {
         throw new Error(
-          `${adapter.descriptor.displayName} does not expose native session modes.`
+          `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
         );
       }
-      const setMode = adapter.setSessionMode.bind(adapter);
-      updateNative = () => setMode(session.id, input.modeId);
-    } else if (input.operation === 'SET_CONFIG_OPTION') {
+      const snapshot = await this.store.snapshot();
       if (
-        typeof input.configId !== 'string' ||
-        !input.configId ||
-        !['string', 'boolean'].includes(typeof input.value) ||
-        !adapter.setSessionConfigOption
+        snapshot.runs.some(
+          (run) =>
+            run.sessionId === session.id &&
+            [
+              'QUEUED',
+              'STARTING',
+              'RUNNING',
+              'AWAITING_APPROVAL',
+              'AWAITING_USER_INPUT',
+              'INTERRUPTING',
+              'RECOVERY_REQUIRED'
+            ].includes(run.status)
+        )
       ) {
         throw new Error(
-          `${adapter.descriptor.displayName} does not expose this native configuration option.`
+          'Provider-native session settings cannot change during an active or recovery-required run.'
         );
       }
-      const setConfigOption = adapter.setSessionConfigOption.bind(adapter);
-      updateNative = () => setConfigOption(session.id, input.configId, input.value);
-    } else {
-      throw new Error('Unknown provider-native session operation.');
-    }
-    if (session.status === 'NOT_LOADED') {
-      if (!session.providerSessionId) {
-        throw new Error(`Agent session ${session.id} has no provider session ID.`);
+      if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
+        throw new Error(
+          `Agent session ${session.id} is ${session.status} and cannot be configured.`
+        );
       }
-      await adapter.attachSession({
-        localSessionId: session.id,
-        providerSessionId: session.providerSessionId
-      });
-    }
 
-    const native = await updateNative();
-    return {
-      taskId: session.taskId,
-      sessionId: session.id,
-      runtimeId: session.runtimeId,
-      native
-    };
+      const adapter = this.runtimeRegistry.require(input.runtimeId);
+      await this.assertAgentRuntimeAvailable();
+      await this.assertRuntimeAllowedInCurrentSurface(adapter);
+      if (!adapter.applySessionControl) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not expose typed provider session controls.`
+        );
+      }
+      if (session.status === 'NOT_LOADED') {
+        if (!session.providerSessionId) {
+          throw new Error(`Agent session ${session.id} has no provider session ID.`);
+        }
+        await adapter.attachSession({
+          localSessionId: session.id,
+          providerSessionId: session.providerSessionId
+        });
+      }
+
+      const updated = await adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: input.controlId,
+        value: input.value,
+        revision: input.revision
+      });
+      return {
+        taskId: session.taskId,
+        sessionId: session.id,
+        runtimeId: session.runtimeId,
+        native: updated.native,
+        controls: updated.controls
+      };
+    });
   }
 
   listTasks(): Promise<TaskSnapshot> {
@@ -752,8 +755,14 @@ export class TaskManagerService {
     });
   }
 
-  cancelRun(input: CancelRunRequest): Promise<void> {
-    return this.agents.interruptRun(input.runId);
+  async cancelRun(input: CancelRunRequest): Promise<void> {
+    const run = await this.store.getRun(input.runId);
+    if (!run) return;
+    return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
+      const current = await this.store.getRun(input.runId);
+      if (!current || current.taskId !== run.taskId) return;
+      await this.agents.interruptRun(current.id);
+    });
   }
 
   async steerRun(input: SteerRunRequest): Promise<void> {
@@ -1002,6 +1011,15 @@ export class TaskManagerService {
       ) {
         throw new Error('Wait for the active turn to finish before starting a review.');
       }
+      if (
+        run.id !== task.currentRunId ||
+        !isImplementationRunMode(run.mode) ||
+        run.status !== 'COMPLETED'
+      ) {
+        throw new Error(
+          'A review requires a successfully completed implementation run. Retry or continue this run first.'
+        );
+      }
       const iteration = snapshot.iterations.find(
         (candidate) => candidate.id === run.iterationId
       );
@@ -1062,7 +1080,9 @@ export class TaskManagerService {
   }
 
   respondToInteraction(input: RespondToInteractionRequest) {
-    return this.agents.respondToInteraction(input);
+    return this.withTaskAction(input.taskId, 'Interaction response', () =>
+      this.agents.respondToInteraction(input)
+    );
   }
 
   async shutdown(): Promise<void> {
@@ -1308,9 +1328,13 @@ export class TaskManagerService {
       const latestMerge = snapshot.mergeSnapshots
         .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
         .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+      const currentRun = task.currentRunId
+        ? snapshot.runs.find((candidate) => candidate.id === task.currentRunId)
+        : undefined;
 
       const blockedReason = transitionBlocker(task, input.toPhase, {
         hasWorktree: Boolean(task.currentWorktreeId),
+        currentRun,
         hasGitSnapshot: Boolean(latestGit),
         gitStatus: latestGit?.status ?? task.projection.git,
         gitHeadSha: latestGit?.headSha,
@@ -1643,6 +1667,7 @@ function createBuiltInAgentRuntimes(
     cwd: string;
     codexExecutable?: string;
     openCodeExecutable?: string;
+    antigravityExecutable?: string;
     acpExecutablePaths?: Partial<Record<string, string>>;
     browserDevBoundary: boolean;
     codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
@@ -1660,24 +1685,22 @@ function createBuiltInAgentRuntimes(
     executable:
       options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN
   });
+  const antigravity = new AntigravityAdapter(store, events, {
+    cwd: options.cwd,
+    executable:
+      options.antigravityExecutable ?? process.env[TASK_MONKI_ANTIGRAVITY_BIN_ENV]
+  });
   const acp = ACP_RUNTIME_PROFILES.map(
     (profile) =>
       new AcpRuntimeAdapter(store, events, profile, {
         cwd: options.cwd,
         executable:
           options.acpExecutablePaths?.[profile.descriptor.id] ??
-          process.env[ACP_RUNTIME_EXECUTABLE_ENV[profile.descriptor.id]]
+          process.env[profile.executableEnvironmentKey]
       })
   );
-  return [codex, openCode, ...acp];
+  return [codex, openCode, antigravity, ...acp];
 }
-
-const ACP_RUNTIME_EXECUTABLE_ENV: Record<string, string> = {
-  'gemini-acp': 'TASK_MONKI_GEMINI_ACP_BIN',
-  'grok-acp': 'TASK_MONKI_GROK_ACP_BIN',
-  'cursor-agent-acp': 'TASK_MONKI_CURSOR_AGENT_ACP_BIN',
-  'claude-agent-acp': 'TASK_MONKI_CLAUDE_AGENT_ACP_BIN'
-};
 
 async function prepareTaskCreationSettings(
   adapter: AgentRuntimeAdapter,
@@ -1801,6 +1824,7 @@ export function transitionBlocker(
   toPhase: Task['workflowPhase'],
   evidence: {
     hasWorktree: boolean;
+    currentRun?: Pick<RunRecord, 'id' | 'mode' | 'status'>;
     hasGitSnapshot?: boolean;
     gitStatus?: Task['projection']['git'];
     gitHeadSha?: string;
@@ -1822,8 +1846,13 @@ export function transitionBlocker(
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
     }
-    if (task.projection.agentRun !== 'COMPLETED') {
-      return 'The agent turn must complete before moving to review.';
+    if (
+      !evidence.currentRun ||
+      evidence.currentRun.id !== task.currentRunId ||
+      evidence.currentRun.status !== 'COMPLETED' ||
+      !isImplementationRunMode(evidence.currentRun.mode)
+    ) {
+      return 'The current implementation run must complete successfully before moving to review.';
     }
     return undefined;
   }

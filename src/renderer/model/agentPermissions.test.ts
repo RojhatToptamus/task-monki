@@ -120,6 +120,15 @@ describe('agent permission settings', () => {
         approvalsReviewer: 'user'
       })
     ).toBe('Enabled');
+    expect(
+      formatAgentPermissionMode({
+        runtimeId: 'opencode',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('Ask for approval');
   });
 });
 

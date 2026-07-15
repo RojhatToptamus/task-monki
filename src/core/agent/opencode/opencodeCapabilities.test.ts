@@ -8,6 +8,15 @@ describe('opencodeCapabilities', () => {
     expect(
       capabilities.executionPolicy.presets.map((preset) => preset.networkAccess)
     ).toEqual(['REQUIRED', 'REQUIRED']);
+    expect(
+      capabilities.executionPolicy.presets.map((preset) => ({
+        sandbox: preset.sandbox,
+        approvalPolicy: preset.approvalPolicy
+      }))
+    ).toEqual([
+      { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'on-request' },
+      { sandbox: 'DANGER_FULL_ACCESS', approvalPolicy: 'never' }
+    ]);
     expect(capabilities.attachmentDelivery.maturity).toBe('unsupported');
     expect(capabilities.promptRefinement.maturity).toBe('unsupported');
     expect(capabilities.sessionFork).toEqual({

@@ -148,6 +148,72 @@ describe('AgentInteractionService permission decisions', () => {
     );
     expect(updates).toContain('run.activity');
   });
+
+  it('never sends a positive decision after the run has started interrupting', async () => {
+    const run = { ...runFixture(), status: 'INTERRUPTING' as const };
+    const session = sessionFixture();
+    const interaction = interactionFixture('/tmp/worktree/file.txt');
+    const transitionInteractionRequest = vi.fn();
+    const store = {
+      getInteractionRequest: vi.fn().mockResolvedValue(interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockResolvedValue(undefined)
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'PERMISSION_APPROVAL',
+          action: 'GRANT_TURN',
+          permissions: { fileSystem: { read: ['/tmp/worktree/file.txt'] } }
+        }
+      })
+    ).rejects.toThrow('cannot resume');
+
+    expect(transitionInteractionRequest).not.toHaveBeenCalled();
+    expect(adapter.respondToInteraction).not.toHaveBeenCalled();
+  });
+
+  it('never sends a positive decision from a partial record whose session is not awaiting', async () => {
+    const run = runFixture();
+    const session = sessionFixture();
+    const interaction = interactionFixture('/tmp/worktree/file.txt');
+    const transitionInteractionRequest = vi.fn();
+    const store = {
+      getInteractionRequest: vi.fn().mockResolvedValue(interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockResolvedValue(undefined)
+    } as unknown as AgentRuntimeAdapter;
+    const service = new AgentInteractionService(store, new AppEventBus(), () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'PERMISSION_APPROVAL',
+          action: 'GRANT_TURN',
+          permissions: { fileSystem: { read: ['/tmp/worktree/file.txt'] } }
+        }
+      })
+    ).rejects.toThrow('run/session awaiting state is AWAITING_APPROVAL/ACTIVE');
+
+    expect(transitionInteractionRequest).not.toHaveBeenCalled();
+    expect(adapter.respondToInteraction).not.toHaveBeenCalled();
+  });
 });
 
 function interactionFixture(deliveryPath: string): InteractionRequestRecord {

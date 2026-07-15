@@ -67,7 +67,7 @@ describe('AppSettingsStore', () => {
     const store = new MemoryAppSettingsStore({
       runtimeExecutablePaths: {
         opencode: '/opt/opencode',
-        'gemini-acp': '/opt/gemini'
+        antigravity: '/opt/agy'
       }
     });
 
@@ -80,7 +80,7 @@ describe('AppSettingsStore', () => {
 
     expect(settings.runtimeExecutablePaths).toEqual({
       opencode: null,
-      'gemini-acp': '/opt/gemini',
+      antigravity: '/opt/agy',
       'grok-acp': '/opt/grok'
     });
   });
@@ -179,6 +179,97 @@ describe('AppSettingsStore', () => {
       reviewRuntimeId: 'codex',
       reviewModel: 'gpt-review'
     });
+  });
+
+  it('migrates Gemini ACP selections without treating Antigravity as protocol-compatible', () => {
+    expect(
+      normalizeAppSettings({
+        schemaVersion: 5,
+        defaultRuntimeId: 'gemini-acp',
+        defaultModel: 'gemini-default',
+        defaultModelProvider: 'google',
+        defaultReasoningEffort: 'high',
+        promptRefinementRuntimeId: 'gemini-acp',
+        promptRefinementModel: 'gemini-refine',
+        promptRefinementModelProvider: 'google',
+        reviewRuntimeId: 'gemini-acp',
+        reviewModel: 'gemini-review',
+        reviewModelProvider: 'google',
+        reviewReasoningEffort: 'high',
+        runtimeExecutablePaths: {
+          'gemini-acp': '/opt/gemini',
+          opencode: '/opt/opencode'
+        }
+      })
+    ).toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      defaultRuntimeId: 'antigravity',
+      defaultModel: undefined,
+      defaultModelProvider: undefined,
+      defaultReasoningEffort: undefined,
+      promptRefinementRuntimeId: 'codex',
+      promptRefinementModel: undefined,
+      promptRefinementModelProvider: undefined,
+      reviewRuntimeId: 'codex',
+      reviewModel: undefined,
+      reviewModelProvider: undefined,
+      reviewReasoningEffort: undefined,
+      runtimeExecutablePaths: { opencode: '/opt/opencode' }
+    });
+  });
+
+  it('persists the Gemini ACP migration during the first successful load', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-migration-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({
+        schemaVersion: 5,
+        defaultRuntimeId: 'gemini-acp',
+        defaultModel: 'gemini-default',
+        runtimeExecutablePaths: {
+          'gemini-acp': '/opt/gemini',
+          opencode: '/opt/opencode'
+        }
+      }),
+      'utf8'
+    );
+
+    const loaded = await new AppSettingsStore(settingsPath).get();
+    const persisted = JSON.parse(await fs.readFile(settingsPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+
+    expect(loaded).toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      defaultRuntimeId: 'antigravity',
+      defaultModel: undefined,
+      runtimeExecutablePaths: { opencode: '/opt/opencode' }
+    });
+    expect(persisted).toMatchObject({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      defaultRuntimeId: 'antigravity',
+      runtimeExecutablePaths: { opencode: '/opt/opencode' }
+    });
+    expect(JSON.stringify(persisted)).not.toContain('gemini-acp');
+  });
+
+  it('rejects and preserves settings written by a newer application schema', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-future-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const raw = `${JSON.stringify({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION + 1,
+      defaultRuntimeId: 'future-runtime',
+      futureProviderSettings: { retained: true }
+    }, null, 2)}\n`;
+    await fs.writeFile(settingsPath, raw, 'utf8');
+
+    await expect(new AppSettingsStore(settingsPath).get()).rejects.toThrow(
+      'newer than supported'
+    );
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
+    await expect(fs.readdir(dir)).resolves.toEqual(['app-settings.json']);
   });
 
   it('moves invalid JSON aside and recreates normalized defaults', async () => {

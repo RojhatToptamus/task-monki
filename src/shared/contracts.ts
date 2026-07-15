@@ -10,6 +10,8 @@ import type {
   AgentRunMode,
   AgentRunStatus,
   AgentServerInstance,
+  AgentSessionControlSet,
+  AgentSessionControlValue,
   AgentSessionRecord,
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
@@ -753,28 +755,21 @@ export interface SyncAgentGoalRequest {
   sessionId: string;
 }
 
-export type UpdateAgentNativeSessionRequest =
-  | {
-      operation: 'SET_MODE';
-      taskId: string;
-      sessionId: string;
-      runtimeId: AgentRuntimeId;
-      modeId: string;
-    }
-  | {
-      operation: 'SET_CONFIG_OPTION';
-      taskId: string;
-      sessionId: string;
-      runtimeId: AgentRuntimeId;
-      configId: string;
-      value: string | boolean;
-    };
+export interface UpdateAgentNativeSessionRequest {
+  taskId: string;
+  sessionId: string;
+  runtimeId: AgentRuntimeId;
+  controlId: string;
+  value: AgentSessionControlValue;
+  revision: string;
+}
 
 export interface UpdateAgentNativeSessionResult {
   taskId: string;
   sessionId: string;
   runtimeId: AgentRuntimeId;
   native: import('./agent').AgentJsonValue;
+  controls: AgentSessionControlSet;
 }
 
 export interface RespondToInteractionRequest {

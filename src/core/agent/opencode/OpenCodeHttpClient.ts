@@ -1,4 +1,6 @@
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
+import { redactCredentialText } from '../AgentCredentialRedaction';
+import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_HTTP_BODY_BYTES = 16 * 1024 * 1024;
@@ -19,6 +21,7 @@ export interface OpenCodeHttpClientOptions {
   password: string;
   directory: string;
   requestTimeoutMs?: number;
+  sensitiveValues?: readonly string[];
   journal: OpenCodeJournalWriter;
   fetch?: typeof fetch;
 }
@@ -26,6 +29,11 @@ export interface OpenCodeHttpClientOptions {
 export interface OpenCodeHttpResult<T> {
   data: T;
   raw: AgentProtocolMessageReference;
+}
+
+export interface OpenCodeRequestOptions {
+  /** Absolute wall-clock deadline shared by a bounded multi-request control flow. */
+  deadlineAt?: number;
 }
 
 export class OpenCodeHttpError extends Error {
@@ -56,10 +64,18 @@ export interface OpenCodeEventStreamHandlers {
 }
 
 export interface OpenCodeClientTransport {
-  get<T>(path: string): Promise<OpenCodeHttpResult<T>>;
-  post<T>(path: string, body?: unknown): Promise<OpenCodeHttpResult<T>>;
-  patch<T>(path: string, body?: unknown): Promise<OpenCodeHttpResult<T>>;
-  delete<T>(path: string): Promise<OpenCodeHttpResult<T>>;
+  get<T>(path: string, options?: OpenCodeRequestOptions): Promise<OpenCodeHttpResult<T>>;
+  post<T>(
+    path: string,
+    body?: unknown,
+    options?: OpenCodeRequestOptions
+  ): Promise<OpenCodeHttpResult<T>>;
+  patch<T>(
+    path: string,
+    body?: unknown,
+    options?: OpenCodeRequestOptions
+  ): Promise<OpenCodeHttpResult<T>>;
+  delete<T>(path: string, options?: OpenCodeRequestOptions): Promise<OpenCodeHttpResult<T>>;
   startEventStream(handlers: OpenCodeEventStreamHandlers): { stop(): void };
 }
 
@@ -74,20 +90,31 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     this.authorization = `Basic ${Buffer.from(`${options.username}:${options.password}`).toString('base64')}`;
   }
 
-  get<T>(path: string): Promise<OpenCodeHttpResult<T>> {
-    return this.request<T>('GET', path);
+  get<T>(path: string, options?: OpenCodeRequestOptions): Promise<OpenCodeHttpResult<T>> {
+    return this.request<T>('GET', path, undefined, false, options);
   }
 
-  post<T>(path: string, body?: unknown): Promise<OpenCodeHttpResult<T>> {
-    return this.request<T>('POST', path, body, true);
+  post<T>(
+    path: string,
+    body?: unknown,
+    options?: OpenCodeRequestOptions
+  ): Promise<OpenCodeHttpResult<T>> {
+    return this.request<T>('POST', path, body, true, options);
   }
 
-  patch<T>(path: string, body?: unknown): Promise<OpenCodeHttpResult<T>> {
-    return this.request<T>('PATCH', path, body, true);
+  patch<T>(
+    path: string,
+    body?: unknown,
+    options?: OpenCodeRequestOptions
+  ): Promise<OpenCodeHttpResult<T>> {
+    return this.request<T>('PATCH', path, body, true, options);
   }
 
-  delete<T>(path: string): Promise<OpenCodeHttpResult<T>> {
-    return this.request<T>('DELETE', path, undefined, true);
+  delete<T>(
+    path: string,
+    options?: OpenCodeRequestOptions
+  ): Promise<OpenCodeHttpResult<T>> {
+    return this.request<T>('DELETE', path, undefined, true, options);
   }
 
   startEventStream(handlers: OpenCodeEventStreamHandlers): { stop(): void } {
@@ -104,20 +131,40 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body?: unknown,
-    mutation = false
+    mutation = false,
+    options?: OpenCodeRequestOptions
   ): Promise<OpenCodeHttpResult<T>> {
     const operation = `${method} ${path}`;
     const requestBody = body === undefined ? undefined : JSON.stringify(body);
-    await this.options.journal(
-      'OUTBOUND',
-      JSON.stringify({ method, path, body: body ?? null }),
-      { transport: 'HTTP', operation }
-    );
+    if (
+      options?.deadlineAt !== undefined &&
+      (!Number.isFinite(options.deadlineAt) || options.deadlineAt <= Date.now())
+    ) {
+      throw new Error(`${operation} exceeded its caller deadline before it was sent.`);
+    }
+    const remainingMs = options?.deadlineAt === undefined
+      ? this.requestTimeoutMs
+      : Math.min(this.requestTimeoutMs, options.deadlineAt - Date.now());
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      throw new Error(`${operation} exceeded its caller deadline before it was sent.`);
+    }
     const controller = new AbortController();
-    const deadlineAt = Date.now() + this.requestTimeoutMs;
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const deadlineAt = Date.now() + remainingMs;
+    const timer = setTimeout(() => controller.abort(), remainingMs);
     timer.unref();
     try {
+      await waitForAbortable(
+        this.appendJournal(
+          'OUTBOUND',
+          JSON.stringify({ method, path, body: body ?? null }),
+          { transport: 'HTTP', operation }
+        ),
+        controller.signal,
+        `${operation} timed out before its outbound journal entry was persisted.`
+      );
+      if (controller.signal.aborted || Date.now() >= deadlineAt) {
+        throw new Error(`${operation} exceeded its caller deadline before it was sent.`);
+      }
       let response: Response;
       try {
         response = await this.fetchImplementation(this.url(path), {
@@ -131,7 +178,9 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
           signal: controller.signal
         });
       } catch (cause) {
-        const message = `${operation} did not produce an authoritative HTTP response: ${errorMessage(cause)}`;
+        const message = this.redactText(
+          `${operation} did not produce an authoritative HTTP response: ${errorMessage(cause)}`
+        );
         if (mutation) throw new OpenCodeAmbiguousMutationError(operation, message);
         throw new Error(message, { cause });
       }
@@ -145,14 +194,16 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
         throw mutation
           ? new OpenCodeAmbiguousMutationError(
               operation,
-              `${operation} returned HTTP ${response.status}, but its response body could not be read: ${errorMessage(cause)}`
+              this.redactText(
+                `${operation} returned HTTP ${response.status}, but its response body could not be read: ${errorMessage(cause)}`
+              )
             )
           : cause;
       }
       let raw: AgentProtocolMessageReference;
       try {
         raw = await waitForAbortable(
-          this.options.journal('INBOUND', text || JSON.stringify({ status: response.status }), {
+          this.appendJournal('INBOUND', text || JSON.stringify({ status: response.status }), {
             transport: 'HTTP',
             operation,
             status: response.status
@@ -164,7 +215,9 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
         throw mutation
           ? new OpenCodeAmbiguousMutationError(
               operation,
-              `${operation} returned HTTP ${response.status}, but Task Monki could not journal the acknowledgement: ${errorMessage(cause)}`
+              this.redactText(
+                `${operation} returned HTTP ${response.status}, but Task Monki could not journal the acknowledgement: ${errorMessage(cause)}`
+              )
             )
           : cause;
       }
@@ -172,7 +225,10 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
         throw new OpenCodeHttpError(
           response.status,
           operation,
-          `OpenCode rejected ${operation} with HTTP ${response.status}: ${safeErrorBody(text)}`
+          `OpenCode rejected ${operation} with HTTP ${response.status}: ${safeErrorBody(
+            text,
+            this.options.sensitiveValues
+          )}`
         );
       }
       if (!text) {
@@ -218,7 +274,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     while (!signal.aborted) {
       try {
         await this.consumeEventStream(signal, handlers.onEvent, async () => {
-          if (connected) await handlers.onReconnect();
+          if (connected) await handlers.onReconnect().catch(() => undefined);
           connected = true;
           attempt = 0;
         });
@@ -227,7 +283,10 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
       } catch (cause) {
         if (signal.aborted) return;
         const error = toError(cause);
-        await handlers.onDisconnect(error);
+        // Adapter callbacks persist telemetry and may fail independently of
+        // the HTTP transport. A callback failure must not terminate the only
+        // reconnect loop while the caller still owns this stream handle.
+        await handlers.onDisconnect(error).catch(() => undefined);
         attempt += 1;
         await abortableDelay(Math.min(10_000, 250 * 2 ** Math.min(attempt, 6)), signal);
         if (signal.aborted) return;
@@ -252,13 +311,16 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
       throw new OpenCodeHttpError(
         response.status,
         'GET /event',
-        `OpenCode event stream failed with HTTP ${response.status}: ${safeErrorBody(body)}`
+        `OpenCode event stream failed with HTTP ${response.status}: ${safeErrorBody(
+          body,
+          this.options.sensitiveValues
+        )}`
       );
     }
     await onConnected();
     const parser = new OpenCodeSseParser(async (data) => {
       if (data === '[DONE]') return;
-      const raw = await this.options.journal('INBOUND', data, {
+      const raw = await this.appendJournal('INBOUND', data, {
         transport: 'SSE',
         operation: 'GET /event'
       });
@@ -287,6 +349,23 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     const url = new URL(pathname, this.options.baseUrl);
     url.searchParams.set('directory', this.options.directory);
     return url.toString();
+  }
+
+  private appendJournal(
+    direction: AgentProtocolMessageReference['direction'],
+    raw: string,
+    metadata: Record<string, unknown>
+  ): Promise<AgentProtocolMessageReference> {
+    const safe = redactProtocolJournalRecord(
+      raw,
+      metadata,
+      this.options.sensitiveValues
+    );
+    return this.options.journal(direction, safe.raw, safe.metadata);
+  }
+
+  private redactText(value: string): string {
+    return redactCredentialText(value, this.options.sensitiveValues);
   }
 }
 
@@ -417,8 +496,13 @@ function waitForAbortable<T>(
   });
 }
 
-function safeErrorBody(body: string): string {
-  const normalized = body.replace(/[\r\n\t]+/gu, ' ').trim();
+function safeErrorBody(
+  body: string,
+  sensitiveValues: readonly string[] = []
+): string {
+  const normalized = redactCredentialText(body, sensitiveValues)
+    .replace(/[\r\n\t]+/gu, ' ')
+    .trim();
   return normalized.slice(0, 1_000) || 'no response body';
 }
 

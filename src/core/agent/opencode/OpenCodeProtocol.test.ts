@@ -3,6 +3,7 @@ import {
   mapOpenCodeModels,
   mapOpenCodeTodoSteps,
   normalizeOpenCodeEvent,
+  openCodeErrorDiagnostic,
   parseOpenCodeProviderCatalog
 } from './OpenCodeProtocol';
 
@@ -62,6 +63,31 @@ describe('OpenCodeProtocol', () => {
     ]);
   });
 
+  it('fails closed when the provider catalog omits authoritative connection state', () => {
+    expect(() =>
+      parseOpenCodeProviderCatalog({
+        all: [
+          {
+            id: 'anthropic',
+            models: { claude: { id: 'claude' } }
+          }
+        ]
+      })
+    ).toThrow('missing authoritative connected-provider state');
+
+    expect(() =>
+      parseOpenCodeProviderCatalog({
+        connected: ['anthropic', 42],
+        all: [
+          {
+            id: 'anthropic',
+            models: { claude: { id: 'claude' } }
+          }
+        ]
+      })
+    ).toThrow('missing authoritative connected-provider state');
+  });
+
   it('unwraps global and durable event envelopes without losing the event id', () => {
     expect(
       normalizeOpenCodeEvent({
@@ -102,5 +128,53 @@ describe('OpenCodeProtocol', () => {
       { step: 'Implement', status: 'IN_PROGRESS' },
       { step: 'Verify', status: 'PENDING' }
     ]);
+  });
+
+  it('extracts allowlisted provider-error fields without exposing response internals', () => {
+    const diagnostic = openCodeErrorDiagnostic({
+      name: 'APIError',
+      data: {
+        message: 'token expired or incorrect',
+        statusCode: 401,
+        isRetryable: false,
+        responseHeaders: { authorization: 'Bearer provider-secret' },
+        responseBody: '{"credential":"provider-secret"}',
+        metadata: { url: 'https://provider.example/?api_key=provider-secret' }
+      }
+    });
+
+    expect(diagnostic).toBe(
+      'APIError: token expired or incorrect (status 401; not retryable)'
+    );
+    expect(diagnostic).not.toMatch(/provider-secret|response|metadata|provider\.example/iu);
+  });
+
+  it('redacts and bounds provider error diagnostics before durable use', () => {
+    const opaque = 'm7Qp4Vz9Lk2Nc8';
+    const diagnostic = openCodeErrorDiagnostic(
+      {
+        name: 'APIError',
+        data: {
+          message: `Provider rejected credential ${opaque}. ${'🧪'.repeat(8_000)}`,
+          statusCode: 500,
+          isRetryable: true
+        }
+      },
+      [opaque]
+    );
+
+    expect(Buffer.byteLength(diagnostic, 'utf8')).toBeLessThanOrEqual(4 * 1024);
+    expect(diagnostic).toContain('credential [REDACTED]');
+    expect(diagnostic).toContain('[OpenCode diagnostic truncated]');
+    expect(diagnostic).not.toContain(opaque);
+  });
+
+  it('preserves explicit abort diagnostics without assigning workflow meaning to them', () => {
+    expect(
+      openCodeErrorDiagnostic({
+        name: 'MessageAbortedError',
+        data: { message: 'Aborted' }
+      })
+    ).toBe('MessageAbortedError: Aborted');
   });
 });

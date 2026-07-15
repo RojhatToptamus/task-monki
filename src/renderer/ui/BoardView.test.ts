@@ -20,6 +20,23 @@ describe('describeTaskAttention', () => {
     });
   });
 
+  it('directs failed implementation work to retry instead of review', () => {
+    const attention = describeTaskAttention(
+      taskFixture({
+        workflowPhase: 'IN_PROGRESS',
+        projection: {
+          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
+          agentRun: 'FAILED'
+        }
+      })
+    );
+
+    expect(attention).toMatchObject({
+      label: 'Run failed',
+      detail: 'Retry or continue the implementation before review.'
+    });
+  });
+
   it('labels failing GitHub checks as delivery attention', () => {
     const attention = describeTaskAttention(
       taskFixture({

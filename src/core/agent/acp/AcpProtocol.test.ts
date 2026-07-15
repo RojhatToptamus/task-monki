@@ -3,7 +3,10 @@ import {
   decodeAcpMessage,
   flattenSelectOptions,
   parseConfigOptions,
+  parseInitializeModelExtension,
+  parseNewSessionResponse,
   parsePermissionRequest,
+  parseSessionModelExtension,
   parseSessionNotification
 } from './AcpProtocol';
 
@@ -54,6 +57,95 @@ describe('ACP stable-v1 protocol codec', () => {
         expect.objectContaining({ value: 'gemini-pro', _meta: { context: 1000000 } })
       ]);
     }
+  });
+
+  it('keeps provider session-model fields outside the stable-v1 setup schema', () => {
+    const setup = parseNewSessionResponse({
+      sessionId: 'session-1',
+      models: { incompatibleVendorShape: true },
+      _meta: { providerOwned: true }
+    });
+    expect(setup).toEqual({
+      sessionId: 'session-1',
+      modes: null,
+      configOptions: null,
+      _meta: { providerOwned: true }
+    });
+    expect(setup).not.toHaveProperty('models');
+  });
+
+  it('parses the captured Grok model catalog only through the explicit extension codec', () => {
+    const models = parseSessionModelExtension(
+      {
+        sessionId: '4da7bbcf-21ef-4748-81cf-84c4960b2370',
+        models: {
+          currentModelId: 'grok-build',
+          availableModels: [
+            {
+              modelId: 'grok-composer-2.5-fast',
+              name: 'Composer 2.5',
+              description: 'Cursor latest coding model'
+            },
+            {
+              modelId: 'grok-build',
+              name: 'Grok Build',
+              description: 'Best for advanced coding tasks'
+            }
+          ]
+        },
+        _meta: { providerOwned: true }
+      },
+      'models'
+    );
+    expect(models).toMatchObject({
+      currentModelId: 'grok-build',
+      availableModels: [
+        { modelId: 'grok-composer-2.5-fast', name: 'Composer 2.5' },
+        { modelId: 'grok-build', name: 'Grok Build' }
+      ]
+    });
+  });
+
+  it('parses the captured Grok initialize catalog only through the explicit metadata extension', () => {
+    expect(
+      parseInitializeModelExtension(
+        {
+          protocolVersion: 1,
+          agentCapabilities: {},
+          _meta: {
+            modelState: {
+              currentModelId: 'grok-build',
+              availableModels: [
+                { modelId: 'grok-composer-2.5-fast', name: 'Composer 2.5' },
+                { modelId: 'grok-build', name: 'Grok Build' }
+              ]
+            }
+          }
+        },
+        'modelState'
+      )
+    ).toMatchObject({
+      currentModelId: 'grok-build',
+      availableModels: [
+        { modelId: 'grok-composer-2.5-fast' },
+        { modelId: 'grok-build' }
+      ]
+    });
+  });
+
+  it('rejects model state whose current ID was not advertised', () => {
+    expect(() =>
+      parseSessionModelExtension(
+        {
+          sessionId: 'session-1',
+          models: {
+            currentModelId: 'unadvertised',
+            availableModels: [{ modelId: 'grok-build', name: 'Grok Build' }]
+          }
+        },
+        'models'
+      )
+    ).toThrow('unadvertised model IDs');
   });
 
   it('retains opaque permission option IDs for every semantic kind', () => {

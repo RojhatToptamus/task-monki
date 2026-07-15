@@ -49,6 +49,7 @@ import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
+  isImplementationRunMode,
   isTaskCreationToken,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
@@ -108,6 +109,11 @@ export interface CreateRunInput {
   requestedSettings?: AgentExecutionSettings;
   beforeGitSnapshotId?: string;
 }
+
+export type CreateInteractionRequestInput = Omit<
+  InteractionRequestRecord,
+  'id' | 'status' | 'requestedAt'
+>;
 
 export interface CreateForkedAlternativeTaskInput extends CreateTaskRequest {
   sourceTaskId: string;
@@ -414,6 +420,7 @@ export class FileTaskStore {
   private loaded = false;
   private writeQueue: Promise<unknown> = Promise.resolve();
   private taskCreationQueue: Promise<unknown> = Promise.resolve();
+  private finalArtifactQueue: Promise<unknown> = Promise.resolve();
   private readonly maxUnreferencedTerminalAgentServers: number;
 
   constructor(
@@ -504,6 +511,7 @@ export class FileTaskStore {
   async close(): Promise<void> {
     try {
       await this.taskCreationQueue.catch(() => undefined);
+      await this.finalArtifactQueue.catch(() => undefined);
       await this.writeQueue.catch(() => undefined);
       await this.protocolJournal.close();
     } finally {
@@ -1754,8 +1762,10 @@ export class FileTaskStore {
       relationshipProblems.length > 0 ? 'CONTRADICTORY' : 'RESOLVED';
     const now = new Date().toISOString();
     const requestedSettings = {
+      ...parent.requestedSettings,
       ...(existing?.requestedSettings ?? {}),
-      ...(input.requestedSettings ?? {})
+      ...(input.requestedSettings ?? {}),
+      runtimeId: parent.runtimeId
     };
     const stored: AgentSessionRecord = existing
       ? {
@@ -2251,18 +2261,30 @@ export class FileTaskStore {
     return clone(stored);
   }
 
+  /**
+   * Publishes the actionable interaction, matching run projection/event, and
+   * exact owning session awaiting state as one durable store boundary.
+   */
   async createInteractionRequest(
-    input: Omit<InteractionRequestRecord, 'id' | 'status' | 'requestedAt'>
+    input: CreateInteractionRequestInput
   ): Promise<InteractionRequestRecord> {
     await this.init();
     const run = this.state.runs.find((candidate) => candidate.id === input.runId);
+    const session = this.state.agentSessions.find(
+      (candidate) => candidate.id === input.sessionId
+    );
     if (
       !run ||
+      !session ||
       run.taskId !== input.taskId ||
       run.iterationId !== input.iterationId ||
       run.sessionId !== input.sessionId ||
       run.serverInstanceId !== input.serverInstanceId ||
-      run.runtimeId !== input.runtimeId
+      run.runtimeId !== input.runtimeId ||
+      session.taskId !== input.taskId ||
+      session.iterationId !== input.iterationId ||
+      session.worktreeId !== run.worktreeId ||
+      session.runtimeId !== input.runtimeId
     ) {
       throw new Error('Interaction request ownership does not match its run.');
     }
@@ -2314,25 +2336,39 @@ export class FileTaskStore {
       status: 'PENDING',
       requestedAt: new Date().toISOString()
     };
-    this.state = {
-      ...this.state,
-      interactionRequests: [stored, ...this.state.interactionRequests]
-    };
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'AGENT_INTERACTION_REQUESTED',
-        taskId: stored.taskId,
-        iterationId: stored.iterationId,
-        runId: stored.runId,
-        worktreeId: run.worktreeId,
-        agentSessionId: stored.sessionId,
-        serverInstanceId: stored.serverInstanceId,
-        interactionRequestId: stored.id,
-        source: 'provider',
-        payload: { type: stored.type, providerRequestId: stored.providerRequestId }
-      }),
-      false
+    const requestedEvent = createDomainEvent({
+      type: 'AGENT_INTERACTION_REQUESTED',
+      taskId: stored.taskId,
+      iterationId: stored.iterationId,
+      runId: stored.runId,
+      worktreeId: run.worktreeId,
+      agentSessionId: stored.sessionId,
+      serverInstanceId: stored.serverInstanceId,
+      interactionRequestId: stored.id,
+      source: 'provider',
+      payload: { type: stored.type, providerRequestId: stored.providerRequestId }
+    });
+    let nextState = applyEventToState(
+      {
+        ...this.state,
+        interactionRequests: [stored, ...this.state.interactionRequests]
+      },
+      requestedEvent
     );
+    const awaitingStatus =
+      stored.type === 'USER_INPUT' ? 'AWAITING_USER_INPUT' : 'AWAITING_APPROVAL';
+    const updatedSession: AgentSessionRecord = {
+      ...session,
+      status: awaitingStatus,
+      updatedAt: stored.requestedAt
+    };
+    nextState = {
+      ...nextState,
+      agentSessions: nextState.agentSessions.map((candidate) =>
+        candidate.id === updatedSession.id ? updatedSession : candidate
+      )
+    };
+    this.state = nextState;
     await this.persistQueued();
     return clone(stored);
   }
@@ -2853,6 +2889,27 @@ export class FileTaskStore {
     }
   }
 
+  /**
+   * Atomically checks the current run projection and appends an event without
+   * yielding between the status guard and projection update.
+   */
+  async appendRunEventIfStatus(
+    event: DomainEvent,
+    allowedStatuses: readonly RunRecord['status'][]
+  ): Promise<boolean> {
+    await this.init();
+    if (!event.runId) {
+      throw new Error('A conditional run event requires a run id.');
+    }
+    const run = this.state.runs.find((candidate) => candidate.id === event.runId);
+    if (!run || !allowedStatuses.includes(run.status)) {
+      return false;
+    }
+    this.state = applyEventToState(this.state, event);
+    await this.persistQueued();
+    return true;
+  }
+
   async appendArtifact(artifactId: string, chunk: string): Promise<void> {
     await this.init();
 
@@ -2879,34 +2936,51 @@ export class FileTaskStore {
   async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
     await this.init();
 
-    const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
-    await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
+    const queued = this.finalArtifactQueue.catch(() => undefined).then(async () => {
+      const run = this.state.runs.find((candidate) => candidate.id === runId);
+      if (!run || run.taskId !== taskId) {
+        throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
+      }
+      const existing = this.state.artifacts.find(
+        (artifact) => artifact.runId === runId && artifact.kind === 'agent-final'
+      );
+      if (existing) {
+        // A prior attempt may have updated memory before its snapshot publish
+        // failed. Republish before reporting an idempotent retry as durable.
+        await this.persistQueued();
+        return clone(existing);
+      }
 
-    const hash = createHash('sha256').update(content).digest('hex');
-    const stored: ArtifactRecord = {
-      ...artifact,
-      byteCount: Buffer.byteLength(content),
-      updatedAt: new Date().toISOString()
-    };
+      const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
+      await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
 
-    this.state = {
-      ...this.state,
-      artifacts: [stored, ...this.state.artifacts]
-    };
+      const hash = createHash('sha256').update(content).digest('hex');
+      const stored: ArtifactRecord = {
+        ...artifact,
+        byteCount: Buffer.byteLength(content),
+        updatedAt: new Date().toISOString()
+      };
 
-    await this.appendEvent(
-      createDomainEvent({
-        type: 'ARTIFACT_CREATED',
-        taskId,
-        runId,
-        source: 'storage',
-        payload: { artifactId: stored.id, kind: stored.kind, hash }
-      }),
-      false
-    );
+      const stateWithArtifact = {
+        ...this.state,
+        artifacts: [stored, ...this.state.artifacts]
+      };
+      this.state = applyEventToState(
+        stateWithArtifact,
+        createDomainEvent({
+          type: 'ARTIFACT_CREATED',
+          taskId,
+          runId,
+          source: 'storage',
+          payload: { artifactId: stored.id, kind: stored.kind, hash }
+        })
+      );
 
-    await this.persistQueued();
-    return clone(stored);
+      await this.persistQueued();
+      return clone(stored);
+    });
+    this.finalArtifactQueue = queued.catch(() => undefined);
+    return queued;
   }
 
   async writeTextArtifact(taskId: string, kind: ArtifactKind, content: string): Promise<ArtifactRecord> {
@@ -3853,9 +3927,23 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     const taskCurrentRun = task.currentRunId
       ? runs.find((run) => run.id === task.currentRunId)
       : undefined;
-    const currentRun = findReviewRunForRepair(taskWithDefaults, runs);
+    const shouldRepairImplementationPhase = Boolean(
+      taskCurrentRun &&
+        isImplementationRunMode(taskCurrentRun.mode) &&
+        ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+          taskCurrentRun.status
+        ) &&
+        taskWithDefaults.workflowPhase === 'REVIEW'
+    );
+    const normalizedTask = shouldRepairImplementationPhase
+      ? { ...taskWithDefaults, workflowPhase: 'IN_PROGRESS' as const }
+      : taskWithDefaults;
+    if (shouldRepairImplementationPhase) {
+      changed = true;
+    }
+    const currentRun = findReviewRunForRepair(normalizedTask, runs);
     if (!currentRun) {
-      return taskWithDefaults;
+      return normalizedTask;
     }
 
     const isActiveReview = activeRunStatuses.includes(currentRun.status);
@@ -3863,14 +3951,24 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       taskCurrentRun !== undefined &&
       taskCurrentRun.mode !== 'REVIEW' &&
       activeRunStatuses.includes(taskCurrentRun.status);
+    const hasNewerNonReviewWorkThatIsNotReviewReady = Boolean(
+      taskCurrentRun &&
+        taskCurrentRun.mode !== 'REVIEW' &&
+        !(
+          isImplementationRunMode(taskCurrentRun.mode) &&
+          taskCurrentRun.status === 'COMPLETED'
+        )
+    );
     const shouldRepairPhase =
+      !shouldRepairImplementationPhase &&
       !hasActiveNonReviewRun &&
-      taskWithDefaults.workflowPhase !== 'REVIEW' &&
-      taskWithDefaults.workflowPhase !== 'IN_REVIEW' &&
-      taskWithDefaults.workflowPhase !== 'DONE' &&
-      taskWithDefaults.workflowPhase !== 'CANCELED' &&
-      taskWithDefaults.workflowPhase !== 'ARCHIVED';
-    const currentReview = taskWithDefaults.projection.codexReview;
+      !hasNewerNonReviewWorkThatIsNotReviewReady &&
+      normalizedTask.workflowPhase !== 'REVIEW' &&
+      normalizedTask.workflowPhase !== 'IN_REVIEW' &&
+      normalizedTask.workflowPhase !== 'DONE' &&
+      normalizedTask.workflowPhase !== 'CANCELED' &&
+      normalizedTask.workflowPhase !== 'ARCHIVED';
+    const currentReview = normalizedTask.projection.codexReview;
     const sameProjectedReview = currentReview?.runId === currentRun.id;
     const reviewResult =
       parseCodexReviewResult(currentRun.finalMessage) ??
@@ -3903,7 +4001,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       (!currentReview.result && Boolean(reviewResult));
 
     if (!shouldRepairPhase && !shouldRepairReview && !shouldRepairCurrentRun) {
-      return taskWithDefaults;
+      return normalizedTask;
     }
 
     changed = true;
@@ -3914,15 +4012,15 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       | StatusProjection['agentRun']
       | undefined;
     return {
-      ...taskWithDefaults,
-      workflowPhase: shouldRepairPhase ? 'REVIEW' : taskWithDefaults.workflowPhase,
-      currentRunId: repairedSourceRun?.id ?? taskWithDefaults.currentRunId,
-      currentAgentSessionId: repairedSourceRun?.sessionId ?? taskWithDefaults.currentAgentSessionId,
-      currentIterationId: repairedSourceRun?.iterationId ?? taskWithDefaults.currentIterationId,
-      currentWorktreeId: repairedSourceRun?.worktreeId ?? taskWithDefaults.currentWorktreeId,
+      ...normalizedTask,
+      workflowPhase: shouldRepairPhase ? 'REVIEW' : normalizedTask.workflowPhase,
+      currentRunId: repairedSourceRun?.id ?? normalizedTask.currentRunId,
+      currentAgentSessionId: repairedSourceRun?.sessionId ?? normalizedTask.currentAgentSessionId,
+      currentIterationId: repairedSourceRun?.iterationId ?? normalizedTask.currentIterationId,
+      currentWorktreeId: repairedSourceRun?.worktreeId ?? normalizedTask.currentWorktreeId,
       projection: {
-        ...taskWithDefaults.projection,
-        agentRun: repairedAgentRun ?? taskWithDefaults.projection.agentRun,
+        ...normalizedTask.projection,
+        agentRun: repairedAgentRun ?? normalizedTask.projection.agentRun,
         codexReview: {
           ...currentReview,
           status: reviewStatus,
@@ -4082,7 +4180,7 @@ function findSourceRunForReviewRepair(
       (run) =>
         run.id === reviewRun.continuedFromRunId &&
         run.taskId === reviewRun.taskId &&
-        run.mode !== 'REVIEW'
+        isImplementationRunMode(run.mode)
     );
     if (sourceRun) {
       return sourceRun;
@@ -4093,7 +4191,7 @@ function findSourceRunForReviewRepair(
       (run) =>
         run.taskId === reviewRun.taskId &&
         run.iterationId === reviewRun.iterationId &&
-        run.mode !== 'REVIEW'
+        isImplementationRunMode(run.mode)
     )
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
 }

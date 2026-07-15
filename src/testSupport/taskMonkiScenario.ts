@@ -14,6 +14,7 @@ import type {
   TaskSnapshot
 } from '../shared/contracts';
 import { AgentMutationAmbiguousError } from '../core/agent/AgentRuntimeAdapter';
+import { createRuntimeReadiness } from '../core/agent/AgentRuntimeReadiness';
 import type {
   AgentRuntimeAdapter,
   AgentReconciliationResult,
@@ -168,10 +169,8 @@ export class ScriptedAgentRuntimeAdapter implements AgentRuntimeAdapter {
   preflight(): Promise<AgentPreflight> {
     return Promise.resolve({
       runtime: this.descriptor,
-      ready: true,
+      readiness: createRuntimeReadiness('READY', 'Scenario runtime is ready.'),
       capabilities: codexCapabilities(),
-      problems: [],
-      warnings: []
     });
   }
 

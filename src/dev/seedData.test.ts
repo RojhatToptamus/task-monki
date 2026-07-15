@@ -326,7 +326,13 @@ describe('Task Monki development seed data', () => {
       await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
         runtimes: [
           {
-            preflight: { ready: false, problems: [disabledReason] },
+            preflight: {
+              readiness: {
+                status: 'DISABLED',
+                canStart: false,
+                detail: disabledReason
+              }
+            },
             models: []
           }
         ],

@@ -3,10 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
-import {
-  GEMINI_ACP_PROFILE,
-  acpCapabilities
-} from '../agent/acp/AcpRuntimeProfiles';
+import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
+import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
@@ -22,30 +20,38 @@ afterEach(async () => {
 });
 
 describe('TaskManagerService provider-native session configuration', () => {
-  it('routes typed operations only after validating task, runtime, and idle ownership', async () => {
+  it('routes revisioned provider controls only after validating task, runtime, and idle ownership', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-native-session-'));
     temporaryDirectories.push(directory);
     const store = new FileTaskStore(path.join(directory, 'store'));
     const scripted = new ScriptedAgentRuntimeAdapter(store);
     Object.defineProperty(scripted, 'descriptor', {
-      value: GEMINI_ACP_PROFILE.descriptor
+      value: TEST_ACP_PROFILE.descriptor
     });
     const adapter = scripted as AgentRuntimeAdapter;
-    const setSessionMode = vi.fn(async () => ({
-      sessionId: 'provider-session-1',
-      modes: { currentModeId: 'plan' }
+    const applySessionControl = vi.fn(async (input: {
+      localSessionId: string;
+      controlId: string;
+      value: string | boolean;
+      revision: string;
+    }) => ({
+      native: {
+        sessionId: 'provider-session-1',
+        applied: { id: input.controlId, value: input.value }
+      },
+      controls: {
+        localSessionId: input.localSessionId,
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
+      }
     }));
-    const setSessionConfigOption = vi.fn(async () => ({
-      sessionId: 'provider-session-1',
-      configOptions: [{ id: 'model', currentValue: 'gemini-2.5-pro' }]
-    }));
-    adapter.setSessionMode = setSessionMode;
-    adapter.setSessionConfigOption = setSessionConfigOption;
+    adapter.applySessionControl = applySessionControl;
     const service = new TaskManagerService(store, directory, undefined, {
       agentProviderAdapter: adapter
     });
     const settings = {
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       model: 'default',
       modelProvider: 'google',
       sandbox: 'DANGER_FULL_ACCESS' as const,
@@ -57,7 +63,7 @@ describe('TaskManagerService provider-native session configuration', () => {
       title: 'Native configuration',
       prompt: 'Keep provider-native controls typed.',
       repositoryPath: directory,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -70,7 +76,7 @@ describe('TaskManagerService provider-native session configuration', () => {
       task,
       iteration,
       worktree,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       requestedSettings: settings
     });
     const session = await store.updateAgentSession(createdSession.id, {
@@ -80,53 +86,89 @@ describe('TaskManagerService provider-native session configuration', () => {
 
     await expect(
       service.updateAgentNativeSession({
-        operation: 'SET_MODE',
         taskId: task.id,
         sessionId: session.id,
-        runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-        modeId: 'plan'
+        runtimeId: TEST_ACP_PROFILE.descriptor.id,
+        controlId: 'model',
+        value: 'grok-build',
+        revision: 'revision-1'
       })
     ).resolves.toEqual({
       taskId: task.id,
       sessionId: session.id,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       native: {
         sessionId: 'provider-session-1',
-        modes: { currentModeId: 'plan' }
+        applied: { id: 'model', value: 'grok-build' }
+      },
+      controls: {
+        localSessionId: session.id,
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
       }
     });
-    expect(setSessionMode).toHaveBeenCalledWith(session.id, 'plan');
-
-    await service.updateAgentNativeSession({
-      operation: 'SET_CONFIG_OPTION',
-      taskId: task.id,
-      sessionId: session.id,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-      configId: 'model',
-      value: 'gemini-2.5-pro'
+    expect(applySessionControl).toHaveBeenCalledWith({
+      localSessionId: session.id,
+      controlId: 'model',
+      value: 'grok-build',
+      revision: 'revision-1'
     });
-    expect(setSessionConfigOption).toHaveBeenCalledWith(
-      session.id,
-      'model',
-      'gemini-2.5-pro'
-    );
 
     await expect(
       service.updateAgentNativeSession({
-        operation: 'SET_MODE',
+        taskId: task.id,
+        sessionId: session.id,
+        runtimeId: TEST_ACP_PROFILE.descriptor.id,
+        controlId: 'mode',
+        value: 'plan',
+        revision: 'revision-1'
+      })
+    ).resolves.toEqual({
+      taskId: task.id,
+      sessionId: session.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      native: {
+        sessionId: 'provider-session-1',
+        applied: { id: 'mode', value: 'plan' }
+      },
+      controls: {
+        localSessionId: session.id,
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
+      }
+    });
+
+    await service.updateAgentNativeSession({
+      taskId: task.id,
+      sessionId: session.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      controlId: 'provider:temperature',
+      value: 'precise',
+      revision: 'revision-1'
+    });
+    expect(applySessionControl).toHaveBeenLastCalledWith({
+      localSessionId: session.id,
+      controlId: 'provider:temperature',
+      value: 'precise',
+      revision: 'revision-1'
+    });
+
+    await expect(
+      service.updateAgentNativeSession({
         taskId: 'another-task',
         sessionId: session.id,
-        runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-        modeId: 'plan'
+        runtimeId: TEST_ACP_PROFILE.descriptor.id,
+        controlId: 'mode', value: 'plan', revision: 'revision-1'
       })
     ).rejects.toThrow('ownership');
     await expect(
       service.updateAgentNativeSession({
-        operation: 'SET_MODE',
         taskId: task.id,
         sessionId: session.id,
         runtimeId: 'grok-acp',
-        modeId: 'plan'
+        controlId: 'mode', value: 'plan', revision: 'revision-1'
       })
     ).rejects.toThrow('belongs to');
 
@@ -139,17 +181,53 @@ describe('TaskManagerService provider-native session configuration', () => {
     });
     await expect(
       service.updateAgentNativeSession({
-        operation: 'SET_MODE',
         taskId: task.id,
         sessionId: session.id,
-        runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-        modeId: 'plan'
+        runtimeId: TEST_ACP_PROFILE.descriptor.id,
+        controlId: 'mode', value: 'plan', revision: 'revision-1'
       })
     ).rejects.toThrow('active or recovery-required');
     await store.updateRun(run.id, { status: 'COMPLETED' });
 
+    let releaseModelUpdate!: () => void;
+    const modelUpdateReleased = new Promise<void>((resolve) => {
+      releaseModelUpdate = resolve;
+    });
+    let markModelUpdateStarted!: () => void;
+    const modelUpdateStarted = new Promise<void>((resolve) => {
+      markModelUpdateStarted = resolve;
+    });
+    applySessionControl.mockImplementationOnce(async (input) => {
+      markModelUpdateStarted();
+      await modelUpdateReleased;
+      return {
+        native: {
+          sessionId: 'provider-session-1',
+          applied: { id: input.controlId, value: input.value }
+        },
+        controls: {
+          localSessionId: input.localSessionId,
+          providerSessionId: 'provider-session-1',
+          revision: 'revision-2',
+          controls: []
+        }
+      };
+    });
+    const pendingModelUpdate = service.updateAgentNativeSession({
+      taskId: task.id,
+      sessionId: session.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      controlId: 'model', value: 'grok-build', revision: 'revision-1'
+    });
+    await modelUpdateStarted;
+    await expect(service.startRun({ taskId: task.id })).rejects.toThrow(
+      'Provider session update is already running for this task.'
+    );
+    releaseModelUpdate();
+    await pendingModelUpdate;
+
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(
-      acpCapabilities(GEMINI_ACP_PROFILE)
+      acpCapabilities(TEST_ACP_PROFILE)
     );
     const browserService = new TaskManagerService(store, directory, undefined, {
       agentProviderAdapter: adapter,
@@ -157,11 +235,10 @@ describe('TaskManagerService provider-native session configuration', () => {
     });
     await expect(
       browserService.updateAgentNativeSession({
-        operation: 'SET_MODE',
         taskId: task.id,
         sessionId: session.id,
-        runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-        modeId: 'plan'
+        runtimeId: TEST_ACP_PROFILE.descriptor.id,
+        controlId: 'mode', value: 'plan', revision: 'revision-1'
       })
     ).rejects.toThrow('browser development');
     await service.shutdown();

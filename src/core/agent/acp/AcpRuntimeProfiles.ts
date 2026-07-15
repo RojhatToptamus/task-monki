@@ -4,26 +4,71 @@ import type {
   AgentRuntimeDescriptor,
   AgentRuntimeId
 } from '../../../shared/agent';
+import {
+  AWS_ENVIRONMENT_KEYS,
+  AWS_SENSITIVE_ENVIRONMENT_KEYS,
+  GOOGLE_ENVIRONMENT_KEYS,
+  GOOGLE_SENSITIVE_ENVIRONMENT_KEYS,
+  NETWORK_ENVIRONMENT_KEYS,
+  NETWORK_SENSITIVE_ENVIRONMENT_KEYS,
+  USER_CONFIG_ENVIRONMENT_KEYS,
+  type ProviderEnvironmentPolicy
+} from '../ProviderEnvironmentPolicy';
 
 export interface AcpRuntimeProfile {
   descriptor: AgentRuntimeDescriptor;
+  /** Debug-only executable override owned by this provider profile. */
+  executableEnvironmentKey: string;
   executableCandidates: readonly string[];
   argv: readonly string[];
   versionArgv: readonly string[];
+  /**
+   * Non-mutating proof that this executable exposes the profile's exact ACP
+   * launch entrypoint. A successful version command establishes only that an
+   * executable can run; it does not establish provider identity or ACP support.
+   */
+  launchContractProbe: {
+    argv: readonly string[];
+    description: string;
+    requiredOutput: readonly {
+      pattern: RegExp;
+      description: string;
+    }[];
+  };
   defaultModelProvider: string;
   defaultModel: string;
-  /** Credential/configuration keys this specific child is allowed to inherit. */
-  allowedEnvironmentKeys: readonly string[];
-  /** Extra proof required for ambiguous executable names discovered from PATH. */
-  discoveryIdentity?: {
-    executableNames: readonly string[];
-    argv: readonly string[];
-    outputPattern: RegExp;
-    description: string;
-  };
+  /** Versioned, exact environment contract inherited by this provider child. */
+  environmentPolicy: ProviderEnvironmentPolicy;
+  /**
+   * Optional provider-owned model contract layered on top of stable ACP v1.
+   * This is deliberately profile-gated because the stable v1.19 schema does
+   * not define a session `models` field or `session/set_model`.
+   */
+  sessionModelExtension?: AcpSessionModelExtensionContract;
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
-  extensions: Readonly<Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>>;
+  extensions: Readonly<
+    Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
+  >;
 }
+
+export interface AcpSessionModelExtensionContract {
+  contractId: string;
+  /** Provider-owned catalog advertised during ACP initialize, before a session exists. */
+  initializeResponseMetaField?: 'modelState';
+  setupResponseField: 'models';
+  setModelMethod: 'session/set_model';
+}
+
+/**
+ * Captured Grok Build ACP vendor contract. Its wire shape is versioned here so
+ * a future incompatible provider change requires an explicit adapter update.
+ */
+export const GROK_SESSION_MODEL_EXTENSION = {
+  contractId: 'grok-build-acp/session-models@v1',
+  initializeResponseMetaField: 'modelState',
+  setupResponseField: 'models',
+  setModelMethod: 'session/set_model'
+} as const satisfies AcpSessionModelExtensionContract;
 
 const descriptor = (id: AgentRuntimeId, displayName: string): AgentRuntimeDescriptor => ({
   id,
@@ -39,40 +84,44 @@ const descriptor = (id: AgentRuntimeId, displayName: string): AgentRuntimeDescri
  * session control; it does not erase each agent's own authentication, model
  * catalog, configuration selectors, or extensions.
  */
-export const GEMINI_ACP_PROFILE: AcpRuntimeProfile = {
-  descriptor: descriptor('gemini-acp', 'Gemini CLI'),
-  executableCandidates: ['gemini'],
-  argv: ['--acp'],
-  versionArgv: ['--version'],
-  defaultModelProvider: 'google',
-  defaultModel: 'default',
-  allowedEnvironmentKeys: [
-    'GEMINI_API_KEY',
-    'GOOGLE_API_KEY',
-    'GOOGLE_CLOUD_PROJECT',
-    'GOOGLE_CLOUD_LOCATION',
-    'GOOGLE_APPLICATION_CREDENTIALS'
-  ],
-  extensions: {
-    geminiSessionModes: {
-      maturity: 'stable',
-      detail: 'Gemini approval modes are retained as native ACP session modes/configuration.'
-    },
-    geminiExtensions: {
-      maturity: 'stable',
-      detail: 'Gemini CLI extensions remain agent-owned; Task Monki does not reinterpret them.'
-    }
-  }
-};
-
 export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   descriptor: descriptor('grok-acp', 'Grok Build'),
+  executableEnvironmentKey: 'TASK_MONKI_GROK_ACP_BIN',
   executableCandidates: ['grok'],
   argv: ['--no-auto-update', 'agent', 'stdio'],
   versionArgv: ['--version'],
+  launchContractProbe: {
+    argv: ['--no-auto-update', 'agent', 'stdio', '--help'],
+    description: 'Grok Build ACP stdio launch contract',
+    requiredOutput: [
+      {
+        pattern: /\bUsage:\s+grok\s+agent\s+stdio\b/iu,
+        description: 'the grok agent stdio command'
+      },
+      {
+        pattern: /\bRun the agent over stdio\b/iu,
+        description: 'the stdio agent identity'
+      }
+    ]
+  },
   defaultModelProvider: 'xai',
-  defaultModel: 'default',
-  allowedEnvironmentKeys: ['XAI_API_KEY', 'GROK_API_KEY'],
+  defaultModel: 'grok-build',
+  environmentPolicy: {
+    contractId: 'task-monki/grok-acp-environment@v1',
+    allowedKeys: [
+      'XAI_API_KEY',
+      'GROK_API_KEY',
+      'XAI_BASE_URL',
+      ...USER_CONFIG_ENVIRONMENT_KEYS,
+      ...NETWORK_ENVIRONMENT_KEYS
+    ],
+    sensitiveKeys: [
+      'XAI_API_KEY',
+      'GROK_API_KEY',
+      ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS
+    ]
+  },
+  sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
   extensions: {
     noAutomaticUpdates: {
       maturity: 'stable',
@@ -81,23 +130,44 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
     grokNativeAgent: {
       maturity: 'stable',
       detail: 'Grok Build remains the tool-executing agent; Task Monki is only its ACP client.'
+    },
+    grokSessionModels: {
+      maturity: 'experimental',
+      detail:
+        'Grok Build session models use the captured grok-build-acp/session-models@v1 vendor contract, not baseline ACP v1.'
     }
   }
 };
 
 export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   descriptor: descriptor('cursor-agent-acp', 'Cursor Agent'),
-  executableCandidates: ['cursor-agent', 'agent'],
+  executableEnvironmentKey: 'TASK_MONKI_CURSOR_AGENT_ACP_BIN',
+  // `agent` is a generic binary name used by unrelated products. It remains
+  // valid as an explicit user-selected executable after launch-contract
+  // attestation, but must never be executed during automatic PATH discovery.
+  executableCandidates: ['cursor-agent'],
   argv: ['acp'],
   versionArgv: ['--version'],
+  launchContractProbe: {
+    argv: ['help', 'acp'],
+    description: 'Cursor Agent ACP launch contract',
+    requiredOutput: [
+      {
+        pattern: /(?:Usage:\s+(?:cursor-agent|agent)\s+acp\b|Start the Cursor Agent as an ACP)/iu,
+        description: 'Cursor Agent ACP identity'
+      }
+    ]
+  },
   defaultModelProvider: 'cursor',
   defaultModel: 'default',
-  allowedEnvironmentKeys: ['CURSOR_API_KEY'],
-  discoveryIdentity: {
-    executableNames: ['agent'],
-    argv: ['help', 'acp'],
-    outputPattern: /(?:Usage:\s+agent\s+acp|Start the Cursor Agent as an ACP)/iu,
-    description: 'Cursor Agent ACP help identity'
+  environmentPolicy: {
+    contractId: 'task-monki/cursor-agent-acp-environment@v1',
+    allowedKeys: [
+      'CURSOR_API_KEY',
+      ...USER_CONFIG_ENVIRONMENT_KEYS,
+      ...NETWORK_ENVIRONMENT_KEYS
+    ],
+    sensitiveKeys: ['CURSOR_API_KEY', ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS]
   },
   extensions: {
     cursorModelSelection: {
@@ -113,12 +183,63 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
 
 export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   descriptor: descriptor('claude-agent-acp', 'Claude Agent ACP'),
+  executableEnvironmentKey: 'TASK_MONKI_CLAUDE_AGENT_ACP_BIN',
   executableCandidates: ['claude-agent-acp'],
   argv: [],
   versionArgv: ['--version'],
+  launchContractProbe: {
+    // The bridge has no standalone help mode. Its bridge-specific --cli
+    // delegation is the only non-mutating identity probe available before the
+    // real ACP process negotiates initialize.
+    argv: ['--cli', '--help'],
+    description: 'Claude Agent ACP bridge delegation contract',
+    requiredOutput: [
+      {
+        pattern: /\bUsage:\s+claude\b/iu,
+        description: 'the bundled Claude CLI delegation entrypoint'
+      }
+    ]
+  },
   defaultModelProvider: 'anthropic',
   defaultModel: 'default',
-  allowedEnvironmentKeys: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
+  environmentPolicy: {
+    contractId: 'task-monki/claude-agent-acp-environment@v1',
+    allowedKeys: [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_CUSTOM_HEADERS',
+      'ANTHROPIC_BEDROCK_BASE_URL',
+      'ANTHROPIC_VERTEX_BASE_URL',
+      'ANTHROPIC_VERTEX_PROJECT_ID',
+      'ANTHROPIC_MODEL',
+      'ANTHROPIC_SMALL_FAST_MODEL',
+      'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CONFIG_DIR',
+      'CLAUDE_CODE_API_KEY_HELPER_TTL_MS',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'CLAUDE_CODE_SKIP_BEDROCK_AUTH',
+      'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_SKIP_VERTEX_AUTH',
+      'CLOUD_ML_REGION',
+      'DISABLE_PROMPT_CACHING',
+      ...AWS_ENVIRONMENT_KEYS,
+      ...GOOGLE_ENVIRONMENT_KEYS,
+      ...USER_CONFIG_ENVIRONMENT_KEYS,
+      ...NETWORK_ENVIRONMENT_KEYS
+    ],
+    sensitiveKeys: [
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_CUSTOM_HEADERS',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CONFIG_DIR',
+      ...AWS_SENSITIVE_ENVIRONMENT_KEYS,
+      ...GOOGLE_SENSITIVE_ENVIRONMENT_KEYS,
+      ...NETWORK_SENSITIVE_ENVIRONMENT_KEYS
+    ]
+  },
   extensions: {
     claudeAgentSdk: {
       maturity: 'stable',
@@ -132,7 +253,6 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
 };
 
 export const ACP_RUNTIME_PROFILES = [
-  GEMINI_ACP_PROFILE,
   GROK_ACP_PROFILE,
   CURSOR_ACP_PROFILE,
   CLAUDE_AGENT_ACP_PROFILE
@@ -173,13 +293,25 @@ export function acpCapabilities(
     },
     modelCatalog: {
       maturity: 'inferred',
-      detail: 'ACP has no global model-list method; models come from native session config selectors.'
+      detail: profile.sessionModelExtension
+        ? `${profile.descriptor.displayName} session models use the explicit ${profile.sessionModelExtension.contractId} provider extension; stable ACP model-category config selectors remain a separate path.`
+        : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
     reasoningEffort: {
       maturity: 'inferred',
       detail: 'Preserved through native thought-level/model-config selectors when an agent exposes them.'
     },
-    persistentSessions: { maturity: 'stable', detail: 'ACP sessions have provider-owned IDs.' },
+    persistentSessions: negotiated?.resume || negotiated?.loadSession
+      ? {
+          maturity: 'stable',
+          detail: 'Provider session IDs can be reloaded because the connected agent advertised session/resume or session/load.'
+        }
+      : {
+          maturity: negotiated ? 'unsupported' : 'inferred',
+          detail: negotiated
+            ? 'Provider session IDs are recorded, but the connected agent advertised no method to reload them after process loss.'
+            : negotiationDetail
+        },
     sessionResume: negotiated?.resume || negotiated?.loadSession
       ? { maturity: 'stable', detail: negotiationDetail }
       : {
@@ -229,10 +361,14 @@ export function acpCapabilities(
       maturity: 'stable',
       detail: 'Disconnects fail closed; ambiguous prompts are never replayed automatically.'
     },
+    sessionControls: {
+      maturity: 'stable',
+      detail: 'Provider-owned ACP session selectors are projected as typed, revisioned boolean/select controls.'
+    },
     extensions: {
       nativeSessionConfiguration: {
         maturity: 'stable',
-        detail: 'Operational mode/config IDs remain exact; renderer state is schema-selected and opaque metadata stays in the protected journal.'
+        detail: 'Stable ACP mode and config IDs remain exact; renderer state is schema-selected and opaque metadata stays in the protected journal.'
       },
       rawAcpExtensions: {
         maturity: 'stable',

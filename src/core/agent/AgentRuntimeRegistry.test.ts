@@ -6,6 +6,7 @@ import type {
 } from '../../shared/agent';
 import type { AgentRuntimeAdapter } from './AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from './AgentRuntimeRegistry';
+import { createRuntimeReadiness } from './AgentRuntimeReadiness';
 
 describe('AgentRuntimeRegistry', () => {
   it('rejects duplicate runtime IDs and an unregistered default', () => {
@@ -37,13 +38,20 @@ describe('AgentRuntimeRegistry', () => {
     expect(healthy.initialize).toHaveBeenCalledOnce();
     expect(catalog.runtimes).toEqual([
       expect.objectContaining({
-        preflight: expect.objectContaining({ ready: true }),
+        preflight: expect.objectContaining({
+          readiness: expect.objectContaining({ status: 'READY', canStart: true })
+        }),
         models: [expect.objectContaining({ runtimeId: 'codex' })]
       }),
       expect.objectContaining({
         preflight: expect.objectContaining({
-          ready: false,
-          problems: ['server failed to bind', 'health endpoint unavailable']
+          readiness: expect.objectContaining({
+            status: 'FAILED',
+            diagnostics: [
+              expect.objectContaining({ message: 'server failed to bind' }),
+              expect.objectContaining({ message: 'health endpoint unavailable' })
+            ]
+          })
         }),
         models: []
       })
@@ -63,15 +71,20 @@ describe('AgentRuntimeRegistry', () => {
     const catalog = await registry.getCatalog();
 
     expect(catalog.runtimes[0]).toMatchObject({
-      preflight: { ready: true },
+      preflight: { readiness: { status: 'READY', canStart: true } },
       models: [{ runtimeId: 'codex' }]
     });
     expect(catalog.runtimes[1]).toMatchObject({
       preflight: {
-        ready: false,
-        problems: [
-          'Runtime opencode returned an invalid or unqualified model identity: codex:test/model.'
-        ]
+        readiness: {
+          status: 'FAILED',
+          diagnostics: [
+            expect.objectContaining({
+              message:
+                'Runtime opencode returned an invalid or unqualified model identity: codex:test/model.'
+            })
+          ]
+        }
       },
       models: []
     });
@@ -80,19 +93,149 @@ describe('AgentRuntimeRegistry', () => {
     );
   });
 
-  it('requires typed operations for stable native session configuration', async () => {
+  it('requires typed discovery and mutation for stable session controls', async () => {
     const incomplete = runtime('gemini-acp');
     const capabilities = unsupportedCapabilities('gemini-acp');
-    capabilities.extensions.nativeSessionConfiguration = { maturity: 'stable' };
+    capabilities.sessionControls = { maturity: 'stable' };
     incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
     const registry = new AgentRuntimeRegistry([incomplete], 'gemini-acp');
 
     const [failure] = await registry.initializeAll();
 
     expect(failure?.error.message).toContain(
-      'does not implement both typed session configuration operations'
+      'does not implement typed control discovery and mutation'
     );
     expect(incomplete.initialize).not.toHaveBeenCalled();
+  });
+
+  it('reports a surface isolation mismatch as an unsupported security policy', async () => {
+    const adapter = runtime('opencode');
+    const registry = new AgentRuntimeRegistry([adapter], 'opencode');
+
+    const catalog = await registry.getCatalog({
+      excludedRuntimeIds: new Set(['opencode']),
+      exclusionReason: 'This surface requires an attested process sandbox.'
+    });
+
+    expect(catalog.runtimes[0]).toMatchObject({
+      preflight: {
+        readiness: {
+          status: 'UNSUPPORTED_SECURITY_POLICY',
+          canStart: false,
+          nextAction: {
+            kind: 'VIEW_DETAILS',
+            label: 'Use the desktop app for agent runs'
+          },
+          diagnostics: [
+            expect.objectContaining({
+              code: 'SECURITY_POLICY_UNSUPPORTED',
+              stage: 'SECURITY'
+            })
+          ]
+        }
+      },
+      models: []
+    });
+    expect(adapter.listModels).not.toHaveBeenCalled();
+  });
+
+  it('returns readiness advanced by live model discovery', async () => {
+    const descriptor: AgentRuntimeDescriptor = {
+      id: 'grok-acp',
+      displayName: 'Grok Build',
+      kind: 'ACP_AGENT',
+      transport: 'STDIO',
+      lifecycleScope: 'APPLICATION'
+    };
+    const capabilities = unsupportedCapabilities(descriptor.id);
+    let preflight = {
+      runtime: descriptor,
+      readiness: createRuntimeReadiness(
+        'DISCOVERED',
+        'Executable discovery completed.',
+        { checks: { discovery: 'FOUND', initialization: 'NOT_STARTED' } }
+      ),
+      capabilities
+    };
+    const adapter = runtime(descriptor.id, {
+      descriptor,
+      preflight: vi.fn(async () => preflight),
+      listModels: vi.fn(async () => {
+        preflight = {
+          runtime: descriptor,
+          readiness: createRuntimeReadiness('DISCOVERED', 'ACP model catalog connected.', {
+            checks: {
+              discovery: 'FOUND',
+              compatibility: 'COMPATIBLE',
+              initialization: 'INITIALIZED',
+              modelCatalog: 'AVAILABLE'
+            }
+          }),
+          capabilities
+        };
+        return [model(descriptor.id)];
+      })
+    });
+
+    const catalog = await new AgentRuntimeRegistry([adapter], descriptor.id).getCatalog();
+
+    expect(catalog.runtimes[0]).toMatchObject({
+      preflight: {
+        readiness: {
+          status: 'DISCOVERED',
+          checks: { initialization: 'INITIALIZED', modelCatalog: 'AVAILABLE' }
+        }
+      },
+      models: [{ runtimeId: descriptor.id }]
+    });
+    expect(adapter.preflight).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves a typed blocked state when live model discovery fails', async () => {
+    const adapter = runtime('grok-acp');
+    const capabilities = unsupportedCapabilities('grok-acp');
+    let preflight = await adapter.preflight();
+    adapter.preflight = vi.fn(async () => preflight);
+    adapter.listModels = vi.fn(async () => {
+      preflight = {
+        runtime: adapter.descriptor,
+        readiness: createRuntimeReadiness(
+          'AUTHENTICATION_REQUIRED',
+          'Grok authentication is required.',
+          {
+            checks: {
+              discovery: 'FOUND',
+              compatibility: 'COMPATIBLE',
+              initialization: 'FAILED',
+              authentication: 'REQUIRED'
+            },
+            nextAction: { kind: 'AUTHENTICATE', label: 'Sign in to Grok' }
+          }
+        ),
+        capabilities
+      };
+      throw new Error('Grok model catalog requires authentication.');
+    });
+
+    const catalog = await new AgentRuntimeRegistry([adapter], 'grok-acp').getCatalog();
+
+    expect(catalog.runtimes[0]).toMatchObject({
+      preflight: {
+        readiness: {
+          status: 'AUTHENTICATION_REQUIRED',
+          canStart: false,
+          checks: { authentication: 'REQUIRED', modelCatalog: 'FAILED' },
+          nextAction: { kind: 'AUTHENTICATE', label: 'Sign in to Grok' },
+          diagnostics: [
+            expect.objectContaining({
+              code: 'MODEL_CATALOG_FAILED',
+              message: 'Grok model catalog requires authentication.'
+            })
+          ]
+        }
+      },
+      models: []
+    });
   });
 });
 
@@ -113,10 +256,8 @@ function runtime(
     initialize: vi.fn().mockResolvedValue(undefined),
     preflight: vi.fn().mockResolvedValue({
       runtime: descriptor,
-      ready: true,
+      readiness: createRuntimeReadiness('READY', 'Test runtime is ready.'),
       capabilities,
-      problems: [],
-      warnings: []
     }),
     capabilities: vi.fn().mockResolvedValue(capabilities),
     listModels: vi.fn().mockResolvedValue([model(runtimeId)]),

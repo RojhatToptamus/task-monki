@@ -1,6 +1,15 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { AgentServerInstance, Task } from '../../shared/contracts';
+import {
+  acpCapabilities,
+  GROK_ACP_PROFILE
+} from '../../core/agent/acp/AcpRuntimeProfiles';
+import type {
+  AgentRuntimeState,
+  AgentServerInstance,
+  AgentSessionRecord,
+  Task
+} from '../../shared/contracts';
 import { ProviderOverviewPanel } from './ProviderOverviewPanel';
 
 describe('ProviderOverviewPanel', () => {
@@ -56,6 +65,7 @@ describe('ProviderOverviewPanel', () => {
         settingsObservations={[]}
         server={server}
         onSyncGoal={async () => undefined}
+        onUpdateNativeSession={async () => undefined}
       />
     );
 
@@ -64,5 +74,89 @@ describe('ProviderOverviewPanel', () => {
     expect(html).toContain('/opt/homebrew/bin/codex');
     expect(html).toContain('Codex App Server command or stdio transport was not detected.');
     expect(html).toContain('/Applications/Codex.app/Contents/Resources/codex');
+  });
+
+  it('renders only provider-advertised native session controls', () => {
+    const task = {
+      id: 'task-1',
+      prompt: 'Use the provider-native model.',
+      runtimeId: 'grok-acp'
+    } as Task;
+    const session = {
+      id: 'local-session-1',
+      taskId: task.id,
+      runtimeId: 'grok-acp',
+      providerSessionId: 'provider-session-1',
+      status: 'IDLE'
+    } as AgentSessionRecord;
+    const runtimeState = {
+      preflight: {
+        runtime: {
+          id: 'grok-acp',
+          displayName: 'Grok Build',
+          kind: 'ACP_AGENT',
+          transport: 'STDIO',
+          lifecycleScope: 'APPLICATION'
+        },
+        readiness: {
+          status: 'READY',
+          canStart: true,
+          summary: 'Ready',
+          detail: 'Provider session established.',
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'COMPATIBLE',
+            initialization: 'INITIALIZED',
+            authentication: 'PROVIDER_MANAGED',
+            modelCatalog: 'AVAILABLE'
+          },
+          diagnostics: []
+        },
+        capabilities: acpCapabilities(GROK_ACP_PROFILE)
+      },
+      models: [],
+      sessionControls: [{
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId,
+        revision: 'revision-1',
+        controls: [
+          {
+            id: 'model', label: 'Model', kind: 'SELECT', value: 'grok-build', mutable: true,
+            choices: [
+              { value: 'grok-build', label: 'Grok Build' },
+              { value: 'grok-composer', label: 'Composer' }
+            ]
+          },
+          {
+            id: 'mode', label: 'Mode', kind: 'SELECT', value: 'code', mutable: true,
+            choices: [{ value: 'code', label: 'Code' }]
+          },
+          {
+            id: 'config:telemetry', label: 'Telemetry', kind: 'BOOLEAN', value: true,
+            mutable: true
+          }
+        ]
+      }],
+      refreshedAt: new Date(0).toISOString()
+    } as AgentRuntimeState;
+
+    const html = renderToStaticMarkup(
+      <ProviderOverviewPanel
+        task={task}
+        session={session}
+        goalSnapshots={[]}
+        usageSnapshots={[]}
+        settingsObservations={[]}
+        runtimeState={runtimeState}
+        onSyncGoal={async () => undefined}
+        onUpdateNativeSession={async () => undefined}
+      />
+    );
+
+    expect(html).toContain('Native session controls');
+    expect(html).toContain('Grok Build');
+    expect(html).toContain('Composer');
+    expect(html).toContain('Code');
+    expect(html).toContain('Telemetry');
   });
 });

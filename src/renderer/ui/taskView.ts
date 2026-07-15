@@ -49,6 +49,34 @@ export interface TaskCardVM {
   evidence: CardEvidenceItem[];
 }
 
+export interface RunFailureBannerViewModel {
+  status: 'FAILED' | 'LOST' | 'RECOVERY_REQUIRED';
+  title: string;
+  detail: string;
+}
+
+export function describeRunFailureBanner(
+  task: Task
+): RunFailureBannerViewModel | undefined {
+  switch (task.projection.agentRun) {
+    case 'FAILED':
+      return {
+        status: 'FAILED',
+        title: 'The agent run failed',
+        detail: `${task.projection.summary} Retry in this session or continue from the current worktree.`
+      };
+    case 'LOST':
+    case 'RECOVERY_REQUIRED':
+      return {
+        status: task.projection.agentRun,
+        title: 'Task Monki cannot prove the final provider state',
+        detail: task.projection.summary
+      };
+    default:
+      return undefined;
+  }
+}
+
 export interface TaskCardOptions {
   /** Show the repository name; false collapses it when all cards share one repo. */
   showRepo?: boolean;
@@ -468,9 +496,13 @@ function verificationFinishBlocker(
 }
 
 function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
-  return ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'RECOVERY_REQUIRED', 'LOST'].includes(
-    agentRun
-  );
+  return [
+    'AWAITING_APPROVAL',
+    'AWAITING_USER_INPUT',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'LOST'
+  ].includes(agentRun);
 }
 
 export function evidenceLineForTask(task: Task): CardEvidenceItem[] {

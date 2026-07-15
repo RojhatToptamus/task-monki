@@ -103,6 +103,79 @@ describe('FileTaskStore', () => {
     await expect(reloaded.readArtifact(final.id)).resolves.toBe('# Final\n');
   });
 
+  it('reuses one durable final artifact for every write attempt on a run', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-final-artifact-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      runtimeId: 'opencode',
+      title: 'Retry terminal persistence',
+      prompt: 'Persist one terminal artifact.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/final-artifact-idempotency',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'opencode'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+
+    const [first, concurrentRetry] = await Promise.all([
+      store.writeFinalArtifact(task.id, run.id, 'first durable result\n'),
+      store.writeFinalArtifact(task.id, run.id, 'replacement must not win\n')
+    ]);
+    const sequentialRetry = await store.writeFinalArtifact(
+      task.id,
+      run.id,
+      'another replacement must not win\n'
+    );
+
+    expect(concurrentRetry.id).toBe(first.id);
+    expect(sequentialRetry.id).toBe(first.id);
+    await expect(store.readArtifact(first.id)).resolves.toBe('first durable result\n');
+
+    const snapshot = await store.snapshot();
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
+      )
+    ).toEqual([expect.objectContaining({ id: first.id })]);
+    expect(
+      snapshot.events.filter(
+        (event) => event.type === 'ARTIFACT_CREATED' && event.runId === run.id
+      )
+    ).toHaveLength(1);
+    expect(snapshot.runs.find((candidate) => candidate.id === run.id)?.finalArtifactId).toBe(
+      first.id
+    );
+    expect(snapshot.tasks.find((candidate) => candidate.id === task.id)?.projection.artifact).toBe(
+      'FINAL_MESSAGE_PRESENT'
+    );
+
+    const reloaded = new FileTaskStore(dir);
+    const restartRetry = await reloaded.writeFinalArtifact(
+      task.id,
+      run.id,
+      'restart replacement must not win\n'
+    );
+    expect(restartRetry.id).toBe(first.id);
+    await expect(reloaded.readArtifact(first.id)).resolves.toBe('first durable result\n');
+    await expect(reloaded.getRun(run.id)).resolves.toMatchObject({
+      finalArtifactId: first.id
+    });
+  });
+
   it.runIf(process.platform !== 'win32')(
     'reconciles managed artifact orphans after a published delete survives restart',
     async () => {
@@ -1124,6 +1197,214 @@ describe('FileTaskStore', () => {
     expect(reloadedTask.projection.codexReview?.status).toBe('PASSED');
     expect(reloadedTask.projection.codexReview?.result?.verdict).toBe('PASSED');
   });
+
+  it.each([
+    {
+      status: 'FAILED' as const,
+      eventType: 'AGENT_RUN_FAILED' as const,
+      payload: { error: 'Provider startup failed.' }
+    },
+    {
+      status: 'INTERRUPTED' as const,
+      eventType: 'AGENT_RUN_INTERRUPTED' as const,
+      payload: { terminalReason: 'Stopped by user.' }
+    },
+    {
+      status: 'RECOVERY_REQUIRED' as const,
+      eventType: 'AGENT_MUTATION_AMBIGUOUS' as const,
+      payload: { reason: 'Prompt delivery is ambiguous.' }
+    },
+    {
+      status: 'LOST' as const,
+      eventType: 'AGENT_RUNTIME_RECONCILED' as const,
+      payload: {
+        terminal: true,
+        status: 'LOST',
+        recoveryState: 'UNRECOVERABLE'
+      }
+    }
+  ])(
+    'repairs a persisted REVIEW task with a $status implementation back to in progress',
+    async ({ status, eventType, payload }) => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), `task-manager-${status.toLowerCase()}-run-phase-repair-`)
+      );
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Retry failed implementation',
+        prompt: 'Implement the task.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/failed-run-phase-repair',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.appendEvent(
+        createDomainEvent({
+          type: eventType,
+          taskId: task.id,
+          iterationId: iteration.id,
+          runId: run.id,
+          worktreeId: worktree.id,
+          agentSessionId: session.id,
+          source: 'provider',
+          payload
+        })
+      );
+
+      const storePath = path.join(dir, 'store.json');
+      const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
+      raw.tasks = raw.tasks.map((candidate: any) =>
+        candidate.id === task.id
+          ? { ...candidate, workflowPhase: 'REVIEW' }
+          : candidate
+      );
+      await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
+
+      const repairedStore = new FileTaskStore(dir);
+      const repairedTask = await repairedStore.getTask(task.id);
+
+      expect(repairedTask?.workflowPhase).toBe('IN_PROGRESS');
+      expect(repairedTask?.currentRunId).toBe(run.id);
+      expect(repairedTask?.projection.agentRun).toBe(status);
+      const persisted = JSON.parse(await fs.readFile(storePath, 'utf8'));
+      expect(
+        persisted.tasks.find((candidate: any) => candidate.id === task.id)?.workflowPhase
+      ).toBe('IN_PROGRESS');
+    }
+  );
+
+  it.each([
+    { mode: 'ANALYSIS' as const, expectedPhase: 'IN_PROGRESS' as const },
+    { mode: 'COMPACTION' as const, expectedPhase: 'IN_PROGRESS' as const },
+    { mode: 'FOLLOW_UP' as const, expectedPhase: 'REVIEW' as const }
+  ])(
+    'keeps restart workflow repair anchored to the exact current $mode run',
+    async ({ mode, expectedPhase }) => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), `task-manager-historical-review-${mode.toLowerCase()}-`)
+      );
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Keep historical review contextual',
+        prompt: 'Run implementation, review it, then do newer work.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/historical-review-${mode.toLowerCase()}`,
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const implementationSession = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex'
+      });
+      const implementationRun = await store.createRun({
+        task,
+        session: implementationSession,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_RUN_COMPLETED',
+          taskId: task.id,
+          iterationId: iteration.id,
+          runId: implementationRun.id,
+          worktreeId: worktree.id,
+          agentSessionId: implementationSession.id,
+          source: 'provider',
+          payload: { terminalStatus: 'completed' }
+        })
+      );
+
+      const reviewTask = (await store.getTask(task.id))!;
+      const reviewSession = await store.createAgentSession({
+        task: reviewTask,
+        iteration,
+        worktree,
+        runtimeId: 'codex',
+        role: 'REVIEW',
+        parentSessionId: implementationSession.id,
+        forkedFromSessionId: implementationSession.id
+      });
+      const reviewRun = await store.createRun({
+        task: reviewTask,
+        session: reviewSession,
+        mode: 'REVIEW',
+        prompt: 'Review the implementation.',
+        continuedFromRunId: implementationRun.id
+      });
+      await store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_RUN_COMPLETED',
+          taskId: task.id,
+          iterationId: iteration.id,
+          runId: reviewRun.id,
+          worktreeId: worktree.id,
+          agentSessionId: reviewSession.id,
+          source: 'provider',
+          payload: {
+            mode: 'REVIEW',
+            codexReviewResult: {
+              schemaVersion: 'codex-review/v1',
+              verdict: 'PASSED',
+              summary: 'The implementation passed review.',
+              findings: []
+            }
+          }
+        })
+      );
+
+      const taskWithHistoricalReview = (await store.getTask(task.id))!;
+      const currentRun = await store.createRun({
+        task: taskWithHistoricalReview,
+        session: implementationSession,
+        mode,
+        prompt: `Run ${mode.toLowerCase()} work after review.`,
+        continuedFromRunId: implementationRun.id
+      });
+      await store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_RUN_COMPLETED',
+          taskId: task.id,
+          iterationId: iteration.id,
+          runId: currentRun.id,
+          worktreeId: worktree.id,
+          agentSessionId: implementationSession.id,
+          source: 'provider',
+          payload: { terminalStatus: 'completed' }
+        })
+      );
+
+      const beforeRestart = (await store.getTask(task.id))!;
+      expect(beforeRestart.workflowPhase).toBe(expectedPhase);
+      expect(beforeRestart.currentRunId).toBe(currentRun.id);
+      expect(beforeRestart.projection.codexReview?.status).toBe('STALE');
+
+      const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
+      expect(reloadedTask.workflowPhase).toBe(expectedPhase);
+      expect(reloadedTask.currentRunId).toBe(currentRun.id);
+      expect(reloadedTask.projection.codexReview?.status).toBe('STALE');
+    }
+  );
 
   it('keeps detached review runs inside the review workflow phase', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-store-'));

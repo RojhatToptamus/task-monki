@@ -98,9 +98,9 @@ export function buildInitialRunPrompt(input: {
       ? 'Analyze this task in an isolated Git worktree without modifying files.'
       : 'You are implementing this task in an isolated Git worktree.',
     `Repository root: ${input.worktree.worktreePath}`,
-    input.settings.sandbox === 'WORKSPACE_WRITE'
-      ? 'Only modify files inside this worktree.'
-      : 'Do not modify repository files.',
+    input.readOnlyMode
+      ? 'Do not modify repository files.'
+      : 'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
     '',
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,

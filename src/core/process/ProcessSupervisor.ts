@@ -92,7 +92,11 @@ async function cancelProcess(child: ChildProcessWithoutNullStreams): Promise<voi
   }
 
   await signalChild(child, 'SIGKILL');
-  await waitForExit(child, 3000);
+  if (!(await waitForExit(child, 3000))) {
+    throw new Error(
+      `Process ${child.pid ?? '<unknown>'} did not exit after SIGINT, SIGTERM, and SIGKILL.`
+    );
+  }
 }
 
 async function signalChild(
@@ -149,8 +153,7 @@ export function sanitizeEnvironment(
     'SHELL',
     'TMPDIR',
     'LANG',
-    'LC_ALL',
-    'CODEX_HOME'
+    'LC_ALL'
   ];
 
   const next: NodeJS.ProcessEnv = {};
@@ -185,8 +188,8 @@ export function redactProcessDiagnostic(
       '[REDACTED]'
     )
     .replace(
-      /\b([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+@/giu,
-      '$1[REDACTED]@'
+      /(^|[^a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)([^/?#\s@]+)@/giu,
+      '$1$2[REDACTED]@'
     );
   const exactValues = [...new Set(sensitiveValues)]
     .filter((sensitive) => sensitive.length > 0)

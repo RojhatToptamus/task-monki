@@ -171,6 +171,89 @@ describe('projection reducer', () => {
     expect(state.tasks[0].workflowPhase).toBe('IN_PROGRESS');
   });
 
+  it('keeps failed and interrupted implementation work in progress for retry', () => {
+    const implementation = createRun({ mode: 'IMPLEMENTATION' });
+    const task = createTask({
+      workflowPhase: 'IN_PROGRESS',
+      currentRunId: implementation.id
+    });
+    const initial = { ...createEmptyState(), tasks: [task], runs: [implementation] };
+
+    const failed = applyEventToState(
+      initial,
+      createEvent('AGENT_RUN_FAILED', { error: 'Provider start failed.' })
+    );
+    const interrupted = applyEventToState(
+      initial,
+      createEvent('AGENT_RUN_INTERRUPTED', { terminalReason: 'Stopped by user.' })
+    );
+
+    expect(failed.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(failed.tasks[0].projection.agentRun).toBe('FAILED');
+    expect(interrupted.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(interrupted.tasks[0].projection.agentRun).toBe('INTERRUPTED');
+  });
+
+  it('enters review only when reconciliation proves implementation completed', () => {
+    const implementation = createRun({
+      mode: 'IMPLEMENTATION',
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'RECONCILING'
+    });
+    const task = createTask({
+      workflowPhase: 'IN_PROGRESS',
+      currentRunId: implementation.id
+    });
+    const initial = { ...createEmptyState(), tasks: [task], runs: [implementation] };
+
+    const failed = applyEventToState(
+      initial,
+      createEvent('AGENT_RUNTIME_RECONCILED', {
+        terminal: true,
+        status: 'FAILED',
+        recoveryState: 'UNRECOVERABLE'
+      })
+    );
+    const completed = applyEventToState(
+      initial,
+      createEvent('AGENT_RUNTIME_RECONCILED', {
+        terminal: true,
+        status: 'COMPLETED',
+        recoveryState: 'RECOVERED'
+      })
+    );
+
+    expect(failed.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(completed.tasks[0].workflowPhase).toBe('REVIEW');
+  });
+
+  it('does not promote analysis, compaction, or subagent completion to review', () => {
+    for (const mode of ['ANALYSIS', 'COMPACTION', 'SUBAGENT'] as const) {
+      const run = createRun({ mode });
+      const task = createTask({
+        workflowPhase: 'IN_PROGRESS',
+        currentRunId: run.id
+      });
+      const initial = { ...createEmptyState(), tasks: [task], runs: [run] };
+
+      const completed = applyEventToState(
+        initial,
+        createEvent('AGENT_RUN_COMPLETED', { terminalStatus: 'completed' })
+      );
+      const reconciled = applyEventToState(
+        initial,
+        createEvent('AGENT_RUNTIME_RECONCILED', {
+          terminal: true,
+          status: 'COMPLETED',
+          recoveryState: 'RECOVERED'
+        })
+      );
+
+      expect(completed.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+      expect(reconciled.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    }
+  });
+
   it('keeps Codex review runs in Review and records an inconclusive review result', () => {
     const task: Task = {
       id: 'task-1',

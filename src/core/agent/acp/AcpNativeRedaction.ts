@@ -1,7 +1,14 @@
 import type { AgentJsonValue } from '../../../shared/agent';
+import {
+  REDACTED_CREDENTIAL,
+  isSensitiveCredentialFieldName,
+  redactCredentialText,
+  shouldRedactCredentialRecordEntry
+} from '../AgentCredentialRedaction';
 import type {
   AcpInitializeResponse,
   AcpSessionConfigOption,
+  AcpSessionModelState,
   AcpSessionModeState
 } from './AcpProtocol';
 import type { AcpNativeSessionState } from './AcpEventMapper';
@@ -10,7 +17,7 @@ const MAX_NATIVE_DEPTH = 8;
 const MAX_NATIVE_COLLECTION = 500;
 const MAX_NATIVE_STRING = 4_096;
 
-/** Renderer/persistence-safe view; lossless opaque data remains in the 0600 journal. */
+/** Renderer/persistence-safe view; opaque data remains in the redacted 0600 journal. */
 export function redactAcpNativeValue(value: unknown, depth = 0): AgentJsonValue {
   if (depth > MAX_NATIVE_DEPTH) return '[TRUNCATED]';
   if (value === null || typeof value === 'boolean') return value;
@@ -22,34 +29,69 @@ export function redactAcpNativeValue(value: unknown, depth = 0): AgentJsonValue 
       .map((entry) => redactAcpNativeValue(entry, depth + 1));
   }
   if (typeof value !== 'object' || value === undefined) return String(value);
+  const record = value as Record<string, unknown>;
   const result: Record<string, AgentJsonValue> = {};
-  for (const [key, nested] of Object.entries(value).slice(0, MAX_NATIVE_COLLECTION)) {
+  for (const [key, nested] of Object.entries(record).slice(0, MAX_NATIVE_COLLECTION)) {
     // `_meta` is explicitly opaque in ACP. It belongs only in the protected
     // raw journal, never in settings, model catalogs, or renderer payloads.
     if (key === '_meta') continue;
-    result[key] = isSensitiveKey(key)
-      ? '[REDACTED]'
+    result[key] = shouldRedactCredentialRecordEntry(record, key, nested)
+      ? REDACTED_CREDENTIAL
       : redactAcpNativeValue(nested, depth + 1);
   }
   return result;
 }
 
-export function sanitizeAcpNativeSession(state: AcpNativeSessionState): AcpNativeSessionState {
+export function sanitizeAcpNativeSession(
+  state: AcpNativeSessionState,
+  sensitiveValues: readonly string[] = []
+): AcpNativeSessionState {
+  if (!isSafeOperationalIdentifier(state.sessionId, sensitiveValues)) {
+    throw new Error(
+      'ACP native session view cannot publish a sensitive operational identifier.'
+    );
+  }
+  const availableModes = (state.modes?.availableModes ?? []).filter((mode) =>
+    isSafeOperationalIdentifier(mode.id, sensitiveValues)
+  );
+  const availableModels = (state.models?.availableModels ?? []).filter((model) =>
+    isSafeOperationalIdentifier(model.modelId, sensitiveValues)
+  );
   return {
     sessionId: state.sessionId,
-    modes: state.modes
+    modes: state.modes && availableModes.some((mode) => mode.id === state.modes?.currentModeId)
       ? {
           currentModeId: state.modes.currentModeId,
-          availableModes: state.modes.availableModes.map((mode) => ({
+          availableModes: availableModes.map((mode) => ({
             id: mode.id,
-            name: redactNativeString(mode.name),
-            description: mode.description ? redactNativeString(mode.description) : null
+            name: redactCredentialText(mode.name, sensitiveValues),
+            description: mode.description
+              ? redactCredentialText(mode.description, sensitiveValues)
+              : null
+          }))
+        }
+      : null,
+    models: state.models && availableModels.some(
+      (model) => model.modelId === state.models?.currentModelId
+    )
+      ? {
+          currentModelId: state.models.currentModelId,
+          availableModels: availableModels.map((model) => ({
+            modelId: model.modelId,
+            name: redactCredentialText(model.name, sensitiveValues),
+            description: model.description
+              ? redactCredentialText(model.description, sensitiveValues)
+              : null
           }))
         }
       : null,
     configOptions: state.configOptions
-      .filter((option) => !isSensitiveConfig(option))
-      .map(projectConfigOption)
+      .filter(
+        (option) =>
+          !isSensitiveConfig(option) &&
+          isSafeOperationalIdentifier(option.id, sensitiveValues)
+      )
+      .flatMap((option) => projectConfigOption(option, sensitiveValues))
   };
 }
 
@@ -69,6 +111,7 @@ export function normalizeAcpOperationalSession(
           }))
         }
       : null,
+    models: projectModelState(state.models, false),
     configOptions: state.configOptions.map((option) =>
       option.type === 'boolean'
         ? {
@@ -106,6 +149,34 @@ export function normalizeAcpOperationalSession(
           }
     )
   };
+}
+
+function projectModelState(
+  models: AcpSessionModelState | null,
+  redact: boolean
+): AcpSessionModelState | null {
+  if (!models) return null;
+  return {
+    currentModelId: redact
+      ? redactNativeString(models.currentModelId)
+      : models.currentModelId,
+    availableModels: models.availableModels.map((model) => ({
+      modelId: redact ? redactNativeString(model.modelId) : model.modelId,
+      name: redact ? redactNativeString(model.name) : model.name,
+      description: model.description
+        ? redact
+          ? redactNativeString(model.description)
+          : model.description
+        : null
+    }))
+  };
+}
+
+/** Removes opaque provider metadata while retaining exact model identifiers. */
+export function normalizeAcpOperationalModelState(
+  models: AcpSessionModelState | null
+): AcpSessionModelState | null {
+  return projectModelState(models, false);
 }
 
 export function acpInitializeNativeView(initialize: AcpInitializeResponse | undefined): AgentJsonValue {
@@ -181,63 +252,91 @@ export function sanitizeAcpInitializeResponse(
 }
 
 export function redactNativeString(value: string): string {
-  return value
-    .replace(
-      /\b(api[_-]?key|access[_-]?token|auth(?:orization)?|password|secret)\b\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+/giu,
-      '$1=[REDACTED]'
-    )
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[REDACTED]')
-    .replace(/\bAIza[A-Za-z0-9_-]{16,}\b/gu, '[REDACTED]');
+  return redactCredentialText(value);
 }
 
-function projectConfigOption(option: AcpSessionConfigOption): AcpSessionConfigOption {
+function projectConfigOption(
+  option: AcpSessionConfigOption,
+  sensitiveValues: readonly string[] = []
+): AcpSessionConfigOption[] {
   const common = {
     id: option.id,
-    name: redactNativeString(option.name),
-    description: option.description ? redactNativeString(option.description) : null,
-    category: option.category ?? null
+    name: redactCredentialText(option.name, sensitiveValues),
+    description: option.description
+      ? redactCredentialText(option.description, sensitiveValues)
+      : null,
+    category: option.category
+      ? redactCredentialText(option.category, sensitiveValues)
+      : null
   };
   if (option.type === 'boolean') {
-    return {
+    return [{
       ...common,
       type: 'boolean',
       currentValue: option.currentValue
-    };
+    }];
   }
-  return {
+  const options: Extract<
+    AcpSessionConfigOption,
+    { type: 'select' }
+  >['options'] = [];
+  for (const entry of option.options) {
+    if ('options' in entry) {
+      options.push({
+        group: redactCredentialText(entry.group, sensitiveValues),
+        name: redactCredentialText(entry.name, sensitiveValues),
+        options: entry.options
+          .filter((nested) =>
+            isSafeOperationalIdentifier(nested.value, sensitiveValues)
+          )
+          .map((nested) => ({
+            value: nested.value,
+            name: redactCredentialText(nested.name, sensitiveValues),
+            description: nested.description
+              ? redactCredentialText(nested.description, sensitiveValues)
+              : null
+          }))
+      });
+    } else if (isSafeOperationalIdentifier(entry.value, sensitiveValues)) {
+      options.push({
+        value: entry.value,
+        name: redactCredentialText(entry.name, sensitiveValues),
+        description: entry.description
+          ? redactCredentialText(entry.description, sensitiveValues)
+          : null
+      });
+    }
+  }
+  if (!flattenProjectedOptions(options).includes(option.currentValue)) return [];
+  return [{
     ...common,
     type: 'select',
     currentValue: option.currentValue,
-    options: option.options.map((entry) =>
-      'options' in entry
-        ? {
-            group: entry.group,
-            name: redactNativeString(entry.name),
-            options: entry.options.map((nested) => ({
-              value: nested.value,
-              name: redactNativeString(nested.name),
-              description: nested.description
-                ? redactNativeString(nested.description)
-                : null
-            }))
-          }
-        : {
-            value: entry.value,
-            name: redactNativeString(entry.name),
-            description: entry.description ? redactNativeString(entry.description) : null
-          }
-    )
-  };
+    options
+  }];
+}
+
+function isSafeOperationalIdentifier(
+  value: string,
+  sensitiveValues: readonly string[]
+): boolean {
+  return redactCredentialText(value, sensitiveValues) === value;
+}
+
+function flattenProjectedOptions(
+  options: Extract<AcpSessionConfigOption, { type: 'select' }>['options']
+): string[] {
+  return options.flatMap((entry) =>
+    'options' in entry
+      ? entry.options.map((option) => option.value)
+      : [entry.value]
+  );
 }
 
 function isSensitiveConfig(option: AcpSessionConfigOption): boolean {
-  return [option.id, option.name, option.category ?? ''].some(isSensitiveKey);
-}
-
-function isSensitiveKey(key: string): boolean {
-  return /(?:^|[_-])(?:api[_-]?key|access[_-]?token|auth(?:orization)?|auth[_-]?token|credential|cookie|password|secret)s?$/iu.test(
-    key
-  ) || /(?:apiKey|accessToken|authToken|clientSecret)$/u.test(key);
+  return [option.id, option.name, option.category ?? ''].some(
+    isSensitiveCredentialFieldName
+  );
 }
 
 function schemaSelectedAuthMethod(value: unknown): AgentJsonValue {

@@ -1932,6 +1932,27 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.provider-native-controls {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.provider-native-controls .provider-section__heading h4 {
+  margin: 0;
+}
+
+.provider-native-controls select {
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 5px 7px;
+  font: inherit;
+}
+
 .usage-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5347,6 +5368,10 @@ textarea:focus-visible {
 
 .tm-setup-tools__dot--error {
   color: var(--error);
+}
+
+.tm-setup-tools__dot--warning {
+  color: var(--action);
 }
 
 .tm-setup-tools__dot--muted {

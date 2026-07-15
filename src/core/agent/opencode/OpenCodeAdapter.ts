@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
@@ -20,6 +21,10 @@ import {
   type AgentTurnAttachment
 } from '../AgentAttachmentDelivery';
 import {
+  redactCredentialText,
+  redactCredentialValue
+} from '../AgentCredentialRedaction';
+import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
   type AgentInteractionResponse,
@@ -34,6 +39,12 @@ import {
   type ResolveAgentExecution,
   type StartAgentTurn
 } from '../AgentRuntimeAdapter';
+import {
+  appendRuntimeDiagnostic,
+  createRuntimeReadiness,
+  errorDiagnostic,
+  warningDiagnostic
+} from '../AgentRuntimeReadiness';
 import {
   buildInteractionPolicy,
   interactionTerminalStatus
@@ -60,7 +71,7 @@ import {
   mapOpenCodeTodoSteps,
   mapOpenCodeUsage,
   normalizeOpenCodeEvent,
-  openCodeMessageError,
+  openCodeErrorDiagnostic,
   parseOpenCodeMessages,
   parseOpenCodePermissions,
   parseOpenCodeProviderCatalog,
@@ -86,10 +97,12 @@ import {
 } from './OpenCodeServerSupervisor';
 import {
   OPENCODE_RUNTIME_ID,
+  OpenCodeRuntimeResolutionError,
   resolveOpenCodeRuntime,
   type OpenCodeRuntimeResolverOptions,
   type ResolvedOpenCodeRuntime
 } from './OpenCodeRuntimeResolver';
+import { openCodeSensitiveEnvironmentValues } from './OpenCodeEnvironmentPolicy';
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
@@ -116,6 +129,9 @@ const STREAM_OUTPUT_FLUSH_BYTES = 64 * 1024;
 const MAX_BUFFERED_STREAM_PARTS_PER_RUN = 8;
 const OPENCODE_CATALOG_REFRESH_MS = 250;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_INTERRUPT_COMPLETION_TIMEOUT_MS = 6_000;
+const MAX_INTERRUPT_RECONCILIATION_WINDOW_MS = 1_500;
+const MAX_TRACKED_ASSISTANT_MESSAGES_PER_SESSION = 2_048;
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -125,6 +141,10 @@ const OPENCODE_CATALOG_EVENTS = new Set([
   'integration.connection.updated',
   'installation.updated'
 ]);
+
+class OpenCodeRuntimeGenerationChangedError extends Error {
+  readonly name = 'OpenCodeRuntimeGenerationChangedError';
+}
 
 interface BufferedOpenCodeStreamPart {
   part: OpenCodePart;
@@ -143,6 +163,17 @@ interface OpenCodeRunStreamBuffer {
   timer?: NodeJS.Timeout;
 }
 
+interface OpenCodeInterruptDeadline {
+  runId: string;
+  sessionId: string;
+  providerTurnId: string;
+  serverInstanceId: string;
+  deadlineAt: number;
+  evidence?: 'ACTIVE' | 'UNCERTAIN';
+  probeCount: number;
+  timer?: NodeJS.Timeout;
+}
+
 export interface OpenCodeAdapterOptions
   extends Omit<OpenCodeRuntimeResolverOptions, 'cwd'>,
     Pick<OpenCodeServerSupervisorOptions, 'requestTimeoutMs' | 'startupTimeoutMs'> {
@@ -156,29 +187,41 @@ export interface OpenCodeAdapterOptions
   ) => OpenCodeSessionSupervisor;
   /** Keeps inactive per-session loopback processes bounded; primarily shortened by lifecycle tests. */
   sessionIdleTimeoutMs?: number;
+  /** Total post-acknowledgement window for OpenCode to prove interruption. */
+  interruptCompletionTimeoutMs?: number;
 }
 
 export class OpenCodeAdapter implements AgentRuntimeAdapter {
   readonly descriptor = OPENCODE_RUNTIME_DESCRIPTOR;
 
   private runtime?: ResolvedOpenCodeRuntime;
+  private operationalModels: AgentModel[] = [];
   private models: AgentModel[] = [];
   private nativeCatalogState?: AgentJsonValue;
   private preflightState: AgentPreflight = {
     runtime: OPENCODE_RUNTIME_DESCRIPTOR,
-    ready: false,
+    readiness: createRuntimeReadiness(
+      'INITIALIZING',
+      'OpenCode has not been initialized.',
+      { checks: { initialization: 'NOT_STARTED' } }
+    ),
     capabilities: opencodeCapabilities(),
-    problems: ['OpenCode has not been initialized.'],
-    warnings: []
   };
   private readonly supervisors = new Map<string, OpenCodeSessionSupervisor>();
   private readonly eventStreams = new Map<string, { stop(): void }>();
-  private readonly inboundQueues = new Map<string, Promise<void>>();
+  private readonly sessionOperationQueues = new Map<string, Promise<void>>();
+  private readonly retiredSessionOperationQueues = new Set<Promise<void>>();
   private readonly streamBuffers = new Map<string, OpenCodeRunStreamBuffer>();
   private readonly recoveryAttempts = new Map<string, number>();
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly idleEvictionTimers = new Map<string, NodeJS.Timeout>();
+  private readonly interruptDeadlines = new Map<string, OpenCodeInterruptDeadline>();
   private readonly reconciliationCounts = new Map<string, number>();
+  private readonly sessionQuarantinePromises = new Map<string, Promise<void>>();
+  private readonly sessionClosePromises = new Map<string, Promise<void>>();
+  private readonly sessionRuntimeFences = new Map<string, Error>();
+  private readonly assistantMessageParents = new Map<string, Map<string, string>>();
+  private catalogSupervisor?: OpenCodeSessionSupervisor;
   private catalogRefreshTimer?: NodeJS.Timeout;
   private catalogRefreshPromise?: Promise<void>;
   private runtimeConfigurationResetTimer?: NodeJS.Timeout;
@@ -187,6 +230,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private runtimeReconfigurationPending = false;
   private initialized = false;
   private shuttingDown = false;
+  private readonly sensitiveValues: readonly string[];
+  private readonly interruptCompletionTimeoutMs: number;
 
   constructor(
     private readonly store: FileTaskStore,
@@ -194,6 +239,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     private readonly options: OpenCodeAdapterOptions
   ) {
     this.configuredExecutable = normalizeExecutableOverride(options.executable);
+    this.sensitiveValues = openCodeSensitiveEnvironmentValues(
+      options.environment ?? process.env
+    );
+    this.interruptCompletionTimeoutMs = positiveTimeout(
+      options.interruptCompletionTimeoutMs,
+      DEFAULT_INTERRUPT_COMPLETION_TIMEOUT_MS
+    );
   }
 
   async initialize(): Promise<void> {
@@ -216,14 +268,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch (cause) {
       this.preflightState = {
         runtime: this.descriptor,
-        ready: false,
+        readiness: openCodeFailureReadiness(cause, this.sensitiveValues),
         capabilities: opencodeCapabilities(),
-        problems: [errorMessage(cause)],
-        warnings: []
       };
       await this.shutdown().catch(() => undefined);
       this.initialized = false;
       this.runtime = undefined;
+      this.operationalModels = [];
       this.models = [];
       this.nativeCatalogState = undefined;
       throw cause;
@@ -246,7 +297,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         cwd: this.options.cwd
       });
     }
-    if (this.models.length === 0) await this.refreshCatalog();
+    if (this.operationalModels.length === 0) await this.refreshCatalog();
     return structuredClone(this.models);
   }
 
@@ -266,15 +317,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
     if (await this.hasActiveRuntimeWork()) {
       this.runtimeReconfigurationPending = true;
-      this.preflightState = {
-        ...this.preflightState,
-        warnings: [
-          ...new Set([
-            ...this.preflightState.warnings,
-            'The OpenCode runtime configuration is saved and will be applied after active provider work reaches a definitive terminal state.'
-          ])
-        ]
-      };
+      this.preflightState = appendRuntimeDiagnostic(
+        this.preflightState,
+        warningDiagnostic(
+          'RUNTIME_RESTART_REQUIRED',
+          'CONFIGURATION',
+          'The OpenCode runtime configuration is saved and will be applied after active provider work reaches a definitive terminal state.'
+        )
+      );
       this.emitRuntimeUpdate();
       return;
     }
@@ -302,6 +352,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     catalogLabel: string,
     allowDeferredExplicitSelection = false
   ): ResolvedAgentExecution {
+    if (
+      (input.settings.modelProvider &&
+        !this.isSafeOperationalIdentifier(input.settings.modelProvider)) ||
+      (input.settings.model &&
+        !this.isSafeOperationalIdentifier(input.settings.model)) ||
+      (input.settings.reasoningEffort &&
+        !this.isSafeOperationalIdentifier(input.settings.reasoningEffort))
+    ) {
+      throw new Error(
+        'OpenCode rejected a model selection whose operational identifier matches a runtime credential.'
+      );
+    }
     const matchingProvider = input.settings.modelProvider
       ? models.filter((candidate) => candidate.modelProvider === input.settings.modelProvider)
       : models;
@@ -375,7 +437,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     );
     const selectedSettings = this.resolveExecutionFromModels(
       { settings: input.settings, attachments: [] },
-      mapOpenCodeModels(projectCatalog),
+      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
       `worktree catalog for ${session.worktreePath}`
     ).settings;
     const ownershipTitle = openCodeOwnershipTitle(session.id);
@@ -387,23 +449,42 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         candidate.title === ownershipTitle
     );
     if (existingProviderSession) {
-      assertSessionDirectory(existingProviderSession, session.worktreePath);
+      if (!this.isSafeOperationalIdentifier(existingProviderSession.id)) {
+        await this.quarantineSessionRuntime(
+          session.id,
+          'session/discovery',
+          'OpenCode returned a session identifier matching a runtime credential.'
+        );
+        throw new Error(
+          'OpenCode cannot attach the discovered session because its identifier matches a runtime credential.'
+        );
+      }
+      await this.assertSessionDirectoryOrQuarantine(
+        session.id,
+        'session/discovery',
+        existingProviderSession,
+        session.worktreePath
+      );
       session = await this.store.updateAgentSession(session.id, {
         providerSessionId: existingProviderSession.id,
         providerSessionTreeId: existingProviderSession.id,
         status: await this.readProviderSessionStatus(client, existingProviderSession.id),
         materialized: true,
         requestedSettings: selectedSettings,
-        observedSettings: settingsFromSession(existingProviderSession, selectedSettings),
+        observedSettings: this.safeObservedSettings(
+          settingsFromSession(existingProviderSession, selectedSettings)
+        ),
         lastAttachedAt: new Date().toISOString()
       });
       await this.bindEventStream(session, client, server.id);
       if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
       return session;
     }
-    const response = parseOpenCodeSession(
-      (
-        await client.post<unknown>('/session', {
+    let response: OpenCodeSession;
+    try {
+      response = parseOpenCodeSession(
+        (
+          await client.post<unknown>('/session', {
           title: ownershipTitle,
           model: modelReference(selectedSettings),
           metadata: {
@@ -411,10 +492,38 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
             taskMonkiTaskId: input.taskId
           },
           permission: openCodePermissionRules(selectedSettings)
-        })
-      ).data
+          })
+        ).data
+      );
+    } catch (cause) {
+      const error = mapOpenCodeMutationError('session/create', cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'session/create',
+          'The provider may have created a session whose identity was not confirmed.',
+          error
+        );
+      }
+      throw error;
+    }
+    await this.assertSessionDirectoryOrQuarantine(
+      session.id,
+      'session/create',
+      response,
+      session.worktreePath
     );
-    assertSessionDirectory(response, session.worktreePath);
+    if (!this.isSafeOperationalIdentifier(response.id)) {
+      await this.throwAmbiguousAfterQuarantine(
+        session.id,
+        'session/create',
+        'OpenCode created a session whose identifier cannot be persisted safely.',
+        new AgentMutationAmbiguousError(
+          'session/create',
+          'OpenCode created a session whose identifier matches a runtime credential.'
+        )
+      );
+    }
     try {
       session = await this.store.updateAgentSession(session.id, {
         providerSessionId: response.id,
@@ -422,7 +531,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         status: 'IDLE',
         materialized: false,
         requestedSettings: selectedSettings,
-        observedSettings: settingsFromSession(response, selectedSettings),
+        observedSettings: this.safeObservedSettings(
+          settingsFromSession(response, selectedSettings)
+        ),
         lastAttachedAt: new Date().toISOString()
       });
     } catch (cause) {
@@ -430,13 +541,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       if (persisted?.providerSessionId === response.id) {
         session = persisted;
       } else {
-        throw new Error(
-          `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`,
-          { cause }
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'session/create',
+          `OpenCode created session ${response.id}, but Task Monki could not persist its ownership.`,
+          new AgentMutationAmbiguousError(
+            'session/create',
+            `OpenCode created session ${response.id}, but Task Monki could not persist its ownership. A retry will recover it by Task Monki metadata instead of creating another session.`
+          )
         );
       }
     }
-    await this.recordSettingsObservation(session, 'THREAD_START_RESPONSE', selectedSettings);
+    await this.recordSettingsObservation(
+      session,
+      'THREAD_START_RESPONSE',
+      session.observedSettings ?? selectedSettings
+    );
     await this.bindEventStream(session, client, server.id);
     this.scheduleSessionIdleEviction(session.id);
     return session;
@@ -449,6 +569,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const providerSessionId = ref.providerSessionId ?? session.providerSessionId;
     if (!providerSessionId) {
       throw new Error(`OpenCode session ${session.id} has not been materialized.`);
+    }
+    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+      throw new Error(
+        'The persisted OpenCode session identifier matches a runtime credential and cannot be attached safely.'
+      );
     }
     const { client, server } = await this.ensureSessionRuntime(session);
     let response: OpenCodeSession;
@@ -465,14 +590,31 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
       throw cause;
     }
-    assertSessionDirectory(response, session.worktreePath);
+    if (!this.isSafeOperationalIdentifier(response.id)) {
+      await this.quarantineSessionRuntime(
+        session.id,
+        'session/attach',
+        'OpenCode returned a session identifier matching a runtime credential.'
+      );
+      throw new Error(
+        'OpenCode cannot attach the session because its returned identifier matches a runtime credential.'
+      );
+    }
+    await this.assertSessionDirectoryOrQuarantine(
+      session.id,
+      'session/attach',
+      response,
+      session.worktreePath
+    );
     const status = await this.readProviderSessionStatus(client, providerSessionId);
     session = await this.store.updateAgentSession(session.id, {
       providerSessionId: response.id,
       providerSessionTreeId: response.id,
       status,
       materialized: true,
-      observedSettings: settingsFromSession(response, session.requestedSettings),
+      observedSettings: this.safeObservedSettings(
+        settingsFromSession(response, session.requestedSettings)
+      ),
       lastAttachedAt: new Date().toISOString()
     });
     const activeRun = await this.getCurrentRunForSession(session.id);
@@ -514,15 +656,37 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     let session = await this.requireSession(ref.localSessionId);
     const providerSessionId = ref.providerSessionId ?? session.providerSessionId;
     if (!providerSessionId) return { session, runs: [] };
+    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+      throw new Error(
+        'The OpenCode session identifier matches a runtime credential and cannot be read safely.'
+      );
+    }
     const { client } = await this.ensureSessionRuntime(session);
     const response = parseOpenCodeSession(
       (await client.get<unknown>(sessionPath(providerSessionId))).data
     );
-    assertSessionDirectory(response, session.worktreePath);
+    if (!this.isSafeOperationalIdentifier(response.id)) {
+      await this.quarantineSessionRuntime(
+        session.id,
+        'session/read',
+        'OpenCode returned a session identifier matching a runtime credential.'
+      );
+      throw new Error(
+        'OpenCode cannot read the session because its returned identifier matches a runtime credential.'
+      );
+    }
+    await this.assertSessionDirectoryOrQuarantine(
+      session.id,
+      'session/read',
+      response,
+      session.worktreePath
+    );
     session = await this.store.updateAgentSession(session.id, {
       status: await this.readProviderSessionStatus(client, providerSessionId),
       materialized: true,
-      observedSettings: settingsFromSession(response, session.requestedSettings),
+      observedSettings: this.safeObservedSettings(
+        settingsFromSession(response, session.requestedSettings)
+      ),
       lastAttachedAt: new Date().toISOString()
     });
     const snapshot = await this.store.snapshot();
@@ -537,20 +701,28 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     await this.applyPendingRuntimeConfiguration(input.localRunId);
+    return this.enqueueSessionOperation(input.session.localSessionId, () =>
+      this.startTurnOwned(input)
+    );
+  }
+
+  private async startTurnOwned(input: StartAgentTurn): Promise<AgentTurn> {
+    const quarantine = this.sessionQuarantinePromises.get(input.session.localSessionId);
+    if (quarantine) await quarantine;
     let session = await this.requireSession(input.session.localSessionId);
     this.assertSessionOwnership(session);
     assertOpenCodeManagedAttachmentsUnsupported(input.attachments ?? []);
     const settings = input.settings ?? session.requestedSettings;
     assertOpenCodeExecutionSettings(settings);
     const hadProviderSession = Boolean(session.providerSessionId);
-    const runtimeWasDetached = !this.supervisors.has(session.id);
+    const previousSupervisor = this.supervisors.get(session.id);
     let running = await this.ensureSessionRuntime(session);
     const projectCatalog = parseOpenCodeProviderCatalog(
       (await running.client.get<unknown>('/provider')).data
     );
     const selectedModel = this.resolveExecutionFromModels(
       { settings, attachments: [] },
-      mapOpenCodeModels(projectCatalog),
+      this.safePublishedModels(mapOpenCodeModels(projectCatalog)),
       `worktree catalog for ${session.worktreePath}`
     );
     if (!session.providerSessionId) {
@@ -564,16 +736,28 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         settings: selectedModel.settings
       });
     }
-    if (hadProviderSession && session.providerSessionId && runtimeWasDetached) {
+    if (
+      hadProviderSession &&
+      session.providerSessionId &&
+      this.supervisors.get(session.id) !== previousSupervisor
+    ) {
       session = await this.attachSession({
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
       });
     }
     const providerSessionId = session.providerSessionId!;
+    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+      throw new Error(
+        'The persisted OpenCode session identifier matches a runtime credential and cannot be used safely.'
+      );
+    }
     running = await this.ensureSessionRuntime(session);
     const { client, server } = running;
     await this.bindEventStream(session, client, server.id);
+    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+      throw new Error('OpenCode replaced the session runtime before prompt submission.');
+    }
     const providerMessageId = providerMessageIdForRun(input.localRunId);
     await this.store.updateRun(input.localRunId, {
       providerTurnId: providerMessageId,
@@ -581,6 +765,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       status: 'STARTING',
       lastEventAt: new Date().toISOString()
     });
+    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+      throw new Error('OpenCode replaced the session runtime before prompt submission.');
+    }
     try {
       await client.post<void>(`${sessionPath(providerSessionId)}/prompt_async`, {
         messageID: providerMessageId,
@@ -594,7 +781,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         parts: [{ type: 'text', text: input.prompt }]
       });
     } catch (cause) {
-      throw mapOpenCodeMutationError('session/prompt_async', cause);
+      const error = mapOpenCodeMutationError('session/prompt_async', cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          'session/prompt_async',
+          `Prompt ${providerMessageId} may have been accepted without an authoritative acknowledgement.`,
+          error
+        );
+      }
+      throw error;
+    }
+    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+      throw new AgentMutationAmbiguousError(
+        'session/prompt_async',
+        `OpenCode accepted message ${providerMessageId}, but its owning runtime generation was replaced before Task Monki could persist the acknowledgement.`
+      );
     }
     const submittedAt = new Date().toISOString();
     try {
@@ -604,6 +806,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         attachmentSubmissions: [],
         lastEventAt: submittedAt
       });
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new OpenCodeRuntimeGenerationChangedError();
+      }
       session = await this.store.updateAgentSession(session.id, {
         status: 'ACTIVE',
         materialized: true,
@@ -611,36 +816,394 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         observedSettings: selectedModel.settings,
         lastAttachedAt: submittedAt
       });
+      if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+        throw new OpenCodeRuntimeGenerationChangedError();
+      }
       await this.recordSettingsObservation(
         session,
-        'THREAD_SETTINGS_NOTIFICATION',
+        'TASK_MONKI_RESOLUTION',
         selectedModel.settings,
         input.localRunId
       );
     } catch (cause) {
-      throw new AgentMutationAmbiguousError(
+      if (cause instanceof OpenCodeRuntimeGenerationChangedError) {
+        throw new AgentMutationAmbiguousError(
+          'session/prompt_async',
+          `OpenCode accepted message ${providerMessageId}, but its owning runtime generation changed during durable acknowledgement.`
+        );
+      }
+      await this.throwAmbiguousAfterQuarantine(
+        session.id,
         'session/prompt_async',
-        `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        `OpenCode accepted message ${providerMessageId}, but Task Monki could not persist the acknowledgement.`,
+        new AgentMutationAmbiguousError(
+          'session/prompt_async',
+          `OpenCode accepted message ${providerMessageId}, but Task Monki could not durably record the acknowledgement: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        )
       );
     }
     return { localRunId: input.localRunId, providerTurnId: providerMessageId };
   }
 
   async interruptTurn(input: InterruptAgentTurn): Promise<void> {
-    const session = await this.requireSession(input.session.localSessionId);
-    const providerSessionId = input.session.providerSessionId ?? session.providerSessionId;
-    if (!providerSessionId) throw new Error('Cannot interrupt an unmaterialized OpenCode session.');
-    const { client } = await this.ensureSessionRuntime(session);
+    await this.enqueueSessionOperation(input.session.localSessionId, async () => {
+      const session = await this.requireSession(input.session.localSessionId);
+      const providerSessionId = input.session.providerSessionId ?? session.providerSessionId;
+      if (!providerSessionId) {
+        throw new Error('Cannot interrupt an unmaterialized OpenCode session.');
+      }
+      if (!this.isSafeOperationalIdentifier(providerSessionId)) {
+        throw new Error(
+          'The OpenCode session identifier matches a runtime credential and cannot be interrupted safely.'
+        );
+      }
+      const run = await this.store.getRunByProviderTurnId(
+        this.descriptor.id,
+        input.providerTurnId
+      );
+      if (!run || run.sessionId !== session.id) {
+        throw new Error('The OpenCode turn does not belong to the selected session.');
+      }
+      const supervisor = this.supervisors.get(session.id);
+      const client = supervisor?.currentClient;
+      const server = supervisor?.currentServer;
+      if (!client || !server || run.serverInstanceId !== server.id) {
+        throw new AgentMutationAmbiguousError(
+          'session/abort',
+          'The OpenCode process that owns this turn is no longer available; cancellation delivery cannot be confirmed.'
+        );
+      }
+      const controlWindowMs = this.interruptReconciliationWindowMs();
+      try {
+        await client.post<boolean>(
+          `${sessionPath(providerSessionId)}/abort`,
+          undefined,
+          { deadlineAt: Date.now() + controlWindowMs }
+        );
+      } catch (cause) {
+        const error = mapOpenCodeMutationError('session/abort', cause);
+        if (error instanceof AgentMutationAmbiguousError) {
+          await this.throwAmbiguousAfterQuarantine(
+            session.id,
+            'session/abort',
+            `Cancellation of provider session ${providerSessionId} could not be confirmed.`,
+            error
+          );
+        }
+        throw error;
+      }
+      if (run && ACTIVE_RUN_STATES.includes(run.status)) {
+        await this.store.updateRun(run.id, {
+          status: 'INTERRUPTING',
+          lastEventAt: new Date().toISOString()
+        });
+      }
+      const interrupting = await this.store.getRun(run.id);
+      if (!interrupting || interrupting.status !== 'INTERRUPTING') return;
+      const deadline = this.armInterruptDeadline(interrupting, server.id);
+      try {
+        await this.reconcileInterruptOwned(
+          interrupting,
+          session,
+          client,
+          server.id,
+          Math.min(deadline.deadlineAt, Date.now() + controlWindowMs)
+        );
+      } catch (cause) {
+        const current = await this.store.getRun(run.id);
+        if (current?.status === 'INTERRUPTING') {
+          await this.recordRunActivity(current, 'session/abort/reconcile-deferred', {
+            error: this.redactProviderText(errorMessage(cause))
+          });
+        }
+      }
+    });
+  }
+
+  private interruptReconciliationWindowMs(): number {
+    return Math.max(
+      1,
+      Math.min(
+        MAX_INTERRUPT_RECONCILIATION_WINDOW_MS,
+        Math.floor(this.interruptCompletionTimeoutMs / 4)
+      )
+    );
+  }
+
+  private armInterruptDeadline(
+    run: RunRecord,
+    serverInstanceId: string
+  ): OpenCodeInterruptDeadline {
+    this.clearInterruptDeadline(run.id);
+    const deadline: OpenCodeInterruptDeadline = {
+      runId: run.id,
+      sessionId: run.sessionId,
+      providerTurnId: run.providerTurnId!,
+      serverInstanceId,
+      deadlineAt: Date.now() + this.interruptCompletionTimeoutMs,
+      probeCount: 0
+    };
+    this.interruptDeadlines.set(run.id, deadline);
+    this.scheduleInterruptProbe(deadline);
+    return deadline;
+  }
+
+  private scheduleInterruptProbe(deadline: OpenCodeInterruptDeadline): void {
+    const probeAt = deadline.deadlineAt - this.interruptReconciliationWindowMs();
+    this.scheduleInterruptTimer(deadline, Math.max(0, probeAt - Date.now()), () =>
+      this.handleInterruptProbe(deadline)
+    );
+  }
+
+  private scheduleInterruptExpiration(deadline: OpenCodeInterruptDeadline): void {
+    this.scheduleInterruptTimer(
+      deadline,
+      Math.max(0, deadline.deadlineAt - Date.now()),
+      () => this.handleInterruptExpiration(deadline)
+    );
+  }
+
+  private scheduleInterruptTimer(
+    deadline: OpenCodeInterruptDeadline,
+    delayMs: number,
+    operation: () => Promise<void>
+  ): void {
+    if (deadline.timer) clearTimeout(deadline.timer);
+    const timer = setTimeout(() => {
+      if (
+        this.shuttingDown ||
+        this.interruptDeadlines.get(deadline.runId) !== deadline
+      ) {
+        return;
+      }
+      deadline.timer = undefined;
+      void this.enqueueSessionOperation(deadline.sessionId, operation).catch((cause) =>
+        this.recordProtocolIncident(deadline.sessionId, cause).catch(() => undefined)
+      );
+    }, delayMs);
+    timer.unref();
+    deadline.timer = timer;
+  }
+
+  private async handleInterruptProbe(
+    deadline: OpenCodeInterruptDeadline
+  ): Promise<void> {
+    if (!this.isCurrentInterruptDeadline(deadline)) return;
+    const run = await this.store.getRun(deadline.runId);
+    if (!run || run.status !== 'INTERRUPTING') {
+      this.clearInterruptDeadline(deadline.runId, deadline);
+      return;
+    }
+    const session = await this.requireSession(deadline.sessionId);
+    const client = this.supervisors.get(deadline.sessionId)?.currentClient;
+    deadline.probeCount += 1;
+    if (!client) {
+      deadline.evidence = 'UNCERTAIN';
+      this.scheduleInterruptExpiration(deadline);
+      return;
+    }
     try {
-      await client.post<boolean>(`${sessionPath(providerSessionId)}/abort`);
+      const result = await this.reconcileInterruptOwned(
+        run,
+        session,
+        client,
+        deadline.serverInstanceId,
+        deadline.deadlineAt
+      );
+      deadline.evidence = result === 'ACTIVE' ? 'ACTIVE' : 'UNCERTAIN';
     } catch (cause) {
-      throw mapOpenCodeMutationError('session/abort', cause);
+      deadline.evidence = 'UNCERTAIN';
+      const current = await this.store.getRun(deadline.runId);
+      if (current?.status === 'INTERRUPTING') {
+        await this.recordRunActivity(current, 'session/abort/reconcile-failed', {
+          error: this.redactProviderText(errorMessage(cause))
+        });
+      }
     }
-    const run = await this.store.getRunByProviderTurnId(this.descriptor.id, input.providerTurnId);
-    if (run && ACTIVE_RUN_STATES.includes(run.status)) {
-      await this.store.updateRun(run.id, { status: 'INTERRUPTING', lastEventAt: new Date().toISOString() });
+    if (!this.isCurrentInterruptDeadline(deadline)) return;
+    const current = await this.store.getRun(deadline.runId);
+    if (!current || current.status !== 'INTERRUPTING') {
+      this.clearInterruptDeadline(deadline.runId, deadline);
+      return;
     }
-    await this.reconcileSession(session.id);
+    const remainingMs = deadline.deadlineAt - Date.now();
+    if (remainingMs <= 0 || deadline.probeCount >= 2) {
+      this.scheduleInterruptExpiration(deadline);
+      return;
+    }
+    const finalProbeWindowMs = Math.max(
+      1,
+      Math.min(250, Math.floor(this.interruptReconciliationWindowMs() / 4))
+    );
+    this.scheduleInterruptTimer(
+      deadline,
+      Math.max(0, deadline.deadlineAt - finalProbeWindowMs - Date.now()),
+      () => this.handleInterruptProbe(deadline)
+    );
+  }
+
+  private async handleInterruptExpiration(
+    deadline: OpenCodeInterruptDeadline
+  ): Promise<void> {
+    if (!this.isCurrentInterruptDeadline(deadline)) return;
+    const run = await this.store.getRun(deadline.runId);
+    if (!run || run.status !== 'INTERRUPTING') {
+      this.clearInterruptDeadline(deadline.runId, deadline);
+      return;
+    }
+    this.clearInterruptDeadline(deadline.runId, deadline);
+    const reason = deadline.evidence === 'ACTIVE'
+      ? 'OpenCode acknowledged cancellation but still reported the provider session as active at the interruption deadline.'
+      : 'OpenCode acknowledged cancellation but Task Monki could not prove a terminal provider state before the interruption deadline.';
+    let quarantineFailure: unknown;
+    try {
+      await this.quarantineSessionRuntime(
+        deadline.sessionId,
+        'session/abort-completion',
+        reason
+      );
+    } catch (cause) {
+      quarantineFailure = cause;
+    }
+    const current = await this.store.getRun(deadline.runId);
+    if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
+    if (!quarantineFailure) {
+      await this.finalizeRun(
+        current,
+        'INTERRUPTED',
+        `${reason} Task Monki stopped the owning OpenCode session process.`,
+        '',
+        'process'
+      );
+      return;
+    }
+    await this.recordReconciliation(
+      current,
+      'RECOVERY_REQUIRED',
+      'REQUIRES_USER_ACTION',
+      false
+    );
+    await this.recordRunActivity(current, 'session/abort/deadline-expired', {
+      reason,
+      quarantineError: this.redactProviderText(errorMessage(quarantineFailure))
+    });
+  }
+
+  private async reconcileInterruptOwned(
+    run: RunRecord,
+    session: AgentSessionRecord,
+    client: OpenCodeClientTransport,
+    serverInstanceId: string,
+    deadlineAt: number
+  ): Promise<'TERMINAL' | 'ACTIVE' | 'UNCERTAIN'> {
+    if (!this.isCurrentSessionServerGeneration(session.id, serverInstanceId)) {
+      return 'UNCERTAIN';
+    }
+    const providerSessionId = session.providerSessionId;
+    if (!providerSessionId) return 'UNCERTAIN';
+    const messagesResult = await client.get<unknown>(
+      `${sessionPath(providerSessionId)}/message`,
+      { deadlineAt }
+    );
+    if (!this.isCurrentSessionServerGeneration(session.id, serverInstanceId)) {
+      return 'UNCERTAIN';
+    }
+    const messages = parseOpenCodeMessages(messagesResult.data);
+    const userMessage = messages.find(
+      (message) => message.info.role === 'user' && message.info.id === run.providerTurnId
+    );
+    if (!userMessage) return 'UNCERTAIN';
+    const status = await this.readProviderInterruptStatus(
+      client,
+      providerSessionId,
+      deadlineAt
+    );
+    if (!this.isCurrentSessionServerGeneration(session.id, serverInstanceId)) {
+      return 'UNCERTAIN';
+    }
+    const assistant = latestAssistantFor(messages, userMessage.info.id);
+    if (
+      assistant &&
+      (status === 'IDLE' || isOpenCodeAbortError(assistant.info.error))
+    ) {
+      await this.finalizeFromSnapshot(
+        run,
+        session,
+        assistant,
+        messagesResult.raw,
+        serverInstanceId
+      );
+      return 'TERMINAL';
+    }
+    if (status === 'IDLE') {
+      await this.finalizeRun(
+        run,
+        'INTERRUPTED',
+        'OpenCode acknowledged cancellation and reported the provider session idle.'
+      );
+      if (this.isCurrentSessionServerGeneration(session.id, serverInstanceId)) {
+        await this.store.updateAgentSession(session.id, {
+          status: 'IDLE',
+          materialized: true
+        });
+        this.scheduleSessionIdleEviction(session.id);
+      }
+      return 'TERMINAL';
+    }
+    if (status === 'ACTIVE') {
+      await this.store.updateAgentSession(session.id, {
+        status: 'ACTIVE',
+        materialized: true
+      });
+      return 'ACTIVE';
+    }
+    return 'UNCERTAIN';
+  }
+
+  private async readProviderInterruptStatus(
+    client: OpenCodeClientTransport,
+    providerSessionId: string,
+    deadlineAt: number
+  ): Promise<'IDLE' | 'ACTIVE' | 'UNKNOWN'> {
+    const value = (
+      await client.get<unknown>('/session/status', { deadlineAt })
+    ).data;
+    const statuses = asRecord(value);
+    if (
+      !statuses ||
+      !Object.prototype.hasOwnProperty.call(statuses, providerSessionId)
+    ) {
+      return 'UNKNOWN';
+    }
+    const status = mapOpenCodeSessionStatus(statuses[providerSessionId]);
+    return status === 'IDLE' ? 'IDLE' : status === 'ACTIVE' ? 'ACTIVE' : 'UNKNOWN';
+  }
+
+  private isCurrentInterruptDeadline(deadline: OpenCodeInterruptDeadline): boolean {
+    return !this.shuttingDown &&
+      this.interruptDeadlines.get(deadline.runId) === deadline &&
+      this.isCurrentSessionServerGeneration(
+        deadline.sessionId,
+        deadline.serverInstanceId
+      );
+  }
+
+  private clearInterruptDeadline(
+    runId: string,
+    expected?: OpenCodeInterruptDeadline
+  ): void {
+    const deadline = this.interruptDeadlines.get(runId);
+    if (!deadline || (expected && deadline !== expected)) return;
+    if (deadline.timer) clearTimeout(deadline.timer);
+    this.interruptDeadlines.delete(runId);
+  }
+
+  private clearSessionInterruptDeadlines(sessionId: string): void {
+    for (const deadline of [...this.interruptDeadlines.values()]) {
+      if (deadline.sessionId === sessionId) {
+        this.clearInterruptDeadline(deadline.runId, deadline);
+      }
+    }
   }
 
   async forkSession(input: ForkAgentSession): Promise<AgentSessionRecord> {
@@ -648,6 +1211,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.assertSessionOwnership(source);
     const sourceProviderId = input.sourceSession.providerSessionId ?? source.providerSessionId;
     if (!sourceProviderId) throw new Error('Cannot fork an unmaterialized OpenCode session.');
+    if (!this.isSafeOperationalIdentifier(sourceProviderId)) {
+      throw new Error(
+        'The source OpenCode session identifier matches a runtime credential and cannot be forked safely.'
+      );
+    }
     const target = await this.requireSession(input.localSessionId);
     this.assertSessionOwnership(target);
     assertOpenCodeExecutionSettings(input.settings);
@@ -669,11 +1237,31 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         (await client.post<unknown>(`${sessionPath(sourceProviderId)}/fork`, {})).data
       );
     } catch (cause) {
-      throw mapOpenCodeMutationError('session/fork', cause);
+      const error = mapOpenCodeMutationError('session/fork', cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          target.id,
+          'session/fork',
+          `The fork of provider session ${sourceProviderId} may have been created without a confirmed identity.`,
+          error
+        );
+      }
+      throw error;
+    }
+    if (!this.isSafeOperationalIdentifier(forked.id)) {
+      return this.throwAmbiguousAfterQuarantine(
+        target.id,
+        'session/fork',
+        'OpenCode created a fork whose identifier cannot be persisted safely.',
+        new AgentMutationAmbiguousError(
+          'session/fork',
+          'OpenCode created a fork whose identifier matches a runtime credential.'
+        )
+      );
     }
     let stored: AgentSessionRecord;
     try {
-      assertSessionDirectory(forked, target.worktreePath);
+      await assertSessionDirectory(forked, target.worktreePath);
       stored = await this.store.updateAgentSession(target.id, {
         providerSessionId: forked.id,
         providerSessionTreeId: forked.id,
@@ -682,13 +1270,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         status: 'IDLE',
         materialized: true,
         requestedSettings: input.settings,
-        observedSettings: settingsFromSession(forked, input.settings),
+        observedSettings: this.safeObservedSettings(
+          settingsFromSession(forked, input.settings)
+        ),
         lastAttachedAt: new Date().toISOString()
       });
     } catch (cause) {
-      throw new AgentMutationAmbiguousError(
+      return this.throwAmbiguousAfterQuarantine(
+        target.id,
         'session/fork',
-        `OpenCode created fork ${forked.id}, but Task Monki could not durably record its ownership: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        `OpenCode created fork ${forked.id}, but Task Monki could not persist its ownership.`,
+        new AgentMutationAmbiguousError(
+          'session/fork',
+          `OpenCode created fork ${forked.id}, but Task Monki could not durably record its ownership: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        )
       );
     }
     await this.bindEventStream(stored, client, server.id);
@@ -712,7 +1307,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     try {
       responseRaw = (await client.post<boolean>(endpoint, mapped.body)).raw;
     } catch (cause) {
-      throw mapOpenCodeMutationError(`${mapped.path}/reply`, cause);
+      const operation = `${mapped.path}/reply`;
+      const error = mapOpenCodeMutationError(operation, cause);
+      if (error instanceof AgentMutationAmbiguousError) {
+        await this.throwAmbiguousAfterQuarantine(
+          session.id,
+          operation,
+          `The interaction reply for ${input.interaction.id} could not be confirmed.`,
+          error
+        );
+      }
+      throw error;
     }
     try {
       const latest = await this.store.getInteractionRequest(input.interaction.id);
@@ -731,9 +1336,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       });
       this.emitInteractionUpdate(resolved);
     } catch (cause) {
-      throw new AgentMutationAmbiguousError(
+      await this.throwAmbiguousAfterQuarantine(
+        session.id,
         `${mapped.path}/reply`,
-        `OpenCode acknowledged the ${mapped.path} reply, but Task Monki could not durably record it: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        `OpenCode acknowledged interaction ${input.interaction.id}, but Task Monki could not persist its resolution.`,
+        new AgentMutationAmbiguousError(
+          `${mapped.path}/reply`,
+          `OpenCode acknowledged the ${mapped.path} reply, but Task Monki could not durably record it: ${errorMessage(cause)} Automatic resubmission is disabled.`
+        )
       );
     }
   }
@@ -758,6 +1368,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    for (const deadline of this.interruptDeadlines.values()) {
+      if (deadline.timer) clearTimeout(deadline.timer);
+    }
+    this.interruptDeadlines.clear();
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     for (const timer of this.idleEvictionTimers.values()) clearTimeout(timer);
@@ -773,10 +1387,27 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       buffer.timer = undefined;
     }
     for (const stream of this.eventStreams.values()) stream.stop();
-    this.eventStreams.clear();
-    await Promise.allSettled([...this.inboundQueues.values()]);
+    this.assistantMessageParents.clear();
+    await Promise.allSettled([
+      ...this.sessionOperationQueues.values(),
+      ...this.retiredSessionOperationQueues
+    ]);
     if (this.catalogRefreshPromise) await this.catalogRefreshPromise.catch(() => undefined);
     const failures: unknown[] = [];
+    const quarantineResults = await Promise.allSettled([
+      ...this.sessionQuarantinePromises.values()
+    ]);
+    failures.push(
+      ...quarantineResults
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason)
+    );
+    const closeResults = await Promise.allSettled([...this.sessionClosePromises.values()]);
+    failures.push(
+      ...closeResults
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason)
+    );
     for (const runId of [...this.streamBuffers.keys()]) {
       try {
         await this.materializeRunStreamBuffer(runId);
@@ -784,10 +1415,44 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         failures.push(cause);
       }
     }
+    const catalogSupervisor = this.catalogSupervisor;
+    if (catalogSupervisor) {
+      try {
+        await catalogSupervisor.shutdown();
+        if (this.catalogSupervisor === catalogSupervisor) {
+          this.catalogSupervisor = undefined;
+        }
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    const supervisorEntries = [...this.supervisors.entries()];
     const supervisorResults = await Promise.allSettled(
-      [...this.supervisors.values()].map((supervisor) => supervisor.shutdown())
+      supervisorEntries.map(([, supervisor]) => supervisor.shutdown())
     );
-    this.supervisors.clear();
+    for (const [index, result] of supervisorResults.entries()) {
+      const [sessionId, supervisor] = supervisorEntries[index]!;
+      if (result.status === 'fulfilled') {
+        if (this.supervisors.get(sessionId) === supervisor) {
+          this.supervisors.delete(sessionId);
+        }
+        this.eventStreams.delete(sessionId);
+        if (!this.sessionQuarantinePromises.has(sessionId)) {
+          this.sessionRuntimeFences.delete(sessionId);
+        }
+      } else if (!this.sessionRuntimeFences.has(sessionId)) {
+        this.sessionRuntimeFences.set(
+          sessionId,
+          new Error(
+            `OpenCode session runtime shutdown is unconfirmed: ${errorMessage(result.reason)}`,
+            { cause: result.reason }
+          )
+        );
+      }
+    }
+    for (const sessionId of [...this.eventStreams.keys()]) {
+      if (!this.supervisors.has(sessionId)) this.eventStreams.delete(sessionId);
+    }
     this.initialized = false;
     failures.push(
       ...supervisorResults
@@ -801,48 +1466,182 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async refreshCatalog(): Promise<void> {
     const runtime = this.requireRuntime();
+    if (this.catalogSupervisor) {
+      throw new Error(
+        'OpenCode cannot launch a catalog runtime because termination of the previous catalog process is unconfirmed.'
+      );
+    }
     const supervisor = this.createSupervisor(runtime, this.options.cwd);
+    this.catalogSupervisor = supervisor;
+    let catalog: ReturnType<typeof parseOpenCodeProviderCatalog> | undefined;
+    let operationFailure: unknown;
     try {
       const { client } = await supervisor.start();
-      const catalog = parseOpenCodeProviderCatalog((await client.get<unknown>('/provider')).data);
-      this.applyCatalog(catalog, runtime);
-    } finally {
-      await supervisor.shutdown().catch(() => undefined);
+      catalog = parseOpenCodeProviderCatalog((await client.get<unknown>('/provider')).data);
+    } catch (cause) {
+      operationFailure = cause;
     }
+    let shutdownFailure: unknown;
+    try {
+      await supervisor.shutdown();
+      if (this.catalogSupervisor === supervisor) this.catalogSupervisor = undefined;
+    } catch (cause) {
+      shutdownFailure = cause;
+    }
+    if (operationFailure && shutdownFailure) {
+      throw new AggregateError(
+        [operationFailure, shutdownFailure],
+        'OpenCode catalog discovery failed and its temporary runtime could not be shut down safely.'
+      );
+    }
+    if (shutdownFailure) throw shutdownFailure;
+    if (operationFailure) throw operationFailure;
+    if (!catalog) throw new Error('OpenCode catalog discovery returned no result.');
+    this.applyCatalog(catalog, runtime);
   }
 
   private applyCatalog(
     catalog: ReturnType<typeof parseOpenCodeProviderCatalog>,
     runtime: ResolvedOpenCodeRuntime
   ): void {
-    this.models = mapOpenCodeModels(catalog);
+    this.operationalModels = mapOpenCodeModels(catalog);
+    this.models = this.safePublishedModels(this.operationalModels);
+    const safeProviderIds = new Set(
+      catalog.providers
+        .map((provider) => provider.id)
+        .filter((id) => this.isSafeOperationalIdentifier(id))
+    );
     this.nativeCatalogState = JSON.parse(
       JSON.stringify({
-        connectedProviders: catalog.connected ?? catalog.providers.map((provider) => provider.id),
-        defaults: catalog.defaults,
-        providers: catalog.providers.map((provider) => ({
-          id: provider.id,
-          name: provider.name ?? provider.id,
-          modelCount: Object.keys(provider.models).length
-        }))
+        connectedProviders: catalog.connected.filter((id) => safeProviderIds.has(id)),
+        defaults: Object.fromEntries(
+          Object.entries(catalog.defaults).filter(
+            ([providerId, modelId]) =>
+              safeProviderIds.has(providerId) &&
+              this.isSafeOperationalIdentifier(modelId)
+          )
+        ),
+        providers: catalog.providers.flatMap((provider) =>
+          safeProviderIds.has(provider.id)
+            ? [{
+                id: provider.id,
+                name: this.redactProviderText(provider.name ?? provider.id),
+                modelCount: Object.values(provider.models).filter((model) =>
+                  this.isSafeOperationalIdentifier(model.id)
+                ).length
+              }]
+            : []
+        )
       })
     ) as AgentJsonValue;
     const providerCount = new Set(this.models.map((model) => model.modelProvider)).size;
+    const connectedProviderCount = catalog.connected.length;
+    const sandboxWarning = warningDiagnostic(
+      'PROVIDER_PROCESS_NOT_SANDBOXED',
+      'SECURITY',
+      'OpenCode does not attest an OS or network sandbox.',
+      'Native permission rules may gate mutations, while process filesystem and network access remain provider-controlled.'
+    );
+    const pendingRestartWarning = this.runtimeReconfigurationPending
+      ? [
+          warningDiagnostic(
+            'RUNTIME_RESTART_REQUIRED',
+            'CONFIGURATION',
+            'The saved OpenCode executable change is pending a safe runtime restart.'
+          )
+        ]
+      : [];
+    const sensitiveIdentifierWarning =
+      this.models.length < this.operationalModels.length ||
+      this.operationalModels.some((model) =>
+        model.supportedReasoningEfforts.some(
+          (variant) => !this.isSafeOperationalIdentifier(variant)
+        ) || model.inputModalities.some(
+          (modality) => !this.isSafeOperationalIdentifier(modality)
+        )
+      ) ||
+      safeProviderIds.size < catalog.providers.length
+        ? [
+            warningDiagnostic(
+              'SENSITIVE_PROVIDER_IDENTIFIER_OMITTED',
+              'SECURITY',
+              'OpenCode returned provider, model, variant, or modality identifiers matching runtime credentials, so those catalog entries were omitted.',
+              'Exact identifiers remain internal for provider operations and are never replaced with redacted placeholders in actionable views.'
+            )
+          ]
+        : [];
+    const readiness = this.models.length > 0
+      ? createRuntimeReadiness('READY', 'OpenCode and its provider catalog are operational.', {
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'COMPATIBLE',
+            initialization: 'INITIALIZED',
+            authentication: providerCount > 0 ? 'AUTHENTICATED' : 'UNKNOWN',
+            modelCatalog: 'AVAILABLE'
+          },
+          diagnostics: [
+            sandboxWarning,
+            ...sensitiveIdentifierWarning,
+            ...pendingRestartWarning
+          ]
+        })
+      : connectedProviderCount === 0
+        ? createRuntimeReadiness(
+          'AUTHENTICATION_REQUIRED',
+          'Connect at least one model provider in OpenCode.',
+          {
+            checks: {
+              discovery: 'FOUND',
+              compatibility: 'COMPATIBLE',
+              initialization: 'INITIALIZED',
+              authentication: 'REQUIRED',
+              modelCatalog: 'EMPTY'
+            },
+            diagnostics: [
+              errorDiagnostic(
+                'NO_CONNECTED_PROVIDER_MODELS',
+                'AUTHENTICATION',
+                'OpenCode has no connected provider models.'
+              ),
+              sandboxWarning,
+              ...sensitiveIdentifierWarning,
+              ...pendingRestartWarning
+            ],
+            nextAction: { kind: 'AUTHENTICATE', label: 'Configure OpenCode providers' }
+          }
+        )
+        : createRuntimeReadiness(
+            'FAILED',
+            'OpenCode connected providers did not expose any usable models.',
+            {
+              checks: {
+                discovery: 'FOUND',
+                compatibility: 'COMPATIBLE',
+                initialization: 'INITIALIZED',
+                authentication: 'AUTHENTICATED',
+                modelCatalog: 'FAILED'
+              },
+              diagnostics: [
+                errorDiagnostic(
+                  'CONNECTED_PROVIDER_MODEL_CATALOG_EMPTY',
+                  'MODEL_CATALOG',
+                  'OpenCode reported connected providers but no usable models.'
+                ),
+                sandboxWarning,
+                ...sensitiveIdentifierWarning,
+                ...pendingRestartWarning
+              ],
+              nextAction: { kind: 'RETRY', label: 'Refresh OpenCode models' }
+            }
+          );
     this.preflightState = {
       runtime: this.descriptor,
-      ready: this.models.length > 0,
+      readiness,
       capabilities: opencodeCapabilities(),
       runtimeVersion: runtime.version,
       accountLabel: providerCount > 0
         ? `${providerCount} connected provider${providerCount === 1 ? '' : 's'}`
-        : undefined,
-      problems: this.models.length > 0 ? [] : ['OpenCode has no connected provider models.'],
-      warnings: [
-        'OpenCode does not provide an attested OS or network sandbox. Mutation tools remain approval-gated, while process network is provider-controlled.',
-        ...(this.runtimeReconfigurationPending
-          ? ['The saved OpenCode executable change is pending a safe runtime restart.']
-          : [])
-      ]
+        : undefined
     };
   }
 
@@ -873,15 +1672,16 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           await this.refreshCatalog();
         }
       } catch (cause) {
-        this.preflightState = {
-          ...this.preflightState,
-          warnings: [
-            ...new Set([
-              ...this.preflightState.warnings,
-              `OpenCode provider catalog refresh failed: ${errorMessage(cause)}`
-            ])
-          ]
-        };
+        this.preflightState = appendRuntimeDiagnostic(
+          this.preflightState,
+          warningDiagnostic(
+            'MODEL_CATALOG_REFRESH_FAILED',
+            'MODEL_CATALOG',
+            'OpenCode provider catalog refresh failed.',
+            this.redactProviderText(errorMessage(cause))
+          ),
+          this.preflightState.readiness.status === 'READY' ? 'DEGRADED' : undefined
+        );
       } finally {
         this.emitRuntimeUpdate();
       }
@@ -894,16 +1694,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private emitRuntimeUpdate(): void {
+    const payload = this.redactProviderValue({
+      preflight: structuredClone(this.preflightState),
+      models: structuredClone(this.models),
+      native: this.nativeCatalogState === undefined
+        ? undefined
+        : structuredClone(this.nativeCatalogState)
+    });
     this.appEvents.emit({
       type: 'runtime.updated',
       taskId: `runtime:${this.descriptor.id}`,
-      payload: {
-        preflight: structuredClone(this.preflightState),
-        models: structuredClone(this.models),
-        native: this.nativeCatalogState === undefined
-          ? undefined
-          : structuredClone(this.nativeCatalogState)
-      },
+      payload,
       at: new Date().toISOString()
     });
   }
@@ -911,6 +1712,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async ensureSessionRuntime(
     session: AgentSessionRecord
   ): Promise<{ client: OpenCodeClientTransport; server: { id: string } }> {
+    const quarantine = this.sessionQuarantinePromises.get(session.id);
+    if (quarantine) await quarantine;
+    const closing = this.sessionClosePromises.get(session.id);
+    if (closing) await closing;
+    const fence = this.sessionRuntimeFences.get(session.id);
+    if (fence) {
+      throw new Error(
+        `OpenCode session ${session.id} is fenced because termination of its previous runtime is unconfirmed: ${fence.message}`,
+        { cause: fence }
+      );
+    }
     this.assertSessionOwnership(session);
     this.cancelSessionIdleEviction(session.id);
     let supervisor = this.supervisors.get(session.id);
@@ -923,7 +1735,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         this.eventStreams.delete(session.id);
         this.supervisors.delete(session.id);
         void this.enqueueInbound(session.id, async () => {
-          await this.handleRuntimeLoss(server.id);
+          await this.handleRuntimeLoss(
+            server.id,
+            'OpenCode session runtime exited unexpectedly.',
+            session.id
+          );
           this.scheduleSessionRecovery(session.id);
         });
       });
@@ -931,6 +1747,199 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     const running = await supervisor.start();
     return { client: running.client, server: running.server };
+  }
+
+  /**
+   * OpenCode servers are session-scoped. Unsafe provider state invalidates
+   * only that session's process, but it must be stopped before the session can
+   * be reused so late SSE events cannot cross a run boundary.
+   */
+  private quarantineSessionRuntime(
+    sessionId: string,
+    operation: string,
+    detail: string
+  ): Promise<void> {
+    const existing = this.sessionQuarantinePromises.get(sessionId);
+    if (existing) return existing;
+    const quarantine = this.performSessionQuarantine(sessionId, operation, detail);
+    this.sessionQuarantinePromises.set(sessionId, quarantine);
+    void quarantine.then(
+      () => {
+        if (this.sessionQuarantinePromises.get(sessionId) === quarantine) {
+          this.sessionQuarantinePromises.delete(sessionId);
+        }
+      },
+      // Retain a rejected quarantine as a hard fence. Reusing the session
+      // while its old provider process may still exist is unsafe.
+      () => undefined
+    );
+    return quarantine;
+  }
+
+  private async throwAmbiguousAfterQuarantine(
+    sessionId: string,
+    operation: string,
+    detail: string,
+    ambiguity: AgentMutationAmbiguousError
+  ): Promise<never> {
+    try {
+      await this.quarantineSessionRuntime(sessionId, operation, detail);
+    } catch (cause) {
+      throw new AgentMutationAmbiguousError(
+        operation,
+        `${ambiguity.message} Task Monki fenced the session from reuse, but could not fully confirm process quarantine: ${errorMessage(cause)}`
+      );
+    }
+    throw ambiguity;
+  }
+
+  private async assertSessionDirectoryOrQuarantine(
+    sessionId: string,
+    operation: string,
+    providerSession: OpenCodeSession,
+    expectedDirectory: string
+  ): Promise<void> {
+    try {
+      await assertSessionDirectory(providerSession, expectedDirectory);
+    } catch (cause) {
+      const diagnostic = this.redactProviderText(errorMessage(cause));
+      try {
+        await this.quarantineSessionRuntime(
+          sessionId,
+          operation,
+          `The provider-reported session directory failed ownership verification: ${diagnostic}`
+        );
+      } catch (quarantineCause) {
+        throw new Error(
+          `${diagnostic} Task Monki fenced the session from reuse, but could not fully confirm process quarantine: ${errorMessage(quarantineCause)}`,
+          { cause: quarantineCause }
+        );
+      }
+      throw cause;
+    }
+  }
+
+  private async performSessionQuarantine(
+    sessionId: string,
+    operation: string,
+    detail: string
+  ): Promise<void> {
+    const fence = new Error(
+      `OpenCode session runtime is quarantined after ${operation}.`
+    );
+    this.sessionRuntimeFences.set(sessionId, fence);
+    this.retireSessionOperationQueue(sessionId);
+    this.clearSessionInterruptDeadlines(sessionId);
+    this.cancelSessionIdleEviction(sessionId);
+    const recoveryTimer = this.recoveryTimers.get(sessionId);
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    this.recoveryTimers.delete(sessionId);
+    const stream = this.eventStreams.get(sessionId);
+    stream?.stop();
+    const supervisor = this.supervisors.get(sessionId);
+    const serverId = supervisor?.currentServer?.id;
+    let shutdownFailure: unknown;
+    try {
+      await supervisor?.shutdown();
+      if (this.supervisors.get(sessionId) === supervisor) {
+        this.supervisors.delete(sessionId);
+      }
+      if (this.eventStreams.get(sessionId) === stream) {
+        this.eventStreams.delete(sessionId);
+      }
+    } catch (cause) {
+      shutdownFailure = cause;
+    }
+    this.clearAssistantMessageParents(sessionId);
+    const reason = `Task Monki quarantined the OpenCode session process after ${operation}. ${detail}`;
+    if (serverId) await this.handleRuntimeLoss(serverId, reason, sessionId);
+    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
+    if (session?.status !== 'NOT_LOADED') {
+      await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+    }
+    if (shutdownFailure) {
+      throw new Error(
+        `OpenCode session process quarantine was incomplete: ${errorMessage(shutdownFailure)}`,
+        { cause: shutdownFailure }
+      );
+    }
+    if (this.sessionRuntimeFences.get(sessionId) === fence) {
+      this.sessionRuntimeFences.delete(sessionId);
+    }
+  }
+
+  private async runForProviderMessage(
+    session: AgentSessionRecord,
+    providerMessageId: string,
+    serverId: string
+  ): Promise<RunRecord | undefined> {
+    const run = await this.store.getRunByProviderTurnId(
+      this.descriptor.id,
+      providerMessageId
+    );
+    return run &&
+      run.sessionId === session.id &&
+      run.serverInstanceId === serverId &&
+      ACTIVE_RUN_STATES.includes(run.status)
+      ? run
+      : undefined;
+  }
+
+  private async runForInteractionMessage(
+    session: AgentSessionRecord,
+    providerMessageId: string,
+    serverId: string
+  ): Promise<RunRecord | undefined> {
+    const direct = await this.runForProviderMessage(session, providerMessageId, serverId);
+    if (direct) return direct;
+    let parentId = this.assistantMessageParents.get(session.id)?.get(providerMessageId);
+    if (!parentId && session.providerSessionId) {
+      const client = this.supervisors.get(session.id)?.currentClient;
+      if (client) {
+        try {
+          const messages = parseOpenCodeMessages(
+            (await client.get<unknown>(`${sessionPath(session.providerSessionId)}/message`)).data
+          );
+          const assistant = messages.find(
+            (message) =>
+              message.info.role === 'assistant' &&
+              message.info.id === providerMessageId &&
+              typeof message.info.parentID === 'string'
+          );
+          parentId = assistant?.info.parentID;
+          if (parentId) {
+            this.rememberAssistantParent(session.id, providerMessageId, parentId);
+          }
+        } catch {
+          // The raw request remains in the journal. Fail closed and let the
+          // next authoritative reconciliation retry correlation.
+          return undefined;
+        }
+      }
+    }
+    return parentId
+      ? this.runForProviderMessage(session, parentId, serverId)
+      : undefined;
+  }
+
+  private rememberAssistantParent(
+    sessionId: string,
+    assistantMessageId: string,
+    parentUserMessageId: string
+  ): void {
+    const parents = this.assistantMessageParents.get(sessionId) ?? new Map<string, string>();
+    parents.delete(assistantMessageId);
+    parents.set(assistantMessageId, parentUserMessageId);
+    while (parents.size > MAX_TRACKED_ASSISTANT_MESSAGES_PER_SESSION) {
+      const oldest = parents.keys().next().value as string | undefined;
+      if (!oldest) break;
+      parents.delete(oldest);
+    }
+    this.assistantMessageParents.set(sessionId, parents);
+  }
+
+  private clearAssistantMessageParents(sessionId: string): void {
+    this.assistantMessageParents.delete(sessionId);
   }
 
   private createSupervisor(
@@ -960,15 +1969,29 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const supervisor = this.supervisors.get(session.id);
     const stream = client.startEventStream({
       onEvent: async (value, raw) => {
-        await this.enqueueInbound(session.id, () => this.handleEvent(value, raw, serverId));
+        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
+        await this.enqueueInbound(session.id, async () => {
+          if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
+          await this.handleEvent(value, raw, serverId);
+        }, serverId);
       },
       onDisconnect: async (error) => {
-        await supervisor?.markDegraded(error.message);
+        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
+        const reason = this.redactProviderText(error.message);
+        await supervisor?.markDegraded(reason);
+        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
         const run = await this.getCurrentRunForSession(session.id);
-        if (run) await this.recordRunActivity(run, 'runtime/sse/disconnected', { reason: error.message });
+        if (
+          run?.serverInstanceId === serverId &&
+          this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)
+        ) {
+          await this.recordRunActivity(run, 'runtime/sse/disconnected', { reason });
+        }
       },
       onReconnect: async () => {
+        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
         await supervisor?.markRunning();
+        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
         await this.reconcileSession(session.id);
       }
     });
@@ -976,15 +1999,70 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     await supervisor?.markRunning();
   }
 
-  private enqueueInbound(sessionId: string, operation: () => Promise<void>): Promise<void> {
-    const queued = (this.inboundQueues.get(sessionId) ?? Promise.resolve())
-      .then(operation)
-      .catch((cause) => this.recordProtocolIncident(sessionId, cause));
-    const tracked = queued.finally(() => {
-      if (this.inboundQueues.get(sessionId) === tracked) this.inboundQueues.delete(sessionId);
+  private isCurrentSessionRuntime(
+    sessionId: string,
+    supervisor: OpenCodeSessionSupervisor | undefined,
+    client: OpenCodeClientTransport,
+    serverId: string
+  ): boolean {
+    return this.isCurrentSessionServerGeneration(sessionId, serverId) &&
+      supervisor !== undefined &&
+      this.supervisors.get(sessionId) === supervisor &&
+      supervisor.currentClient === client;
+  }
+
+  private isCurrentSessionServerGeneration(sessionId: string, serverId: string): boolean {
+    return !this.shuttingDown &&
+      !this.sessionRuntimeFences.has(sessionId) &&
+      this.supervisors.get(sessionId)?.currentServer?.id === serverId;
+  }
+
+  /**
+   * Quarantine cuts over to a fresh session operation lane immediately. Work
+   * already running on the retired lane remains tracked for shutdown, but its
+   * server-generation attestations make it a no-op after the cutover. This
+   * avoids waiting on an inbound handler that initiated quarantine itself.
+   */
+  private retireSessionOperationQueue(sessionId: string): void {
+    const retired = this.sessionOperationQueues.get(sessionId);
+    if (!retired) return;
+    this.sessionOperationQueues.delete(sessionId);
+    this.retiredSessionOperationQueues.add(retired);
+    void retired.then(
+      () => this.retiredSessionOperationQueues.delete(retired),
+      () => this.retiredSessionOperationQueues.delete(retired)
+    );
+  }
+
+  private enqueueSessionOperation<T>(
+    sessionId: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const result = (
+      this.sessionOperationQueues.get(sessionId) ?? Promise.resolve()
+    ).then(operation);
+    const tail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    const tracked = tail.finally(() => {
+      if (this.sessionOperationQueues.get(sessionId) === tracked) {
+        this.sessionOperationQueues.delete(sessionId);
+      }
     });
-    this.inboundQueues.set(sessionId, tracked);
-    return tracked;
+    this.sessionOperationQueues.set(sessionId, tracked);
+    return result;
+  }
+
+  private enqueueInbound(
+    sessionId: string,
+    operation: () => Promise<void>,
+    serverId?: string
+  ): Promise<void> {
+    return this.enqueueSessionOperation(sessionId, operation).catch(async (cause) => {
+      if (serverId && !this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
+      await this.recordProtocolIncident(sessionId, cause);
+    });
   }
 
   private async handleEvent(
@@ -1001,20 +2079,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       case 'server.connected':
         return;
       case 'session.status':
-        await this.handleSessionStatus(event);
+        await this.handleSessionStatus(event, serverId);
         return;
       case 'session.idle':
-        await this.handleSessionIdle(event);
+        await this.handleSessionIdle(event, serverId);
         return;
       case 'message.updated':
-        await this.handleMessageUpdated(event, raw);
+        await this.handleMessageUpdated(event, raw, serverId);
         return;
       case 'message.part.updated':
       case 'message.part.delta':
-        await this.handlePartUpdated(event, raw);
+        await this.handlePartUpdated(event, raw, serverId);
         return;
       case 'todo.updated':
-        await this.handleTodoUpdated(event, raw);
+        await this.handleTodoUpdated(event, raw, serverId);
         return;
       case 'permission.updated':
       case 'permission.asked':
@@ -1034,10 +2112,10 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         await this.handleExternalInteractionResolution(event, raw, serverId);
         return;
       case 'session.created':
-        await this.handleChildSession(event, raw);
+        await this.handleChildSession(event, raw, serverId);
         return;
       case 'session.error':
-        await this.handleSessionError(event);
+        await this.handleSessionError(event, serverId);
         return;
       default: {
         const sessionId = stringProperty(event.properties, 'sessionID');
@@ -1045,58 +2123,89 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           ? await this.store.getAgentSessionByProviderId(this.descriptor.id, sessionId)
           : undefined;
         const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
-        if (run) await this.recordRunActivity(run, event.type, { eventId: event.id });
+        if (
+          session &&
+          run?.serverInstanceId === serverId &&
+          this.isCurrentSessionServerGeneration(session.id, serverId)
+        ) {
+          await this.recordRunActivity(run, event.type, { eventId: event.id });
+        }
       }
     }
   }
 
-  private async handleSessionStatus(event: OpenCodeEvent): Promise<void> {
+  private async handleSessionStatus(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     if (!providerSessionId) return;
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId);
-    if (!session) return;
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const status = mapOpenCodeSessionStatus(event.properties.status);
     await this.store.updateAgentSession(session.id, { status });
     const run = await this.getCurrentRunForSession(session.id);
-    if (run) await this.recordRunActivity(run, 'session/status', { status: event.properties.status });
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    if (run?.serverInstanceId === serverId) {
+      await this.recordRunActivity(run, 'session/status', { status: event.properties.status });
+    }
     if (status === 'IDLE') {
-      await this.reconcileSession(session.id);
+      await this.reconcileSessionOwned(session.id, serverId);
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       this.scheduleSessionIdleEviction(session.id);
     }
   }
 
-  private async handleSessionIdle(event: OpenCodeEvent): Promise<void> {
+  private async handleSessionIdle(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
       ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
-    if (session) {
-      await this.reconcileSession(session.id);
+    if (session && this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      await this.reconcileSessionOwned(session.id, serverId);
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       this.scheduleSessionIdleEviction(session.id);
     }
   }
 
   private async handleMessageUpdated(
     event: OpenCodeEvent,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    serverId: string
   ): Promise<void> {
     const info = asRecord(event.properties.info) as unknown as OpenCodeMessageInfo | undefined;
     if (!info || typeof info.id !== 'string' || typeof info.sessionID !== 'string') return;
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, info.sessionID);
-    if (!session) return;
-    const run = await this.getCurrentRunForSession(session.id);
-    if (!run) return;
-    if (info.role === 'user' && info.id === run.providerTurnId) {
-      const observed = settingsFromMessage(info, run.requestedSettings);
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    if (info.role === 'user') {
+      const run = await this.runForProviderMessage(session, info.id, serverId);
+      if (!run || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      const providerSettings = settingsObservedFromMessage(info, run.requestedSettings);
+      const observed = this.safeObservedSettings(
+        providerSettings ?? run.requestedSettings
+      );
       if (run.status === 'RECOVERY_REQUIRED') {
         await this.recordReconciliation(run, 'RUNNING', 'RECOVERED', false);
+        if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       }
       await this.store.updateRun(run.id, { observedSettings: observed, status: 'RUNNING' });
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       await this.store.updateAgentSession(session.id, { observedSettings: observed, status: 'ACTIVE' });
-      await this.recordSettingsObservation(session, 'THREAD_SETTINGS_NOTIFICATION', observed, run.id, raw);
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      if (providerSettings) {
+        await this.recordSettingsObservation(
+          session,
+          'THREAD_SETTINGS_NOTIFICATION',
+          observed,
+          run.id,
+          raw
+        );
+      }
       return;
     }
-    if (info.role === 'assistant' && (info.time?.completed || info.finish || info.error)) {
+    if (!info.parentID) return;
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    this.rememberAssistantParent(session.id, info.id, info.parentID);
+    const run = await this.runForProviderMessage(session, info.parentID, serverId);
+    if (!run || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    if (info.time?.completed || info.finish || info.error) {
       const usage = mapOpenCodeUsage(info);
       await this.store.recordAgentUsageSnapshot({
         taskId: run.taskId,
@@ -1113,14 +2222,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async handlePartUpdated(
     event: OpenCodeEvent,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    serverId: string
   ): Promise<void> {
     const part = asRecord(event.properties.part) as unknown as OpenCodePart | undefined;
     if (!part || typeof part.id !== 'string' || typeof part.sessionID !== 'string') return;
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, part.sessionID);
-    const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
-    if (!session || !run) return;
-    const isUserPart = part.messageID === run.providerTurnId;
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    let run = await this.runForProviderMessage(session, part.messageID, serverId);
+    const isUserPart = Boolean(run);
+    if (!run) {
+      const parentId = this.assistantMessageParents.get(session.id)?.get(part.messageID);
+      run = parentId
+        ? await this.runForProviderMessage(session, parentId, serverId)
+        : undefined;
+    }
+    if (!run || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const status = mapOpenCodePartStatus(part);
     const type = isUserPart ? 'USER_MESSAGE' : mapOpenCodePartType(part);
     if (!isUserPart && (part.type === 'text' || part.type === 'reasoning')) {
@@ -1143,7 +2260,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerItemId: part.id,
       type,
       status,
-      payload: part,
+      payload: this.redactProviderValue(part),
       rawMessage: raw,
       providerStartedAt: providerTimestamp(part.state?.time?.start),
       providerCompletedAt: providerTimestamp(part.state?.time?.end)
@@ -1210,14 +2327,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async handleTodoUpdated(
     event: OpenCodeEvent,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    serverId: string
   ): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
       ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
-    if (!session || !run) return;
+    if (
+      !session ||
+      run?.serverInstanceId !== serverId ||
+      !this.isCurrentSessionServerGeneration(session.id, serverId)
+    ) {
+      return;
+    }
     const steps = mapOpenCodeTodoSteps(event.properties.todos);
     await this.store.recordAgentPlanRevision({
       taskId: run.taskId,
@@ -1225,7 +2349,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       runId: run.id,
       sessionId: session.id,
       runtimeId: this.descriptor.id,
-      steps,
+      steps: this.redactProviderValue(steps),
       rawMessage: raw
     });
     this.emitRunActivity(run, { eventType: 'turn/plan/updated', stepCount: steps.length });
@@ -1239,13 +2363,14 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const permission = event.properties as unknown as OpenCodePermissionRequest;
     if (typeof permission.id !== 'string' || typeof permission.sessionID !== 'string') return;
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, permission.sessionID);
-    if (!session) return;
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.materializeInteraction(
       session,
       permission.id,
       mapOpenCodePermission(permission, session.worktreePath),
       raw,
-      serverId
+      serverId,
+      permission.source?.messageID ?? permission.tool?.messageID
     );
   }
 
@@ -1257,8 +2382,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const question = event.properties as unknown as OpenCodeQuestionRequest;
     if (typeof question.id !== 'string' || typeof question.sessionID !== 'string') return;
     const session = await this.store.getAgentSessionByProviderId(this.descriptor.id, question.sessionID);
-    if (!session) return;
-    await this.materializeInteraction(session, question.id, mapOpenCodeQuestion(question), raw, serverId);
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    await this.materializeInteraction(
+      session,
+      question.id,
+      mapOpenCodeQuestion(question),
+      raw,
+      serverId,
+      question.tool?.messageID
+    );
   }
 
   private async materializeInteraction(
@@ -1266,10 +2398,42 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     providerRequestId: string,
     mapped: MappedOpenCodeInteraction,
     raw: AgentProtocolMessageReference,
-    serverId: string
+    serverId: string,
+    providerMessageId?: string
   ): Promise<void> {
-    const run = await this.getCurrentRunForSession(session.id);
-    if (!run || run.serverInstanceId !== serverId) return;
+    if (!providerMessageId) {
+      await this.quarantineSessionRuntime(
+        session.id,
+        'interaction/ownership',
+        `OpenCode interaction ${providerRequestId} did not identify its owning message.`
+      );
+      return;
+    }
+    if (
+      [providerRequestId, providerMessageId, mapped.providerItemId].some(
+        (value) =>
+          typeof value === 'string' && !this.isSafeOperationalIdentifier(value)
+      )
+    ) {
+      await this.quarantineSessionRuntime(
+        session.id,
+        'interaction/sensitive-identifier',
+        'OpenCode returned an actionable interaction identifier matching a runtime credential.'
+      );
+      return;
+    }
+    const run = await this.runForInteractionMessage(
+      session,
+      providerMessageId,
+      serverId
+    );
+    if (
+      !run ||
+      run.serverInstanceId !== serverId ||
+      !this.isCurrentSessionServerGeneration(session.id, serverId)
+    ) {
+      return;
+    }
     const policy = buildInteractionPolicy({
       type: mapped.type,
       request: mapped.request,
@@ -1288,7 +2452,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       providerTurnId: run.providerTurnId,
       providerItemId: mapped.providerItemId,
       type: mapped.type,
-      request: mapped.request,
+      request: this.redactProviderValue(mapped.request),
       allowedActions: policy.allowedActions,
       policyWarnings: policy.warnings,
       requestRawMessage: raw
@@ -1373,7 +2537,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const requestId = stringProperty(event.properties, 'requestID') ?? stringProperty(event.properties, 'permissionID');
     if (!requestId) return;
     const interaction = await this.store.getInteractionRequestByProviderId(serverId, requestId);
-    if (!interaction || interaction.status !== 'PENDING') return;
+    if (
+      !interaction ||
+      interaction.status !== 'PENDING' ||
+      !this.isCurrentSessionServerGeneration(interaction.sessionId, serverId)
+    ) {
+      return;
+    }
     const stale = await this.store.transitionInteractionRequest(interaction.id, 'PENDING', {
       status: 'STALE',
       responseRawMessage: raw,
@@ -1385,7 +2555,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async handleChildSession(
     event: OpenCodeEvent,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    serverId: string
   ): Promise<void> {
     const infoRecord = asRecord(event.properties.info);
     if (!infoRecord) return;
@@ -1397,8 +2568,23 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     if (!child.parentID) return;
     const parent = await this.store.getAgentSessionByProviderId(this.descriptor.id, child.parentID);
-    if (!parent) return;
+    if (!parent || !this.isCurrentSessionServerGeneration(parent.id, serverId)) return;
     const parentRun = await this.getCurrentRunForSession(parent.id);
+    if (
+      !this.isCurrentSessionServerGeneration(parent.id, serverId) ||
+      (parentRun && parentRun.serverInstanceId !== serverId)
+    ) {
+      return;
+    }
+    if (
+      !this.isSafeOperationalIdentifier(child.id) ||
+      !this.isSafeOperationalIdentifier(child.parentID)
+    ) {
+      if (parentRun) {
+        await this.recordRunActivity(parentRun, 'subagent/sensitive-identifier-omitted', {});
+      }
+      return;
+    }
     await this.store.observeSubagent({
       parentSessionId: parent.id,
       parentRunId: parentRun?.id,
@@ -1411,21 +2597,40 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     });
   }
 
-  private async handleSessionError(event: OpenCodeEvent): Promise<void> {
+  private async handleSessionError(event: OpenCodeEvent, serverId: string): Promise<void> {
     const providerSessionId = stringProperty(event.properties, 'sessionID');
     const session = providerSessionId
       ? await this.store.getAgentSessionByProviderId(this.descriptor.id, providerSessionId)
       : undefined;
+    if (!session || !this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     const run = session ? await this.getCurrentRunForSession(session.id) : undefined;
-    if (!run) return;
-    await this.finalizeRun(run, 'FAILED', errorMessage(event.properties.error ?? 'OpenCode session error.'));
-    if (session) {
-      await this.store.updateAgentSession(session.id, { status: 'SYSTEM_ERROR' });
-      this.scheduleSessionIdleEviction(session.id);
+    if (
+      run?.serverInstanceId !== serverId ||
+      !this.isCurrentSessionServerGeneration(session.id, serverId)
+    ) {
+      return;
     }
+    const diagnostic = openCodeErrorDiagnostic(
+      event.properties.error ?? 'OpenCode session error.',
+      this.sensitiveValues
+    );
+    const status = run.status === 'INTERRUPTING' ? 'INTERRUPTED' : 'FAILED';
+    await this.finalizeRun(run, status, diagnostic);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    await this.store.updateAgentSession(session.id, {
+      status: status === 'INTERRUPTED' ? 'IDLE' : 'SYSTEM_ERROR'
+    });
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    this.scheduleSessionIdleEviction(session.id);
   }
 
-  private async reconcileRun(run: RunRecord): Promise<'reconciled' | 'recovery-required'> {
+  private reconcileRun(run: RunRecord): Promise<'reconciled' | 'recovery-required'> {
+    return this.enqueueSessionOperation(run.sessionId, () => this.reconcileRunOwned(run));
+  }
+
+  private async reconcileRunOwned(
+    run: RunRecord
+  ): Promise<'reconciled' | 'recovery-required'> {
     this.reconciliationCounts.set(
       run.sessionId,
       (this.reconciliationCounts.get(run.sessionId) ?? 0) + 1
@@ -1442,10 +2647,20 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async reconcileRunInternal(
     run: RunRecord
   ): Promise<'reconciled' | 'recovery-required'> {
-    if (TERMINAL_RUN_STATES.includes(run.status)) return 'reconciled';
+    const storedRun = await this.store.getRun(run.id);
+    if (!storedRun || TERMINAL_RUN_STATES.includes(storedRun.status)) return 'reconciled';
+    run = storedRun;
     const session = await this.requireSession(run.sessionId);
     if (!session.providerSessionId) {
       await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
+      return 'recovery-required';
+    }
+    if (!this.isSafeOperationalIdentifier(session.providerSessionId)) {
+      await this.quarantineSessionRuntime(
+        session.id,
+        'session/reconcile',
+        'The persisted OpenCode session identifier matches a runtime credential.'
+      );
       return 'recovery-required';
     }
     let client: OpenCodeClientTransport;
@@ -1472,12 +2687,45 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       await this.reconcilePendingInteractions(session, client, serverId);
       return 'recovery-required';
     }
+    const recoveredSettings = settingsObservedFromMessage(
+      userMessage.info,
+      run.requestedSettings
+    );
+    if (recoveredSettings) {
+      const observed = this.safeObservedSettings(recoveredSettings);
+      run = await this.store.updateRun(run.id, { observedSettings: observed });
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+        return 'recovery-required';
+      }
+      await this.store.updateAgentSession(session.id, { observedSettings: observed });
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+        return 'recovery-required';
+      }
+      await this.recordSettingsObservation(
+        session,
+        'RECOVERY_RESUME_RESPONSE',
+        observed,
+        run.id,
+        messagesResult.raw
+      );
+    }
     const status = await this.readProviderSessionStatus(client, session.providerSessionId);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
     const assistant = latestAssistantFor(messages, userMessage.info.id);
     if (assistant && status === 'IDLE') {
-      await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw);
+      await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw, serverId);
     } else if (status === 'ACTIVE') {
-      await this.recordReconciliation(run, 'RUNNING', 'RECOVERED', false);
+      await this.recordReconciliation(
+        run,
+        run.status === 'INTERRUPTING' ? 'INTERRUPTING' : 'RUNNING',
+        'RECOVERED',
+        false
+      );
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+        return 'recovery-required';
+      }
       await this.store.updateAgentSession(session.id, { status: 'ACTIVE', materialized: true });
     } else {
       await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
@@ -1488,11 +2736,31 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     return 'reconciled';
   }
 
-  private async reconcileSession(
+  private reconcileSession(
     sessionId: string
   ): Promise<'none' | 'reconciled' | 'recovery-required'> {
+    return this.enqueueSessionOperation(sessionId, () => this.reconcileSessionOwned(sessionId));
+  }
+
+  private async reconcileSessionOwned(
+    sessionId: string,
+    expectedServerId?: string
+  ): Promise<'none' | 'reconciled' | 'recovery-required'> {
+    if (
+      expectedServerId &&
+      !this.isCurrentSessionServerGeneration(sessionId, expectedServerId)
+    ) {
+      return 'none';
+    }
     const run = await this.getCurrentRunForSession(sessionId);
-    return run ? this.reconcileRun(run) : 'none';
+    if (
+      expectedServerId &&
+      (!this.isCurrentSessionServerGeneration(sessionId, expectedServerId) ||
+        (run && run.serverInstanceId !== expectedServerId))
+    ) {
+      return 'none';
+    }
+    return run ? this.reconcileRunOwned(run) : 'none';
   }
 
   private async reconcilePendingInteractions(
@@ -1504,24 +2772,29 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       client.get<unknown>('/permission'),
       client.get<unknown>('/question')
     ]);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     for (const permission of parseOpenCodePermissions(permissionsResult.data)) {
       if (permission.sessionID !== session.providerSessionId) continue;
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       await this.materializeInteraction(
         session,
         permission.id,
         mapOpenCodePermission(permission, session.worktreePath),
         permissionsResult.raw,
-        serverId
+        serverId,
+        permission.source?.messageID ?? permission.tool?.messageID
       );
     }
     for (const question of parseOpenCodeQuestions(questionsResult.data)) {
       if (question.sessionID !== session.providerSessionId) continue;
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
       await this.materializeInteraction(
         session,
         question.id,
         mapOpenCodeQuestion(question),
         questionsResult.raw,
-        serverId
+        serverId,
+        question.tool?.messageID
       );
     }
   }
@@ -1530,7 +2803,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     run: RunRecord,
     session: AgentSessionRecord,
     assistant: OpenCodeMessage,
-    raw: AgentProtocolMessageReference
+    raw: AgentProtocolMessageReference,
+    serverId: string
   ): Promise<void> {
     const current = await this.store.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
@@ -1544,7 +2818,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerItemId: part.id,
         type: mapOpenCodePartType(part),
         status: terminalPartStatus(part),
-        payload: part,
+        payload: this.redactProviderValue(part),
         rawMessage: raw,
         providerStartedAt: providerTimestamp(part.state?.time?.start),
         providerCompletedAt: providerTimestamp(part.state?.time?.end ?? assistant.info.time?.completed)
@@ -1556,20 +2830,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       .map((part) => part.text)
       .join('\n')
       .trim();
-    const providerError = openCodeMessageError(assistant.info);
-    const interrupted = providerError ? /abort|interrupt/i.test(JSON.stringify(assistant.info.error)) : false;
-    const status: Extract<RunRecord['status'], 'COMPLETED' | 'FAILED' | 'INTERRUPTED'> = providerError
-      ? interrupted
+    const providerDiagnostic = assistant.info.error
+      ? openCodeErrorDiagnostic(assistant.info.error, this.sensitiveValues)
+      : undefined;
+    const status: Extract<RunRecord['status'], 'COMPLETED' | 'FAILED' | 'INTERRUPTED'> =
+      current.status === 'INTERRUPTING'
         ? 'INTERRUPTED'
-        : 'FAILED'
-      : current.status === 'INTERRUPTING'
-        ? 'INTERRUPTED'
-        : 'COMPLETED';
+        : providerDiagnostic
+          ? 'FAILED'
+          : 'COMPLETED';
     await this.recordRunActivity(current, 'message/completed', {
       messageText: finalMessage,
       providerMessageId: assistant.info.id
     });
-    await this.finalizeRun(current, status, providerError, finalMessage);
+    await this.finalizeRun(current, status, providerDiagnostic, finalMessage);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.store.updateAgentSession(session.id, { status: 'IDLE', materialized: true });
     this.scheduleSessionIdleEviction(session.id);
   }
@@ -1578,8 +2853,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     run: RunRecord,
     status: Extract<RunRecord['status'], 'COMPLETED' | 'FAILED' | 'INTERRUPTED'>,
     error?: string,
-    finalMessage = ''
+    finalMessage = '',
+    source: 'provider' | 'process' = 'provider'
   ): Promise<void> {
+    error = error === undefined ? undefined : this.redactProviderText(error);
+    finalMessage = this.redactProviderText(finalMessage);
     await this.materializeRunStreamBuffer(run.id);
     const current = await this.store.getRun(run.id);
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
@@ -1610,7 +2888,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         worktreeId: current.worktreeId,
         agentSessionId: current.sessionId,
         serverInstanceId: current.serverInstanceId,
-        source: 'provider',
+        source,
         payload: {
           terminalStatus: status.toLowerCase(),
           terminalReason: error,
@@ -1621,6 +2899,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         }
       })
     );
+    this.clearInterruptDeadline(current.id);
     this.appEvents.emit({
       type: 'run.terminal',
       taskId: current.taskId,
@@ -1635,12 +2914,17 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.schedulePendingRuntimeReset();
   }
 
-  private async handleRuntimeLoss(serverInstanceId: string): Promise<void> {
+  private async handleRuntimeLoss(
+    serverInstanceId: string,
+    reason = 'OpenCode session runtime exited unexpectedly.',
+    owningSessionId?: string
+  ): Promise<void> {
     const snapshot = await this.store.snapshot();
     const runs = snapshot.runs.filter(
       (run) => run.serverInstanceId === serverInstanceId && ACTIVE_RUN_STATES.includes(run.status)
     );
     for (const run of runs) {
+      this.clearInterruptDeadline(run.id);
       await this.materializeRunStreamBuffer(run.id);
       await this.store.appendEvent(
         createDomainEvent({
@@ -1652,24 +2936,41 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           agentSessionId: run.sessionId,
           serverInstanceId,
           source: 'process',
-          payload: { reason: 'OpenCode session runtime exited unexpectedly.' }
+          payload: { reason }
         })
       );
       this.emitRunActivity(run, {
         eventType: 'runtime/lost',
-        reason: 'OpenCode session runtime exited unexpectedly.'
+        reason
       });
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
+    }
+    if (owningSessionId && !runs.some((run) => run.sessionId === owningSessionId)) {
+      const session = await this.store.getAgentSession(owningSessionId);
+      if (session && session.status !== 'NOT_LOADED') {
+        await this.store.updateAgentSession(owningSessionId, { status: 'NOT_LOADED' });
+      }
     }
     for (const interaction of snapshot.interactionRequests.filter(
       (candidate) => candidate.serverInstanceId === serverInstanceId && ['PENDING', 'RESPONDING'].includes(candidate.status)
     )) {
-      const aborted = await this.store.transitionInteractionRequest(interaction.id, interaction.status, {
-        status: 'ABORTED_SERVER_LOST',
-        resolution: { reason: 'OpenCode session runtime exited.' },
-        resolvedAt: new Date().toISOString()
-      });
-      this.emitInteractionUpdate(aborted);
+      const latest = await this.store.getInteractionRequest(interaction.id);
+      if (!latest || !['PENDING', 'RESPONDING'].includes(latest.status)) continue;
+      try {
+        const aborted = await this.store.transitionInteractionRequest(
+          latest.id,
+          latest.status,
+          {
+            status: 'ABORTED_SERVER_LOST',
+            resolution: { reason },
+            resolvedAt: new Date().toISOString()
+          }
+        );
+        this.emitInteractionUpdate(aborted);
+      } catch (cause) {
+        const raced = await this.store.getInteractionRequest(interaction.id);
+        if (raced && ['PENDING', 'RESPONDING'].includes(raced.status)) throw cause;
+      }
     }
   }
 
@@ -1776,6 +3077,25 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     sessionId: string,
     waitForInbound: boolean
   ): Promise<void> {
+    const existing = this.sessionClosePromises.get(sessionId);
+    if (existing) return existing;
+    const operation = this.performSessionRuntimeClose(sessionId, waitForInbound);
+    const tracked = operation.finally(() => {
+      if (this.sessionClosePromises.get(sessionId) === tracked) {
+        this.sessionClosePromises.delete(sessionId);
+      }
+    });
+    this.sessionClosePromises.set(sessionId, tracked);
+    return tracked;
+  }
+
+  private async performSessionRuntimeClose(
+    sessionId: string,
+    waitForInbound: boolean
+  ): Promise<void> {
+    const fence = new Error('OpenCode session runtime teardown is in progress.');
+    this.sessionRuntimeFences.set(sessionId, fence);
+    this.clearSessionInterruptDeadlines(sessionId);
     this.cancelSessionIdleEviction(sessionId);
     const recoveryTimer = this.recoveryTimers.get(sessionId);
     if (recoveryTimer) clearTimeout(recoveryTimer);
@@ -1783,7 +3103,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     this.recoveryAttempts.delete(sessionId);
     const stream = this.eventStreams.get(sessionId);
     stream?.stop();
-    this.eventStreams.delete(sessionId);
+    this.clearAssistantMessageParents(sessionId);
     for (const buffer of this.streamBuffers.values()) {
       if (buffer.sessionId === sessionId && buffer.timer) {
         clearTimeout(buffer.timer);
@@ -1791,7 +3111,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     if (waitForInbound) {
-      const pending = this.inboundQueues.get(sessionId);
+      const pending = this.sessionOperationQueues.get(sessionId);
       if (pending) await pending;
       this.cancelSessionIdleEviction(sessionId);
     }
@@ -1801,10 +3121,23 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }
     }
     const supervisor = this.supervisors.get(sessionId);
-    this.supervisors.delete(sessionId);
-    if (supervisor) await supervisor.shutdown();
-    const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
-    if (session) await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+    let shutdownConfirmed = false;
+    try {
+      if (supervisor) await supervisor.shutdown();
+      shutdownConfirmed = true;
+      if (this.supervisors.get(sessionId) === supervisor) {
+        this.supervisors.delete(sessionId);
+      }
+      if (this.eventStreams.get(sessionId) === stream) {
+        this.eventStreams.delete(sessionId);
+      }
+      const session = await this.store.getAgentSession(sessionId).catch(() => undefined);
+      if (session) await this.store.updateAgentSession(sessionId, { status: 'NOT_LOADED' });
+    } finally {
+      if (shutdownConfirmed && this.sessionRuntimeFences.get(sessionId) === fence) {
+        this.sessionRuntimeFences.delete(sessionId);
+      }
+    }
   }
 
   private applyPendingRuntimeConfiguration(excludedQueuedRunId?: string): Promise<void> {
@@ -1849,18 +3182,22 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
     await this.shutdown();
     this.runtime = undefined;
+    this.operationalModels = [];
     this.models = [];
     this.nativeCatalogState = undefined;
     this.runtimeReconfigurationPending = false;
     this.shuttingDown = false;
     this.preflightState = {
       runtime: this.descriptor,
-      ready: false,
+      readiness: createRuntimeReadiness(
+        'INITIALIZING',
+        'OpenCode executable discovery must be refreshed.',
+        {
+          checks: { initialization: 'NOT_STARTED' },
+          nextAction: { kind: 'RETRY', label: 'Refresh OpenCode' }
+        }
+      ),
       capabilities: opencodeCapabilities(),
-      problems: ['OpenCode executable discovery must be refreshed.'],
-      warnings: [
-        'Runtime discovery and provider catalog probing will run when OpenCode is initialized.'
-      ]
     };
     this.emitRuntimeUpdate();
   }
@@ -1877,9 +3214,25 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       }).catch((cause) => {
         this.preflightState = {
           ...this.preflightState,
-          problems: [
-            ...new Set([...this.preflightState.problems, errorMessage(cause)])
-          ]
+          readiness: createRuntimeReadiness(
+            'FAILED',
+            'OpenCode could not apply the saved runtime configuration.',
+            {
+              checks: {
+                ...this.preflightState.readiness.checks,
+                initialization: 'FAILED'
+              },
+              diagnostics: [
+                ...this.preflightState.readiness.diagnostics,
+                errorDiagnostic(
+                  'RUNTIME_RECONFIGURATION_FAILED',
+                  'CONFIGURATION',
+                  errorMessage(cause)
+                )
+              ],
+              nextAction: { kind: 'RETRY', label: 'Retry OpenCode' }
+            }
+          )
         };
         this.emitRuntimeUpdate();
       });
@@ -1890,16 +3243,26 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
 
   private async readProviderSessionStatus(
     client: OpenCodeClientTransport,
-    providerSessionId: string
+    providerSessionId: string,
+    deadlineAt?: number
   ): Promise<AgentSessionRecord['status']> {
-    const value = (await client.get<unknown>('/session/status')).data;
+    const value = (
+      await client.get<unknown>(
+        '/session/status',
+        deadlineAt === undefined ? undefined : { deadlineAt }
+      )
+    ).data;
     const statuses = asRecord(value);
     return mapOpenCodeSessionStatus(statuses?.[providerSessionId] ?? { type: 'idle' });
   }
 
   private async recordSettingsObservation(
     session: AgentSessionRecord,
-    source: 'THREAD_START_RESPONSE' | 'THREAD_SETTINGS_NOTIFICATION' | 'RECOVERY_RESUME_RESPONSE',
+    source:
+      | 'TASK_MONKI_RESOLUTION'
+      | 'THREAD_START_RESPONSE'
+      | 'THREAD_SETTINGS_NOTIFICATION'
+      | 'RECOVERY_RESUME_RESPONSE',
     settings: AgentExecutionSettings,
     runId?: string,
     rawMessage?: AgentProtocolMessageReference
@@ -1921,6 +3284,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     eventType: string,
     payload: Record<string, unknown>
   ): Promise<void> {
+    payload = this.redactProviderValue(payload);
     await this.store.appendEvent(
       createDomainEvent({
         type: 'AGENT_ACTIVITY_RECEIVED',
@@ -1938,6 +3302,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async appendRunOutput(run: RunRecord, source: string, text: string): Promise<void> {
+    source = this.redactProviderText(source);
+    text = this.redactProviderText(text);
     await this.store.appendArtifact(run.outputArtifactId, `\n[${source}]\n${text}`);
     this.appEvents.emit({
       type: 'run.output',
@@ -2012,7 +3378,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerItemId: entry.part.id,
         type: entry.type,
         status,
-        payload: entry.part,
+        payload: this.redactProviderValue(entry.part),
         rawMessage: entry.raw,
         providerStartedAt: providerTimestamp(entry.part.state?.time?.start),
         providerCompletedAt: providerTimestamp(entry.part.state?.time?.end)
@@ -2094,12 +3460,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         agentSessionId: session.id,
         serverInstanceId: run.serverInstanceId,
         source: 'provider',
-        payload: { parseError: errorMessage(cause) }
+        payload: { parseError: this.redactProviderText(errorMessage(cause)) }
       })
     );
     this.emitRunActivity(run, {
       eventType: 'runtime/protocol-incident',
-      error: errorMessage(cause)
+      error: this.redactProviderText(errorMessage(cause))
     });
   }
 
@@ -2110,7 +3476,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       iterationId: run.iterationId,
       runId: run.id,
       worktreeId: run.worktreeId,
-      payload,
+      payload: this.redactProviderValue(payload),
       at: new Date().toISOString()
     });
   }
@@ -2121,9 +3487,98 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       taskId: interaction.taskId,
       iterationId: interaction.iterationId,
       runId: interaction.runId,
-      payload: interaction,
+      payload: this.redactProviderValue(interaction),
       at: new Date().toISOString()
     });
+  }
+
+  private redactProviderText(value: string): string {
+    return redactCredentialText(value, this.sensitiveValues);
+  }
+
+  private redactProviderValue<T>(value: T): T {
+    return redactCredentialValue(value, this.sensitiveValues);
+  }
+
+  private isSafeOperationalIdentifier(value: string): boolean {
+    return this.redactProviderText(value) === value;
+  }
+
+  private safePublishedModels(models: readonly AgentModel[]): AgentModel[] {
+    return models.flatMap((model) => {
+      if (
+        !this.isSafeOperationalIdentifier(model.id) ||
+        !this.isSafeOperationalIdentifier(model.modelProvider) ||
+        !this.isSafeOperationalIdentifier(model.model)
+      ) {
+        return [];
+      }
+      const inputModalities = model.inputModalities.filter(
+        (modality) => this.isSafeOperationalIdentifier(modality)
+      );
+      if (inputModalities.length === 0) return [];
+      const published = this.redactProviderValue(model);
+      published.inputModalities = inputModalities;
+      published.supportedReasoningEfforts = model.supportedReasoningEfforts.filter(
+        (variant) => this.isSafeOperationalIdentifier(variant)
+      );
+      published.defaultReasoningEffort =
+        model.defaultReasoningEffort &&
+        this.isSafeOperationalIdentifier(model.defaultReasoningEffort)
+          ? model.defaultReasoningEffort
+          : undefined;
+      const exactVariants = asRecord(asRecord(model.native)?.variants);
+      const safeNative = asRecord(published.native);
+      if (safeNative && exactVariants) {
+        safeNative.variants = Object.fromEntries(
+          Object.entries(exactVariants)
+            .filter(([variant]) => this.isSafeOperationalIdentifier(variant))
+            .map(([variant, metadata]) => [
+              variant,
+              this.redactProviderValue(metadata)
+            ])
+        );
+      }
+      return [published];
+    });
+  }
+
+  private safeObservedSettings(
+    settings: AgentExecutionSettings
+  ): AgentExecutionSettings {
+    const unsafeModel =
+      (settings.modelProvider !== undefined &&
+        !this.isSafeOperationalIdentifier(settings.modelProvider)) ||
+      (settings.model !== undefined &&
+        !this.isSafeOperationalIdentifier(settings.model));
+    const unsafeVariant =
+      settings.reasoningEffort !== undefined &&
+      !this.isSafeOperationalIdentifier(settings.reasoningEffort);
+    if (!unsafeModel && !unsafeVariant) return settings;
+    this.noteSensitiveIdentifierOmission();
+    return {
+      ...settings,
+      ...(unsafeModel
+        ? { modelProvider: undefined, model: undefined, reasoningEffort: undefined }
+        : { reasoningEffort: undefined })
+    };
+  }
+
+  private noteSensitiveIdentifierOmission(): void {
+    if (
+      this.preflightState.readiness.diagnostics.some(
+        (diagnostic) => diagnostic.code === 'SENSITIVE_PROVIDER_IDENTIFIER_OMITTED'
+      )
+    ) return;
+    this.preflightState = appendRuntimeDiagnostic(
+      this.preflightState,
+      warningDiagnostic(
+        'SENSITIVE_PROVIDER_IDENTIFIER_OMITTED',
+        'SECURITY',
+        'OpenCode returned an operational identifier matching a runtime credential, so the affected model setting was omitted.',
+        'Exact identifiers remain internal to protocol processing and are never replaced with redacted placeholders in actionable or durable settings.'
+      )
+    );
   }
 
   private async requireSession(sessionId: string): Promise<AgentSessionRecord> {
@@ -2213,24 +3668,46 @@ function settingsFromSession(
   };
 }
 
-function settingsFromMessage(
+function settingsObservedFromMessage(
   info: OpenCodeMessageInfo,
   fallback: AgentExecutionSettings
-): AgentExecutionSettings {
+): AgentExecutionSettings | undefined {
+  const modelProvider = info.providerID ?? info.model?.providerID;
+  const model = info.modelID ?? info.model?.modelID ?? info.model?.id;
+  if (!modelProvider || !model) return undefined;
   return {
     ...fallback,
     runtimeId: OPENCODE_RUNTIME_ID,
-    modelProvider: info.providerID ?? info.model?.providerID ?? fallback.modelProvider,
-    model: info.modelID ?? info.model?.modelID ?? info.model?.id ?? fallback.model,
-    reasoningEffort: info.variant ?? fallback.reasoningEffort
+    modelProvider,
+    model,
+    reasoningEffort: info.variant
   };
 }
 
-function assertSessionDirectory(session: OpenCodeSession, expected: string): void {
-  if (path.resolve(session.directory) !== path.resolve(expected)) {
+async function assertSessionDirectory(
+  session: OpenCodeSession,
+  expected: string
+): Promise<void> {
+  const [reportedDirectory, worktreeDirectory] = await Promise.all([
+    canonicalExistingDirectory(session.directory, 'reported session directory'),
+    canonicalExistingDirectory(expected, 'Task Monki worktree')
+  ]);
+  if (reportedDirectory !== worktreeDirectory) {
     throw new Error(
       `OpenCode session directory ${session.directory} does not match its Task Monki worktree.`
     );
+  }
+}
+
+async function canonicalExistingDirectory(candidate: string, label: string): Promise<string> {
+  try {
+    const canonical = await fs.realpath(candidate);
+    if (!(await fs.stat(canonical)).isDirectory()) {
+      throw new Error(`${label} is not a directory.`);
+    }
+    return canonical;
+  } catch (cause) {
+    throw new Error(`OpenCode ${label} ${candidate} could not be verified.`, { cause });
   }
 }
 
@@ -2310,6 +3787,16 @@ function providerTimestamp(value: unknown): string | undefined {
     : undefined;
 }
 
+function isOpenCodeAbortError(value: unknown): boolean {
+  return asRecord(value)?.name === 'MessageAbortedError';
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
 function mapOpenCodeMutationError(operation: string, cause: unknown): Error {
   if (cause instanceof OpenCodeAmbiguousMutationError) {
     return new AgentMutationAmbiguousError(
@@ -2330,4 +3817,45 @@ function normalizeExecutableOverride(value: string | undefined): string | undefi
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+function openCodeFailureReadiness(
+  cause: unknown,
+  sensitiveValues: readonly string[] = []
+) {
+  const message = redactCredentialText(errorMessage(cause), sensitiveValues);
+  if (cause instanceof OpenCodeRuntimeResolutionError) {
+    const found = cause.diagnostics.probes.some((probe) => Boolean(probe.version));
+    return createRuntimeReadiness(
+      found ? 'INCOMPATIBLE' : 'NOT_INSTALLED',
+      found
+        ? 'The installed OpenCode executable does not expose the required server contract.'
+        : 'OpenCode was not found on this computer.',
+      {
+        checks: {
+          discovery: found ? 'FOUND' : 'NOT_FOUND',
+          compatibility: found ? 'INCOMPATIBLE' : 'UNKNOWN',
+          initialization: 'NOT_STARTED'
+        },
+        diagnostics: [
+          errorDiagnostic(
+            found ? 'RUNTIME_INCOMPATIBLE' : 'RUNTIME_NOT_INSTALLED',
+            found ? 'COMPATIBILITY' : 'DISCOVERY',
+            message
+          )
+        ],
+        nextAction: {
+          kind: found ? 'CONFIGURE' : 'INSTALL',
+          label: found ? 'Choose a compatible executable' : 'Install OpenCode'
+        }
+      }
+    );
+  }
+  return createRuntimeReadiness('FAILED', message, {
+    checks: { initialization: 'FAILED' },
+    diagnostics: [
+      errorDiagnostic('RUNTIME_INITIALIZATION_FAILED', 'INITIALIZATION', message)
+    ],
+    nextAction: { kind: 'RETRY', label: 'Retry OpenCode' }
+  });
 }

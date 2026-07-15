@@ -31,6 +31,7 @@ import {
   type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
 import { selectModel } from '../model/agentExecutionSettings';
+import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
@@ -68,7 +69,7 @@ export function NewTaskPanel({
   const [prompt, setPrompt] = useState('');
   const [runtimeId, setRuntimeId] = useState(
     defaultAgentSettings?.runtimeId ??
-      runtimes.find((runtime) => runtime.preflight.ready)?.preflight.runtime.id ??
+      runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
       runtimes[0]?.preflight.runtime.id ??
       ''
   );
@@ -101,7 +102,7 @@ export function NewTaskPanel({
       ? runtimeId
       : defaultAgentSettings?.runtimeId && availableRuntimeIds.has(defaultAgentSettings.runtimeId)
         ? defaultAgentSettings.runtimeId
-        : runtimes.find((runtime) => runtime.preflight.ready)?.preflight.runtime.id ??
+        : runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
           runtimes[0]?.preflight.runtime.id ??
           '';
     if (nextRuntimeId !== runtimeId) {
@@ -132,6 +133,7 @@ export function NewTaskPanel({
   const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === runtimeId
   );
+  const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
   const executionPolicy = selectedRuntime?.preflight.capabilities.executionPolicy;
   const permissionPresets = executionPolicy?.presets ?? [];
   const permissionPreset =
@@ -216,7 +218,7 @@ export function NewTaskPanel({
     activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;
   const canDeferModelSelection = Boolean(
     selectedRuntime &&
-      !selectedRuntime.preflight.ready &&
+      !selectedRuntime.preflight.readiness.canStart &&
       activeAttachmentItems.length === 0
   );
 
@@ -620,6 +622,7 @@ export function NewTaskPanel({
                 <label className="field">
                   <span className="field__label">Agent runtime</span>
                   <select
+                    aria-label="Agent runtime"
                     value={runtimeId}
                     onChange={(event) => {
                       const nextRuntimeId = event.target.value;
@@ -636,7 +639,7 @@ export function NewTaskPanel({
                         value={runtime.preflight.runtime.id}
                       >
                         {runtime.preflight.runtime.displayName}
-                        {runtime.preflight.ready ? '' : ' (unavailable)'}
+                        {runtimeReadinessView(runtime).optionSuffix}
                       </option>
                     ))}
                   </select>
@@ -644,6 +647,7 @@ export function NewTaskPanel({
                 <label className="field">
                   <span className="field__label">Model</span>
                   <select
+                    aria-label="Model"
                     value={modelId}
                     onChange={(event) => {
                       const nextModel = runtimeModels.find(
@@ -696,6 +700,7 @@ export function NewTaskPanel({
                     </HelpTooltip>
                   </span>
                   <select
+                    aria-label="Permission mode"
                     value={permissionPreset?.id ?? ''}
                     onChange={(event) => setPermissionPresetId(event.target.value)}
                     disabled={composerLocked || permissionPresets.length === 0}
@@ -760,15 +765,21 @@ export function NewTaskPanel({
               {error}
             </p>
           ) : null}
-          {!selectedRuntime?.preflight.ready ? (
+          {selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="form-error">
-              {selectedRuntime?.preflight.problems.join(' ') ||
-                'The selected agent runtime is unavailable. You can create the task now and start it after the runtime is ready.'}
+              {selectedRuntimeReadiness.detail}
+              {selectedRuntimeReadiness.nextAction
+                ? ` ${selectedRuntimeReadiness.nextAction}.`
+                : ''}{' '}
+              You can create the task now and start it after the runtime is available.
             </p>
           ) : null}
-          {selectedRuntime?.preflight.warnings.map((warning) => (
-            <p className="form-warning" key={warning}>
-              {warning}
+          {selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
+            <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
+          ) : null}
+          {selectedRuntimeReadiness.warnings.map((warning) => (
+            <p className="form-warning" key={`${warning.code}:${warning.message}`}>
+              {warning.message}
             </p>
           ))}
         </div>

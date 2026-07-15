@@ -56,11 +56,20 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
+    let parsed: unknown;
     try {
-      this.settings = normalizeAppSettings(JSON.parse(raw) as unknown);
+      parsed = JSON.parse(raw) as unknown;
     } catch {
       await this.moveInvalidSettingsFileAside();
       this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+      await this.persist();
+      this.loaded = true;
+      return;
+    }
+
+    this.settings = normalizeAppSettings(parsed);
+
+    if (raw !== serializeAppSettings(this.settings)) {
       await this.persist();
     }
 
@@ -78,7 +87,7 @@ export class AppSettingsStore implements AppSettingsStorage {
   private async persist(): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.settings, null, 2)}\n`, {
+    await fs.writeFile(tmpPath, serializeAppSettings(this.settings), {
       encoding: 'utf8',
       mode: 0o600
     });
@@ -96,6 +105,10 @@ export class AppSettingsStore implements AppSettingsStorage {
       }
     }
   }
+}
+
+function serializeAppSettings(settings: TaskManagerAppSettings): string {
+  return `${JSON.stringify(settings, null, 2)}\n`;
 }
 
 export class MemoryAppSettingsStore implements AppSettingsStorage {
@@ -117,9 +130,25 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
 
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
   const record = isRecord(value) ? value : {};
+  assertSupportedSchemaVersion(record.schemaVersion);
   const repositories = normalizeRepositories(record.repositories);
-  const promptRefinementModel = normalizeOptionalString(record.promptRefinementModel);
-  const reviewModel = normalizeOptionalString(record.reviewModel);
+  const migratesLegacyDefaultRuntime = record.defaultRuntimeId === 'gemini-acp';
+  const migratesLegacyRefinementRuntime =
+    record.promptRefinementRuntimeId === 'gemini-acp';
+  const migratesLegacyReviewRuntime = record.reviewRuntimeId === 'gemini-acp';
+  const promptRefinementModel = migratesLegacyRefinementRuntime
+    ? undefined
+    : normalizeOptionalString(record.promptRefinementModel);
+  const reviewModel = migratesLegacyReviewRuntime
+    ? undefined
+    : normalizeOptionalString(record.reviewModel);
+  const runtimeExecutablePaths = normalizeRuntimeExecutablePaths(
+    record.runtimeExecutablePaths
+  );
+  // Gemini ACP is no longer a product runtime. Keep historical task/run IDs
+  // untouched, but do not carry its executable into the distinct `agy`
+  // integration or expose a dead settings entry.
+  delete runtimeExecutablePaths['gemini-acp'];
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: normalizeTheme(record.theme),
@@ -135,28 +164,56 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
       record.firstLaunchSetupCompleted,
       repositories
     ),
-    defaultRuntimeId: normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
-    defaultModel: normalizeOptionalString(record.defaultModel),
-    defaultModelProvider: normalizeOptionalString(record.defaultModelProvider),
-    defaultReasoningEffort: normalizeOptionalString(record.defaultReasoningEffort),
+    defaultRuntimeId: migratesLegacyDefaultRuntime
+      ? 'antigravity'
+      : normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
+    defaultModel: migratesLegacyDefaultRuntime
+      ? undefined
+      : normalizeOptionalString(record.defaultModel),
+    defaultModelProvider: migratesLegacyDefaultRuntime
+      ? undefined
+      : normalizeOptionalString(record.defaultModelProvider),
+    defaultReasoningEffort: migratesLegacyDefaultRuntime
+      ? undefined
+      : normalizeOptionalString(record.defaultReasoningEffort),
     promptRefinementModel,
     promptRefinementRuntimeId:
-      normalizeOptionalString(record.promptRefinementRuntimeId) ??
+      (migratesLegacyRefinementRuntime
+        ? CODEX_RUNTIME_ID
+        : normalizeOptionalString(record.promptRefinementRuntimeId)) ??
       (promptRefinementModel ? CODEX_RUNTIME_ID : undefined),
-    promptRefinementModelProvider: normalizeOptionalString(record.promptRefinementModelProvider),
+    promptRefinementModelProvider: migratesLegacyRefinementRuntime
+      ? undefined
+      : normalizeOptionalString(record.promptRefinementModelProvider),
     reviewModel,
     reviewRuntimeId:
-      normalizeOptionalString(record.reviewRuntimeId) ??
+      (migratesLegacyReviewRuntime
+        ? CODEX_RUNTIME_ID
+        : normalizeOptionalString(record.reviewRuntimeId)) ??
       (reviewModel ? CODEX_RUNTIME_ID : undefined),
-    reviewModelProvider: normalizeOptionalString(record.reviewModelProvider),
-    reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
+    reviewModelProvider: migratesLegacyReviewRuntime
+      ? undefined
+      : normalizeOptionalString(record.reviewModelProvider),
+    reviewReasoningEffort: migratesLegacyReviewRuntime
+      ? undefined
+      : normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    runtimeExecutablePaths: normalizeRuntimeExecutablePaths(
-      record.runtimeExecutablePaths
-    ),
+    runtimeExecutablePaths,
     repositories
   };
+}
+
+function assertSupportedSchemaVersion(value: unknown): void {
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error('App settings contain an invalid schema version.');
+  }
+  if (value > TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+    throw new Error(
+      `App settings schema ${String(value)} is newer than supported schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}. Upgrade Task Monki before opening this settings file.`
+    );
+  }
 }
 
 export function mergeAppSettings(

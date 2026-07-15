@@ -10,27 +10,35 @@ import {
   terminatePortableProcessTree
 } from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
+import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
 import {
+  ACP_CLIENT_CAPABILITIES,
   ACP_PROTOCOL_VERSION,
   ACP_SCHEMA_ARTIFACT_VERSION,
+  parseInitializeModelExtension,
   parseInitializeResponse,
-  type AcpInitializeResponse
+  type AcpInitializeResponse,
+  type AcpSessionModelState
 } from './AcpProtocol';
 import { AcpRpcClient } from './AcpRpcClient';
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
 import type { ResolvedAcpRuntime } from './AcpRuntimeResolver';
-import { sanitizeAcpInitializeResponse } from './AcpNativeRedaction';
+import {
+  normalizeAcpOperationalModelState,
+  sanitizeAcpInitializeResponse
+} from './AcpNativeRedaction';
 
 const MAX_DIAGNOSTIC_TAIL_BYTES = 64 * 1024;
-const NON_SENSITIVE_RUNTIME_ENVIRONMENT_KEYS = new Set([
-  'GOOGLE_CLOUD_PROJECT',
-  'GOOGLE_CLOUD_LOCATION'
-]);
-
 interface AcpSupervisorEvents {
   ready: [server: AgentServerInstance, initialize: AcpInitializeResponse];
   exit: [server: AgentServerInstance, unexpected: boolean];
   protocolError: [error: Error];
+}
+
+interface ManagedCloseHandling {
+  promise: Promise<void>;
+  resolve(): void;
+  reject(cause: unknown): void;
 }
 
 export interface AcpStdioSupervisorOptions {
@@ -40,12 +48,17 @@ export interface AcpStdioSupervisorOptions {
   appVersion?: string;
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  spawnProcess?: typeof spawnPortable;
+  shutdownGraceTimeoutMs?: number;
+  shutdownKillTimeoutMs?: number;
+  closeHandlingTimeoutMs?: number;
 }
 
 export interface RunningAcpAgent {
   server: AgentServerInstance;
   client: AcpRpcClient;
   initialize: AcpInitializeResponse;
+  profileModelState?: AcpSessionModelState;
 }
 
 export class AcpStdioSupervisor {
@@ -55,10 +68,27 @@ export class AcpStdioSupervisor {
   private client?: AcpRpcClient;
   private server?: AgentServerInstance;
   private initializeResponse?: AcpInitializeResponse;
+  private profileModelState?: AcpSessionModelState;
   private startPromise?: Promise<RunningAcpAgent>;
-  private closeHandling?: Promise<void>;
+  private readonly closeHandlings = new WeakMap<
+    ChildProcessWithoutNullStreams,
+    ManagedCloseHandling
+  >();
+  private readonly closeListeners = new WeakMap<
+    ChildProcessWithoutNullStreams,
+    (exitCode: number | null, signal: NodeJS.Signals | null) => void
+  >();
+  private readonly diagnosticListeners = new WeakMap<
+    ChildProcessWithoutNullStreams,
+    (chunk: Buffer) => void
+  >();
+  private readonly rawDiagnosticTails = new WeakMap<ChildProcessWithoutNullStreams, string>();
+  private readonly exitEmittedChildren = new WeakSet<ChildProcessWithoutNullStreams>();
+  private safetyFence?: {
+    child: ChildProcessWithoutNullStreams;
+    reason: string;
+  };
   private shuttingDown = false;
-  private rawDiagnosticTail = '';
 
   constructor(
     private readonly store: FileTaskStore,
@@ -77,18 +107,49 @@ export class AcpStdioSupervisor {
     return this.initializeResponse;
   }
 
+  /**
+   * A safety fence is permanent for this supervisor instance. Reusing a
+   * supervisor after an unconfirmed termination or protocol violation could
+   * overlap a replacement with a still-live provider process.
+   */
+  get safetyFenceReason(): string | undefined {
+    return this.safetyFence?.reason;
+  }
+
   start(): Promise<RunningAcpAgent> {
-    if (this.client && this.server && this.initializeResponse && this.child) {
+    if (this.safetyFence) {
+      return Promise.reject(
+        new Error(`ACP supervisor is safety-fenced until app restart. ${this.safetyFence.reason}`)
+      );
+    }
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('ACP supervisor has been shut down.'));
+    }
+    if (
+      this.client &&
+      this.server &&
+      this.initializeResponse &&
+      this.child &&
+      this.child.exitCode === null &&
+      this.child.signalCode === null
+    ) {
       return Promise.resolve({
         client: this.client,
         server: this.server,
-        initialize: this.initializeResponse
+        initialize: this.initializeResponse,
+        profileModelState: this.profileModelState
       });
     }
     if (!this.startPromise) {
-      this.startPromise = this.startInternal().finally(() => {
-        this.startPromise = undefined;
-      });
+      const priorChild = this.child;
+      this.startPromise = (priorChild
+        ? this.waitForHandledClose(priorChild).then((handled) => {
+            if (!handled) throw new Error('Timed out finalizing the prior ACP process exit.');
+          })
+        : Promise.resolve()
+      ).then(() => this.startInternal()).finally(() => {
+          this.startPromise = undefined;
+        });
     }
     return this.startPromise;
   }
@@ -104,90 +165,195 @@ export class AcpStdioSupervisor {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const child = this.child;
     this.client?.close('Task Monki is shutting down the ACP runtime.');
-    if (!child) return;
-    if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
-      this.server = await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
+    const failures: unknown[] = [];
+    const starting = this.startPromise;
+    const childAtShutdown = this.child;
+    try {
+      if (this.server && ['READY', 'RUNNING', 'DEGRADED'].includes(this.server.status)) {
+        this.server = await this.store.updateAgentServer(this.server.id, {
+          status: 'STOPPING'
+        });
+      }
+    } catch (cause) {
+      failures.push(cause);
     }
-    if (child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
-      if (!(await waitForClose(child, 3_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
-        await waitForClose(child, 2_000);
+    try {
+      if (childAtShutdown) {
+        await terminateAndConfirm(
+          childAtShutdown,
+          this.options.shutdownGraceTimeoutMs ?? 3_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      }
+    } catch (cause) {
+      failures.push(cause);
+      if (childAtShutdown) {
+        try {
+          await this.fenceUnconfirmedProcess(childAtShutdown, cause);
+        } catch (cleanupCause) {
+          failures.push(cleanupCause);
+        }
       }
     }
-    await this.closeHandling;
+    await starting?.catch(() => undefined);
+    const lateChild = this.child;
+    try {
+      if (lateChild && lateChild !== childAtShutdown) {
+        await terminateAndConfirm(
+          lateChild,
+          this.options.shutdownGraceTimeoutMs ?? 3_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      }
+    } catch (cause) {
+      failures.push(cause);
+      if (lateChild && lateChild !== childAtShutdown) {
+        try {
+          await this.fenceUnconfirmedProcess(lateChild, cause);
+        } catch (cleanupCause) {
+          failures.push(cleanupCause);
+        }
+      }
+    }
+    for (const child of new Set([childAtShutdown, lateChild].filter(Boolean))) {
+      try {
+        if (!(await this.waitForHandledClose(child as ChildProcessWithoutNullStreams))) {
+          failures.push(new Error('Timed out finalizing the ACP process exit.'));
+        }
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'ACP runtime shutdown was incomplete.');
+    }
   }
 
   private async startInternal(): Promise<RunningAcpAgent> {
-    this.shuttingDown = false;
-    this.rawDiagnosticTail = '';
     const profile = this.options.profile;
     const argv = [...profile.argv];
-    this.server = await this.store.createAgentServer({
-      runtimeId: profile.descriptor.id,
-      runtimeKind: 'ACP_AGENT',
-      transport: 'STDIO',
-      executable: this.options.runtime.executable,
-      argv,
-      runtimeVersion: this.options.runtime.version,
-      schemaVersion: ACP_SCHEMA_ARTIFACT_VERSION,
-      runtimeResolution: this.options.runtime.diagnostics
-    });
-
     const environment = this.options.environment ?? process.env;
-    const child = spawnPortable(this.options.runtime.executable, argv, {
-      cwd: this.options.cwd,
-      env: sanitizeEnvironment(environment, profile.allowedEnvironmentKeys),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-      windowsHide: true
-    }) as ChildProcessWithoutNullStreams;
-    this.child = child;
-    child.stderr.on('data', (chunk: Buffer) => {
-      this.rawDiagnosticTail = boundedTail(
-        this.rawDiagnosticTail + chunk.toString('utf8'),
-        MAX_DIAGNOSTIC_TAIL_BYTES
-      );
-    });
-    child.once('close', (exitCode, signal) => {
-      const handling = this.handleClose(child, exitCode, signal);
-      this.closeHandling = handling;
-      void handling.finally(() => {
-        if (this.closeHandling === handling) this.closeHandling = undefined;
-      });
-    });
-
+    let server: AgentServerInstance | undefined;
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let client: AcpRpcClient | undefined;
     try {
+      this.assertStartupActive();
+      server = await this.store.createAgentServer({
+        runtimeId: profile.descriptor.id,
+        runtimeKind: 'ACP_AGENT',
+        transport: 'STDIO',
+        executable: this.options.runtime.executable,
+        argv,
+        runtimeVersion: this.options.runtime.version,
+        schemaVersion: ACP_SCHEMA_ARTIFACT_VERSION,
+        runtimeResolution: this.options.runtime.diagnostics
+      });
+      this.server = server;
+      this.assertStartupActive();
+
+      child = (this.options.spawnProcess ?? spawnPortable)(
+        this.options.runtime.executable,
+        argv,
+        {
+          cwd: this.options.cwd,
+          env: sanitizeEnvironment(environment, profile.environmentPolicy.allowedKeys),
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+          windowsHide: true
+        }
+      ) as ChildProcessWithoutNullStreams;
+      this.child = child;
+      this.rawDiagnosticTails.set(child, '');
+      const onDiagnostic = (chunk: Buffer) => {
+        this.rawDiagnosticTails.set(
+          child!,
+          boundedTail(
+            `${this.rawDiagnosticTails.get(child!) ?? ''}${chunk.toString('utf8')}`,
+            MAX_DIAGNOSTIC_TAIL_BYTES
+          )
+        );
+      };
+      this.diagnosticListeners.set(child, onDiagnostic);
+      child.stderr.on('data', onDiagnostic);
+      let settleResolve!: () => void;
+      let settleReject!: (cause: unknown) => void;
+      let settled = false;
+      const promise = new Promise<void>((resolve, reject) => {
+        settleResolve = resolve;
+        settleReject = reject;
+      });
+      const closeHandling: ManagedCloseHandling = {
+        promise,
+        resolve: () => {
+          if (settled) return;
+          settled = true;
+          settleResolve();
+        },
+        reject: (cause) => {
+          if (settled) return;
+          settled = true;
+          settleReject(cause);
+        }
+      };
+      this.closeHandlings.set(child, closeHandling);
+      void promise.catch(() => undefined);
+      const onClose = (exitCode: number | null, signal: NodeJS.Signals | null) => {
+        void this.handleClose(child!, client, server!, exitCode, signal).then(
+          closeHandling.resolve,
+          closeHandling.reject
+        );
+      };
+      this.closeListeners.set(child, onClose);
+      child.once('close', onClose);
+
+      this.assertStartupActive();
       await waitForSpawn(child);
-      this.server = await this.store.updateAgentServer(this.server.id, { pid: child.pid });
-      const client = new AcpRpcClient(
+      this.assertStartupActive();
+      const starting = await this.store.updateAgentServer(server.id, { pid: child.pid });
+      if (this.server?.id === server.id) this.server = starting;
+      this.assertStartupActive();
+      client = new AcpRpcClient(
         child.stdin,
         child.stdout,
         (direction, raw, metadata) =>
-          this.store.appendProtocolMessage(this.server!.id, direction, raw, metadata),
-        this.server.id,
-        this.options.requestTimeoutMs
+          this.store.appendProtocolMessage(server!.id, direction, raw, metadata),
+        server.id,
+        this.options.requestTimeoutMs,
+        sensitiveEnvironmentValues(profile.environmentPolicy, environment)
       );
       this.client = client;
       client.events.on('protocolError', (error) => {
-        this.events.emit('protocolError', error);
-        void this.terminateProtocolViolation(error);
+        if (!this.isCurrentGeneration(child!, client!, server!.id)) return;
+        const safeError = new Error(this.redactDiagnostic(error.message));
+        this.events.emit('protocolError', safeError);
+        void this.terminateProtocolViolation(safeError, child!, client!, server!.id);
       });
 
       const initialized = await client.request<unknown>('initialize', {
         protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false
-        },
+        clientCapabilities: ACP_CLIENT_CAPABILITIES,
         clientInfo: {
           name: 'task-monki',
           title: 'Task Monki',
           version: this.options.appVersion ?? '0.1.0'
         }
       });
+      this.assertStartupActive();
+      const extension = profile.sessionModelExtension;
+      const profileModelState = extension?.initializeResponseMetaField
+        ? normalizeAcpOperationalModelState(
+            parseInitializeModelExtension(
+              initialized.result,
+              extension.initializeResponseMetaField
+            )
+          ) ?? undefined
+        : undefined;
+      if (extension?.initializeResponseMetaField && !profileModelState) {
+        throw new Error(
+          `${profile.descriptor.displayName} did not provide the required ${extension.contractId} initialize catalog.`
+        );
+      }
       const initialize = sanitizeAcpInitializeResponse(
         parseInitializeResponse(initialized.result)
       );
@@ -197,86 +363,261 @@ export class AcpStdioSupervisor {
         );
       }
       this.initializeResponse = initialize;
-      this.server = await this.store.updateAgentServer(this.server.id, {
+      this.profileModelState = profileModelState;
+      const ready = await this.store.updateAgentServer(server.id, {
         status: 'READY',
         runtimeVersion: initialize.agentInfo?.version ?? this.options.runtime.version,
         initializedAt: new Date().toISOString(),
         lastHealthAt: new Date().toISOString()
       });
-      this.events.emit('ready', this.server, initialize);
-      return { client, server: this.server, initialize };
+      this.assertStartupActive();
+      this.server = ready;
+      this.events.emit('ready', ready, initialize);
+      return { client, server: ready, initialize, profileModelState };
     } catch (cause) {
-      this.client?.close(`ACP startup failed: ${errorMessage(cause)}`);
-      if (child.exitCode === null && child.signalCode === null) {
-        await terminatePortableProcessTree(child, 'SIGTERM').catch(() => undefined);
+      const message = this.redactDiagnostic(
+        startupFailure(cause, child ? this.redactedDiagnosticTail(child) : '')
+      );
+      const failure = new Error(message, { cause });
+      const cleanupFailures: unknown[] = [];
+      let terminationUnconfirmed = false;
+      client?.close(`ACP startup failed: ${message}`);
+      if (child && child.exitCode === null && child.signalCode === null) {
+        try {
+          await terminateAndConfirm(
+            child,
+            this.options.shutdownGraceTimeoutMs ?? 1_000,
+            this.options.shutdownKillTimeoutMs ?? 2_000
+          );
+        } catch (cleanupCause) {
+          terminationUnconfirmed = true;
+          cleanupFailures.push(cleanupCause);
+          try {
+            await this.fenceUnconfirmedProcess(child, cleanupCause);
+          } catch (fenceCause) {
+            cleanupFailures.push(fenceCause);
+          }
+        }
       }
-      if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
-        this.server = await this.store.updateAgentServer(this.server.id, {
-          status: 'FAILED',
-          exitedAt: new Date().toISOString(),
-          exitReason: this.redactDiagnostic(
-            startupFailure(cause, this.redactedDiagnosticTail())
-          )
-        });
+      if (child && !terminationUnconfirmed) {
+        try {
+          if (!(await this.waitForHandledClose(child))) {
+            cleanupFailures.push(new Error('Timed out finalizing the ACP startup process exit.'));
+          }
+        } catch (cleanupCause) {
+          cleanupFailures.push(cleanupCause);
+        }
       }
-      throw cause;
+      if (!terminationUnconfirmed) {
+        if (this.client === client) this.client = undefined;
+        if (this.child === child) this.child = undefined;
+      }
+      if (server) {
+        try {
+          const stored = await this.store.getAgentServer(server.id);
+          if (stored && !['EXITED', 'FAILED', 'LOST'].includes(stored.status)) {
+            const terminal = await this.store.updateAgentServer(server.id, {
+              status: this.shuttingDown ? 'EXITED' : 'FAILED',
+              exitedAt: new Date().toISOString(),
+              exitReason: this.shuttingDown ? 'ACP startup was canceled.' : message
+            });
+            if (this.server?.id === server.id) this.server = terminal;
+          }
+        } catch (cleanupCause) {
+          cleanupFailures.push(cleanupCause);
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [failure, ...cleanupFailures],
+          'ACP startup failed and cleanup was incomplete.'
+        );
+      }
+      throw failure;
     }
   }
 
-  private async terminateProtocolViolation(error: Error): Promise<void> {
-    const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    this.client?.close(`ACP protocol violation: ${error.message}`);
-    await terminatePortableProcessTree(child, 'SIGTERM').catch(() => undefined);
+  private async terminateProtocolViolation(
+    error: Error,
+    child: ChildProcessWithoutNullStreams,
+    client: AcpRpcClient,
+    serverId: string
+  ): Promise<void> {
+    if (
+      !this.isCurrentGeneration(child, client, serverId) ||
+      child.exitCode !== null ||
+      child.signalCode !== null
+    ) return;
+    const message = this.redactDiagnostic(error.message);
+    this.latchSafetyFence(
+      child,
+      `ACP protocol violation invalidated the process: ${message}`
+    );
+    client.close(`ACP protocol violation: ${message}`);
+    try {
+      await terminateAndConfirm(
+        child,
+        this.options.shutdownGraceTimeoutMs ?? 1_000,
+        this.options.shutdownKillTimeoutMs ?? 2_000
+      );
+    } catch (cause) {
+      // This method is launched from an EventEmitter callback. Handle every
+      // failure here so there is no unhandled rejection, while retaining the
+      // child and a permanent fence for all subsequent start attempts.
+      await this.fenceUnconfirmedProcess(child, cause).catch(() => undefined);
+    }
   }
 
   private async handleClose(
     child: ChildProcessWithoutNullStreams,
+    client: AcpRpcClient | undefined,
+    server: AgentServerInstance,
     exitCode: number | null,
     signal: NodeJS.Signals | null
   ): Promise<void> {
+    const wasCurrent = this.child === child && this.server?.id === server.id;
+    client?.close('ACP agent process exited.');
+    const unexpected = wasCurrent && !this.shuttingDown;
+    const diagnosticTail = this.redactedDiagnosticTail(child);
+    let emittedServer = server;
+    let storageFailure: unknown;
+    try {
+      const latest = await this.store.getAgentServer(server.id);
+      emittedServer = latest ?? server;
+      if (!['EXITED', 'FAILED', 'LOST'].includes(emittedServer.status)) {
+        emittedServer = await this.store.updateAgentServer(emittedServer.id, {
+          status: unexpected ? 'LOST' : 'EXITED',
+          disconnectedAt: unexpected ? new Date().toISOString() : undefined,
+          exitedAt: new Date().toISOString(),
+          exitCode,
+          signal,
+          exitReason: unexpected
+            ? `ACP agent exited unexpectedly.${diagnosticTail ? ` Diagnostics: ${diagnosticTail}` : ''}`
+            : undefined
+        });
+      }
+    } catch (cause) {
+      storageFailure = cause;
+    } finally {
+      if (this.client === client) this.client = undefined;
+      if (this.child === child) this.child = undefined;
+      this.detachManagedChildListeners(child);
+      if (wasCurrent && this.server?.id === server.id) {
+        this.server = emittedServer;
+        this.initializeResponse = undefined;
+        this.profileModelState = undefined;
+        if (!this.exitEmittedChildren.has(child)) {
+          this.exitEmittedChildren.add(child);
+          this.events.emit('exit', emittedServer, unexpected);
+        }
+      }
+    }
+    if (storageFailure) throw storageFailure;
+  }
+
+  /**
+   * A process that ignores both termination signals remains owned until its
+   * exit is observed. Forgetting it would allow a replacement to overlap a
+   * possibly-live process with the same workspace and provider credentials.
+   * The safety fence is intentionally irreversible until app restart.
+   */
+  private async fenceUnconfirmedProcess(
+    child: ChildProcessWithoutNullStreams,
+    cause: unknown
+  ): Promise<void> {
     if (this.child !== child) return;
+    const client = this.client;
     const server = this.server;
-    this.client?.close('ACP agent process exited.');
-    this.client = undefined;
-    this.child = undefined;
+    const reason = this.redactDiagnostic(
+      `ACP process termination could not be confirmed: ${errorMessage(cause)}`
+    );
+
+    this.latchSafetyFence(child, reason);
+    client?.close(reason);
     this.initializeResponse = undefined;
-    if (!server) return;
-    const latest = await this.store.getAgentServer(server.id).catch(() => undefined);
-    if (latest) this.server = latest;
-    if (!this.server || ['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) return;
-    const unexpected = !this.shuttingDown;
-    const diagnosticTail = this.redactedDiagnosticTail();
-    this.server = await this.store.updateAgentServer(this.server.id, {
-      status: unexpected ? 'LOST' : 'EXITED',
-      disconnectedAt: unexpected ? new Date().toISOString() : undefined,
-      exitedAt: new Date().toISOString(),
-      exitCode,
-      signal,
-      exitReason: unexpected
-        ? `ACP agent exited unexpectedly.${diagnosticTail ? ` Diagnostics: ${diagnosticTail}` : ''}`
-        : undefined
-    });
-    this.events.emit('exit', this.server, unexpected);
+    this.profileModelState = undefined;
+
+    let emittedServer = server;
+    let storageFailure: unknown;
+    try {
+      if (server && !['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
+        emittedServer = await this.store.updateAgentServer(server.id, {
+          status: 'LOST',
+          disconnectedAt: new Date().toISOString(),
+          exitReason: reason
+        });
+      }
+    } catch (persistenceCause) {
+      storageFailure = persistenceCause;
+    } finally {
+      if (server && emittedServer && this.server?.id === server.id) {
+        this.server = emittedServer;
+        if (!this.exitEmittedChildren.has(child)) {
+          this.exitEmittedChildren.add(child);
+          this.events.emit('exit', emittedServer, true);
+        }
+      }
+    }
+    if (storageFailure) throw storageFailure;
+  }
+
+  private latchSafetyFence(
+    child: ChildProcessWithoutNullStreams,
+    reason: string
+  ): void {
+    if (this.safetyFence) return;
+    this.safetyFence = {
+      child,
+      reason: this.redactDiagnostic(reason)
+    };
+  }
+
+  private detachManagedChildListeners(child: ChildProcessWithoutNullStreams): void {
+    const onClose = this.closeListeners.get(child);
+    if (onClose) child.off('close', onClose);
+    this.closeListeners.delete(child);
+    const onDiagnostic = this.diagnosticListeners.get(child);
+    if (onDiagnostic) child.stderr.off('data', onDiagnostic);
+    this.diagnosticListeners.delete(child);
+    this.rawDiagnosticTails.delete(child);
   }
 
   private redactDiagnostic(value: string): string {
     const environment = this.options.environment ?? process.env;
     return redactProcessDiagnostic(
       value,
-      this.options.profile.allowedEnvironmentKeys.flatMap((key) =>
-        !NON_SENSITIVE_RUNTIME_ENVIRONMENT_KEYS.has(key) && environment[key]
-          ? [environment[key]!]
-          : []
-      )
+      sensitiveEnvironmentValues(this.options.profile.environmentPolicy, environment)
     );
   }
 
-  private redactedDiagnosticTail(): string {
+  private redactedDiagnosticTail(child: ChildProcessWithoutNullStreams): string {
     return boundedTail(
-      this.redactDiagnostic(this.rawDiagnosticTail),
+      this.redactDiagnostic(this.rawDiagnosticTails.get(child) ?? ''),
       MAX_DIAGNOSTIC_TAIL_BYTES
     );
+  }
+
+  private assertStartupActive(): void {
+    if (this.safetyFence) {
+      throw new Error(`ACP startup was safety-fenced. ${this.safetyFence.reason}`);
+    }
+    if (this.shuttingDown) throw new Error('ACP startup was canceled.');
+  }
+
+  private isCurrentGeneration(
+    child: ChildProcessWithoutNullStreams,
+    client: AcpRpcClient,
+    serverId: string
+  ): boolean {
+    return this.child === child && this.client === client && this.server?.id === serverId;
+  }
+
+  private waitForHandledClose(
+    child: ChildProcessWithoutNullStreams,
+    timeoutMs = this.options.closeHandlingTimeoutMs ?? 3_000
+  ): Promise<boolean> {
+    const handling = this.closeHandlings.get(child);
+    return handling ? waitForPromise(handling.promise, timeoutMs) : Promise.resolve(true);
   }
 }
 
@@ -312,6 +653,36 @@ function waitForClose(child: ChildProcessWithoutNullStreams, timeoutMs: number):
     };
     child.once('close', onClose);
   });
+}
+
+function waitForPromise(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    void promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      (cause) => {
+        clearTimeout(timer);
+        reject(cause);
+      }
+    );
+  });
+}
+
+async function terminateAndConfirm(
+  child: ChildProcessWithoutNullStreams,
+  gracefulTimeoutMs: number,
+  killTimeoutMs: number
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await terminatePortableProcessTree(child, 'SIGTERM');
+  if (await waitForClose(child, gracefulTimeoutMs)) return;
+  await terminatePortableProcessTree(child, 'SIGKILL');
+  if (!(await waitForClose(child, killTimeoutMs))) {
+    throw new Error(`ACP agent process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
+  }
 }
 
 function boundedTail(value: string, bytes: number): string {

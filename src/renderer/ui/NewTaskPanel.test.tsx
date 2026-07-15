@@ -6,6 +6,7 @@ import {
   CODEX_RUNTIME_DESCRIPTOR,
   codexCapabilities
 } from '../../core/agent/codex/codexCapabilities';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
 import {
   capAttachmentValidationFailures,
   getOrCreateTaskCreationToken,
@@ -169,10 +170,29 @@ describe('NewTaskPanel', () => {
           {
             preflight: {
               runtime: CODEX_RUNTIME_DESCRIPTOR,
-              ready: true,
+              readiness: createRuntimeReadiness('READY', 'Codex is ready.', {
+                diagnostics: [
+                  {
+                    code: 'PROVIDER_PROCESS_NOT_SANDBOXED',
+                    severity: 'WARNING',
+                    stage: 'SECURITY',
+                    message: 'Provider commands run outside a Task Monki sandbox.'
+                  },
+                  {
+                    code: 'RUNTIME_RESTART_REQUIRED',
+                    severity: 'WARNING',
+                    stage: 'CONFIGURATION',
+                    message: 'The saved runtime change will apply after this turn.'
+                  },
+                  {
+                    code: 'ACP_CLIENT_TOOLS_DISABLED',
+                    severity: 'INFO',
+                    stage: 'SECURITY',
+                    message: 'Internal ACP client-tool notice.'
+                  }
+                ]
+              }),
               capabilities: codexCapabilities(),
-              problems: [],
-              warnings: []
             },
             models: models.filter((model) => model.runtimeId === 'codex'),
             refreshedAt: '2026-07-10T00:00:00.000Z'
@@ -186,10 +206,8 @@ describe('NewTaskPanel', () => {
                 transport: 'HTTP_SSE',
                 lifecycleScope: 'SESSION'
               },
-              ready: true,
+              readiness: createRuntimeReadiness('READY', 'OpenCode is ready.'),
               capabilities: { ...codexCapabilities(), runtimeId: 'opencode' },
-              problems: [],
-              warnings: []
             },
             models: models.filter((model) => model.runtimeId === 'opencode'),
             refreshedAt: '2026-07-10T00:00:00.000Z'
@@ -231,10 +249,16 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details class="newtask-settings">');
     expect(html).toContain('Agent runtime');
+    expect(html).toContain('aria-label="Agent runtime"');
+    expect(html).toContain('aria-label="Model"');
+    expect(html).toContain('aria-label="Permission mode"');
     expect(html).toContain('OpenCode');
     expect(html).not.toContain('OpenCode-only model');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
+    expect(html).toContain('Provider commands run outside a Task Monki sandbox.');
+    expect(html).toContain('The saved runtime change will apply after this turn.');
+    expect(html).not.toContain('Internal ACP client-tool notice.');
 
     const gatedHtml = renderPanel(false);
     expect(gatedHtml).toContain('Unavailable in this build');

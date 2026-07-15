@@ -38,6 +38,26 @@ describe('prompt templates', () => {
     expect(prompt).toContain('Task Monki independently verifies Git, tests, reviews, and delivery');
   });
 
+  it('derives modification guidance from run intent rather than the runtime sandbox label', () => {
+    const implementation = buildInitialRunPrompt({
+      task: taskFixture(),
+      worktree: worktreeFixture(),
+      settings: { sandbox: 'DANGER_FULL_ACCESS' },
+      readOnlyMode: false
+    });
+    const analysis = buildInitialRunPrompt({
+      task: taskFixture(),
+      worktree: worktreeFixture(),
+      settings: { sandbox: 'DANGER_FULL_ACCESS' },
+      readOnlyMode: true
+    });
+
+    expect(implementation).toContain('Only modify files inside this worktree.');
+    expect(implementation).not.toContain('Do not modify repository files.');
+    expect(analysis).toContain('Do not modify repository files.');
+    expect(analysis).not.toContain('Only modify files inside this worktree.');
+  });
+
   it('keeps follow-up and retry turns anchored to the same progress contract', () => {
     const prompt = buildContinuationPrompt({
       task: taskFixture(),

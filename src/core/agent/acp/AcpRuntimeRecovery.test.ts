@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
-import { GEMINI_ACP_PROFILE } from './AcpRuntimeProfiles';
+import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
 
@@ -24,7 +24,7 @@ describe('ACP cold recovery', () => {
     const storeDirectory = path.join(directory, 'store');
     const seedStore = new FileTaskStore(storeDirectory);
     const settings = {
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       model: 'default',
       modelProvider: 'google',
       sandbox: 'DANGER_FULL_ACCESS' as const,
@@ -36,7 +36,7 @@ describe('ACP cold recovery', () => {
       title: 'Cold ACP recovery',
       prompt: 'Do not replay this prompt after restart.',
       repositoryPath: directory,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });
     const { iteration, worktree } = await seedStore.createIterationAndWorktree({
@@ -49,7 +49,7 @@ describe('ACP cold recovery', () => {
       task,
       iteration,
       worktree,
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       requestedSettings: settings
     });
     const session = await seedStore.updateAgentSession(createdSession.id, {
@@ -58,7 +58,7 @@ describe('ACP cold recovery', () => {
       materialized: true
     });
     let server = await seedStore.createAgentServer({
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
       runtimeKind: 'ACP_AGENT',
       transport: 'STDIO',
       executable: 'gemini',
@@ -95,7 +95,7 @@ describe('ACP cold recovery', () => {
     const adapter = new AcpRuntimeAdapter(
       recoveredStore,
       appEvents,
-      GEMINI_ACP_PROFILE,
+      TEST_ACP_PROFILE,
       {
         cwd: directory,
         runtimeResolver: async () => {

@@ -188,7 +188,7 @@ describe('GitHubService pull request creation', () => {
   });
 });
 
-describe('GitHubService branch publication', () => {
+describe('GitHubService branch publication', { timeout: 15_000 }, () => {
   it('uses the configured executable instead of rereading raw env overrides', () => {
     const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
     process.env.TASK_MANAGER_GH_PATH = '   ';

@@ -4,10 +4,9 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel, AgentRuntimeCapabilities } from '../../shared/contracts';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
-import {
-  GEMINI_ACP_PROFILE,
-  acpCapabilities
-} from '../agent/acp/AcpRuntimeProfiles';
+import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
+import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
+import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 import {
   OPENCODE_RUNTIME_DESCRIPTOR,
   opencodeCapabilities
@@ -23,16 +22,16 @@ describe('TaskManagerService runtime execution defaults', () => {
       descriptor: OPENCODE_RUNTIME_DESCRIPTOR,
       capabilities: opencodeCapabilities(),
       expected: {
-        sandbox: 'WORKSPACE_WRITE',
+        sandbox: 'DANGER_FULL_ACCESS',
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
         networkAccess: true
       }
     },
     {
-      runtimeId: GEMINI_ACP_PROFILE.descriptor.id,
-      descriptor: GEMINI_ACP_PROFILE.descriptor,
-      capabilities: acpCapabilities(GEMINI_ACP_PROFILE),
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      descriptor: TEST_ACP_PROFILE.descriptor,
+      capabilities: acpCapabilities(TEST_ACP_PROFILE),
       expected: {
         sandbox: 'DANGER_FULL_ACCESS',
         approvalPolicy: 'on-request',
@@ -90,14 +89,14 @@ describe('TaskManagerService runtime execution defaults', () => {
     expect(catalog.runtimes.map((runtime) => runtime.preflight.runtime.id)).toEqual([
       'codex',
       'opencode',
-      'gemini-acp',
+      'antigravity',
       'grok-acp',
       'cursor-agent-acp',
       'claude-agent-acp'
     ]);
-    expect(catalog.runtimes.every((runtime) => runtime.preflight.ready === false)).toBe(
-      true
-    );
+    expect(
+      catalog.runtimes.every((runtime) => !runtime.preflight.readiness.canStart)
+    ).toBe(true);
     await service.shutdown();
   });
 
@@ -113,10 +112,8 @@ describe('TaskManagerService runtime execution defaults', () => {
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
     vi.spyOn(adapter, 'preflight').mockResolvedValue({
       runtime: OPENCODE_RUNTIME_DESCRIPTOR,
-      ready: true,
+      readiness: createRuntimeReadiness('READY', 'OpenCode is ready.'),
       capabilities: opencodeCapabilities(),
-      problems: [],
-      warnings: []
     });
     vi.spyOn(adapter, 'listModels').mockResolvedValue([
       model('opencode', 'openai')

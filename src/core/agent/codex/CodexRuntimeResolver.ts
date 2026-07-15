@@ -13,6 +13,7 @@ import {
   compareCodexVersions,
   parseCodexVersionOutput
 } from './CodexRuntimeVersion';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 
 export const TASK_MONKI_CODEX_BIN_ENV = 'TASK_MONKI_CODEX_BIN';
 
@@ -270,7 +271,10 @@ export async function probeCodexVersion(
 ): Promise<string> {
   const { stdout } = await execFilePortable(executable, ['--version'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: 10_000,
     maxBuffer: 1024 * 1024
   });
@@ -340,7 +344,10 @@ async function probeJsonRpcCapabilities(
   const child = spawnPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
-      ...sanitizeEnvironment(options.environment ?? process.env),
+      ...sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       CODEX_HOME: codexHome
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -595,7 +602,10 @@ async function execFileText(
   try {
     const { stdout, stderr } = await execFilePortable(executable, argv, {
       cwd: options.cwd,
-      env: sanitizeEnvironment(options.environment ?? process.env),
+      env: sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       timeout: 10_000,
       maxBuffer: 1024 * 1024
     });

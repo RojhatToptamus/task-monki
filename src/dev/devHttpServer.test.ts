@@ -122,18 +122,20 @@ describe('development HTTP server', () => {
     expect(updateAppSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('routes only typed native-session operations through the authenticated API', async () => {
+  it('routes only typed revisioned session controls through the authenticated API', async () => {
     const updateAgentNativeSession = vi.fn(async (input: unknown) => ({
       ...(input as Record<string, unknown>),
-      native: { modes: { currentModeId: 'plan' } }
+      native: { modes: { currentModeId: 'plan' } },
+      controls: { localSessionId: 'session-1', revision: 'revision-2', controls: [] }
     }));
     const running = await startServer({ updateAgentNativeSession });
     const request = {
-      operation: 'SET_MODE',
       taskId: 'task-1',
       sessionId: 'session-1',
       runtimeId: 'gemini-acp',
-      modeId: 'plan'
+      controlId: 'mode',
+      value: 'plan',
+      revision: 'revision-1'
     };
 
     const response = await fetch(`${running.baseUrl}/api/agent/session/native`, {

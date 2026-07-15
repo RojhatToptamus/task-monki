@@ -5,6 +5,91 @@ import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from './FileTaskStore';
 
 describe('FileTaskStore Phase 5 provider observations', () => {
+  it('structurally redacts provider credentials before journal persistence', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-redacted-journal-'));
+    const store = new FileTaskStore(dir);
+    const server = await store.createAgentServer({
+      runtimeId: 'grok',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: 'grok',
+      argv: ['agent', 'stdio']
+    });
+    const secrets = {
+      env: 'grok-env-secret',
+      header: 'grok-header-secret',
+      password: 'grok-url-password',
+      metadata: 'grok-metadata-secret'
+    };
+    const reference = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: '_x.ai/mcp/servers_updated',
+        params: {
+          servers: [
+            {
+              name: 'github',
+              env: [
+                {
+                  name: 'GITHUB_PERSONAL_ACCESS_TOKEN',
+                  value: secrets.env
+                },
+                { name: 'LOG_LEVEL', value: 'debug' }
+              ],
+              headers: [
+                {
+                  key: 'Authorization',
+                  value: `Bearer ${secrets.header}`
+                }
+              ],
+              endpoint: `https://mcp-user:${secrets.password}@example.test/rpc`
+            }
+          ],
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        }
+      }),
+      {
+        authorization: `Basic ${secrets.metadata}`,
+        tokenCount: 15
+      }
+    );
+
+    const persisted = await store.readProtocolMessage(reference);
+    const raw = JSON.parse(persisted.raw) as {
+      params: {
+        servers: Array<{
+          env: Array<{ name: string; value: string }>;
+          headers: Array<{ key: string; value: string }>;
+          endpoint: string;
+        }>;
+        usage: { totalTokens: number };
+      };
+    };
+    expect(raw.params.servers[0]?.env).toEqual([
+      { name: 'GITHUB_PERSONAL_ACCESS_TOKEN', value: '[REDACTED]' },
+      { name: 'LOG_LEVEL', value: 'debug' }
+    ]);
+    expect(raw.params.servers[0]?.headers[0]?.value).toBe('[REDACTED]');
+    expect(raw.params.servers[0]?.endpoint).toBe(
+      'https://[REDACTED]@example.test/rpc'
+    );
+    expect(raw.params.usage.totalTokens).toBe(15);
+    expect(persisted.metadata).toEqual({
+      authorization: '[REDACTED]',
+      tokenCount: 15
+    });
+
+    await store.close();
+    const journalBytes = await fs.readFile(server.protocolJournalPath, 'utf8');
+    for (const secret of Object.values(secrets)) {
+      expect(journalBytes).not.toContain(secret);
+    }
+    expect(journalBytes).toContain('GITHUB_PERSONAL_ACCESS_TOKEN');
+    expect(journalBytes).toContain('[REDACTED]');
+  });
+
   it('persists immutable provider observations and validates raw journal reads', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase5-store-'));
     const store = new FileTaskStore(dir);

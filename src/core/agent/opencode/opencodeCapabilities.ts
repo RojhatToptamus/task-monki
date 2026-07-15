@@ -25,8 +25,8 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
         {
           id: 'ask-for-approval',
           label: 'Ask for approval',
-          detail: 'Commands and edits require Task Monki approval; process network remains provider-controlled.',
-          sandbox: 'WORKSPACE_WRITE',
+          detail: 'Commands, edits, and external-directory access require Task Monki approval. The OpenCode process itself remains unconfined and its network is provider-controlled.',
+          sandbox: 'DANGER_FULL_ACCESS',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'user',
           networkAccess: 'REQUIRED'

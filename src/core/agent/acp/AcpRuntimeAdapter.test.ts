@@ -1,13 +1,18 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentInteractionService } from '../AgentInteractionService';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
-import { GEMINI_ACP_PROFILE, type AcpRuntimeProfile } from './AcpRuntimeProfiles';
+import type { AcpRpcClient } from './AcpRpcClient';
+import {
+  GROK_SESSION_MODEL_EXTENSION,
+  type AcpRuntimeProfile
+} from './AcpRuntimeProfiles';
+import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
 
@@ -20,17 +25,335 @@ afterEach(async () => {
 });
 
 describe('AcpRuntimeAdapter end-to-end', () => {
+  it.each([
+    {
+      catalog: 'missing',
+      initializeMeta: undefined,
+      expectedError: 'did not provide the required grok-build-acp/session-models@v1 initialize catalog'
+    },
+    {
+      catalog: 'malformed',
+      initializeMeta: {
+        modelState: {
+          currentModelId: 'grok-build',
+          availableModels: [{ modelId: 'grok-build' }]
+        }
+      },
+      expectedError: 'ACP provider extension session model is invalid'
+    }
+  ])(
+    'fails closed when the Grok initialize model catalog is $catalog',
+    async ({ catalog, initializeMeta, expectedError }) => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), `task-monki-grok-${catalog}-catalog-`)
+      );
+      temporaryDirectories.push(directory);
+      const agentScript = path.join(directory, 'agent.cjs');
+      const mutationMarker = path.join(directory, 'provider-mutations.txt');
+      await fs.writeFile(
+        agentScript,
+        invalidGrokCatalogAgentSource(mutationMarker, initializeMeta),
+        { mode: 0o600 }
+      );
+      const runtimeId = `test-grok-${catalog}`;
+      const profile: AcpRuntimeProfile = {
+        ...TEST_ACP_PROFILE,
+        descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+        defaultModelProvider: 'xai',
+        defaultModel: 'grok-build',
+        sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+        executableCandidates: [process.execPath],
+        argv: [agentScript]
+      };
+      const store = new FileTaskStore(path.join(directory, 'store'));
+      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+        cwd: directory,
+        requestTimeoutMs: 1_000,
+        runtimeResolver: async () => ({
+          executable: process.execPath,
+          version: process.version,
+          diagnostics: {
+            selectedExecutable: process.execPath,
+            selectedSource: 'test',
+            selectedVersion: process.version,
+            selectedLaunchArgv: [agentScript],
+            requiredCapabilities: ['ACP protocolVersion=1'],
+            probes: []
+          }
+        })
+      });
+      const settings = {
+        runtimeId,
+        modelProvider: 'xai',
+        sandbox: 'DANGER_FULL_ACCESS' as const,
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user' as const
+      };
+      const task = await store.createTask({
+        title: 'Reject invalid Grok catalog',
+        prompt: 'This prompt must not reach the provider.',
+        repositoryPath: directory,
+        runtimeId,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/grok-${catalog}-catalog`,
+        worktreePath: directory,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId,
+        requestedSettings: settings
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        requestedSettings: settings
+      });
+
+      try {
+        await adapter.initialize();
+        await expect(
+          adapter.resolveExecution({ settings, attachments: [] })
+        ).rejects.toThrow(expectedError);
+        await expect(adapter.listModels()).rejects.toThrow(expectedError);
+        await expect(
+          adapter.startTurn({
+            localRunId: run.id,
+            session: { localSessionId: session.id },
+            mode: 'IMPLEMENTATION',
+            prompt: task.prompt,
+            authoritativeGoal: task.prompt,
+            settings,
+            attachments: []
+          })
+        ).rejects.toThrow(expectedError);
+        await expect(fs.readFile(mutationMarker, 'utf8')).rejects.toMatchObject({
+          code: 'ENOENT'
+        });
+        expect((await store.getAgentSession(session.id))?.providerSessionId).toBeUndefined();
+      } finally {
+        await adapter.shutdown();
+      }
+    }
+  );
+
+  it('preserves deferred explicit models for ACP profiles without an initialize catalog', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-generic-acp-model-')
+    );
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const adapter = new AcpRuntimeAdapter(
+      store,
+      new AppEventBus(),
+      TEST_ACP_PROFILE,
+      {
+        cwd: directory,
+        runtimeResolver: async () => ({
+          executable: process.execPath,
+          version: process.version,
+          diagnostics: {
+            selectedExecutable: process.execPath,
+            selectedSource: 'test',
+            selectedVersion: process.version,
+            selectedLaunchArgv: [],
+            requiredCapabilities: ['ACP protocolVersion=1'],
+            probes: []
+          }
+        })
+      }
+    );
+    const settings = {
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      model: 'provider-specific-model',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+
+    try {
+      await adapter.initialize();
+      await expect(
+        adapter.resolveExecution({ settings, attachments: [] })
+      ).resolves.toMatchObject({
+        settings: {
+          model: 'provider-specific-model',
+          modelProvider: 'test-provider'
+        },
+        model: {
+          model: 'provider-specific-model',
+          modelProvider: 'test-provider',
+          native: { source: 'explicit-runtime-setting' }
+        }
+      });
+      expect((await store.snapshot()).agentServers).toEqual([]);
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('keeps the session/new model observation separate from an acknowledged Grok model resolution', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-model-attestation-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'agent.cjs');
+    await fs.writeFile(
+      agentScript,
+      fakeAgentSource(directory, 'grok-composer-2.5-fast'),
+      { mode: 0o600 }
+    );
+    const runtimeId = 'test-acp-model-attestation';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      defaultModelProvider: 'xai',
+      defaultModel: 'grok-build',
+      sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 2_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings = {
+      runtimeId,
+      model: 'grok-build',
+      modelProvider: 'xai',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const task = await store.createTask({
+      title: 'Attest Grok model selection',
+      prompt: 'Use Grok Build.',
+      repositoryPath: directory,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-model-attestation',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const localSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+
+    try {
+      await adapter.initialize();
+      const session = await adapter.createSession({
+        runtimeId,
+        localSessionId: localSession.id,
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        worktreePath: worktree.worktreePath,
+        settings
+      });
+      expect(session.observedSettings).toMatchObject({
+        model: 'grok-build',
+        modelProvider: 'xai'
+      });
+
+      const snapshot = await store.snapshot();
+      const observations = snapshot.agentSettingsObservations.filter(
+        (observation) => observation.sessionId === session.id
+      );
+      const initial = observations.find(
+        (observation) => observation.source === 'THREAD_START_RESPONSE'
+      );
+      const resolved = observations.find(
+        (observation) => observation.source === 'TASK_MONKI_RESOLUTION'
+      );
+      expect(initial).toMatchObject({
+        settings: { model: 'grok-composer-2.5-fast', modelProvider: 'xai' },
+        rawMessage: { direction: 'INBOUND' }
+      });
+      expect(resolved).toMatchObject({
+        settings: { model: 'grok-build', modelProvider: 'xai' },
+        rawMessage: { direction: 'INBOUND' },
+        detail: expect.stringContaining('not a provider settings observation')
+      });
+      expect(resolved!.rawMessage!.sequence).toBeGreaterThan(
+        initial!.rawMessage!.sequence
+      );
+
+      const server = snapshot.agentServers.find(
+        (candidate) => candidate.id === initial!.rawMessage!.serverInstanceId
+      );
+      expect(server).toBeDefined();
+      const journalRecords = (await fs.readFile(server!.protocolJournalPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { sequence: number; raw: string });
+      const referencedMessage = (sequence: number) =>
+        JSON.parse(
+          journalRecords.find((record) => record.sequence === sequence)!.raw
+        ) as Record<string, unknown>;
+      expect(referencedMessage(initial!.rawMessage!.sequence)).toMatchObject({
+        result: {
+          sessionId: 'provider-session-1',
+          models: { currentModelId: 'grok-composer-2.5-fast' }
+        }
+      });
+      expect(referencedMessage(resolved!.rawMessage!.sequence)).toMatchObject({
+        result: { _meta: { model: { Ok: 'grok-build' } } }
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
   it('runs session -> prompt -> stream -> exact permission -> terminal without client tools', async () => {
+    const opaqueProviderSecret = 'm7Qp4Vz9Lk2Nc8';
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-adapter-'));
     temporaryDirectories.push(directory);
     const agentScript = path.join(directory, 'agent.cjs');
     await fs.writeFile(agentScript, fakeAgentSource(directory), { mode: 0o600 });
     const profile: AcpRuntimeProfile = {
-      ...GEMINI_ACP_PROFILE,
-      descriptor: { ...GEMINI_ACP_PROFILE.descriptor, id: 'test-acp' },
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp' },
+      defaultModelProvider: 'xai',
+      defaultModel: 'grok-build',
+      sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
       executableCandidates: [process.execPath],
       argv: [agentScript],
-      allowedEnvironmentKeys: []
+      environmentPolicy: {
+        contractId: 'task-monki/test-acp-environment@v1',
+        allowedKeys: ['GEMINI_API_KEY'],
+        sensitiveKeys: ['GEMINI_API_KEY']
+      }
     };
     const store = new FileTaskStore(path.join(directory, 'store'));
     const events = new AppEventBus();
@@ -40,10 +363,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const resolvedExecutableOverrides: Array<string | undefined> = [];
     const adapter = new AcpRuntimeAdapter(store, events, profile, {
       cwd: directory,
-      // Production uses a 30-second ACP request deadline. Keep the integration
-      // fixture realistic because every inbound message is journaled before
-      // the terminal response can settle the prompt mutation.
-      requestTimeoutMs: 30_000,
+      environment: { ...process.env, GEMINI_API_KEY: opaqueProviderSecret },
+      // Keep control calls bounded without making child startup sensitive to
+      // full-suite scheduler contention. AcpRpcClient.test.ts proves that
+      // prompt completion can explicitly outlive this bound.
+      requestTimeoutMs: 2_000,
       interruptCompletionTimeoutMs: 25,
       runtimeResolver: async (_runtimeProfile, options) => {
         resolutionCalls += 1;
@@ -64,8 +388,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     });
     const settings = {
       runtimeId: 'test-acp',
-      model: 'default',
-      modelProvider: 'google',
+      model: 'grok-composer-2.5-fast',
+      modelProvider: 'xai',
       sandbox: 'DANGER_FULL_ACCESS' as const,
       networkAccess: true,
       approvalPolicy: 'on-request',
@@ -99,10 +423,82 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       ).rejects.toThrow('managed attachments are unavailable');
       expect(resolutionCalls).toBe(0);
       await adapter.initialize();
-      await adapter.preflight();
-      await adapter.listModels();
-      await adapter.resolveExecution({ settings, attachments: [] });
-      expect((await store.snapshot()).agentServers).toHaveLength(0);
+      expect(await adapter.preflight()).toMatchObject({
+        readiness: {
+          status: 'DISCOVERED',
+          canStart: true,
+          checks: {
+            discovery: 'FOUND',
+            compatibility: 'UNKNOWN',
+            initialization: 'NOT_STARTED'
+          }
+        }
+      });
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({
+          id: 'test-acp:xai/grok-composer-2.5-fast',
+          model: 'grok-composer-2.5-fast',
+          isDefault: false
+        }),
+        expect.objectContaining({
+          id: 'test-acp:xai/grok-build',
+          model: 'grok-build',
+          isDefault: true
+        })
+      ]);
+      await expect(
+        adapter.resolveExecution({
+          settings: { ...settings, model: undefined },
+          attachments: []
+        })
+      ).resolves.toMatchObject({
+        settings: { model: 'grok-build', modelProvider: 'xai' },
+        model: { model: 'grok-build', isDefault: true }
+      });
+      await expect(
+        adapter.resolveExecution({ settings, attachments: [] })
+      ).resolves.toMatchObject({
+        settings: {
+          model: 'grok-composer-2.5-fast',
+          modelProvider: 'xai'
+        },
+        model: { model: 'grok-composer-2.5-fast', isDefault: false }
+      });
+      await expect(
+        adapter.resolveExecution({
+          settings: { ...settings, model: 'not-advertised' },
+          attachments: []
+        })
+      ).rejects.toThrow(
+        'did not advertise model not-advertised in its grok-build-acp/session-models@v1 initialize catalog'
+      );
+      await expect(
+        adapter.resolveExecution({
+          settings: {
+            ...settings,
+            model: undefined,
+            modelProvider: 'not-advertised'
+          },
+          attachments: []
+        })
+      ).rejects.toThrow('models are owned by provider xai, not not-advertised');
+      const resolutionSnapshot = await store.snapshot();
+      expect(resolutionSnapshot.agentServers).toHaveLength(1);
+      const resolutionJournal = await fs.readFile(
+        resolutionSnapshot.agentServers[0]!.protocolJournalPath,
+        'utf8'
+      );
+      const resolutionMethods = resolutionJournal
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(JSON.parse(line).raw) as { method?: string })
+        .map((message) => message.method)
+        .filter((method): method is string => Boolean(method));
+      expect(
+        resolutionMethods.filter((method) =>
+          ['session/new', 'session/prompt', 'session/set_model'].includes(method)
+        )
+      ).toEqual([]);
       expect(resolutionCalls).toBe(1);
       expect(resolvedExecutableOverrides).toEqual([process.execPath]);
       const attachmentRun = await store.createRun({
@@ -136,7 +532,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         })
       ).rejects.toThrow('managed attachments are unavailable');
       expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
-      expect((await store.snapshot()).agentServers).toHaveLength(0);
+      expect((await store.snapshot()).agentServers).toHaveLength(1);
       await store.updateRun(attachmentRun.id, {
         status: 'FAILED',
         endedAt: new Date().toISOString()
@@ -165,6 +561,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       } finally {
         store.updateAgentSession = originalSessionUpdate;
       }
+      const quarantinedOwnershipServer = (await store.snapshot()).agentServers[0];
+      expect(quarantinedOwnershipServer).toMatchObject({ status: 'EXITED' });
+      expect((await store.getAgentSession(localSession.id))?.providerSessionId).toBeUndefined();
       const session = await adapter.createSession({
         runtimeId: 'test-acp',
         localSessionId: localSession.id,
@@ -177,11 +576,27 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(session).toMatchObject({
         providerSessionId: 'provider-session-1',
         runtimeId: 'test-acp',
-        status: 'IDLE'
+        status: 'IDLE',
+        observedSettings: { model: 'grok-composer-2.5-fast' }
       });
-      expect((await store.snapshot()).agentServers).toHaveLength(1);
+      expect(await adapter.preflight()).toMatchObject({
+        readiness: {
+          status: 'READY',
+          canStart: true,
+          checks: {
+            compatibility: 'COMPATIBLE',
+            initialization: 'INITIALIZED',
+            authentication: 'PROVIDER_MANAGED',
+            modelCatalog: 'AVAILABLE'
+          }
+        }
+      });
+      const creationServers = (await store.snapshot()).agentServers;
+      expect(creationServers).toHaveLength(2);
+      const activeCreationServer = creationServers.find((server) => server.status === 'READY');
+      expect(activeCreationServer).toBeDefined();
       const creationJournal = await fs.readFile(
-        (await store.snapshot()).agentServers[0]!.protocolJournalPath,
+        activeCreationServer!.protocolJournalPath,
         'utf8'
       );
       expect(
@@ -189,23 +604,185 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           .trim()
           .split('\n')
           .map((line) => JSON.parse(JSON.parse(line).raw) as { method?: string })
-          .filter((message) => message.method === 'session/new')
+          .filter((message) => message.method === 'session/resume')
       ).toHaveLength(1);
-      await expect(adapter.setSessionMode(session.id, 'plan')).resolves.toMatchObject({
-        modes: { currentModeId: 'plan' }
+      expect(
+        creationJournal
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(JSON.parse(line).raw))
+      ).toContainEqual({
+        jsonrpc: '2.0',
+        id: expect.any(Number),
+        method: 'session/set_model',
+        params: {
+          sessionId: 'provider-session-1',
+          modelId: 'grok-composer-2.5-fast'
+        }
       });
-      await expect(
-        adapter.setSessionConfigOption(session.id, 'telemetry', false)
-      ).resolves.toMatchObject({
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({
+          id: 'test-acp:xai/grok-composer-2.5-fast',
+          model: 'grok-composer-2.5-fast',
+          isDefault: false,
+          native: expect.objectContaining({
+            source: 'provider-initialize-extension'
+          })
+        }),
+        expect.objectContaining({
+          id: 'test-acp:xai/grok-build',
+          model: 'grok-build',
+          isDefault: true,
+          native: expect.objectContaining({
+            source: 'provider-initialize-extension'
+          })
+        })
+      ]);
+      const sessionNativeState = JSON.stringify(await adapter.readNativeState());
+      expect(sessionNativeState).toContain('grok-composer-2.5-fast');
+      expect(sessionNativeState).toContain('grok-build');
+      await expect(adapter.capabilities()).resolves.toMatchObject({
+        extensions: {
+          nativeSessionModels: {
+            maturity: 'experimental',
+            detail: expect.stringContaining('grok-build-acp/session-models@v1')
+          }
+        }
+      });
+      const [initialControls] = await adapter.listSessionControls();
+      expect(initialControls).toMatchObject({
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId,
+        controls: expect.arrayContaining([
+          expect.objectContaining({ id: 'model', kind: 'SELECT' }),
+          expect.objectContaining({ id: 'mode', kind: 'SELECT' }),
+          expect.objectContaining({ id: 'config:telemetry', kind: 'BOOLEAN' })
+        ])
+      });
+      expect(initialControls?.controls.map((control) => control.id)).not.toContain(
+        'config:model'
+      );
+      await expect(adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: 'model',
+        value: 'not-advertised',
+        revision: initialControls!.revision
+      })).rejects.toThrow('invalid choice');
+      await expect(adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: 'model',
+        value: 'grok-build',
+        revision: 'stale-revision'
+      })).rejects.toThrow('controls changed');
+      const modelUpdate = await adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: 'model',
+        value: 'grok-build',
+        revision: initialControls!.revision
+      });
+      expect(modelUpdate.native).toMatchObject({
+        models: { currentModelId: 'grok-build' }
+      });
+      expect(await store.getAgentSession(session.id)).toMatchObject({
+        observedSettings: {
+          model: 'grok-build',
+          runtimeOptions: {
+            'test-acp': { models: { currentModelId: 'grok-build' } }
+          }
+        }
+      });
+      expect(observedEvents).toContainEqual(
+        expect.objectContaining({
+          type: 'runtime.updated',
+          payload: expect.objectContaining({
+            nativeSessions: expect.arrayContaining([
+              expect.objectContaining({
+                models: expect.objectContaining({ currentModelId: 'grok-build' })
+              })
+            ])
+          })
+        })
+      );
+      const modeUpdate = await adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: 'mode',
+        value: 'plan',
+        revision: modelUpdate.controls.revision
+      });
+      expect(modeUpdate.native).toMatchObject({ modes: { currentModeId: 'plan' } });
+      const telemetryUpdate = await adapter.applySessionControl({
+        localSessionId: session.id,
+        controlId: 'config:telemetry',
+        value: false,
+        revision: modeUpdate.controls.revision
+      });
+      expect(telemetryUpdate.native).toMatchObject({
         configOptions: expect.arrayContaining([
           expect.objectContaining({ id: 'telemetry', currentValue: false })
         ])
+      });
+      const unsafePermissionRun = await store.createRun({
+        task,
+        session: (await store.getAgentSession(session.id))!,
+        mode: 'FOLLOW_UP',
+        prompt: 'unsafe permission identifiers',
+        requestedSettings: settings
+      });
+      await adapter.startTurn({
+        localRunId: unsafePermissionRun.id,
+        session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+        mode: 'FOLLOW_UP',
+        prompt: 'unsafe permission identifiers',
+        authoritativeGoal: task.prompt,
+        settings
+      });
+      await waitFor(async () =>
+        (await store.getRun(unsafePermissionRun.id))?.status === 'COMPLETED'
+          ? true
+          : undefined
+      );
+      expect(
+        (await store.snapshot()).interactionRequests.filter(
+          (interaction) => interaction.runId === unsafePermissionRun.id
+        )
+      ).toHaveLength(0);
+      const delayedRun = await store.createRun({
+        task,
+        session: (await store.getAgentSession(session.id))!,
+        mode: 'FOLLOW_UP',
+        prompt: 'delayed terminal',
+        requestedSettings: settings
+      });
+      await adapter.startTurn({
+        localRunId: delayedRun.id,
+        session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+        mode: 'FOLLOW_UP',
+        prompt: 'delayed terminal',
+        authoritativeGoal: task.prompt,
+        settings
+      });
+      await waitFor(async () => {
+        const current = await store.getRun(delayedRun.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
       });
       await adapter.releaseSession({
         localSessionId: session.id,
         providerSessionId: session.providerSessionId
       });
       expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect(await adapter.readNativeState()).toMatchObject({
+        sessions: [
+          expect.objectContaining({
+            localSessionId: session.id,
+            providerSessionId: session.providerSessionId,
+            models: expect.objectContaining({ currentModelId: 'grok-build' }),
+            modes: expect.objectContaining({ currentModeId: 'plan' }),
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: 'telemetry', currentValue: false })
+            ])
+          })
+        ]
+      });
       const run = await store.createRun({
         task,
         session: (await store.getAgentSession(session.id))!,
@@ -239,7 +816,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           providerSessionId: session.providerSessionId
         })
       ).rejects.toThrow('while run');
-      const originalServerId = (await store.snapshot()).agentServers[0]!.id;
+      const originalServerId = (await store.snapshot()).agentServers.find(
+        (server) => server.status === 'RUNNING'
+      )!.id;
       await adapter.configureRuntime({
         executable: '/deferred/custom-acp',
         restart: true
@@ -282,7 +861,10 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             event.type === 'AGENT_INTERACTION_RESOLVED' && event.runId === run.id
         )
       ).toHaveLength(1);
-      const journal = await fs.readFile(snapshot.agentServers[0]!.protocolJournalPath, 'utf8');
+      const journal = await fs.readFile(
+        snapshot.agentServers.find((server) => server.id === originalServerId)!.protocolJournalPath,
+        'utf8'
+      );
       const messages = journal
         .trim()
         .split('\n')
@@ -302,12 +884,17 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             event.payload.status === 'completed'
         )
           ? true
-          : undefined
+          : undefined,
+        // Recovery is durable before application-scoped process quarantine
+        // finishes. Allow the real child close handler enough wall-clock time
+        // when the full Vitest matrix is scheduling other process-heavy suites.
+        20_000
       );
       expect(await adapter.readNativeState()).toMatchObject({
         clientCapabilities: {
           fs: { readTextFile: false, writeTextFile: false },
-          terminal: false
+          terminal: false,
+          session: { configOptions: { boolean: {} } }
         }
       });
       await waitFor(async () =>
@@ -471,8 +1058,13 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(staleInteraction?.status).toBe('STALE');
       await waitFor(async () => {
         const current = await store.getRun(persistenceRun.id);
-        return current?.status === 'COMPLETED' ? current : undefined;
+        return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
       });
+      await store.updateRun(persistenceRun.id, {
+        status: 'INTERRUPTED',
+        endedAt: new Date().toISOString()
+      });
+      await store.updateAgentSession(session.id, { status: 'IDLE' });
 
       const failedRun = await store.createRun({
         task,
@@ -512,6 +1104,25 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             ['PENDING', 'RESPONDING'].includes(interaction.status)
         )
       ).toHaveLength(0);
+      const failedRecord = (await store.getRun(failedRun.id))!;
+      const failedArtifact = (await store.snapshot()).artifacts.find(
+        (artifact) => artifact.id === failedRecord.finalArtifactId
+      );
+      expect(failedArtifact).toBeDefined();
+      const failedArtifactBody = await fs.readFile(failedArtifact!.path, 'utf8');
+      const failedEvents = (await store.snapshot()).events.filter(
+        (event) => event.runId === failedRun.id
+      );
+      expect(failedArtifactBody).toContain('[REDACTED]');
+      expect(failedArtifactBody).not.toContain(opaqueProviderSecret);
+      expect(JSON.stringify(failedEvents)).not.toContain(opaqueProviderSecret);
+      expect(JSON.stringify(observedEvents)).not.toContain(opaqueProviderSecret);
+      const failedServer = (await store.snapshot()).agentServers.find(
+        (server) => server.id === failedRecord.serverInstanceId
+      );
+      expect(failedServer).toBeDefined();
+      const failedJournal = await fs.readFile(failedServer!.protocolJournalPath, 'utf8');
+      expect(failedJournal).not.toContain(opaqueProviderSecret);
 
       const malformedRun = await store.createRun({
         task,
@@ -557,6 +1168,9 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         settings
       });
       expect(interruptedTurn.providerTurnId).toBeDefined();
+      const quarantinedClient = (adapter as unknown as { boundClient?: AcpRpcClient })
+        .boundClient;
+      expect(quarantinedClient).toBeDefined();
       await adapter.interruptTurn({
         session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
         providerTurnId: interruptedTurn.providerTurnId!
@@ -578,18 +1192,134 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           : undefined
       );
       expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
-      // The fake agent responds after Task Monki's ambiguity deadline. The
-      // late response must not silently reverse the recovery decision.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect((await store.getRun(interruptedRun.id))?.status).toBe('RECOVERY_REQUIRED');
+      const quarantinedServerId = (await store.getRun(interruptedRun.id))?.serverInstanceId;
+      expect(quarantinedServerId).toBeDefined();
+      expect(quarantinedClient!.serverInstanceId).toBe(quarantinedServerId);
+      await waitFor(async () =>
+        (await store.getAgentServer(quarantinedServerId!))?.status === 'EXITED'
+          ? true
+          : undefined
+      );
 
-      // Isolate the following process-loss scenario from this deliberately
-      // unresolved cancellation.
+      // Resolve the old run locally, then start replacement work immediately.
+      // The fake process schedules a late old-turn chunk after the cancellation
+      // deadline. Quarantine must kill that process so the chunk cannot be
+      // attributed to this replacement run (ACP updates have no prompt ID).
       await store.updateRun(interruptedRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
       });
       await store.updateAgentSession(session.id, { status: 'IDLE' });
+
+      const replacementRun = await store.createRun({
+        task,
+        session: (await store.getAgentSession(session.id))!,
+        mode: 'FOLLOW_UP',
+        prompt: 'replacement after ambiguous cancel',
+        requestedSettings: settings
+      });
+      const replacementTurn = await adapter.startTurn({
+        localRunId: replacementRun.id,
+        session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+        mode: 'FOLLOW_UP',
+        prompt: 'replacement after ambiguous cancel',
+        authoritativeGoal: task.prompt,
+        settings
+      });
+      expect(replacementTurn.providerTurnId).not.toContain(quarantinedServerId!);
+      const replacementInteraction = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.runId === replacementRun.id && interaction.status === 'PENDING'
+          )
+      );
+
+      // A closed client can still have already queued EventEmitter callbacks.
+      // Explicitly deliver an old-generation chunk and permission after the
+      // replacement process is active; neither may cross the process fence.
+      const lateNotificationParams = {
+        sessionId: 'provider-session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'late-old-message',
+          content: { type: 'text', text: 'late injected output from old ACP generation' }
+        }
+      };
+      const latePermissionRequest = {
+        jsonrpc: '2.0' as const,
+        id: 'late-old-permission',
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'provider-session-1',
+          toolCall: {
+            toolCallId: 'late-old-tool',
+            title: 'Late old tool',
+            kind: 'execute',
+            rawInput: {
+              command: 'dangerous old command',
+              cwd: worktree.worktreePath
+            }
+          },
+          options: [{ optionId: 'late-old-reject', name: 'Reject', kind: 'reject_once' }]
+        }
+      };
+      const lateNotificationRaw = await store.appendProtocolMessage(
+        quarantinedServerId!,
+        'INBOUND',
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: lateNotificationParams
+        })
+      );
+      const latePermissionRaw = await store.appendProtocolMessage(
+        quarantinedServerId!,
+        'INBOUND',
+        JSON.stringify(latePermissionRequest)
+      );
+      quarantinedClient!.events.emit(
+        'notification',
+        'session/update',
+        lateNotificationParams,
+        lateNotificationRaw
+      );
+      quarantinedClient!.events.emit('request', latePermissionRequest, latePermissionRaw);
+      await (adapter as unknown as { inboundQueue: Promise<void> }).inboundQueue;
+
+      const afterLateGeneration = await store.snapshot();
+      expect(
+        afterLateGeneration.interactionRequests.some(
+          (interaction) => interaction.providerRequestId === 'late-old-permission'
+        )
+      ).toBe(false);
+      expect(
+        afterLateGeneration.agentItems
+          .filter((item) => item.runId === replacementRun.id)
+          .map(itemPayloadText)
+          .join('')
+      ).not.toContain('late injected output from old ACP generation');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await interactionService.respond({
+        taskId: task.id,
+        runId: replacementRun.id,
+        interactionRequestId: replacementInteraction.id,
+        decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+      });
+      const replacementCompleted = await waitFor(async () => {
+        const current = await store.getRun(replacementRun.id);
+        return current?.status === 'COMPLETED' ? current : undefined;
+      });
+      expect(replacementCompleted.finalMessage).toBe('Implemented safely.');
+      const replacementItems = (await store.snapshot()).agentItems.filter(
+        (item) => item.runId === replacementRun.id
+      );
+      expect(replacementItems.map(itemPayloadText).join('')).not.toContain(
+        'late output from cancelled prompt'
+      );
+      expect(replacementItems.map(itemPayloadText).join('')).not.toContain(
+        'late injected output from old ACP generation'
+      );
+      expect((await store.getRun(interruptedRun.id))?.status).toBe('INTERRUPTED');
 
       const ambiguousRun = await store.createRun({
         task,
@@ -627,7 +1357,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const submittedPrompts = protocolMessages.filter(
         (message) => message.method === 'session/prompt'
       );
-      expect(submittedPrompts).toHaveLength(7);
+      expect(submittedPrompts).toHaveLength(10);
       expect(
         protocolMessages.filter((message) => message.method === 'session/close')
       ).toHaveLength(2);
@@ -645,7 +1375,479 @@ describe('AcpRuntimeAdapter end-to-end', () => {
   }, 60_000);
 });
 
-async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 3_000): Promise<T> {
+describe('AcpRuntimeAdapter process safety fence', () => {
+  it('retains a failed quarantine and rejects every later runtime operation', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const server = await store.createAgentServer({
+      runtimeId: 'test-acp-fence',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-fence' }
+    };
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory
+    });
+    const shutdownFailure = new Error('old ACP child may still be live');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: 'ACP process termination could not be confirmed.',
+      shutdown: vi.fn().mockRejectedValue(shutdownFailure)
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      quarantineRuntimeAfterAmbiguousMutation(
+        operation: string,
+        detail: string
+      ): Promise<void>;
+      waitForRuntimeQuarantine(): Promise<void>;
+    };
+    internals.supervisor = fakeSupervisor;
+
+    await expect(
+      internals.quarantineRuntimeAfterAmbiguousMutation(
+        'session/prompt',
+        'Delivery could not be confirmed.'
+      )
+    ).rejects.toThrow('safety-fenced until Task Monki restarts');
+    expect(internals.supervisor).toBe(fakeSupervisor);
+    expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+    await expect(internals.waitForRuntimeQuarantine()).rejects.toThrow(
+      'safety-fenced until Task Monki restarts'
+    );
+    await expect(
+      adapter.configureRuntime({ executable: '/replacement/acp', restart: true })
+    ).rejects.toThrow('safety-fenced until Task Monki restarts');
+    expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AcpRuntimeAdapter permission materialization', () => {
+  it.each([
+    {
+      boundary: 'atomic activation before publication',
+      failure: 'injected permission activation failure',
+      failDuringPersistence: false
+    },
+    {
+      boundary: 'atomic boundary persistence',
+      failure: 'injected permission boundary persistence failure',
+      failDuringPersistence: true
+    }
+  ])(
+    'cancels and quarantines when $boundary cannot be persisted',
+    async ({ boundary, failure, failDuringPersistence }) => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-acp-permission-persistence-')
+      );
+      temporaryDirectories.push(directory);
+      const agentScript = path.join(directory, 'permission-agent.cjs');
+      await fs.writeFile(agentScript, permissionMaterializationAgentSource(), {
+        mode: 0o600
+      });
+
+      const runtimeId = `test-acp-permission-${
+        failDuringPersistence ? 'persistence' : 'activation'
+      }`;
+      const profile: AcpRuntimeProfile = {
+        ...TEST_ACP_PROFILE,
+        descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+        executableCandidates: [process.execPath],
+        argv: [agentScript]
+      };
+      const store = new FileTaskStore(path.join(directory, 'store'));
+      const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+        cwd: directory,
+        requestTimeoutMs: 1_000,
+        runtimeResolver: async () => ({
+          executable: process.execPath,
+          version: process.version,
+          diagnostics: {
+            selectedExecutable: process.execPath,
+            selectedSource: 'test',
+            selectedVersion: process.version,
+            selectedLaunchArgv: [agentScript],
+            requiredCapabilities: ['ACP protocolVersion=1'],
+            probes: []
+          }
+        })
+      });
+      const settings = {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider',
+        sandbox: 'DANGER_FULL_ACCESS' as const,
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user' as const
+      };
+      const task = await store.createTask({
+        title: 'Permission materialization failure',
+        prompt: 'Request a permission and remain blocked.',
+        repositoryPath: directory,
+        runtimeId,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/acp-permission-${task.id}`,
+        worktreePath: directory,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId,
+        requestedSettings: settings
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        requestedSettings: settings
+      });
+
+      const persistenceSpies: Array<{ mockRestore(): void }> = [];
+      if (!failDuringPersistence) {
+        persistenceSpies.push(
+          vi
+            .spyOn(store, 'createInteractionRequest')
+            .mockRejectedValueOnce(new Error(failure))
+        );
+      } else {
+        const createInteractionRequest = store.createInteractionRequest.bind(store);
+        persistenceSpies.push(
+          vi
+            .spyOn(store, 'createInteractionRequest')
+            .mockImplementationOnce(async (input) => {
+              const internals = store as unknown as {
+                persistQueued(): Promise<void>;
+              };
+              const persist = vi
+                .spyOn(internals, 'persistQueued')
+                .mockRejectedValueOnce(new Error(failure));
+              try {
+                return await createInteractionRequest(input);
+              } finally {
+                persist.mockRestore();
+              }
+            })
+        );
+      }
+
+      const readProtocolMessages = async () => {
+        const snapshot = await store.snapshot();
+        return (
+          await Promise.all(
+            snapshot.agentServers.map((server) =>
+              fs.readFile(server.protocolJournalPath, 'utf8')
+            )
+          )
+        ).flatMap((journal) =>
+          journal
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map(
+              (line) =>
+                JSON.parse(JSON.parse(line).raw) as {
+                  id?: string | number;
+                  method?: string;
+                  result?: { outcome?: { outcome?: string } };
+                }
+            )
+        );
+      };
+
+      try {
+        await adapter.initialize();
+        await adapter.startTurn({
+          localRunId: run.id,
+          session: { localSessionId: session.id },
+          mode: 'IMPLEMENTATION',
+          prompt: task.prompt,
+          authoritativeGoal: task.prompt,
+          settings,
+          attachments: []
+        });
+
+        const recovered = await waitFor(async () => {
+          const [currentRun, currentSession, snapshot] = await Promise.all([
+            store.getRun(run.id),
+            store.getAgentSession(session.id),
+            store.snapshot()
+          ]);
+          const runtimeStopped = !snapshot.agentServers.some((server) =>
+            ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(
+              server.status
+            )
+          );
+          const unresolvedInteraction = snapshot.interactionRequests.some(
+            (interaction) =>
+              interaction.runId === run.id &&
+              ['PENDING', 'RESPONDING'].includes(interaction.status)
+          );
+          if (
+            currentRun?.status === 'RECOVERY_REQUIRED' &&
+            currentRun.recoveryState === 'REQUIRES_USER_ACTION' &&
+            currentSession?.status === 'NOT_LOADED' &&
+            runtimeStopped &&
+            !unresolvedInteraction
+          ) {
+            return { run: currentRun, session: currentSession, snapshot };
+          }
+          return undefined;
+        });
+
+        expect(recovered.run.terminalReason).toContain(failure);
+        expect(recovered.session.status).toBe('NOT_LOADED');
+        expect(
+          recovered.snapshot.events.filter(
+            (event) => event.runId === run.id && event.type === 'AGENT_MUTATION_AMBIGUOUS'
+          )
+        ).toHaveLength(1);
+        expect(
+          recovered.snapshot.interactionRequests.filter(
+            (interaction) =>
+              interaction.runId === run.id &&
+              ['PENDING', 'RESPONDING'].includes(interaction.status)
+          )
+        ).toHaveLength(0);
+
+        const protocolMessages = await readProtocolMessages();
+        expect(
+          protocolMessages.filter((message) => message.method === 'session/prompt')
+        ).toHaveLength(1);
+        expect(
+          protocolMessages.filter(
+            (message) =>
+              message.id === 'permission-persistence-1' &&
+              message.result?.outcome?.outcome === 'cancelled'
+          )
+        ).toHaveLength(1);
+        expect(
+          recovered.snapshot.agentServers.some((server) =>
+            ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(
+              server.status
+            )
+          )
+        ).toBe(false);
+
+        const internals = adapter as unknown as {
+          boundClient?: AcpRpcClient;
+          activePromptRunIds: Set<string>;
+        };
+        expect(internals.boundClient).toBeUndefined();
+        expect(internals.activePromptRunIds.has(run.id)).toBe(false);
+
+        const reconciliation = await adapter.reconcile();
+        expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
+        expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
+        expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+        expect(
+          (await readProtocolMessages()).filter(
+            (message) => message.method === 'session/prompt'
+          )
+        ).toHaveLength(1);
+      } finally {
+        for (const spy of persistenceSpies) spy.mockRestore();
+        await adapter.shutdown();
+      }
+    },
+    30_000
+  );
+});
+
+describe('AcpRuntimeAdapter terminal persistence', () => {
+  it('fails closed without replay after consuming a prompt response whose final artifact cannot be persisted', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-terminal-persistence-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'terminal-agent.cjs');
+    await fs.writeFile(agentScript, terminalPersistenceAgentSource(), { mode: 0o600 });
+
+    const runtimeId = 'test-acp-terminal-persistence';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const appEvents = new AppEventBus();
+    const observedEvents: Array<{ type: string; runId?: string }> = [];
+    appEvents.on((event) => observedEvents.push(event));
+    const adapter = new AcpRuntimeAdapter(store, appEvents, profile, {
+      cwd: directory,
+      requestTimeoutMs: 1_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'test-provider',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const task = await store.createTask({
+      title: 'Terminal persistence failure',
+      prompt: 'Return a definitive terminal response.',
+      repositoryPath: directory,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-terminal-persistence',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings
+    });
+
+    const originalWriteFinalArtifact = store.writeFinalArtifact.bind(store);
+    let injectedFailures = 0;
+    const artifactSpy = vi
+      .spyOn(store, 'writeFinalArtifact')
+      .mockImplementation(async (taskId, runId, content) => {
+        if (runId === run.id && injectedFailures === 0) {
+          injectedFailures += 1;
+          throw new Error('injected post-response final artifact persistence failure');
+        }
+        return originalWriteFinalArtifact(taskId, runId, content);
+      });
+
+    try {
+      await adapter.initialize();
+      await adapter.startTurn({
+        localRunId: run.id,
+        session: { localSessionId: session.id },
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        authoritativeGoal: task.prompt,
+        settings,
+        attachments: []
+      });
+
+      const recovered = await waitFor(async () => {
+        const [currentRun, currentSession, snapshot] = await Promise.all([
+          store.getRun(run.id),
+          store.getAgentSession(session.id),
+          store.snapshot()
+        ]);
+        const runtimeStopped = !snapshot.agentServers.some((server) =>
+          ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status)
+        );
+        if (
+          currentRun?.status === 'RECOVERY_REQUIRED' &&
+          currentRun.recoveryState === 'REQUIRES_USER_ACTION' &&
+          currentSession?.status === 'NOT_LOADED' &&
+          runtimeStopped
+        ) {
+          return { run: currentRun, session: currentSession };
+        }
+        return undefined;
+      });
+
+      expect(injectedFailures).toBe(1);
+      expect(recovered.run.terminalReason).toContain(
+        'injected post-response final artifact persistence failure'
+      );
+      expect(recovered.session.status).toBe('NOT_LOADED');
+      expect(
+        (await store.snapshot()).events.filter(
+          (event) =>
+            event.runId === run.id && event.type === 'AGENT_MUTATION_AMBIGUOUS'
+        )
+      ).toHaveLength(1);
+      expect(
+        (await store.snapshot()).events.filter(
+          (event) =>
+            event.runId === run.id &&
+            ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(
+              event.type
+            )
+        )
+      ).toHaveLength(0);
+      expect(
+        observedEvents.filter(
+          (event) => event.runId === run.id && event.type === 'run.terminal'
+        )
+      ).toHaveLength(0);
+
+      const readPromptRequests = async () => {
+        const snapshot = await store.snapshot();
+        const protocolMessages = (
+          await Promise.all(
+            snapshot.agentServers.map((server) =>
+              fs.readFile(server.protocolJournalPath, 'utf8')
+            )
+          )
+        ).flatMap((journal) =>
+          journal
+            .trim()
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(JSON.parse(line).raw) as { method?: string })
+        );
+        return protocolMessages.filter((message) => message.method === 'session/prompt');
+      };
+      expect(await readPromptRequests()).toHaveLength(1);
+
+      const reconciliation = await adapter.reconcile();
+      expect(reconciliation.recoveryRequiredSessionIds).toContain(session.id);
+      expect((await store.getRun(run.id))?.status).toBe('RECOVERY_REQUIRED');
+      expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
+      expect(await readPromptRequests()).toHaveLength(1);
+      expect(
+        (await store.snapshot()).agentServers.some((server) =>
+          ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status)
+        )
+      ).toBe(false);
+    } finally {
+      artifactSpy.mockRestore();
+      await adapter.shutdown();
+    }
+  });
+});
+
+async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 10_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await read();
@@ -661,12 +1863,116 @@ function itemPayloadText(item: { payload: unknown } | undefined): string {
   return typeof text === 'string' ? text : '';
 }
 
-function fakeAgentSource(cwd: string): string {
+function invalidGrokCatalogAgentSource(
+  mutationMarker: string,
+  initializeMeta: Record<string, unknown> | undefined
+): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'invalid-grok-catalog', version: '1.0.0' },
+      ${initializeMeta ? `_meta: ${JSON.stringify(initializeMeta)}` : ''}
+    }});
+    return;
+  }
+  fs.appendFileSync(${JSON.stringify(mutationMarker)}, message.method + '\\n');
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function terminalPersistenceAgentSource(): string {
+  return `
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'terminal-persistence-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'terminal-persistence-session'
+    }});
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
+}
+
+function permissionMaterializationAgentSource(): string {
+  return `
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'permission-materialization-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: 'permission-materialization-session'
+    }});
+    return;
+  }
+  if (message.method === 'session/prompt') {
+    send({
+      jsonrpc: '2.0',
+      id: 'permission-persistence-1',
+      method: 'session/request_permission',
+      params: {
+        sessionId: 'permission-materialization-session',
+        toolCall: {
+          toolCallId: 'permission-tool-1',
+          title: 'Run tests',
+          kind: 'execute',
+          rawInput: { command: 'npm test' }
+        },
+        options: [
+          { optionId: 'permission-allow-1', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'permission-reject-1', name: 'Reject', kind: 'reject_once' }
+        ]
+      }
+    });
+    return;
+  }
+});
+`;
+}
+
+function fakeAgentSource(cwd: string, initialModelId = 'grok-build'): string {
   return `
 const readline = require('node:readline');
 const input = readline.createInterface({ input: process.stdin });
 let promptRequestId;
 let permissionCount = 0;
+let currentModelId = ${JSON.stringify(initialModelId)};
+let telemetryEnabled = true;
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
 input.on('line', (line) => {
   const message = JSON.parse(line);
@@ -677,7 +1983,24 @@ input.on('line', (line) => {
         promptCapabilities: {},
         sessionCapabilities: { resume: {}, close: {} }
       },
-      agentInfo: { name: 'fake-acp', version: '1.0.0' }
+      agentInfo: { name: 'fake-acp', version: '1.0.0' },
+      _meta: {
+        modelState: {
+          currentModelId,
+          availableModels: [
+            {
+              modelId: 'grok-composer-2.5-fast',
+              name: 'Composer 2.5',
+              description: 'Cursor latest coding model'
+            },
+            {
+              modelId: 'grok-build',
+              name: 'Grok Build',
+              description: 'Best for advanced coding tasks'
+            }
+          ]
+        }
+      }
     }});
     return;
   }
@@ -689,6 +2012,21 @@ input.on('line', (line) => {
         availableModes: [
           { id: 'code', name: 'Code' },
           { id: 'plan', name: 'Plan' }
+        ]
+      },
+      models: {
+        currentModelId,
+        availableModels: [
+          {
+            modelId: 'grok-composer-2.5-fast',
+            name: 'Composer 2.5',
+            description: 'Cursor latest coding model'
+          },
+          {
+            modelId: 'grok-build',
+            name: 'Grok Build',
+            description: 'Best for advanced coding tasks'
+          }
         ]
       },
       configOptions: [
@@ -707,10 +2045,30 @@ input.on('line', (line) => {
   if (message.method === 'session/resume' || message.method === 'session/load') {
     send({ jsonrpc: '2.0', id: message.id, result: {
       sessionId: message.params.sessionId,
-      configOptions: [{
-        id: 'model', name: 'Model', category: 'model', type: 'select',
-        currentValue: 'default', options: [{ value: 'default', name: 'Provider default' }]
-      }]
+      modes: {
+        currentModeId: 'code',
+        availableModes: [
+          { id: 'code', name: 'Code' },
+          { id: 'plan', name: 'Plan' }
+        ]
+      },
+      models: {
+        currentModelId,
+        availableModels: [
+          { modelId: 'grok-composer-2.5-fast', name: 'Composer 2.5' },
+          { modelId: 'grok-build', name: 'Grok Build' }
+        ]
+      },
+      configOptions: [
+        {
+          id: 'model', name: 'Model', category: 'model', type: 'select',
+          currentValue: 'default', options: [{ value: 'default', name: 'Provider default' }]
+        },
+        {
+          id: 'telemetry', name: 'Telemetry', category: 'other', type: 'boolean',
+          currentValue: telemetryEnabled
+        }
+      ]
     }});
     return;
   }
@@ -718,7 +2076,15 @@ input.on('line', (line) => {
     send({ jsonrpc: '2.0', id: message.id, result: {} });
     return;
   }
+  if (message.method === 'session/set_model') {
+    currentModelId = message.params.modelId;
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      _meta: { model: { Ok: currentModelId } }
+    }});
+    return;
+  }
   if (message.method === 'session/set_config_option') {
+    if (message.params.configId === 'telemetry') telemetryEnabled = message.params.value;
     send({ jsonrpc: '2.0', id: message.id, result: {
       configOptions: [
         {
@@ -727,7 +2093,7 @@ input.on('line', (line) => {
         },
         {
           id: 'telemetry', name: 'Telemetry', category: 'other', type: 'boolean',
-          currentValue: message.params.value
+          currentValue: telemetryEnabled
         }
       ]
     }});
@@ -739,14 +2105,28 @@ input.on('line', (line) => {
   }
   if (message.method === 'session/prompt') {
     promptRequestId = message.id;
+    if (JSON.stringify(message.params.prompt).includes('delayed terminal')) {
+      setTimeout(() => send({
+        jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' }
+      }), 250);
+      return;
+    }
     if (JSON.stringify(message.params.prompt).includes('hang for interrupt')) {
       return;
     }
     if (JSON.stringify(message.params.prompt).includes('ambiguous disconnect')) {
       process.exit(17);
     }
+    if (JSON.stringify(message.params.prompt).includes('unsafe permission identifiers')) {
+      send({ jsonrpc: '2.0', id: process.env.GEMINI_API_KEY, method: 'session/request_permission', params: {
+        sessionId: 'provider-session-1',
+        toolCall: { toolCallId: 'tool-safe', title: 'Unsafe provider request', kind: 'execute', rawInput: { command: 'npm test' } },
+        options: [{ optionId: 'allow-safe', name: 'Allow once', kind: 'allow_once' }]
+      }});
+      return;
+    }
     if (JSON.stringify(message.params.prompt).includes('definitive failure')) {
-      send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'provider rejected prompt' } });
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'provider rejected prompt ' + process.env.GEMINI_API_KEY } });
       return;
     }
     if (JSON.stringify(message.params.prompt).includes('malformed terminal response')) {
@@ -790,12 +2170,27 @@ input.on('line', (line) => {
     return;
   }
   if (message.method === 'session/cancel') {
+    const cancelledPromptRequestId = promptRequestId;
     setTimeout(() => send({
-      jsonrpc: '2.0', id: promptRequestId, result: { stopReason: 'cancelled' }
+      jsonrpc: '2.0', method: 'session/update', params: {
+        sessionId: 'provider-session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'message-late-cancelled',
+          content: { type: 'text', text: 'late output from cancelled prompt' }
+        }
+      }
+    }), 60);
+    setTimeout(() => send({
+      jsonrpc: '2.0', id: cancelledPromptRequestId, result: { stopReason: 'cancelled' }
     }), 75);
     return;
   }
   if (typeof message.id === 'string' && message.id.startsWith('permission-native-') && message.result) {
+    send({ jsonrpc: '2.0', id: promptRequestId, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  if (message.id === process.env.GEMINI_API_KEY && message.result?.outcome?.outcome === 'cancelled') {
     send({ jsonrpc: '2.0', id: promptRequestId, result: { stopReason: 'end_turn' } });
   }
 });

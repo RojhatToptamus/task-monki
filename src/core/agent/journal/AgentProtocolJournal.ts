@@ -9,6 +9,7 @@ import {
   isOwnedByCurrentUser,
   syncDirectoryIfSupported
 } from '../../filesystem/secureFilesystem';
+import { redactProtocolJournalRecord } from './AgentProtocolRedaction';
 
 const SERVER_INSTANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -79,7 +80,7 @@ export interface AgentProtocolJournalRecord {
 }
 
 /**
- * Per-server segmented raw protocol storage.
+ * Per-server segmented, structurally redacted protocol storage.
  *
  * Appends for one server are serialized and references use a global sequence.
  * Segment zero keeps the historical `<server>.ndjson` name; newer references
@@ -122,13 +123,20 @@ export class AgentProtocolJournal {
       return Promise.reject(new Error('Protocol journal is closed.'));
     }
     assertSafeServerInstanceId(serverInstanceId);
+    let redacted: AgentProtocolJournalRecord;
+    try {
+      this.assertUnredactedInputSize(raw, metadata);
+      redacted = redactProtocolJournalRecord(raw, metadata);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     return this.enqueue(serverInstanceId, async () => {
       this.throwBackgroundError(serverInstanceId);
       const reference = await this.appendSerialized(
         serverInstanceId,
         direction,
-        raw,
-        metadata
+        redacted.raw,
+        redacted.metadata
       );
       const state = this.writers.get(serverInstanceId);
       if (!state) {
@@ -424,6 +432,19 @@ export class AgentProtocolJournal {
     }
     if (byteLength > this.options.maxSegmentBytes) {
       throw new Error('Protocol journal entry cannot fit in one segment.');
+    }
+  }
+
+  private assertUnredactedInputSize(
+    raw: string,
+    metadata?: Record<string, unknown>
+  ): void {
+    const metadataJson = metadata === undefined ? '' : JSON.stringify(metadata);
+    const byteLength = Buffer.byteLength(raw) + Buffer.byteLength(metadataJson);
+    if (byteLength > this.options.maxEntryBytes) {
+      throw new Error(
+        `Protocol journal entry exceeds the ${this.options.maxEntryBytes}-byte limit.`
+      );
     }
   }
 

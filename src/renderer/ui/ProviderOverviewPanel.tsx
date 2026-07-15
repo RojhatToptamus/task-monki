@@ -7,12 +7,17 @@ import type {
   AgentSettingsObservationRecord,
   AgentUsageSnapshotRecord,
   RunRecord,
-  Task
+  Task,
+  UpdateAgentNativeSessionRequest
 } from '../../shared/contracts';
 import {
   PROVIDER_SETTING_FIELDS
 } from '../model/providerSettings';
 import { shouldShowProviderGoalDiagnostics } from '../model/debugDiagnostics';
+import {
+  selectNativeSessionControls,
+  type NativeSessionControls
+} from '../model/providerNativeSession';
 import { RawProviderMessage } from './RawProviderMessage';
 import { humanizeEnum } from './display';
 
@@ -26,6 +31,7 @@ interface ProviderOverviewPanelProps {
   runtimeState?: AgentRuntimeState;
   server?: AgentServerInstance;
   onSyncGoal(taskId: string, sessionId: string): Promise<void>;
+  onUpdateNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
 }
 
 export function ProviderOverviewPanel({
@@ -37,7 +43,8 @@ export function ProviderOverviewPanel({
   settingsObservations,
   runtimeState,
   server,
-  onSyncGoal
+  onSyncGoal,
+  onUpdateNativeSession
 }: ProviderOverviewPanelProps) {
   const [syncing, setSyncing] = useState(false);
   const runtime = runtimeState?.preflight.runtime;
@@ -54,6 +61,10 @@ export function ProviderOverviewPanel({
   const rejectedRuntimeProbes =
     runtimeResolution?.probes.filter((probe) => !probe.compatible) ?? [];
   const showGoalDiagnostics = shouldShowProviderGoalDiagnostics(goal, Boolean(session));
+  const nativeSessionControls = useMemo(
+    () => selectNativeSessionControls(runtimeState?.sessionControls, session?.id),
+    [runtimeState?.sessionControls, session?.id]
+  );
   const hasProviderSignal = Boolean(
     runtimeState ||
       server ||
@@ -97,9 +108,7 @@ export function ProviderOverviewPanel({
               {humanizeEnum(
                 server?.status ??
                   (runtimeState
-                    ? runtimeState.preflight.ready
-                      ? 'READY'
-                      : 'NOT_READY'
+                    ? runtimeState.preflight.readiness.status
                     : 'UNKNOWN')
               )}
             </span>
@@ -152,6 +161,29 @@ export function ProviderOverviewPanel({
             </>
           ) : null}
         </dl>
+        {runtimeState?.preflight.readiness.diagnostics.length ? (
+          <details className="raw-provider-event">
+            <summary>Show runtime diagnostics</summary>
+            {runtimeState.preflight.readiness.diagnostics.map((diagnostic) => (
+              <dl
+                className="provider-item-kv"
+                key={`${diagnostic.code}:${diagnostic.message}:${diagnostic.detail ?? ''}`}
+              >
+                <dt>Code</dt>
+                <dd>{diagnostic.code}</dd>
+                <dt>Stage</dt>
+                <dd>{humanizeEnum(diagnostic.stage)}</dd>
+                <dt>Severity</dt>
+                <dd>{humanizeEnum(diagnostic.severity)}</dd>
+                <dt>Message</dt>
+                <dd>
+                  {diagnostic.message}
+                  {diagnostic.detail ? <small>{diagnostic.detail}</small> : null}
+                </dd>
+              </dl>
+            ))}
+          </details>
+        ) : null}
         {runtimeResolution ? (
           <details className="raw-provider-event">
             <summary>Show runtime resolution probes</summary>
@@ -262,6 +294,15 @@ export function ProviderOverviewPanel({
             );
           })}
         </div>
+        {nativeSessionControls && session && runtime ? (
+          <NativeSessionControlsPanel
+            taskId={task.id}
+            session={session}
+            runtimeId={runtime.id}
+            controls={nativeSessionControls}
+            onUpdate={onUpdateNativeSession}
+          />
+        ) : null}
         {runtimeState?.native !== undefined ? (
           <details className="raw-provider-event">
             <summary>Show runtime-native metadata</summary>
@@ -295,6 +336,86 @@ export function ProviderOverviewPanel({
         )}
       </div>
     </section>
+  );
+}
+
+function NativeSessionControlsPanel({
+  taskId,
+  session,
+  runtimeId,
+  controls,
+  onUpdate
+}: {
+  taskId: string;
+  session: AgentSessionRecord;
+  runtimeId: string;
+  controls: NativeSessionControls;
+  onUpdate(input: UpdateAgentNativeSessionRequest): Promise<void>;
+}) {
+  const [updating, setUpdating] = useState<string>();
+  const [error, setError] = useState<string>();
+  const configurable = ['IDLE', 'NOT_LOADED'].includes(session.status);
+  const hasControls = controls.controls.length > 0;
+  if (!hasControls) return null;
+
+  const update = async (key: string, input: UpdateAgentNativeSessionRequest) => {
+    setUpdating(key);
+    setError(undefined);
+    try {
+      await onUpdate(input);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setUpdating(undefined);
+    }
+  };
+
+  return (
+    <div className="provider-native-controls">
+      <div className="provider-section__heading">
+        <h4>Native session controls</h4>
+        {!configurable ? <small>Available while the session is idle</small> : null}
+      </div>
+      <div className="settings-table">
+        {controls.controls.map((control) => (
+          <label className="settings-table__row" key={control.id} title={control.description}>
+            <strong>{control.label}</strong>
+            <select
+              value={String(control.value)}
+              disabled={!configurable || !control.mutable || Boolean(updating)}
+              onChange={(event) =>
+                void update(control.id, {
+                  taskId,
+                  sessionId: session.id,
+                  runtimeId,
+                  controlId: control.id,
+                  value:
+                    control.kind === 'BOOLEAN'
+                      ? event.target.value === 'true'
+                      : event.target.value,
+                  revision: controls.revision
+                })
+              }
+            >
+              {control.kind === 'BOOLEAN' ? (
+                <>
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </>
+              ) : (
+                control.choices.map((choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+        ))}
+      </div>
+      {updating ? <p className="muted">Updating provider session…</p> : null}
+      {error ? <p className="provider-warning">{error}</p> : null}
+    </div>
   );
 }
 

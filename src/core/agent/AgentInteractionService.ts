@@ -53,6 +53,17 @@ export class AgentInteractionService {
       throw new Error('Interaction request no longer matches its provider run.');
     }
 
+    const expectedRunStatus =
+      interaction.type === 'USER_INPUT' ? 'AWAITING_USER_INPUT' : 'AWAITING_APPROVAL';
+    if (
+      !isNonGrantingDecision(input.decision.action) &&
+      (run.status !== expectedRunStatus || session.status !== expectedRunStatus)
+    ) {
+      throw new Error(
+        `Interaction request ${interaction.id} cannot resume run ${run.id} while its run/session awaiting state is ${run.status}/${session.status}.`
+      );
+    }
+
     validateInteractionDecision(
       interaction,
       input.decision,
@@ -156,4 +167,10 @@ export class AgentInteractionService {
       at: new Date().toISOString()
     });
   }
+}
+
+function isNonGrantingDecision(
+  action: RespondToInteractionRequest['decision']['action']
+): boolean {
+  return action === 'DECLINE' || action === 'DECLINE_FOR_SESSION' || action === 'CANCEL';
 }

@@ -81,8 +81,12 @@ export async function resolveOpenCodeRuntime(
             maxBuffer: 1024 * 1024
           })
         : undefined;
+      const helpOutput = help ? `${help.stdout}\n${help.stderr}` : '';
       const hasHttpServer = Boolean(
-        help && /\bserve\b/u.test(help.stdout) && /--hostname/u.test(help.stdout) && /--port/u.test(help.stdout)
+        help &&
+          /\bopencode\s+serve\b/u.test(helpOutput) &&
+          /--hostname\b/u.test(helpOutput) &&
+          /--port\b/u.test(helpOutput)
       );
       const accepted = compatible && hasHttpServer;
       probes.push({
@@ -92,7 +96,7 @@ export async function resolveOpenCodeRuntime(
         compatible: accepted,
         version,
         launchArgv: accepted
-          ? ['serve', '--hostname', '127.0.0.1', '--port', '0']
+          ? ['serve', '--hostname', '127.0.0.1', '--port', '<allocated-loopback-port>']
           : undefined,
         launchForm: accepted ? 'native-http-sse' : undefined,
         missingCapabilities: hasHttpServer ? undefined : ['opencode serve --hostname/--port'],
@@ -111,7 +115,13 @@ export async function resolveOpenCodeRuntime(
             selectedExecutable: candidate.executable,
             selectedSource: candidate.source,
             selectedVersion: version,
-            selectedLaunchArgv: ['serve', '--hostname', '127.0.0.1', '--port', '0'],
+            selectedLaunchArgv: [
+              'serve',
+              '--hostname',
+              '127.0.0.1',
+              '--port',
+              '<allocated-loopback-port>'
+            ],
             requiredCapabilities: [...REQUIRED_OPENCODE_HTTP_CAPABILITIES],
             probes
           }
@@ -147,11 +157,16 @@ export async function probeOpenCodeVersion(
     timeout: 10_000,
     maxBuffer: 1024 * 1024
   });
-  const match = result.stdout.trim().match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:[-+\s]|$)/u);
-  if (!match) {
+  const stdoutVersions = semanticVersionsIn(result.stdout);
+  if (stdoutVersions.length === 1) return stdoutVersions[0];
+  if (stdoutVersions.length > 1) {
+    throw new Error('OpenCode returned an ambiguous version string.');
+  }
+  const stderrVersions = semanticVersionsIn(result.stderr);
+  if (stderrVersions.length !== 1) {
     throw new Error('OpenCode returned an unrecognized version string.');
   }
-  return match[1];
+  return stderrVersions[0];
 }
 
 export function isCompatibleOpenCodeVersion(
@@ -205,6 +220,14 @@ function compareVersion(
   right: { major: number; minor: number; patch: number }
 ): number {
   return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
+}
+
+function semanticVersionsIn(value: string): string[] {
+  const versions = new Set<string>();
+  for (const match of value.matchAll(/(?:^|\s)v?(\d+\.\d+\.\d+)(?=[-+\s]|$)/gu)) {
+    versions.add(match[1]);
+  }
+  return [...versions];
 }
 
 function supportedVersionMessage(minimum = MINIMUM_OPENCODE_VERSION, maximumMajor = MAXIMUM_OPENCODE_MAJOR): string {

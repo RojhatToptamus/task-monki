@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   interactionActionsForAcpOptions,
   modelsFromAcpConfig,
+  observedSettingsFromAcpState,
   permissionOutcomeForDecision,
   requestedNativeConfigValues
 } from './AcpEventMapper';
-import { GEMINI_ACP_PROFILE } from './AcpRuntimeProfiles';
+import { GROK_ACP_PROFILE } from './AcpRuntimeProfiles';
+import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { assertAcpExecutionPolicy } from './AcpRuntimeAdapter';
 import type { AcpPermissionOption } from './AcpProtocol';
 
@@ -50,22 +52,23 @@ describe('ACP event mapping', () => {
 
   it('derives runtime-qualified models from native ACP selectors losslessly', () => {
     const models = modelsFromAcpConfig(
-      GEMINI_ACP_PROFILE,
+      TEST_ACP_PROFILE,
       [
         {
           sessionId: 'session-1',
           modes: null,
+          models: null,
           configOptions: [
             {
               id: 'model',
               name: 'Model',
               category: 'model',
               type: 'select',
-              currentValue: 'gemini-3-pro',
+              currentValue: 'test-model-pro',
               options: [
                 {
-                  value: 'gemini-3-pro',
-                  name: 'Gemini 3 Pro',
+                  value: 'test-model-pro',
+                  name: 'Test Model Pro',
                   description: 'Provider description',
                   _meta: { tier: 'native' }
                 }
@@ -78,31 +81,189 @@ describe('ACP event mapping', () => {
     );
     expect(models).toEqual([
       expect.objectContaining({
-        id: 'gemini-acp:google/gemini-3-pro',
-        modelProvider: 'google',
-        model: 'gemini-3-pro',
+        id: 'test-acp:test-provider/test-model-pro',
+        modelProvider: 'test-provider',
+        model: 'test-model-pro',
         inputModalities: ['text', 'image'],
         native: expect.objectContaining({ configId: 'model' })
       })
     ]);
   });
 
+  it('maps and observes captured Grok session models as first-class models', () => {
+    const state = {
+      sessionId: 'session-grok',
+      modes: null,
+      models: {
+        currentModelId: 'grok-build',
+        availableModels: [
+          {
+            modelId: 'grok-composer-2.5-fast',
+            name: 'Composer 2.5',
+            description: 'Cursor latest coding model'
+          },
+          {
+            modelId: 'grok-build',
+            name: 'Grok Build',
+            description: 'Best for advanced coding tasks'
+          }
+        ]
+      },
+      configOptions: []
+    };
+    const profile = {
+      ...GROK_ACP_PROFILE,
+      defaultModel: 'grok-build'
+    };
+
+    expect(modelsFromAcpConfig(profile, [state], ['text'])).toEqual([
+      expect.objectContaining({
+        id: 'grok-acp:xai/grok-build',
+        model: 'grok-build',
+        isDefault: true
+      }),
+      expect.objectContaining({
+        id: 'grok-acp:xai/grok-composer-2.5-fast',
+        modelProvider: 'xai',
+        model: 'grok-composer-2.5-fast',
+        displayName: 'Composer 2.5',
+        isDefault: false,
+        native: expect.objectContaining({ source: 'session-models' })
+      })
+    ]);
+    expect(
+      observedSettingsFromAcpState(profile, state, {
+        model: 'grok-composer-2.5-fast',
+        modelProvider: 'xai'
+      })
+    ).toMatchObject({
+      runtimeId: 'grok-acp',
+      model: 'grok-build',
+      modelProvider: 'xai',
+      runtimeOptions: {
+        'grok-acp': {
+          models: { currentModelId: 'grok-build' }
+        }
+      }
+    });
+  });
+
+  it('keeps the model union and fallback stable across live-session order', () => {
+    const profile = {
+      ...GROK_ACP_PROFILE,
+      defaultModel: 'provider-default-not-advertised'
+    };
+    const sessions: Parameters<typeof modelsFromAcpConfig>[1] = [
+      {
+        sessionId: 'session-z',
+        modes: null,
+        models: {
+          currentModelId: 'model-z',
+          availableModels: [
+            { modelId: 'model-z', name: 'Model Z' },
+            { modelId: 'model-a', name: 'Native Model A' }
+          ]
+        },
+        configOptions: []
+      },
+      {
+        sessionId: 'session-a',
+        modes: null,
+        models: null,
+        configOptions: [
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'model-b',
+            options: [
+              { value: 'model-b', name: 'Model B' },
+              { value: 'model-a', name: 'Config Model A' }
+            ]
+          }
+        ]
+      }
+    ];
+
+    const forward = modelsFromAcpConfig(profile, sessions, ['text']);
+    const reversed = modelsFromAcpConfig(profile, [...sessions].reverse(), ['text']);
+
+    expect(reversed).toEqual(forward);
+    expect(forward.map((model) => model.model)).toEqual([
+      'model-a',
+      'model-b',
+      'model-z'
+    ]);
+    expect(forward.every((model) => !model.isDefault)).toBe(true);
+    expect(forward[0]).toMatchObject({
+      displayName: 'Native Model A',
+      native: { source: 'session-models' }
+    });
+  });
+
+  it('never promotes credential-bearing provider values into model routing or settings', () => {
+    const profile = {
+      ...GROK_ACP_PROFILE,
+      defaultModel: 'safe-model'
+    };
+    const state: Parameters<typeof modelsFromAcpConfig>[1][number] = {
+      sessionId: 'session-sensitive-models',
+      modes: null,
+      models: {
+        currentModelId: 'AWS_SESSION_TOKEN=secret-marker',
+        availableModels: [
+          { modelId: 'safe-model', name: 'Safe model' },
+          {
+            modelId: 'HASHICORP_TOKEN=secret-marker',
+            name: 'Credential-shaped model'
+          }
+        ]
+      },
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'AWS_SESSION_TOKEN=secret-marker',
+          options: [
+            { value: 'safe-config-model', name: 'Safe config model' },
+            {
+              value: 'HASURA_GRAPHQL_ADMIN_SECRET=secret-marker',
+              name: 'Credential-shaped option'
+            }
+          ]
+        }
+      ]
+    };
+
+    const models = modelsFromAcpConfig(profile, [state], ['text']);
+    expect(models.map((model) => model.model)).toEqual([
+      'safe-config-model',
+      'safe-model'
+    ]);
+    const observed = observedSettingsFromAcpState(profile, state, {});
+    expect(observed.model).toBeUndefined();
+    expect(JSON.stringify({ models, observed })).not.toContain('secret-marker');
+  });
+
   it('keeps runtime-native values scoped to their runtime', () => {
     expect(
-      requestedNativeConfigValues('gemini-acp', {
+      requestedNativeConfigValues(TEST_ACP_PROFILE.descriptor.id, {
         runtimeOptions: {
-          'gemini-acp': {
-            configValues: { model: 'gemini-pro', telemetry: false }
+          [TEST_ACP_PROFILE.descriptor.id]: {
+            configValues: { model: 'test-model', telemetry: false }
           },
           'grok-acp': { configValues: { model: 'grok-code' } }
         }
       })
-    ).toEqual({ model: 'gemini-pro', telemetry: false });
+    ).toEqual({ model: 'test-model', telemetry: false });
   });
 
   it('fails closed instead of silently downgrading Task Monki security settings', () => {
     expect(() =>
-      assertAcpExecutionPolicy(GEMINI_ACP_PROFILE, {
+      assertAcpExecutionPolicy(TEST_ACP_PROFILE, {
         sandbox: 'WORKSPACE_WRITE',
         networkAccess: false,
         approvalPolicy: 'on-request',
@@ -110,7 +271,7 @@ describe('ACP event mapping', () => {
       })
     ).toThrow('cannot enforce');
     expect(() =>
-      assertAcpExecutionPolicy(GEMINI_ACP_PROFILE, {
+      assertAcpExecutionPolicy(TEST_ACP_PROFILE, {
         sandbox: 'DANGER_FULL_ACCESS',
         networkAccess: true,
         approvalPolicy: 'on-request',
@@ -118,15 +279,26 @@ describe('ACP event mapping', () => {
       })
     ).not.toThrow();
     expect(() =>
-      assertAcpExecutionPolicy(GEMINI_ACP_PROFILE, {
+      assertAcpExecutionPolicy(TEST_ACP_PROFILE, {
         sandbox: 'DANGER_FULL_ACCESS',
         networkAccess: true,
         approvalPolicy: 'on-request',
         approvalsReviewer: 'user',
         runtimeOptions: {
-          'gemini-acp': { apiKey: 'sk-secret-value-123' }
+          [TEST_ACP_PROFILE.descriptor.id]: { apiKey: 'sk-secret-value-123' }
         }
       })
     ).toThrow('cannot contain credentials');
+    expect(() =>
+      assertAcpExecutionPolicy(TEST_ACP_PROFILE, {
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        runtimeOptions: {
+          'grok-acp': { apiKey: 'provider-owned-value' }
+        }
+      })
+    ).not.toThrow();
   });
 });

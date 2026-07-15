@@ -7,6 +7,12 @@ import type {
   AgentRuntimeState
 } from '../../shared/agent';
 import type { AgentRuntimeAdapter } from './AgentRuntimeAdapter';
+import {
+  appendRuntimeDiagnostic,
+  createRuntimeReadiness,
+  errorDiagnostic,
+  warningDiagnostic
+} from './AgentRuntimeReadiness';
 
 export interface AgentRuntimeInitializationFailure {
   runtimeId: AgentRuntimeId;
@@ -158,21 +164,30 @@ export class AgentRuntimeRegistry {
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const initializationError = this.initializationFailures.get(adapter.descriptor.id);
+      const messages = [initializationError?.message, error.message].filter(
+        (message, index, all): message is string =>
+          Boolean(message) && all.indexOf(message) === index
+      );
       preflight = {
         runtime: adapter.descriptor,
-        ready: false,
-        capabilities: await safeCapabilities(adapter),
-        problems: [initializationError?.message, error.message].filter(
-          (message, index, messages): message is string =>
-            Boolean(message) && messages.indexOf(message) === index
+        readiness: createRuntimeReadiness(
+          'FAILED',
+          messages[0] ?? 'Runtime health could not be determined.',
+          {
+            diagnostics: messages.map((message) =>
+              errorDiagnostic('RUNTIME_PREFLIGHT_FAILED', 'HEALTH', message)
+            ),
+            nextAction: { kind: 'RETRY', label: 'Retry discovery' }
+          }
         ),
-        warnings: []
+        capabilities: await safeCapabilities(adapter),
       };
     }
 
     let models: AgentRuntimeState['models'] = [];
     let native: AgentRuntimeState['native'];
-    if (preflight.ready) {
+    let sessionControls: AgentRuntimeState['sessionControls'];
+    if (preflight.readiness.canStart) {
       try {
         models = await adapter.listModels();
         const modelIds = new Set<string>();
@@ -194,32 +209,59 @@ export class AgentRuntimeRegistry {
           }
           modelIds.add(model.id);
         }
+        // Model discovery may be the runtime's first live operation. Re-read
+        // readiness so the catalog reports the state proven by that operation
+        // instead of the passive discovery snapshot captured above.
+        preflight = await adapter.preflight();
+        assertPreflightIdentity(adapter, preflight);
+        if (!preflight.readiness.canStart) {
+          models = [];
+        }
       } catch (cause) {
-        preflight = {
-          ...preflight,
-          ready: false,
-          problems: [
-            ...preflight.problems,
-            cause instanceof Error ? cause.message : String(cause)
-          ]
-        };
+        const message = cause instanceof Error ? cause.message : String(cause);
+        try {
+          const latestPreflight = await adapter.preflight();
+          assertPreflightIdentity(adapter, latestPreflight);
+          preflight = latestPreflight;
+        } catch {
+          // Retain the last valid snapshot when the adapter cannot report a
+          // newer typed failure state.
+        }
+        preflight = modelCatalogFailurePreflight(preflight, message);
         models = [];
       }
     }
-    if (preflight.ready && adapter.readNativeState) {
+    if (preflight.readiness.canStart && adapter.readNativeState) {
       try {
         native = await adapter.readNativeState();
       } catch (cause) {
-        preflight = {
-          ...preflight,
-          warnings: [
-            ...preflight.warnings,
-            `Native runtime metadata is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`
-          ]
-        };
+        preflight = appendRuntimeDiagnostic(
+          preflight,
+          warningDiagnostic(
+            'NATIVE_METADATA_UNAVAILABLE',
+            'HEALTH',
+            'Native runtime metadata is unavailable.',
+            cause instanceof Error ? cause.message : String(cause)
+          )
+        );
       }
     }
-    return { preflight, models, native, refreshedAt };
+    if (preflight.readiness.canStart && adapter.listSessionControls) {
+      try {
+        sessionControls = await adapter.listSessionControls();
+      } catch (cause) {
+        preflight = appendRuntimeDiagnostic(
+          preflight,
+          warningDiagnostic(
+            'SESSION_CONTROLS_UNAVAILABLE',
+            'HEALTH',
+            'Provider-native session controls are unavailable.',
+            cause instanceof Error ? cause.message : String(cause)
+          )
+        );
+      }
+    }
+    return { preflight, models, native, sessionControls, refreshedAt };
   }
 
   private async getExcludedRuntimeState(
@@ -230,15 +272,60 @@ export class AgentRuntimeRegistry {
     return {
       preflight: {
         runtime: adapter.descriptor,
-        ready: false,
+        readiness: createRuntimeReadiness('UNSUPPORTED_SECURITY_POLICY', reason, {
+          diagnostics: [
+            errorDiagnostic('SECURITY_POLICY_UNSUPPORTED', 'SECURITY', reason)
+          ],
+          nextAction: {
+            kind: 'VIEW_DETAILS',
+            label: 'Use the desktop app for agent runs'
+          }
+        }),
         capabilities: await safeCapabilities(adapter),
-        problems: [reason],
-        warnings: []
       },
       models: [],
       refreshedAt
     };
   }
+}
+
+function modelCatalogFailurePreflight(
+  preflight: AgentPreflight,
+  message: string
+): AgentPreflight {
+  const diagnostic = errorDiagnostic(
+    'MODEL_CATALOG_FAILED',
+    'MODEL_CATALOG',
+    message
+  );
+  if (!preflight.readiness.canStart) {
+    return {
+      ...preflight,
+      readiness: {
+        ...preflight.readiness,
+        checks: {
+          ...preflight.readiness.checks,
+          modelCatalog: 'FAILED'
+        },
+        diagnostics: [...preflight.readiness.diagnostics, diagnostic]
+      }
+    };
+  }
+  return {
+    ...preflight,
+    readiness: createRuntimeReadiness(
+      'FAILED',
+      'The runtime model catalog is unavailable.',
+      {
+        checks: {
+          ...preflight.readiness.checks,
+          modelCatalog: 'FAILED'
+        },
+        diagnostics: [...preflight.readiness.diagnostics, diagnostic],
+        nextAction: { kind: 'RETRY', label: 'Retry model discovery' }
+      }
+    )
+  };
 }
 
 function normalizeRuntimeId(runtimeId: AgentRuntimeId): AgentRuntimeId {
@@ -308,12 +395,12 @@ async function validateAdapterContract(adapter: AgentRuntimeAdapter): Promise<vo
     }
   }
   if (
-    capabilities.extensions.nativeSessionConfiguration?.maturity === 'stable' &&
-    (typeof adapter.setSessionMode !== 'function' ||
-      typeof adapter.setSessionConfigOption !== 'function')
+    capabilities.sessionControls?.maturity === 'stable' &&
+    (typeof adapter.listSessionControls !== 'function' ||
+      typeof adapter.applySessionControl !== 'function')
   ) {
     throw new Error(
-      `Runtime ${adapter.descriptor.id} declares nativeSessionConfiguration but does not implement both typed session configuration operations.`
+      `Runtime ${adapter.descriptor.id} declares sessionControls but does not implement typed control discovery and mutation.`
     );
   }
 }

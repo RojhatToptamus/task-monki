@@ -57,6 +57,8 @@ export interface AgentRuntimeCapabilities {
   dynamicTools: AgentCapability;
   attachmentDelivery: AgentCapability;
   runtimeRecovery: AgentCapability;
+  /** Safe provider-owned boolean/select controls for an existing session. */
+  sessionControls?: AgentCapability;
   /** Runtime-native features that Task Monki preserves without pretending they are universal. */
   extensions: Record<string, AgentCapability>;
 }
@@ -95,6 +97,11 @@ export type AgentRunMode =
   | 'REVIEW'
   | 'COMPACTION'
   | 'SUBAGENT';
+
+/** Modes whose successful completion produces implementation work for review. */
+export function isImplementationRunMode(mode: AgentRunMode): boolean {
+  return mode === 'IMPLEMENTATION' || mode === 'FOLLOW_UP' || mode === 'RETRY';
+}
 
 export type AgentRunOrigin = 'TASK_MONKI' | 'PROVIDER_SUBAGENT';
 
@@ -200,7 +207,7 @@ export interface TaskManagerRepositorySettings {
   selectedPath: string | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 5 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 6 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -256,6 +263,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
 };
 
 export type AgentObservationSource =
+  | 'TASK_MONKI_RESOLUTION'
   | 'THREAD_START_RESPONSE'
   | 'THREAD_RESUME_RESPONSE'
   | 'THREAD_FORK_RESPONSE'
@@ -778,14 +786,131 @@ export interface AgentModel {
   native?: AgentJsonValue;
 }
 
+export type AgentRuntimeReadinessStatus =
+  | 'NOT_INSTALLED'
+  | 'INCOMPATIBLE'
+  | 'AUTHENTICATION_REQUIRED'
+  | 'ACCOUNT_UNSUPPORTED'
+  | 'DISCOVERED'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'DEGRADED'
+  | 'FAILED'
+  | 'UNSUPPORTED_SECURITY_POLICY'
+  | 'DISABLED';
+
+export type AgentRuntimeDiagnosticSeverity = 'INFO' | 'WARNING' | 'ERROR';
+
+export type AgentRuntimeDiagnosticStage =
+  | 'DISCOVERY'
+  | 'COMPATIBILITY'
+  | 'INITIALIZATION'
+  | 'AUTHENTICATION'
+  | 'MODEL_CATALOG'
+  | 'HEALTH'
+  | 'CONFIGURATION'
+  | 'SECURITY';
+
+export interface AgentRuntimeDiagnostic {
+  /** Stable machine-readable reason; renderer code must not parse `message`. */
+  code: string;
+  severity: AgentRuntimeDiagnosticSeverity;
+  stage: AgentRuntimeDiagnosticStage;
+  message: string;
+  detail?: string;
+}
+
+export interface AgentRuntimeReadinessChecks {
+  discovery: 'UNKNOWN' | 'NOT_FOUND' | 'FOUND';
+  compatibility: 'UNKNOWN' | 'COMPATIBLE' | 'INCOMPATIBLE';
+  initialization: 'NOT_STARTED' | 'NEGOTIATING' | 'INITIALIZED' | 'FAILED';
+  authentication:
+    | 'UNKNOWN'
+    | 'PROVIDER_MANAGED'
+    | 'AUTHENTICATED'
+    | 'REQUIRED'
+    | 'FAILED'
+    | 'UNSUPPORTED_ACCOUNT';
+  modelCatalog: 'UNKNOWN' | 'AVAILABLE' | 'EMPTY' | 'FAILED';
+}
+
+export interface AgentRuntimeNextAction {
+  kind: 'INSTALL' | 'AUTHENTICATE' | 'CONFIGURE' | 'RETRY' | 'VIEW_DETAILS';
+  label: string;
+  /** Informational command only. Task Monki never executes it implicitly. */
+  command?: string;
+}
+
+type StartableAgentRuntimeStatus = 'DISCOVERED' | 'READY' | 'DEGRADED';
+type BlockedAgentRuntimeStatus = Exclude<
+  AgentRuntimeReadinessStatus,
+  StartableAgentRuntimeStatus
+>;
+
+export type AgentRuntimeReadiness =
+  | {
+      status: StartableAgentRuntimeStatus;
+      canStart: true;
+      summary: string;
+      detail: string;
+      checks: AgentRuntimeReadinessChecks;
+      diagnostics: AgentRuntimeDiagnostic[];
+      nextAction?: AgentRuntimeNextAction;
+    }
+  | {
+      status: BlockedAgentRuntimeStatus;
+      canStart: false;
+      summary: string;
+      detail: string;
+      checks: AgentRuntimeReadinessChecks;
+      diagnostics: AgentRuntimeDiagnostic[];
+      nextAction?: AgentRuntimeNextAction;
+    };
+
 export interface AgentPreflight {
   runtime: AgentRuntimeDescriptor;
-  ready: boolean;
+  readiness: AgentRuntimeReadiness;
   capabilities: AgentRuntimeCapabilities;
   runtimeVersion?: string;
   accountLabel?: string;
-  problems: string[];
-  warnings: string[];
+}
+
+export type AgentSessionControlValue = string | boolean;
+
+export interface AgentSessionControlChoice {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export type AgentSessionControl =
+  | {
+      id: string;
+      label: string;
+      description?: string;
+      group?: string;
+      kind: 'BOOLEAN';
+      value: boolean;
+      mutable: boolean;
+    }
+  | {
+      id: string;
+      label: string;
+      description?: string;
+      group?: string;
+      kind: 'SELECT';
+      value: string;
+      choices: AgentSessionControlChoice[];
+      mutable: boolean;
+    };
+
+/** Provider-owned controls projected into safe boolean/select UI primitives. */
+export interface AgentSessionControlSet {
+  localSessionId: string;
+  providerSessionId?: string;
+  /** Optimistic concurrency token for the exact control catalog and values. */
+  revision: string;
+  controls: AgentSessionControl[];
 }
 
 export interface AgentRuntimeState {
@@ -793,6 +918,8 @@ export interface AgentRuntimeState {
   models: AgentModel[];
   /** Runtime-native catalog/configuration view, redacted as required by its adapter. */
   native?: AgentJsonValue;
+  /** Typed actionable controls; the renderer never interprets opaque native metadata. */
+  sessionControls?: AgentSessionControlSet[];
   refreshedAt: string;
 }
 

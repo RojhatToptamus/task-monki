@@ -8,8 +8,122 @@ import {
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
+import { createDomainEvent } from '../storage/domainEvent';
 
 describe('TaskManagerService review and PR action coordination', () => {
+  it('rejects review for a failed implementation and keeps retry recovery in progress', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-failed-run-review-guard'
+    });
+    const task = await scenario.createTask({
+      title: 'Failed implementation',
+      prompt: 'Fail before implementation completes.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id });
+
+    await scenario.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_FAILED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: { error: 'Provider rejected the turn.' }
+      })
+    );
+
+    await expect(
+      scenario.service.startReview({ taskId: task.id, runId: run.id })
+    ).rejects.toThrow(
+      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+    );
+    expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
+    expect(scenario.agent.startedReviews).toHaveLength(0);
+  });
+
+  it('rejects a completed analysis run as a review source', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-analysis-review-guard'
+    });
+    const task = await scenario.createTask({
+      title: 'Read-only analysis',
+      prompt: 'Inspect without changing the worktree.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' });
+
+    await scenario.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_COMPLETED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: { terminalStatus: 'completed' }
+      })
+    );
+
+    await expect(
+      scenario.service.startReview({ taskId: task.id, runId: run.id })
+    ).rejects.toThrow(
+      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+    );
+    expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
+    expect(scenario.agent.startedReviews).toHaveLength(0);
+  });
+
+  it.each(['ANALYSIS', 'COMPACTION'] as const)(
+    'keeps a historical review contextual after a completed %s run',
+    async (mode) => {
+      const scenario = await createTaskMonkiScenario({
+        name: `task-monki-historical-review-${mode.toLowerCase()}`
+      });
+      const task = await scenario.createTask({
+        title: 'Historical review context',
+        prompt: 'Implement, review, then perform newer non-implementation work.'
+      });
+      const implementation = await scenario.service.startRun({ taskId: task.id });
+      await scenario.completeRun(implementation.id, 'Implementation finished.');
+
+      const historicalReview = await scenario.service.startReview({
+        taskId: task.id,
+        runId: implementation.id
+      });
+      await scenario.completeRun(historicalReview.id, 'The historical review passed.');
+
+      const current = await scenario.service.startRun({ taskId: task.id, mode });
+      await scenario.completeRun(current.id, `${mode} finished.`);
+
+      const currentTask = await scenario.store.getTask(task.id);
+      expect(currentTask).toMatchObject({
+        currentRunId: current.id,
+        workflowPhase: 'IN_PROGRESS',
+        projection: {
+          codexReview: {
+            runId: historicalReview.id,
+            sourceRunId: implementation.id,
+            status: 'STALE'
+          }
+        }
+      });
+
+      await expect(
+        scenario.service.startReview({ taskId: task.id, runId: implementation.id })
+      ).rejects.toThrow(
+        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      );
+      await expect(
+        scenario.service.startReview({ taskId: task.id, runId: current.id })
+      ).rejects.toThrow(
+        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      );
+      expect(scenario.agent.startedReviews).toHaveLength(1);
+    }
+  );
+
   it('makes review and PR actions deterministic around a running review', async () => {
     const ghPath = await writeFakeGh();
     const scenario = await createScenarioWithCompletedRun(

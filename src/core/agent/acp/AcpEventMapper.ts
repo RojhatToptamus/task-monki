@@ -13,6 +13,7 @@ import {
   type AcpContentBlock,
   type AcpPermissionOption,
   type AcpSessionConfigOption,
+  type AcpSessionModelState,
   type AcpSessionModeState,
   type AcpToolCallStatus,
   type AcpToolKind
@@ -27,6 +28,7 @@ import {
 export interface AcpNativeSessionState {
   sessionId: string;
   modes: AcpSessionModeState | null;
+  models: AcpSessionModelState | null;
   configOptions: AcpSessionConfigOption[];
 }
 
@@ -125,10 +127,59 @@ export function modelsFromAcpConfig(
   inputModalities: string[]
 ): AgentModel[] {
   const models = new Map<string, AgentModel>();
-  for (const session of sessions) {
-    for (const config of session.configOptions) {
-      if (config.type !== 'select' || config.category !== 'model') continue;
-      for (const option of flattenSelectOptions(config)) {
+  const orderedSessions = [...sessions].sort((left, right) =>
+    compareStableText(left.sessionId, right.sessionId)
+  );
+
+  // Prefer the first-class ACP model catalog over the compatibility config
+  // selector, independent of the order in which live sessions were observed.
+  for (const session of orderedSessions) {
+    const availableModels = [...(session.models?.availableModels ?? [])].sort(
+      (left, right) =>
+        compareStableText(left.modelId, right.modelId) ||
+        compareStableText(left.name, right.name) ||
+        compareStableText(left.description ?? '', right.description ?? '')
+    );
+    for (const model of availableModels) {
+      // Model IDs become durable routing identifiers and renderer text. Drop a
+      // provider value if credential redaction would alter it; a redacted ID
+      // must never become an executable model selection.
+      if (redactNativeString(model.modelId) !== model.modelId) continue;
+      if (models.has(model.modelId)) continue;
+      models.set(model.modelId, {
+        id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${model.modelId}`,
+        runtimeId: profile.descriptor.id,
+        modelProvider: profile.defaultModelProvider,
+        model: model.modelId,
+        displayName: redactNativeString(model.name),
+        description: model.description
+          ? redactNativeString(model.description)
+          : undefined,
+        hidden: false,
+        supportedReasoningEfforts: [],
+        serviceTiers: [],
+        inputModalities,
+        isDefault: profile.defaultModel === model.modelId,
+        native: redactAcpNativeValue({ source: 'session-models', model })
+      });
+    }
+  }
+
+  for (const session of orderedSessions) {
+    const modelConfigs = session.configOptions
+      .filter(
+        (config): config is Extract<AcpSessionConfigOption, { type: 'select' }> =>
+          config.type === 'select' && config.category === 'model'
+      )
+      .sort((left, right) => compareStableText(left.id, right.id));
+    for (const config of modelConfigs) {
+      const options = flattenSelectOptions(config).sort(
+        (left, right) =>
+          compareStableText(left.value, right.value) ||
+          compareStableText(left.name, right.name)
+      );
+      for (const option of options) {
+        if (redactNativeString(option.value) !== option.value) continue;
         if (models.has(option.value)) continue;
         models.set(option.value, {
           id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${option.value}`,
@@ -143,7 +194,7 @@ export function modelsFromAcpConfig(
           supportedReasoningEfforts: [],
           serviceTiers: [],
           inputModalities,
-          isDefault: config.currentValue === option.value,
+          isDefault: profile.defaultModel === option.value,
           native: redactAcpNativeValue({
             configId: config.id,
             category: config.category,
@@ -153,7 +204,14 @@ export function modelsFromAcpConfig(
       }
     }
   }
-  return [...models.values()];
+  return [...models.values()].sort(
+    (left, right) =>
+      compareStableText(left.model, right.model) || compareStableText(left.id, right.id)
+  );
+}
+
+function compareStableText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function observedSettingsFromAcpState(
@@ -165,10 +223,16 @@ export function observedSettingsFromAcpState(
     (option): option is Extract<AcpSessionConfigOption, { type: 'select' }> =>
       option.type === 'select' && option.category === 'model'
   );
+  const observedModel =
+    state.models?.currentModelId ??
+    modelSelector?.currentValue ??
+    requested.model ??
+    profile.defaultModel;
+  const safeObservedModel = redactNativeString(observedModel);
   return {
     ...requested,
     runtimeId: profile.descriptor.id,
-    model: modelSelector?.currentValue ?? requested.model ?? profile.defaultModel,
+    model: safeObservedModel === observedModel ? observedModel : undefined,
     modelProvider: requested.modelProvider ?? profile.defaultModelProvider,
     runtimeOptions: {
       ...requested.runtimeOptions,
@@ -181,6 +245,7 @@ export function nativeOptionsValue(state: AcpNativeSessionState): AgentJsonValue
   const safe = sanitizeAcpNativeSession(state);
   return redactAcpNativeValue({
     modes: safe.modes,
+    models: safe.models,
     configOptions: safe.configOptions
   });
 }

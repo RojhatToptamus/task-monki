@@ -15,6 +15,7 @@ describe('ProcessSupervisor', () => {
       sanitizeEnvironment(
         {
           PATH: '/bin',
+          CODEX_HOME: '/codex/provider-state',
           OPENCODE_SERVER_PASSWORD: 'runtime-secret',
           UNRELATED_API_KEY: 'must-not-pass'
         },
@@ -24,6 +25,13 @@ describe('ProcessSupervisor', () => {
       PATH: '/bin',
       OPENCODE_SERVER_PASSWORD: 'runtime-secret'
     });
+  });
+
+  it('keeps Codex state out of the portable base unless a runtime explicitly opts in', () => {
+    const source = { PATH: '/bin', CODEX_HOME: '/codex/provider-state' };
+
+    expect(sanitizeEnvironment(source)).toEqual({ PATH: '/bin' });
+    expect(sanitizeEnvironment(source, ['CODEX_HOME'])).toEqual(source);
   });
 
   it('rejects malformed runtime environment allowlist keys', () => {
@@ -52,6 +60,24 @@ describe('ProcessSupervisor', () => {
     expect(diagnostic).toContain('pin=[REDACTED]');
     expect(diagnostic).toContain('"refresh_token":"[REDACTED]"');
     expect(diagnostic.match(/\[REDACTED\]/gu)?.length).toBeGreaterThanOrEqual(9);
+  });
+
+  it('redacts URI userinfo in linear time while preserving ordinary URLs', () => {
+    const benignPrefix = 'v'.repeat(128 * 1024);
+    const input =
+      `${benignPrefix}\n` +
+      'remote=(https://user:password@example.test/path) ' +
+      'public=https://example.test/docs';
+    const startedAt = performance.now();
+
+    const diagnostic = redactProcessDiagnostic(input);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(diagnostic).toBe(
+      `${benignPrefix}\n` +
+        'remote=(https://[REDACTED]@example.test/path) ' +
+        'public=https://example.test/docs'
+    );
   });
 
   it('captures stdout, stderr, and exit codes separately', async () => {

@@ -2,6 +2,14 @@ import { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
 import {
+  redactCredentialText,
+  redactCredentialValue
+} from '../AgentCredentialRedaction';
+import {
+  redactProtocolJournalRecord,
+  redactProtocolText
+} from '../journal/AgentProtocolRedaction';
+import {
   ACP_MAX_MESSAGE_BYTES,
   decodeAcpMessage,
   isNotification,
@@ -21,7 +29,7 @@ export type AcpJournalWriter = (
 interface PendingRequest {
   method: string;
   mutation: boolean;
-  timer: NodeJS.Timeout;
+  timer?: NodeJS.Timeout;
   resolve(value: AcpRpcResult<unknown>): void;
   reject(error: Error): void;
 }
@@ -42,6 +50,11 @@ export interface AcpStartedRequest<T> {
   requestId: AcpJsonRpcId;
   response: Promise<AcpRpcResult<T>>;
   outbound: AgentProtocolMessageReference;
+}
+
+/** Omit `timeoutMs` for the bounded client default; use `null` for long-lived completion. */
+export interface AcpRequestOptions {
+  timeoutMs?: number | null;
 }
 
 export class AcpRpcError extends Error {
@@ -82,7 +95,8 @@ export class AcpRpcClient {
     private readonly output: Readable,
     private readonly journal: AcpJournalWriter,
     readonly serverInstanceId: string,
-    private readonly requestTimeoutMs = 30_000
+    private readonly requestTimeoutMs = 30_000,
+    private readonly sensitiveValues: readonly string[] = []
   ) {
     output.on('data', this.onData);
     output.once('end', this.onEnd);
@@ -90,26 +104,30 @@ export class AcpRpcClient {
     input.once('error', this.onInputError);
   }
 
-  async request<T>(method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<AcpRpcResult<T>> {
-    const started = await this.startRequest<T>(method, params, false, timeoutMs);
+  async request<T>(
+    method: string,
+    params: unknown,
+    options?: AcpRequestOptions
+  ): Promise<AcpRpcResult<T>> {
+    const started = await this.startRequest<T>(method, params, false, options);
     return started.response;
   }
 
   async requestMutation<T>(
     method: string,
     params: unknown,
-    timeoutMs = this.requestTimeoutMs
+    options?: AcpRequestOptions
   ): Promise<AcpRpcResult<T>> {
-    const started = await this.startRequest<T>(method, params, true, timeoutMs);
+    const started = await this.startRequest<T>(method, params, true, options);
     return started.response;
   }
 
   startMutation<T>(
     method: string,
     params: unknown,
-    timeoutMs = this.requestTimeoutMs
+    options?: AcpRequestOptions
   ): Promise<AcpStartedRequest<T>> {
-    return this.startRequest<T>(method, params, true, timeoutMs);
+    return this.startRequest<T>(method, params, true, options);
   }
 
   async notify(method: string, params: unknown): Promise<AgentProtocolMessageReference> {
@@ -144,8 +162,9 @@ export class AcpRpcClient {
     this.output.off('end', this.onEnd);
     this.output.off('error', this.onOutputError);
     this.input.off('error', this.onInputError);
+    reason = this.redactText(reason);
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       pending.reject(
         pending.mutation
           ? new AcpAmbiguousMutationError(
@@ -163,33 +182,41 @@ export class AcpRpcClient {
     method: string,
     params: unknown,
     mutation: boolean,
-    timeoutMs: number
+    options?: AcpRequestOptions
   ): Promise<AcpStartedRequest<T>> {
     if (this.closed) throw new Error('ACP connection is closed.');
+    const timeoutMs = options?.timeoutMs === undefined
+      ? this.requestTimeoutMs
+      : options.timeoutMs;
+    if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new Error('ACP request timeout must be a positive finite number or null.');
+    }
     const requestId = this.nextRequestId++;
     let settle!: PendingRequest;
     const response = new Promise<AcpRpcResult<T>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        this.trackExpired(requestId);
-        reject(
-          mutation
-            ? new AcpAmbiguousMutationError(
-                method,
-                `ACP mutation timed out after submission: ${method}`
-              )
-            : new Error(`ACP request timed out: ${method}`)
-        );
-      }, timeoutMs);
-      timer.unref();
       settle = {
         method,
         mutation,
-        timer,
         resolve: (value) => resolve(value as AcpRpcResult<T>),
         reject
       };
       this.pending.set(requestId, settle);
+      if (timeoutMs !== null) {
+        const timer = setTimeout(() => {
+          this.pending.delete(requestId);
+          this.trackExpired(requestId);
+          reject(
+            mutation
+              ? new AcpAmbiguousMutationError(
+                  method,
+                  `ACP mutation timed out after submission: ${method}`
+                )
+              : new Error(`ACP request timed out: ${method}`)
+          );
+        }, timeoutMs);
+        timer.unref();
+        settle.timer = timer;
+      }
     });
 
     try {
@@ -197,7 +224,7 @@ export class AcpRpcClient {
       return { requestId, response, outbound };
     } catch (cause) {
       if (this.pending.get(requestId) === settle) {
-        clearTimeout(settle.timer);
+        if (settle.timer) clearTimeout(settle.timer);
         this.pending.delete(requestId);
         settle.reject(
           mutation
@@ -264,30 +291,40 @@ export class AcpRpcClient {
   };
 
   private readonly onOutputError = (error: Error): void => {
-    this.events.emit('protocolError', error);
-    this.close(`ACP stdout failed: ${error.message}`);
+    const safeError = new Error(this.redactText(error.message), { cause: error });
+    this.events.emit('protocolError', safeError);
+    this.close(`ACP stdout failed: ${safeError.message}`);
   };
 
   private readonly onInputError = (error: Error): void => {
-    this.events.emit('protocolError', error);
-    this.close(`ACP stdin failed: ${error.message}`);
+    const safeError = new Error(this.redactText(error.message), { cause: error });
+    this.events.emit('protocolError', safeError);
+    this.close(`ACP stdin failed: ${safeError.message}`);
   };
 
   private async handleLine(rawLine: string): Promise<void> {
+    const safeRawLine = redactProtocolText(rawLine, this.sensitiveValues);
     let message: AcpJsonRpcMessage;
     try {
       message = decodeAcpMessage(rawLine);
     } catch (cause) {
-      this.events.emit('protocolError', asError(cause), rawLine);
+      this.events.emit(
+        'protocolError',
+        new Error(this.redactText(errorMessage(cause)), { cause }),
+        safeRawLine
+      );
       return;
     }
 
     let raw: AgentProtocolMessageReference;
     try {
-      raw = await this.journal('INBOUND', rawLine, rpcMetadata(message));
+      raw = await this.appendJournal('INBOUND', rawLine, rpcMetadata(message));
     } catch (cause) {
-      const error = new Error(`Could not durably journal ACP input: ${errorMessage(cause)}`);
-      this.events.emit('protocolError', error, rawLine);
+      const error = new Error(
+        this.redactText(`Could not durably journal ACP input: ${errorMessage(cause)}`),
+        { cause }
+      );
+      this.events.emit('protocolError', error, safeRawLine);
       this.close(error.message);
       return;
     }
@@ -298,17 +335,27 @@ export class AcpRpcClient {
         if (!this.expiredRequestIds.has(message.id)) {
           this.events.emit(
             'protocolError',
-            new Error(`ACP response has no pending request: ${String(message.id)}`),
-            rawLine,
+            new Error(
+              this.redactText(
+                `ACP response has no pending request: ${String(message.id)}`
+              )
+            ),
+            safeRawLine,
             raw
           );
         }
         return;
       }
       this.pending.delete(message.id);
-      clearTimeout(pending.timer);
+      if (pending.timer) clearTimeout(pending.timer);
       if ('error' in message) {
-        pending.reject(new AcpRpcError(message.error.code, message.error.message, message.error.data));
+        pending.reject(
+          new AcpRpcError(
+            message.error.code,
+            this.redactText(message.error.message),
+            redactCredentialValue(message.error.data, this.sensitiveValues)
+          )
+        );
       } else {
         pending.resolve({ result: message.result, raw });
       }
@@ -333,7 +380,7 @@ export class AcpRpcClient {
       if (Buffer.byteLength(raw, 'utf8') > ACP_MAX_MESSAGE_BYTES) {
         throw new Error(`ACP outbound message exceeds ${ACP_MAX_MESSAGE_BYTES} bytes.`);
       }
-      const reference = await this.journal('OUTBOUND', raw, rpcMetadata(message));
+      const reference = await this.appendJournal('OUTBOUND', raw, rpcMetadata(message));
       await onJournaled?.(reference);
       await writeWithBackpressure(this.input, `${raw}\n`);
       return reference;
@@ -348,6 +395,19 @@ export class AcpRpcClient {
       const oldest = this.expiredRequestIds.values().next().value;
       if (oldest !== undefined) this.expiredRequestIds.delete(oldest);
     }
+  }
+
+  private appendJournal(
+    direction: AgentProtocolMessageReference['direction'],
+    raw: string,
+    metadata: Record<string, unknown>
+  ): Promise<AgentProtocolMessageReference> {
+    const safe = redactProtocolJournalRecord(raw, metadata, this.sensitiveValues);
+    return this.journal(direction, safe.raw, safe.metadata);
+  }
+
+  private redactText(value: string): string {
+    return redactCredentialText(value, this.sensitiveValues);
   }
 }
 

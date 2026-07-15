@@ -26,6 +26,15 @@ Codex App Server and OpenCode use their native protocols; supported ACP agents
 use the stable Agent Client Protocol. Task Monki observes Git and GitHub
 delivery evidence independently. It never merges a pull request for you.
 
+Each supported agent has a first-class durable runtime identity with its own
+models, permissions, and capability record. Codex and OpenCode are native
+server integrations; Antigravity has a dedicated turn-scoped CLI integration;
+Grok, Cursor, and the Claude bridge use registered ACP compatibility
+integrations with explicitly documented limits.
+Task Monki does not force any of them through a generic model-SDK loop. See the
+current
+[provider runtime compatibility matrix](docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md).
+
 A key principle: Task Monki keeps what an **agent reports** separate from what
 it has **verified locally**. Runtime plans, usage, and completion claims are
 always marked as such—only Task Monki's own Git inspection and GitHub sync count
@@ -41,7 +50,8 @@ as verified delivery evidence.
 6. **Commit** — create a delivery commit when the local diff is ready.
 7. **Ship** — open a draft pull request once the branch and GitHub evidence are ready.
 
-You can steer or interrupt a run mid-turn, follow up in the same session, retry, or fork an alternative attempt.
+When the selected runtime supports it, you can steer or interrupt a run
+mid-turn, follow up in the same session, retry, or fork an alternative attempt.
 
 ### Attachments
 
@@ -67,8 +77,9 @@ Builds are currently unsigned, so macOS and Windows may show a security warning 
 - At least one supported runtime installed and authenticated:
   - [Codex CLI](https://github.com/openai/codex)
   - [OpenCode](https://github.com/anomalyco/opencode)
-  - an available ACP agent profile such as Gemini CLI, Grok Build, Cursor Agent,
-    or `claude-agent-acp`
+  - [Antigravity CLI](https://antigravity.google/docs/cli-reference)
+  - an available ACP agent profile such as Grok Build, Cursor Agent, or
+    `claude-agent-acp`
 - Optional — [GitHub CLI](https://cli.github.com/), authenticated, for branch and pull-request features (`gh auth login`)
 
 Packaged apps probe supported runtimes and their capabilities instead of

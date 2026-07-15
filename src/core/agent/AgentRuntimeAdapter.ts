@@ -4,6 +4,8 @@ import type {
   AgentRuntimeCapabilities,
   AgentRuntimeDescriptor,
   AgentRuntimeId,
+  AgentSessionControlSet,
+  AgentSessionControlValue,
   AgentJsonValue,
   AgentGoalSnapshotRecord,
   AgentReviewTarget,
@@ -25,6 +27,11 @@ export interface CreateAgentSession {
   worktreeId: string;
   worktreePath: string;
   settings: AgentExecutionSettings;
+  /**
+   * Storage-verified task attachments whose exact managed paths must be part
+   * of a provider session's initial confinement boundary.
+   */
+  attachments?: AgentTurnAttachment[];
 }
 
 export interface AgentSessionRef {
@@ -132,12 +139,13 @@ export interface AgentRuntimeAdapter {
   capabilities(): Promise<AgentRuntimeCapabilities>;
   listModels(): Promise<AgentModel[]>;
   readNativeState?(): Promise<AgentJsonValue | undefined>;
-  setSessionMode?(localSessionId: string, modeId: string): Promise<AgentJsonValue>;
-  setSessionConfigOption?(
-    localSessionId: string,
-    configId: string,
-    value: string | boolean
-  ): Promise<AgentJsonValue>;
+  listSessionControls?(): Promise<AgentSessionControlSet[]>;
+  applySessionControl?(input: {
+    localSessionId: string;
+    controlId: string;
+    value: AgentSessionControlValue;
+    revision: string;
+  }): Promise<{ native: AgentJsonValue; controls: AgentSessionControlSet }>;
   configureRuntime?(input: {
     executable?: string;
     restart: boolean;

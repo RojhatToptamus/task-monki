@@ -63,21 +63,25 @@ The important product rule is:
 2. `TaskManagerService.startRun` prepares or verifies the worktree.
 3. `AgentOrchestrator.startTurn` creates a run with `mode: "IMPLEMENTATION"`.
 4. Reducer moves the task to `IN_PROGRESS`.
-5. When the run completes, fails, or is interrupted, reducer moves an
-   `IN_PROGRESS` task to `REVIEW`.
+5. Only a successfully completed implementation run moves an `IN_PROGRESS`
+   task to `REVIEW`. Failed, interrupted, lost, and recovery-required runs stay
+   in `IN_PROGRESS` until the owner retries or continues them.
 
 Expected UI:
 
 - Board column: In Progress while active.
 - Card chip: Running, needs approval, needs input, failed, etc.
-- After terminal run: Review column.
+- After successful completion: Review column.
+- After an unsuccessful terminal run: In Progress with Retry in session as the
+  primary recovery action; review is unavailable.
 - Review gate: `NOT_RUN` unless a previous review exists.
 
 ### Starting agent review
 
 1. User clicks Run agent review from a task in Review.
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
-3. The current source run is kept as the implementation source.
+3. The current source run must be the latest successfully completed
+   implementation-side run. Failed and superseded runs are rejected.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
 5. When the selected review runtime is the source runtime and advertises a
@@ -191,7 +195,7 @@ is still changing the implementation.
 
 ### Follow-up completion
 
-When the follow-up terminal event arrives:
+When the follow-up completes successfully:
 
 1. Reducer moves the task from `IN_PROGRESS` back to `REVIEW`.
 2. The old agent review remains `STALE`.
@@ -204,6 +208,10 @@ Expected UI:
 - Review panel: stale/needs re-review.
 - Old findings: still visible as context, not as current actionable verdict.
 - Primary next action: Run review again.
+
+If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
+in `IN_PROGRESS`. Retry or continue the implementation before a fresh review is
+allowed; the previous review remains stale context only.
 
 ## Staleness rules
 
@@ -246,8 +254,12 @@ Provider edge cases:
     should locally stop/reconcile the review instead of leaving the UI stuck in
     Reviewing.
 - The provider may not emit a terminal event after interruption.
-  - Task Monki records ambiguous delivery, then locally reconciles if timeout
-    recovery proves the run should stop.
+  - Task Monki uses the owning runtime's bounded interruption deadline and
+    reconciles authoritative provider snapshots without replaying the prompt.
+  - An acknowledged interrupt plus provider terminal evidence becomes
+    interrupted. If evidence remains inconclusive, confirmed termination of the
+    owning local runtime becomes a local interruption; an unconfirmed stop
+    remains recovery-required and fenced from reuse.
 - The selected agent runtime may exit or lose its event stream.
   - Runtime loss/recovery events must reconcile the run before the UI offers
     actions that assume a live active turn.
@@ -293,9 +305,17 @@ Use these as invariants:
   - `codexReview.status: RUNNING`
   - board: Review, even if workflow data is stale
   - card: AI reviewing
-- Terminal implementation/follow-up/retry from In Progress:
+- Successfully completed implementation/follow-up/retry from In Progress:
   - `workflowPhase: REVIEW`
   - board: Review
+- Failed, interrupted, lost, or recovery-required implementation/follow-up/retry:
+  - `workflowPhase: IN_PROGRESS`
+  - board: In Progress
+  - primary recovery action: Retry in session
+  - agent review unavailable
+  - store initialization repairs a persisted `REVIEW` mismatch back to
+    `IN_PROGRESS` when the current implementation-side run has one of these
+    unsuccessful states
 - Terminal review:
   - workflow phase remains Review
   - card reflects review gate result
@@ -303,6 +323,13 @@ Use these as invariants:
   - board: Review after follow-up completes
   - card: Needs re-review
   - old findings: context only
+- Historical review after newer non-implementation work:
+  - a completed analysis or compaction run remains the exact current run
+  - board: In Progress; the historical review remains visible as read-only context
+  - no review or review-derived follow-up action may target the older implementation
+  - store initialization must not promote the task to Review from that older
+    review; only the exact current completed implementation-side run is a valid
+    review source
 
 ## Debugging checklist
 
@@ -333,6 +360,9 @@ When the UI shows the wrong state:
 ## UI rules
 
 - Do not show Request changes for a stale review.
+- Derive every review entry action from the exact current completed
+  implementation-side run. Never fall back to the source of a historical
+  review or another completed run in the iteration.
 - Do not show review completion actions while any implementation-side run is
   active.
 - Apply that pause consistently across review cards, finish panels, header

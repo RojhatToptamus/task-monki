@@ -78,14 +78,15 @@ WebSocket transport is not used.
 - `AgentServerInstance`
   - Codex App Server process state, runtime version, schema hash, and status.
 - `AgentProtocolJournal`
-  - Bounded append-only NDJSON segments for raw protocol debugging. Segment
-    zero keeps the legacy server journal path; rotated references carry an
-    explicit segment. Complete old segments are pruned at the per-server
-    retention bound. Across every runtime, only the eight newest unreferenced
-    terminal server records are retained; referenced and nonterminal servers
-    are protected. The store removes a collected server record durably before
-    its serialized journal cleanup, and startup reconciles safe orphan
-    segments. Raw debug history is therefore not a permanent audit log.
+  - Bounded append-only NDJSON segments for structurally redacted protocol
+    debugging. Segment zero keeps the legacy server journal path; rotated
+    references carry an explicit segment. Complete old segments are pruned at
+    the per-server retention bound. Across every runtime, only the eight newest
+    unreferenced terminal server records are retained; referenced and
+    nonterminal servers are protected. The store removes a collected server
+    record durably before its serialized journal cleanup, and startup
+    reconciles safe orphan segments. Debug history is therefore neither a
+    lossless provider transcript nor a permanent audit log.
 - `StatusProjection`
   - Compact UI-facing state derived from Task Monki domain events.
 - `TaskAttachmentRecord`
@@ -127,7 +128,7 @@ The adapter must:
 - start implementation, follow-up, retry, and review turns;
 - correlate provider thread IDs, turn IDs, item IDs, and request IDs;
 - materialize useful provider events into Task Monki records;
-- keep raw protocol traffic in the journal;
+- keep structurally redacted protocol traffic in the journal;
 - recover or locally reconcile when provider delivery is ambiguous;
 - resolve attachment records only from Task Monki storage, reverify their
   immutable task-owned files, use native `localImage` inputs when appropriate,
@@ -270,6 +271,9 @@ probed with `--version`, `codex app-server --help`, an isolated temporary
 `CODEX_HOME`, `initialize`, and the JSON-RPC methods Task Monki needs. The
 newest compatible automatically discovered runtime is selected. An explicit
 configured runtime is treated as intentional and must itself be compatible.
+`CODEX_HOME` belongs to the versioned Codex child-environment contract; it is
+not part of Task Monki's portable process base and is never forwarded to
+OpenCode, Antigravity, or ACP children.
 The selected runtime, all candidate versions, rejected candidates, missing
 capabilities, and probe failures are persisted on the App Server instance and
 shown only in provider diagnostics/debug surfaces.
@@ -284,6 +288,30 @@ Codex protocol detail:
 - `turn/start` has a first-class `effort` field.
 - `thread/start`, `thread/resume`, and `thread/fork` do not; they must pass
   `model_reasoning_effort` through the request `config` object.
+- `thread/start` allocates an empty thread on the current App Server but does
+  not create a resumable rollout. The first `turn/start` therefore uses the
+  newly attested thread directly; calling `thread/resume` first fails with
+  `no rollout found for thread id` on the real runtime. The initial permission
+  profile includes the exact storage-verified attachment paths needed by that
+  first turn.
+- An empty thread is reusable only while the adapter retains its permission
+  attestation for the current App Server generation. After a process restart
+  or a pre-turn profile change, Task Monki replaces the empty thread with a new
+  attested `thread/start`. This is safe because no prompt was submitted. Once
+  Task Monki is ready to submit the first `turn/start`, it first persists the
+  run as starting, then durably fences the session as potentially materialized.
+  It drains queued provider notifications and rechecks the live App Server
+  generation and exact permission attestation immediately before submission.
+  Therefore a pending permission drift blocks provider input, while a lost
+  acknowledgement or post-acknowledgement storage failure can only take the
+  resume-and-reconcile path; it can never replace the thread and replay the
+  prompt. A definitive JSON-RPC rejection may clear the fence only after queued
+  evidence is drained, the local run still has no provider turn identity, and
+  no provider notification has failed to materialize since the empty-thread
+  attestation and submission boundary. Timeout, transport ambiguity, or failed
+  evidence materialization retain it. Provider reads never downgrade a durable
+  materialization fence merely because a transient response has no turns. The
+  normal resume-and-attest path is required for every later turn.
 - Reviews use `thread/fork` before `review/start`, so review latency depends on
   this config being set correctly.
 - Task Monki starts `review/start` inline on that fork. Requesting a second
@@ -305,10 +333,43 @@ Provider delivery can be ambiguous. The app must handle:
 Recovery must prefer a truthful local state over an endlessly running UI. An
 acknowledged mutation followed by local persistence failure is not safe to
 replay as a new mutation: keep the run in recovery-required state for
-reconciliation. Attachments remain immutable task-owned inputs and are reused
-after reconciliation; there is no disposable run-specific attachment copy. If
-the provider cannot confirm a terminal event, record the ambiguity and
-reconcile locally when the evidence proves the run is no longer active.
+reconciliation. If first-turn acknowledgement persistence fails, the durable
+pre-submit materialization fence prevents empty-thread replacement and Task
+Monki stops the owning App Server process before returning the ambiguity. The
+process and client are fenced before Task Monki attempts to persist the final
+lost-process diagnostic; even diagnostic persistence failure cannot leave a
+reusable client alive. A process that cannot be confirmed stopped latches the
+supervisor lifecycle closed. Attachments remain immutable task-owned inputs and
+are reused after reconciliation; there is no disposable run-specific
+attachment copy. If the provider cannot confirm a terminal event, record the
+ambiguity and reconcile locally when the evidence proves the run is no longer
+active.
+
+Inbound notifications follow the same no-resend rule. After the RPC client has
+journaled a notification, the adapter serializes its normalized storage writes
+on one inbound queue. A failed notification write increments the empty-thread
+materialization generation before recovery, so a concurrent first turn cannot
+cross that failed-evidence boundary. For a notification that identifies a
+Task Monki thread or submitted turn, the adapter then performs one targeted
+`thread/resume` snapshot reconciliation on that run; it never replays
+`turn/start`. A terminal snapshot retries the idempotent final-artifact and
+terminal-event materialization, while a live or uncertain snapshot leaves an
+explicit recovery-required run. Notifications emitted for that same thread or
+turn while its snapshot recovery is in flight remain serialized, but they do
+not start a nested recovery loop; the resume response is the authoritative
+recovery snapshot. Concurrent notifications for other runs retain their own
+recovery path.
+
+If that targeted path cannot durably leave the run terminal or
+recovery-required, the adapter latches readiness failed, clears its live
+attestations and deadlines, and stops the owning App Server through a one-way
+supervisor fence. The fenced generation is not automatically restarted. Only
+after the process boundary is closed does Task Monki best-effort record runtime
+loss for every run and pending interaction owned by that server. Failures in
+that loss sweep are diagnostic-only and do not recursively invoke notification
+recovery; a new application/runtime supervisor must reconcile the durable
+records later. Thus a dropped terminal write cannot leave a reusable provider
+generation silently running behind a local `RUNNING` record.
 
 ## Verification
 

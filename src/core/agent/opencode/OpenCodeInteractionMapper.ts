@@ -25,22 +25,16 @@ export interface MappedOpenCodeInteraction {
 
 /**
  * OpenCode does not provide an OS sandbox. Unknown and mutation-capable tools
- * therefore remain approval-gated even when ordinary workspace writes are
- * requested. Explicit read-only/never policies fail closed.
+ * therefore remain approval-gated in the on-request preset. The execution
+ * settings always report `DANGER_FULL_ACCESS`: OpenCode's native permission
+ * rules are an approval boundary, not an OS confinement boundary.
  */
 export function openCodePermissionRules(
   settings: AgentExecutionSettings
 ): OpenCodePermissionRule[] {
   assertOpenCodeExecutionSettings(settings);
-  const mutationAction = settings.sandbox === 'READ_ONLY'
-    ? 'deny'
-    : settings.sandbox === 'DANGER_FULL_ACCESS' && settings.approvalPolicy === 'never'
-      ? 'allow'
-      : 'ask';
-  const externalDirectoryAction =
-    settings.sandbox === 'DANGER_FULL_ACCESS' && settings.approvalPolicy === 'never'
-      ? 'allow'
-      : 'deny';
+  const mutationAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
+  const externalDirectoryAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const networkAction = settings.networkAccess === true ? 'allow' : 'deny';
   return [
     { permission: '*', pattern: '*', action: 'ask' },
@@ -65,21 +59,14 @@ export function assertOpenCodeExecutionSettings(settings: AgentExecutionSettings
       'OpenCode cannot attest network-disabled execution because providers, plugins, MCP servers, and shell tools share its credential-bearing process. Enable provider-controlled network access or choose a runtime with an attested network boundary.'
     );
   }
-  if (
-    settings.sandbox === 'DANGER_FULL_ACCESS' &&
-    settings.approvalPolicy !== 'never'
-  ) {
+  if (settings.sandbox !== 'DANGER_FULL_ACCESS') {
     throw new Error(
-      'OpenCode can only represent full access as an explicit no-approval mode. Use workspace-write for approval-gated execution.'
+      `OpenCode cannot attest Task Monki's ${settings.sandbox ?? 'restricted'} filesystem sandbox. Use a provider-controlled full-access preset; on-request approvals can still gate native tool mutations.`
     );
   }
-  if (
-    settings.approvalPolicy === 'never' &&
-    settings.sandbox !== 'READ_ONLY' &&
-    settings.sandbox !== 'DANGER_FULL_ACCESS'
-  ) {
+  if (settings.approvalPolicy !== 'on-request' && settings.approvalPolicy !== 'never') {
     throw new Error(
-      'OpenCode cannot safely honor approvalPolicy "never" with workspace writes because it does not provide an attested OS sandbox. Use on-request approvals, read-only, or explicitly choose full access.'
+      `OpenCode supports only on-request or never approval policies; ${settings.approvalPolicy ?? 'an unspecified policy'} is not enforceable.`
     );
   }
 }

@@ -225,6 +225,26 @@ describe('AgentProtocolJournal', () => {
     await journal.close();
   });
 
+  it('applies the entry bound before redaction can shrink provider input', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new AgentProtocolJournal(directory, tinyLimits());
+
+    await expect(
+      journal.append(
+        'server-redaction-bounds',
+        'INBOUND',
+        JSON.stringify({ apiKey: 'x'.repeat(2_000) })
+      )
+    ).rejects.toThrow('entry exceeds');
+    const accepted = await journal.append(
+      'server-redaction-bounds',
+      'INBOUND',
+      'small'
+    );
+    expect(accepted.sequence).toBe(1);
+    await journal.close();
+  });
+
   it('rejects path traversal and does not follow a journal symlink', async () => {
     const directory = await temporaryDirectory();
     const journal = new AgentProtocolJournal(directory, tinyLimits());

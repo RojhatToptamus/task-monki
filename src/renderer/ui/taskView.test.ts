@@ -7,6 +7,7 @@ import {
   canRequestReviewChanges,
   columnTasks,
   computeNavCounts,
+  describeRunFailureBanner,
   describeTaskHeaderState,
   evidenceLineForTask,
   finishActionsForTask,
@@ -51,6 +52,48 @@ describe('task card view model', () => {
     expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
     expect(vm.hasDecision).toBe(true);
+  });
+
+  it('keeps a failed implementation in progress and does not label it ready for review', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'FAILED',
+        codexReview: { status: 'NOT_RUN' }
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+    const vm = buildTaskCardVM(task);
+    const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
+    const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
+
+    expect(vm.stateLabel).toBe('Run failed');
+    expect(vm.stateTone).toBe('error');
+    expect(computeNavCounts([task]).review).toBe(0);
+    expect(columnTasks([task], reviewColumn)).toHaveLength(0);
+    expect(columnTasks([task], progressColumn)).toHaveLength(1);
+    expect(describeRunFailureBanner(task)).toEqual({
+      status: 'FAILED',
+      title: 'The agent run failed',
+      detail: expect.stringMatching(/retry in this session or continue/i)
+    });
+  });
+
+  it('reserves ambiguous provider-state copy for recovery and runtime loss', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'RECOVERY_REQUIRED',
+        summary: 'The turn outcome is ambiguous.'
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+
+    expect(describeRunFailureBanner(task)).toEqual({
+      status: 'RECOVERY_REQUIRED',
+      title: 'Task Monki cannot prove the final provider state',
+      detail: 'The turn outcome is ambiguous.'
+    });
   });
 
   it('keeps a running review gate in the review lane even if the phase is stale', () => {

@@ -1,11 +1,83 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
-import { FileTaskStore } from './FileTaskStore';
+import {
+  FileTaskStore,
+  type CreateInteractionRequestInput
+} from './FileTaskStore';
 
 describe('FileTaskStore agent persistence', () => {
+  it('publishes an awaiting interaction, run, and session as one durable boundary', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+
+    const interaction = await fixture.store.createInteractionRequest(
+      fixture.interaction
+    );
+
+    assertCompleteAwaitingBoundary(await fixture.store.snapshot(), fixture, interaction.id);
+    assertCompleteAwaitingBoundary(
+      await new FileTaskStore(fixture.dir).snapshot(),
+      fixture,
+      interaction.id
+    );
+  });
+
+  it('never exposes a partially actionable awaiting interaction while its write fails', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    let markWriteEntered!: () => void;
+    let failWrite!: (cause: Error) => void;
+    const writeEntered = new Promise<void>((resolve) => {
+      markWriteEntered = resolve;
+    });
+    const failedWrite = new Promise<void>((_resolve, reject) => {
+      failWrite = reject;
+    });
+    const internals = fixture.store as unknown as {
+      persistQueued(): Promise<void>;
+    };
+    const persist = vi
+      .spyOn(internals, 'persistQueued')
+      .mockImplementationOnce(async () => {
+        markWriteEntered();
+        await failedWrite;
+      });
+
+    const activation = fixture.store.createInteractionRequest(
+      fixture.interaction
+    );
+    const rejected = expect(activation).rejects.toThrow(
+      'injected awaiting-boundary write failure'
+    );
+    await writeEntered;
+
+    const live = await fixture.store.snapshot();
+    const interactionId = live.interactionRequests.find(
+      (candidate) => candidate.providerRequestId === fixture.interaction.providerRequestId
+    )?.id;
+    expect(interactionId).toBeTruthy();
+    assertCompleteAwaitingBoundary(live, fixture, interactionId!);
+
+    failWrite(new Error('injected awaiting-boundary write failure'));
+    await rejected;
+    persist.mockRestore();
+
+    // A failed pre-publication write leaves the prior durable snapshot intact;
+    // the in-memory snapshot also contains a complete boundary for the adapter
+    // to stale during its cancellation/quarantine recovery path.
+    assertCompleteAwaitingBoundary(
+      await fixture.store.snapshot(),
+      fixture,
+      interactionId!
+    );
+    const durable = await new FileTaskStore(fixture.dir).snapshot();
+    expect(durable.interactionRequests).toHaveLength(0);
+    expect(durable.runs.find((run) => run.id === fixture.runId)?.status).toBe('RUNNING');
+    expect(durable.agentSessions.find((session) => session.id === fixture.sessionId)?.status)
+      .toBe('ACTIVE');
+  });
+
   it('persists provider-neutral server, session, turn, item, and interaction records', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-store-'));
     const store = new FileTaskStore(dir);
@@ -457,3 +529,104 @@ describe('FileTaskStore agent persistence', () => {
     );
   });
 });
+
+async function createAwaitingInteractionFixture(): Promise<{
+  dir: string;
+  store: FileTaskStore;
+  taskId: string;
+  runId: string;
+  sessionId: string;
+  interaction: CreateInteractionRequestInput;
+}> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-awaiting-boundary-'));
+  const store = new FileTaskStore(dir);
+  const task = await store.createTask({
+    title: 'Atomic approval boundary',
+    prompt: 'Request approval.',
+    repositoryPath: dir
+  });
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task,
+    branchName: 'codex/atomic-approval-boundary',
+    worktreePath: dir,
+    baseSha: 'base'
+  });
+  const createdSession = await store.createAgentSession({
+    task,
+    iteration,
+    worktree,
+    runtimeId: 'codex'
+  });
+  const session = await store.updateAgentSession(createdSession.id, {
+    providerSessionId: 'atomic-approval-session',
+    status: 'ACTIVE',
+    materialized: true
+  });
+  const server = await store.createAgentServer({
+    runtimeId: 'codex',
+    runtimeKind: 'APP_SERVER',
+    transport: 'STDIO',
+    executable: 'codex',
+    argv: ['app-server', '--stdio']
+  });
+  const createdRun = await store.createRun({
+    task,
+    session,
+    serverInstanceId: server.id,
+    mode: 'IMPLEMENTATION',
+    prompt: task.prompt
+  });
+  const run = await store.updateRun(createdRun.id, {
+    providerTurnId: 'atomic-approval-turn',
+    status: 'RUNNING'
+  });
+  const requestRawMessage = await store.appendProtocolMessage(
+    server.id,
+    'INBOUND',
+    '{"method":"session/request_permission","id":"atomic-approval-request"}'
+  );
+  return {
+    dir,
+    store,
+    taskId: task.id,
+    runId: run.id,
+    sessionId: session.id,
+    interaction: {
+      runtimeId: 'codex',
+      serverInstanceId: server.id,
+      providerRequestId: 'atomic-approval-request',
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      providerTurnId: run.providerTurnId,
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: Date.now() },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage
+    }
+  };
+}
+
+function assertCompleteAwaitingBoundary(
+  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>,
+  fixture: { taskId: string; runId: string; sessionId: string },
+  interactionId: string
+): void {
+  expect(snapshot.interactionRequests.find((interaction) => interaction.id === interactionId))
+    .toMatchObject({ status: 'PENDING', runId: fixture.runId, sessionId: fixture.sessionId });
+  expect(snapshot.runs.find((run) => run.id === fixture.runId)?.status)
+    .toBe('AWAITING_APPROVAL');
+  expect(snapshot.agentSessions.find((session) => session.id === fixture.sessionId)?.status)
+    .toBe('AWAITING_APPROVAL');
+  expect(snapshot.tasks.find((task) => task.id === fixture.taskId)?.projection.agentRun)
+    .toBe('AWAITING_APPROVAL');
+  expect(
+    snapshot.events.filter(
+      (event) =>
+        event.type === 'AGENT_INTERACTION_REQUESTED' &&
+        event.interactionRequestId === interactionId
+    )
+  ).toHaveLength(1);
+}

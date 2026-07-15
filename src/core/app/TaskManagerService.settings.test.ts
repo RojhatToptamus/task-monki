@@ -2,8 +2,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
 import { getGitExecutablePath, configureGitExecutablePath } from '../git/gitCli';
+import { AppEventBus } from '../runner/AppEventBus';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
@@ -12,7 +14,9 @@ import {
   writeOutputExecutable
 } from '../../testSupport/fakeExecutable';
 
-describe('TaskManagerService settings', () => {
+const SERVICE_INTEGRATION_TIMEOUT_MS = 20_000;
+
+describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_MS }, () => {
   const originalGitPath = process.env.TASK_MANAGER_GIT_PATH;
   const originalCodexBin = process.env[TASK_MONKI_CODEX_BIN_ENV];
   const originalPath = process.env.PATH;
@@ -103,7 +107,7 @@ describe('TaskManagerService settings', () => {
     await service.init();
     try {
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers[0]?.argv).toEqual([
+      expect(codexServers(snapshot)[0]?.argv).toEqual([
         'app-server',
         '--stdio',
         '-c',
@@ -145,7 +149,7 @@ describe('TaskManagerService settings', () => {
         apps: 'disabled'
       });
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers[0]?.argv).toEqual([
+      expect(codexServers(snapshot)[0]?.argv).toEqual([
         'app-server',
         '--stdio',
         '-c',
@@ -199,10 +203,10 @@ describe('TaskManagerService settings', () => {
       version: '9.9.9'
     });
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: executable,
-      appSettingsStore: new MemoryAppSettingsStore(),
-      worktreeRoot: path.join(dir, 'worktrees')
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable
     });
     await service.init();
     try {
@@ -240,9 +244,11 @@ describe('TaskManagerService settings', () => {
       });
 
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers).toHaveLength(1);
-      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.warnings).toContain(
-        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
+      expect(codexServers(snapshot)).toHaveLength(1);
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
       );
     } finally {
       await service.shutdown();
@@ -258,10 +264,10 @@ describe('TaskManagerService settings', () => {
     });
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version git-only');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: executable,
-      appSettingsStore: new MemoryAppSettingsStore(),
-      worktreeRoot: path.join(dir, 'worktrees')
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable
     });
 
     await service.init();
@@ -273,11 +279,13 @@ describe('TaskManagerService settings', () => {
       });
 
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers).toHaveLength(1);
-      expect(snapshot.agentServers[0]?.executable).toBe(executable);
+      expect(codexServers(snapshot)).toHaveLength(1);
+      expect(codexServers(snapshot)[0]?.executable).toBe(executable);
       expect(getGitExecutablePath()).toBe(fakeGit);
-      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.warnings).not.toContain(
-        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).not.toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
       );
     } finally {
       await service.shutdown();
@@ -341,8 +349,8 @@ describe('TaskManagerService settings', () => {
         resolvedPath: await expectedDiscoveredPath(staleCodex),
         version: 'codex-cli 0.22.0'
       });
-      expect(snapshot.agentServers[0]?.executable).toBe(compatibleCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedExecutable).toBe(
+      expect(codexServers(snapshot)[0]?.executable).toBe(compatibleCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedExecutable).toBe(
         compatibleCodex
       );
     } finally {
@@ -373,8 +381,8 @@ describe('TaskManagerService settings', () => {
     try {
       const snapshot = await waitForAgentServerSnapshot(store);
 
-      expect(snapshot.agentServers[0]?.executable).toBe(customCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+      expect(codexServers(snapshot)[0]?.executable).toBe(customCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedSource).toBe('config');
     } finally {
       await service.shutdown();
     }
@@ -408,8 +416,8 @@ describe('TaskManagerService settings', () => {
         resolvedPath: envCodex,
         status: 'ok'
       });
-      expect(snapshot.agentServers[0]?.executable).toBe(envCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+      expect(codexServers(snapshot)[0]?.executable).toBe(envCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedSource).toBe('config');
     } finally {
       await service.shutdown();
     }
@@ -461,17 +469,43 @@ function withPath(...entries: string[]): string {
   return [...entries, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
 }
 
+function createCodexSettingsTestService(input: {
+  store: FileTaskStore;
+  repositoryPath: string;
+  executable: string;
+}): TaskManagerService {
+  const events = new AppEventBus();
+  const codex = new CodexAppServerAdapter(input.store, events, {
+    cwd: input.repositoryPath,
+    executable: input.executable,
+    requestTimeoutMs: 2_000,
+    restartDelaysMs: []
+  });
+  return new TaskManagerService(input.store, input.repositoryPath, events, {
+    codexPath: input.executable,
+    appSettingsStore: new MemoryAppSettingsStore(),
+    worktreeRoot: path.join(input.repositoryPath, 'worktrees'),
+    agentRuntimeAdapters: [codex]
+  });
+}
+
 async function waitForAgentServerSnapshot(
   store: FileTaskStore
 ): Promise<Awaited<ReturnType<FileTaskStore['snapshot']>>> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const snapshot = await store.snapshot();
-    if (snapshot.agentServers.length > 0) {
+    if (codexServers(snapshot).length > 0) {
       return snapshot;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for Codex App Server startup.');
+}
+
+function codexServers(
+  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>
+) {
+  return snapshot.agentServers.filter((server) => server.runtimeId === 'codex');
 }
 
 async function writeFakeCodex(

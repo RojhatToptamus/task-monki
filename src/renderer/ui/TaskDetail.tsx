@@ -22,6 +22,7 @@ import type {
   AgentUsageSnapshotRecord,
   AgentRuntimeState,
   AgentServerInstance,
+  UpdateAgentNativeSessionRequest,
   CodexReviewFinding,
   CodexReviewGateStatus,
   InteractionRequestRecord,
@@ -57,12 +58,16 @@ import {
   shortFindingRef
 } from './Findings';
 import {
+  findCompletedCurrentImplementationRun,
+  isActiveNonReviewRun,
+  isCompletedCurrentImplementationRun,
   selectNextAction,
   type NextActionId,
   type NextActionModel
 } from '../model/nextAction';
 import {
   canRequestReviewChanges,
+  describeRunFailureBanner,
   describeTaskHeaderState,
   finishRequirementsForTask,
   getFinishEvidenceState,
@@ -145,6 +150,7 @@ interface TaskDetailProps {
   onRetry(runId: string, strategy: AgentRetryStrategy, instruction?: string): Promise<void>;
   onReview(runId: string): Promise<void>;
   onSyncAgentGoal(taskId: string, sessionId: string): Promise<void>;
+  onUpdateAgentNativeSession(input: UpdateAgentNativeSessionRequest): Promise<void>;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -300,22 +306,18 @@ export function TaskDetail(props: TaskDetailProps) {
     useRunActivity: reviewGate.status === 'RUNNING',
     items: props.items
   });
-  const reviewSourceRun =
-    (reviewGate.sourceRunId
-      ? props.runs.find((candidate) => candidate.id === reviewGate.sourceRunId)
-      : undefined) ??
-    (reviewRun?.continuedFromRunId
-      ? props.runs.find((candidate) => candidate.id === reviewRun.continuedFromRunId)
-      : undefined) ??
-    props.runs.find(
-      (candidate) =>
-        candidate.mode !== 'REVIEW' &&
-        candidate.iterationId === task.currentIterationId &&
-        ['COMPLETED', 'FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
-          candidate.status
-        )
-    );
-  const reviewPhaseVisible = isReviewPhase(task.workflowPhase) || reviewRun?.mode === 'REVIEW';
+  // The review run and projection remain historical display context. Starting
+  // another review or review-derived follow-up always targets the exact current
+  // completed implementation run, never the source of an older review.
+  const actionableReviewSourceRun = findCompletedCurrentImplementationRun(
+    task,
+    props.runs
+  );
+  const hasHistoricalReviewContext =
+    reviewRun?.mode === 'REVIEW' || reviewGate.status !== 'NOT_RUN';
+  const reviewPhaseVisible =
+    hasHistoricalReviewContext ||
+    (isReviewPhase(task.workflowPhase) && Boolean(actionableReviewSourceRun));
   const activeImplementationRun = run && isActiveNonReviewRun(run) ? run : undefined;
   const reviewPauseReason: ReviewActionPauseReason | undefined = reviewIsRunning
     ? 'review-running'
@@ -431,7 +433,7 @@ export function TaskDetail(props: TaskDetailProps) {
   const openRequestChanges = (findingIds?: string[]) => {
     const hasReviewOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
     if (
-      !reviewSourceRun ||
+      !actionableReviewSourceRun ||
       reviewActionsPaused ||
       !canRequestReviewChanges(reviewGate, reviewGate.status, hasReviewOutput)
     ) {
@@ -448,12 +450,12 @@ export function TaskDetail(props: TaskDetailProps) {
   };
 
   const submitRequestChanges = async () => {
-    if (!reviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
+    if (!actionableReviewSourceRun || !requestInstruction.trim() || reviewActionsPaused) {
       return;
     }
     await runReviewAction(async () => {
       try {
-        await props.onContinue(reviewSourceRun.id, requestInstruction.trim());
+        await props.onContinue(actionableReviewSourceRun.id, requestInstruction.trim());
         setRequestDrawerOpen(false);
       } catch {
         // The app shell reports the error. Keep the drawer open so the user can retry.
@@ -524,8 +526,8 @@ export function TaskDetail(props: TaskDetailProps) {
     switch (id) {
       case 'run-review':
       case 'run-review-again':
-        if (reviewSourceRun) {
-          void runReview(reviewSourceRun.id);
+        if (actionableReviewSourceRun) {
+          void runReview(actionableReviewSourceRun.id);
         }
         return;
       case 'request-changes':
@@ -555,7 +557,7 @@ export function TaskDetail(props: TaskDetailProps) {
       case 'run-review-again':
         return {
           disabled:
-            !reviewSourceRun ||
+            !actionableReviewSourceRun ||
             reviewActionsPaused ||
             busy ||
             Boolean(props.reviewDisabledReason),
@@ -584,10 +586,7 @@ export function TaskDetail(props: TaskDetailProps) {
   });
 
   const headActions: HeadAction[] = [];
-  if (
-    task.projection.agentRun === 'COMPLETED' &&
-    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)
-  ) {
+  if (shouldShowMoveToReviewHeaderAction(task, run)) {
     headActions.push({
       label: 'Move to review',
       kind: 'soft',
@@ -647,27 +646,26 @@ export function TaskDetail(props: TaskDetailProps) {
     finishCiStatus,
     finishVerifiedChecksEvidence
   );
-  const isFailed = ['FAILED', 'LOST', 'RECOVERY_REQUIRED'].includes(task.projection.agentRun);
+  const runFailure = describeRunFailureBanner(task);
 
   // The single "what next" model for the rail. Kept in one place so the header,
   // run surface, and rail all agree instead of each inventing an action.
-  const awaitingMoveToReview =
-    task.projection.agentRun === 'COMPLETED' &&
-    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase);
+  const awaitingMoveToReview = shouldShowMoveToReviewHeaderAction(task, run);
   const reviewHasOutput = Boolean(reviewGate.result) || Boolean(reviewRun?.finalMessage?.trim());
   const reviewHasActionableFindings =
-    Boolean(reviewSourceRun) &&
+    Boolean(actionableReviewSourceRun) &&
     canRequestReviewChanges(reviewGate, reviewGate.status, reviewHasOutput);
   const nextAction = selectNextAction({
     task,
     reviewStatus: reviewPending ? 'RUNNING' : reviewGate.status,
     finishEvidence,
     requirements: finishRequirements,
-    hasReviewSource: Boolean(reviewSourceRun),
+    hasReviewSource: Boolean(actionableReviewSourceRun),
     reviewHasActionableFindings,
     canCommit: canCreateDeliveryCommit(task),
     awaitingMoveToReview,
-    runInFlight: Boolean(activeImplementationRun) || reviewPending
+    runInFlight: Boolean(activeImplementationRun) || reviewPending,
+    implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status
   });
 
   const detailHeadClassName = props.showMascot
@@ -761,19 +759,19 @@ export function TaskDetail(props: TaskDetailProps) {
                 onRespond={props.onRespondToInteraction}
               />
 
-              {isFailed ? (
+              {runFailure ? (
                 <div className="tm-failure">
                   <div className="tm-failure__head">
                     <span className="tm-failure__dot" />
                     <span className="tm-failure__eyebrow">
-                      {humanizeEnum(task.projection.agentRun)}
+                      {humanizeEnum(runFailure.status)}
                     </span>
                   </div>
                   <h3 className="tm-panel__title" style={{ margin: '0 0 7px' }}>
-                    Task Monki cannot prove the final provider state
+                    {runFailure.title}
                   </h3>
                   <p className="tm-panel__lead" style={{ margin: 0 }}>
-                    {task.projection.summary}
+                    {runFailure.detail}
                   </p>
                 </div>
               ) : null}
@@ -943,6 +941,7 @@ export function TaskDetail(props: TaskDetailProps) {
               runtimeState={props.runtimeState}
               server={props.server}
               onSyncGoal={props.onSyncAgentGoal}
+              onUpdateNativeSession={props.onUpdateAgentNativeSession}
             />
             <InteractionAuditPanel interactions={interactions} sessions={sessions} />
           </div>
@@ -1643,12 +1642,13 @@ function isReviewPhase(phase: WorkflowPhase): boolean {
   return phase === 'REVIEW' || phase === 'IN_REVIEW';
 }
 
-function isActiveNonReviewRun(run: RunRecord): boolean {
+export function shouldShowMoveToReviewHeaderAction(
+  task: Pick<Task, 'currentRunId' | 'workflowPhase'>,
+  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
+): boolean {
   return (
-    run.mode !== 'REVIEW' &&
-    ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
-      run.status
-    )
+    isCompletedCurrentImplementationRun(task, run) &&
+    !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)
   );
 }
 

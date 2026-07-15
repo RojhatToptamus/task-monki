@@ -49,6 +49,13 @@ export function inferAgentPermissionMode(
     return 'FULL_ACCESS';
   }
   if (
+    sandbox === 'DANGER_FULL_ACCESS' &&
+    approvalPolicy === 'on-request' &&
+    approvalsReviewer === 'user'
+  ) {
+    return 'ASK_FOR_APPROVAL';
+  }
+  if (
     (sandbox === 'WORKSPACE_WRITE' || sandbox === 'READ_ONLY') &&
     settings.networkAccess !== true &&
     approvalPolicy === 'never' &&

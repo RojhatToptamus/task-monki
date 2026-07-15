@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-11
+Date: 2026-07-14
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -26,17 +26,23 @@ behavior and architecture, not private roadmap sequencing.
      data flow, renderer behavior, evidence boundaries, and invariants.
 5. `docs/DEV_SEEDING.md`
    - Deterministic local seed data for UI and workflow testing.
+6. `docs/PROVIDER_SMOKE_TESTING.md`
+   - Live provider/model verification through TaskManagerService in a clean,
+     remote-free throwaway Git repository.
 
 ### Architecture
 
 1. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
    - Current multi-runtime registry, durable identity, routing, capability,
      security, recovery, and extension boundaries.
-2. `docs/APP_SERVER_ARCHITECTURE.md`
+2. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
+   - Current support tiers, native and ACP runtime matrix, readiness
+     conditions, provider-specific limits, and execution security boundaries.
+3. `docs/APP_SERVER_ARCHITECTURE.md`
    - Codex-specific App Server integration and protocol behavior.
-3. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+4. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
-4. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+5. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
    - Current restricted attachment formats (and explicitly unsupported generic
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,

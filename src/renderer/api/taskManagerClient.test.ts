@@ -177,7 +177,13 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
       taskId: 'task-1',
       sessionId: 'session-1',
       runtimeId: 'gemini-acp',
-      native: { modes: { currentModeId: 'plan' } }
+      native: { modes: { currentModeId: 'plan' } },
+      controls: {
+        localSessionId: 'session-1',
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
+      }
     };
     vi.stubGlobal(
       'fetch',
@@ -190,11 +196,12 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
     const api = createBrowserTaskManagerApi('');
     await expect(
       api.updateAgentNativeSession({
-        operation: 'SET_MODE',
         taskId: 'task-1',
         sessionId: 'session-1',
         runtimeId: 'gemini-acp',
-        modeId: 'plan'
+        controlId: 'mode',
+        value: 'plan',
+        revision: 'revision-1'
       })
     ).resolves.toEqual(result);
     expect(calls).toEqual([
@@ -203,11 +210,12 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
         init: expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({
-            operation: 'SET_MODE',
             taskId: 'task-1',
             sessionId: 'session-1',
             runtimeId: 'gemini-acp',
-            modeId: 'plan'
+            controlId: 'mode',
+            value: 'plan',
+            revision: 'revision-1'
           })
         })
       }

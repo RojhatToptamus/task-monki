@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-07-10
+Date: 2026-07-14
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -10,7 +10,7 @@ is not just an AI chat UI.
 1. User creates a task in the active repository with a goal, model, and
    reasoning effort.
 2. Task Monki prepares an isolated Git worktree.
-3. An AI provider runs in that worktree.
+3. The selected coding-agent runtime runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
 5. User reviews, requests changes, follows up, continues unfinished runs,
@@ -28,15 +28,19 @@ shows setup instead of an empty board. Adding a repository completes only the
 repository step. The setup surface remains open so the user can review required
 tool status and defaults, then explicitly finish setup before entering the
 board and creating tasks. Finishing setup re-checks required Git and the
-selected default agent runtime before the completion flag is saved; GitHub CLI remains
-optional because it only affects PR delivery.
+selected default agent runtime before the completion flag is saved; GitHub CLI
+remains optional because it only affects PR delivery. A passively discovered
+on-demand runtime is startable but is not labeled Ready until its runtime-owned
+live check succeeds. Authentication, account incompatibility, and protocol
+failure remain distinct states with explicit next actions.
 
 New tasks inherit the active sidebar repository automatically. The creation
 flow should not ask for a repository path when a repository is already selected.
 Capturing a text-only task is a local operation and remains available when the
 selected agent runtime is unavailable; live model resolution is deferred until
-Start. Attachment-backed creation still requires a ready runtime/model because
-Task Monki must validate modality and isolation before adopting the draft.
+Start. Attachment-backed creation still requires a runtime/model with an
+attested attachment boundary because Task Monki must validate modality and
+isolation before adopting the draft.
 
 The new-task attachment flow accepts a bounded set of PNG,
 JPEG, and still WebP images plus UTF-8 text, data, configuration, and source-code
@@ -146,9 +150,10 @@ across surfaces.
 - Backlog / Ready
   - Task exists and can be prepared or started.
 - In Progress
-  - Implementation-side work is active or being corrected.
+  - Implementation-side work is active, being corrected, or waiting for a
+    retry after an unsuccessful run.
 - Review
-  - Implementation-side work has reached a terminal state and is ready for
+  - Implementation-side work completed successfully and is ready for
     inspection, review gate, acceptance, commit, or PR creation.
 - In Review
   - A PR or external review process exists.
@@ -165,8 +170,10 @@ flowchart LR
   Ready["Ready"] --> Prepare["Prepare worktree"]
   Prepare --> Start["Start implementation"]
   Start --> Progress["In Progress"]
-  Progress --> Terminal{"Run terminal?"}
-  Terminal --> Review["Review phase"]
+  Progress --> Terminal{"Run outcome?"}
+  Terminal -->|Completed| Review["Review phase"]
+  Terminal -->|Failed / interrupted / recovery| Retry["Retry or continue"]
+  Retry --> Progress
   Review --> Gate["Run agent review"]
   Gate --> Passed["Review passed"]
   Gate --> Changes["Needs changes"]
@@ -217,6 +224,9 @@ In Progress:
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
+- After a failed, interrupted, lost, or recovery-required implementation run,
+  keep the task in progress and make retry the primary recovery action. Continue
+  and fork alternative remain available; do not offer agent review.
 - Do not show review completion actions.
 
 Review:
@@ -224,6 +234,8 @@ Review:
 - Show verified evidence prominently, with PR Status as the primary delivery
   surface.
 - Allow Run agent review when no implementation-side run is active.
+- Require the current implementation-side run to have completed successfully;
+  unsuccessful or older superseded runs are not valid review sources.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -238,11 +250,12 @@ Post-run implementation controls:
   - Normal next implementation action after a completed run when the owner wants
     another pass in the same task, worktree, branch, and provider session.
 - Continue
-  - Recovery action for failed, interrupted, lost, or recovery-required runs.
-    It resumes from the current local state in the same task/worktree.
+  - Recovery alternative for failed, interrupted, lost, or recovery-required
+    runs when the owner wants to add guidance. It resumes from the current local
+    state in the same task/worktree.
 - Retry in session
-  - Secondary action that starts a retry in the same task, worktree, branch, and
-    provider session.
+  - Primary recovery action after an unsuccessful run. It starts a retry in the
+    same task, worktree, branch, and provider session.
 - Fork alternative
   - Creates a separate task with its own worktree, branch, iteration, run, and
     fresh provider session.

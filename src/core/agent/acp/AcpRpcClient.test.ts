@@ -67,10 +67,31 @@ describe('AcpRpcClient', () => {
     const started = await harness.client.startMutation('session/prompt', {
       sessionId: 'session-1',
       prompt: [{ type: 'text', text: 'hello' }]
-    });
+    }, { timeoutMs: null });
     await harness.outbound.next();
     harness.client.close('test disconnect');
     await expect(started.response).rejects.toBeInstanceOf(AcpAmbiguousMutationError);
+  });
+
+  it('lets an explicitly long-lived prompt outlast the bounded control timeout', async () => {
+    const harness = rpcHarness(20);
+    const started = await harness.client.startMutation('session/prompt', {
+      sessionId: 'session-1',
+      prompt: [{ type: 'text', text: 'slow work' }]
+    }, { timeoutMs: null });
+    const prompt = JSON.parse(await harness.outbound.next()) as { id: number };
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    harness.agentOutput.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id: prompt.id, result: { stopReason: 'end_turn' } })}\n`
+    );
+    await expect(started.response).resolves.toMatchObject({
+      result: { stopReason: 'end_turn' }
+    });
+
+    const control = harness.client.request('session/list', {});
+    await harness.outbound.next();
+    await expect(control).rejects.toThrow('ACP request timed out: session/list');
   });
 
   it('rejects malformed envelopes without resolving unrelated requests', async () => {
@@ -81,9 +102,65 @@ describe('AcpRpcClient', () => {
     harness.agentOutput.write('{"id":1,"result":{}}\n');
     expect((await protocolError).message).toContain('JSON-RPC 2.0');
   });
+
+  it('preserves opaque operational IDs while redacting journals and protocol errors', async () => {
+    const opaque = 'm7Qp4Vz9Lk2Nc8';
+    const harness = rpcHarness(1_000, [opaque]);
+    const request = harness.client.request('session/list', {});
+    const outbound = JSON.parse(await harness.outbound.next()) as { id: number };
+    harness.agentOutput.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: outbound.id,
+        error: { code: -32000, message: `provider echoed ${opaque}` }
+      })}\n`
+    );
+
+    await expect(request).rejects.toThrow('provider echoed [REDACTED]');
+    expect(harness.journal.map((entry) => entry.raw).join('\n')).not.toContain(opaque);
+
+    const sessionRequest = harness.client.request<{
+      sessionId: string;
+      models: { currentModelId: string };
+      configOptions: Array<{ id: string; currentValue: string }>;
+    }>('session/new', {});
+    const sessionOutbound = JSON.parse(await harness.outbound.next()) as { id: number };
+    harness.agentOutput.write(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: sessionOutbound.id,
+        result: {
+          sessionId: opaque,
+          models: { currentModelId: `model-${opaque}` },
+          configOptions: [
+            { id: `control-${opaque}`, currentValue: `choice-${opaque}` }
+          ]
+        }
+      })}\n`
+    );
+    await expect(sessionRequest).resolves.toMatchObject({
+      result: {
+        sessionId: opaque,
+        models: { currentModelId: `model-${opaque}` },
+        configOptions: [
+          { id: `control-${opaque}`, currentValue: `choice-${opaque}` }
+        ]
+      }
+    });
+    expect(harness.journal.map((entry) => entry.raw).join('\n')).not.toContain(opaque);
+
+    const protocolError = new Promise<string | undefined>((resolve) => {
+      harness.client.events.once('protocolError', (_error, rawLine) => resolve(rawLine));
+    });
+    harness.agentOutput.write(`not-json-${opaque}\n`);
+    await expect(protocolError).resolves.toBe('not-json-[REDACTED]');
+  });
 });
 
-function rpcHarness() {
+function rpcHarness(
+  requestTimeoutMs = 1_000,
+  sensitiveValues: readonly string[] = []
+) {
   const clientInput = new PassThrough();
   const agentOutput = new PassThrough();
   const outbound = lineCollector(clientInput);
@@ -107,7 +184,8 @@ function rpcHarness() {
       return reference;
     },
     'server-1',
-    1_000
+    requestTimeoutMs,
+    sensitiveValues
   );
   return { client, agentOutput, outbound, journal };
 }

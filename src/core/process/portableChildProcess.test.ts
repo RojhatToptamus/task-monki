@@ -95,6 +95,28 @@ describe('prepareProcessCommand', () => {
     ).toContain('^^^"space^^^ arg^^^" ^^^"a^^^&b^^^"');
   });
 
+  it('closes stdin for complete noninteractive exec commands', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki exec eof '));
+    const executable = await writeNodeExecutable(
+      directory,
+      'wait-for-eof',
+      [
+        "process.stdin.on('data', () => undefined);",
+        "process.stdin.on('end', () => process.stdout.write('stdin-closed\\n'));",
+        'process.stdin.resume();'
+      ].join('\n')
+    );
+
+    const { stdout } = await execFilePortable(executable, [], {
+      cwd: directory,
+      env: process.env,
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024
+    });
+
+    expect(stdout.trim()).toBe('stdin-closed');
+  });
+
   it.runIf(process.platform === 'win32')(
     'executes generated Windows cmd launchers through execFilePortable',
     async () => {

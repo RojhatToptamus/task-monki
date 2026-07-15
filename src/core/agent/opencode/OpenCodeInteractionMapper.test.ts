@@ -7,10 +7,11 @@ import {
 } from './OpenCodeInteractionMapper';
 
 describe('OpenCodeInteractionMapper', () => {
-  it('keeps mutation tools gated and blocks external-directory escape', () => {
+  it('keeps mutation and external-directory tools approval-gated without claiming confinement', () => {
     const rules = openCodePermissionRules({
       runtimeId: 'opencode',
-      sandbox: 'WORKSPACE_WRITE',
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'on-request',
       networkAccess: true
     });
     expect(rules).toContainEqual({ permission: 'edit', pattern: '*', action: 'ask' });
@@ -18,33 +19,34 @@ describe('OpenCodeInteractionMapper', () => {
     expect(rules).toContainEqual({
       permission: 'external_directory',
       pattern: '*',
-      action: 'deny'
+      action: 'ask'
     });
     expect(rules).toContainEqual({ permission: 'webfetch', pattern: '*', action: 'allow' });
     expect(() =>
       openCodePermissionRules({
         runtimeId: 'opencode',
-        sandbox: 'WORKSPACE_WRITE',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'on-request',
         networkAccess: false
       })
     ).toThrow('cannot attest network-disabled execution');
   });
 
-  it('fails closed for read-only and never-approval execution', () => {
-    const rules = openCodePermissionRules({
-      sandbox: 'READ_ONLY',
-      approvalPolicy: 'never',
-      networkAccess: true
-    });
-    expect(rules).toContainEqual({ permission: 'edit', pattern: '*', action: 'deny' });
-    expect(rules).toContainEqual({ permission: 'bash', pattern: '*', action: 'deny' });
+  it('fails closed for settings that falsely claim a Task Monki sandbox', () => {
     expect(() =>
       openCodePermissionRules({
         sandbox: 'WORKSPACE_WRITE',
+        approvalPolicy: 'on-request',
+        networkAccess: true
+      })
+    ).toThrow('cannot attest Task Monki');
+    expect(() =>
+      openCodePermissionRules({
+        sandbox: 'READ_ONLY',
         approvalPolicy: 'never',
         networkAccess: true
       })
-    ).toThrow('cannot safely honor approvalPolicy "never"');
+    ).toThrow('cannot attest Task Monki');
   });
 
   it('only allows mutation tools for explicit danger-full-access settings', () => {
@@ -67,13 +69,16 @@ describe('OpenCodeInteractionMapper', () => {
         networkAccess: false
       })
     ).toThrow('cannot attest network-disabled execution');
-    expect(() =>
-      openCodePermissionRules({
-        sandbox: 'DANGER_FULL_ACCESS',
-        approvalPolicy: 'on-request',
-        networkAccess: true
-      })
-    ).toThrow('only represent full access');
+    const approvalRules = openCodePermissionRules({
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'on-request',
+      networkAccess: true
+    });
+    expect(approvalRules).toContainEqual({
+      permission: 'edit',
+      pattern: '*',
+      action: 'ask'
+    });
   });
 
   it('maps command and file permissions with reviewable native context', () => {

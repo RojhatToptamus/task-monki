@@ -23,6 +23,7 @@ import {
   shouldShowExecutablePathControls
 } from '../model/executableSettings';
 import type { RepositorySetupState } from '../model/repositories';
+import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
 import { Chip, dotStyle } from './StatusBadge';
@@ -251,8 +252,9 @@ function FirstLaunchSetup({
   const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === selectedModels.defaultRuntimeId
   );
+  const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
   const gitReady = externalToolStatus?.tools.git.status === 'ok';
-  const requiredToolsReady = Boolean(gitReady && selectedRuntime?.preflight.ready);
+  const requiredToolsReady = Boolean(gitReady && selectedRuntimeReadiness.canStart);
   const isLoading = state === 'loading';
   const hasRepository = Boolean(activeRepositoryPath);
   const addRepositoryDisabled = isLoading || addingRepository;
@@ -451,6 +453,7 @@ function SetupToolList({
   onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
 }) {
+  const runtimeReadiness = runtimeReadinessView(selectedRuntime);
   const rows: Array<{
     key: ExternalToolId;
     label: string;
@@ -502,20 +505,19 @@ function SetupToolList({
     <div className="tm-setup-tools">
       <div className="tm-setup-tools__row">
         <span
-          className={`tm-setup-tools__dot tm-setup-tools__dot--${
-            selectedRuntime?.preflight.ready ? 'ok' : 'error'
-          }`}
+          className={`tm-setup-tools__dot tm-setup-tools__dot--${runtimeReadiness.tone}`}
         />
         <div className="tm-setup-tools__copy">
           <strong>{selectedRuntime?.preflight.runtime.displayName ?? 'Agent runtime'}</strong>
           <span>Required for agent runs</span>
         </div>
         <div className="tm-setup-tools__meta">
-          <strong>{selectedRuntime?.preflight.ready ? 'Ready' : 'Unavailable'}</strong>
+          <strong>{runtimeReadiness.label}</strong>
           <span>
-            {selectedRuntime?.preflight.runtimeVersion ??
-              selectedRuntime?.preflight.problems[0] ??
-              'Not checked'}
+            {selectedRuntime?.preflight.runtimeVersion &&
+            selectedRuntime.preflight.readiness.status === 'READY'
+              ? `Version ${selectedRuntime.preflight.runtimeVersion}`
+              : runtimeReadiness.detail}
           </span>
         </div>
       </div>
@@ -903,7 +905,7 @@ function selectSettingsModels(
     ...models.map((model) => model.runtimeId)
   ]);
   const firstRuntimeId =
-    runtimes.find((runtime) => runtime.preflight.ready)?.preflight.runtime.id ??
+    runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
     runtimes[0]?.preflight.runtime.id ??
     models[0]?.runtimeId ??
     appSettings.defaultRuntimeId;
@@ -914,7 +916,7 @@ function selectSettingsModels(
     runtimes
       .filter(
         (runtime) =>
-          runtime.preflight.ready &&
+          runtime.preflight.readiness.canStart &&
           runtime.preflight.capabilities.promptRefinement.maturity !==
           'unsupported'
       )
@@ -924,7 +926,7 @@ function selectSettingsModels(
     runtimes
       .filter(
         (runtime) =>
-          runtime.preflight.ready &&
+          runtime.preflight.readiness.canStart &&
           (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
             runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
               'stable')
@@ -1008,12 +1010,12 @@ function Settings({
   const selectedModels = selectSettingsModels(models, runtimes, appSettings);
   const promptRefinementRuntimes = runtimes.filter(
     (runtime) =>
-      runtime.preflight.ready &&
+      runtime.preflight.readiness.canStart &&
       runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
   );
   const reviewRuntimes = runtimes.filter(
     (runtime) =>
-      runtime.preflight.ready &&
+      runtime.preflight.readiness.canStart &&
       (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
         runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
           'stable')
@@ -1404,10 +1406,11 @@ function RuntimeExecutableSettingRow({
     mode === 'auto'
       ? value !== null
       : Boolean(normalizedDraft) && normalizedDraft !== savedPath;
-  const statusLabel = runtime.preflight.ready ? 'Ready' : 'Unavailable';
-  const statusDetail = runtime.preflight.runtimeVersion
-    ? `Version ${runtime.preflight.runtimeVersion}`
-    : runtime.preflight.problems[0] ?? runtime.preflight.capabilities.executionPolicy.detail;
+  const readiness = runtimeReadinessView(runtime);
+  const statusDetail = readiness.nextAction ??
+    (readiness.canStart && runtime.preflight.runtimeVersion
+      ? `Version ${runtime.preflight.runtimeVersion}`
+      : readiness.detail);
 
   return (
     <div className="tm-settings__row">
@@ -1416,7 +1419,7 @@ function RuntimeExecutableSettingRow({
           {runtime.preflight.runtime.displayName}
         </div>
         <div className="tm-settings__hint">
-          {statusLabel} · {compactSettingsText(statusDetail, 88)}
+          {readiness.label} · {statusDetail}
         </div>
       </div>
       <div className="tm-settings__controls">
@@ -1760,7 +1763,7 @@ function ModelSettingRow({
               value={runtime.preflight.runtime.id}
             >
               {runtime.preflight.runtime.displayName}
-              {runtime.preflight.ready ? '' : ' (unavailable)'}
+              {runtimeReadinessView(runtime).optionSuffix}
             </option>
           ))}
         </select>

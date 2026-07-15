@@ -4,8 +4,8 @@
  * These types follow the official schema artifact v1.19.0. Task Monki's main
  * process is CommonJS while the official TypeScript SDK is ESM-only, so the
  * runtime uses a small typed JSON-RPC transport instead of pulling an SDK
- * through an unsafe interop shim. Unknown `_meta` and extension payloads stay
- * lossless in the protocol journal.
+ * through an unsafe interop shim. Unknown `_meta` and extension payloads remain
+ * available in the structurally redacted protocol journal.
  */
 
 export const ACP_PROTOCOL_VERSION = 1 as const;
@@ -45,7 +45,19 @@ export type AcpJsonRpcMessage =
 export interface AcpClientCapabilities {
   fs: { readTextFile: false; writeTextFile: false };
   terminal: false;
+  session: {
+    configOptions: {
+      boolean: { _meta?: Record<string, unknown> | null };
+    };
+  };
 }
+
+/** Exact client capability payload supported from schema artifact v1.19.0. */
+export const ACP_CLIENT_CAPABILITIES = {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+  session: { configOptions: { boolean: {} } }
+} as const satisfies AcpClientCapabilities;
 
 export interface AcpPromptCapabilities {
   image?: boolean;
@@ -166,6 +178,24 @@ export interface AcpSessionMode {
 export interface AcpSessionModeState {
   currentModeId: string;
   availableModes: AcpSessionMode[];
+  _meta?: Record<string, unknown> | null;
+}
+
+/**
+ * Model types for profile-owned ACP extensions. These are not part of the
+ * stable ACP v1.19 schema; profiles must explicitly opt into a captured wire
+ * contract before the adapter parses or invokes them.
+ */
+export interface AcpSessionModel {
+  modelId: string;
+  name: string;
+  description?: string | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpSessionModelState {
+  currentModelId: string;
+  availableModels: AcpSessionModel[];
   _meta?: Record<string, unknown> | null;
 }
 
@@ -311,6 +341,32 @@ export function parseSessionSetupResponse(value: unknown): AcpSessionSetupRespon
     configOptions: parseConfigOptions(record.configOptions),
     _meta: optionalMeta(record._meta)
   };
+}
+
+/**
+ * Parses the captured provider extension carried in a session setup response.
+ * Callers must profile-gate this function before invoking it.
+ */
+export function parseSessionModelExtension(
+  value: unknown,
+  setupResponseField: 'models'
+): AcpSessionModelState | null {
+  const record = requireRecord(value, 'ACP session setup response');
+  return parseModelState(record[setupResponseField]);
+}
+
+/**
+ * Parses a profile-gated model catalog carried in the initialize response's
+ * opaque metadata. This is not part of stable ACP v1; callers must opt into an
+ * exact provider contract before using it.
+ */
+export function parseInitializeModelExtension(
+  value: unknown,
+  initializeResponseMetaField: 'modelState'
+): AcpSessionModelState | null {
+  const record = requireRecord(value, 'ACP initialize response');
+  const meta = optionalMeta(record._meta);
+  return parseModelState(meta?.[initializeResponseMetaField]);
 }
 
 export function parsePromptResponse(value: unknown): AcpPromptResponse {
@@ -480,6 +536,48 @@ function parseModeState(value: unknown): AcpSessionModeState | null {
         _meta: optionalMeta(mode._meta)
       };
     }),
+    _meta: optionalMeta(state._meta)
+  };
+}
+
+function parseModelState(value: unknown): AcpSessionModelState | null {
+  if (value == null) return null;
+  const state = requireRecord(value, 'ACP provider extension session model state');
+  if (
+    typeof state.currentModelId !== 'string' ||
+    !state.currentModelId ||
+    !Array.isArray(state.availableModels)
+  ) {
+    throw new Error('ACP provider extension session model state is invalid.');
+  }
+  const availableModels = state.availableModels.map((candidate) => {
+    const model = requireRecord(candidate, 'ACP provider extension session model');
+    if (
+      typeof model.modelId !== 'string' ||
+      !model.modelId ||
+      typeof model.name !== 'string'
+    ) {
+      throw new Error('ACP provider extension session model is invalid.');
+    }
+    return {
+      modelId: model.modelId,
+      name: model.name,
+      description: typeof model.description === 'string' ? model.description : null,
+      _meta: optionalMeta(model._meta)
+    };
+  });
+  const modelIds = new Set(availableModels.map((model) => model.modelId));
+  if (
+    modelIds.size !== availableModels.length ||
+    !modelIds.has(state.currentModelId)
+  ) {
+    throw new Error(
+      'ACP provider extension session model state has duplicate or unadvertised model IDs.'
+    );
+  }
+  return {
+    currentModelId: state.currentModelId,
+    availableModels,
     _meta: optionalMeta(state._meta)
   };
 }

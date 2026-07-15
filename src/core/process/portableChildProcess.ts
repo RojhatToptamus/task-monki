@@ -69,14 +69,30 @@ export function execFilePortable(
   options: ExecFileOptions
 ): Promise<{ stdout: string; stderr: string }> {
   const command = prepareProcessCommand(executable, argv, process.platform, options.env);
-  return execFileAsync(
-    command.executable,
-    command.argv,
-    withPreparedProcessOptions(command, options)
-  ) as Promise<{
-    stdout: string;
-    stderr: string;
-  }>;
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      command.executable,
+      command.argv,
+      withPreparedProcessOptions(command, options),
+      (error, stdout, stderr) => {
+        if (error) {
+          const failure = error as Error & {
+            stdout?: string | Buffer;
+            stderr?: string | Buffer;
+          };
+          failure.stdout = stdout;
+          failure.stderr = stderr;
+          reject(failure);
+          return;
+        }
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      }
+    );
+    // execFile is used for complete noninteractive commands. Explicit EOF is
+    // part of that contract: some CLIs wait for piped stdin before exiting,
+    // even for discovery subcommands that never consume input.
+    child.stdin?.end();
+  });
 }
 
 /**

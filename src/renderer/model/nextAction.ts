@@ -1,4 +1,10 @@
-import type { CodexReviewGateStatus, Task } from '../../shared/contracts';
+import type {
+  AgentRunStatus,
+  CodexReviewGateStatus,
+  RunRecord,
+  Task
+} from '../../shared/contracts';
+import { isImplementationRunMode } from '../../shared/contracts';
 import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
 
 /**
@@ -48,6 +54,8 @@ export interface NextActionInput {
   awaitingMoveToReview: boolean;
   /** An implementation/review run is currently in flight. */
   runInFlight: boolean;
+  /** Current implementation-side run status, used to keep recovery ahead of review. */
+  implementationRunStatus?: AgentRunStatus;
 }
 
 const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
@@ -72,6 +80,41 @@ function countActionableFindings(task: Task): number {
   return task.projection.codexReview?.result?.findings?.length ?? 0;
 }
 
+export function isActiveNonReviewRun(
+  run: Pick<RunRecord, 'mode' | 'status'>
+): boolean {
+  return (
+    run.mode !== 'REVIEW' &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING'
+    ].includes(run.status)
+  );
+}
+
+export function isCompletedCurrentImplementationRun(
+  task: Pick<Task, 'currentRunId'>,
+  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
+): boolean {
+  return Boolean(
+    run &&
+      run.id === task.currentRunId &&
+      run.status === 'COMPLETED' &&
+      isImplementationRunMode(run.mode)
+  );
+}
+
+export function findCompletedCurrentImplementationRun(
+  task: Pick<Task, 'currentRunId'>,
+  runs: readonly RunRecord[]
+): RunRecord | undefined {
+  return runs.find((run) => isCompletedCurrentImplementationRun(task, run));
+}
+
 export function selectNextAction(input: NextActionInput): NextActionModel {
   const {
     task,
@@ -82,7 +125,8 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     reviewHasActionableFindings,
     canCommit,
     awaitingMoveToReview,
-    runInFlight
+    runInFlight,
+    implementationRunStatus
   } = input;
 
   if (task.workflowPhase === 'DONE') {
@@ -97,6 +141,21 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
         reviewStatus === 'RUNNING'
           ? 'Reviewing the current diff.'
           : 'The agent is working — follow progress above.',
+      secondaries: []
+    };
+  }
+
+  if (
+    implementationRunStatus &&
+    ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+      implementationRunStatus
+    )
+  ) {
+    return {
+      sentence:
+        implementationRunStatus === 'FAILED'
+          ? 'The run failed — retry in this session or continue from the current worktree.'
+          : 'The run did not complete — retry or continue before starting review.',
       secondaries: []
     };
   }
@@ -120,6 +179,13 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
       };
     case 'NEEDS_CHANGES':
     case 'INCONCLUSIVE': {
+      if (!hasReviewSource) {
+        return {
+          sentence:
+            'The previous review is historical — complete the current implementation before reviewing again.',
+          secondaries: []
+        };
+      }
       const count = countActionableFindings(task);
       const sentence =
         count > 0
@@ -134,6 +200,13 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     case 'FAILED':
     case 'CANCELED':
     case 'STALE': {
+      if (!hasReviewSource) {
+        return {
+          sentence:
+            'The previous review is historical — complete the current implementation before reviewing again.',
+          secondaries: []
+        };
+      }
       const staleNote =
         reviewStatus === 'STALE'
           ? 'The diff changed since the last review — re-run it before finishing cleanly.'
