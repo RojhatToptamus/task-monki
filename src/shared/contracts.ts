@@ -28,7 +28,10 @@ import type {
 } from './attachments';
 
 export * from './agent';
+export * from './agentRuntime';
 export * from './attachments';
+export * from './discourse';
+export * from './repositories';
 
 export const TASK_STORE_SCHEMA_VERSION = 11 as const;
 
@@ -684,12 +687,17 @@ export interface TaskSnapshot {
 export interface CreateTaskRequest {
   title: string;
   prompt: string;
-  repositoryPath: string;
+  repositoryId: string;
   /** Stable across retries of one logical create action. */
   creationToken?: string;
   completionPolicy?: CompletionPolicy;
   agentSettings?: AgentExecutionSettings;
   attachmentDraftId?: string;
+}
+
+/** Core/storage input after an authoritative repository id has been resolved. */
+export interface CreateStoredTaskRequest extends Omit<CreateTaskRequest, 'repositoryId'> {
+  repositoryPath: string;
 }
 
 export interface StartRunRequest {
@@ -783,7 +791,7 @@ export interface ProtocolMessageRecord {
 }
 
 export interface RefinePromptRequest {
-  repositoryPath: string;
+  repositoryId: string;
   input: string;
   model?: string;
 }
@@ -806,7 +814,6 @@ export interface UpdateAppSettingsRequest {
   reviewReasoningEffort?: string | null;
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
-  repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
 }
 
 export type ExternalToolId = 'git' | 'codex' | 'gh';
@@ -857,7 +864,7 @@ export interface OpenTargetDetectedApp {
 export type OpenTargetRef =
   | {
       type: 'repository';
-      repositoryPath: string;
+      repositoryId: string;
     }
   | {
       type: 'worktree';
@@ -929,6 +936,11 @@ export interface RefreshGitHubRequest {
   taskId: string;
 }
 
+export type AppEventScope =
+  | { kind: 'APP' }
+  | { kind: 'TASK'; taskId: string }
+  | { kind: 'DISCOURSE'; conversationId: string; waveId?: string; jobId?: string };
+
 export interface AppUpdateEvent {
   type:
     | 'task.updated'
@@ -946,8 +958,14 @@ export interface AppUpdateEvent {
     | 'provider.updated'
     | 'projection.updated'
     | 'finding.updated'
-    | 'task.deleted';
-  taskId: string;
+    | 'task.deleted'
+    | 'discourse.summary.updated'
+    | 'discourse.message.appended'
+    | 'discourse.wave.updated'
+    | 'discourse.job.updated'
+    | 'discourse.delta';
+  scope: AppEventScope;
+  taskId?: string;
   iterationId?: string;
   runId?: string;
   worktreeId?: string;
@@ -955,10 +973,24 @@ export interface AppUpdateEvent {
   at: string;
 }
 
+export type LegacyTaskAppUpdateEvent = Omit<AppUpdateEvent, 'scope' | 'taskId'> & {
+  taskId: string;
+};
+
 export interface TaskManagerApi {
-  getDefaultRepositoryPath(): Promise<string>;
-  chooseRepositoryFolder(): Promise<string | undefined>;
-  validateRepository(path: string): Promise<RepositoryPreflight>;
+  getRepositoryCatalog(): Promise<import('./repositories').RepositoryCatalogSnapshot>;
+  selectRepository(
+    input: import('./repositories').SelectRepositoryRequest
+  ): Promise<import('./repositories').RepositoryCatalogSnapshot>;
+  addRepository(
+    input: import('./repositories').AddRepositoryRequest
+  ): Promise<import('./repositories').RepositoryCatalogSnapshot | null>;
+  removeRepository(
+    input: import('./repositories').RemoveRepositoryRequest
+  ): Promise<import('./repositories').RepositoryCatalogSnapshot>;
+  relinkRepository(
+    input: import('./repositories').RelinkRepositoryRequest
+  ): Promise<import('./repositories').RepositoryCatalogSnapshot | null>;
   getAppSettings(): Promise<import('./agent').TaskManagerAppSettings>;
   updateAppSettings(
     input: UpdateAppSettingsRequest
@@ -971,6 +1003,58 @@ export interface TaskManagerApi {
   ): Promise<OpenTargetActionResult>;
   getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
   listTasks(): Promise<TaskSnapshot>;
+  listDiscourseConversations(
+    input?: import('./discourse').ListDiscourseConversationsRequest
+  ): Promise<import('./discourse').DiscourseConversationPage>;
+  getDiscourseConversation(
+    conversationId: string
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
+  listDiscourseMessages(
+    input: import('./discourse').ListDiscourseMessagesRequest
+  ): Promise<import('./discourse').DiscourseMessagePage>;
+  getDiscourseMentionCatalog(): Promise<import('./discourse').DiscourseMentionCatalogSnapshot>;
+  createDiscourseConversation(
+    input: import('./discourse').CreateDiscourseConversationRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  appendHumanDiscourseMessage(
+    input: import('./discourse').AppendHumanDiscourseMessageRequest
+  ): Promise<import('./discourse').DiscourseMessageRecord>;
+  sendDiscourseMessage(
+    input: import('./discourse').SendDiscourseMessageRequest
+  ): Promise<import('./discourse').SendDiscourseMessageResult>;
+  tombstoneDiscourseMessage(
+    input: import('./discourse').TombstoneDiscourseMessageRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setPinnedDiscourseContext(
+    input: import('./discourse').SetPinnedDiscourseContextRequest
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
+  previewDiscourseContext(
+    input: import('./discourse').PreviewDiscourseContextRequest
+  ): Promise<import('./discourse').DiscourseContextPreview>;
+  saveDiscourseDraft(
+    input: import('./discourse').SaveDiscourseDraftRequest
+  ): Promise<import('./discourse').DiscourseDraftRecord>;
+  getDiscourseDraft(draftId: string): Promise<import('./discourse').DiscourseDraftRecord | undefined>;
+  listDiscourseDrafts(): Promise<import('./discourse').DiscourseDraftRecord[]>;
+  deleteDiscourseDraft(input: import('./discourse').DeleteDiscourseDraftRequest): Promise<void>;
+  renameDiscourseConversation(
+    input: import('./discourse').RenameDiscourseConversationRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setDiscourseConversationRead(
+    input: import('./discourse').SetDiscourseConversationReadRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setDiscourseConversationArchived(
+    input: import('./discourse').SetDiscourseConversationArchivedRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  deleteDiscourseConversation(
+    input: import('./discourse').DeleteDiscourseConversationRequest
+  ): Promise<void>;
+  stopDiscourseWave(
+    input: import('./discourse').StopDiscourseWaveRequest
+  ): Promise<import('./discourse').DiscourseResponseWaveRecord>;
+  confirmDiscourseWaveContext(
+    input: import('./discourse').ConfirmDiscourseWaveContextRequest
+  ): Promise<import('./discourse').DiscourseResponseWaveRecord>;
   stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;

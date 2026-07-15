@@ -1,7 +1,11 @@
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
+import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
 import {
   createDevApiTokenLease,
   DEFAULT_DEV_API_PORT,
@@ -40,6 +44,19 @@ const service = new TaskManagerService(
   undefined,
   {
     appSettingsStore: new AppSettingsStore(appSettingsPath),
+    repositoryRegistry: new FileRepositoryRegistry(
+      process.env.TASK_MANAGER_REPOSITORY_REGISTRY_DIR ??
+        path.join(storeDir, 'repository-registry'),
+      new NodeRepositoryInspector()
+    ),
+    agentRuntimeStore: new FileAgentRuntimeStore(
+      process.env.TASK_MANAGER_AGENT_RUNTIME_DIR ??
+        path.join(storeDir, 'agent-runtime')
+    ),
+    discourseStore: new FileDiscourseStore(
+      process.env.TASK_MANAGER_DISCOURSE_DIR ?? path.join(storeDir, 'discourse')
+    ),
+    discourseWorkspaceRoot: path.join(storeDir, 'discourse-workspaces'),
     // A same-user provider process can read ordinary filesystem secrets. Keep
     // the browser-only HTTP development surface unreachable from agent commands
     // by requiring non-escalatable, network-disabled turns. Startup also makes

@@ -10,7 +10,7 @@ import {
   spawnPortable,
   terminatePortableProcessTree
 } from '../../process/portableChildProcess';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import { CodexRpcClient } from './CodexRpcClient';
 import {
   resolveCodexRuntime,
@@ -124,7 +124,7 @@ export class CodexAppServerSupervisor {
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
 
   constructor(
-    private readonly store: FileTaskStore,
+    private readonly store: AgentProviderRuntimeStore,
     private readonly options: CodexAppServerSupervisorOptions
   ) {}
 

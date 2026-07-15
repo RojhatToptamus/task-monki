@@ -1,6 +1,6 @@
 # Product Workflow
 
-Date: 2026-07-10
+Date: 2026-07-13
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
@@ -22,6 +22,14 @@ The sidebar repository selector defines the active task context. It filters the
 board, counts, settings summary, and new-task defaults to the selected
 repository. Adding a repository opens the local folder picker and validates the
 selected folder before it is saved as a selectable repository.
+
+Repository paths are host-owned discovery inputs, not renderer authority. The
+core keeps a durable repository registry with opaque repository IDs, canonical
+paths, identity evidence, aliases, availability, and last-seen metadata. Public
+renderer/API requests select, create, refine, open, remove, and relink by ID;
+only the trusted Electron or development host may pass a folder-picker path to
+the registry. A missing or identity-changed repository remains visible as
+unavailable until it is explicitly relinked to a matching repository.
 
 On first launch, when no repository has been configured, the main workflow area
 shows setup instead of an empty board. Adding a repository completes only the
@@ -69,12 +77,38 @@ cleanup, and privacy semantics.
 
 Task Monki attachment runs require read-only or managed workspace access.
 
-Task records remain bound to the repository path they were created with. Runs,
-worktrees, Git evidence, GitHub delivery, and provider sessions continue
-to resolve through the task and iteration records rather than the currently
-selected sidebar repository. Switching repositories must therefore close task
-detail views from the previous repository instead of mutating those task
-records.
+Task records remain bound to the canonical repository path resolved from their
+repository ID when they were created. The registry preserves the ID-to-path
+association and reconciles legacy task paths during startup. Runs, worktrees,
+Git evidence, GitHub delivery, and provider sessions continue to resolve through
+the task and iteration records rather than the currently selected sidebar
+repository. Switching repositories must therefore close task detail views from
+the previous repository instead of mutating those task records.
+
+## Global discourse
+
+Discourse is a general technical conversation workspace across tasks and
+repositories. It is not a task phase and does not inherit the active board
+repository. Human messages can stand alone, or one message can explicitly ask
+for a Direct, Panel, or Team response using global `@` mentions and selected
+context.
+
+Direct produces one attributable answer. Panel asks two or three selected
+agents independently from the same frozen input, preserving successful answers
+when another panelist fails. Team uses Lead, Skeptic, and Verifier: Lead answers,
+the two reviewers independently return structured review receipts, and Lead may
+make one attributable correction for eligible material concerns. A Team wave
+uses at most four agent turns.
+
+Later follow-ups are durably queued behind the current response in the same
+conversation. Context is previewed and frozen per wave; if it changes before
+dispatch, the user must Continue with the latest context or Cancel. Agent
+sessions are fresh, read-only, offline, tool-free, attachment-free, and never
+request approval. Discourse activity does not create or mutate task workflow,
+Git evidence, GitHub delivery, review-gate state, or acceptance.
+
+The complete source of truth is
+`docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`.
 
 ## UI priority
 

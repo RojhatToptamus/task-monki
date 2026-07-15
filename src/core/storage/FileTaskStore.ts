@@ -11,7 +11,6 @@ import type {
   AgentPlanRevisionRecord,
   AgentRunMode,
   AgentServerInstance,
-  AgentServerStatus,
   AgentSessionRecord,
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
@@ -22,7 +21,7 @@ import type {
   BranchPublicationRecord,
   CiRollupRecord,
   CodexReviewGateStatus,
-  CreateTaskRequest,
+  CreateStoredTaskRequest,
   DomainEvent,
   GitSnapshotRecord,
   GitHubRepositoryRecord,
@@ -52,6 +51,7 @@ import {
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
 import { AgentProtocolJournal } from '../agent/journal/AgentProtocolJournal';
+import { validateAgentServerTransition } from '../agent/AgentServerLifecycle';
 import {
   enforcePosixMode,
   hasNoGroupOrOtherPosixAccess,
@@ -82,6 +82,8 @@ export interface CreateAgentSessionInput {
   requestedSettings?: AgentExecutionSettings;
   parentSessionId?: string;
   forkedFromSessionId?: string;
+  /** Create a new access epoch instead of reusing the current primary session. */
+  forceNew?: boolean;
 }
 
 export interface CreateRunInput {
@@ -97,7 +99,7 @@ export interface CreateRunInput {
   beforeGitSnapshotId?: string;
 }
 
-export interface CreateForkedAlternativeTaskInput extends CreateTaskRequest {
+export interface CreateForkedAlternativeTaskInput extends CreateStoredTaskRequest {
   sourceTaskId: string;
   sourceRunId: string;
 }
@@ -218,7 +220,7 @@ const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
 );
 
 function normalizeCreateTaskCompletionPolicy(
-  value: CreateTaskRequest['completionPolicy']
+  value: CreateStoredTaskRequest['completionPolicy']
 ): Task['completionPolicy'] {
   if (value === undefined) {
     return 'LOCAL_ACCEPTANCE';
@@ -235,7 +237,7 @@ interface TaskCreationMetadata {
 }
 
 function taskCreationMetadata(
-  input: CreateTaskRequest
+  input: CreateStoredTaskRequest
 ): TaskCreationMetadata | undefined {
   if (input.creationToken === undefined) {
     return undefined;
@@ -396,7 +398,21 @@ export class FileTaskStore {
     try {
       const raw = await readPrivateStoreFile(this.storePath);
       const persisted = JSON.parse(raw) as PersistedState;
+      await enforceTaskStoreSchemaBoundary({
+        baseDir: this.baseDir,
+        storePath: this.storePath,
+        persisted,
+        raw
+      });
       const migrated = migratePersistedState(persisted);
+      if (migrated.changed) {
+        await preserveTaskStoreBackup({
+          baseDir: this.baseDir,
+          storePath: this.storePath,
+          suffix: 'pre-v11-backup',
+          raw
+        });
+      }
       const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
       this.state = normalized.state;
       const attachments = await this.attachmentFiles.migrateLegacyRecords(
@@ -825,7 +841,7 @@ export class FileTaskStore {
     );
   }
 
-  async createTask(input: CreateTaskRequest): Promise<Task> {
+  async createTask(input: CreateStoredTaskRequest): Promise<Task> {
     return this.enqueueTaskCreation(() => this.createTaskRecord(input, 'ui'));
   }
 
@@ -843,7 +859,7 @@ export class FileTaskStore {
    * attachment draft. A token reused with different normalized input is a
    * conflict, never permission to return the first task.
    */
-  async resolveTaskCreationRetry(input: CreateTaskRequest): Promise<Task | undefined> {
+  async resolveTaskCreationRetry(input: CreateStoredTaskRequest): Promise<Task | undefined> {
     await this.init();
     await this.taskCreationQueue.catch(() => undefined);
     return clone(this.resolveTaskCreationRetryFromState(input));
@@ -971,7 +987,7 @@ export class FileTaskStore {
   }
 
   private async createTaskRecord(
-    input: CreateTaskRequest,
+    input: CreateStoredTaskRequest,
     source: DomainEvent['source'],
     fork?: { sourceTaskId: string; sourceRunId: string }
   ): Promise<Task> {
@@ -1134,7 +1150,7 @@ export class FileTaskStore {
   }
 
   private resolveTaskCreationRetryFromState(
-    input: CreateTaskRequest
+    input: CreateStoredTaskRequest
   ): Task | undefined {
     const metadata = taskCreationMetadata(input);
     if (!metadata) {
@@ -1189,6 +1205,11 @@ export class FileTaskStore {
     };
     await this.persistQueued();
     return clone(server);
+  }
+
+  async listAgentServers(): Promise<AgentServerInstance[]> {
+    await this.init();
+    return clone(this.state.agentServers);
   }
 
   async updateAgentServer(
@@ -1412,7 +1433,7 @@ export class FileTaskStore {
 
     const role = input.role ?? 'PRIMARY';
     const existing =
-      role === 'PRIMARY'
+      role === 'PRIMARY' && !input.forceNew
         ? this.state.agentSessions.find(
             (session) =>
               session.taskId === input.task.id &&
@@ -2755,6 +2776,76 @@ async function readPrivateStoreFile(storePath: string): Promise<string> {
   }
 }
 
+async function enforceTaskStoreSchemaBoundary(input: {
+  baseDir: string;
+  storePath: string;
+  persisted: PersistedState;
+  raw: string;
+}): Promise<void> {
+  const version = input.persisted.schemaVersion;
+  if (version === 12) {
+    const backupPath = await preserveTaskStoreBackup({
+      baseDir: input.baseDir,
+      storePath: input.storePath,
+      suffix: 'unshipped-schema-12-backup',
+      raw: input.raw
+    });
+    throw new Error(
+      'Detected the development-only task-specific discourse schema 12. ' +
+        `The original store was preserved at ${backupPath}; Task Monki will not ` +
+        'silently reinterpret or discard those records. Regenerate seed data or restore a schema-11 store.'
+    );
+  }
+  if (
+    typeof version === 'number' &&
+    Number.isSafeInteger(version) &&
+    version > TASK_STORE_SCHEMA_VERSION
+  ) {
+    throw new Error(
+      `Task store schema ${version} is newer than this app supports. ` +
+        'Upgrade Task Monki or restore a compatible backup; the store was not modified.'
+    );
+  }
+}
+
+async function preserveTaskStoreBackup(input: {
+  baseDir: string;
+  storePath: string;
+  suffix: string;
+  raw: string;
+}): Promise<string> {
+  const backupPath = `${input.storePath}.${input.suffix}`;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(
+      backupPath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o600
+    );
+    await handle.writeFile(input.raw, 'utf8');
+    await handle.sync();
+    await enforcePosixMode(handle, 0o600);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await syncDirectoryIfSupported(input.baseDir);
+    return backupPath;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    const existing = await readPrivateStoreFile(backupPath);
+    if (existing !== input.raw) {
+      throw new Error(
+        `Task store migration backup conflicts with ${backupPath}. Preserve both files and resolve the conflict before retrying.`
+      );
+    }
+    return backupPath;
+  }
+}
+
 async function cleanupStoreTemporaryFiles(
   baseDir: string,
   storePath: string
@@ -2944,7 +3035,7 @@ function requireCurrentState(state: PersistedState): StoreState {
   if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
     throw new Error(
       `Unsupported Task Monki store schema ${String(state.schemaVersion)}. ` +
-        `Delete the local store and restart; migrations are intentionally not supported.`
+        'Restore a compatible backup or upgrade through a supported migration path; the store was not modified.'
     );
   }
   const requiredCollections: Array<keyof StoreState> = [
@@ -3383,28 +3474,6 @@ function exactArrayBuffer(value: Uint8Array): ArrayBuffer {
 
 function uniqueIds(values: string[]): string[] {
   return [...new Set(values)];
-}
-
-function validateAgentServerTransition(
-  current: AgentServerStatus,
-  next: AgentServerStatus | undefined
-): void {
-  if (!next || next === current) {
-    return;
-  }
-  const allowed: Record<AgentServerStatus, AgentServerStatus[]> = {
-    STARTING: ['READY', 'RUNNING', 'FAILED', 'EXITED', 'LOST'],
-    READY: ['RUNNING', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    RUNNING: ['READY', 'DEGRADED', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    DEGRADED: ['READY', 'RUNNING', 'STOPPING', 'EXITED', 'FAILED', 'LOST'],
-    STOPPING: ['EXITED', 'FAILED', 'LOST'],
-    EXITED: [],
-    FAILED: [],
-    LOST: []
-  };
-  if (!allowed[current].includes(next)) {
-    throw new Error(`Invalid agent server transition: ${current} -> ${next}`);
-  }
 }
 
 function branchPublicationEventType(

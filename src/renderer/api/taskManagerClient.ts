@@ -19,7 +19,6 @@ import type {
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
-  RepositoryPreflight,
   RunRecord,
   StartRunRequest,
   Task,
@@ -85,7 +84,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   const emitSyntheticUpdate = () => {
     const event: AppUpdateEvent = {
       type: 'projection.updated',
-      taskId: '__browser_poll__',
+      scope: { kind: 'APP' },
       payload: { source: 'fallback-poll' },
       at: new Date().toISOString()
     };
@@ -133,11 +132,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   };
 
   return {
-    getDefaultRepositoryPath: () => get<string>(baseUrl, '/api/defaultRepositoryPath'),
-    chooseRepositoryFolder: async () => {
-      const selectedPath = await post<string | null>(baseUrl, '/api/repository/chooseFolder', {});
-      return selectedPath ?? undefined;
-    },
+    getRepositoryCatalog: () => get(baseUrl, '/api/repositories'),
+    selectRepository: (input) => post(baseUrl, '/api/repositories/select', input),
+    addRepository: (input) => post(baseUrl, '/api/repositories/add', input),
+    removeRepository: (input) => post(baseUrl, '/api/repositories/remove', input),
+    relinkRepository: (input) => post(baseUrl, '/api/repositories/relink', input),
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),
@@ -149,9 +148,44 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
-    validateRepository: (path) =>
-      post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
+    listDiscourseConversations: (input = {}) =>
+      get(baseUrl, `/api/discourse/conversations${queryString(input)}`),
+    getDiscourseConversation: (conversationId) =>
+      get(baseUrl, `/api/discourse/conversation${queryString({ conversationId })}`),
+    listDiscourseMessages: (input) =>
+      get(baseUrl, `/api/discourse/messages${queryString(input)}`),
+    getDiscourseMentionCatalog: () => get(baseUrl, '/api/discourse/catalog'),
+    createDiscourseConversation: (input) =>
+      post(baseUrl, '/api/discourse/conversations', input),
+    appendHumanDiscourseMessage: (input) =>
+      post(baseUrl, '/api/discourse/messages', input),
+    sendDiscourseMessage: (input) =>
+      post(baseUrl, '/api/discourse/messages/send', input),
+    tombstoneDiscourseMessage: (input) =>
+      post(baseUrl, '/api/discourse/messages/tombstone', input),
+    setPinnedDiscourseContext: (input) =>
+      post(baseUrl, '/api/discourse/context/pinned', input),
+    previewDiscourseContext: (input) =>
+      post(baseUrl, '/api/discourse/context/preview', input),
+    saveDiscourseDraft: (input) => post(baseUrl, '/api/discourse/drafts', input),
+    getDiscourseDraft: (draftId) =>
+      get(baseUrl, `/api/discourse/draft${queryString({ draftId })}`),
+    listDiscourseDrafts: () => get(baseUrl, '/api/discourse/drafts'),
+    deleteDiscourseDraft: (input) =>
+      post<void>(baseUrl, '/api/discourse/drafts/delete', input),
+    renameDiscourseConversation: (input) =>
+      post(baseUrl, '/api/discourse/conversations/rename', input),
+    setDiscourseConversationRead: (input) =>
+      post(baseUrl, '/api/discourse/conversations/read', input),
+    setDiscourseConversationArchived: (input) =>
+      post(baseUrl, '/api/discourse/conversations/archive', input),
+    deleteDiscourseConversation: (input) =>
+      post<void>(baseUrl, '/api/discourse/conversations/delete', input),
+    stopDiscourseWave: (input) =>
+      post(baseUrl, '/api/discourse/waves/stop', input),
+    confirmDiscourseWaveContext: (input) =>
+      post(baseUrl, '/api/discourse/waves/confirm-context', input),
     stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
       post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {
         attachments: input.attachments.map((attachment) => ({
@@ -216,6 +250,17 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       };
     }
   };
+}
+
+function queryString(input: object): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (value !== undefined && value !== null && value !== '') {
+      query.set(key, String(value));
+    }
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : '';
 }
 
 function arrayBufferToBase64(bytes: ArrayBuffer): string {

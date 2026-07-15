@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-11
+Date: 2026-07-13
 
 This document describes the current runtime architecture and responsibility
 boundaries.
@@ -40,6 +40,10 @@ flowchart LR
   RPC --> Server["resolved codex app-server stdio transport"]
   RPC --> Journal["Protocol journal"]
   Journal --> Store["FileTaskStore"]
+  Service --> DiscourseCoordinator["DiscourseRuntimeCoordinator"]
+  DiscourseCoordinator --> RuntimeStore["FileAgentRuntimeStore"]
+  DiscourseCoordinator --> DiscourseStore["FileDiscourseStore"]
+  Codex --> RuntimeStore
   Service --> Git["GitSnapshotService"]
   Service --> GitHub["GitHubService"]
 ```
@@ -68,9 +72,13 @@ Reasons:
   - Provider thread/session metadata. Primary sessions are used for
     implementation-side work. Review sessions use `role: "REVIEW"`.
 - `AgentServerInstance`
-  - Codex App Server process state, runtime version, schema hash, and status.
+  - App-level Codex process state, runtime version, schema hash, and status.
+    New records live in `AgentRuntimeStore`, not in a task.
 - `AgentProtocolJournal`
-  - Append-only raw protocol messages for debugging and reconstruction.
+  - Private append-only raw protocol messages for debugging and
+    reconstruction. Journals are owned by `AgentRuntimeStore`, bounded per
+    process by message count, message size, and total bytes, and referenced by
+    checksummed byte ranges from normalized records.
 - `StatusProjection`
   - Compact UI-facing state derived from Task Monki domain events.
 - `TaskAttachmentRecord`
@@ -81,6 +89,91 @@ Reasons:
   - Path-free evidence recorded only after `turn/start` succeeds. It identifies
     the verified bytes and submission mode, but does not assert that the model
     read or used them.
+- `AgentRuntimeSessionRecord` / `AgentRuntimeRunRecord`
+  - Owner-neutral provider execution records. An owner is explicitly either a
+    task or a discourse participant; discourse records never fabricate task,
+    iteration, or worktree ownership.
+- `AgentSessionAccessEpoch`
+  - Immutable hash of the full execution boundary for one provider session,
+    including canonical roots, managed inputs, model settings, and permission
+    profile. A changed execution boundary requires another epoch/session.
+- `AgentSchedulerQueueEntry`
+  - Durable, globally bounded queue/lease state. Start delivery and interrupt
+    delivery are separate state machines so an uncertain interrupt is never
+    mistaken for an uncertain start or replayed automatically.
+- `FileDiscourseStore`
+  - Dedicated curated conversation authority using per-conversation segmented
+    event logs, bounded summary/index files, opaque pagination cursors, archive,
+    and durable deletion tombstones. Conversation transcripts are not part of
+    `TaskSnapshot`.
+
+## Owner-neutral scoped runtime
+
+Task Manager composition opens `FileAgentRuntimeStore` and
+`FileDiscourseStore` before provider startup. Startup repairs cross-store links
+and terminal-before-curated-message crashes before it can clear a prior
+scheduler shutdown latch. A latch remains closed whenever a leased turn still
+needs reconciliation.
+
+For every provider turn, task and discourse work share one durable scheduler
+and one App Server/process journal. Task foreground work retains priority while
+bounded aging prevents queued discourse from starving. For a discourse job,
+the durable ordering is:
+
+1. persist the curated job and immutable context identity;
+2. persist an owner-bearing runtime session, run, prompt/output/diagnostic
+   artifacts, and scheduler entry;
+3. lease capacity and persist `SENDING` before `thread/start`, `thread/resume`,
+   or `turn/start` can mutate provider state;
+4. reconcile an authoritative start notification/response without replaying an
+   ambiguous mutation;
+5. persist provider terminal output in the runtime store before creating the
+   attributable curated message and settling the job/wave.
+
+Every discourse provider session is fresh, offline, attachment-free, read-only,
+and uses `approvalPolicy: never`. Live settings are checked against the exact
+access-epoch permission scope. An unexpected approval, tool, or user-input
+request is recorded in scoped diagnostics, declined, and terminalizes or marks
+the scoped run for recovery; it cannot enter task interaction controls.
+
+Queued cancellation persists wave/job stop intent before making the runtime run
+provably not delivered and canceling its queue entry. Active cancellation
+persists separate interrupt send intent before `turn/interrupt`; an ambiguous
+interrupt becomes recovery-required and is never automatically retried.
+
+Task workflow remains projected through `FileTaskStore`, but provider delivery,
+queue ownership, execution epochs, raw artifacts, normalized telemetry, App
+Server lifecycle, and protocol journals are persisted in `AgentRuntimeStore`
+first. The task projection is retained for task workflow selectors and shipped
+schema compatibility; it cannot create discourse activity or override generic
+delivery evidence. Restart repair covers a task projection without a generic
+run, a generic queued run without artifacts/queue linkage, a leased-but-unsent
+turn, and a submitted turn whose delivery is ambiguous. None of these paths
+replays provider mutation without proof that it was not delivered.
+
+Provider-spawned child sessions are recorded with
+`INHERITED_UNATTESTED` execution context. Their activity and child runs remain
+auditable, but inherited scope is never reused as a fresh Task Monki access
+attestation. Legacy runtime schema-v1 sessions are similarly migrated once as
+`LEGACY_UNATTESTED`; the original runtime file is preserved before the v2
+snapshot is published.
+
+Task-store migrations preserve the original `store.json` before rewriting an
+older supported schema. The development-only task-specific schema 12 is backed
+up and refused explicitly; it is never silently reinterpreted as owner-neutral
+runtime or conversation data. Newer schemas fail closed without rewriting the
+source store.
+
+The shipped task-runtime migration is idempotent and one-way: historical task
+sessions, runs, artifacts, and normalized provider observations are copied into
+the generic runtime without rewriting the task store. Active historical
+provider delivery is quarantined as recovery-required instead of replayed.
+Old task-owned protocol journals remain readable through the compatibility
+fallback, while all new App Server traffic is journaled by the generic runtime.
+
+The Discourse wave, context, review/correction, cancellation, and recovery state
+machines are documented in
+`docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`.
 
 ## Provider adapter responsibilities
 
@@ -223,9 +316,19 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - theme, sidebar, and mascot preferences;
 - first-launch setup completion;
 - default implementation, review, and prompt-refinement models;
-- selected and known repositories;
+- the selected repository ID;
 - Codex external tool modes for web search, MCP servers, and apps;
 - external executable path preferences for Git, Codex CLI, and GitHub CLI.
+
+Known repository roots live in a separate versioned
+`FileRepositoryRegistry`, not in app settings. The registry owns opaque IDs,
+canonical real paths, path aliases, repository identity evidence, availability,
+and the default repository. On the app-settings v3-to-v4 migration, Task Monki
+registers the default, legacy configured, and task-derived roots first, saves a
+pre-v4 settings backup, then publishes the selected repository ID. Registry
+mutation is therefore durable before selection mutation; startup repairs a
+selection that points to a removed record. Newer settings or registry schemas
+fail closed rather than being silently reinterpreted.
 
 Empty executable paths mean Auto-detect. The main process resolves and probes
 executables live; resolved paths and detected versions are not persisted. Git

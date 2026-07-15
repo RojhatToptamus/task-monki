@@ -35,14 +35,14 @@ import {
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
-  defaultRepositoryPath: string;
+  repositoryId: string;
   models: AgentModel[];
   preflight?: AgentPreflight;
   defaultAgentSettings?: AgentExecutionSettings;
   disabled?: boolean;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
-  onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
+  onRefinePrompt(repositoryId: string, input: string): Promise<RefinePromptResponse>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
@@ -50,7 +50,7 @@ interface NewTaskPanelProps {
 }
 
 export function NewTaskPanel({
-  defaultRepositoryPath,
+  repositoryId,
   models,
   preflight,
   defaultAgentSettings,
@@ -103,7 +103,7 @@ export function NewTaskPanel({
   }, [defaultAgentSettings?.model, defaultAgentSettings?.reasoningEffort, model, models]);
 
   const selectedModel = models.find((candidate) => candidate.model === model);
-  const repositoryPath = defaultRepositoryPath.trim();
+  const selectedRepositoryId = repositoryId.trim();
   const sandboxedSelected = permissionMode === 'SANDBOXED';
   const fullAccessSelected = permissionMode === 'FULL_ACCESS';
   const reasoningEfforts = [
@@ -215,7 +215,7 @@ export function NewTaskPanel({
       return;
     }
     setError(undefined);
-    if (!repositoryPath) {
+    if (!selectedRepositoryId) {
       setError('Select a repository before creating a task.');
       return;
     }
@@ -231,7 +231,7 @@ export function NewTaskPanel({
         await onCreate({
           title,
           prompt,
-          repositoryPath,
+          repositoryId: selectedRepositoryId,
           creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
           attachmentDraftId,
           agentSettings: {
@@ -266,7 +266,7 @@ export function NewTaskPanel({
 
   const refine = async () => {
     setError(undefined);
-    if (!repositoryPath) {
+    if (!selectedRepositoryId) {
       setError('Select a repository before refining the description.');
       return;
     }
@@ -274,7 +274,7 @@ export function NewTaskPanel({
     setRestorable(undefined);
     setIsRefining(true);
     try {
-      const refined = await onRefinePrompt(repositoryPath, prompt);
+      const refined = await onRefinePrompt(selectedRepositoryId, prompt);
       // Present as a proposal instead of overwriting the user's input.
       setProposal({ prompt: refined.prompt, titleSuggestion: refined.titleSuggestion });
     } catch (caught) {
@@ -310,7 +310,7 @@ export function NewTaskPanel({
     isRefining ||
     !title.trim() ||
     !prompt.trim() ||
-    !repositoryPath ||
+    !selectedRepositoryId ||
     attachmentsBusy ||
     attachmentsHaveErrors ||
     selectedModelRejectsImages;
@@ -384,7 +384,7 @@ export function NewTaskPanel({
                       composerLocked ||
                       isRefining ||
                       !prompt.trim() ||
-                      !repositoryPath ||
+                      !selectedRepositoryId ||
                       Boolean(proposal)
                     }
                     aria-busy={isRefining}

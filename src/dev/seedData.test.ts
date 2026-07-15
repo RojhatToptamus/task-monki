@@ -7,6 +7,9 @@ import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
 import type { Task, TaskSnapshot } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import {
@@ -51,16 +54,22 @@ describe('Task Monki development seed data', () => {
 
   it('creates a current-schema deterministic scenario catalog', async () => {
     const settings = await new AppSettingsStore(manifest.appSettingsPath).get();
+    const registry = await new FileRepositoryRegistry(
+      manifest.repositoryRegistryDir,
+      new NodeRepositoryInspector()
+    ).snapshot();
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(settings.repositories.selectedPath).toBe(manifest.repositoryPath);
-    expect(settings.repositories.knownPaths).toContain(manifest.repositoryPath);
+    expect(settings.repositories.selectedRepositoryId).toBe(registry.defaultRepositoryId);
     expect(await pathExists(manifest.manifestPath)).toBe(true);
     expect(await pathExists(manifest.envFilePath)).toBe(true);
     expect(manifest.env).toMatchObject({
       TASK_MANAGER_STORE_DIR: manifest.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
+      TASK_MANAGER_REPOSITORY_REGISTRY_DIR: manifest.repositoryRegistryDir,
+      TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
+      TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -74,6 +83,13 @@ describe('Task Monki development seed data', () => {
     );
 
     for (const scenario of manifest.scenarios) {
+      if (scenario.group === 'discourse') {
+        expect(scenario.conversationId).toBeTruthy();
+        const aggregate = await new FileDiscourseStore(manifest.discourseDir)
+          .getConversation(scenario.conversationId!);
+        expect(aggregate.conversation.title).toContain(`[seed:${scenario.slug}]`);
+        continue;
+      }
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
@@ -296,6 +312,45 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
+  it('materializes discourse Team, Panel, queue, correction, and recovery states', async () => {
+    const store = new FileDiscourseStore(manifest.discourseDir);
+    const discourse = async (slug: string) => {
+      const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug)!;
+      return store.getConversation(scenario.conversationId!);
+    };
+
+    await expect(discourse('discourse-team-running')).resolves.toMatchObject({
+      waves: [{ policy: 'TEAM', status: 'RUNNING' }],
+      jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
+    });
+    await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
+      waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
+    });
+    const silent = await discourse('discourse-review-silent');
+    expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
+      { result: { outcome: 'NO_CONCERN_FOUND' } },
+      { result: { outcome: 'NO_CONCERN_FOUND' } }
+    ]);
+    const corrected = await discourse('discourse-author-correction');
+    expect(corrected.concerns).toMatchObject([{
+      resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
+    }]);
+    await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
+      waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
+    });
+    await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
+      waves: [{ status: 'RECOVERY_REQUIRED' }],
+      jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
+    });
+    await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
+      waves: [{
+        status: 'PLANNED',
+        dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
+      }],
+      jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
+    });
+  });
+
   it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
     const store = new FileTaskStore(manifest.storeDir);
     const before = await store.snapshot();
@@ -309,6 +364,10 @@ describe('Task Monki development seed data', () => {
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
+      repositoryRegistry: new FileRepositoryRegistry(
+        manifest.repositoryRegistryDir,
+        new NodeRepositoryInspector()
+      ),
       agentProviderAdapter: adapter,
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
@@ -354,7 +413,7 @@ describe('Task Monki development seed data', () => {
       ).rejects.toThrow(disabledReason);
       await expect(
         service.refinePrompt({
-          repositoryPath: manifest.repositoryPath,
+          repositoryId: (await service.getRepositoryCatalog()).selectedRepositoryId!,
           input: 'Do not start Codex from fixture mode.'
         })
       ).rejects.toThrow(disabledReason);

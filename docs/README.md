@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-11
+Date: 2026-07-13
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -26,6 +26,9 @@ behavior and architecture, not private roadmap sequencing.
      data flow, renderer behavior, evidence boundaries, and invariants.
 5. `docs/DEV_SEEDING.md`
    - Deterministic local seed data for UI and workflow testing.
+6. `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`
+   - Global human/agent conversation authority, Direct/Panel/Team response
+     policies, context freshness, review/correction, waiting, and recovery.
 
 ### Architecture
 

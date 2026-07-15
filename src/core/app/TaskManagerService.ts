@@ -3,6 +3,7 @@ import type {
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
+  CreateStoredTaskRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
   GitSnapshotRecord,
@@ -46,6 +47,13 @@ import type {
   ReadTaskAttachmentRequest,
   StageTaskAttachmentBatchRequest,
 } from '../../shared/contracts';
+import type {
+  AddRepositoryRequest,
+  RelinkRepositoryRequest,
+  RemoveRepositoryRequest,
+  RepositoryCatalogSnapshot,
+  SelectRepositoryRequest
+} from '../../shared/repositories';
 import {
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_TOTAL_BYTES,
@@ -59,6 +67,7 @@ import {
 } from '../../shared/contracts';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
@@ -77,6 +86,7 @@ import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
 import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
+import { codexReadOnlyScopeProfile } from '../agent/codex/CodexPermissionProfile';
 import {
   MemoryAppSettingsStore,
   type AppSettingsStorage
@@ -89,6 +99,61 @@ import {
   assertModelSupportsAttachments
 } from '../agent/AgentAttachmentDelivery';
 import { AttachmentStoreError } from '../storage/AttachmentFileStore';
+import type { RepositoryRegistry } from '../repository/RepositoryRegistry';
+import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
+import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
+import { TaskAgentRuntimeMigrator } from '../agent/TaskAgentRuntimeMigrator';
+import type { DiscourseStore } from '../discourse/DiscourseStore';
+import { DiscourseRuntimeCoordinator } from '../discourse/DiscourseRuntimeCoordinator';
+import { DiscourseContextResolver } from '../discourse/DiscourseContextResolver';
+import { DiscourseContextSnapshotService } from '../discourse/DiscourseContextSnapshotService';
+import { DiscourseService } from '../discourse/DiscourseService';
+import { DiscourseWorkspace } from '../discourse/DiscourseWorkspace';
+import {
+  appendDiscourseDelta,
+  createDiscourseDeltaAccumulator,
+  drainDiscourseDeltas,
+  type DiscourseDeltaAccumulatorState
+} from '../discourse/DiscourseDeltaAccumulator';
+import { DISCOURSE_LIMITS } from '../../shared/discourse';
+import type {
+  AppendHumanDiscourseMessageRequest,
+  CreateDiscourseConversationRequest,
+  DeleteDiscourseConversationRequest,
+  DeleteDiscourseDraftRequest,
+  ListDiscourseConversationsRequest,
+  ListDiscourseMessagesRequest,
+  PreviewDiscourseContextRequest,
+  RenameDiscourseConversationRequest,
+  SaveDiscourseDraftRequest,
+  SendDiscourseMessageRequest,
+  ConfirmDiscourseWaveContextRequest,
+  SetDiscourseConversationArchivedRequest,
+  SetDiscourseConversationReadRequest,
+  SetPinnedDiscourseContextRequest,
+  StopDiscourseWaveRequest,
+  TombstoneDiscourseMessageRequest
+} from '../../shared/discourse';
+
+export type RepositoryRequestErrorCode =
+  | 'REPOSITORY_INVALID_REQUEST'
+  | 'REPOSITORY_NOT_FOUND'
+  | 'REPOSITORY_UNAVAILABLE'
+  | 'REPOSITORY_IN_USE'
+  | 'REPOSITORY_DEFAULT'
+  | 'REPOSITORY_IDENTITY_MISMATCH';
+
+export class RepositoryRequestError extends Error {
+  constructor(
+    readonly code: RepositoryRequestErrorCode,
+    readonly httpStatus: 400 | 404 | 409,
+    message: string,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.name = 'RepositoryRequestError';
+  }
+}
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -98,9 +163,19 @@ export class TaskManagerService {
   private readonly github: GitHubService;
   private readonly promptRefiner = new PromptRefinementService();
   private readonly appSettingsStore: AppSettingsStorage;
+  private readonly repositoryRegistry?: RepositoryRegistry;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
   private readonly browserDevAgentBoundary: boolean;
+  private readonly agentRuntimeStore?: AgentRuntimeStore;
+  private readonly discourseStore?: DiscourseStore;
+  private readonly discourseCoordinator?: DiscourseRuntimeCoordinator;
+  private readonly discourseContextSnapshots?: DiscourseContextSnapshotService;
+  private readonly discourse?: DiscourseService;
+  private readonly agentTurnScheduler?: AgentTurnScheduler;
+  private readonly serviceLifecycleId = randomUUID();
+  private readonly discourseDeltaAccumulators = new Map<string, DiscourseDeltaAccumulatorState>();
+  private readonly discourseDeltaTimers = new Map<string, NodeJS.Timeout>();
   private readonly taskActionLocks = new Map<string, string>();
   private readonly activeAttachmentDrafts = new Set<string>();
   private readonly agentProviderStartupDisabledReason?: string;
@@ -118,18 +193,28 @@ export class TaskManagerService {
       codexPath?: string;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
+      repositoryRegistry?: RepositoryRegistry;
       agentProviderAdapter?: AgentProviderAdapter;
       openTargetHost?: OpenTargetHost;
       allowAgentNetworkAccess?: boolean;
       agentProviderStartupDisabledReason?: string;
+      agentRuntimeStore?: AgentRuntimeStore;
+      discourseStore?: DiscourseStore;
+      discourseWorkspaceRoot?: string;
     } = {}
   ) {
+    if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
+      throw new Error(
+        'The agent runtime and discourse stores must be configured together.'
+      );
+    }
     const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
     this.agentProviderStartupDisabledReason =
       options.agentProviderStartupDisabledReason;
     this.events = events;
     this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
+    this.repositoryRegistry = options.repositoryRegistry;
     this.externalToolResolver = new ExternalToolResolver({
       cwd: agentCwd,
       overrides: {
@@ -139,12 +224,74 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
+    this.agentRuntimeStore = options.agentRuntimeStore;
+    this.discourseStore = options.discourseStore;
+    if (this.discourseStore && this.repositoryRegistry) {
+      const contextResolver = new DiscourseContextResolver(
+        this.store,
+        this.repositoryRegistry
+      );
+      this.discourseContextSnapshots = new DiscourseContextSnapshotService(
+        contextResolver,
+        new DiscourseWorkspace(
+          options.discourseWorkspaceRoot ??
+            path.join(os.tmpdir(), 'task-monki-discourse-workspaces')
+        ),
+        async (input) => {
+          const profile = await codexReadOnlyScopeProfile({
+            sessionId: input.sessionId,
+            scope: {
+              primaryCwd: input.primaryCwd,
+              readOnlyRoots: input.readRoots.map((root) => root.canonicalPath)
+            },
+            reasoningEffort: input.modelSettings.reasoningEffort
+          });
+          return {
+            attestation: { status: 'ATTESTED' },
+            primaryCwd: input.primaryCwd,
+            readRoots: input.readRoots,
+            managedAttachments: [],
+            permissionProfileHash: profile.scopeHash,
+            modelSettings: input.modelSettings,
+            externalTools: {
+              network: false,
+              webSearch: 'disabled',
+              mcpServers: false,
+              apps: false,
+              dynamicTools: false
+            },
+            clientOperationId: input.clientOperationId
+          };
+        }
+      );
+    }
+    if (this.agentRuntimeStore && this.discourseStore) {
+      this.discourseCoordinator = new DiscourseRuntimeCoordinator(
+        this.discourseStore,
+        this.agentRuntimeStore
+      );
+      this.agentTurnScheduler = new AgentTurnScheduler(this.agentRuntimeStore);
+    }
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
       toolSettings: this.appSettings.codexExternalTools,
       failClosedMcpDiscovery: this.browserDevAgentBoundary,
-      enforceBrowserDevBoundary: this.browserDevAgentBoundary
+      enforceBrowserDevBoundary: this.browserDevAgentBoundary,
+      ...(this.agentRuntimeStore
+        ? { providerRuntimeStore: this.agentRuntimeStore }
+        : {}),
+      ...(this.agentRuntimeStore && this.discourseCoordinator
+        ? {
+            scopedRuntimeStore: this.agentRuntimeStore,
+            onScopedTurnCompleted: async (input) => {
+              await this.ingestScopedCodexTerminal(input);
+            },
+            onScopedTurnDelta: async (input) => {
+              await this.ingestScopedCodexDelta(input);
+            }
+          }
+        : {})
     });
     this.agents = new AgentOrchestrator(
       store,
@@ -152,7 +299,64 @@ export class TaskManagerService {
       options.agentProviderAdapter ?? this.codexAdapter,
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
-        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
+        ...(this.agentRuntimeStore && this.agentTurnScheduler
+          ? {
+              runtimeStore: this.agentRuntimeStore,
+              scheduler: this.agentTurnScheduler,
+              dispatchNonTaskQueueEntry: async (entry) => {
+                if (entry.scope.kind !== 'DISCOURSE' || !this.discourseCoordinator) {
+                  throw new Error('Global scheduler routed an invalid non-task entry.');
+                }
+                const scope = entry.scope;
+                const aggregate = await this.discourseStore!.getConversation(
+                  scope.conversationId
+                );
+                const snapshot = aggregate.contextSnapshots.find(
+                  (candidate) => candidate.id === scope.contextSnapshotId
+                );
+                if (
+                  !snapshot ||
+                  (this.discourseContextSnapshots &&
+                    await this.discourseContextSnapshots.freshness(snapshot) !== 'FRESH')
+                ) {
+                  const job = await this.discourseCoordinator.rejectLeasedJobForStaleContext(
+                    entry.id,
+                    `service-stale:${entry.id}:${entry.recordRevision}`
+                  );
+                  this.events.emit({
+                    type: 'discourse.job.updated',
+                    scope: {
+                      kind: 'DISCOURSE',
+                      conversationId: scope.conversationId,
+                      waveId: scope.waveId,
+                      jobId: scope.jobId
+                    },
+                    payload: job,
+                    at: new Date().toISOString()
+                  });
+                  return;
+                }
+                const run = await this.discourseCoordinator.dispatchLeasedJob(
+                  entry.id,
+                  this.codexAdapter,
+                  `service-dispatch:${entry.id}:${entry.recordRevision}`
+                );
+                this.events.emit({
+                  type: 'discourse.job.updated',
+                  scope: {
+                    kind: 'DISCOURSE',
+                    conversationId: scope.conversationId,
+                    waveId: scope.waveId,
+                    jobId: scope.jobId
+                  },
+                  runId: run.id,
+                  payload: { status: run.status, delivery: run.delivery },
+                  at: new Date().toISOString()
+                });
+              }
+            }
+          : {})
       }
     );
     this.worktrees = new WorktreeService(
@@ -161,6 +365,29 @@ export class TaskManagerService {
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
     this.github = new GitHubService(options.ghPath);
+    if (this.discourseStore && this.repositoryRegistry) {
+      const contextResolver = new DiscourseContextResolver(this.store, this.repositoryRegistry);
+      this.discourse = new DiscourseService(
+        this.discourseStore,
+        contextResolver,
+        this.events,
+        {
+          getProviderState: () => this.agents.getProviderState(),
+          getAppSettings: () => this.getAppSettings(),
+          ...(this.discourseCoordinator && this.discourseContextSnapshots
+            ? {
+                runtime: {
+                  coordinator: this.discourseCoordinator,
+                  contextSnapshots: this.discourseContextSnapshots,
+                  provider: this.codexAdapter,
+                  notifySchedulerWorkAvailable: () =>
+                    this.agents.notifySchedulerWorkAvailable()
+                }
+              }
+            : {})
+        }
+      );
+    }
     this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         void this.capturePostRunEvidence(event.runId);
@@ -170,7 +397,49 @@ export class TaskManagerService {
 
   async init(): Promise<void> {
     await this.store.init();
+    await this.initializeDiscourseRuntime();
+    const initialSnapshot = await this.store.snapshot();
+    if (this.repositoryRegistry) {
+      await this.repositoryRegistry.reconcile([
+        ...(this.defaultRepositoryPath
+          ? [{ path: this.defaultRepositoryPath, source: 'DEFAULT' as const, isDefault: true }]
+          : []),
+        ...initialSnapshot.tasks.map((task) => ({
+          path: task.repositoryPath,
+          source: 'TASK' as const
+        }))
+      ]);
+    }
+    await this.appSettingsStore.initializeRepositories(async (legacy) => {
+      const registry = this.requireRepositoryRegistry();
+      await registry.reconcile([
+        ...legacy.knownPaths.map((candidatePath) => ({
+          path: candidatePath,
+          source: 'LEGACY_SETTINGS' as const
+        })),
+        ...(legacy.selectedPath
+          ? [{ path: legacy.selectedPath, source: 'LEGACY_SETTINGS' as const }]
+          : [])
+      ]);
+      const selected = legacy.selectedPath
+        ? await registry.resolveRecordedPath(legacy.selectedPath)
+        : undefined;
+      const state = await registry.snapshot();
+      return {
+        selectedRepositoryId:
+          selected?.repositoryId ?? state.defaultRepositoryId ??
+          state.repositories.find((record) => !record.removedAt)?.id ?? null
+      };
+    });
     this.appSettings = await this.loadBoundarySafeAppSettings();
+    if (this.repositoryRegistry) {
+      const catalog = await this.getRepositoryCatalog();
+      if (catalog.selectedRepositoryId !== this.appSettings.repositories.selectedRepositoryId) {
+        this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(
+          catalog.selectedRepositoryId
+        );
+      }
+    }
     await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
     await this.agents.initialize();
     if (this.agentProviderStartupDisabledReason) {
@@ -189,8 +458,113 @@ export class TaskManagerService {
     );
   }
 
-  getDefaultRepositoryPath(): string {
-    return this.defaultRepositoryPath;
+  async getRepositoryCatalog(): Promise<RepositoryCatalogSnapshot> {
+    const registry = this.requireRepositoryRegistry();
+    const [settings, snapshot] = await Promise.all([
+      this.appSettingsStore.get(),
+      this.store.snapshot()
+    ]);
+    return registry.catalog({
+      selectedRepositoryId: settings.repositories.selectedRepositoryId,
+      tasks: snapshot.tasks
+    });
+  }
+
+  async selectRepository(input: SelectRepositoryRequest): Promise<RepositoryCatalogSnapshot> {
+    const repositoryId = requireRepositoryId(input?.repositoryId);
+    await this.resolveRepository(repositoryId);
+    this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(repositoryId);
+    return this.getRepositoryCatalog();
+  }
+
+  async addRepositoryFromTrustedPath(
+    candidatePath: string,
+    input: AddRepositoryRequest
+  ): Promise<RepositoryCatalogSnapshot> {
+    requireRepositoryMutationId(input?.clientMutationId);
+    let record: Awaited<ReturnType<RepositoryRegistry['registerTrustedPath']>>;
+    try {
+      record = await this.requireRepositoryRegistry().registerTrustedPath(candidatePath);
+    } catch (error) {
+      throw new RepositoryRequestError(
+        'REPOSITORY_UNAVAILABLE',
+        409,
+        'The selected folder is not an available Git repository.',
+        { cause: error }
+      );
+    }
+    this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(record.id);
+    return this.getRepositoryCatalog();
+  }
+
+  async relinkRepositoryFromTrustedPath(
+    candidatePath: string,
+    input: RelinkRepositoryRequest
+  ): Promise<RepositoryCatalogSnapshot> {
+    requireRepositoryMutationId(input?.clientMutationId);
+    const repositoryId = requireRepositoryId(input?.repositoryId);
+    try {
+      await this.requireRepositoryRegistry().relinkTrustedPath(repositoryId, candidatePath);
+    } catch (error) {
+      throw new RepositoryRequestError(
+        'REPOSITORY_IDENTITY_MISMATCH',
+        409,
+        'The selected folder does not match this registered repository.',
+        { cause: error }
+      );
+    }
+    return this.getRepositoryCatalog();
+  }
+
+  async removeRepository(input: RemoveRepositoryRequest): Promise<RepositoryCatalogSnapshot> {
+    requireRepositoryMutationId(input?.clientMutationId);
+    const repositoryId = requireRepositoryId(input?.repositoryId);
+    const registry = this.requireRepositoryRegistry();
+    const snapshot = await this.store.snapshot();
+    const catalog = await registry.catalog({
+      selectedRepositoryId: this.appSettings.repositories.selectedRepositoryId,
+      tasks: snapshot.tasks
+    });
+    const inUse = catalog.taskAssociations.some(
+      (association) => association.repositoryId === repositoryId
+    );
+    const record = (await registry.snapshot()).repositories.find(
+      (candidate) => candidate.id === repositoryId
+    );
+    if (!record) {
+      throw new RepositoryRequestError(
+        'REPOSITORY_NOT_FOUND',
+        404,
+        'The repository is no longer registered.'
+      );
+    }
+    if (!record.removedAt) {
+      try {
+        await registry.remove(repositoryId, { inUse });
+      } catch (error) {
+        const isDefault = repositoryId === (await registry.snapshot()).defaultRepositoryId;
+        throw new RepositoryRequestError(
+          isDefault ? 'REPOSITORY_DEFAULT' : inUse ? 'REPOSITORY_IN_USE' : 'REPOSITORY_UNAVAILABLE',
+          409,
+          isDefault
+            ? 'The default repository cannot be removed.'
+            : inUse
+              ? 'Move or delete this repository’s tasks before removing it.'
+              : 'The repository could not be removed.',
+          { cause: error }
+        );
+      }
+    }
+    const repaired = await registry.catalog({
+      selectedRepositoryId: this.appSettings.repositories.selectedRepositoryId,
+      tasks: snapshot.tasks
+    });
+    if (repaired.selectedRepositoryId !== this.appSettings.repositories.selectedRepositoryId) {
+      this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(
+        repaired.selectedRepositoryId
+      );
+    }
+    return this.getRepositoryCatalog();
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
@@ -201,6 +575,13 @@ export class TaskManagerService {
   async updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
+    if (input && typeof input === 'object' && 'repositories' in input) {
+      throw new RepositoryRequestError(
+        'REPOSITORY_INVALID_REQUEST',
+        400,
+        'Repository selection must use the repository catalog API and an authoritative repository id.'
+      );
+    }
     if (
       this.browserDevAgentBoundary &&
       input.codexExternalTools &&
@@ -234,7 +615,7 @@ export class TaskManagerService {
       if (affectsCodexRuntime) {
         this.events.emit({
           type: 'provider.updated',
-          taskId: 'settings',
+          scope: { kind: 'APP' },
           payload: await this.getAgentProviderState(),
           at: new Date().toISOString()
         });
@@ -258,27 +639,21 @@ export class TaskManagerService {
   }
 
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
-    this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.inspect(input, {
       snapshot: await this.store.snapshot(),
-      defaultRepositoryPath: this.defaultRepositoryPath,
-      appSettings: this.appSettings
+      resolveRepositoryPath: async (repositoryId) =>
+        (await this.resolveRepository(requireRepositoryId(repositoryId))).canonicalRealPath
     });
   }
 
   async executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
-    this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.execute(input, {
       snapshot: await this.store.snapshot(),
-      defaultRepositoryPath: this.defaultRepositoryPath,
-      appSettings: this.appSettings
+      resolveRepositoryPath: async (repositoryId) =>
+        (await this.resolveRepository(requireRepositoryId(repositoryId))).canonicalRealPath
     });
-  }
-
-  validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
-    return validateRepositoryPath(repositoryPath);
   }
 
   getAgentProviderState() {
@@ -287,6 +662,86 @@ export class TaskManagerService {
 
   listTasks(): Promise<TaskSnapshot> {
     return this.store.snapshot();
+  }
+
+  listDiscourseConversations(input: ListDiscourseConversationsRequest = {}) {
+    return this.requireDiscourseService().listConversations(input);
+  }
+
+  getDiscourseConversation(conversationId: string) {
+    return this.requireDiscourseService().getConversation(conversationId);
+  }
+
+  listDiscourseMessages(input: ListDiscourseMessagesRequest) {
+    return this.requireDiscourseService().listMessages(input);
+  }
+
+  getDiscourseMentionCatalog() {
+    return this.requireDiscourseService().getMentionCatalog();
+  }
+
+  createDiscourseConversation(input: CreateDiscourseConversationRequest) {
+    return this.requireDiscourseService().createConversation(input);
+  }
+
+  appendHumanDiscourseMessage(input: AppendHumanDiscourseMessageRequest) {
+    return this.requireDiscourseService().appendHumanMessage(input);
+  }
+
+  sendDiscourseMessage(input: SendDiscourseMessageRequest) {
+    return this.requireDiscourseService().sendMessage(input);
+  }
+
+  tombstoneDiscourseMessage(input: TombstoneDiscourseMessageRequest) {
+    return this.requireDiscourseService().tombstoneMessage(input);
+  }
+
+  setPinnedDiscourseContext(input: SetPinnedDiscourseContextRequest) {
+    return this.requireDiscourseService().setPinnedContext(input);
+  }
+
+  previewDiscourseContext(input: PreviewDiscourseContextRequest) {
+    return this.requireDiscourseService().previewContext(input);
+  }
+
+  saveDiscourseDraft(input: SaveDiscourseDraftRequest) {
+    return this.requireDiscourseService().saveDraft(input);
+  }
+
+  getDiscourseDraft(draftId: string) {
+    return this.requireDiscourseService().getDraft(draftId);
+  }
+
+  listDiscourseDrafts() {
+    return this.requireDiscourseService().listDrafts();
+  }
+
+  deleteDiscourseDraft(input: DeleteDiscourseDraftRequest) {
+    return this.requireDiscourseService().deleteDraft(input);
+  }
+
+  renameDiscourseConversation(input: RenameDiscourseConversationRequest) {
+    return this.requireDiscourseService().renameConversation(input);
+  }
+
+  setDiscourseConversationRead(input: SetDiscourseConversationReadRequest) {
+    return this.requireDiscourseService().setConversationRead(input);
+  }
+
+  setDiscourseConversationArchived(input: SetDiscourseConversationArchivedRequest) {
+    return this.requireDiscourseService().setConversationArchived(input);
+  }
+
+  deleteDiscourseConversation(input: DeleteDiscourseConversationRequest) {
+    return this.requireDiscourseService().deleteConversation(input);
+  }
+
+  stopDiscourseWave(input: StopDiscourseWaveRequest) {
+    return this.requireDiscourseService().stopWave(input);
+  }
+
+  confirmDiscourseWaveContext(input: ConfirmDiscourseWaveContextRequest) {
+    return this.requireDiscourseService().confirmWaveContext(input);
   }
 
   async stageTaskAttachmentBatch(
@@ -357,6 +812,15 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
+    const resolved = await this.resolveRepository(requireRepositoryId(input?.repositoryId));
+    const { repositoryId: _repositoryId, ...rest } = input;
+    return this.createTaskFromTrustedPath({
+      ...rest,
+      repositoryPath: resolved.canonicalRealPath
+    });
+  }
+
+  async createTaskFromTrustedPath(input: CreateStoredTaskRequest): Promise<Task> {
     const acknowledgedTask = await this.store.resolveTaskCreationRetry(input);
     if (acknowledgedTask) {
       return acknowledgedTask;
@@ -407,8 +871,9 @@ export class TaskManagerService {
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
     await this.assertAttachmentProviderBoundaryAvailable();
+    const repository = await this.resolveRepository(requireRepositoryId(input?.repositoryId));
     const refined = await this.promptRefiner.refine(
-      input.repositoryPath,
+      repository.canonicalRealPath,
       input.input,
       input.model,
       this.codexExecutable,
@@ -717,6 +1182,33 @@ export class TaskManagerService {
     });
   }
 
+  private requireRepositoryRegistry(): RepositoryRegistry {
+    if (!this.repositoryRegistry) {
+      throw new Error('Repository registry is not configured for this Task Monki service.');
+    }
+    return this.repositoryRegistry;
+  }
+
+  private requireDiscourseService(): DiscourseService {
+    if (!this.discourse) {
+      throw new Error('Global discourse is not configured for this Task Monki service.');
+    }
+    return this.discourse;
+  }
+
+  private async resolveRepository(repositoryId: string) {
+    try {
+      return await this.requireRepositoryRegistry().resolve(repositoryId);
+    } catch (error) {
+      throw new RepositoryRequestError(
+        'REPOSITORY_UNAVAILABLE',
+        409,
+        'The repository is unavailable or its identity has changed.',
+        { cause: error }
+      );
+    }
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
@@ -775,10 +1267,289 @@ export class TaskManagerService {
   }
 
   async shutdown(): Promise<void> {
+    let firstError: unknown;
+    for (const timer of this.discourseDeltaTimers.values()) clearTimeout(timer);
+    this.discourseDeltaTimers.clear();
+    this.discourseDeltaAccumulators.clear();
+    if (this.agentTurnScheduler) {
+      try {
+        await this.agentTurnScheduler.latchShutdown(
+          `service-shutdown:${this.serviceLifecycleId}`
+        );
+      } catch (error) {
+        firstError = error;
+      }
+    }
     try {
       await this.agents.shutdown();
+    } catch (error) {
+      firstError ??= error;
+    }
+    for (const close of [
+      () => this.discourseStore?.close(),
+      () => this.agentRuntimeStore?.close(),
+      () => this.store.close()
+    ]) {
+      try {
+        await close();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError) {
+      throw firstError;
+    }
+  }
+
+  private async initializeDiscourseRuntime(): Promise<void> {
+    if (!this.agentRuntimeStore || !this.discourseStore || !this.discourseCoordinator) {
+      return;
+    }
+    await this.agentRuntimeStore.init();
+    await new TaskAgentRuntimeMigrator(
+      this.store,
+      this.agentRuntimeStore
+    ).migrateTaskStoreV11();
+    await this.repairDeletedTaskRuntime();
+    await this.discourseStore.init();
+
+    const conversationIds = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await this.discourseStore.listConversations({
+        ...(cursor ? { cursor } : {}),
+        limit: 100
+      });
+      page.conversations.forEach((conversation) => {
+        conversationIds.add(conversation.id);
+      });
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    const runtimeSnapshot = await this.agentRuntimeStore.snapshot();
+    runtimeSnapshot.runs.forEach((run) => {
+      if (run.scope.kind === 'DISCOURSE') {
+        conversationIds.add(run.scope.conversationId);
+      }
+    });
+    for (const conversationId of conversationIds) {
+      if (this.discourse) {
+        await this.discourse.recoverConversation(conversationId);
+      } else {
+        await this.discourseCoordinator.recoverConversation(conversationId);
+      }
+    }
+
+    const recoveredSnapshot = await this.agentRuntimeStore.snapshot();
+    if (
+      recoveredSnapshot.shutdownLatched &&
+      !recoveredSnapshot.queueEntries.some((entry) => entry.status === 'LEASED')
+    ) {
+      await this.agentTurnScheduler?.reopenAfterRecovery(
+        `service-startup:${this.serviceLifecycleId}`
+      );
+    }
+  }
+
+  private async repairDeletedTaskRuntime(): Promise<void> {
+    if (!this.agentRuntimeStore) return;
+    const [tasks, runtime] = await Promise.all([
+      this.store.snapshot(),
+      this.agentRuntimeStore.snapshot()
+    ]);
+    const taskIds = new Set(tasks.tasks.map((task) => task.id));
+    const orphanTaskIds = new Set(
+      [...runtime.sessions, ...runtime.runs]
+        .filter(
+          (record) =>
+            record.owner.kind === 'TASK' && !taskIds.has(record.owner.taskId)
+        )
+        .map((record) =>
+          record.owner.kind === 'TASK' ? record.owner.taskId : ''
+        )
+        .filter(Boolean)
+    );
+    for (const taskId of orphanTaskIds) {
+      await this.agentRuntimeStore.purgeTask(taskId);
+    }
+  }
+
+  private async ingestScopedCodexTerminal(input: {
+    runId: string;
+    providerTurnId: string;
+    status: 'completed' | 'interrupted' | 'failed' | 'inProgress';
+    finalMessage?: string;
+    error?: string;
+    completedAt: string;
+  }): Promise<void> {
+    if (!this.agentRuntimeStore || !this.discourseCoordinator) return;
+    try {
+      await this.flushScopedCodexDelta(input.runId);
+      this.discourseDeltaAccumulators.delete(input.runId);
+      const run = await this.agentRuntimeStore.getRun(input.runId);
+      if (!run || run.scope.kind !== 'DISCOURSE') {
+        throw new Error(`Scoped Codex terminal references an unknown discourse run: ${input.runId}`);
+      }
+      const scope = run.scope;
+      const body =
+        input.finalMessage ??
+        (await this.agentRuntimeStore.readArtifact(run.outputArtifactId));
+      const discourseAggregate = this.discourseStore
+        ? await this.discourseStore.getConversation(scope.conversationId)
+        : undefined;
+      const snapshot = discourseAggregate?.contextSnapshots.find(
+        (candidate) => candidate.id === scope.contextSnapshotId
+      );
+      const freshness = this.discourseContextSnapshots && snapshot
+        ? await this.discourseContextSnapshots.freshness(snapshot)
+        : run.contextFreshnessAtCompletion ?? 'UNKNOWN';
+      const job = discourseAggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
+      const operationId = `codex-terminal:${input.runId}:${input.providerTurnId}`;
+      if (run.status === 'COMPLETED' && body.trim()) {
+        if (!job) throw new Error(`Scoped Codex terminal references an unknown job: ${scope.jobId}`);
+        const terminalInput = {
+          runId: input.runId,
+          providerTurnId: input.providerTurnId,
+          body,
+          freshnessAtCompletion: freshness,
+          clientOperationId: operationId,
+          completedAt: input.completedAt,
+          providerTerminalSource:
+            run.providerTerminalSource ?? 'TURN_COMPLETED_NOTIFICATION'
+        };
+        const result = job.role === 'CRITIQUE'
+          ? await this.discourseCoordinator.ingestReview(terminalInput)
+          : job.role === 'CORRECT'
+            ? await this.discourseCoordinator.ingestCorrection(terminalInput)
+            : await this.discourseCoordinator.ingestContribution(terminalInput);
+        if (result.kind !== 'CONVERSATION_DELETED') {
+          await this.discourse?.advanceWave(
+            scope.conversationId,
+            scope.waveId,
+            `${operationId}:advance`
+          );
+        }
+        this.events.emit({
+          type: result.kind === 'CURATED'
+            ? 'discourse.message.appended'
+            : 'discourse.job.updated',
+          scope: {
+            kind: 'DISCOURSE',
+            conversationId: scope.conversationId,
+            waveId: scope.waveId,
+            jobId: scope.jobId
+          },
+          runId: run.id,
+          payload: result,
+          at: input.completedAt
+        });
+        return;
+      }
+      await this.discourseCoordinator.ingestFailure({
+        runId: input.runId,
+        providerTurnId: input.providerTurnId,
+        clientOperationId: operationId,
+        completedAt: input.completedAt,
+        providerTerminalSource:
+          run.providerTerminalSource ?? 'TURN_COMPLETED_NOTIFICATION',
+        reason:
+          input.error ??
+          (input.status === 'completed'
+            ? 'Codex completed the scoped turn without a response.'
+              : `Codex scoped turn ended with status ${input.status}.`)
+      });
+      await this.discourse?.advanceWave(
+        scope.conversationId,
+        scope.waveId,
+        `${operationId}:advance-failure`
+      );
+      this.events.emit({
+        type: 'discourse.job.updated',
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: scope.conversationId,
+          waveId: scope.waveId,
+          jobId: scope.jobId
+        },
+        runId: run.id,
+        payload: { status: 'FAILED' },
+        at: input.completedAt
+      });
     } finally {
-      await this.store.close();
+      this.agents.notifySchedulerWorkAvailable();
+    }
+  }
+
+  private async ingestScopedCodexDelta(input: {
+    runId: string;
+    providerTurnId: string;
+    text: string;
+    observedAt: string;
+  }): Promise<void> {
+    if (!this.agentRuntimeStore || !this.discourseStore) return;
+    const run = await this.agentRuntimeStore.getRun(input.runId);
+    if (
+      !run ||
+      run.scope.kind !== 'DISCOURSE' ||
+      run.providerTurnId !== input.providerTurnId ||
+      run.status !== 'RUNNING'
+    ) return;
+    const scope = run.scope;
+    const aggregate = await this.discourseStore.getConversation(scope.conversationId);
+    const wave = aggregate.waves.find((candidate) => candidate.id === scope.waveId);
+    if (!wave) return;
+    const current = this.discourseDeltaAccumulators.get(run.id) ??
+      createDiscourseDeltaAccumulator(scope.jobId, wave.attempt);
+    const appended = appendDiscourseDelta(current, {
+      jobId: scope.jobId,
+      attempt: wave.attempt,
+      text: input.text
+    });
+    if (!appended.accepted) return;
+    this.discourseDeltaAccumulators.set(run.id, appended.state);
+    if (this.discourseDeltaTimers.has(run.id)) return;
+    const timer = setTimeout(() => {
+      this.discourseDeltaTimers.delete(run.id);
+      void this.flushScopedCodexDelta(run.id, input.observedAt);
+    }, DISCOURSE_LIMITS.deltaCoalesceIntervalMs);
+    this.discourseDeltaTimers.set(run.id, timer);
+  }
+
+  private async flushScopedCodexDelta(
+    runId: string,
+    observedAt = new Date().toISOString()
+  ): Promise<void> {
+    const timer = this.discourseDeltaTimers.get(runId);
+    if (timer) clearTimeout(timer);
+    this.discourseDeltaTimers.delete(runId);
+    const current = this.discourseDeltaAccumulators.get(runId);
+    if (!current) return;
+    const drained = drainDiscourseDeltas(current);
+    if (drained.publication) {
+      const run = await this.agentRuntimeStore?.getRun(runId);
+      if (run?.scope.kind === 'DISCOURSE') {
+        this.events.emit({
+          type: 'discourse.delta',
+          scope: {
+            kind: 'DISCOURSE',
+            conversationId: run.scope.conversationId,
+            waveId: run.scope.waveId,
+            jobId: run.scope.jobId
+          },
+          runId,
+          payload: {
+            jobId: run.scope.jobId,
+            attempt: current.attempt,
+            publication: drained.publication
+          },
+          at: observedAt
+        });
+      }
+    }
+    if (drained.state.truncated) {
+      this.discourseDeltaAccumulators.delete(runId);
+    } else {
+      this.discourseDeltaAccumulators.set(runId, drained.state);
     }
   }
 
@@ -1051,6 +1822,7 @@ export class TaskManagerService {
       }
 
       await this.store.deleteTask(task.id);
+      await this.agentRuntimeStore?.purgeTask(task.id);
       const result = { taskId: task.id, removedWorktree };
       this.events.emit({
         type: 'task.deleted',
@@ -1066,7 +1838,15 @@ export class TaskManagerService {
     return this.store.readArtifact(input.artifactId);
   }
 
-  readProtocolMessage(input: ReadProtocolMessageRequest) {
+  async readProtocolMessage(input: ReadProtocolMessageRequest) {
+    if (this.agentRuntimeStore) {
+      const runtimeServer = await this.agentRuntimeStore.getAgentServer(
+        input.reference.serverInstanceId
+      );
+      if (runtimeServer) {
+        return this.agentRuntimeStore.readProtocolMessage(input.reference);
+      }
+    }
     return this.store.readProtocolMessage(input.reference);
   }
 
@@ -1355,6 +2135,34 @@ const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'INTERRUPTING',
   'RECOVERY_REQUIRED'
 ]);
+
+function requireRepositoryId(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,256}$/u.test(value)
+  ) {
+    throw new RepositoryRequestError(
+      'REPOSITORY_INVALID_REQUEST',
+      400,
+      'A valid repository id is required.'
+    );
+  }
+  return value;
+}
+
+function requireRepositoryMutationId(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9_-]{16,128}$/u.test(value)
+  ) {
+    throw new RepositoryRequestError(
+      'REPOSITORY_INVALID_REQUEST',
+      400,
+      'A valid repository mutation id is required.'
+    );
+  }
+  return value;
+}
 
 function activeTaskOperationBlocker(task: Task): string | undefined {
   if (ACTIVE_AGENT_RUN_STATUSES.has(task.projection.agentRun as RunRecord['status'])) {

@@ -111,6 +111,7 @@ import { describeGitSnapshot } from './gitSnapshotCopy';
 interface TaskDetailProps {
   error?: string;
   task?: Task;
+  repositoryId?: string;
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
@@ -685,7 +686,9 @@ export function TaskDetail(props: TaskDetailProps) {
                 openTarget={
                   worktree
                     ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
-                    : { type: 'repository', repositoryPath: task.repositoryPath }
+                    : props.repositoryId
+                      ? { type: 'repository', repositoryId: props.repositoryId }
+                      : undefined
                 }
                 onArchive={props.onArchive}
                 onRequestDelete={props.onRequestDelete}

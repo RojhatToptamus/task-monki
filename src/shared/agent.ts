@@ -150,11 +150,10 @@ export interface ExternalExecutablePathSettings {
 export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
 
 export interface TaskManagerRepositorySettings {
-  knownPaths: string[];
-  selectedPath: string | null;
+  selectedRepositoryId: string | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 3 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 4 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -195,8 +194,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
   repositories: {
-    knownPaths: [],
-    selectedPath: null
+    selectedRepositoryId: null
   }
 };
 

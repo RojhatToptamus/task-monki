@@ -7,6 +7,7 @@ import type {
 } from '../../../shared/agent';
 import {
   assertCodexAttachmentExternalToolsDisabled,
+  assertCodexDiscourseExternalToolsDisabled,
   codexExternalToolConfigOverrides,
   parseDisabledCodexMcpServerConfigOverrides,
   resolveCodexExternalToolConfigOverrides
@@ -35,6 +36,25 @@ describe('Codex external tool config', () => {
         true
       )
     ).not.toThrow();
+  });
+
+  it('requires all external tools to be disabled for every discourse job', () => {
+    expect(() =>
+      assertCodexDiscourseExternalToolsDisabled({
+        webSearchMode: 'disabled',
+        mcpServers: 'disabled',
+        apps: 'disabled'
+      })
+    ).not.toThrow();
+    for (const settings of [
+      { webSearchMode: 'live', mcpServers: 'disabled', apps: 'disabled' },
+      { webSearchMode: 'disabled', mcpServers: 'all', apps: 'disabled' },
+      { webSearchMode: 'disabled', mcpServers: 'disabled', apps: 'enabled' }
+    ] as const) {
+      expect(() => assertCodexDiscourseExternalToolsDisabled(settings)).toThrow(
+        'Agent discourse requires'
+      );
+    }
   });
 
   it('emits exact web search and apps overrides for every supported mode', () => {

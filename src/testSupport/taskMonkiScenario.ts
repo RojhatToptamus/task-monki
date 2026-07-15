@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import type {
   AgentModel,
   AgentPreflight,
@@ -20,6 +21,7 @@ import type {
   AgentSessionRef,
   AgentTurn,
   CreateAgentSession,
+  DescribeAgentExecutionContext,
   InterruptAgentTurn,
   StartAgentReview,
   StartAgentTurn,
@@ -94,7 +96,7 @@ export async function createTaskMonkiScenario(
     agent,
     service,
     createTask(input = {}) {
-      return service.createTask({
+      return service.createTaskFromTrustedPath({
         title: input.title ?? 'Scenario task',
         prompt: input.prompt ?? 'Exercise the task workflow.',
         repositoryPath,
@@ -187,6 +189,38 @@ export class ScriptedAgentProviderAdapter implements AgentProviderAdapter {
         isDefault: true
       }
     ]);
+  }
+
+  describeExecutionContext(
+    input: DescribeAgentExecutionContext
+  ): Promise<import('../shared/agentRuntime').AgentExecutionContext> {
+    return Promise.resolve({
+      attestation: { status: 'ATTESTED' },
+      primaryCwd: path.resolve(input.worktreePath),
+      readRoots: [
+        {
+          canonicalPath: path.resolve(input.worktreePath),
+          kind: 'WORKTREE'
+        }
+      ],
+      managedAttachments: input.attachments.map((attachment) => ({
+        attachmentId: attachment.attachmentId,
+        contentSha256: attachment.sha256,
+        byteCount: attachment.byteCount
+      })),
+      permissionProfileHash: createHash('sha256')
+        .update(`scenario:${path.resolve(input.worktreePath)}`)
+        .digest('hex'),
+      modelSettings: input.settings,
+      externalTools: {
+        network: false,
+        webSearch: 'disabled',
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: input.clientOperationId
+    });
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {

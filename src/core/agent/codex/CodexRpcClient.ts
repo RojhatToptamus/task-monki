@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AgentProviderRuntimeStore } from '../AgentRuntimeStore';
 import {
   decodeCodexProtocolMessage,
   type CodexRpcErrorPayload,
@@ -116,7 +116,7 @@ export class CodexRpcClient {
   constructor(
     private readonly input: Writable,
     output: Readable,
-    private readonly store: FileTaskStore,
+    private readonly store: Pick<AgentProviderRuntimeStore, 'appendProtocolMessage'>,
     readonly serverInstanceId: string,
     private readonly requestTimeoutMs = 30_000
   ) {

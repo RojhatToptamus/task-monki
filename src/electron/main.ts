@@ -12,8 +12,30 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import type {
+  AppendHumanDiscourseMessageRequest,
+  ConfirmDiscourseWaveContextRequest,
+  CreateDiscourseConversationRequest,
+  DeleteDiscourseConversationRequest,
+  DeleteDiscourseDraftRequest,
+  ListDiscourseConversationsRequest,
+  ListDiscourseMessagesRequest,
+  PreviewDiscourseContextRequest,
+  RenameDiscourseConversationRequest,
+  SaveDiscourseDraftRequest,
+  SendDiscourseMessageRequest,
+  SetDiscourseConversationArchivedRequest,
+  SetDiscourseConversationReadRequest,
+  SetPinnedDiscourseContextRequest,
+  StopDiscourseWaveRequest,
+  TombstoneDiscourseMessageRequest
+} from '../shared/discourse';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
+import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
+import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
 import type {
   AppUpdateEvent,
   ContinueRunRequest,
@@ -40,6 +62,12 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import type {
+  AddRepositoryRequest,
+  RelinkRepositoryRequest,
+  RemoveRepositoryRequest,
+  SelectRepositoryRequest
+} from '../shared/repositories';
 import {
   ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS,
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -293,8 +321,7 @@ function installIpcHandlers(): void {
     }
     syncWindowChrome(window);
   });
-  handleTrustedIpc('repository:defaultPath', () => service.getDefaultRepositoryPath());
-  handleTrustedIpc('repository:chooseFolder', async () => {
+  const chooseRepositoryDirectory = async () => {
     const options: OpenDialogOptions = {
       title: 'Add repository',
       properties: ['openDirectory']
@@ -303,6 +330,25 @@ function installIpcHandlers(): void {
       ? await dialog.showOpenDialog(mainWindow, options)
       : await dialog.showOpenDialog(options);
     return result.canceled ? undefined : result.filePaths[0];
+  };
+  handleTrustedIpc('repository:catalog', () => service.getRepositoryCatalog());
+  handleTrustedIpc('repository:select', async (_, input: SelectRepositoryRequest) => {
+    return service.selectRepository(input);
+  });
+  handleTrustedIpc('repository:add', async (_, input: AddRepositoryRequest) => {
+    const selectedPath = await chooseRepositoryDirectory();
+    return selectedPath
+      ? service.addRepositoryFromTrustedPath(selectedPath, input)
+      : null;
+  });
+  handleTrustedIpc('repository:remove', async (_, input: RemoveRepositoryRequest) => {
+    return service.removeRepository(input);
+  });
+  handleTrustedIpc('repository:relink', async (_, input: RelinkRepositoryRequest) => {
+    const selectedPath = await chooseRepositoryDirectory();
+    return selectedPath
+      ? service.relinkRepositoryFromTrustedPath(selectedPath, input)
+      : null;
   });
   handleTrustedIpc('agent:providerState', () => service.getAgentProviderState());
   handleTrustedIpc('settings:get', () => service.getAppSettings());
@@ -320,13 +366,90 @@ function installIpcHandlers(): void {
     return service.executeOpenTargetAction(input);
   });
 
-  handleTrustedIpc('repository:validate', async (_, repositoryPath: string) => {
-    return service.validateRepository(repositoryPath);
-  });
-
   handleTrustedIpc('task:list', async () => {
     return service.listTasks();
   });
+
+  handleTrustedIpc(
+    'discourse:conversations:list',
+    async (_, input: ListDiscourseConversationsRequest = {}) =>
+      service.listDiscourseConversations(input)
+  );
+  handleTrustedIpc('discourse:conversation:get', async (_, conversationId: string) =>
+    service.getDiscourseConversation(conversationId)
+  );
+  handleTrustedIpc('discourse:messages:list', async (_, input: ListDiscourseMessagesRequest) =>
+    service.listDiscourseMessages(input)
+  );
+  handleTrustedIpc('discourse:catalog', () => service.getDiscourseMentionCatalog());
+  handleTrustedIpc(
+    'discourse:conversation:create',
+    async (_, input: CreateDiscourseConversationRequest) =>
+      service.createDiscourseConversation(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:append-human',
+    async (_, input: AppendHumanDiscourseMessageRequest) =>
+      service.appendHumanDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:send',
+    async (_, input: SendDiscourseMessageRequest) => service.sendDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:tombstone',
+    async (_, input: TombstoneDiscourseMessageRequest) =>
+      service.tombstoneDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:context:set-pinned',
+    async (_, input: SetPinnedDiscourseContextRequest) =>
+      service.setPinnedDiscourseContext(input)
+  );
+  handleTrustedIpc(
+    'discourse:wave:stop',
+    async (_, input: StopDiscourseWaveRequest) => service.stopDiscourseWave(input)
+  );
+  handleTrustedIpc(
+    'discourse:wave:confirm-context',
+    async (_, input: ConfirmDiscourseWaveContextRequest) =>
+      service.confirmDiscourseWaveContext(input)
+  );
+  handleTrustedIpc(
+    'discourse:context:preview',
+    async (_, input: PreviewDiscourseContextRequest) =>
+      service.previewDiscourseContext(input)
+  );
+  handleTrustedIpc('discourse:draft:save', async (_, input: SaveDiscourseDraftRequest) =>
+    service.saveDiscourseDraft(input)
+  );
+  handleTrustedIpc('discourse:draft:get', async (_, draftId: string) =>
+    service.getDiscourseDraft(draftId)
+  );
+  handleTrustedIpc('discourse:drafts:list', () => service.listDiscourseDrafts());
+  handleTrustedIpc('discourse:draft:delete', async (_, input: DeleteDiscourseDraftRequest) =>
+    service.deleteDiscourseDraft(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:rename',
+    async (_, input: RenameDiscourseConversationRequest) =>
+      service.renameDiscourseConversation(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:read',
+    async (_, input: SetDiscourseConversationReadRequest) =>
+      service.setDiscourseConversationRead(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:archive',
+    async (_, input: SetDiscourseConversationArchivedRequest) =>
+      service.setDiscourseConversationArchived(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:delete',
+    async (_, input: DeleteDiscourseConversationRequest) =>
+      service.deleteDiscourseConversation(input)
+  );
 
   handleTrustedIpc(
     'attachment:stage-batch',
@@ -360,6 +483,7 @@ function installIpcHandlers(): void {
     const task = await service.createTask(input);
     broadcast({
       type: 'task.updated',
+      scope: { kind: 'TASK', taskId: task.id },
       taskId: task.id,
       payload: task,
       at: new Date().toISOString()
@@ -560,6 +684,15 @@ void app.whenReady().then(async () => {
       appSettingsStore: new AppSettingsStore(
         path.join(userDataDir, 'app-settings.json')
       ),
+      repositoryRegistry: new FileRepositoryRegistry(
+        path.join(userDataDir, 'repository-registry'),
+        new NodeRepositoryInspector()
+      ),
+      agentRuntimeStore: new FileAgentRuntimeStore(
+        path.join(userDataDir, 'agent-runtime')
+      ),
+      discourseStore: new FileDiscourseStore(path.join(userDataDir, 'discourse')),
+      discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces'),
       openTargetHost: createElectronOpenTargetHost()
     }
   );

@@ -3,29 +3,228 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentOrchestrator } from '../AgentOrchestrator';
+import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
+import { AgentTurnScheduler } from '../AgentTurnScheduler';
 import { AgentMutationAmbiguousError } from '../AgentProviderAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
+import { codexReadOnlyScopeProfile } from './CodexPermissionProfile';
 
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', () => {
+  it('runs a scoped discourse turn over real stdio without touching task projections', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
+    const executable = await writeFakeCodexExecutable(dir, 'scoped');
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const taskStore = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    const events = new AppEventBus();
+    let resolveTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const adapter = new CodexAppServerAdapter(taskStore, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      providerRuntimeStore: runtime,
+      scopedRuntimeStore: runtime,
+      onScopedTurnCompleted: async () => {
+        resolveTerminal();
+      }
+    });
+    await adapter.initialize();
+
+    const owner = {
+      kind: 'DISCOURSE' as const,
+      conversationId: 'conversation-1',
+      stableParticipantId: 'participant-1'
+    };
+    const sessionId = 'scoped-session-1';
+    const profile = await codexReadOnlyScopeProfile({
+      sessionId,
+      scope: { primaryCwd: workspace, readOnlyRoots: [workspace] },
+      reasoningEffort: 'high'
+    });
+    const executionContext = {
+      attestation: { status: 'ATTESTED' as const },
+      primaryCwd: workspace,
+      readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' as const }],
+      managedAttachments: [],
+      permissionProfileHash: profile.scopeHash,
+      modelSettings: {
+        model: 'fake-model',
+        modelProvider: 'openai',
+        reasoningEffort: 'high',
+        sandbox: 'READ_ONLY' as const,
+        networkAccess: false,
+        approvalPolicy: 'NEVER',
+        approvalsReviewer: 'user' as const
+      },
+      externalTools: {
+        network: false,
+        webSearch: 'disabled' as const,
+        mcpServers: false,
+        apps: false,
+        dynamicTools: false
+      },
+      clientOperationId: 'scoped-execution-context-1'
+    };
+    const session = await runtime.createSession({
+      id: sessionId,
+      owner,
+      accessEpoch: createAgentSessionAccessEpoch({
+        owner,
+        sessionId,
+        epoch: 1,
+        providerId: 'codex',
+        model: 'fake-model',
+        executionContext,
+        createdAt: '2026-07-13T00:00:00.000Z'
+      }),
+      executionContext,
+      clientOperationId: 'create-scoped-session',
+      provider: 'codex',
+      role: 'PRIMARY',
+      relationshipState: 'ROOT',
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      requestedSettings: executionContext.modelSettings
+    });
+    const run = await runtime.createRun({
+      id: 'scoped-run-1',
+      owner,
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: owner.conversationId,
+        waveId: 'wave-1',
+        jobId: 'job-1',
+        contextSnapshotId: 'context-1',
+        attemptId: 'attempt-1'
+      },
+      sessionId: session.id,
+      sessionAccessEpoch: session.accessEpoch.epoch,
+      purpose: 'DISCOURSE_ANSWER',
+      generationKey: 'generation-1',
+      clientOperationId: 'create-scoped-run',
+      requestedSettings: executionContext.modelSettings,
+      promptArtifactId: 'scoped-prompt-1',
+      outputArtifactId: 'scoped-output-1',
+      diagnosticArtifactId: 'scoped-diagnostic-1'
+    });
+    await Promise.all([
+      runtime.createArtifact({
+        id: run.promptArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'PROMPT',
+        clientOperationId: 'create-scoped-prompt',
+        content: 'Question the proposed architecture.'
+      }),
+      runtime.createArtifact({
+        id: run.outputArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'create-scoped-output',
+        content: ''
+      }),
+      runtime.createArtifact({
+        id: run.diagnosticArtifactId,
+        owner,
+        runId: run.id,
+        kind: 'DIAGNOSTIC',
+        clientOperationId: 'create-scoped-diagnostic',
+        content: ''
+      })
+    ]);
+    const starting = await runtime.updateRun(
+      run.id,
+      run.recordRevision,
+      {
+        status: 'STARTING',
+        delivery: 'SENDING',
+        startedAt: '2026-07-13T00:00:01.000Z'
+      },
+      'scoped-start-intent'
+    );
+    const started = await adapter.startScopedTurn({
+      session,
+      run: starting,
+      executionContext,
+      prompt: 'Question the proposed architecture.'
+    });
+    const afterResponse = (await runtime.getRun(run.id))!;
+    if (afterResponse.status === 'STARTING') {
+      await runtime.updateRun(
+        run.id,
+        afterResponse.recordRevision,
+        {
+          serverInstanceId: started.serverInstanceId,
+          providerTurnId: started.providerTurnId,
+          status: 'RUNNING',
+          delivery: 'ACKNOWLEDGED'
+        },
+        'scoped-start-ack'
+      );
+    }
+    await terminal;
+
+    await expect(runtime.getRun(run.id)).resolves.toMatchObject({
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      providerTurnId: 'turn-1'
+    });
+    expect(await runtime.readArtifact(run.outputArtifactId)).toContain(
+      'Fake task completed.'
+    );
+    expect(await taskStore.snapshot()).toMatchObject({
+      tasks: [],
+      runs: [],
+      agentSessions: [],
+      agentItems: [],
+      interactionRequests: []
+    });
+    const journal = await fs.readFile(
+      (await runtime.listAgentServers())[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.find((message) => message.method === 'thread/start')?.params).toMatchObject({
+      cwd: workspace,
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    });
+    await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-'));
     const executable = await writeFakeCodexExecutable(dir);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    const scheduler = new AgentTurnScheduler(runtime);
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      providerRuntimeStore: runtime,
+      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      runtimeStore: runtime,
+      scheduler
     });
     await orchestrator.initialize();
 
@@ -33,7 +232,7 @@ describe('CodexAppServerAdapter', () => {
     expect(provider.preflight.ready, JSON.stringify(provider.preflight.problems)).toBe(true);
     expect(provider.models[0]?.model).toBe('fake-model');
     expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
-    const initializedServer = (await store.snapshot()).agentServers[0];
+    const initializedServer = (await runtime.listAgentServers())[0];
     expect(initializedServer.runtimeResolution).toMatchObject({
       selectedExecutable: executable,
       selectedSource: 'config',
@@ -186,12 +385,30 @@ describe('CodexAppServerAdapter', () => {
           record.settings.approvalsReviewer === 'auto_review'
       )
     ).toBe(true);
-    expect(snapshot.agentServers[0]?.runtimeKind).toBe('APP_SERVER');
-    expect(
-      snapshot.agentServers.some((server) => server.runtimeKind !== 'APP_SERVER')
-    ).toBe(false);
+    expect(snapshot.agentServers).toEqual([]);
+    expect((await runtime.listAgentServers())[0]?.runtimeKind).toBe('APP_SERVER');
+    const runtimeTelemetry = await runtime.listTelemetryByOwner({
+      kind: 'TASK',
+      taskId: task.id
+    });
+    expect(new Set(runtimeTelemetry.map((record) => record.kind))).toEqual(
+      new Set(['ITEM', 'GOAL', 'PLAN', 'USAGE', 'SETTINGS'])
+    );
+    expect(runtimeTelemetry).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'ITEM',
+          sessionId: completed?.sessionId,
+          runId: completed?.id
+        })
+      ])
+    );
+    for (const telemetry of runtimeTelemetry) {
+      expect(telemetry.payload).not.toHaveProperty('taskId');
+      expect(telemetry.payload).not.toHaveProperty('iterationId');
+    }
     const finalJournal = await fs.readFile(
-      snapshot.agentServers[0]!.protocolJournalPath,
+      (await runtime.listAgentServers())[0]!.protocolJournalPath,
       'utf8'
     );
     const outbound = readOutboundMessages(finalJournal);
@@ -317,14 +534,20 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-'));
     const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    const scheduler = new AgentTurnScheduler(runtime);
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      providerRuntimeStore: runtime,
+      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      runtimeStore: runtime,
+      scheduler
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -381,7 +604,7 @@ describe('CodexAppServerAdapter', () => {
         }
       })
     ).rejects.toThrow('expected PENDING');
-    const server = (await store.snapshot()).agentServers[0];
+    const server = (await runtime.listAgentServers())[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const response = journal
       .trim()
@@ -390,6 +613,16 @@ describe('CodexAppServerAdapter', () => {
       .map((entry) => JSON.parse(entry.raw) as { id?: string | number; result?: unknown })
       .find((message) => message.id === 41 && message.result);
     expect(response?.id).toBe(41);
+    const interactionTelemetry = (
+      await runtime.listTelemetryByOwner({ kind: 'TASK', taskId: task.id })
+    ).filter((record) => record.kind === 'INTERACTION');
+    expect(
+      new Set(
+        interactionTelemetry.map(
+          (record) => (record.payload as { status: string }).status
+        )
+      )
+    ).toEqual(new Set(['PENDING', 'RESPONDING', 'RESOLVED']));
 
     await orchestrator.shutdown();
   });
@@ -546,14 +779,20 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    const scheduler = new AgentTurnScheduler(runtime);
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
+      providerRuntimeStore: runtime,
+      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
+      runtimeStore: runtime,
+      scheduler
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -626,6 +865,34 @@ describe('CodexAppServerAdapter', () => {
     );
     expect(snapshot.tasks[0]?.currentRunId).toBe(parentRun.id);
     expect(snapshot.tasks[0]?.projection.agentRun).toBe('COMPLETED');
+    const runtimeSnapshot = await runtime.snapshot();
+    const runtimeChildSession = runtimeSnapshot.sessions.find(
+      (session) => session.providerSessionId === 'thread-child'
+    );
+    expect(runtimeChildSession).toMatchObject({
+      role: 'SUBAGENT',
+      parentSessionId: parentRun.sessionId,
+      executionContext: {
+        attestation: {
+          status: 'INHERITED_UNATTESTED',
+          parentSessionId: parentRun.sessionId
+        }
+      }
+    });
+    expect(runtimeSnapshot.runs.find((run) => run.providerTurnId === 'turn-child'))
+      .toMatchObject({
+        purpose: 'PROVIDER_SUBAGENT',
+        parentRunId: parentRun.id,
+        status: 'COMPLETED',
+        delivery: 'TERMINAL'
+      });
+    expect(
+      new Set(
+        (await runtime.listTelemetryByOwner({ kind: 'TASK', taskId: task.id }))
+          .filter((record) => record.sessionId === runtimeChildSession?.id)
+          .map((record) => record.kind)
+      )
+    ).toEqual(new Set(['SUBAGENT', 'ITEM', 'INTERACTION']));
 
     await orchestrator.shutdown();
   });
@@ -1676,6 +1943,7 @@ async function writeFakeCodexExecutable(
 function fakeCodexScript(
   mode:
     | 'normal'
+    | 'scoped'
     | 'ack-only'
     | 'approval'
     | 'permission'
@@ -1801,7 +2069,10 @@ const threadResponse = (request = {}) => {
   instructionSources: [],
   approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
   approvalsReviewer: request.approvalsReviewer ?? 'user',
-  sandbox: {
+  sandbox: mode === 'scoped' ? {
+    type: 'readOnly',
+    networkAccess: false
+  } : {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
     networkAccess: false,
@@ -2067,6 +2338,8 @@ rl.on('line', (line) => {
             approvalsReviewer: message.params.approvalsReviewer ?? 'user',
             sandboxPolicy: mode === 'unsafe-live-settings'
               ? { type: 'dangerFullAccess' }
+              : mode === 'scoped'
+                ? { type: 'readOnly', networkAccess: false }
               : message.params.sandboxPolicy ?? {
                   type: 'workspaceWrite',
                   writableRoots: [process.cwd()],

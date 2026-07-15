@@ -1,9 +1,14 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  assertCodexReadOnlyScopeEvidence,
   assertCodexPermissionProfileEvidence,
   codexPermissionProfileConfig,
-  codexPermissionProfileId
+  codexPermissionProfileId,
+  codexReadOnlyScopeProfile
 } from './CodexPermissionProfile';
 
 describe('Codex permission profile', () => {
@@ -206,6 +211,196 @@ describe('Codex permission profile', () => {
     }
   );
 });
+
+describe('Codex discourse read-only permission scope', () => {
+  it('hashes an order-independent verified multi-root scope into the attested profile id', async () => {
+    const fixture = await scopeFixture();
+    const first = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: {
+        primaryCwd: fixture.primary,
+        readOnlyRoots: [fixture.secondary, fixture.primary],
+        verifiedReadOnlyFiles: [
+          { canonicalPath: fixture.attachment, contentSha256: fixture.attachmentHash }
+        ]
+      },
+      reasoningEffort: 'high'
+    });
+    const reordered = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: {
+        primaryCwd: fixture.primary,
+        readOnlyRoots: [fixture.primary, fixture.secondary],
+        verifiedReadOnlyFiles: [
+          { canonicalPath: fixture.attachment, contentSha256: fixture.attachmentHash }
+        ]
+      },
+      reasoningEffort: 'high'
+    });
+
+    expect(reordered).toEqual(first);
+    expect(first.profileId).toContain(first.scopeHash.slice(0, 24));
+    expect(first.config).toMatchObject({
+      model_reasoning_effort: 'high',
+      default_permissions: first.profileId,
+      permissions: {
+        [first.profileId]: {
+          filesystem: {
+            ':minimal': 'read',
+            [fixture.primary]: 'read',
+            [fixture.secondary]: 'read',
+            [fixture.attachment]: 'read'
+          },
+          network: { enabled: false }
+        }
+      }
+    });
+  });
+
+  it('rejects broad, overlapping, noncanonical, and unverified paths', async () => {
+    const fixture = await scopeFixture();
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: {
+          primaryCwd: fixture.primary,
+          readOnlyRoots: [path.parse(fixture.primary).root]
+        }
+      })
+    ).rejects.toThrow('filesystem root or home');
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: { primaryCwd: fixture.primary, readOnlyRoots: [fixture.nested] }
+      })
+    ).rejects.toThrow('must not overlap');
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: {
+          primaryCwd: fixture.primary,
+          readOnlyRoots: [],
+          verifiedReadOnlyFiles: [
+            {
+              canonicalPath: path.parse(fixture.primary).root,
+              contentSha256: fixture.attachmentHash
+            }
+          ]
+        }
+      })
+    ).rejects.toThrow('filesystem root or home');
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: {
+          primaryCwd: fixture.primary,
+          readOnlyRoots: [],
+          verifiedReadOnlyFiles: [
+            { canonicalPath: fixture.attachment, contentSha256: 'not-a-hash' }
+          ]
+        }
+      })
+    ).rejects.toThrow('verified SHA-256');
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: {
+          primaryCwd: fixture.primary,
+          readOnlyRoots: [],
+          verifiedReadOnlyFiles: [
+            { canonicalPath: fixture.symlink, contentSha256: fixture.attachmentHash }
+          ]
+        }
+      })
+    ).rejects.toThrow('canonical regular file');
+    await fs.writeFile(fixture.attachment, 'changed', 'utf8');
+    await expect(
+      codexReadOnlyScopeProfile({
+        sessionId: 'session-discourse',
+        scope: {
+          primaryCwd: fixture.primary,
+          readOnlyRoots: [],
+          verifiedReadOnlyFiles: [
+            { canonicalPath: fixture.attachment, contentSha256: fixture.attachmentHash }
+          ]
+        }
+      })
+    ).rejects.toThrow('content changed');
+  });
+
+  it('requires exact profile, cwd, sole primary root, offline read-only sandbox, and no approvals', async () => {
+    const fixture = await scopeFixture();
+    const profile = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: fixture.primary, readOnlyRoots: [] }
+    });
+    const response = {
+      activePermissionProfile: { id: profile.profileId, extends: null },
+      runtimeWorkspaceRoots: [fixture.primary],
+      cwd: fixture.primary,
+      sandbox: { type: 'readOnly', networkAccess: false },
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    };
+    expect(() =>
+      assertCodexReadOnlyScopeEvidence({
+        profileId: profile.profileId,
+        primaryCwd: fixture.primary,
+        response
+      })
+    ).not.toThrow();
+
+    for (const patch of [
+      { activePermissionProfile: { id: 'stale-profile', extends: null } },
+      { activePermissionProfile: { id: profile.profileId } },
+      { runtimeWorkspaceRoots: [fixture.primary, fixture.secondary] },
+      { runtimeWorkspaceRoots: ['.'] },
+      { cwd: '.' },
+      { cwd: fixture.secondary },
+      { sandbox: { type: 'workspaceWrite', networkAccess: false } },
+      { sandbox: { type: 'readOnly', networkAccess: true } },
+      { approvalPolicy: 'on-request' },
+      { approvalsReviewer: 'auto_review' }
+    ]) {
+      expect(() =>
+        assertCodexReadOnlyScopeEvidence({
+          profileId: profile.profileId,
+          primaryCwd: fixture.primary,
+          response: { ...response, ...patch }
+        })
+      ).toThrow();
+    }
+  });
+});
+
+async function scopeFixture(): Promise<{
+  primary: string;
+  secondary: string;
+  nested: string;
+  attachment: string;
+  attachmentHash: string;
+  symlink: string;
+}> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-read-scope-'));
+  const canonicalRoot = await fs.realpath(root);
+  const primary = path.join(canonicalRoot, 'primary');
+  const secondary = path.join(canonicalRoot, 'secondary');
+  const nested = path.join(primary, 'nested');
+  const attachment = path.join(canonicalRoot, 'evidence.txt');
+  const symlink = path.join(canonicalRoot, 'evidence-link.txt');
+  await fs.mkdir(nested, { recursive: true });
+  await fs.mkdir(secondary, { recursive: true });
+  await fs.writeFile(attachment, 'verified evidence', 'utf8');
+  await fs.symlink(attachment, symlink);
+  return {
+    primary,
+    secondary,
+    nested,
+    attachment,
+    attachmentHash: crypto.createHash('sha256').update('verified evidence').digest('hex'),
+    symlink
+  };
+}
 
 function nativeAbsolute(...segments: string[]): string {
   return path.join(path.parse(process.cwd()).root, 'private', ...segments);

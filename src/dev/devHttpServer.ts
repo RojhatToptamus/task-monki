@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
-import type { TaskManagerService } from '../core/app/TaskManagerService';
+import {
+  RepositoryRequestError,
+  type TaskManagerService
+} from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
 import type { AppUpdateEvent } from '../shared/contracts';
 import {
@@ -248,8 +251,56 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
     const readJson = () => readBoundedJson(request, maxJsonBodyBytes);
 
     try {
-      if (request.method === 'GET' && url.pathname === '/api/defaultRepositoryPath') {
-        sendJson(response, requestId, 200, await options.service.getDefaultRepositoryPath());
+      if (request.method === 'GET' && url.pathname === '/api/repositories') {
+        sendJson(response, requestId, 200, await options.service.getRepositoryCatalog());
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/repositories/select') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.selectRepository((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/repositories/add') {
+        const input = (await readJson()) as never;
+        const selectedPath = await options.chooseRepositoryFolder();
+        sendJson(
+          response,
+          requestId,
+          200,
+          selectedPath
+            ? await options.service.addRepositoryFromTrustedPath(selectedPath, input)
+            : null
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/repositories/remove') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.removeRepository((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/repositories/relink') {
+        const input = (await readJson()) as never;
+        const selectedPath = await options.chooseRepositoryFolder();
+        sendJson(
+          response,
+          requestId,
+          200,
+          selectedPath
+            ? await options.service.relinkRepositoryFromTrustedPath(selectedPath, input)
+            : null
+        );
         return;
       }
 
@@ -313,6 +364,188 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/discourse/conversations') {
+        const status = url.searchParams.get('status') ?? undefined;
+        const cursor = url.searchParams.get('cursor') ?? undefined;
+        const limitValue = url.searchParams.get('limit');
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.listDiscourseConversations({
+            ...(status ? { status: status as 'OPEN' | 'ARCHIVED' } : {}),
+            ...(cursor ? { cursor } : {}),
+            ...(limitValue ? { limit: Number(limitValue) } : {})
+          })
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/conversation') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseConversation(
+            requiredQueryParameter(url, 'conversationId')
+          )
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/messages') {
+        const beforeCursor = url.searchParams.get('beforeCursor') ?? undefined;
+        const limitValue = url.searchParams.get('limit');
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.listDiscourseMessages({
+            conversationId: requiredQueryParameter(url, 'conversationId'),
+            ...(beforeCursor ? { beforeCursor } : {}),
+            ...(limitValue ? { limit: Number(limitValue) } : {})
+          })
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/catalog') {
+        sendJson(response, requestId, 200, await options.service.getDiscourseMentionCatalog());
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations') {
+        sendJson(
+          response,
+          requestId,
+          201,
+          await options.service.createDiscourseConversation((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/messages') {
+        sendJson(
+          response,
+          requestId,
+          201,
+          await options.service.appendHumanDiscourseMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/messages/send') {
+        sendJson(
+          response,
+          requestId,
+          201,
+          await options.service.sendDiscourseMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/messages/tombstone') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.tombstoneDiscourseMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/context/pinned') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.setPinnedDiscourseContext((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/waves/stop') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.stopDiscourseWave((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/waves/confirm-context') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.confirmDiscourseWaveContext((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/context/preview') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.previewDiscourseContext((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/draft') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseDraft(requiredQueryParameter(url, 'draftId'))
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/drafts') {
+        sendJson(response, requestId, 200, await options.service.listDiscourseDrafts());
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/drafts') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.saveDiscourseDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/drafts/delete') {
+        await options.service.deleteDiscourseDraft((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/rename') {
+        sendJson(response, requestId, 200, await options.service.renameDiscourseConversation((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/read') {
+        sendJson(response, requestId, 200, await options.service.setDiscourseConversationRead((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/archive') {
+        sendJson(response, requestId, 200, await options.service.setDiscourseConversationArchived((await readJson()) as never));
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/delete') {
+        await options.service.deleteDiscourseConversation((await readJson()) as never);
+        sendJson(response, requestId, 200, {});
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/attachments/stage-batch') {
         const payload = await readBoundedJson(request, ATTACHMENT_BATCH_MAX_JSON_BYTES);
         const attachments = decodeAttachmentBatch(payload);
@@ -351,23 +584,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
             );
           }
         );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/repository/validate') {
-        const body = (await readJson()) as { path: string };
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.validateRepository(body.path)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/repository/chooseFolder') {
-        await readJson();
-        sendJson(response, requestId, 200, (await options.chooseRepositoryFolder()) ?? null);
         return;
       }
 
@@ -614,7 +830,8 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
 export function createDevEventStreamFrame(event: AppUpdateEvent): string {
   const signal: AppUpdateEvent = {
     type: event.type,
-    taskId: event.taskId,
+    scope: event.scope,
+    ...(event.taskId ? { taskId: event.taskId } : {}),
     iterationId: event.iterationId,
     runId: event.runId,
     worktreeId: event.worktreeId,
@@ -738,6 +955,9 @@ function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
     return error;
   }
   if (error instanceof TaskCreationRequestError) {
+    return new DevApiHttpError(error.httpStatus, error.code, error.message);
+  }
+  if (error instanceof RepositoryRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);
   }
   if (

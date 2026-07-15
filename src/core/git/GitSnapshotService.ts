@@ -285,6 +285,30 @@ async function computeDirtyFingerprint(worktreePath: string): Promise<string> {
     git(worktreePath, ['diff', '--binary']).catch(() => ''),
     git(worktreePath, ['diff', '--cached', '--binary']).catch(() => '')
   ]);
+  return hashDirtyFingerprint(worktreePath, statusOutput, unstaged, staged);
+}
+
+/**
+ * Captures the live Git working-tree generation used by immutable discourse
+ * context. Unlike the workflow snapshot helper above, inspection failures are
+ * not converted into an apparently stable empty fingerprint: context
+ * freshness must fail closed when Git evidence cannot be observed.
+ */
+export async function inspectGitWorkingTreeFingerprint(worktreePath: string): Promise<string> {
+  const [statusOutput, unstaged, staged] = await Promise.all([
+    git(worktreePath, [...GIT_STATUS_ARGS]),
+    git(worktreePath, ['diff', '--binary']),
+    git(worktreePath, ['diff', '--cached', '--binary'])
+  ]);
+  return hashDirtyFingerprint(worktreePath, statusOutput, unstaged, staged);
+}
+
+async function hashDirtyFingerprint(
+  worktreePath: string,
+  statusOutput: string,
+  unstaged: string,
+  staged: string
+): Promise<string> {
   const parsed = parseGitStatusPorcelain(statusOutput);
   const hash = createHash('sha256');
   hash.update(statusOutput);

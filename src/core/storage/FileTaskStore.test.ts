@@ -404,9 +404,7 @@ describe('FileTaskStore', () => {
       string,
       unknown
     >;
-    await fs.writeFile(
-      storePath,
-      `${JSON.stringify(
+    const schema8Raw = `${JSON.stringify(
         {
           ...persisted,
           schemaVersion: 8,
@@ -414,9 +412,8 @@ describe('FileTaskStore', () => {
         },
         null,
         2
-      )}\n`,
-      'utf8'
-    );
+      )}\n`;
+    await fs.writeFile(storePath, schema8Raw, 'utf8');
 
     const migrated = await new FileTaskStore(dir).snapshot();
     expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
@@ -428,6 +425,64 @@ describe('FileTaskStore', () => {
     >;
     expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(rewritten.testRuns).toBeUndefined();
+    await expect(
+      fs.readFile(`${storePath}.pre-v11-backup`, 'utf8')
+    ).resolves.toBe(schema8Raw);
+  });
+
+  it('backs up and refuses the unshipped task-specific schema 12 without rewriting it', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema12-'));
+    const store = new FileTaskStore(dir);
+    await store.snapshot();
+    await store.close();
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const schema12Raw = `${JSON.stringify(
+      {
+        ...persisted,
+        schemaVersion: 12,
+        discourses: [{ id: 'development-only-record' }]
+      },
+      null,
+      2
+    )}\n`;
+    await fs.writeFile(storePath, schema12Raw, { mode: 0o600 });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'development-only task-specific discourse schema 12'
+    );
+    await expect(fs.readFile(storePath, 'utf8')).resolves.toBe(schema12Raw);
+    await expect(
+      fs.readFile(`${storePath}.unshipped-schema-12-backup`, 'utf8')
+    ).resolves.toBe(schema12Raw);
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'will not silently reinterpret or discard'
+    );
+  });
+
+  it('refuses a newer task schema without modifying or backing up the store', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-newer-'));
+    const store = new FileTaskStore(dir);
+    await store.snapshot();
+    await store.close();
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const newerRaw = `${JSON.stringify({ ...persisted, schemaVersion: 99 }, null, 2)}\n`;
+    await fs.writeFile(storePath, newerRaw, { mode: 0o600 });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'newer than this app supports'
+    );
+    await expect(fs.readFile(storePath, 'utf8')).resolves.toBe(newerRaw);
+    await expect(fs.readdir(dir)).resolves.not.toContain(
+      'store.json.unshipped-schema-12-backup'
+    );
   });
 
   it('links forked alternative tasks to their source task and run', async () => {

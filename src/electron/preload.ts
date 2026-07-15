@@ -28,6 +28,12 @@ import type {
   TransitionTaskRequest,
   UpdateAppSettingsRequest
 } from '../shared/contracts';
+import type {
+  AddRepositoryRequest,
+  RelinkRepositoryRequest,
+  RemoveRepositoryRequest,
+  SelectRepositoryRequest
+} from '../shared/repositories';
 import {
   ATTACHMENT_MAX_IMAGE_BYTES,
   type DiscardTaskAttachmentDraftRequest,
@@ -56,8 +62,15 @@ function getWindowChromePlatform(): WindowChromePlatform {
 const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
-  getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
-  chooseRepositoryFolder: () => ipcRenderer.invoke('repository:chooseFolder'),
+  getRepositoryCatalog: () => ipcRenderer.invoke('repository:catalog'),
+  selectRepository: (input: SelectRepositoryRequest) =>
+    ipcRenderer.invoke('repository:select', input),
+  addRepository: (input: AddRepositoryRequest) =>
+    ipcRenderer.invoke('repository:add', input),
+  removeRepository: (input: RemoveRepositoryRequest) =>
+    ipcRenderer.invoke('repository:remove', input),
+  relinkRepository: (input: RelinkRepositoryRequest) =>
+    ipcRenderer.invoke('repository:relink', input),
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
     ipcRenderer.invoke('settings:update', input),
@@ -69,8 +82,40 @@ const api: TaskManagerApi = {
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     ipcRenderer.invoke('openTarget:execute', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
-  validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),
+  listDiscourseConversations: (input = {}) =>
+    ipcRenderer.invoke('discourse:conversations:list', input),
+  getDiscourseConversation: (conversationId) =>
+    ipcRenderer.invoke('discourse:conversation:get', conversationId),
+  listDiscourseMessages: (input) => ipcRenderer.invoke('discourse:messages:list', input),
+  getDiscourseMentionCatalog: () => ipcRenderer.invoke('discourse:catalog'),
+  createDiscourseConversation: (input) =>
+    ipcRenderer.invoke('discourse:conversation:create', input),
+  appendHumanDiscourseMessage: (input) =>
+    ipcRenderer.invoke('discourse:message:append-human', input),
+  sendDiscourseMessage: (input) =>
+    ipcRenderer.invoke('discourse:message:send', input),
+  tombstoneDiscourseMessage: (input) =>
+    ipcRenderer.invoke('discourse:message:tombstone', input),
+  setPinnedDiscourseContext: (input) =>
+    ipcRenderer.invoke('discourse:context:set-pinned', input),
+  previewDiscourseContext: (input) =>
+    ipcRenderer.invoke('discourse:context:preview', input),
+  saveDiscourseDraft: (input) => ipcRenderer.invoke('discourse:draft:save', input),
+  getDiscourseDraft: (draftId) => ipcRenderer.invoke('discourse:draft:get', draftId),
+  listDiscourseDrafts: () => ipcRenderer.invoke('discourse:drafts:list'),
+  deleteDiscourseDraft: (input) => ipcRenderer.invoke('discourse:draft:delete', input),
+  renameDiscourseConversation: (input) =>
+    ipcRenderer.invoke('discourse:conversation:rename', input),
+  setDiscourseConversationRead: (input) =>
+    ipcRenderer.invoke('discourse:conversation:read', input),
+  setDiscourseConversationArchived: (input) =>
+    ipcRenderer.invoke('discourse:conversation:archive', input),
+  deleteDiscourseConversation: (input) =>
+    ipcRenderer.invoke('discourse:conversation:delete', input),
+  stopDiscourseWave: (input) => ipcRenderer.invoke('discourse:wave:stop', input),
+  confirmDiscourseWaveContext: (input) =>
+    ipcRenderer.invoke('discourse:wave:confirm-context', input),
   stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
     const byteCount = assertAttachmentIpcBatch(input);
     return attachmentIpcClientGate.run(byteCount, () =>

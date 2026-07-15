@@ -40,7 +40,7 @@ describe('TaskManagerService attachments', () => {
     }] });
 
     await expect(
-      service.createTask({
+      service.createTaskFromTrustedPath({
         title: 'Inspect screenshot',
         prompt: 'Use the attached screenshot.',
         repositoryPath: dir,
@@ -70,7 +70,7 @@ describe('TaskManagerService attachments', () => {
     }] });
     const staged = draft.attachments[0]!;
 
-    const task = await service.createTask({
+    const task = await service.createTaskFromTrustedPath({
       title: 'Inspect screenshot',
       prompt: 'Use the attached screenshot.',
       repositoryPath: dir,
@@ -104,11 +104,11 @@ describe('TaskManagerService attachments', () => {
       attachmentDraftId: draft.id
     };
 
-    const created = await service.createTask(request);
+    const created = await service.createTaskFromTrustedPath(request);
     await expect(store.listAttachmentDraft(draft.id)).rejects.toMatchObject({
       code: 'ATTACHMENT_DRAFT_NOT_FOUND'
     });
-    const retried = await service.createTask(request);
+    const retried = await service.createTaskFromTrustedPath(request);
 
     expect(retried.id).toBe(created.id);
     const snapshot = await store.snapshot();
@@ -126,7 +126,7 @@ describe('TaskManagerService attachments', () => {
     });
 
     await expect(
-      service.createTask({
+      service.createTaskFromTrustedPath({
         title: 'Invalid retry token',
         prompt: 'Do not create this task.',
         repositoryPath: dir,
@@ -150,7 +150,7 @@ describe('TaskManagerService attachments', () => {
     ] });
 
     await expect(
-      service.createTask({
+      service.createTaskFromTrustedPath({
         title: 'Network attachment boundary',
         prompt: 'Use the attachment.',
         repositoryPath: dir,
@@ -160,7 +160,7 @@ describe('TaskManagerService attachments', () => {
     ).rejects.toThrow('Network access must be disabled');
 
     await expect(
-      service.createTask({
+      service.createTaskFromTrustedPath({
         title: 'Unsafe attachment boundary',
         prompt: 'Use the attachment.',
         repositoryPath: dir,

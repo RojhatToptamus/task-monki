@@ -2,9 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createInitialProjection,
-  TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   TASK_STORE_SCHEMA_VERSION,
-  type TaskManagerAppSettings,
   type TaskSnapshot,
   type WorktreeRecord
 } from '../../shared/contracts';
@@ -13,28 +11,6 @@ import {
   OpenTargetService,
   type OpenTargetHost
 } from './OpenTargetService';
-
-const defaultSettings: TaskManagerAppSettings = {
-  schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-  theme: 'device',
-  sidebarCollapsed: false,
-  showMascot: true,
-  firstLaunchSetupCompleted: true,
-  codexExternalTools: {
-    webSearchMode: 'disabled',
-    mcpServers: 'disabled',
-    apps: 'disabled'
-  },
-  externalExecutables: {
-    gitExecutablePath: null,
-    codexExecutablePath: null,
-    ghExecutablePath: null
-  },
-  repositories: {
-    knownPaths: ['/repo'],
-    selectedPath: '/repo'
-  }
-};
 
 describe('OpenTargetService', () => {
   it('provides an icon reader in the shared Node host', () => {
@@ -232,7 +208,7 @@ describe('OpenTargetService', () => {
           appId: 'default',
           target: {
             type: 'repository',
-            repositoryPath: '/repo'
+            repositoryId: 'repository-1'
           }
         },
         testContext()
@@ -405,7 +381,7 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('rejects repository targets that are not recorded by Task Monki', async () => {
+  it('rejects repository ids that are not recorded by Task Monki', async () => {
     const service = new OpenTargetService(new FakeOpenTargetHost({
       '/repo': directory(),
       '/outside': directory(),
@@ -417,12 +393,12 @@ describe('OpenTargetService', () => {
         {
           target: {
             type: 'repository',
-            repositoryPath: '/outside'
+            repositoryId: 'forged-repository'
           }
         },
         testContext()
       )
-    ).rejects.toThrow(/not recorded/);
+    ).rejects.toThrow(/Unknown repository id/);
   });
 
   it('copies safe UTF-8 files but blocks binary contents', async () => {
@@ -579,13 +555,11 @@ function testContext(input: { repositoryPath?: string; worktreePath?: string } =
   const worktreePath = input.worktreePath ?? '/worktree';
   return {
     snapshot: testSnapshot({ repositoryPath, worktreePath }),
-    defaultRepositoryPath: repositoryPath,
-    appSettings: {
-      ...defaultSettings,
-      repositories: {
-        knownPaths: [repositoryPath],
-        selectedPath: repositoryPath
+    resolveRepositoryPath: async (repositoryId: string) => {
+      if (repositoryId !== 'repository-1') {
+        throw new Error(`Unknown repository id: ${repositoryId}`);
       }
+      return repositoryPath;
     }
   };
 }

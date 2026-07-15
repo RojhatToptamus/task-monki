@@ -48,7 +48,7 @@ describe('createBrowserTaskManagerApi updates', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'projection.updated',
-      taskId: '__browser_poll__'
+      scope: { kind: 'APP' }
     });
 
     unsubscribe();
@@ -64,6 +64,7 @@ describe('createBrowserTaskManagerApi updates', () => {
     const unsubscribe = api.onUpdate((event) => events.push(event));
     const event: AppUpdateEvent = {
       type: 'run.output',
+      scope: { kind: 'TASK', taskId: 'task-1' },
       taskId: 'task-1',
       payload: { stream: 'stdout' },
       at: '2026-06-29T00:00:00.000Z'
@@ -163,5 +164,117 @@ describe('createBrowserTaskManagerApi settings', () => {
       retryable: false,
       requestId: 'request-1'
     });
+  });
+});
+
+describe('createBrowserTaskManagerApi repository catalog', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses opaque ids and never submits repository paths', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const catalog = {
+      revision: 1,
+      defaultRepositoryId: 'repository-1',
+      selectedRepositoryId: 'repository-1',
+      repositories: [],
+      taskAssociations: []
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => catalog } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('');
+
+    await api.getRepositoryCatalog();
+    await api.selectRepository({ repositoryId: 'repository-1' });
+    await api.addRepository({ clientMutationId: 'add-repository-0001' });
+    await api.removeRepository({
+      repositoryId: 'repository-1',
+      clientMutationId: 'remove-repository-01'
+    });
+    await api.relinkRepository({
+      repositoryId: 'repository-1',
+      clientMutationId: 'relink-repository-01'
+    });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      '/api/repositories',
+      '/api/repositories/select',
+      '/api/repositories/add',
+      '/api/repositories/remove',
+      '/api/repositories/relink'
+    ]);
+    expect(calls.slice(1).map((call) => String(call.init?.body))).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('/Users/')])
+    );
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
+      repositoryId: 'repository-1'
+    });
+  });
+});
+
+describe('createBrowserTaskManagerApi discourse', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps pagination in query parameters and context authority in opaque ids', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, json: async () => ({ conversations: [], messages: [] }) } as Response;
+    }));
+    const api = createBrowserTaskManagerApi('');
+
+    await api.listDiscourseConversations({ status: 'OPEN', cursor: 'cursor-1', limit: 40 });
+    await api.listDiscourseMessages({
+      conversationId: 'conversation-1',
+      beforeCursor: 'cursor-2',
+      limit: 25
+    });
+    await api.previewDiscourseContext({
+      conversationId: 'conversation-1',
+      messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
+    });
+    await api.sendDiscourseMessage({
+      conversationId: 'conversation-1',
+      body: 'Review this.',
+      context: [],
+      clientMessageId: 'message-1',
+      policy: 'TEAM',
+      agentProfileIds: ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'],
+      previewFingerprint: 'preview-1'
+    });
+    await api.stopDiscourseWave({
+      conversationId: 'conversation-1',
+      waveId: 'wave-1',
+      clientOperationId: 'stop-1',
+      reason: 'User stopped.'
+    });
+    await api.confirmDiscourseWaveContext({
+      conversationId: 'conversation-1',
+      waveId: 'wave-1',
+      previewFingerprint: 'preview-2',
+      expectedWaveRevision: 1,
+      clientOperationId: 'confirm-1'
+    });
+
+    expect(calls[0]?.url).toBe('/api/discourse/conversations?status=OPEN&cursor=cursor-1&limit=40');
+    expect(calls[1]?.url).toBe('/api/discourse/messages?conversationId=conversation-1&beforeCursor=cursor-2&limit=25');
+    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+      conversationId: 'conversation-1',
+      messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
+    });
+    expect(String(calls[2]?.init?.body)).not.toContain('/Users/');
+    expect(calls.slice(3).map((call) => call.url)).toEqual([
+      '/api/discourse/messages/send',
+      '/api/discourse/waves/stop',
+      '/api/discourse/waves/confirm-context'
+    ]);
   });
 });

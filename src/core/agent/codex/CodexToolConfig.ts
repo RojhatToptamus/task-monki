@@ -50,6 +50,21 @@ export function assertCodexAttachmentExternalToolsDisabled(
   }
 }
 
+export function assertCodexDiscourseExternalToolsDisabled(
+  settings: CodexExternalToolSettings | undefined
+): void {
+  const normalized = normalizeCodexExternalToolSettings(settings);
+  if (
+    normalized.webSearchMode !== 'disabled' ||
+    normalized.mcpServers !== 'disabled' ||
+    normalized.apps !== 'disabled'
+  ) {
+    throw new Error(
+      'Agent discourse requires Codex web search, MCP servers, and apps to be disabled.'
+    );
+  }
+}
+
 export function codexExternalToolConfigOverrides(
   settings: CodexExternalToolSettings = DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
 ): string[] {

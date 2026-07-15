@@ -1,6 +1,9 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { TaskManagerService } from '../core/app/TaskManagerService';
+import {
+  RepositoryRequestError,
+  type TaskManagerService
+} from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { AttachmentStoreError } from '../core/storage/AttachmentFileStore';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
@@ -34,24 +37,26 @@ describe('development HTTP server', () => {
   it('requires proxy authentication and emits no permissive CORS headers', async () => {
     const running = await startServer();
 
-    const unauthenticated = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`);
+    const unauthenticated = await fetch(`${running.baseUrl}/api/repositories`);
     expect(unauthenticated.status).toBe(401);
     await expect(unauthenticated.json()).resolves.toMatchObject({
       error: { code: 'UNAUTHORIZED', retryable: false }
     });
 
-    const authenticated = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const authenticated = await fetch(`${running.baseUrl}/api/repositories`, {
       headers: running.headers
     });
     expect(authenticated.status).toBe(200);
     expect(authenticated.headers.get('access-control-allow-origin')).toBeNull();
     expect(authenticated.headers.get('cache-control')).toBe('no-store');
-    await expect(authenticated.json()).resolves.toBe('/trusted/repository');
+    await expect(authenticated.json()).resolves.toMatchObject({
+      selectedRepositoryId: 'repository-trusted'
+    });
   });
 
   it('returns a retryable 503 during the listen-to-token startup window', async () => {
     const running = await startServer({}, undefined, undefined, '');
-    const response = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const response = await fetch(`${running.baseUrl}/api/repositories`, {
       headers: running.headers
     });
     expect(response.status).toBe(503);
@@ -63,7 +68,7 @@ describe('development HTTP server', () => {
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 
-    const hostileOrigin = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const hostileOrigin = await fetch(`${running.baseUrl}/api/repositories`, {
       headers: { ...running.headers, origin: 'https://evil.test' }
     });
     expect(hostileOrigin.status).toBe(403);
@@ -71,7 +76,7 @@ describe('development HTTP server', () => {
       error: { code: 'INVALID_ORIGIN' }
     });
 
-    const crossSite = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const crossSite = await fetch(`${running.baseUrl}/api/repositories`, {
       headers: { ...running.headers, 'sec-fetch-site': 'cross-site' }
     });
     expect(crossSite.status).toBe(403);
@@ -120,6 +125,85 @@ describe('development HTTP server', () => {
       error: { code: 'REQUEST_BODY_TOO_LARGE' }
     });
     expect(updateAppSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes discourse send, stop, and context confirmation through the same private boundary', async () => {
+    const sendDiscourseMessage = vi.fn(async (input: unknown) => ({ input }));
+    const stopDiscourseWave = vi.fn(async (input: unknown) => ({ input }));
+    const confirmDiscourseWaveContext = vi.fn(async (input: unknown) => ({ input }));
+    const running = await startServer({
+      sendDiscourseMessage,
+      stopDiscourseWave,
+      confirmDiscourseWaveContext
+    });
+    const post = (pathname: string, body: unknown) => fetch(`${running.baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const send = { conversationId: 'conversation-1', policy: 'TEAM' };
+    const stop = { conversationId: 'conversation-1', waveId: 'wave-1' };
+    const confirm = { conversationId: 'conversation-1', waveId: 'wave-1', previewFingerprint: 'preview-2' };
+
+    expect((await post('/api/discourse/messages/send', send)).status).toBe(201);
+    expect((await post('/api/discourse/waves/stop', stop)).status).toBe(200);
+    expect((await post('/api/discourse/waves/confirm-context', confirm)).status).toBe(200);
+    expect(sendDiscourseMessage).toHaveBeenCalledWith(send);
+    expect(stopDiscourseWave).toHaveBeenCalledWith(stop);
+    expect(confirmDiscourseWaveContext).toHaveBeenCalledWith(confirm);
+  });
+
+  it('keeps repository paths host-owned and returns safe repository errors', async () => {
+    const addRepositoryFromTrustedPath = vi.fn(async () => ({
+      revision: 2,
+      defaultRepositoryId: 'repository-default',
+      selectedRepositoryId: 'repository-added',
+      repositories: [],
+      taskAssociations: []
+    }));
+    const running = await startServer(
+      {
+        addRepositoryFromTrustedPath,
+        selectRepository: vi.fn(async () => {
+          throw new RepositoryRequestError(
+            'REPOSITORY_UNAVAILABLE',
+            409,
+            'The repository is unavailable or its identity has changed.'
+          );
+        })
+      },
+      undefined,
+      undefined,
+      'private-test-token',
+      { chooseRepositoryFolder: async () => '/trusted/from-native-picker' }
+    );
+
+    const added = await fetch(`${running.baseUrl}/api/repositories/add`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        clientMutationId: 'add-repository-0001',
+        repositoryPath: '/forged/from-renderer'
+      })
+    });
+    expect(added.status).toBe(200);
+    expect(addRepositoryFromTrustedPath).toHaveBeenCalledWith(
+      '/trusted/from-native-picker',
+      expect.objectContaining({ clientMutationId: 'add-repository-0001' })
+    );
+
+    const unavailable = await fetch(`${running.baseUrl}/api/repositories/select`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ repositoryId: 'repository-missing' })
+    });
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      error: {
+        code: 'REPOSITORY_UNAVAILABLE',
+        message: 'The repository is unavailable or its identity has changed.'
+      }
+    });
   });
 
   it('accepts one bounded attachment batch and preserves no source path', async () => {
@@ -304,7 +388,7 @@ describe('development HTTP server', () => {
     const logger = { error: vi.fn() };
     const running = await startServer(
       {
-        getDefaultRepositoryPath: vi.fn(() => {
+        getRepositoryCatalog: vi.fn(() => {
           throw new Error('Failed at /Users/private/secret.txt');
         })
       },
@@ -312,7 +396,7 @@ describe('development HTTP server', () => {
       logger
     );
 
-    const response = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const response = await fetch(`${running.baseUrl}/api/repositories`, {
       headers: running.headers
     });
     expect(response.status).toBe(500);
@@ -384,6 +468,7 @@ describe('development HTTP server', () => {
   it('uses SSE as a compact invalidation signal instead of copying provider output', () => {
     const frame = createDevEventStreamFrame({
       type: 'run.output',
+      scope: { kind: 'TASK', taskId: 'task-1' },
       taskId: 'task-1',
       runId: 'run-1',
       payload: { source: 'agent', text: 'x'.repeat(1024 * 1024) },
@@ -403,7 +488,9 @@ type ServerLimitOptions = Pick<
   | 'maxEventStreamBufferBytes'
   | 'maxAttachmentOperations'
   | 'maxAttachmentInFlightBytes'
->;
+> & {
+  chooseRepositoryFolder?: () => Promise<string | undefined>;
+};
 
 async function startServer(
   overrides: Record<string, unknown> = {},
@@ -415,7 +502,13 @@ async function startServer(
   const events = new AppEventBus();
   const service = {
     events,
-    getDefaultRepositoryPath: vi.fn(() => '/trusted/repository'),
+    getRepositoryCatalog: vi.fn(async () => ({
+      revision: 1,
+      defaultRepositoryId: 'repository-trusted',
+      selectedRepositoryId: 'repository-trusted',
+      repositories: [],
+      taskAssociations: []
+    })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async (input: unknown) => input),
     ...overrides
@@ -425,13 +518,17 @@ async function startServer(
     expectedHost: '',
     expectedOrigin: devRendererOrigin(5173)
   };
+  const {
+    chooseRepositoryFolder = async () => undefined,
+    ...serverLimits
+  } = eventStreamOptions;
   const devServer = createDevHttpServer({
     service,
     security,
-    chooseRepositoryFolder: async () => undefined,
+    chooseRepositoryFolder,
     maxJsonBodyBytes,
     logger,
-    ...eventStreamOptions
+    ...serverLimits
   });
   await new Promise<void>((resolve, reject) => {
     devServer.server.once('error', reject);

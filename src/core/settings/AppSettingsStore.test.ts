@@ -74,39 +74,31 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('keeps first-launch setup incomplete when a fresh config adds a repository', async () => {
+  it('keeps first-launch setup incomplete when a fresh config selects a repository', async () => {
     const store = new MemoryAppSettingsStore();
 
-    const settings = await store.update({
-      repositories: {
-        knownPaths: ['/repos/current'],
-        selectedPath: '/repos/current'
-      }
-    });
+    const settings = await store.setSelectedRepositoryId('repository-current');
 
     expect(settings.firstLaunchSetupCompleted).toBe(false);
     expect(settings.repositories).toEqual({
-      knownPaths: ['/repos/current'],
-      selectedPath: '/repos/current'
+      selectedRepositoryId: 'repository-current'
     });
   });
 
-  it('infers first-launch setup as completed for legacy configs that already have repositories', () => {
+  it('infers first-launch setup as completed for current configs that already have a selection', () => {
     expect(
       normalizeAppSettings({
         repositories: {
-          knownPaths: ['/repos/current'],
-          selectedPath: '/repos/current'
+          selectedRepositoryId: 'repository-current'
         }
       }).firstLaunchSetupCompleted
     ).toBe(true);
   });
 
-  it('infers first-launch setup for memory stores initialized with legacy repositories', async () => {
+  it('infers first-launch setup for memory stores initialized with a selection', async () => {
     const store = new MemoryAppSettingsStore({
       repositories: {
-        knownPaths: ['/repos/current'],
-        selectedPath: '/repos/current'
+        selectedRepositoryId: 'repository-current'
       }
     });
 
@@ -120,11 +112,77 @@ describe('AppSettingsStore', () => {
       normalizeAppSettings({
         firstLaunchSetupCompleted: false,
         repositories: {
-          knownPaths: ['/repos/current'],
-          selectedPath: '/repos/current'
+          selectedRepositoryId: 'repository-current'
         }
       }).firstLaunchSetupCompleted
     ).toBe(false);
+  });
+
+  it('migrates legacy repository paths through the registry before publishing schema v4', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v3-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const legacyRaw = `${JSON.stringify({
+      schemaVersion: 3,
+      theme: 'dark',
+      repositories: {
+        knownPaths: ['/repos/one', '/repos/two'],
+        selectedPath: '/repos/two'
+      }
+    }, null, 2)}\n`;
+    await fs.writeFile(settingsPath, legacyRaw, 'utf8');
+    const store = new AppSettingsStore(settingsPath);
+    let registryWasUpdated = false;
+
+    await store.initializeRepositories(async (legacy) => {
+      expect(legacy).toEqual({
+        knownPaths: ['/repos/one', '/repos/two'],
+        selectedPath: '/repos/two'
+      });
+      registryWasUpdated = true;
+      await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(legacyRaw);
+      return { selectedRepositoryId: 'repository-two' };
+    });
+
+    expect(registryWasUpdated).toBe(true);
+    await expect(store.get()).resolves.toMatchObject({
+      schemaVersion: 4,
+      theme: 'dark',
+      firstLaunchSetupCompleted: true,
+      repositories: { selectedRepositoryId: 'repository-two' }
+    });
+    await expect(fs.readFile(`${settingsPath}.pre-v4-backup`, 'utf8')).resolves.toBe(
+      legacyRaw
+    );
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.not.toContain('knownPaths');
+  });
+
+  it('does not mutate legacy settings when registry migration fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v3-fail-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const raw = JSON.stringify({
+      schemaVersion: 3,
+      repositories: { knownPaths: ['/repos/one'], selectedPath: '/repos/one' }
+    });
+    await fs.writeFile(settingsPath, raw, 'utf8');
+    const store = new AppSettingsStore(settingsPath);
+
+    await expect(
+      store.initializeRepositories(async () => {
+        throw new Error('registry unavailable');
+      })
+    ).rejects.toThrow('registry unavailable');
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
+    await expect(fs.readFile(`${settingsPath}.pre-v4-backup`, 'utf8')).resolves.toBe(raw);
+  });
+
+  it('refuses to load legacy settings without a registry migration', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-v3-gate-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    await fs.writeFile(settingsPath, JSON.stringify({ schemaVersion: 3 }), 'utf8');
+
+    await expect(new AppSettingsStore(settingsPath).get()).rejects.toThrow(
+      'require repository-registry migration'
+    );
   });
 
   it('normalizes empty executable paths as auto-detect', () => {
@@ -162,5 +220,20 @@ describe('AppSettingsStore', () => {
     );
     const files = await fs.readdir(dir);
     expect(files.some((file) => file.startsWith('app-settings.json.invalid-'))).toBe(true);
+  });
+
+  it('refuses a newer schema without rewriting or moving the settings file', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-newer-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const raw = JSON.stringify({
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION + 1,
+      futureSetting: true
+    });
+    await fs.writeFile(settingsPath, raw, 'utf8');
+    const store = new AppSettingsStore(settingsPath);
+
+    await expect(store.get()).rejects.toThrow('newer than this app supports');
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
+    expect(await fs.readdir(dir)).toEqual(['app-settings.json']);
   });
 });

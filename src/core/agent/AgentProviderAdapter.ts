@@ -11,6 +11,7 @@ import type {
   AgentInteractionDecision,
   InteractionRequestRecord
 } from '../../shared/agent';
+import type { AgentExecutionContext } from '../../shared/agentRuntime';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
 
 export interface CreateAgentSession {
@@ -84,6 +85,14 @@ export interface AgentReconciliationResult {
   recoveryRequiredSessionIds: string[];
 }
 
+export interface DescribeAgentExecutionContext {
+  sessionId: string;
+  worktreePath: string;
+  settings: AgentExecutionSettings;
+  attachments: readonly AgentTurnAttachment[];
+  clientOperationId: string;
+}
+
 export class AgentMutationAmbiguousError extends Error {
   constructor(
     readonly operation: string,
@@ -109,6 +118,9 @@ export interface AgentProviderAdapter {
   preflight(): Promise<AgentPreflight>;
   capabilities(): Promise<AgentProviderCapabilities>;
   listModels(): Promise<AgentModel[]>;
+  describeExecutionContext?(
+    input: DescribeAgentExecutionContext
+  ): Promise<AgentExecutionContext>;
   createSession(input: CreateAgentSession): Promise<AgentSessionRecord>;
   attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord>;
   readSession(ref: AgentSessionRef): Promise<AgentSessionSnapshot>;

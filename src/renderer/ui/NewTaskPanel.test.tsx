@@ -144,7 +144,7 @@ describe('NewTaskPanel', () => {
 
     const renderPanel = (attachmentsEnabled = true) => renderToStaticMarkup(
       <NewTaskPanel
-        defaultRepositoryPath="/tmp/project"
+        repositoryId="repository-project"
         models={models}
         attachmentsEnabled={attachmentsEnabled}
         onCreate={async () => undefined}

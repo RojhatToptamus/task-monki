@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
@@ -12,12 +12,14 @@ import {
   type InteractionRequestRecord,
   type Task,
   type TaskManagerAppSettings,
+  type RepositoryCatalogSnapshot,
   type TaskSnapshot,
   type UpdateAppSettingsRequest,
   type WorkflowPhase,
   type WorktreeRecord
 } from '../../shared/contracts';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   selectActiveRun,
   selectCurrentWorktree,
@@ -34,14 +36,12 @@ import {
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import { areRequiredExternalToolsReady } from '../model/executableSettings';
+import { appendUniqueNotification } from '../model/notifications';
 import {
   buildRepositoryOptions,
   isSameRepositoryPath,
-  mergeRepositoryPath,
-  normalizeRepositoryPath,
-  repositoryDisplayPath,
   resolveRepositorySetupState,
-  resolveSelectedRepositoryPath,
+  resolveSelectedRepositoryId,
   tasksForRepository
 } from '../model/repositories';
 import { MainColumn } from './MainColumn';
@@ -50,6 +50,11 @@ import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
+
+const DiscourseWorkspace = lazy(async () => {
+  const module = await import('./DiscourseWorkspace');
+  return { default: module.DiscourseWorkspace };
+});
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -78,6 +83,14 @@ const emptySnapshot: TaskSnapshot = {
   attachments: []
 };
 
+const emptyRepositoryCatalog: RepositoryCatalogSnapshot = {
+  revision: 0,
+  defaultRepositoryId: null,
+  selectedRepositoryId: null,
+  repositories: [],
+  taskAssociations: []
+};
+
 type NotificationTone = 'info' | 'success' | 'error';
 
 function prefersDarkScheme(): boolean {
@@ -99,11 +112,14 @@ function resolveWindowChromePlatform() {
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
-  const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
+  const [repositoryCatalog, setRepositoryCatalog] = useState<RepositoryCatalogSnapshot>(
+    emptyRepositoryCatalog
+  );
   const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
-  const [view, setView] = useState<NavView>('board');
+  const [view, setView] = useState<NavView | 'discourse'>('board');
+  const [discourseNavCount, setDiscourseNavCount] = useState(0);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
@@ -121,7 +137,7 @@ export function App() {
   const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setNotifications((current) => [...current.slice(-2), { id, tone, message }]);
+    setNotifications((current) => appendUniqueNotification(current, { id, tone, message }));
     window.setTimeout(() => {
       setNotifications((current) => current.filter((notification) => notification.id !== id));
     }, 4200);
@@ -166,8 +182,19 @@ export function App() {
   }, [appSettings.sidebarCollapsed, updateAppSettings]);
 
   const refresh = useCallback(async () => {
-    const next = await taskManagerApi.listTasks();
-    setSnapshot(next);
+    const [nextSnapshot, nextCatalog] = await Promise.all([
+      taskManagerApi.listTasks(),
+      taskManagerApi.getRepositoryCatalog()
+    ]);
+    setSnapshot(nextSnapshot);
+    setRepositoryCatalog(nextCatalog);
+  }, []);
+  const refreshDiscourseNav = useCallback(async () => {
+    const conversations = await listDiscourseConversationSnapshot(taskManagerApi, 'OPEN');
+    const count = conversations.filter(
+      (conversation) => conversation.unreadCount > 0 || conversation.needsAttention
+    ).length;
+    setDiscourseNavCount(count);
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
     const next = await taskManagerApi.getExternalToolStatus();
@@ -227,15 +254,14 @@ export function App() {
 
     async function load() {
       try {
-        const [repoPath, provider, settings, tools] = await Promise.all([
-          taskManagerApi.getDefaultRepositoryPath(),
+        const [provider, settings, tools] = await Promise.all([
           taskManagerApi.getAgentProviderState(),
           taskManagerApi.getAppSettings(),
           taskManagerApi.getExternalToolStatus(),
-          refresh()
+          refresh(),
+          refreshDiscourseNav()
         ]);
         if (!canceled) {
-          setDefaultRepositoryPath(repoPath);
           setProviderState(provider);
           setAppSettings(settings);
           setExternalToolStatus(tools);
@@ -255,63 +281,52 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [refresh]);
+  }, [refresh, refreshDiscourseNav]);
 
   useEffect(() => {
     return taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
         void taskManagerApi.getAgentProviderState().then(setProviderState);
       }
-      void refresh();
+      if (event.scope.kind === 'DISCOURSE') {
+        void refreshDiscourseNav();
+      } else {
+        void refresh();
+      }
     });
-  }, [refresh]);
+  }, [refresh, refreshDiscourseNav]);
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
-  const knownRepositoryPaths = appSettings.repositories.knownPaths;
-  const selectedRepositoryPath = appSettings.repositories.selectedPath ?? '';
-
   const repositoryOptions = useMemo(
-    () =>
-      buildRepositoryOptions({
-        defaultRepositoryPath,
-        storedRepositoryPaths: knownRepositoryPaths,
-        tasks: snapshot.tasks
-      }),
-    [defaultRepositoryPath, knownRepositoryPaths, snapshot.tasks]
+    () => buildRepositoryOptions(repositoryCatalog),
+    [repositoryCatalog]
   );
-  const activeRepositoryPath = resolveSelectedRepositoryPath(
-    repositoryOptions,
-    selectedRepositoryPath
+  const activeRepositoryId = resolveSelectedRepositoryId(repositoryCatalog);
+  const activeRepository = repositoryOptions.find(
+    (repository) => repository.id === activeRepositoryId
   );
+  const activeRepositoryDisplayPath = activeRepository?.displayPath ?? '';
   const repositorySetupState = resolveRepositorySetupState({
     loading: isLoading,
     options: repositoryOptions,
-    activeRepositoryPath,
+    activeRepositoryId,
     firstLaunchSetupCompleted: appSettings.firstLaunchSetupCompleted
   });
   const canCreateTask =
-    !isLoading && Boolean(activeRepositoryPath) && repositorySetupState === 'complete';
+    !isLoading &&
+    Boolean(activeRepositoryId) &&
+    activeRepository?.available === true &&
+    repositorySetupState === 'complete';
   const visibleTasks = useMemo(
-    () => tasksForRepository(snapshot.tasks, activeRepositoryPath),
-    [activeRepositoryPath, snapshot.tasks]
+    () => tasksForRepository(snapshot.tasks, repositoryCatalog, activeRepositoryId),
+    [activeRepositoryId, repositoryCatalog, snapshot.tasks]
   );
 
-  useEffect(() => {
-    if (activeRepositoryPath && activeRepositoryPath !== selectedRepositoryPath) {
-      void updateAppSettings(
-        { repositories: { selectedPath: activeRepositoryPath } },
-        ''
-      );
-    }
-  }, [activeRepositoryPath, selectedRepositoryPath, updateAppSettings]);
-
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
-  const selectedTask =
-    selectedTaskCandidate &&
-    isSameRepositoryPath(selectedTaskCandidate.repositoryPath, activeRepositoryPath)
-      ? selectedTaskCandidate
-      : undefined;
+  const selectedTask = selectedTaskCandidate && visibleTasks.some(
+    (task) => task.id === selectedTaskCandidate.id
+  ) ? selectedTaskCandidate : undefined;
   const deleteCandidate = snapshot.tasks.find((task) => task.id === deleteCandidateId);
 
   useEffect(() => {
@@ -473,11 +488,11 @@ export function App() {
     }
   };
 
-  const refinePrompt = async (repositoryPath: string, input: string) => {
+  const refinePrompt = async (repositoryId: string, input: string) => {
     try {
       const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
       const refined = await taskManagerApi.refinePrompt({
-        repositoryPath,
+        repositoryId,
         input,
         model: refinementModel?.model
       });
@@ -720,66 +735,56 @@ export function App() {
   };
 
   const selectRepository = useCallback(
-    async (repositoryPath: string) => {
-      const normalized = normalizeRepositoryPath(repositoryPath);
-      if (!normalized || normalized === activeRepositoryPath) {
+    async (repositoryId: string) => {
+      if (!repositoryId || repositoryId === activeRepositoryId) {
         return;
       }
-      const nextSettings = await updateAppSettings(
-        {
-          repositories: {
-            knownPaths: mergeRepositoryPath(knownRepositoryPaths, normalized),
-            selectedPath: normalized
-          }
-        },
-        ''
-      );
-      if (!nextSettings) {
-        return;
+      try {
+        const nextCatalog = await taskManagerApi.selectRepository({ repositoryId });
+        setRepositoryCatalog(nextCatalog);
+        setAppSettings((current) => ({
+          ...current,
+          repositories: { selectedRepositoryId: nextCatalog.selectedRepositoryId }
+        }));
+        setSelectedTaskId(undefined);
+        setLastTaskId(undefined);
+        setIsDetailOpen(false);
+        setIsNewTaskOpen(false);
+        setError(undefined);
+        const selected = nextCatalog.repositories.find(
+          (repository) => repository.id === nextCatalog.selectedRepositoryId
+        );
+        notify(`Switched to ${selected?.displayPath ?? 'repository'}.`, 'success');
+      } catch (caught) {
+        reportActionError(caught, 'Could not switch repositories.');
       }
-      setSelectedTaskId(undefined);
-      setLastTaskId(undefined);
-      setIsDetailOpen(false);
-      setIsNewTaskOpen(false);
-      setError(undefined);
-      notify(`Switched to ${repositoryDisplayPath(normalized)}.`, 'success');
     },
-    [activeRepositoryPath, knownRepositoryPaths, notify, updateAppSettings]
+    [activeRepositoryId, notify, reportActionError]
   );
 
   const addRepository = useCallback(async () => {
     setError(undefined);
     setIsAddingRepository(true);
     try {
-      const selectedPath = await taskManagerApi.chooseRepositoryFolder();
-      const normalized = normalizeRepositoryPath(selectedPath ?? '');
-      if (!normalized) {
+      const nextCatalog = await taskManagerApi.addRepository({
+        clientMutationId: globalThis.crypto.randomUUID()
+      });
+      if (!nextCatalog) {
         return false;
       }
-
-      const preflight = await taskManagerApi.validateRepository(normalized);
-      if (preflight.status !== 'VALID') {
-        throw new Error(preflight.error ?? 'Selected folder is not a valid Git repository.');
-      }
-
-      const repositoryRoot = normalizeRepositoryPath(preflight.root ?? normalized);
-      const nextSettings = await updateAppSettings(
-        {
-          repositories: {
-            knownPaths: mergeRepositoryPath(knownRepositoryPaths, repositoryRoot),
-            selectedPath: repositoryRoot
-          }
-        },
-        ''
-      );
-      if (!nextSettings) {
-        return false;
-      }
+      setRepositoryCatalog(nextCatalog);
+      setAppSettings((current) => ({
+        ...current,
+        repositories: { selectedRepositoryId: nextCatalog.selectedRepositoryId }
+      }));
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
       setIsNewTaskOpen(false);
-      notify(`Added ${repositoryDisplayPath(repositoryRoot)}.`, 'success');
+      const selected = nextCatalog.repositories.find(
+        (repository) => repository.id === nextCatalog.selectedRepositoryId
+      );
+      notify(`Added ${selected?.displayPath ?? 'repository'}.`, 'success');
       return true;
     } catch (caught) {
       reportActionError(caught, 'Could not add repository.');
@@ -787,10 +792,10 @@ export function App() {
     } finally {
       setIsAddingRepository(false);
     }
-  }, [knownRepositoryPaths, notify, reportActionError, updateAppSettings]);
+  }, [notify, reportActionError]);
 
   const finishFirstLaunchSetup = useCallback(async () => {
-    if (!activeRepositoryPath) {
+    if (!activeRepositoryId) {
       const message = 'Add a repository before finishing setup.';
       reportActionError(new Error(message), message);
       throw new Error(message);
@@ -816,7 +821,7 @@ export function App() {
       reportActionError(caught, 'Could not finish setup.');
       throw caught;
     }
-  }, [activeRepositoryPath, notify, reportActionError]);
+  }, [activeRepositoryId, notify, reportActionError]);
 
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
@@ -837,7 +842,7 @@ export function App() {
     }
   };
 
-  const showView = (next: NavView) => {
+  const showView = (next: NavView | 'discourse') => {
     setView(next);
     setIsDetailOpen(false);
   };
@@ -931,6 +936,15 @@ export function App() {
               onClick={() => showView('inbox')}
             />
             <NavItem
+              label="Discourse"
+              icon={<DiscourseIcon />}
+              count={discourseNavCount}
+              urgent={false}
+              active={!showDetail && view === 'discourse'}
+              collapsed={isSidebarCollapsed}
+              onClick={() => showView('discourse')}
+            />
+            <NavItem
               label="Board"
               icon={<BoardIcon />}
               active={!showDetail && view === 'board'}
@@ -973,7 +987,7 @@ export function App() {
           <div className="tm-nav__spacer" />
 
           <RepositorySwitcher
-            activeRepositoryPath={activeRepositoryPath}
+            activeRepositoryId={activeRepositoryId}
             options={repositoryOptions}
             collapsed={isSidebarCollapsed}
             adding={isAddingRepository}
@@ -986,6 +1000,7 @@ export function App() {
           <TaskDetail
             error={error}
             task={selectedTask}
+            repositoryId={activeRepositoryId}
             run={selectedRun}
             worktree={selectedWorktree}
             gitSnapshot={selectedGitSnapshot}
@@ -1029,6 +1044,17 @@ export function App() {
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
           />
+        ) : view === 'discourse' ? (
+          <Suspense fallback={(
+            <div className="tm-discourse tm-discourse--loading" aria-busy="true">
+              Loading Discourse…
+            </div>
+          )}>
+            <DiscourseWorkspace
+              onNotify={notify}
+              onError={reportActionError}
+            />
+          </Suspense>
         ) : (
           <MainColumn
             view={view}
@@ -1043,7 +1069,8 @@ export function App() {
             onTestExternalTool={testExternalTool}
             error={error}
             models={providerModels}
-            activeRepositoryPath={activeRepositoryPath}
+            activeRepositoryId={activeRepositoryId}
+            activeRepositoryPath={activeRepositoryDisplayPath}
             repositorySetupState={repositorySetupState}
             addingRepository={isAddingRepository}
             onAddRepository={addRepository}
@@ -1058,7 +1085,7 @@ export function App() {
 
       {isNewTaskOpen ? (
         <NewTaskPanel
-          defaultRepositoryPath={activeRepositoryPath}
+          repositoryId={activeRepositoryId}
           models={providerModels}
           preflight={providerState?.preflight}
           defaultAgentSettings={defaultTaskSettings}
@@ -1350,6 +1377,15 @@ function InboxIcon() {
     <svg {...ICON_PROPS}>
       <path d="M22 12h-6l-2 3h-4l-2-3H2" />
       <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </svg>
+  );
+}
+
+function DiscourseIcon() {
+  return (
+    <svg {...ICON_PROPS}>
+      <path d="M4 5h16v11H9l-5 4z" />
+      <path d="M8 9h8M8 12h5" />
     </svg>
   );
 }

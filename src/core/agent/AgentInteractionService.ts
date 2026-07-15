@@ -8,12 +8,15 @@ import {
   validateInteractionDecision
 } from './AgentInteractionPolicy';
 import type { AgentProviderAdapter } from './AgentProviderAdapter';
+import type { AgentRuntimeStore } from './AgentRuntimeStore';
+import { recordTaskRuntimeTelemetry } from './TaskAgentRuntimeTelemetry';
 
 export class AgentInteractionService {
   constructor(
     private readonly store: FileTaskStore,
     private readonly events: AppEventBus,
-    private readonly adapter: AgentProviderAdapter
+    private readonly adapter: AgentProviderAdapter,
+    private readonly runtimeStore?: AgentRuntimeStore
   ) {}
 
   async respond(
@@ -62,6 +65,7 @@ export class AgentInteractionService {
         respondedAt: new Date().toISOString()
       }
     );
+    await this.mirror(responding);
     this.emitUpdate(responding);
 
     try {
@@ -69,7 +73,10 @@ export class AgentInteractionService {
         interaction: responding,
         decision: input.decision
       });
-      return (await this.store.getInteractionRequest(interaction.id)) ?? responding;
+      const latest =
+        (await this.store.getInteractionRequest(interaction.id)) ?? responding;
+      await this.mirror(latest);
+      return latest;
     } catch (error) {
       const latest = await this.store.getInteractionRequest(interaction.id);
       if (latest?.status === 'RESPONDING') {
@@ -84,6 +91,7 @@ export class AgentInteractionService {
             resolvedAt: new Date().toISOString()
           }
         );
+        await this.mirror(stale);
         this.emitUpdate(stale);
       }
       throw error;
@@ -99,5 +107,14 @@ export class AgentInteractionService {
       payload: interaction,
       at: new Date().toISOString()
     });
+  }
+
+  private async mirror(interaction: InteractionRequestRecord): Promise<void> {
+    await recordTaskRuntimeTelemetry(
+      this.runtimeStore,
+      'INTERACTION',
+      interaction,
+      interaction.resolvedAt ?? interaction.respondedAt ?? interaction.requestedAt
+    );
   }
 }

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -12,18 +13,42 @@ import {
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
+import { syncDirectoryIfSupported } from '../filesystem/secureFilesystem';
 
 export interface AppSettingsStorage {
+  initializeRepositories(
+    migrate: RepositorySettingsMigration
+  ): Promise<void>;
   get(): Promise<TaskManagerAppSettings>;
   update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings>;
+  setSelectedRepositoryId(repositoryId: string | null): Promise<TaskManagerAppSettings>;
 }
+
+export interface LegacyRepositorySettings {
+  knownPaths: string[];
+  selectedPath: string | null;
+}
+
+export type RepositorySettingsMigration = (
+  legacy: LegacyRepositorySettings
+) => Promise<{ selectedRepositoryId: string | null }>;
 
 export class AppSettingsStore implements AppSettingsStorage {
   private settings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private loaded = false;
+  private initPromise?: Promise<void>;
+  private repositoryMigration?: RepositorySettingsMigration;
   private writeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly filePath: string) {}
+
+  async initializeRepositories(migrate: RepositorySettingsMigration): Promise<void> {
+    if (this.repositoryMigration && this.repositoryMigration !== migrate) {
+      throw new Error('App settings repository migration was configured more than once.');
+    }
+    this.repositoryMigration = migrate;
+    await this.init();
+  }
 
   async get(): Promise<TaskManagerAppSettings> {
     await this.init();
@@ -37,11 +62,30 @@ export class AppSettingsStore implements AppSettingsStorage {
     return cloneSettings(this.settings);
   }
 
-  private async init(): Promise<void> {
-    if (this.loaded) {
-      return;
-    }
+  async setSelectedRepositoryId(
+    repositoryId: string | null
+  ): Promise<TaskManagerAppSettings> {
+    await this.init();
+    this.settings = normalizeAppSettings({
+      ...this.settings,
+      repositories: { selectedRepositoryId: normalizeRepositoryId(repositoryId) }
+    });
+    await this.persistQueued();
+    return cloneSettings(this.settings);
+  }
 
+  private async init(): Promise<void> {
+    if (this.loaded) return;
+    if (!this.initPromise) {
+      this.initPromise = this.initialize().catch((error) => {
+        this.initPromise = undefined;
+        throw error;
+      });
+    }
+    await this.initPromise;
+  }
+
+  private async initialize(): Promise<void> {
     let raw: string;
     try {
       raw = await fs.readFile(this.filePath, 'utf8');
@@ -55,12 +99,40 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
+    let parsed: unknown;
     try {
-      this.settings = normalizeAppSettings(JSON.parse(raw) as unknown);
+      parsed = JSON.parse(raw) as unknown;
     } catch {
       await this.moveInvalidSettingsFileAside();
       this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
       await this.persist();
+      this.loaded = true;
+      return;
+    }
+    assertSupportedSettingsSchema(parsed);
+    if (settingsSchemaVersion(parsed) < TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+      if (!this.repositoryMigration) {
+        throw new Error(
+          'Task Monki app settings require repository-registry migration before they can be loaded.'
+        );
+      }
+      const legacy = readLegacyRepositorySettings(parsed);
+      await this.ensurePreV4Backup(raw);
+      const migrated = await this.repositoryMigration(legacy);
+      const record = isRecord(parsed) ? parsed : {};
+      this.settings = normalizeAppSettings({
+        ...record,
+        firstLaunchSetupCompleted:
+          typeof record.firstLaunchSetupCompleted === 'boolean'
+            ? record.firstLaunchSetupCompleted
+            : Boolean(legacy.selectedPath || legacy.knownPaths.length > 0),
+        repositories: {
+          selectedRepositoryId: migrated.selectedRepositoryId
+        }
+      });
+      await this.persist();
+    } else {
+      this.settings = normalizeAppSettings(parsed);
     }
 
     this.loaded = true;
@@ -75,13 +147,26 @@ export class AppSettingsStore implements AppSettingsStorage {
   }
 
   private async persist(): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.settings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.rename(tmpPath, this.filePath);
+    const directory = path.dirname(this.filePath);
+    await fs.mkdir(directory, { recursive: true });
+    const tmpPath = path.join(
+      directory,
+      `.${path.basename(this.filePath)}-${process.pid}-${crypto.randomUUID()}.tmp`
+    );
+    const handle = await fs.open(tmpPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(this.settings, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await fs.rename(tmpPath, this.filePath);
+      await syncDirectoryIfSupported(directory);
+    } catch (error) {
+      await fs.unlink(tmpPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async moveInvalidSettingsFileAside(): Promise<void> {
@@ -95,6 +180,48 @@ export class AppSettingsStore implements AppSettingsStorage {
       }
     }
   }
+
+  private async ensurePreV4Backup(raw: string): Promise<void> {
+    const backupPath = `${this.filePath}.pre-v4-backup`;
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    try {
+      const handle = await fs.open(backupPath, 'wx', 0o600);
+      try {
+        await handle.writeFile(raw, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const existing = await fs.readFile(backupPath, 'utf8');
+      if (existing !== raw) {
+        throw new Error(
+          'The pre-v4 app-settings backup does not match the settings being migrated. Preserve both files and resolve the conflict before retrying.'
+        );
+      }
+    }
+  }
+}
+
+function assertSupportedSettingsSchema(value: unknown): void {
+  if (!isRecord(value) || value.schemaVersion === undefined) return;
+  if (typeof value.schemaVersion !== 'number' || !Number.isSafeInteger(value.schemaVersion)) {
+    throw new Error('Task Monki app settings contain an invalid schema version.');
+  }
+  if (value.schemaVersion < 1) {
+    throw new Error('Task Monki app settings contain an invalid schema version.');
+  }
+  if (value.schemaVersion > TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+    throw new Error(
+      `Task Monki app settings schema ${value.schemaVersion} is newer than this app supports. Upgrade Task Monki or restore a compatible backup.`
+    );
+  }
+}
+
+function settingsSchemaVersion(value: unknown): number {
+  if (!isRecord(value) || value.schemaVersion === undefined) return 3;
+  return value.schemaVersion as number;
 }
 
 export class MemoryAppSettingsStore implements AppSettingsStorage {
@@ -104,12 +231,25 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
     this.settings = normalizeAppSettings(initialSettings);
   }
 
+  initializeRepositories(): Promise<void> {
+    return Promise.resolve();
+  }
+
   get(): Promise<TaskManagerAppSettings> {
     return Promise.resolve(cloneSettings(this.settings));
   }
 
   update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     this.settings = mergeAppSettings(this.settings, input);
+    return Promise.resolve(cloneSettings(this.settings));
+  }
+
+
+  setSelectedRepositoryId(repositoryId: string | null): Promise<TaskManagerAppSettings> {
+    this.settings = normalizeAppSettings({
+      ...this.settings,
+      repositories: { selectedRepositoryId: normalizeRepositoryId(repositoryId) }
+    });
     return Promise.resolve(cloneSettings(this.settings));
   }
 }
@@ -187,12 +327,6 @@ export function mergeAppSettings(
       ...input.externalExecutables
     });
   }
-  if (input.repositories) {
-    patch.repositories = normalizeRepositories({
-      ...current.repositories,
-      ...input.repositories
-    });
-  }
   return normalizeAppSettings({
     ...current,
     ...patch
@@ -226,13 +360,8 @@ function normalizeExternalExecutables(value: unknown): ExternalExecutablePathSet
 
 function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
   const record = isRecord(value) ? value : {};
-  const knownPaths = Array.isArray(record.knownPaths)
-    ? uniqueStrings(record.knownPaths.map((candidate) => normalizeOptionalString(candidate)))
-    : [];
-  const selectedPath = normalizeOptionalString(record.selectedPath) ?? null;
   return {
-    knownPaths,
-    selectedPath
+    selectedRepositoryId: normalizeRepositoryId(record.selectedRepositoryId)
   };
 }
 
@@ -243,7 +372,30 @@ function normalizeFirstLaunchSetupCompleted(
   if (typeof value === 'boolean') {
     return value;
   }
-  return Boolean(repositories.selectedPath || repositories.knownPaths.length > 0);
+  return Boolean(repositories.selectedRepositoryId);
+}
+
+function normalizeRepositoryId(value: unknown): string | null {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) return null;
+  if (Buffer.byteLength(normalized, 'utf8') > 256) {
+    throw new Error('Selected repository id exceeds its safety limit.');
+  }
+  return normalized;
+}
+
+function readLegacyRepositorySettings(value: unknown): LegacyRepositorySettings {
+  const repositories = isRecord(value) && isRecord(value.repositories)
+    ? value.repositories
+    : {};
+  return {
+    knownPaths: Array.isArray(repositories.knownPaths)
+      ? uniqueStrings(
+          repositories.knownPaths.map((candidate) => normalizeOptionalString(candidate))
+        )
+      : [],
+    selectedPath: normalizeOptionalString(repositories.selectedPath) ?? null
+  };
 }
 
 function normalizeExecutablePath(value: unknown): string | null {

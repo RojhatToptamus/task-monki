@@ -27,8 +27,22 @@ import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotSe
 import { git } from '../core/git/gitCli';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
+import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import type {
+  AgentAssignmentSnapshot,
+  BuiltInAgentProfileId,
+  ContextSnapshotRecord,
+  DiscourseAgentJobRecord,
+  DiscourseConcernRecord,
+  DiscourseDefaultPolicy,
+  DiscourseParticipantRecord,
+  DiscourseParticipantRevisionRecord,
+  DiscourseResponseWaveRecord
+} from '../shared/discourse';
 
 export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v1';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
@@ -39,7 +53,8 @@ export type DevSeedScenarioGroup =
   | 'review'
   | 'delivery'
   | 'completion'
-  | 'workflow';
+  | 'workflow'
+  | 'discourse';
 
 export type DevSeedScenarioSet = 'all' | DevSeedScenarioGroup;
 
@@ -52,7 +67,8 @@ export interface DevSeedScenarioDefinition {
 }
 
 export interface DevSeedManifestScenario extends DevSeedScenarioDefinition {
-  taskId: string;
+  taskId?: string;
+  conversationId?: string;
   relatedTaskIds?: string[];
 }
 
@@ -67,11 +83,17 @@ export interface DevSeedManifest {
   repositoryPath: string;
   worktreeRoot: string;
   appSettingsPath: string;
+  repositoryRegistryDir: string;
+  discourseDir: string;
+  agentRuntimeDir: string;
   manifestPath: string;
   envFilePath: string;
   env: {
     TASK_MANAGER_STORE_DIR: string;
     TASK_MANAGER_APP_SETTINGS_PATH: string;
+    TASK_MANAGER_REPOSITORY_REGISTRY_DIR: string;
+    TASK_MANAGER_DISCOURSE_DIR: string;
+    TASK_MANAGER_AGENT_RUNTIME_DIR: string;
     TASK_MANAGER_REPO_PATH: string;
     TASK_MANAGER_WORKTREE_ROOT: string;
     TASK_MANAGER_DEV_SEED_MODE: '1';
@@ -92,6 +114,9 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   repositoryPath?: string;
   worktreeRoot?: string;
   appSettingsPath?: string;
+  repositoryRegistryDir?: string;
+  discourseDir?: string;
+  agentRuntimeDir?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
 }
@@ -375,7 +400,20 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   ]),
   scenario('task-archived', 'workflow', 'Archived task', 'Task is archived as a terminal workflow state.', [
     'phase:ARCHIVED'
-  ])
+  ]),
+  scenario('discourse-empty', 'discourse', 'Empty discourse', 'A new human conversation with no messages.', ['discourse:empty']),
+  scenario('discourse-context-picker', 'discourse', 'Context picker draft', 'A durable draft with task and repository context.', ['discourse:draft', 'context:structured']),
+  scenario('discourse-human-only', 'discourse', 'Human-only conversation', 'Human notes, reply ancestry, and a correction.', ['discourse:human-only']),
+  scenario('discourse-team-running', 'discourse', 'Team response running', 'Reserved seeded surface for a running Team response.', ['discourse:team', 'status:RUNNING']),
+  scenario('discourse-panel-partial', 'discourse', 'Partial panel', 'Reserved seeded surface for partial independent answers.', ['discourse:panel', 'status:PARTIAL']),
+  scenario('discourse-review-silent', 'discourse', 'Review with no concerns', 'Reserved seeded surface for explicit no-concern review receipts.', ['discourse:review', 'outcome:NO_CONCERN_FOUND']),
+  scenario('discourse-author-correction', 'discourse', 'Author correction', 'Reserved seeded surface for attributable correction provenance.', ['discourse:correction']),
+  scenario('discourse-followup-queued', 'discourse', 'Follow-up queued', 'Reserved seeded surface for a durable queued response.', ['discourse:queue']),
+  scenario('discourse-context-stale', 'discourse', 'Context changed', 'Conversation context changed after an earlier message.', ['discourse:context', 'freshness:STALE']),
+  scenario('discourse-context-unavailable', 'discourse', 'Context unavailable', 'Historical context remains visible when its source is unavailable.', ['discourse:context', 'availability:UNAVAILABLE']),
+  scenario('discourse-recovery-required', 'discourse', 'Recovery required', 'Reserved seeded surface for an ambiguous provider response.', ['discourse:recovery']),
+  scenario('discourse-long-history', 'discourse', 'Long conversation', 'A paginated transcript with more than one message page.', ['discourse:pagination']),
+  scenario('discourse-archived', 'discourse', 'Archived conversation', 'A completed conversation in the archive.', ['discourse:archived'])
 ];
 
 interface SeedPaths {
@@ -384,6 +422,9 @@ interface SeedPaths {
   repositoryPath: string;
   worktreeRoot: string;
   appSettingsPath: string;
+  repositoryRegistryDir: string;
+  discourseDir: string;
+  agentRuntimeDir: string;
   manifestPath: string;
   envFilePath: string;
 }
@@ -446,17 +487,21 @@ export async function seedTaskMonkiDevelopmentData(
   const store = new FileTaskStore(paths.storeDir);
   await store.init();
   const appSettingsStore = new AppSettingsStore(paths.appSettingsPath);
+  const repositoryRegistry = new FileRepositoryRegistry(
+    paths.repositoryRegistryDir,
+    new NodeRepositoryInspector()
+  );
+  const registry = await repositoryRegistry.reconcile([
+    { path: paths.repositoryPath, source: 'DEFAULT', isDefault: true }
+  ]);
   await appSettingsStore.update({
     firstLaunchSetupCompleted: true,
     defaultModel: DEFAULT_AGENT_SETTINGS.model ?? null,
     defaultReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
     reviewModel: DEFAULT_AGENT_SETTINGS.model ?? null,
-    reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
-    repositories: {
-      knownPaths: [paths.repositoryPath],
-      selectedPath: paths.repositoryPath
-    }
+    reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null
   });
+  await appSettingsStore.setSelectedRepositoryId(registry.defaultRepositoryId);
 
   const server = await store.createAgentServer({
     provider: 'codex',
@@ -486,7 +531,21 @@ export async function seedTaskMonkiDevelopmentData(
     prCounter: 100
   };
 
+  const discourseStore = new FileDiscourseStore(paths.discourseDir);
+  await discourseStore.init();
+
   for (const definition of scenariosForSet(scenarioSet)) {
+    if (definition.group === 'discourse') {
+      const conversationId = await seedDiscourseScenario({
+        definition,
+        discourseStore,
+        taskStore: store,
+        repositoryPath: paths.repositoryPath,
+        repositoryId: registry.defaultRepositoryId ?? registry.repositories[0]?.id ?? ''
+      });
+      ctx.scenarios.push({ ...definition, conversationId });
+      continue;
+    }
     const result = await seedScenario(ctx, definition);
     ctx.scenarios.push({
       ...definition,
@@ -512,6 +571,9 @@ export async function seedTaskMonkiDevelopmentData(
     env: {
       TASK_MANAGER_STORE_DIR: paths.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: paths.appSettingsPath,
+      TASK_MANAGER_REPOSITORY_REGISTRY_DIR: paths.repositoryRegistryDir,
+      TASK_MANAGER_DISCOURSE_DIR: paths.discourseDir,
+      TASK_MANAGER_AGENT_RUNTIME_DIR: paths.agentRuntimeDir,
       TASK_MANAGER_REPO_PATH: paths.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -537,6 +599,828 @@ export async function seedTaskMonkiDevelopmentData(
   return manifest;
 }
 
+async function seedDiscourseScenario(input: {
+  definition: DevSeedScenarioDefinition;
+  discourseStore: FileDiscourseStore;
+  taskStore: FileTaskStore;
+  repositoryPath: string;
+  repositoryId: string;
+}): Promise<string> {
+  const { definition, discourseStore } = input;
+  const conversationId = `seed-${definition.slug}`;
+  const seededPolicy = discourseSeedPolicy(definition.slug);
+  const bindings = discourseSeedBindings(conversationId, seededPolicy);
+  const conversation = await discourseStore.createConversation({
+    id: conversationId,
+    title: `[seed:${definition.slug}] ${definition.title}`,
+    defaultPolicy: seededPolicy,
+    participants: bindings.map((binding) => binding.participant),
+    participantRevisions: bindings.map((binding) => binding.revision),
+    clientOperationId: `create-${definition.slug}`
+  });
+  if (definition.slug === 'discourse-empty') return conversation.id;
+
+  const task =
+    (await input.taskStore.snapshot()).tasks[0] ??
+    await input.taskStore.createTask({
+      title: '[seed:discourse-context] Context source',
+      prompt: 'Provide durable task context for Discourse seed scenarios.',
+      repositoryPath: input.repositoryPath
+    });
+  const append = (body: string, suffix: string, options: {
+    replyToMessageId?: string;
+    supersedesMessageId?: string;
+    context?: Array<{
+      entityKind: 'TASK' | 'REPOSITORY';
+      entityId: string;
+      labelSnapshot: string;
+      availability: 'AVAILABLE' | 'UNAVAILABLE';
+    }>;
+  } = {}) => discourseStore.appendHumanMessage({
+    conversationId,
+    body,
+    ...options,
+    clientMessageId: `${definition.slug}-${suffix}`
+  });
+
+  if (definition.slug === 'discourse-context-picker') {
+    await discourseStore.saveDraft({
+      conversationId,
+      body: 'Compare the implementation against @context source and @repository.',
+      policy: 'NONE',
+      recipientParticipantIds: [],
+      tokens: [
+        {
+          kind: 'TASK',
+          entityId: task.id,
+          labelSnapshot: task.title
+        },
+        {
+          kind: 'REPOSITORY',
+          entityId: input.repositoryId,
+          labelSnapshot: 'task-monki seed repository'
+        }
+      ]
+    });
+    return conversation.id;
+  }
+
+  if (definition.slug === 'discourse-human-only') {
+    const root = await append(
+      'The conversation store should stay independent from task workflow state.',
+      'root',
+      {
+        context: [{
+          entityKind: 'TASK',
+          entityId: task.id,
+          labelSnapshot: task.title,
+          availability: 'AVAILABLE'
+        }]
+      }
+    );
+    const reply = await append(
+      'Agreed. Repository context should also be explicit rather than inherited from the board filter.',
+      'reply',
+      { replyToMessageId: root.id }
+    );
+    await append(
+      'Correction: repository context must be selected or pinned explicitly; the active board repository is never inherited.',
+      'correction',
+      { supersedesMessageId: reply.id }
+    );
+    return conversation.id;
+  }
+
+  if ([
+    'discourse-team-running',
+    'discourse-panel-partial',
+    'discourse-review-silent',
+    'discourse-author-correction',
+    'discourse-followup-queued',
+    'discourse-recovery-required'
+  ].includes(definition.slug)) {
+    const trigger = await append(definition.description, 'message');
+    await seedDiscourseAgentWaveState({
+      slug: definition.slug,
+      store: discourseStore,
+      conversationId,
+      triggerMessageId: trigger.id,
+      triggerOrdinal: trigger.ordinal,
+      contextRevisionId: trigger.contextRevisionId!,
+      bindings
+    });
+    return conversation.id;
+  }
+
+  if (definition.slug === 'discourse-context-stale') {
+    await discourseStore.setPinnedContext({
+      conversationId,
+      context: [{
+        entityKind: 'REPOSITORY',
+        entityId: input.repositoryId,
+        labelSnapshot: 'task-monki seed repository',
+        availability: 'AVAILABLE'
+      }],
+      expectedRevision: conversation.recordRevision,
+      clientOperationId: 'seed-context-stale-pin'
+    });
+    const trigger = await append('This note captured the repository context before it changed.', 'message');
+    const aggregate = await discourseStore.getConversation(conversationId);
+    await discourseStore.setPinnedContext({
+      conversationId,
+      context: [{
+        entityKind: 'REPOSITORY',
+        entityId: input.repositoryId,
+        labelSnapshot: 'task-monki seed repository',
+        availability: 'UNAVAILABLE'
+      }],
+      expectedRevision: aggregate.conversation.recordRevision,
+      clientOperationId: 'seed-context-stale-change'
+    });
+    await seedDiscourseAgentWaveState({
+      slug: definition.slug,
+      store: discourseStore,
+      conversationId,
+      triggerMessageId: trigger.id,
+      triggerOrdinal: trigger.ordinal,
+      contextRevisionId: trigger.contextRevisionId!,
+      bindings
+    });
+    return conversation.id;
+  }
+
+  if (definition.slug === 'discourse-context-unavailable') {
+    await append('The referenced repository is retained as historical context.', 'message', {
+      context: [{
+        entityKind: 'REPOSITORY',
+        entityId: input.repositoryId,
+        labelSnapshot: 'Unavailable seed repository',
+        availability: 'UNAVAILABLE'
+      }]
+    });
+    return conversation.id;
+  }
+
+  if (definition.slug === 'discourse-long-history') {
+    for (let index = 1; index <= 125; index += 1) {
+      await append(
+        `History entry ${index}. This transcript exercises backward pagination and stable reading position.`,
+        `message-${index}`
+      );
+    }
+    return conversation.id;
+  }
+
+  await append(definition.description, 'message');
+  if (definition.slug === 'discourse-archived') {
+    const aggregate = await discourseStore.getConversation(conversationId);
+    await discourseStore.setConversationArchived({
+      conversationId,
+      archived: true,
+      expectedRevision: aggregate.conversation.recordRevision,
+      clientOperationId: 'seed-archive-conversation'
+    });
+  }
+  return conversation.id;
+}
+
+const DISCOURSE_SEED_TIME = '2026-07-13T09:00:00.000Z';
+
+function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
+  if ([
+    'discourse-team-running',
+    'discourse-review-silent',
+    'discourse-author-correction'
+  ].includes(slug)) return 'TEAM';
+  if (slug === 'discourse-panel-partial') return 'PANEL';
+  if (['discourse-followup-queued', 'discourse-recovery-required', 'discourse-context-stale'].includes(slug)) {
+    return 'DIRECT';
+  }
+  return 'NONE';
+}
+
+function discourseSeedBindings(
+  conversationId: string,
+  policy: DiscourseDefaultPolicy
+): Array<{
+  participant: DiscourseParticipantRecord;
+  revision: DiscourseParticipantRevisionRecord;
+}> {
+  const profiles: BuiltInAgentProfileId[] = policy === 'TEAM'
+    ? ['builtin.lead', 'builtin.skeptic', 'builtin.verifier']
+    : policy === 'PANEL'
+      ? ['builtin.lead', 'builtin.skeptic']
+      : policy === 'DIRECT'
+        ? ['builtin.lead']
+        : [];
+  return profiles.map((profileId) => {
+    const suffix = profileId.split('.').at(-1)!;
+    const participantId = `${conversationId}-${suffix}`;
+    const revisionId = `${participantId}-revision`;
+    const displayName = suffix.charAt(0).toUpperCase() + suffix.slice(1);
+    const configuredRole = profileId === 'builtin.lead'
+      ? 'LEAD' as const
+      : profileId === 'builtin.skeptic'
+        ? 'SKEPTIC' as const
+        : 'VERIFIER' as const;
+    return {
+      participant: {
+        id: participantId,
+        conversationId,
+        agentProfileId: profileId,
+        currentRevisionId: revisionId,
+        enabled: true,
+        recordRevision: 1,
+        createdAt: DISCOURSE_SEED_TIME
+      },
+      revision: {
+        id: revisionId,
+        conversationId,
+        stableParticipantId: participantId,
+        agentProfileId: profileId,
+        profileRevision: 1,
+        displayNameSnapshot: displayName,
+        providerId: 'codex',
+        model: 'scenario-model',
+        modelProvider: 'openai',
+        reasoningEffort: 'medium',
+        configuredRole,
+        roleContractVersion: 1,
+        roleContractHash: 'a'.repeat(64),
+        revision: 1,
+        createdAt: DISCOURSE_SEED_TIME
+      }
+    };
+  });
+}
+
+async function seedDiscourseAgentWaveState(input: {
+  slug: string;
+  store: FileDiscourseStore;
+  conversationId: string;
+  triggerMessageId: string;
+  triggerOrdinal: number;
+  contextRevisionId: string;
+  bindings: ReturnType<typeof discourseSeedBindings>;
+}): Promise<void> {
+  const assignments = input.bindings.map((binding): AgentAssignmentSnapshot => ({
+    stableParticipantId: binding.participant.id,
+    participantRevisionId: binding.revision.id,
+    agentProfileId: binding.revision.agentProfileId,
+    profileRevision: binding.revision.profileRevision,
+    displayNameSnapshot: binding.revision.displayNameSnapshot,
+    providerId: binding.revision.providerId,
+    model: binding.revision.model,
+    modelProvider: binding.revision.modelProvider,
+    reasoningEffort: binding.revision.reasoningEffort,
+    configuredRole: binding.revision.configuredRole,
+    roleContractVersion: binding.revision.roleContractVersion,
+    roleContractHash: binding.revision.roleContractHash,
+    assignmentRole: input.slug === 'discourse-panel-partial'
+      ? 'PANELIST'
+      : binding.revision.agentProfileId === 'builtin.lead'
+        ? 'PRIMARY'
+        : 'REVIEWER',
+    required: true
+  }));
+  const policy = discourseSeedPolicy(input.slug);
+  const first = await seedWavePlan({
+    ...input,
+    suffix: 'wave-1',
+    policy: policy === 'NONE' ? 'DIRECT' : policy,
+    assignments,
+    answerAssignments: policy === 'TEAM' ? assignments.slice(0, 1) : assignments,
+    ...(input.slug === 'discourse-context-stale'
+      ? {
+          dispatchGate: {
+            status: 'RECONFIRMATION_REQUIRED' as const,
+            previewFingerprint: 'seed-preview',
+            currentFingerprint: 'seed-current',
+            mismatchReason: 'Selected context changed after the preview.'
+          }
+        }
+      : {})
+  });
+
+  if (input.slug === 'discourse-context-stale') return;
+
+  if (input.slug === 'discourse-followup-queued') {
+    await seedWaveRunning(input.store, input.conversationId, first.wave.id);
+    await seedJobRunning(input.store, input.conversationId, first.jobs[0]!.id);
+    await seedWavePlan({
+      ...input,
+      suffix: 'wave-2',
+      policy: 'DIRECT',
+      assignments,
+      answerAssignments: assignments
+    });
+    return;
+  }
+
+  if (input.slug === 'discourse-recovery-required') {
+    await seedWaveRunning(input.store, input.conversationId, first.wave.id);
+    const starting = await seedJobStarting(
+      input.store,
+      input.conversationId,
+      first.jobs[0]!.id
+    );
+    await input.store.updateJob({
+      conversationId: input.conversationId,
+      expectedRevision: starting.recordRevision,
+      clientOperationId: `${input.slug}:job-recovery`,
+      job: {
+        ...starting,
+        recordRevision: starting.recordRevision + 1,
+        status: 'RECOVERY_REQUIRED',
+        delivery: 'AMBIGUOUS',
+        error: {
+          code: 'DELIVERY_AMBIGUOUS',
+          message: 'Provider delivery could not be confirmed after restart.',
+          category: 'DELIVERY',
+          retryable: false
+        }
+      }
+    });
+    const wave = requireSeedWave(await input.store.getConversation(input.conversationId), first.wave.id);
+    await input.store.updateWave({
+      conversationId: input.conversationId,
+      expectedRevision: wave.recordRevision,
+      clientOperationId: `${input.slug}:wave-recovery`,
+      wave: { ...wave, recordRevision: wave.recordRevision + 1, status: 'RECOVERY_REQUIRED' }
+    });
+    return;
+  }
+
+  await seedWaveRunning(input.store, input.conversationId, first.wave.id);
+  if (input.slug === 'discourse-team-running') {
+    await seedJobRunning(input.store, input.conversationId, first.jobs[0]!.id);
+    return;
+  }
+
+  if (input.slug === 'discourse-panel-partial') {
+    await seedCompleteContribution(
+      input.store,
+      input.conversationId,
+      first.jobs[0]!.id,
+      'Lead found that the event log remains reconstructible and bounded by segments.'
+    );
+    await seedFailJob(input.store, input.conversationId, first.jobs[1]!.id);
+    await seedSettleWave(input.store, input.conversationId, first.wave.id, 'PARTIAL', 'FAILED');
+    return;
+  }
+
+  const leadMessageId = await seedCompleteContribution(
+    input.store,
+    input.conversationId,
+    first.jobs[0]!.id,
+    'The durable owner-neutral runtime keeps discourse work isolated from task workflow.'
+  );
+  await seedWavePhase(input.store, input.conversationId, first.wave.id, 'REVIEW');
+  const aggregate = await input.store.getConversation(input.conversationId);
+  const snapshotId = first.wave.contextSnapshotId!;
+  const reviewerJobs = assignments.slice(1).map((assignment, index) =>
+    seedJobRecord({
+      conversationId: input.conversationId,
+      waveId: first.wave.id,
+      snapshotId,
+      assignment,
+      id: `${input.conversationId}-review-${index + 1}`,
+      role: 'CRITIQUE',
+      phase: 2,
+      targetMessageIds: [leadMessageId],
+      visibleMessageIds: [input.triggerMessageId, leadMessageId]
+    })
+  );
+  await input.store.addJobsToWave({
+    conversationId: input.conversationId,
+    waveId: first.wave.id,
+    jobs: reviewerJobs,
+    expectedConversationRevision: aggregate.conversation.recordRevision,
+    clientOperationId: `${input.slug}:add-reviews`
+  });
+  await seedCompleteReview(
+    input.store,
+    input.conversationId,
+    reviewerJobs[0]!.id,
+    leadMessageId,
+    []
+  );
+  const concern = input.slug === 'discourse-author-correction'
+    ? [seedConcern(input.conversationId, first.wave.id, reviewerJobs[1]!, leadMessageId)]
+    : [];
+  await seedCompleteReview(
+    input.store,
+    input.conversationId,
+    reviewerJobs[1]!.id,
+    leadMessageId,
+    concern
+  );
+  if (input.slug === 'discourse-review-silent') {
+    await seedSettleWave(input.store, input.conversationId, first.wave.id, 'COMPLETE', 'COMPLETED');
+    return;
+  }
+
+  await seedWavePhase(input.store, input.conversationId, first.wave.id, 'CORRECT');
+  const correctionAssignment = assignments[0]!;
+  const correctionJob = seedJobRecord({
+    conversationId: input.conversationId,
+    waveId: first.wave.id,
+    snapshotId,
+    assignment: correctionAssignment,
+    id: `${input.conversationId}-correction`,
+    role: 'CORRECT',
+    phase: 3,
+    targetMessageIds: [leadMessageId],
+    visibleMessageIds: [input.triggerMessageId, leadMessageId]
+  });
+  const beforeCorrection = await input.store.getConversation(input.conversationId);
+  await input.store.addJobsToWave({
+    conversationId: input.conversationId,
+    waveId: first.wave.id,
+    jobs: [correctionJob],
+    expectedConversationRevision: beforeCorrection.conversation.recordRevision,
+    clientOperationId: `${input.slug}:add-correction`
+  });
+  const runningCorrection = await seedJobRunning(
+    input.store,
+    input.conversationId,
+    correctionJob.id
+  );
+  const correctionMessage = await input.store.appendAgentMessage({
+    conversationId: input.conversationId,
+    body: 'Correction: discourse runs are isolated from task workflow, while shared scheduler capacity remains globally bounded.',
+    stableParticipantId: correctionAssignment.stableParticipantId,
+    participantRevisionId: correctionAssignment.participantRevisionId,
+    displayNameSnapshot: correctionAssignment.displayNameSnapshot,
+    waveId: first.wave.id,
+    jobId: correctionJob.id,
+    contextSnapshotId: snapshotId,
+    replyToMessageId: leadMessageId,
+    sourceMessageIds: correctionJob.visibleMessageIds,
+    freshnessAtCompletion: 'FRESH',
+    clientOperationId: `${input.slug}:correction-message`
+  });
+  await input.store.completeCorrectionJob({
+    conversationId: input.conversationId,
+    expectedRevision: runningCorrection.recordRevision,
+    clientOperationId: `${input.slug}:correction-terminal`,
+    concernIds: concern.map((candidate) => candidate.id),
+    job: {
+      ...runningCorrection,
+      recordRevision: runningCorrection.recordRevision + 1,
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      freshnessAtCompletion: 'FRESH',
+      result: {
+        kind: 'CORRECTION',
+        outcome: 'REVISED',
+        limitations: [],
+        outputMessageId: correctionMessage.id
+      },
+      finishedAt: DISCOURSE_SEED_TIME
+    }
+  });
+  await seedSettleWave(input.store, input.conversationId, first.wave.id, 'COMPLETE', 'COMPLETED');
+}
+
+async function seedWavePlan(input: {
+  slug: string;
+  suffix: string;
+  store: FileDiscourseStore;
+  conversationId: string;
+  triggerMessageId: string;
+  triggerOrdinal: number;
+  contextRevisionId: string;
+  policy: 'DIRECT' | 'PANEL' | 'TEAM';
+  assignments: AgentAssignmentSnapshot[];
+  answerAssignments: AgentAssignmentSnapshot[];
+  dispatchGate?: DiscourseResponseWaveRecord['dispatchGate'];
+}) {
+  const waveId = `${input.conversationId}-${input.suffix}`;
+  const snapshotId = `${waveId}-snapshot`;
+  const wave: DiscourseResponseWaveRecord = {
+    id: waveId,
+    conversationId: input.conversationId,
+    triggerMessageId: input.triggerMessageId,
+    policy: input.policy,
+    policyVersion: 1,
+    assignments: input.assignments,
+    sourceMessageIds: [input.triggerMessageId],
+    plannedContextRevisionId: input.contextRevisionId,
+    contextSnapshotId: snapshotId,
+    attempt: 1,
+    recordRevision: 1,
+    status: 'PLANNED',
+    phase: 'ANSWER',
+    clientOperationId: `${input.slug}:${input.suffix}`,
+    requestFingerprint: 'b'.repeat(64),
+    dispatchGate: input.dispatchGate ?? {
+      status: 'READY',
+      previewFingerprint: 'seed-preview',
+      confirmedAtRevision: 1
+    },
+    createdAt: DISCOURSE_SEED_TIME
+  };
+  const jobs = input.answerAssignments.map((assignment, index) => seedJobRecord({
+    conversationId: input.conversationId,
+    waveId,
+    snapshotId,
+    assignment,
+    id: `${waveId}-answer-${index + 1}`,
+    role: 'ANSWER',
+    phase: 1,
+    targetMessageIds: [input.triggerMessageId],
+    visibleMessageIds: [input.triggerMessageId]
+  }));
+  const snapshot: ContextSnapshotRecord = {
+    id: snapshotId,
+    conversationId: input.conversationId,
+    waveId,
+    contextRevisionId: input.contextRevisionId,
+    recordRevision: 1,
+    status: 'READY',
+    sources: [],
+    transcriptOrdinals: [input.triggerOrdinal],
+    attachmentIds: [],
+    permissionProfileHash: 'd'.repeat(64),
+    budget: { inputBytes: 128, estimatedInputTokens: 32, reservedOutputTokens: 16_000, sourceCount: 0 },
+    exclusions: [],
+    contextSchemaVersion: 1,
+    promptPolicyVersion: 1,
+    createdAt: DISCOURSE_SEED_TIME,
+    resolvedAt: DISCOURSE_SEED_TIME
+  };
+  const aggregate = await input.store.getConversation(input.conversationId);
+  await input.store.createWave({
+    conversationId: input.conversationId,
+    expectedConversationRevision: aggregate.conversation.recordRevision,
+    wave,
+    jobs,
+    contextSnapshot: snapshot,
+    clientOperationId: wave.clientOperationId
+  });
+  return { wave, jobs };
+}
+
+function seedJobRecord(input: {
+  conversationId: string;
+  waveId: string;
+  snapshotId: string;
+  assignment: AgentAssignmentSnapshot;
+  id: string;
+  role: 'ANSWER' | 'CRITIQUE' | 'CORRECT';
+  phase: number;
+  targetMessageIds: string[];
+  visibleMessageIds: string[];
+}): DiscourseAgentJobRecord {
+  return {
+    id: input.id,
+    conversationId: input.conversationId,
+    waveId: input.waveId,
+    assignment: input.assignment,
+    role: input.role,
+    phase: input.phase,
+    targetMessageIds: input.targetMessageIds,
+    visibleMessageIds: input.visibleMessageIds,
+    contextSnapshotId: input.snapshotId,
+    attemptId: `${input.id}-attempt`,
+    generationKey: `${input.id}-generation`,
+    recordRevision: 1,
+    status: 'QUEUED',
+    delivery: 'NOT_SENT',
+    createdAt: DISCOURSE_SEED_TIME
+  };
+}
+
+async function seedWaveRunning(store: FileDiscourseStore, conversationId: string, waveId: string) {
+  for (const status of ['SNAPSHOTTING', 'QUEUED', 'RUNNING'] as const) {
+    const wave = requireSeedWave(await store.getConversation(conversationId), waveId);
+    await store.updateWave({
+      conversationId,
+      expectedRevision: wave.recordRevision,
+      clientOperationId: `${waveId}:status:${status}`,
+      wave: {
+        ...wave,
+        recordRevision: wave.recordRevision + 1,
+        status,
+        ...(status === 'RUNNING' ? { startedAt: DISCOURSE_SEED_TIME } : {})
+      }
+    });
+  }
+}
+
+async function seedJobStarting(store: FileDiscourseStore, conversationId: string, jobId: string) {
+  let job = requireSeedJob(await store.getConversation(conversationId), jobId);
+  job = await store.updateJob({
+    conversationId,
+    expectedRevision: job.recordRevision,
+    clientOperationId: `${jobId}:resolving`,
+    job: { ...job, recordRevision: job.recordRevision + 1, status: 'RESOLVING_CONTEXT' }
+  });
+  return store.updateJob({
+    conversationId,
+    expectedRevision: job.recordRevision,
+    clientOperationId: `${jobId}:starting`,
+    job: {
+      ...job,
+      recordRevision: job.recordRevision + 1,
+      status: 'STARTING',
+      delivery: 'SENDING',
+      startedAt: DISCOURSE_SEED_TIME
+    }
+  });
+}
+
+async function seedJobRunning(store: FileDiscourseStore, conversationId: string, jobId: string) {
+  const starting = await seedJobStarting(store, conversationId, jobId);
+  return store.updateJob({
+    conversationId,
+    expectedRevision: starting.recordRevision,
+    clientOperationId: `${jobId}:running`,
+    job: {
+      ...starting,
+      recordRevision: starting.recordRevision + 1,
+      status: 'RUNNING',
+      delivery: 'ACKNOWLEDGED'
+    }
+  });
+}
+
+async function seedCompleteContribution(
+  store: FileDiscourseStore,
+  conversationId: string,
+  jobId: string,
+  body: string
+): Promise<string> {
+  const job = await seedJobRunning(store, conversationId, jobId);
+  const message = await store.appendAgentMessage({
+    conversationId,
+    body,
+    stableParticipantId: job.assignment.stableParticipantId,
+    participantRevisionId: job.assignment.participantRevisionId,
+    displayNameSnapshot: job.assignment.displayNameSnapshot,
+    waveId: job.waveId,
+    jobId: job.id,
+    contextSnapshotId: job.contextSnapshotId,
+    sourceMessageIds: job.visibleMessageIds,
+    freshnessAtCompletion: 'FRESH',
+    clientOperationId: `${jobId}:message`
+  });
+  await store.updateJob({
+    conversationId,
+    expectedRevision: job.recordRevision,
+    clientOperationId: `${jobId}:completed`,
+    job: {
+      ...job,
+      recordRevision: job.recordRevision + 1,
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      freshnessAtCompletion: 'FRESH',
+      result: { kind: 'CONTRIBUTION', outputMessageId: message.id },
+      finishedAt: DISCOURSE_SEED_TIME
+    }
+  });
+  return message.id;
+}
+
+async function seedFailJob(store: FileDiscourseStore, conversationId: string, jobId: string) {
+  const job = await seedJobRunning(store, conversationId, jobId);
+  await store.updateJob({
+    conversationId,
+    expectedRevision: job.recordRevision,
+    clientOperationId: `${jobId}:failed`,
+    job: {
+      ...job,
+      recordRevision: job.recordRevision + 1,
+      status: 'FAILED',
+      delivery: 'TERMINAL',
+      error: {
+        code: 'PROVIDER_UNAVAILABLE',
+        message: 'The second panelist did not return a response.',
+        category: 'PROVIDER',
+        retryable: true
+      },
+      finishedAt: DISCOURSE_SEED_TIME
+    }
+  });
+}
+
+async function seedCompleteReview(
+  store: FileDiscourseStore,
+  conversationId: string,
+  jobId: string,
+  targetMessageId: string,
+  concerns: DiscourseConcernRecord[]
+) {
+  const job = await seedJobRunning(store, conversationId, jobId);
+  await store.completeReviewJob({
+    conversationId,
+    expectedRevision: job.recordRevision,
+    clientOperationId: `${jobId}:completed`,
+    concerns,
+    job: {
+      ...job,
+      recordRevision: job.recordRevision + 1,
+      status: 'COMPLETED',
+      delivery: 'TERMINAL',
+      freshnessAtCompletion: 'FRESH',
+      result: {
+        kind: 'REVIEW',
+        outcome: concerns.length > 0 ? 'CONCERNS' : 'NO_CONCERN_FOUND',
+        reviewedScope: targetMessageId,
+        limitations: [],
+        requiredAccessAvailable: true,
+        concernIds: concerns.map((concern) => concern.id)
+      },
+      finishedAt: DISCOURSE_SEED_TIME
+    }
+  });
+}
+
+function seedConcern(
+  conversationId: string,
+  waveId: string,
+  reviewJob: DiscourseAgentJobRecord,
+  targetMessageId: string
+): DiscourseConcernRecord {
+  return {
+    id: `${reviewJob.id}-concern`,
+    conversationId,
+    waveId,
+    reviewJobId: reviewJob.id,
+    reviewerParticipantRevisionId: reviewJob.assignment.participantRevisionId,
+    targetMessageId,
+    targetClaim: 'Discourse work is completely separate from shared runtime capacity.',
+    category: 'runtime isolation',
+    severity: 'MATERIAL',
+    confidence: 'HIGH',
+    evidenceStatus: 'LOGICAL_CONTRADICTION',
+    reason: 'The answer omits that task and discourse jobs share a globally bounded scheduler.',
+    evidence: 'Both owners lease work through AgentTurnScheduler.',
+    suggestedResolution: 'Clarify owner isolation while acknowledging shared scheduler capacity.',
+    requiredAccessAvailable: true,
+    recordRevision: 1,
+    createdAt: DISCOURSE_SEED_TIME
+  };
+}
+
+async function seedWavePhase(
+  store: FileDiscourseStore,
+  conversationId: string,
+  waveId: string,
+  phase: 'REVIEW' | 'CORRECT'
+) {
+  const wave = requireSeedWave(await store.getConversation(conversationId), waveId);
+  await store.updateWave({
+    conversationId,
+    expectedRevision: wave.recordRevision,
+    clientOperationId: `${waveId}:phase:${phase}`,
+    wave: { ...wave, recordRevision: wave.recordRevision + 1, phase }
+  });
+}
+
+async function seedSettleWave(
+  store: FileDiscourseStore,
+  conversationId: string,
+  waveId: string,
+  outcome: 'COMPLETE' | 'PARTIAL',
+  settlementReason: 'COMPLETED' | 'FAILED'
+) {
+  const wave = requireSeedWave(await store.getConversation(conversationId), waveId);
+  await store.updateWave({
+    conversationId,
+    expectedRevision: wave.recordRevision,
+    clientOperationId: `${waveId}:settled`,
+    wave: {
+      ...wave,
+      recordRevision: wave.recordRevision + 1,
+      status: 'SETTLED',
+      phase: 'COMPLETE',
+      outcome,
+      settlementReason,
+      settledAt: DISCOURSE_SEED_TIME
+    }
+  });
+}
+
+function requireSeedWave(
+  aggregate: Awaited<ReturnType<FileDiscourseStore['getConversation']>>,
+  waveId: string
+) {
+  const wave = aggregate.waves.find((candidate) => candidate.id === waveId);
+  if (!wave) throw new Error(`Seed discourse wave is missing: ${waveId}`);
+  return wave;
+}
+
+function requireSeedJob(
+  aggregate: Awaited<ReturnType<FileDiscourseStore['getConversation']>>,
+  jobId: string
+) {
+  const job = aggregate.jobs.find((candidate) => candidate.id === jobId);
+  if (!job) throw new Error(`Seed discourse job is missing: ${jobId}`);
+  return job;
+}
+
 function scenario(
   slug: string,
   group: DevSeedScenarioGroup,
@@ -554,7 +1438,18 @@ function scenariosForSet(set: DevSeedScenarioSet): DevSeedScenarioDefinition[] {
 }
 
 function assertValidScenarioSet(value: string): asserts value is DevSeedScenarioSet {
-  if (!['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow'].includes(value)) {
+  if (
+    ![
+      'all',
+      'board',
+      'agent',
+      'review',
+      'delivery',
+      'completion',
+      'workflow',
+      'discourse'
+    ].includes(value)
+  ) {
     throw new Error(`Unknown seed scenario set: ${value}`);
   }
 }
@@ -567,6 +1462,11 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
     repositoryPath: path.resolve(options.repositoryPath ?? path.join(rootDir, 'repo')),
     worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
     appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
+    repositoryRegistryDir: path.resolve(
+      options.repositoryRegistryDir ?? path.join(rootDir, 'repository-registry')
+    ),
+    discourseDir: path.resolve(options.discourseDir ?? path.join(rootDir, 'discourse')),
+    agentRuntimeDir: path.resolve(options.agentRuntimeDir ?? path.join(rootDir, 'agent-runtime')),
     manifestPath: path.join(rootDir, 'manifest.json'),
     envFilePath: path.join(rootDir, 'dev-api.env')
   };

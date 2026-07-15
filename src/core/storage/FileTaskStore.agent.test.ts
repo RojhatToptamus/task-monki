@@ -199,7 +199,7 @@ describe('FileTaskStore agent persistence', () => {
     });
 
     await expect(new FileTaskStore(dir).init()).rejects.toThrow(
-      'migrations are intentionally not supported'
+      'supported migration path'
     );
   });
 });

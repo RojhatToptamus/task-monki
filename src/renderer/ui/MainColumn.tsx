@@ -53,6 +53,7 @@ interface MainColumnProps {
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
+  activeRepositoryId: string;
   activeRepositoryPath: string;
   repositorySetupState: RepositorySetupState;
   addingRepository: boolean;
@@ -108,6 +109,10 @@ const SETUP_VIEW_TITLES: Record<
     title: 'Set up Task Monki',
     subtitle: 'Add a Git repository before creating tasks'
   },
+  repositoryUnavailable: {
+    title: 'Repository unavailable',
+    subtitle: 'Choose an available Git repository to continue'
+  },
   needsReview: {
     title: 'Set up Task Monki',
     subtitle: 'Review tools and defaults before entering the board'
@@ -127,6 +132,7 @@ export function MainColumn({
   onTestExternalTool,
   error,
   models,
+  activeRepositoryId,
   activeRepositoryPath,
   repositorySetupState,
   addingRepository,
@@ -175,6 +181,7 @@ export function MainColumn({
       {!showRepositorySetup && view === 'board' ? (
         <BoardKanban
           tasks={tasks}
+          repositoryId={activeRepositoryId}
           onSelect={onSelect}
           onArchive={onArchive}
           onRequestDelete={onRequestDelete}
@@ -183,6 +190,7 @@ export function MainColumn({
       {!showRepositorySetup && (view === 'active' || view === 'review' || view === 'done') ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
+          repositoryId={activeRepositoryId}
           view={view}
           onSelect={onSelect}
           onArchive={onArchive}
@@ -247,11 +255,23 @@ function FirstLaunchSetup({
   const hasRepository = Boolean(activeRepositoryPath);
   const addRepositoryDisabled = isLoading || addingRepository;
   const canFinishSetup =
-    hasRepository && requiredToolsReady && !isRefreshingTools && !isFinishingSetup;
+    hasRepository &&
+    state !== 'repositoryUnavailable' &&
+    requiredToolsReady &&
+    !isRefreshingTools &&
+    !isFinishingSetup;
   const repositoryLabel = hasRepository
-    ? compactSettingsText(activeRepositoryPath, 72)
+    ? `${compactSettingsText(activeRepositoryPath, 72)}${
+        state === 'repositoryUnavailable' ? ' · Unavailable' : ''
+      }`
     : 'Choose the Git repository for new tasks.';
-  const repositoryStepTone = isLoading ? 'pending' : hasRepository ? 'complete' : 'active';
+  const repositoryStepTone = isLoading
+    ? 'pending'
+    : state === 'repositoryUnavailable'
+      ? 'active'
+      : hasRepository
+        ? 'complete'
+        : 'active';
   const repositoryActionLabel = hasRepository ? 'Change repository' : 'Add repository';
   const toolsDetail = externalToolStatus
     ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and Codex are required.`
@@ -552,11 +572,13 @@ function RefreshIcon() {
 
 function BoardKanban({
   tasks,
+  repositoryId,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   tasks: Task[];
+  repositoryId: string;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
@@ -578,6 +600,7 @@ function BoardKanban({
                 <TaskCard
                   key={task.id}
                   vm={buildTaskCardVM(task, { showRepo, columnKey: column.key })}
+                  repositoryId={repositoryId}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onRequestDelete={onRequestDelete}
@@ -593,12 +616,14 @@ function BoardKanban({
 
 function CardGrid({
   tasks,
+  repositoryId,
   view,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   tasks: Task[];
+  repositoryId: string;
   view: NavView;
   onSelect(id: string): void;
   onArchive(id: string): void;
@@ -616,6 +641,7 @@ function CardGrid({
             <TaskCard
               key={task.id}
               vm={buildTaskCardVM(task, { showRepo, showReviewCount })}
+              repositoryId={repositoryId}
               onSelect={onSelect}
               onArchive={onArchive}
               onRequestDelete={onRequestDelete}
@@ -629,11 +655,13 @@ function CardGrid({
 
 export function TaskCard({
   vm,
+  repositoryId,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   vm: TaskCardVM;
+  repositoryId?: string;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
@@ -660,7 +688,7 @@ export function TaskCard({
             taskId={vm.id}
             title={vm.title}
             archived={vm.archived}
-            openTarget={{ type: 'repository', repositoryPath: vm.repositoryPath }}
+            openTarget={repositoryId ? { type: 'repository', repositoryId } : undefined}
             onArchive={onArchive}
             onRequestDelete={onRequestDelete}
             className="tm-card__actions"

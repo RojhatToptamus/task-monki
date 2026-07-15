@@ -78,6 +78,13 @@ export default defineConfig(() => {
     },
     test: {
       environment: 'node',
+      // The suite exercises many fsync-heavy stores, Git subprocesses, and real
+      // stdio provider fixtures. Bounding file workers keeps those integration
+      // tests deterministic on developer machines instead of letting unrelated
+      // files exhaust I/O and trip Vitest's short unit-test timeout.
+      minWorkers: 1,
+      maxWorkers: 1,
+      testTimeout: 10_000,
       include: [
         'src/**/*.{test,spec}.{ts,tsx}',
         'scripts/**/*.{test,spec}.mjs'
