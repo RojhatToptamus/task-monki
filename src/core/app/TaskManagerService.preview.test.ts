@@ -70,9 +70,15 @@ defaultScenario: frontend
     await fs.writeFile(
       path.join(scenario.repositoryPath, 'server.mjs'),
       `import http from 'node:http';
-const server = http.createServer((request, response) => {
+const server = http.createServer(async (request, response) => {
   response.statusCode = request.url === '/health/ready' ? 204 : 200;
-  response.end(request.url === '/health/ready' ? '' : process.env.NEXT_PUBLIC_API_URL ?? 'missing');
+  if (request.url === '/health/ready') { response.end(); return; }
+  if (request.url === '/backend') {
+    const backend = await fetch(process.env.NEXT_PUBLIC_API_URL);
+    response.end(await backend.text());
+    return;
+  }
+  response.end(process.env.NEXT_PUBLIC_API_URL ?? 'missing');
 });
 server.listen(Number(process.env.PORT), '127.0.0.1');
 `
@@ -136,6 +142,11 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
       generation.routes[0].hostname,
       '/'
     )).resolves.toMatchObject({ status: 200, body: expectedBackendOrigin });
+    await expect(requestRoute(
+      generation.routes[0].gatewayPort,
+      generation.routes[0].hostname,
+      '/backend'
+    )).resolves.toMatchObject({ status: 200, body: 'controlled backend' });
     const previewOrigin = `http://${generation.routes[0].hostname}:${generation.routes[0].gatewayPort}`;
     await expect(requestRoute(
       backendPort,
@@ -151,6 +162,172 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     });
     await scenario.service.stopPreview({ taskId: task.id, generationId: generation.id });
   }, 20_000);
+
+  it('keeps a cross-task Preview route stable through producer replacement and absence', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-preview-cross-task-binding',
+      previewEnabled: true
+    });
+    scenarios.push(scenario);
+    const producer = await scenario.createTask({ title: 'Backend producer' });
+    const consumer = await scenario.createTask({ title: 'Frontend consumer' });
+    const producerWorktree = await scenario.service.prepareWorktree({ taskId: producer.id });
+    const consumerWorktree = await scenario.service.prepareWorktree({ taskId: consumer.id });
+    await fs.mkdir(path.join(producerWorktree.worktreePath, '.taskmonki'), { recursive: true });
+    await fs.mkdir(path.join(consumerWorktree.worktreePath, '.taskmonki'), { recursive: true });
+    await fs.writeFile(
+      path.join(producerWorktree.worktreePath, '.taskmonki', 'preview.yaml'),
+      `version: 1
+services:
+  api:
+    command: [node, producer.mjs]
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /health/ready }
+routes:
+  api: { service: api, port: http, primary: true }
+`
+    );
+    const producerSource = (version: string) => `import http from 'node:http';
+const server = http.createServer((request, response) => {
+  if (request.url === '/health/ready') { response.writeHead(204).end(); return; }
+  response.end('${version}:' + request.url);
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`;
+    await fs.writeFile(
+      path.join(producerWorktree.worktreePath, 'producer.mjs'),
+      producerSource('producer-one')
+    );
+    await fs.writeFile(
+      path.join(consumerWorktree.worktreePath, '.taskmonki', 'preview.yaml'),
+      `version: 1
+attachments:
+  backend:
+    type: http
+    target: { type: local }
+services:
+  web:
+    command: [node, consumer.mjs]
+    env:
+      BACKEND_ORIGIN: { type: attached-http-origin, attachment: backend }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /health/ready }
+routes:
+  app: { service: web, port: http, primary: true }
+`
+    );
+    await fs.writeFile(
+      path.join(consumerWorktree.worktreePath, 'consumer.mjs'),
+      `import http from 'node:http';
+const server = http.createServer((request, response) => {
+  if (request.url === '/health/ready') { response.writeHead(204).end(); return; }
+  response.end(process.env.BACKEND_ORIGIN ?? 'missing');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`
+    );
+
+    const producerPlan = await scenario.service.resolvePreview({ taskId: producer.id });
+    if (producerPlan.status !== 'PLAN') throw new Error('Expected producer plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: producer.id,
+      planId: producerPlan.plan.id,
+      executionDigest: producerPlan.plan.executionDigest
+    });
+    const producerOne = await scenario.service.startPreview({ taskId: producer.id });
+
+    const consumerRequired = await scenario.service.resolvePreview({ taskId: consumer.id });
+    if (consumerRequired.status !== 'CONFIGURATION_REQUIRED') {
+      throw new Error('Expected consumer binding requirement.');
+    }
+    await scenario.service.setPreviewLocalAttachmentBinding({
+      taskId: consumer.id,
+      attachmentId: 'backend',
+      target: {
+        type: 'task-preview-route',
+        targetTaskId: producer.id,
+        routeId: 'api',
+        basePath: '/v1'
+      }
+    });
+    const consumerPlan = await scenario.service.resolvePreview({
+      taskId: consumer.id,
+      scenarioId: consumerRequired.selectedScenarioId
+    });
+    if (consumerPlan.status !== 'PLAN') throw new Error('Expected consumer plan.');
+    await scenario.service.approvePreviewPlan({
+      taskId: consumer.id,
+      planId: consumerPlan.plan.id,
+      executionDigest: consumerPlan.plan.executionDigest
+    });
+    const consumerGeneration = await scenario.service.startPreview({ taskId: consumer.id });
+    expect(consumerGeneration.routes[0].gatewayPort).toBe(producerOne.routes[0].gatewayPort);
+    const stableBackendOrigin = `http://${previewRouteHostname(producer.id, 'api')}:${producerOne.routes[0].gatewayPort}/v1`;
+    await expect(requestRoute(
+      consumerGeneration.routes[0].gatewayPort,
+      consumerGeneration.routes[0].hostname,
+      '/'
+    )).resolves.toMatchObject({ status: 200, body: stableBackendOrigin });
+    await expect(requestRoute(
+      producerOne.routes[0].gatewayPort,
+      producerOne.routes[0].hostname,
+      '/v1/ping'
+    )).resolves.toMatchObject({ status: 200, body: 'producer-one:/v1/ping' });
+
+    await fs.writeFile(
+      path.join(producerWorktree.worktreePath, 'producer.mjs'),
+      producerSource('producer-two')
+    );
+    const producerTwo = await scenario.service.startPreview({ taskId: producer.id });
+    expect(producerTwo.routes[0].hostname).toBe(producerOne.routes[0].hostname);
+    await expect(requestRoute(
+      producerTwo.routes[0].gatewayPort,
+      producerTwo.routes[0].hostname,
+      '/v1/ping'
+    )).resolves.toMatchObject({ status: 200, body: 'producer-two:/v1/ping' });
+
+    await scenario.service.stopPreview({
+      taskId: consumer.id,
+      generationId: consumerGeneration.id
+    });
+    await expect(requestRoute(
+      producerTwo.routes[0].gatewayPort,
+      producerTwo.routes[0].hostname,
+      '/v1/ping'
+    )).resolves.toMatchObject({ status: 200, body: 'producer-two:/v1/ping' });
+    const restartedConsumer = await scenario.service.startPreview({ taskId: consumer.id });
+    await expect(requestRoute(
+      restartedConsumer.routes[0].gatewayPort,
+      restartedConsumer.routes[0].hostname,
+      '/'
+    )).resolves.toMatchObject({ status: 200, body: stableBackendOrigin });
+    await scenario.service.stopPreview({ taskId: producer.id, generationId: producerTwo.id });
+    await expect(requestRoute(
+      restartedConsumer.routes[0].gatewayPort,
+      producerTwo.routes[0].hostname,
+      '/v1/ping'
+    )).resolves.toMatchObject({ status: 503 });
+    const consumerAfterProducerStop = await scenario.store.getPreviewGeneration(restartedConsumer.id);
+    expect(consumerAfterProducerStop).toMatchObject({ state: 'READY', routingState: 'ACTIVE' });
+    await scenario.service.stopPreview({
+      taskId: consumer.id,
+      generationId: restartedConsumer.id
+    });
+    const stoppedSnapshot = await scenario.store.snapshot();
+    const stoppedGenerations = stoppedSnapshot.previewGenerations.filter(
+      (generation) => generation.taskId === producer.id || generation.taskId === consumer.id
+    );
+    expect(stoppedGenerations).toHaveLength(4);
+    expect(stoppedGenerations.every(
+      (generation) => generation.state === 'STOPPED' && generation.routingState === 'RETIRED'
+    )).toBe(true);
+    expect(stoppedSnapshot.previewResources.filter(
+      (resource) => resource.taskId === producer.id || resource.taskId === consumer.id
+    ).every((resource) => resource.state === 'STOPPED')).toBe(true);
+    for (const generation of stoppedGenerations) {
+      await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  }, 30_000);
 
   it('runs resolve → approve → dirty capture → job → ready → stale → stop without touching the worktree', async () => {
     const scenario = await previewScenario('task-monki-preview-service');

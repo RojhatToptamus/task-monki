@@ -69,8 +69,7 @@ export function selectPreviewTaskRouteOptions(
 }
 
 export function createPreviewAttachmentBindingDraft(
-  requirement: PreviewLocalAttachmentRequirement,
-  routeOptions: readonly PreviewTaskRouteOption[]
+  requirement: PreviewLocalAttachmentRequirement
 ): PreviewAttachmentBindingDraft {
   return {
     mode: 'endpoint',
@@ -81,8 +80,8 @@ export function createPreviewAttachmentBindingDraft(
     database: '',
     username: '',
     tls: '',
-    targetTaskId: routeOptions[0]?.taskId ?? '',
-    routeId: routeOptions[0]?.routeId ?? ''
+    targetTaskId: '',
+    routeId: ''
   };
 }
 

@@ -540,23 +540,25 @@ function PreviewLocalAttachmentConfiguration({
     requirements[0];
   const [draft, setDraft] = useState<PreviewAttachmentBindingDraft>(() =>
     requirement
-      ? createPreviewAttachmentBindingDraft(requirement, routeOptions)
+      ? createPreviewAttachmentBindingDraft(requirement)
       : createPreviewAttachmentBindingDraft({
           attachmentId: 'unknown', attachmentType: 'http', allowedTargetTypes: ['endpoint'], usages: []
-        }, routeOptions)
+        })
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
     if (!requirement) return;
-    setDraft(createPreviewAttachmentBindingDraft(requirement, routeOptions));
+    setDraft(createPreviewAttachmentBindingDraft(requirement));
     setError(undefined);
   }, [requirement?.attachmentId]);
 
   if (!requirement) return null;
   const taskRouteAllowed = requirement.allowedTargetTypes.includes('task-preview-route');
-  const selectedRouteValue = `${draft.targetTaskId}\u0000${draft.routeId}`;
+  const selectedRouteValue = draft.targetTaskId && draft.routeId
+    ? `${draft.targetTaskId}\u0000${draft.routeId}`
+    : '';
   const update = (fields: Partial<PreviewAttachmentBindingDraft>) => {
     setDraft((current) => ({ ...current, ...fields }));
     setError(undefined);
@@ -624,7 +626,9 @@ function PreviewLocalAttachmentConfiguration({
                     update({ targetTaskId, routeId });
                   }}
                 >
-                  {routeOptions.length === 0 ? <option value="">No routes available</option> : null}
+                  <option value="" disabled>
+                    {routeOptions.length === 0 ? 'No routes available' : 'Select a Preview route'}
+                  </option>
                   {routeOptions.map((option) => (
                     <option key={`${option.taskId}:${option.routeId}`} value={`${option.taskId}\u0000${option.routeId}`}>
                       {option.taskTitle} · {option.routeId}{option.available ? ' · running' : ' · stopped'}
@@ -642,7 +646,15 @@ function PreviewLocalAttachmentConfiguration({
           )}
           {error ? <p className="tm-preview-input__feedback tm-preview-input__feedback--error" role="alert">{error}</p> : null}
           <div className="tm-preview-binding-editor__actions">
-            <button type="submit" className="primary-button" disabled={busy || (draft.mode === 'task-preview-route' && routeOptions.length === 0)}>
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={
+                busy ||
+                (draft.mode === 'task-preview-route' &&
+                  (routeOptions.length === 0 || !draft.targetTaskId || !draft.routeId))
+              }
+            >
               {busy ? 'Saving…' : 'Save target'}
             </button>
           </div>

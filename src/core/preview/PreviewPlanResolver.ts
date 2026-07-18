@@ -143,7 +143,10 @@ export class PreviewPlanResolver {
       const binding = await this.store?.getPreviewLocalBinding(taskId, attachment.id);
       if (!binding) {
         const requirement = requirementsById.get(attachment.id);
-        if (requirement) missing.push(requirement);
+        if (!requirement) {
+          throw new Error(`Local binding authority is unavailable for attachment ${attachment.id}.`);
+        }
+        missing.push(requirement);
         attachments.push(attachment);
         continue;
       }

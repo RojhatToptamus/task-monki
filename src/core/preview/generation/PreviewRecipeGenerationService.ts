@@ -65,15 +65,19 @@ interface ParsedAgentGeneration {
   report: PreviewRecipeGenerationReport;
 }
 
+interface DraftValidationAuthority {
+  taskId: string;
+  capabilities: PreviewFrameworkCapabilities;
+  publicEnvironmentCandidates: PreviewPublicEnvironmentCandidate[];
+  publicEnvironmentDecisions: PreviewPublicEnvironmentDecision[];
+}
+
 class InvalidAgentGenerationError extends Error {}
 
 export class PreviewRecipeGenerationService {
   private readonly states = new Map<string, PreviewRecipeGenerationSnapshot>();
   private readonly operations = new Map<string, ActiveGeneration>();
-  private readonly draftCapabilities = new Map<
-    string,
-    { taskId: string; capabilities: PreviewFrameworkCapabilities }
-  >();
+  private readonly draftValidationAuthority = new Map<string, DraftValidationAuthority>();
   private shuttingDown = false;
 
   constructor(
@@ -131,11 +135,16 @@ export class PreviewRecipeGenerationService {
     if (!draft || draft.id !== draftId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    const capabilityEntry = this.draftCapabilities.get(draftId);
-    if (!capabilityEntry || capabilityEntry.taskId !== taskId) {
+    const authority = this.draftValidationAuthority.get(draftId);
+    if (!authority || authority.taskId !== taskId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    return validateGeneratedPreviewRecipeDraft(yaml, capabilityEntry.capabilities);
+    return validateAgentGeneratedPreviewRecipeDraft(
+      yaml,
+      authority.capabilities,
+      authority.publicEnvironmentCandidates,
+      authority.publicEnvironmentDecisions
+    );
   }
 
   async writeAcceptedRecipe(input: {
@@ -151,13 +160,15 @@ export class PreviewRecipeGenerationService {
     if (!state?.draft || state.draft.id !== input.draftId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    const capabilityEntry = this.draftCapabilities.get(input.draftId);
-    if (!capabilityEntry || capabilityEntry.taskId !== input.taskId) {
+    const authority = this.draftValidationAuthority.get(input.draftId);
+    if (!authority || authority.taskId !== input.taskId) {
       throw new Error('The Preview recipe draft is no longer current.');
     }
-    const validation = validateGeneratedPreviewRecipeDraft(
+    const validation = validateAgentGeneratedPreviewRecipeDraft(
       input.yaml,
-      capabilityEntry.capabilities
+      authority.capabilities,
+      authority.publicEnvironmentCandidates,
+      authority.publicEnvironmentDecisions
     );
     if (validation.status !== 'VALID') {
       throw new Error(validation.issues[0]?.message ?? 'The Preview recipe is invalid.');
@@ -167,7 +178,7 @@ export class PreviewRecipeGenerationService {
 
   completeAcceptance(taskId: string): PreviewRecipeGenerationSnapshot {
     this.states.delete(taskId);
-    this.clearDraftCapabilities(taskId);
+    this.clearDraftAuthority(taskId);
     return { taskId, status: 'EMPTY' };
   }
 
@@ -182,7 +193,7 @@ export class PreviewRecipeGenerationService {
     }
     const empty = { taskId, status: 'EMPTY' as const };
     this.states.delete(taskId);
-    this.clearDraftCapabilities(taskId);
+    this.clearDraftAuthority(taskId);
     onUpdate?.(structuredClone(empty));
     await operation?.settled?.catch(() => undefined);
     return empty;
@@ -203,7 +214,7 @@ export class PreviewRecipeGenerationService {
     );
     this.operations.clear();
     this.states.clear();
-    this.draftCapabilities.clear();
+    this.draftValidationAuthority.clear();
   }
 
   private async completeGeneration(
@@ -313,17 +324,20 @@ export class PreviewRecipeGenerationService {
         validation,
         generatedAt: new Date().toISOString()
       };
-      this.clearDraftCapabilities(input.taskId);
-      this.draftCapabilities.set(draft.id, {
-        taskId: input.taskId,
-        capabilities: structuredClone(evidence.frameworkCapabilities)
-      });
-      return this.finish(
+      const finished = this.finish(
         input.taskId,
         operation,
         { taskId: input.taskId, status: 'READY', draft },
         input.onUpdate
       );
+      this.clearDraftAuthority(input.taskId);
+      this.draftValidationAuthority.set(draft.id, {
+        taskId: input.taskId,
+        capabilities: structuredClone(evidence.frameworkCapabilities),
+        publicEnvironmentCandidates: structuredClone(evidence.publicEnvironment.candidates),
+        publicEnvironmentDecisions: structuredClone(parsed.report.publicEnvironmentDecisions)
+      });
+      return finished;
     } catch (error) {
       if (operation.canceled) {
         const current = this.operations.get(input.taskId);
@@ -383,9 +397,9 @@ export class PreviewRecipeGenerationService {
     return snapshot;
   }
 
-  private clearDraftCapabilities(taskId: string): void {
-    for (const [draftId, entry] of this.draftCapabilities) {
-      if (entry.taskId === taskId) this.draftCapabilities.delete(draftId);
+  private clearDraftAuthority(taskId: string): void {
+    for (const [draftId, entry] of this.draftValidationAuthority) {
+      if (entry.taskId === taskId) this.draftValidationAuthority.delete(draftId);
     }
   }
 }

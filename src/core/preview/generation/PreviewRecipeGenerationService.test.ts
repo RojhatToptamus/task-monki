@@ -214,6 +214,24 @@ describe('PreviewRecipeGenerationService', () => {
       attachmentId: 'backend'
     }]);
     expect(result.draft?.yaml).toContain('type: attached-http-origin');
+    if (!result.draft) throw new Error('Expected generated draft.');
+    const inconsistentEdit = result.draft.yaml.replace(
+      'NEXT_PUBLIC_API_URL:',
+      'NEXT_PUBLIC_OTHER_URL:'
+    );
+    expect(service.validate('task-next', result.draft.id, inconsistentEdit)).toEqual({
+      status: 'INVALID',
+      issues: [{
+        code: 'PUBLIC_ENVIRONMENT_DECISION_INVALID',
+        message: 'The generated public environment decision does not match the Preview recipe.'
+      }]
+    });
+    await expect(service.writeAcceptedRecipe({
+      taskId: 'task-next',
+      draftId: result.draft.id,
+      yaml: inconsistentEdit,
+      worktreePath: root
+    })).rejects.toThrow('does not match the Preview recipe');
   });
 
   it('rejects missing or YAML-inconsistent public environment decisions', async () => {

@@ -690,11 +690,16 @@ export function App() {
     setError(undefined);
     try {
       await taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target });
-      await resolvePreview(taskId, scenarioId);
-      notify('Preview target configured.', 'success');
     } catch (caught) {
       reportActionError(caught, 'Could not configure the Preview target.');
       throw caught;
+    }
+    notify('Preview target configured.', 'success');
+    try {
+      await resolvePreview(taskId, scenarioId);
+    } catch {
+      // Resolution reports its own failure. The public binding was still saved successfully.
+      await refresh().catch(() => undefined);
     }
   };
 

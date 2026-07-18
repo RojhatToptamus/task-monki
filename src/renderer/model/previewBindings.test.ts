@@ -57,17 +57,18 @@ describe('Preview attachment bindings', () => {
   });
 
   it('materializes typed literal and task-route targets from one bounded draft model', () => {
-    const draft = createPreviewAttachmentBindingDraft(httpRequirement, [{
-      taskId: 'producer', taskTitle: 'Backend', routeId: 'api', available: false
-    }]);
+    const draft = createPreviewAttachmentBindingDraft(httpRequirement);
     expect(() => materializePreviewAttachmentTarget(httpRequirement, draft)).toThrow('host');
+    expect(() => materializePreviewAttachmentTarget(httpRequirement, {
+      ...draft, mode: 'task-preview-route'
+    })).toThrow('Select a valid Preview route');
     expect(materializePreviewAttachmentTarget(httpRequirement, {
       ...draft, scheme: 'https', host: 'backend.test', port: '8443', basePath: '/v1'
     })).toEqual({
       type: 'endpoint', scheme: 'https', host: 'backend.test', port: 8443, basePath: '/v1'
     });
     expect(materializePreviewAttachmentTarget(httpRequirement, {
-      ...draft, mode: 'task-preview-route'
+      ...draft, mode: 'task-preview-route', targetTaskId: 'producer', routeId: 'api'
     })).toEqual({
       type: 'task-preview-route', targetTaskId: 'producer', routeId: 'api', basePath: '/'
     });
