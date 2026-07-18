@@ -96,13 +96,16 @@ export class AgentRuntimeRegistry {
   }
 
   async getCatalog(options: {
+    disabledRuntimeIds?: ReadonlySet<AgentRuntimeId>;
     excludedRuntimeIds?: ReadonlySet<AgentRuntimeId>;
     exclusionReason?: string;
   } = {}): Promise<AgentRuntimeCatalog> {
     const refreshedAt = new Date().toISOString();
     const runtimes = await Promise.all(
       this.list().map((adapter) =>
-        options.excludedRuntimeIds?.has(adapter.descriptor.id)
+        options.disabledRuntimeIds?.has(adapter.descriptor.id)
+          ? this.getDisabledRuntimeState(adapter, refreshedAt)
+          : options.excludedRuntimeIds?.has(adapter.descriptor.id)
           ? this.getExcludedRuntimeState(
               adapter,
               refreshedAt,
@@ -282,6 +285,37 @@ export class AgentRuntimeRegistry {
           }
         }),
         capabilities: await safeCapabilities(adapter),
+      },
+      models: [],
+      refreshedAt
+    };
+  }
+
+  private async getDisabledRuntimeState(
+    adapter: AgentRuntimeAdapter,
+    refreshedAt: string
+  ): Promise<AgentRuntimeState> {
+    return {
+      preflight: {
+        runtime: adapter.descriptor,
+        readiness: createRuntimeReadiness(
+          'DISABLED',
+          `${adapter.descriptor.displayName} is disabled in Settings.`,
+          {
+            diagnostics: [
+              warningDiagnostic(
+                'RUNTIME_DISABLED',
+                'CONFIGURATION',
+                `${adapter.descriptor.displayName} is disabled for new agent work.`
+              )
+            ],
+            nextAction: {
+              kind: 'CONFIGURE',
+              label: 'Enable in Settings'
+            }
+          }
+        ),
+        capabilities: await safeCapabilities(adapter)
       },
       models: [],
       refreshedAt

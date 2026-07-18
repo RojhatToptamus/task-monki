@@ -56,6 +56,45 @@ describe('TaskManagerService task deletion', () => {
     deleteTask.mockRestore();
   });
 
+  it('keeps storage open until task deletion finishes', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-manager-delete-shutdown-race'
+    });
+    const task = await scenario.createTask({
+      title: 'Delete during shutdown',
+      prompt: 'Keep the deletion transaction intact.'
+    });
+    const originalDelete = scenario.store.deleteTask.bind(scenario.store);
+    let markDeleteEntered!: () => void;
+    const deleteEntered = new Promise<void>((resolve) => {
+      markDeleteEntered = resolve;
+    });
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    vi.spyOn(scenario.store, 'deleteTask').mockImplementation(async (taskId) => {
+      markDeleteEntered();
+      await deleteGate;
+      return originalDelete(taskId);
+    });
+    const closeStore = vi.spyOn(scenario.store, 'close');
+
+    const deletion = scenario.service.deleteTask({ taskId: task.id });
+    await deleteEntered;
+    const shutdown = scenario.service.shutdown();
+    await Promise.resolve();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseDelete();
+    await expect(deletion).resolves.toEqual({
+      taskId: task.id,
+      removedWorktree: false
+    });
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
   it('blocks deletion while an agent run is active', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-active-'));
     const store = new FileTaskStore(path.join(dir, 'store'));

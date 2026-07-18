@@ -85,8 +85,7 @@ values from the same contract are redacted from diagnostics, and executable
 override variables are resolver inputs rather than child environment entries.
 
 This distinction prevents an unrelated executable from being treated as an ACP
-agent. Antigravity is a separate dedicated turn-scoped runtime and never enters
-this ACP family. Task Monki never executes a generic PATH `agent` during
+agent. Task Monki never executes a generic PATH `agent` during
 discovery. That Cursor alias is accepted only when the user
 configures it explicitly and `agent help acp` proves the expected contract. Changing a saved
 executable invalidates discovery and safely restarts an idle runtime; an active
@@ -127,9 +126,17 @@ versioned initialize and session model catalogs. The initialize catalog is safe
 for runtime selection and publishes its provider-selected default; the session
 response revalidates the exact ID before any prompt. Those IDs also remain in
 the session's typed control set and are changed through its provider-owned
-`session/set_model`. Other profiles ignore those non-standard fields. Stable
-ACP session-only catalogs remain scoped to the provider session that advertised
-them and do not leak into New Task selection.
+`session/set_model`. Other profiles ignore those non-standard fields. Cursor
+instead profile-gates promotion of the exact stable model-category selector
+observed from a real task-owned session. The latest safe provider observation is
+retained across application restart, but every selection is revalidated against
+the next session before `session/set_config_option`. Task Monki never creates an
+orphan Cursor session for discovery; Auto is the only choice before the first
+real Cursor session. A session's current model is not promoted into an
+application default; explicit Task Monki settings remain authoritative and the
+first provider-ordered choice is the fallback. Other stable ACP session-only
+catalogs remain scoped to the provider session that advertised them and do not
+leak into New Task selection.
 
 The Provider inspector renders only the safe semantic-neutral `BOOLEAN` and
 `SELECT` controls projected for the attached session. Each control retains its
@@ -194,10 +201,14 @@ are attempted at most three times. An append whose outcome is ambiguous is
 never retried; either exhausted path discards retained bytes, quarantines that
 process generation, and requires explicit run recovery. A coalesced item
 publishes one activity event, whose `coalescedEvents` count makes the compaction
-visible. Permission choices retain
-the provider's opaque option IDs. Task Monki intersects the offered choices
-with its own command/path/network policy and sends back the exact ID;
-unverifiable scope and reserved Git/GitHub delivery commands fail closed.
+visible. Permission choices retain the provider's opaque option IDs. Task Monki
+intersects the offered choices with its own command/path/network policy and
+sends back the exact ID; reserved Git/GitHub delivery commands,
+outside-worktree file scope, and disabled-network requests fail closed. When
+Cursor omits command details for a terminal request, its profile may expose
+only the provider's exact one-time approval option. Other ACP profiles fail
+closed on opaque execution scope. Task Monki never turns opaque scope into a
+persistent session grant.
 Only `end_turn` completes a prompt successfully. `cancelled` interrupts it;
 `refusal`, `max_tokens`, and `max_turn_requests` fail it with a bounded provider
 diagnostic.

@@ -338,6 +338,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   async initialize(): Promise<void> {
     if (this.initialized) {
+      if (this.shuttingDown) {
+        throw new Error(
+          'Codex App Server cannot restart because its previous shutdown was not confirmed.'
+        );
+      }
       return;
     }
     this.shuttingDown = false;
@@ -1479,8 +1484,34 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
         'Codex App Server shutdown and ownership settlement both failed.'
       );
     }
+    const confirmedStopped = !this.supervisor.processTreeRunning;
+    if (!settlementFailure && confirmedStopped) {
+      this.resetAfterConfirmedShutdown();
+    }
     if (shutdownFailure) throw shutdownFailure;
     if (settlementFailure) throw settlementFailure;
+  }
+
+  private resetAfterConfirmedShutdown(): void {
+    this.supervisor = this.createSupervisor();
+    this.boundClient = undefined;
+    this.models = [];
+    this.initialized = false;
+    this.shuttingDown = false;
+    this.restartAttempt = 0;
+    this.exitedGenerationDrain = undefined;
+    this.runtimeConfigRestartPending = false;
+    if (!this.securityBoundaryViolation && !this.inboundMaterializationRecoveryFailure) {
+      this.preflightState = {
+        runtime: CODEX_RUNTIME_DESCRIPTOR,
+        readiness: createRuntimeReadiness(
+          'INITIALIZING',
+          'Codex App Server is stopped and ready to initialize.',
+          { checks: { initialization: 'NOT_STARTED' } }
+        ),
+        capabilities: codexCapabilities(),
+      };
+    }
   }
 
   async updateRuntimeConfig(input: {
@@ -1512,13 +1543,9 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
 
     await this.shutdown();
-    this.supervisor = this.createSupervisor();
     this.runtimeConfigRestartPending = false;
     this.inboundMaterializationRecoveryFailure = undefined;
     this.outputPersistenceFence = undefined;
-    this.boundClient = undefined;
-    this.models = [];
-    this.initialized = false;
     this.preflightState = {
       runtime: CODEX_RUNTIME_DESCRIPTOR,
       readiness: createRuntimeReadiness(

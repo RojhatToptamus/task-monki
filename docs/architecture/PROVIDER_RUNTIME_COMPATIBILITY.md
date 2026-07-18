@@ -12,10 +12,6 @@ in general.
 - **Native first-class integration**: Task Monki uses the agent product's
   native server protocol and has a dedicated adapter for its lifecycle,
   streaming, sessions, interactions, recovery, and native features.
-- **Dedicated documented CLI integration**: Task Monki uses a product's public
-  non-interactive command contract in a dedicated adapter. Capabilities are
-  limited to what that command can prove; Task Monki does not infer a private
-  session protocol from a terminal UI or another product's integration.
 - **Registered ACP compatibility integration**: the agent has its own durable
   runtime identity and provider-specific launch/profile rules, but Task Monki
   communicates through stable ACP v1. Only negotiated ACP behavior and
@@ -29,9 +25,8 @@ alias. Its models, modes, configuration, credentials, process, sessions, and
 telemetry are never routed through another provider. The tier describes the
 depth of the protocol integration, not the importance of the provider. In
 particular, “first-class runtime identity” does not mean “full native
-integration”: Codex and OpenCode use native server protocols, Antigravity uses
-its documented turn-scoped print command, and the ACP runtimes use stable ACP
-plus explicitly captured extensions.
+integration”: Codex and OpenCode use native server protocols, while the ACP
+runtimes use stable ACP plus explicitly captured extensions.
 
 ## Current runtime matrix
 
@@ -39,7 +34,6 @@ plus explicitly captured extensions.
 | --- | --- | --- | --- | --- |
 | Codex App Server | `codex`; a resolver-selected native App Server stdio form | Native first-class | Native account and model discovery, threads, resume and fork, streamed turns, steering, interruption, approvals and user input, goals, plans, review, subagent lineage, usage, and managed attachment delivery | Requires a compatible App Server method contract, successful initialization, usable account/model state, and an attested permission profile. True pause is unsupported; some user-input, terminal, and dynamic-tool APIs remain experimental. |
 | OpenCode server | `opencode`; `opencode serve --hostname 127.0.0.1 --port <allocated-port>` | Native first-class | Connected provider/model registry, model variants, sessions and native history fork, messages and parts, asynchronous prompts and abort, per-request permissions, questions, todo plans, accumulated assistant-step usage, tools/plugins/MCP telemetry, reconciliation, and bounded SSE streaming | Supports the validated OpenCode 1.x HTTP/SSE contract (`>=1.4.0` and `<2.0.0`; contract tests cover 1.17.20). Readiness verifies health, an authoritative `connected` provider list, catalog and queue endpoints, and a first SSE event; a catalog that omits connection state fails closed. Both execution presets report `DANGER_FULL_ACCESS`: `on-request` gates native mutation/external-directory tools and denies native task delegation because child permissions cannot be attested, while `never` permits them. Session-wide permission grants are not offered because the native `always` reply is process-local. Task Monki re-reads and attests the effective native rule suffix before each prompt and after a fork, but neither preset attests process confinement. Active-turn steering, true pause, provider goals, native or detached review, managed attachments, and prompt refinement are unsupported. |
-| Google Antigravity CLI | `antigravity`; `agy --print <prompt> --model <exact-label> --new-project --sandbox --print-timeout 30m --mode <plan\|accept-edits>` | Dedicated documented CLI | Exact model discovery through `agy models`, canonical worktree binding, one process per turn, bounded assistant output and diagnostics, process interruption, and exit-code terminal truth | Every turn is a new Antigravity project; there is no provider session ID, resume, fork, steering, structured tools/plans/approvals/questions, attachments, native review, or automatic recovery. Task Monki never uses private APIs, TUI/log scraping, ACP impersonation, or `--dangerously-skip-permissions`. `--sandbox` is mandatory, but terminal permission handling remains Antigravity-owned. The public CLI puts the full prompt in live process argv; durable argv is redacted, and task prompts must not contain secrets. Every model remains non-default; New Task may preselect the first ordered label, while execution requires its exact value and has no hidden adapter fallback. |
 | Grok Build ACP | `grok-acp`; `grok --no-auto-update agent stdio` | Registered ACP compatibility | ACP streaming, tool calls and diffs, plans, usage/cost context, permissions, cancellation, provider session state, plus Grok's captured `grok-build-acp/session-models@v1` initialize/session catalog, `_x.ai/models/update` replacement catalog, and exact `session/set_model` selection | Grok's initialize `_meta.modelState`, dynamic model-update notification, session `models`, and model mutation are an experimental provider extension, not stable ACP v1. Task Monki exposes only the provider's latest valid catalog; it does not retain or invent historical Grok Build, Composer, or frontier-model entries. The Grok profile binds advertised effort values to `_meta.reasoningEffort` on `session/set_model`, so exact effort selection is available only when the chosen model advertises that value; a stable session `thought_level` selector remains a separate supported path. Otherwise reasoning selection fails closed. `session/new` remains the initial provider observation, while acknowledged mutations are adapter-resolved unless a later provider settings observation confirms them. Installed/version state is only discovery, and operational readiness still requires successful session creation. Session resume/close and other optional behavior are enabled only when advertised by the installed agent. No managed attachments, active steering, fork, goals, general user-input request, standardized subagents, or attested detached review. |
 | Cursor Agent ACP | `cursor-agent-acp`; automatic discovery uses `cursor-agent acp`, while `agent acp` is explicit-configuration only and still requires a Cursor-specific contract probe | Registered ACP compatibility | ACP streaming, tool and diff updates, plans, permissions, cancellation, Cursor-owned rules, and advertised native model/configuration selectors | Task Monki never executes a generic PATH `agent` during discovery. An explicit alias is compatibility-checked but its provenance remains the user's responsibility. ACP initialization and provider session creation are required before operational readiness. Optional resume/close and native controls depend on negotiated or session-advertised capabilities. The common ACP feature limits and full-access process boundary apply. |
 | Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | The bridge retains Claude Agent SDK tool behavior, ACP streaming, tool/diff updates, plans, permissions, cancellation, and advertised Claude modes/configuration/model selectors | This is not a direct native integration with the `claude` CLI. The bridge executable, ACP initialization, authentication, and provider session creation must all succeed. Optional behavior is negotiated; the common ACP feature limits and full-access process boundary apply. |
@@ -115,17 +109,8 @@ only when their live initialization and session checks succeed.
 - Current ACP profiles expose only `provider-controlled-full-access`. The ACP
   agent process owns filesystem and network access, and ACP permission events
   do not prove OS-level confinement.
-- Antigravity receives the documented `--sandbox` boundary on every turn and
-  implementation mode accepts file edits, but terminal permission decisions
-  remain provider-owned. Task Monki never disables that boundary or claims a
-  structured approval flow that print mode cannot expose. Its public print
-  form carries the full prompt in live child argv, which same-user process
-  inspection or endpoint telemetry may observe. Durable command records use a
-  `<prompt>` placeholder, but users must not place secrets in Antigravity task
-  prompts.
-- Runtime children inherit only a minimal portable base environment. OpenCode,
-  Antigravity, and ACP children additionally receive a versioned, exact provider
-  environment
+- Runtime children inherit only a minimal portable base environment. OpenCode
+  and ACP children additionally receive a versioned, exact provider environment
   contract for credentials, cloud configuration, and documented runtime config
   locations. Prefix and wildcard inheritance are not used. Codex explicitly
   adds only its own `CODEX_HOME`; that state is not part of the portable base
@@ -163,7 +148,6 @@ to that shared base.
 | --- | --- | --- |
 | Codex App Server | `task-monki/codex-environment@v1` | `CODEX_HOME` only; Codex configuration, authentication, and runtime state stay Codex-owned |
 | OpenCode | `task-monki/opencode-environment@v1` | OpenCode config roots/content; OpenAI/Azure, Anthropic/Claude, xAI/Grok, AWS Bedrock, Google/Vertex/Gemini credentials and configuration; user config roots; proxy and CA configuration |
-| Antigravity | `task-monki/antigravity-environment@v3` | User config/data/state/cache roots and proxy/CA configuration; on macOS Task Monki supplies the fixed non-secret `XPC_SERVICE_NAME=application.com.google.antigravity` required by the authenticated CLI instead of inheriting a caller value |
 | Grok ACP | `task-monki/grok-acp-environment@v1` | xAI/Grok credentials and base URL; user config roots; proxy and CA configuration |
 | Cursor Agent ACP | `task-monki/cursor-agent-acp-environment@v1` | Cursor API credential; user config roots; proxy and CA configuration |
 | Claude Agent ACP | `task-monki/claude-agent-acp-environment@v1` | Anthropic/Claude, AWS Bedrock, and Google Vertex credentials and configuration; Claude config root; user config roots; proxy and CA configuration |
@@ -171,25 +155,9 @@ to that shared base.
 The authoritative key lists are
 `src/core/agent/codex/CodexEnvironmentPolicy.ts`,
 `src/core/agent/opencode/OpenCodeEnvironmentPolicy.ts`,
-`src/core/agent/antigravity/AntigravityEnvironmentPolicy.ts`,
 `src/core/agent/ProviderEnvironmentPolicy.ts`, and the provider profiles in
 `src/core/agent/acp/AcpRuntimeProfiles.ts`. Runtime executable override keys are
 resolver inputs and are not inherited by provider children.
-
-### Antigravity public contract
-
-Antigravity is a distinct runtime. Task Monki does not translate settings,
-models, executable paths, or sessions from another provider into Antigravity
-state. Unsupported app-settings schemas are rejected without rewriting the
-file.
-
-The dedicated contract is limited to the public
-[CLI reference](https://antigravity.google/docs/cli-reference),
-[execution modes](https://antigravity.google/docs/cli/modes), and
-[conversation lifecycle](https://antigravity.google/docs/cli-conversations).
-Task Monki intentionally does not use Antigravity's interactive resume and fork
-paths because the documented print invocation provides no structured lifecycle
-or recovery protocol for them.
 
 Runtime identity, capability, recovery, and evidence invariants are defined in
 `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`. Codex-specific protocol and

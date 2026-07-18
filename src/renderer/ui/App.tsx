@@ -171,10 +171,22 @@ export function App() {
     setSnapshot(next);
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
-    const next = await taskManagerApi.getExternalToolStatus();
-    setExternalToolStatus(next);
-    return next;
-  }, []);
+    setError(undefined);
+    try {
+      const next = await taskManagerApi.getExternalToolStatus();
+      setExternalToolStatus(next);
+    } catch (caught) {
+      reportActionError(caught, 'Failed to refresh tool status.');
+    }
+  }, [reportActionError]);
+  const refreshAgentRuntimes = useCallback(async () => {
+    setError(undefined);
+    try {
+      setRuntimeCatalog(await taskManagerApi.getAgentRuntimeCatalog());
+    } catch (caught) {
+      reportActionError(caught, 'Failed to refresh agent runtimes.');
+    }
+  }, [reportActionError]);
   const testExternalTool = useCallback(
     async (input: Parameters<typeof taskManagerApi.testExternalTool>[0]) => {
       const result = await taskManagerApi.testExternalTool(input);
@@ -454,13 +466,31 @@ export function App() {
   const deleteCandidateGitSnapshot = deleteCandidate
     ? selectLatestGitSnapshot(snapshot, deleteCandidate)
     : undefined;
+  const disabledRuntimeIds = useMemo(
+    () => new Set(appSettings.disabledRuntimeIds),
+    [appSettings.disabledRuntimeIds]
+  );
+  const enabledRuntimes = useMemo(
+    () =>
+      runtimeCatalog?.runtimes.filter(
+        (runtime) => !disabledRuntimeIds.has(runtime.preflight.runtime.id)
+      ) ?? [],
+    [disabledRuntimeIds, runtimeCatalog?.runtimes]
+  );
+  const enabledRuntimeIds = useMemo(
+    () => new Set(enabledRuntimes.map((runtime) => runtime.preflight.runtime.id)),
+    [enabledRuntimes]
+  );
   const runtimeModels = runtimeCatalog?.models ?? [];
-  const readyPromptRefinementRuntimes =
-    runtimeCatalog?.runtimes.filter(
-      (runtime) =>
-        runtime.preflight.readiness.canStart &&
-        runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
-    ) ?? [];
+  const enabledRuntimeModels = useMemo(
+    () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
+    [enabledRuntimeIds, runtimeModels]
+  );
+  const readyPromptRefinementRuntimes = enabledRuntimes.filter(
+    (runtime) =>
+      runtime.preflight.readiness.canStart &&
+      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+  );
   const configuredPromptRefinementRuntimeId =
     appSettings.promptRefinementRuntimeId ?? appSettings.defaultRuntimeId;
   const promptRefinementRuntime =
@@ -468,14 +498,12 @@ export function App() {
       (runtime) =>
         runtime.preflight.runtime.id === configuredPromptRefinementRuntimeId
     ) ?? readyPromptRefinementRuntimes[0];
-  const readyReviewRuntimes =
-    runtimeCatalog?.runtimes.filter(
-      (runtime) =>
-        runtime.preflight.readiness.canStart &&
-        (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-          runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
-            'stable')
-    ) ?? [];
+  const readyReviewRuntimes = enabledRuntimes.filter(
+    (runtime) =>
+      runtime.preflight.readiness.canStart &&
+      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
+        runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity === 'stable')
+  );
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
   const reviewRuntime =
@@ -500,7 +528,7 @@ export function App() {
   const defaultTaskSettings = useMemo(
     () =>
       resolveModelExecutionSettings(
-        runtimeModels,
+        enabledRuntimeModels,
         appSettings.defaultModel,
         appSettings.defaultReasoningEffort,
         appSettings.defaultRuntimeId,
@@ -511,13 +539,13 @@ export function App() {
       appSettings.defaultModelProvider,
       appSettings.defaultReasoningEffort,
       appSettings.defaultRuntimeId,
-      runtimeModels
+      enabledRuntimeModels
     ]
   );
   const reviewExecutionSettings = useMemo(
     () =>
       resolveModelExecutionSettings(
-        runtimeModels,
+        enabledRuntimeModels,
         appSettings.reviewModel ?? appSettings.defaultModel,
         appSettings.reviewReasoningEffort,
         reviewRuntime?.preflight.runtime.id ??
@@ -535,7 +563,7 @@ export function App() {
       appSettings.reviewRuntimeId,
       reviewRuntime?.preflight.runtime.id,
       selectedTask?.runtimeId,
-      runtimeModels
+      enabledRuntimeModels
     ]
   );
 
@@ -556,7 +584,7 @@ export function App() {
   const refinePrompt = async (repositoryPath: string, input: string) => {
     try {
       const refinementModel = selectModel(
-        runtimeModels,
+        enabledRuntimeModels,
         appSettings.promptRefinementModel,
         promptRefinementRuntime?.preflight.runtime.id,
         appSettings.promptRefinementModelProvider
@@ -1161,7 +1189,9 @@ export function App() {
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
             externalToolStatus={externalToolStatus}
+            agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
             onRefreshExternalTools={refreshExternalToolStatus}
+            onRefreshAgentRuntimes={refreshAgentRuntimes}
             onTestExternalTool={testExternalTool}
             error={error}
             models={runtimeModels}
@@ -1182,8 +1212,8 @@ export function App() {
       {isNewTaskOpen ? (
         <NewTaskPanel
           defaultRepositoryPath={activeRepositoryPath}
-          models={runtimeModels}
-          runtimes={runtimeCatalog?.runtimes ?? []}
+          models={enabledRuntimeModels}
+          runtimes={enabledRuntimes}
           defaultAgentSettings={defaultTaskSettings}
           disabled={!canCreateTask}
           refineDisabledReason={refineDisabledReason}

@@ -39,16 +39,33 @@ describe('ACP permission safety intersection', () => {
     expect(policy.warnings.join(' ')).toContain('commit, publication, merge');
   });
 
-  it('fails closed when an execution request omits its command', async () => {
+  it('offers only one-time approval when an execution request omits its command', async () => {
     const { session, run } = await ownership();
     const policy = materializeAcpPermission({
       toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
       options,
       session,
+      run,
+      allowOpaqueExecuteOnce: true
+    });
+    expect(policy.allowedActions).toEqual([
+      'ACCEPT',
+      'DECLINE',
+      'DECLINE_FOR_SESSION',
+      'CANCEL'
+    ]);
+    expect(policy.warnings.join(' ')).toContain('verifiable command');
+  });
+
+  it('fails closed for opaque execution outside an explicitly attested profile', async () => {
+    const { session, run } = await ownership();
+    const policy = materializeAcpPermission({
+      toolCall: { toolCallId: 'tool-opaque', kind: 'execute', title: 'Do something' },
+      options,
+      session,
       run
     });
     expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
-    expect(policy.warnings.join(' ')).toContain('verifiable command');
   });
 
   it('rejects file scope outside the owned worktree', async () => {

@@ -298,6 +298,218 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     }
   });
 
+  it('promotes and restores Cursor model selectors only from task-owned sessions', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-cursor-model-selector-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'cursor-agent.cjs');
+    const catalogMarker = path.join(directory, 'catalog-state.txt');
+    const sessionSequence = path.join(directory, 'session-sequence.txt');
+    await fs.writeFile(
+      agentScript,
+      cursorModelSelectorAgentSource(catalogMarker, sessionSequence),
+      { mode: 0o600 }
+    );
+    const runtimeId = 'test-cursor-model-selector';
+    const exactModel = 'grok-4.5[effort=high,fast=true]';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      defaultModelProvider: 'cursor',
+      defaultModel: 'default',
+      promoteSessionModelSelector: true,
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const createAdapter = () =>
+      new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+        cwd: directory,
+        requestTimeoutMs: 2_000,
+        runtimeResolver: async () => ({
+          executable: process.execPath,
+          version: process.version,
+          diagnostics: {
+            selectedExecutable: process.execPath,
+            selectedSource: 'test',
+            selectedVersion: process.version,
+            selectedLaunchArgv: [agentScript],
+            requiredCapabilities: ['ACP protocolVersion=1'],
+            probes: []
+          }
+        })
+      });
+    const defaultSettings = {
+      runtimeId,
+      model: 'default',
+      modelProvider: 'cursor',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const createOwnedSession = async (
+      slug: string,
+      settings: typeof defaultSettings
+    ) => {
+      const worktreePath = path.join(directory, slug);
+      await fs.mkdir(worktreePath);
+      const task = await store.createTask({
+        title: slug,
+        prompt: 'Implement the requested change.',
+        repositoryPath: directory,
+        runtimeId,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/${slug}`,
+        worktreePath,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId,
+        requestedSettings: settings
+      });
+      return { task, iteration, worktree, session };
+    };
+
+    const first = createAdapter();
+    try {
+      await first.initialize();
+      await expect(first.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default', displayName: 'Auto' })
+      ]);
+      expect((await store.snapshot()).agentServers).toEqual([]);
+
+      const owned = await createOwnedSession('cursor-default', defaultSettings);
+      await first.createSession({
+        runtimeId,
+        localSessionId: owned.session.id,
+        taskId: owned.task.id,
+        iterationId: owned.iteration.id,
+        worktreeId: owned.worktree.id,
+        worktreePath: owned.worktree.worktreePath,
+        settings: defaultSettings
+      });
+      await expect(first.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default[]', displayName: 'Auto', isDefault: true }),
+        expect.objectContaining({
+          model: exactModel,
+          displayName: 'grok-4.5',
+          isDefault: false,
+          native: {
+            source: 'task-owned-session-model-selector',
+            configId: 'model'
+          }
+        }),
+        expect.objectContaining({
+          model: 'composer-2.5[fast=true]',
+          displayName: 'composer-2.5'
+        })
+      ]);
+      await first.shutdown();
+      await first.initialize();
+      const reenabled = await createOwnedSession('cursor-reenabled', defaultSettings);
+      await expect(
+        first.createSession({
+          runtimeId,
+          localSessionId: reenabled.session.id,
+          taskId: reenabled.task.id,
+          iterationId: reenabled.iteration.id,
+          worktreeId: reenabled.worktree.id,
+          worktreePath: reenabled.worktree.worktreePath,
+          settings: defaultSettings
+        })
+      ).resolves.toMatchObject({
+        id: reenabled.session.id,
+        providerSessionId: expect.any(String)
+      });
+    } finally {
+      await first.shutdown();
+    }
+
+    const serverCountBeforeRestore = (await store.snapshot()).agentServers.length;
+    const restored = createAdapter();
+    try {
+      await restored.initialize();
+      await expect(restored.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default[]', displayName: 'Auto' }),
+        expect.objectContaining({ model: exactModel }),
+        expect.objectContaining({ model: 'composer-2.5[fast=true]' })
+      ]);
+      expect((await store.snapshot()).agentServers).toHaveLength(serverCountBeforeRestore);
+
+      const selectedSettings = { ...defaultSettings, model: exactModel };
+      await expect(
+        restored.resolveExecution({ settings: selectedSettings, attachments: [] })
+      ).resolves.toMatchObject({
+        settings: { model: exactModel, modelProvider: 'cursor' },
+        model: { model: exactModel }
+      });
+      const selected = await createOwnedSession('cursor-selected', selectedSettings);
+      await restored.createSession({
+        runtimeId,
+        localSessionId: selected.session.id,
+        taskId: selected.task.id,
+        iterationId: selected.iteration.id,
+        worktreeId: selected.worktree.id,
+        worktreePath: selected.worktree.worktreePath,
+        settings: selectedSettings
+      });
+      await expect(restored.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default[]', isDefault: true }),
+        expect.objectContaining({ model: exactModel, isDefault: false }),
+        expect.objectContaining({ model: 'composer-2.5[fast=true]', isDefault: false })
+      ]);
+      expect(await protocolMethodCount(store, 'session/set_config_option')).toBe(1);
+      const activeServer = (await store.snapshot()).agentServers.find(
+        (server) => server.status === 'READY'
+      );
+      expect(activeServer).toBeDefined();
+      const journal = await fs.readFile(activeServer!.protocolJournalPath, 'utf8');
+      expect(
+        journal
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(JSON.parse(line).raw))
+      ).toContainEqual({
+        jsonrpc: '2.0',
+        id: expect.any(Number),
+        method: 'session/set_config_option',
+        params: {
+          sessionId: expect.any(String),
+          configId: 'model',
+          value: exactModel
+        }
+      });
+
+      await fs.writeFile(catalogMarker, 'stale');
+      const stale = await createOwnedSession('cursor-stale', selectedSettings);
+      await expect(
+        restored.createSession({
+          runtimeId,
+          localSessionId: stale.session.id,
+          taskId: stale.task.id,
+          iterationId: stale.iteration.id,
+          worktreeId: stale.worktree.id,
+          worktreePath: stale.worktree.worktreePath,
+          settings: selectedSettings
+        })
+      ).rejects.toThrow(`does not offer value ${exactModel}`);
+      expect(await protocolMethodCount(store, 'session/set_config_option')).toBe(1);
+      await expect(restored.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default[]', displayName: 'Auto' })
+      ]);
+    } finally {
+      await restored.shutdown();
+    }
+  });
+
   it('replaces a valid Grok catalog and quarantines a rejected replacement', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-grok-model-update-')
@@ -1847,6 +2059,56 @@ describe('AcpRuntimeAdapter end-to-end', () => {
 });
 
 describe('AcpRuntimeAdapter process safety fence', () => {
+  it('retains and fences an unfenced supervisor when shutdown rejects', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-shutdown-fence-')
+    );
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const server = await store.createAgentServer({
+      runtimeId: 'test-acp-shutdown-fence',
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: '/fake/acp',
+      argv: ['--acp'],
+      schemaVersion: '1.19.0'
+    });
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: 'test-acp-shutdown-fence' }
+    };
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory
+    });
+    const shutdownFailure = new Error('ACP supervisor shutdown rejected');
+    const fakeSupervisor = {
+      currentServer: server,
+      currentClient: {} as AcpRpcClient,
+      safetyFenceReason: undefined,
+      shutdown: vi.fn().mockRejectedValue(shutdownFailure)
+    };
+    const internals = adapter as unknown as {
+      supervisor?: typeof fakeSupervisor;
+      initialized: boolean;
+      runtimeSafetyFence?: Error;
+    };
+    internals.supervisor = fakeSupervisor;
+    internals.initialized = true;
+
+    await expect(adapter.shutdown()).rejects.toThrow(
+      'ACP runtime shutdown was incomplete.'
+    );
+    expect(internals.supervisor).toBe(fakeSupervisor);
+    expect(internals.initialized).toBe(true);
+    expect(internals.runtimeSafetyFence?.message).toContain(
+      'safety-fenced until Task Monki restarts'
+    );
+    await expect(adapter.initialize()).rejects.toThrow(
+      'safety-fenced until Task Monki restarts'
+    );
+    expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+  });
+
   it('retains a failed quarantine and rejects every later runtime operation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
@@ -1897,6 +2159,9 @@ describe('AcpRuntimeAdapter process safety fence', () => {
     await expect(
       adapter.configureRuntime({ executable: '/replacement/acp', restart: true })
     ).rejects.toThrow('safety-fenced until Task Monki restarts');
+    await expect(adapter.initialize()).rejects.toThrow(
+      'safety-fenced until Task Monki restarts'
+    );
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
   });
 });
@@ -2124,6 +2389,168 @@ describe('AcpRuntimeAdapter native settings', () => {
 });
 
 describe('AcpRuntimeAdapter permission materialization', () => {
+  it.each([
+    {
+      profileName: 'Cursor',
+      allowOpaqueExecuteOnce: true,
+      expectedActions: ['ACCEPT', 'DECLINE', 'CANCEL']
+    },
+    {
+      profileName: 'another ACP runtime',
+      allowOpaqueExecuteOnce: false,
+      expectedActions: ['DECLINE', 'CANCEL']
+    }
+  ])(
+    'keeps opaque execute approval profile-scoped for $profileName',
+    async ({ profileName, allowOpaqueExecuteOnce, expectedActions }) => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-acp-opaque-permission-')
+      );
+      temporaryDirectories.push(directory);
+      const agentScript = path.join(directory, 'permission-agent.cjs');
+      await fs.writeFile(agentScript, permissionMaterializationAgentSource(), {
+        mode: 0o600
+      });
+      const runtimeId = allowOpaqueExecuteOnce
+        ? 'test-cursor-opaque-permission'
+        : 'test-acp-opaque-permission';
+      const profile: AcpRuntimeProfile = {
+        ...TEST_ACP_PROFILE,
+        descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+        ...(allowOpaqueExecuteOnce ? { allowOpaqueExecuteOnce: true as const } : {}),
+        executableCandidates: [process.execPath],
+        argv: [agentScript]
+      };
+      const store = new FileTaskStore(path.join(directory, 'store'));
+      const events = new AppEventBus();
+      const adapter = new AcpRuntimeAdapter(store, events, profile, {
+        cwd: directory,
+        requestTimeoutMs: 1_000,
+        runtimeResolver: async () => ({
+          executable: process.execPath,
+          version: process.version,
+          diagnostics: {
+            selectedExecutable: process.execPath,
+            selectedSource: 'test',
+            selectedVersion: process.version,
+            selectedLaunchArgv: [agentScript],
+            requiredCapabilities: ['ACP protocolVersion=1'],
+            probes: []
+          }
+        })
+      });
+      const settings = {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'test-provider',
+        sandbox: 'DANGER_FULL_ACCESS' as const,
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user' as const
+      };
+      const task = await store.createTask({
+        title: `${profileName} opaque permission`,
+        prompt: 'Request an opaque execute permission.',
+        repositoryPath: directory,
+        runtimeId,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/${runtimeId}`,
+        worktreePath: directory,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId,
+        requestedSettings: settings
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        requestedSettings: settings
+      });
+
+      try {
+        await adapter.initialize();
+        await adapter.startTurn({
+          localRunId: run.id,
+          session: { localSessionId: session.id },
+          mode: 'IMPLEMENTATION',
+          prompt: task.prompt,
+          authoritativeGoal: task.prompt,
+          settings,
+          attachments: []
+        });
+        const runtimeInternals = adapter as unknown as {
+          boundClient?: AcpRpcClient;
+        };
+        const client = runtimeInternals.boundClient!;
+        const server = (await store.snapshot()).agentServers.find(
+          (candidate) => candidate.status === 'RUNNING'
+        )!;
+        const requestId = `opaque-permission-${runtimeId}`;
+        const request = {
+          jsonrpc: '2.0' as const,
+          id: requestId,
+          method: 'session/request_permission',
+          params: {
+            sessionId: 'permission-materialization-session',
+            toolCall: {
+              toolCallId: `opaque-tool-${runtimeId}`,
+              title: 'Run command',
+              kind: 'execute'
+            },
+            options: [
+              { optionId: 'opaque-allow-once', name: 'Allow once', kind: 'allow_once' },
+              { optionId: 'opaque-reject-once', name: 'Reject', kind: 'reject_once' }
+            ]
+          }
+        };
+        const raw = await store.appendProtocolMessage(
+          server.id,
+          'INBOUND',
+          JSON.stringify(request)
+        );
+        client.events.emit('request', request, raw);
+
+        const pending = await waitFor(async () =>
+          (await store.snapshot()).interactionRequests.find(
+            (interaction) => interaction.runId === run.id && interaction.status === 'PENDING'
+          )
+        );
+        expect(pending.allowedActions).toEqual(expectedActions);
+
+        if (allowOpaqueExecuteOnce) {
+          const interactionService = new AgentInteractionService(store, events, () => adapter);
+          await interactionService.respond({
+            taskId: task.id,
+            runId: run.id,
+            interactionRequestId: pending.id,
+            decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+          });
+          const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+          const messages = journal
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(JSON.parse(line).raw));
+          expect(messages).toContainEqual({
+            jsonrpc: '2.0',
+            id: requestId,
+            result: { outcome: { outcome: 'selected', optionId: 'opaque-allow-once' } }
+          });
+        }
+      } finally {
+        await adapter.shutdown();
+      }
+    }
+  );
+
   it.each([
     {
       boundary: 'atomic activation before publication',
@@ -2785,6 +3212,67 @@ function itemPayloadText(item: { payload: unknown } | undefined): string {
   if (!item || typeof item.payload !== 'object' || item.payload === null) return '';
   const text = (item.payload as { text?: unknown }).text;
   return typeof text === 'string' ? text : '';
+}
+
+function cursorModelSelectorAgentSource(
+  catalogMarker: string,
+  sessionSequence: string
+): string {
+  return `
+const fs = require('node:fs');
+const readline = require('node:readline');
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const fullOptions = [
+  { value: 'default[]', name: 'Auto' },
+  { value: 'grok-4.5[effort=high,fast=true]', name: 'grok-4.5' },
+  { value: 'composer-2.5[fast=true]', name: 'composer-2.5' }
+];
+const selector = (currentValue, options = fullOptions) => ({
+  id: 'model',
+  name: 'Model',
+  category: 'model',
+  type: 'select',
+  currentValue,
+  options
+});
+const nextSessionId = () => {
+  let sequence = 0;
+  try { sequence = Number(fs.readFileSync(${JSON.stringify(sessionSequence)}, 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  sequence += 1;
+  fs.writeFileSync(${JSON.stringify(sessionSequence)}, String(sequence));
+  return 'cursor-session-' + sequence;
+};
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { promptCapabilities: {} },
+      agentInfo: { name: 'cursor-selector-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'session/new') {
+    let stale = false;
+    try { stale = fs.readFileSync(${JSON.stringify(catalogMarker)}, 'utf8') === 'stale'; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      sessionId: nextSessionId(),
+      configOptions: [selector('default[]', stale ? [fullOptions[0]] : fullOptions)]
+    }});
+    return;
+  }
+  if (message.method === 'session/set_config_option') {
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      configOptions: [selector(message.params.value)]
+    }});
+    return;
+  }
+  send({ jsonrpc: '2.0', id: message.id, result: {} });
+});
+`;
 }
 
 async function createStreamSafetyHarness(scenario: string, secret = 'test-stream-secret') {

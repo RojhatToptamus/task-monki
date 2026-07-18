@@ -13,7 +13,7 @@ describe('browser development runtime isolation', () => {
   const descriptor: AgentRuntimeDescriptor = {
     id: 'test-runtime',
     displayName: 'Test Runtime',
-    kind: 'NATIVE_AGENT',
+    kind: 'ACP_AGENT',
     transport: 'STDIO',
     lifecycleScope: 'APPLICATION'
   };

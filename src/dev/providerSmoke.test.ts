@@ -197,9 +197,9 @@ describe('runProviderSmoke', () => {
 
   it('reports an exact adapter resolution without calling it provider-confirmed', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
-    const candidate = model('antigravity:google/Gemini Low');
+    const candidate = model('grok-acp:xai/grok-build');
     const service = new FakeProviderSmokeService(repositoryPath, {
-      catalogs: [catalogWith([runtime('antigravity', 'READY', true, [candidate])])],
+      catalogs: [catalogWith([runtime('grok-acp', 'READY', true, [candidate])])],
       observation: 'adapter'
     });
 

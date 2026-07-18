@@ -108,7 +108,7 @@ function state(
       runtime: {
         id: 'test',
         displayName: 'Test',
-        kind: 'NATIVE_AGENT',
+        kind: 'ACP_AGENT',
         transport: 'IN_PROCESS',
         lifecycleScope: 'APPLICATION'
       },

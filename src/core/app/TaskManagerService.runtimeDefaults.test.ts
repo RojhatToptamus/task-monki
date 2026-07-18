@@ -89,7 +89,6 @@ describe('TaskManagerService runtime execution defaults', () => {
     expect(catalog.runtimes.map((runtime) => runtime.preflight.runtime.id)).toEqual([
       'codex',
       'opencode',
-      'antigravity',
       'grok-acp',
       'cursor-agent-acp',
       'claude-agent-acp'
@@ -165,6 +164,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       agentRuntimeAdapters: [adapter],
       openCodePath: '/debug/overrides/opencode',
       appSettingsStore: new MemoryAppSettingsStore({
+        defaultRuntimeId: 'opencode',
         runtimeExecutablePaths: { opencode: '/saved/opencode' }
       }),
       agentProviderStartupDisabledReason: 'settings-only test'
@@ -219,7 +219,9 @@ describe('TaskManagerService runtime execution defaults', () => {
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
     const configureRuntime = vi.fn(async () => undefined);
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
-    const settingsStore = new MemoryAppSettingsStore();
+    const settingsStore = new MemoryAppSettingsStore({
+      defaultRuntimeId: 'opencode'
+    });
     const service = new TaskManagerService(store, dir, undefined, {
       agentRuntimeAdapters: [adapter],
       appSettingsStore: settingsStore,

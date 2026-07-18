@@ -63,7 +63,7 @@ export interface AgentRuntimeCapabilities {
   extensions: Record<string, AgentCapability>;
 }
 
-export type AgentRuntimeLifecycleScope = 'APPLICATION' | 'SESSION' | 'TURN';
+export type AgentRuntimeLifecycleScope = 'APPLICATION' | 'SESSION';
 export type AgentRuntimeStartupPolicy = 'EAGER' | 'ON_DEMAND';
 
 export interface AgentRuntimeDescriptor {
@@ -112,6 +112,7 @@ export type AgentRecoveryState =
   | 'REQUIRES_USER_ACTION'
   | 'UNRECOVERABLE';
 
+/** Durable server evidence vocabulary; registered runtimes are defined independently. */
 export type AgentRuntimeKind = 'APP_SERVER' | 'HTTP_AGENT' | 'ACP_AGENT' | 'NATIVE_AGENT';
 export type AgentTransport = 'STDIO' | 'HTTP_SSE' | 'UNIX_SOCKET' | 'IN_PROCESS';
 export type AgentServerStatus =
@@ -207,7 +208,7 @@ export interface TaskManagerRepositorySettings {
   selectedPath: string | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 6 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 7 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -215,6 +216,7 @@ export interface TaskManagerAppSettings {
   sidebarCollapsed: boolean;
   showMascot: boolean;
   firstLaunchSetupCompleted: boolean;
+  disabledRuntimeIds: AgentRuntimeId[];
   defaultRuntimeId: AgentRuntimeId;
   defaultModel?: string;
   defaultModelProvider?: AgentModelProviderId;
@@ -252,6 +254,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   sidebarCollapsed: false,
   showMascot: true,
   firstLaunchSetupCompleted: false,
+  disabledRuntimeIds: [],
   defaultRuntimeId: CODEX_RUNTIME_ID,
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,

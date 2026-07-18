@@ -139,6 +139,34 @@ describe('AgentRuntimeRegistry', () => {
     expect(adapter.listModels).not.toHaveBeenCalled();
   });
 
+  it('reports user-disabled runtimes without probing or discovering models', async () => {
+    const adapter = runtime('cursor-agent-acp');
+    const registry = new AgentRuntimeRegistry([adapter], 'cursor-agent-acp');
+
+    const catalog = await registry.getCatalog({
+      disabledRuntimeIds: new Set(['cursor-agent-acp'])
+    });
+
+    expect(catalog.runtimes[0]).toMatchObject({
+      preflight: {
+        readiness: {
+          status: 'DISABLED',
+          canStart: false,
+          nextAction: { kind: 'CONFIGURE', label: 'Enable in Settings' },
+          diagnostics: [
+            expect.objectContaining({
+              code: 'RUNTIME_DISABLED',
+              stage: 'CONFIGURATION'
+            })
+          ]
+        }
+      },
+      models: []
+    });
+    expect(adapter.preflight).not.toHaveBeenCalled();
+    expect(adapter.listModels).not.toHaveBeenCalled();
+  });
+
   it('returns readiness advanced by live model discovery', async () => {
     const descriptor: AgentRuntimeDescriptor = {
       id: 'grok-acp',
@@ -246,7 +274,7 @@ function runtime(
   const descriptor: AgentRuntimeDescriptor = {
     id: runtimeId,
     displayName: runtimeId,
-    kind: 'NATIVE_AGENT',
+    kind: 'ACP_AGENT',
     transport: 'IN_PROCESS',
     lifecycleScope: 'APPLICATION'
   };

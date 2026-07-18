@@ -81,14 +81,10 @@ import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
 import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import { OpenCodeAdapter } from '../agent/opencode/OpenCodeAdapter';
-import { AntigravityAdapter } from '../agent/antigravity/AntigravityAdapter';
-import {
-  ANTIGRAVITY_RUNTIME_ID,
-  TASK_MONKI_ANTIGRAVITY_BIN_ENV
-} from '../agent/antigravity/AntigravityCapabilities';
 import { AcpRuntimeAdapter } from '../agent/acp/AcpRuntimeAdapter';
 import { ACP_RUNTIME_PROFILES } from '../agent/acp/AcpRuntimeProfiles';
 import {
+  mergeAppSettings,
   MemoryAppSettingsStore,
   type AppSettingsStorage
 } from '../settings/AppSettingsStore';
@@ -118,6 +114,12 @@ export class TaskManagerService {
   private readonly runtimeExecutableOverrides: Readonly<Record<string, string | undefined>>;
   private readonly taskActionLocks = new Map<string, string>();
   private readonly activeAttachmentDrafts = new Set<string>();
+  private runtimeLifecycleTail: Promise<void> = Promise.resolve();
+  private readonly activeRuntimeOperations = new Set<Promise<void>>();
+  private runtimeLifecycleClosing = false;
+  private readonly postRunEvidenceTasks = new Set<Promise<void>>();
+  private readonly disposeAgentEventListener: () => void;
+  private shutdownPromise?: Promise<void>;
   private readonly agentProviderStartupDisabledReason?: string;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
 
@@ -131,7 +133,6 @@ export class TaskManagerService {
       ghPath?: string;
       codexPath?: string;
       openCodePath?: string;
-      antigravityPath?: string;
       acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
@@ -149,8 +150,6 @@ export class TaskManagerService {
     this.runtimeExecutableOverrides = {
       opencode:
         options.openCodePath ?? process.env.TASK_MONKI_OPENCODE_BIN,
-      [ANTIGRAVITY_RUNTIME_ID]:
-        options.antigravityPath ?? process.env[TASK_MONKI_ANTIGRAVITY_BIN_ENV],
       ...Object.fromEntries(
         ACP_RUNTIME_PROFILES.map((profile) => [
           profile.descriptor.id,
@@ -175,7 +174,6 @@ export class TaskManagerService {
         cwd: agentCwd,
         codexExecutable: options.codexPath,
         openCodeExecutable: options.openCodePath,
-        antigravityExecutable: options.antigravityPath,
         acpExecutablePaths: options.acpExecutablePaths,
         browserDevBoundary: this.browserDevAgentBoundary,
         codexToolSettings: this.appSettings.codexExternalTools
@@ -203,41 +201,43 @@ export class TaskManagerService {
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
     this.github = new GitHubService(options.ghPath);
-    this.events.on((event) => {
+    this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
-        void this.capturePostRunEvidence(event.runId);
+        this.trackPostRunEvidence(event.runId);
       }
     });
   }
 
   async init(): Promise<void> {
-    await this.store.init();
-    this.appSettings = await this.loadBoundarySafeAppSettings();
-    await this.applyRuntimeSettings({
-      restartCodex: false,
-      updateCodex: true,
-      updateAgentRuntimes: true,
-      restartAgentRuntimes: false
+    return this.withRuntimeLifecycleChange(async () => {
+      await this.store.init();
+      this.appSettings = await this.loadBoundarySafeAppSettings();
+      await this.assertRuntimeEnablementValid(this.appSettings);
+      await this.applyRuntimeSettings({
+        restartCodex: false,
+        updateCodex: true,
+        updateAgentRuntimes: true,
+        restartAgentRuntimes: false
+      });
+      await this.agents.initialize(
+        [this.appSettings.defaultRuntimeId],
+        new Set(this.appSettings.disabledRuntimeIds)
+      );
+      if (this.agentProviderStartupDisabledReason) {
+        return;
+      }
+      const snapshot = await this.store.snapshot();
+      const recoveryTaskIds = new Set(
+        snapshot.runs
+          .filter((run) => run.recoveryState !== 'NONE')
+          .map((run) => run.taskId)
+      );
+      await Promise.all(
+        [...recoveryTaskIds].map((taskId) =>
+          this.refreshEvidence({ taskId }).catch(() => undefined)
+        )
+      );
     });
-    await this.agents.initialize([
-      this.runtimeRegistry.has(this.appSettings.defaultRuntimeId)
-        ? this.appSettings.defaultRuntimeId
-        : this.runtimeRegistry.defaultRuntimeId
-    ]);
-    if (this.agentProviderStartupDisabledReason) {
-      return;
-    }
-    const snapshot = await this.store.snapshot();
-    const recoveryTaskIds = new Set(
-      snapshot.runs
-        .filter((run) => run.recoveryState !== 'NONE')
-        .map((run) => run.taskId)
-    );
-    await Promise.all(
-      [...recoveryTaskIds].map((taskId) =>
-        this.refreshEvidence({ taskId }).catch(() => undefined)
-      )
-    );
   }
 
   getDefaultRepositoryPath(): string {
@@ -252,6 +252,15 @@ export class TaskManagerService {
   async updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
+    return this.withRuntimeLifecycleChange(() =>
+      this.updateAppSettingsLocked(input)
+    );
+  }
+
+  private async updateAppSettingsLocked(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    const current = await this.appSettingsStore.get();
     for (const runtimeId of [
       input.defaultRuntimeId,
       input.promptRefinementRuntimeId,
@@ -292,7 +301,7 @@ export class TaskManagerService {
       this.browserDevAgentBoundary &&
       input.codexExternalTools &&
       !codexExternalToolsAreDisabled({
-        ...(await this.appSettingsStore.get()).codexExternalTools,
+        ...current.codexExternalTools,
         ...input.codexExternalTools
       })
     ) {
@@ -306,14 +315,43 @@ export class TaskManagerService {
           codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
         }
       : input;
-    this.appSettings = await this.appSettingsStore.update(safeInput);
+    const prospective = mergeAppSettings(current, safeInput);
+    await this.assertRuntimeEnablementValid(prospective, current);
+    const newlyDisabledRuntimeIds = prospective.disabledRuntimeIds.filter(
+      (runtimeId) => !current.disabledRuntimeIds.includes(runtimeId)
+    );
+    const newlyEnabledRuntimeIds = current.disabledRuntimeIds.filter(
+      (runtimeId) => !prospective.disabledRuntimeIds.includes(runtimeId)
+    );
+    const stoppedRuntimeIds: TaskManagerAppSettings['disabledRuntimeIds'] = [];
+    try {
+      for (const runtimeId of newlyDisabledRuntimeIds) {
+        stoppedRuntimeIds.push(runtimeId);
+        await this.runtimeRegistry.require(runtimeId).shutdown();
+      }
+      this.appSettings = await this.appSettingsStore.update(safeInput);
+    } catch (cause) {
+      const recoveryFailures = await this.runtimeRegistry.initialize(stoppedRuntimeIds);
+      if (recoveryFailures.length > 0) {
+        throw new AggregateError(
+          [cause, ...recoveryFailures.map((failure) => failure.error)],
+          'Runtime disablement failed and Task Monki could not restore every stopped provider.'
+        );
+      }
+      throw cause;
+    }
     const affectsExternalTools = Boolean(
       input.codexExternalTools ||
       input.externalExecutables ||
       input.runtimeExecutablePaths
     );
+    const affectsRuntimeAvailability = input.disabledRuntimeIds !== undefined;
+    let runtimeConfigurationChanged = false;
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
+      runtimeConfigurationChanged = Boolean(
+        affectsCodexRuntime || input.runtimeExecutablePaths
+      );
       const hasActiveAgentRun = await this.hasActiveAgentRun();
       try {
         await this.applyRuntimeSettings({
@@ -325,14 +363,15 @@ export class TaskManagerService {
       } catch {
         // The setting is still saved; provider/tool status reports the runtime failure.
       }
-      if (affectsCodexRuntime || input.runtimeExecutablePaths) {
-        this.events.emit({
-          type: 'runtime.updated',
-          taskId: 'settings',
-          payload: await this.getAgentRuntimeCatalog(),
-          at: new Date().toISOString()
-        });
-      }
+    }
+    await this.initializeEnabledRuntimes(newlyEnabledRuntimeIds);
+    if (affectsRuntimeAvailability || runtimeConfigurationChanged) {
+      this.events.emit({
+        type: 'runtime.updated',
+        taskId: 'settings',
+        payload: await this.getAgentRuntimeCatalogUnlocked(),
+        at: new Date().toISOString()
+      });
     }
     return structuredClone(this.appSettings);
   }
@@ -375,8 +414,12 @@ export class TaskManagerService {
     return validateRepositoryPath(repositoryPath);
   }
 
-  getAgentRuntimeCatalog() {
-    return this.agents.getRuntimeCatalog();
+  async getAgentRuntimeCatalog() {
+    return this.withRuntimeOperation(() => this.getAgentRuntimeCatalogUnlocked());
+  }
+
+  private getAgentRuntimeCatalogUnlocked() {
+    return this.agents.getRuntimeCatalog(new Set(this.appSettings.disabledRuntimeIds));
   }
 
   async updateAgentNativeSession(
@@ -400,74 +443,77 @@ export class TaskManagerService {
         'A task, session, and runtime are required for native session updates.'
       );
     }
-    return this.withTaskAction(input.taskId, 'Provider session update', async () => {
-      const session = await this.store.getAgentSession(input.sessionId);
-      if (!session || session.taskId !== input.taskId) {
-        throw new Error('Agent session ownership does not match the selected task.');
-      }
-      if (session.runtimeId !== input.runtimeId) {
-        throw new Error(
-          `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
-        );
-      }
-      const snapshot = await this.store.snapshot();
-      if (
-        snapshot.runs.some(
-          (run) =>
-            run.sessionId === session.id &&
-            [
-              'QUEUED',
-              'STARTING',
-              'RUNNING',
-              'AWAITING_APPROVAL',
-              'AWAITING_USER_INPUT',
-              'INTERRUPTING',
-              'RECOVERY_REQUIRED'
-            ].includes(run.status)
-        )
-      ) {
-        throw new Error(
-          'Provider-native session settings cannot change during an active or recovery-required run.'
-        );
-      }
-      if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
-        throw new Error(
-          `Agent session ${session.id} is ${session.status} and cannot be configured.`
-        );
-      }
-
-      const adapter = this.runtimeRegistry.require(input.runtimeId);
-      await this.assertAgentRuntimeAvailable();
-      await this.assertRuntimeAllowedInCurrentSurface(adapter);
-      if (!adapter.applySessionControl) {
-        throw new Error(
-          `${adapter.descriptor.displayName} does not expose typed provider session controls.`
-        );
-      }
-      if (session.status === 'NOT_LOADED') {
-        if (!session.providerSessionId) {
-          throw new Error(`Agent session ${session.id} has no provider session ID.`);
+    return this.withTaskAction(input.taskId, 'Provider session update', () =>
+      this.withRuntimeOperation(async () => {
+        const session = await this.store.getAgentSession(input.sessionId);
+        if (!session || session.taskId !== input.taskId) {
+          throw new Error('Agent session ownership does not match the selected task.');
         }
-        await adapter.attachSession({
-          localSessionId: session.id,
-          providerSessionId: session.providerSessionId
-        });
-      }
+        if (session.runtimeId !== input.runtimeId) {
+          throw new Error(
+            `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
+          );
+        }
+        const snapshot = await this.store.snapshot();
+        if (
+          snapshot.runs.some(
+            (run) =>
+              run.sessionId === session.id &&
+              [
+                'QUEUED',
+                'STARTING',
+                'RUNNING',
+                'AWAITING_APPROVAL',
+                'AWAITING_USER_INPUT',
+                'INTERRUPTING',
+                'RECOVERY_REQUIRED'
+              ].includes(run.status)
+          )
+        ) {
+          throw new Error(
+            'Provider-native session settings cannot change during an active or recovery-required run.'
+          );
+        }
+        if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
+          throw new Error(
+            `Agent session ${session.id} is ${session.status} and cannot be configured.`
+          );
+        }
 
-      const updated = await adapter.applySessionControl({
-        localSessionId: session.id,
-        controlId: input.controlId,
-        value: input.value,
-        revision: input.revision
-      });
-      return {
-        taskId: session.taskId,
-        sessionId: session.id,
-        runtimeId: session.runtimeId,
-        native: updated.native,
-        controls: updated.controls
-      };
-    });
+        this.assertRuntimeEnabled(input.runtimeId);
+        const adapter = this.runtimeRegistry.require(input.runtimeId);
+        await this.assertAgentRuntimeAvailable();
+        await this.assertRuntimeAllowedInCurrentSurface(adapter);
+        if (!adapter.applySessionControl) {
+          throw new Error(
+            `${adapter.descriptor.displayName} does not expose typed provider session controls.`
+          );
+        }
+        if (session.status === 'NOT_LOADED') {
+          if (!session.providerSessionId) {
+            throw new Error(`Agent session ${session.id} has no provider session ID.`);
+          }
+          await adapter.attachSession({
+            localSessionId: session.id,
+            providerSessionId: session.providerSessionId
+          });
+        }
+
+        const updated = await adapter.applySessionControl({
+          localSessionId: session.id,
+          controlId: input.controlId,
+          value: input.value,
+          revision: input.revision
+        });
+        return {
+          taskId: session.taskId,
+          sessionId: session.id,
+          runtimeId: session.runtimeId,
+          native: updated.native,
+          controls: updated.controls
+        };
+      })
+    );
   }
 
   listTasks(): Promise<TaskSnapshot> {
@@ -542,6 +588,10 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
+    return this.withRuntimeOperation(() => this.createTaskLocked(input));
+  }
+
+  private async createTaskLocked(input: CreateTaskRequest): Promise<Task> {
     if (
       input.runtimeId &&
       input.agentSettings?.runtimeId &&
@@ -566,6 +616,7 @@ export class TaskManagerService {
     if (acknowledgedTask) {
       return acknowledgedTask;
     }
+    this.assertRuntimeEnabled(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
     if (!requestedInput.attachmentDraftId) {
       const settings = await prepareTaskCreationSettings(
@@ -602,13 +653,18 @@ export class TaskManagerService {
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
+    return this.withRuntimeOperation(() => this.refinePromptLocked(input));
+  }
+
+  private async refinePromptLocked(
+    input: RefinePromptRequest
+  ): Promise<RefinePromptResponse> {
     await this.assertAgentRuntimeAvailable();
     const configuredRuntimeId =
       this.appSettings.promptRefinementRuntimeId ??
       this.appSettings.defaultRuntimeId;
-    const runtimeId =
-      input.runtimeId ??
-      configuredRuntimeId;
+    const runtimeId = input.runtimeId ?? configuredRuntimeId;
+    this.assertRuntimeEnabled(runtimeId);
     const useConfiguredModel = runtimeId === configuredRuntimeId;
     const adapter = this.runtimeRegistry.require(runtimeId);
     await this.assertRuntimeAllowedInCurrentSurface(adapter);
@@ -701,19 +757,22 @@ export class TaskManagerService {
   }
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent run', async () => {
-      await this.assertAgentRuntimeAvailable();
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-      const worktree = await this.prepareWorktree({ taskId: task.id });
-      return this.startPreparedRun({
-        task,
-        worktree,
-        mode: input.mode,
-        settings: input.settings
-      });
-    });
+    return this.withTaskAction(input.taskId, 'Agent run', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        const task = await this.requireTask(input.taskId);
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
+        const worktree = await this.prepareWorktree({ taskId: task.id });
+        return this.startPreparedRun({
+          task,
+          worktree,
+          mode: input.mode,
+          settings: input.settings
+        });
+      })
+    );
   }
 
   private async startPreparedRun(input: {
@@ -724,6 +783,7 @@ export class TaskManagerService {
   }): Promise<RunRecord> {
     await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
+    this.assertRuntimeEnabled(task.runtimeId);
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
       throw new Error('Task iteration was not created.');
@@ -753,110 +813,124 @@ export class TaskManagerService {
   }
 
   async cancelRun(input: CancelRunRequest): Promise<void> {
-    const run = await this.store.getRun(input.runId);
-    if (!run) return;
-    return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
-      const current = await this.store.getRun(input.runId);
-      if (!current || current.taskId !== run.taskId) return;
-      await this.agents.interruptRun(current.id);
+    return this.withRuntimeOperation(async () => {
+      const run = await this.store.getRun(input.runId);
+      if (!run) return;
+      return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
+        const current = await this.store.getRun(input.runId);
+        if (!current || current.taskId !== run.taskId) return;
+        await this.agents.interruptRun(current.id);
+      });
     });
   }
 
   async steerRun(input: SteerRunRequest): Promise<void> {
-    const run = await this.requireRunForTask(input.runId, input.taskId);
-    const snapshot = await this.store.snapshot();
-    const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
-    return this.agents.steerRun(
-      run.id,
-      buildSteerInstruction({
-        instruction: input.instruction,
-        worktreePath: worktree?.worktreePath
+    return this.withTaskAction(input.taskId, 'Agent steering', () =>
+      this.withRuntimeOperation(async () => {
+        const run = await this.requireRunForTask(input.runId, input.taskId);
+        const snapshot = await this.store.snapshot();
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.id === run.worktreeId
+        );
+        return this.agents.steerRun(
+          run.id,
+          buildSteerInstruction({
+            instruction: input.instruction,
+            worktreePath: worktree?.worktreePath
+          })
+        );
       })
     );
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
-      await this.assertAgentRuntimeAvailable();
-      const { task, run, iteration, worktree } = await this.requireContinuationContext(
-        input.taskId,
-        input.runId
-      );
-      const snapshot = await this.store.snapshot();
-      assertContinuable(run);
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
-        exceptRunId: run.id
-      });
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, false);
-      const prompt = buildContinuationPrompt({
-        task,
-        run,
-        gitSnapshot,
-        instruction: input.instruction,
-        kind: 'continuation'
-      });
-      await this.agents.resolveRecoveryRunForReplacement(run.id);
-      return this.agents.startTurn({
-        task,
-        iteration,
-        worktree,
-        sessionId: run.sessionId,
-        mode: 'FOLLOW_UP',
-        prompt,
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id,
-        continuedFromRunId: run.id
-      });
-    });
+    return this.withTaskAction(input.taskId, 'Agent follow-up', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        const { task, run, iteration, worktree } = await this.requireContinuationContext(
+          input.taskId,
+          input.runId
+        );
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        assertContinuable(run);
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
+          exceptRunId: run.id
+        });
+        const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+        const settings = followUpSettings(task, run, input.settings, false);
+        const prompt = buildContinuationPrompt({
+          task,
+          run,
+          gitSnapshot,
+          instruction: input.instruction,
+          kind: 'continuation'
+        });
+        await this.agents.resolveRecoveryRunForReplacement(run.id);
+        return this.agents.startTurn({
+          task,
+          iteration,
+          worktree,
+          sessionId: run.sessionId,
+          mode: 'FOLLOW_UP',
+          prompt,
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id,
+          continuedFromRunId: run.id
+        });
+      })
+    );
   }
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent retry', async () => {
-      await this.assertAgentRuntimeAvailable();
-      const { task, run, iteration, worktree } = await this.requireContinuationContext(
-        input.taskId,
-        input.runId
-      );
-      const snapshot = await this.store.snapshot();
-      assertRetryable(run);
-      this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
-        exceptRunId: run.id
-      });
-      if (input.strategy === 'FORK') {
-        await this.agents.resolveRecoveryRunForReplacement(run.id);
-        return this.startForkedAlternative({
-          sourceTaskId: task.id,
-          sourceRun: run,
-          sourceWorktree: worktree,
-          instruction: input.instruction,
-          settings: input.settings
+    return this.withTaskAction(input.taskId, 'Agent retry', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        const { task, run, iteration, worktree } = await this.requireContinuationContext(
+          input.taskId,
+          input.runId
+        );
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        assertRetryable(run);
+        this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
+          exceptRunId: run.id
         });
-      }
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, false);
-      const prompt = buildContinuationPrompt({
-        task,
-        run,
-        gitSnapshot,
-        instruction: input.instruction,
-        kind: 'retry'
-      });
-      await this.agents.resolveRecoveryRunForReplacement(run.id);
-      return this.agents.startTurn({
-        task,
-        iteration,
-        worktree,
-        sessionId: run.sessionId,
-        mode: 'RETRY',
-        prompt,
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id,
-        retryOfRunId: run.id
-      });
-    });
+        if (input.strategy === 'FORK') {
+          await this.agents.resolveRecoveryRunForReplacement(run.id);
+          return this.startForkedAlternative({
+            sourceTaskId: task.id,
+            sourceRun: run,
+            sourceWorktree: worktree,
+            instruction: input.instruction,
+            settings: input.settings
+          });
+        }
+        const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+        const settings = followUpSettings(task, run, input.settings, false);
+        const prompt = buildContinuationPrompt({
+          task,
+          run,
+          gitSnapshot,
+          instruction: input.instruction,
+          kind: 'retry'
+        });
+        await this.agents.resolveRecoveryRunForReplacement(run.id);
+        return this.agents.startTurn({
+          task,
+          iteration,
+          worktree,
+          sessionId: run.sessionId,
+          mode: 'RETRY',
+          prompt,
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id,
+          retryOfRunId: run.id
+        });
+      })
+    );
   }
 
   private async startForkedAlternative(input: {
@@ -869,6 +943,7 @@ export class TaskManagerService {
     const sourceTask = await this.requireTask(input.sourceTaskId);
     const alternativeNumber = (sourceTask.forkedAlternativeTaskIds?.length ?? 0) + 1;
     const runtimeId = input.settings?.runtimeId ?? sourceTask.runtimeId;
+    this.assertRuntimeEnabled(runtimeId);
     const alternativeSettings: AgentExecutionSettings = {
       ...sourceTask.agentSettings,
       ...input.settings,
@@ -942,7 +1017,9 @@ export class TaskManagerService {
       await this.codexAdapter.updateRuntimeConfig({
         executable: codexExecutable,
         toolSettings: this.appSettings.codexExternalTools,
-        restart: input.restartCodex
+        restart:
+          input.restartCodex &&
+          !this.appSettings.disabledRuntimeIds.includes(this.codexAdapter.descriptor.id)
       });
     }
     if (input.updateAgentRuntimes) {
@@ -964,12 +1041,32 @@ export class TaskManagerService {
             startupOverride ?? (configured === null ? undefined : configured);
           await adapter.configureRuntime({
             executable,
-            restart: input.restartAgentRuntimes === true
+            restart:
+              input.restartAgentRuntimes === true &&
+              !this.appSettings.disabledRuntimeIds.includes(adapter.descriptor.id)
           });
         })
       );
     }
     return status;
+  }
+
+  private async initializeEnabledRuntimes(
+    runtimeIds: readonly TaskManagerAppSettings['defaultRuntimeId'][]
+  ): Promise<void> {
+    if (runtimeIds.length === 0 || this.agentProviderStartupDisabledReason) return;
+    const eligible: TaskManagerAppSettings['disabledRuntimeIds'] = [];
+    for (const runtimeId of runtimeIds) {
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      if (
+        this.browserDevAgentBoundary &&
+        !hasBrowserDevRuntimeIsolation(await adapter.capabilities())
+      ) {
+        continue;
+      }
+      eligible.push(runtimeId);
+    }
+    await this.runtimeRegistry.initialize(eligible);
   }
 
   private async loadBoundarySafeAppSettings(): Promise<TaskManagerAppSettings> {
@@ -985,109 +1082,173 @@ export class TaskManagerService {
     });
   }
 
+  private async assertRuntimeEnablementValid(
+    prospective: TaskManagerAppSettings,
+    current?: TaskManagerAppSettings
+  ): Promise<void> {
+    const disabled = new Set(prospective.disabledRuntimeIds);
+    for (const runtimeId of disabled) {
+      this.runtimeRegistry.require(runtimeId);
+    }
+    for (const [purpose, runtimeId] of [
+      ['default task', prospective.defaultRuntimeId],
+      ['prompt refinement', prospective.promptRefinementRuntimeId],
+      ['review', prospective.reviewRuntimeId]
+    ] as const) {
+      if (!runtimeId) continue;
+      this.runtimeRegistry.require(runtimeId);
+      if (disabled.has(runtimeId)) {
+        throw new Error(
+          `${this.runtimeRegistry.require(runtimeId).descriptor.displayName} cannot be disabled while it is the ${purpose} runtime.`
+        );
+      }
+    }
+
+    const newlyDisabled = new Set(
+      prospective.disabledRuntimeIds.filter(
+        (runtimeId) => !current?.disabledRuntimeIds.includes(runtimeId)
+      )
+    );
+    if (newlyDisabled.size === 0) return;
+    const activeRun = (await this.store.snapshot()).runs.find(
+      (run) => newlyDisabled.has(run.runtimeId) && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+    );
+    if (activeRun) {
+      const runtime = this.runtimeRegistry.require(activeRun.runtimeId).descriptor.displayName;
+      throw new Error(
+        `${runtime} cannot be disabled while run ${activeRun.id} is active or requires recovery.`
+      );
+    }
+  }
+
+  private assertRuntimeEnabled(runtimeId: TaskManagerAppSettings['defaultRuntimeId']): void {
+    if (!this.appSettings.disabledRuntimeIds.includes(runtimeId)) return;
+    const runtime = this.runtimeRegistry.require(runtimeId).descriptor.displayName;
+    throw new Error(`${runtime} is disabled. Enable it in Settings before starting agent work.`);
+  }
+
   private async hasActiveAgentRun(): Promise<boolean> {
     const snapshot = await this.store.snapshot();
     return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent review', async () => {
-      await this.assertAgentRuntimeAvailable();
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
-      const runId = input.runId ?? task.currentRunId;
-      if (!runId) {
-        throw new Error('Complete an agent turn before starting a detached review.');
-      }
-      const run = await this.requireRunForTask(runId, task.id);
-      if (
-        ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
-          run.status
-        )
-      ) {
-        throw new Error('Wait for the active turn to finish before starting a review.');
-      }
-      if (
-        run.id !== task.currentRunId ||
-        !isImplementationRunMode(run.mode) ||
-        run.status !== 'COMPLETED'
-      ) {
-        throw new Error(
-          'A review requires a successfully completed implementation run. Retry or continue this run first.'
+    return this.withTaskAction(input.taskId, 'Agent review', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        const task = await this.requireTask(input.taskId);
+        const snapshot = await this.store.snapshot();
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
+        const runId = input.runId ?? task.currentRunId;
+        if (!runId) {
+          throw new Error('Complete an agent turn before starting a detached review.');
+        }
+        const run = await this.requireRunForTask(runId, task.id);
+        if (
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT',
+            'INTERRUPTING'
+          ].includes(run.status)
+        ) {
+          throw new Error('Wait for the active turn to finish before starting a review.');
+        }
+        if (
+          run.id !== task.currentRunId ||
+          !isImplementationRunMode(run.mode) ||
+          run.status !== 'COMPLETED'
+        ) {
+          throw new Error(
+            'A review requires a successfully completed implementation run. Retry or continue this run first.'
+          );
+        }
+        const iteration = snapshot.iterations.find(
+          (candidate) => candidate.id === run.iterationId
         );
-      }
-      const iteration = snapshot.iterations.find(
-        (candidate) => candidate.id === run.iterationId
-      );
-      const worktree = snapshot.worktrees.find(
-        (candidate) => candidate.id === run.worktreeId
-      );
-      if (!iteration || !worktree) {
-        throw new Error('The source run no longer has a valid task iteration.');
-      }
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const configuredReviewRuntimeId =
-        this.appSettings.reviewRuntimeId ?? task.runtimeId;
-      const reviewRuntimeId =
-        input.settings?.runtimeId ?? configuredReviewRuntimeId;
-      this.runtimeRegistry.require(reviewRuntimeId);
-      const useConfiguredReviewModel =
-        reviewRuntimeId === configuredReviewRuntimeId;
-      const configuredReviewSettings: AgentExecutionSettings = {
-        ...(useConfiguredReviewModel && this.appSettings.reviewModel
-          ? { model: this.appSettings.reviewModel }
-          : {}),
-        ...(useConfiguredReviewModel && this.appSettings.reviewModelProvider
-          ? { modelProvider: this.appSettings.reviewModelProvider }
-          : {}),
-        ...(useConfiguredReviewModel && this.appSettings.reviewReasoningEffort
-          ? { reasoningEffort: this.appSettings.reviewReasoningEffort }
-          : {}),
-        ...input.settings,
-        runtimeId: reviewRuntimeId
-      };
-      const settings =
-        reviewRuntimeId === run.runtimeId
-          ? followUpSettings(task, run, configuredReviewSettings, true)
-          : mergeRunSettings({
-              readOnly: true,
-              settings: [
-                portableSecuritySettings(run.requestedSettings),
-                configuredReviewSettings
-              ]
-            });
-      return this.agents.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun: run,
-        target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id
-      });
-    });
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.id === run.worktreeId
+        );
+        if (!iteration || !worktree) {
+          throw new Error('The source run no longer has a valid task iteration.');
+        }
+        const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
+        const configuredReviewRuntimeId =
+          this.appSettings.reviewRuntimeId ?? task.runtimeId;
+        const reviewRuntimeId = input.settings?.runtimeId ?? configuredReviewRuntimeId;
+        this.assertRuntimeEnabled(reviewRuntimeId);
+        this.runtimeRegistry.require(reviewRuntimeId);
+        const useConfiguredReviewModel = reviewRuntimeId === configuredReviewRuntimeId;
+        const configuredReviewSettings: AgentExecutionSettings = {
+          ...(useConfiguredReviewModel && this.appSettings.reviewModel
+            ? { model: this.appSettings.reviewModel }
+            : {}),
+          ...(useConfiguredReviewModel && this.appSettings.reviewModelProvider
+            ? { modelProvider: this.appSettings.reviewModelProvider }
+            : {}),
+          ...(useConfiguredReviewModel && this.appSettings.reviewReasoningEffort
+            ? { reasoningEffort: this.appSettings.reviewReasoningEffort }
+            : {}),
+          ...input.settings,
+          runtimeId: reviewRuntimeId
+        };
+        const settings =
+          reviewRuntimeId === run.runtimeId
+            ? followUpSettings(task, run, configuredReviewSettings, true)
+            : mergeRunSettings({
+                readOnly: true,
+                settings: [
+                  portableSecuritySettings(run.requestedSettings),
+                  configuredReviewSettings
+                ]
+              });
+        return this.agents.startReview({
+          task,
+          iteration,
+          worktree,
+          sourceRun: run,
+          target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id
+        });
+      })
+    );
   }
 
   async syncAgentGoal(input: SyncAgentGoalRequest) {
-    await this.assertAgentRuntimeAvailable();
-    const task = await this.requireTask(input.taskId);
-    return this.agents.syncGoal(task, input.sessionId);
+    return this.withRuntimeOperation(async () => {
+      await this.assertAgentRuntimeAvailable();
+      const task = await this.requireTask(input.taskId);
+      this.assertRuntimeEnabled(task.runtimeId);
+      return this.agents.syncGoal(task, input.sessionId);
+    });
   }
 
   respondToInteraction(input: RespondToInteractionRequest) {
     return this.withTaskAction(input.taskId, 'Interaction response', () =>
-      this.agents.respondToInteraction(input)
+      this.withRuntimeOperation(() => this.agents.respondToInteraction(input))
     );
   }
 
-  async shutdown(): Promise<void> {
-    try {
-      await this.agents.shutdown();
-    } finally {
-      await this.store.close();
-    }
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.runtimeLifecycleClosing = true;
+    this.shutdownPromise = this.enqueueRuntimeLifecycle(async () => {
+      try {
+        await this.agents.shutdown();
+      } finally {
+        try {
+          await this.drainPostRunEvidence();
+        } finally {
+          this.disposeAgentEventListener();
+          await this.store.close();
+        }
+      }
+    });
+    return this.shutdownPromise;
   }
 
   private async assertAgentRuntimeAvailable(): Promise<void> {
@@ -1352,37 +1513,39 @@ export class TaskManagerService {
   }
 
   async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
-    return this.withTaskAction(input.taskId, 'Task deletion', async () => {
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      const blockedReason = taskDeletionBlocker(task, snapshot);
-      if (blockedReason) {
-        throw new Error(blockedReason);
-      }
-
-      await this.agents.releaseTask(task.id);
-
-      let removedWorktree = false;
-      if (input.removeWorktree) {
-        const worktrees = snapshot.worktrees.filter(
-          (worktree) => worktree.taskId === task.id
-        );
-        for (const worktree of worktrees) {
-          await this.worktrees.remove(worktree);
-          removedWorktree = true;
+    return this.withTaskAction(input.taskId, 'Task deletion', () =>
+      this.withRuntimeOperation(async () => {
+        const task = await this.requireTask(input.taskId);
+        const snapshot = await this.store.snapshot();
+        const blockedReason = taskDeletionBlocker(task, snapshot);
+        if (blockedReason) {
+          throw new Error(blockedReason);
         }
-      }
 
-      await this.store.deleteTask(task.id);
-      const result = { taskId: task.id, removedWorktree };
-      this.events.emit({
-        type: 'task.deleted',
-        taskId: task.id,
-        payload: result,
-        at: new Date().toISOString()
-      });
-      return result;
-    });
+        await this.agents.releaseTask(task.id);
+
+        let removedWorktree = false;
+        if (input.removeWorktree) {
+          const worktrees = snapshot.worktrees.filter(
+            (worktree) => worktree.taskId === task.id
+          );
+          for (const worktree of worktrees) {
+            await this.worktrees.remove(worktree);
+            removedWorktree = true;
+          }
+        }
+
+        await this.store.deleteTask(task.id);
+        const result = { taskId: task.id, removedWorktree };
+        this.events.emit({
+          type: 'task.deleted',
+          taskId: task.id,
+          payload: result,
+          at: new Date().toISOString()
+        });
+        return result;
+      })
+    );
   }
 
   readArtifact(input: ReadArtifactRequest): Promise<string> {
@@ -1447,6 +1610,20 @@ export class TaskManagerService {
     } catch {
       // The terminal event already completed the run. Evidence refresh failures remain visible
       // through explicit refresh attempts and stored runtime/provider artifacts.
+    }
+  }
+
+  private trackPostRunEvidence(runId: string): void {
+    const pending = this.capturePostRunEvidence(runId).catch(() => undefined);
+    this.postRunEvidenceTasks.add(pending);
+    void pending.finally(() => {
+      this.postRunEvidenceTasks.delete(pending);
+    });
+  }
+
+  private async drainPostRunEvidence(): Promise<void> {
+    while (this.postRunEvidenceTasks.size > 0) {
+      await Promise.all([...this.postRunEvidenceTasks]);
     }
   }
 
@@ -1533,6 +1710,45 @@ export class TaskManagerService {
         this.taskActionLocks.delete(taskId);
       }
     }
+  }
+
+  private withRuntimeOperation<T>(action: () => Promise<T>): Promise<T> {
+    this.assertRuntimeLifecycleOpen();
+    const operation = this.runtimeLifecycleTail.then(action);
+    const settled = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    this.activeRuntimeOperations.add(settled);
+    void settled.then(() => {
+      this.activeRuntimeOperations.delete(settled);
+    });
+    return operation;
+  }
+
+  private withRuntimeLifecycleChange<T>(action: () => Promise<T>): Promise<T> {
+    this.assertRuntimeLifecycleOpen();
+    return this.enqueueRuntimeLifecycle(action);
+  }
+
+  private assertRuntimeLifecycleOpen(): void {
+    if (this.runtimeLifecycleClosing) {
+      throw new Error('Task Monki is shutting down and cannot start provider work.');
+    }
+  }
+
+  private enqueueRuntimeLifecycle<T>(action: () => Promise<T>): Promise<T> {
+    const previousLifecycle = this.runtimeLifecycleTail;
+    const admittedOperations = [...this.activeRuntimeOperations];
+    const operation = Promise.all([
+      previousLifecycle,
+      ...admittedOperations
+    ]).then(action);
+    this.runtimeLifecycleTail = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   private async withAttachmentDraft<T>(
@@ -1661,7 +1877,6 @@ function createBuiltInAgentRuntimes(
     cwd: string;
     codexExecutable?: string;
     openCodeExecutable?: string;
-    antigravityExecutable?: string;
     acpExecutablePaths?: Partial<Record<string, string>>;
     browserDevBoundary: boolean;
     codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
@@ -1679,11 +1894,6 @@ function createBuiltInAgentRuntimes(
     executable:
       options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN
   });
-  const antigravity = new AntigravityAdapter(store, events, {
-    cwd: options.cwd,
-    executable:
-      options.antigravityExecutable ?? process.env[TASK_MONKI_ANTIGRAVITY_BIN_ENV]
-  });
   const acp = ACP_RUNTIME_PROFILES.map(
     (profile) =>
       new AcpRuntimeAdapter(store, events, profile, {
@@ -1693,7 +1903,7 @@ function createBuiltInAgentRuntimes(
           process.env[profile.executableEnvironmentKey]
       })
   );
-  return [codex, openCode, antigravity, ...acp];
+  return [codex, openCode, ...acp];
 }
 
 async function prepareTaskCreationSettings(

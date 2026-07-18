@@ -28,8 +28,7 @@ delivery evidence independently. It never merges a pull request for you.
 
 Each supported agent has a first-class durable runtime identity with its own
 models, permissions, and capability record. Codex and OpenCode are native
-server integrations; Antigravity has a dedicated turn-scoped CLI integration;
-Grok, Cursor, and the Claude bridge use registered ACP compatibility
+server integrations; Grok, Cursor, and the Claude bridge use registered ACP compatibility
 integrations with explicitly documented limits.
 Task Monki does not force any of them through a generic model-SDK loop. See the
 current
@@ -77,7 +76,6 @@ Builds are currently unsigned, so macOS and Windows may show a security warning 
 - At least one supported runtime installed and authenticated:
   - [Codex CLI](https://github.com/openai/codex)
   - [OpenCode](https://github.com/anomalyco/opencode)
-  - [Antigravity CLI](https://antigravity.google/docs/cli-reference)
   - an available ACP agent profile such as Grok Build, Cursor Agent, or
     `claude-agent-acp`
 - Optional — [GitHub CLI](https://cli.github.com/), authenticated, for branch and pull-request features (`gh auth login`)

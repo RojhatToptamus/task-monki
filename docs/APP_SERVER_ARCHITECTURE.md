@@ -275,7 +275,7 @@ newest compatible automatically discovered runtime is selected. An explicit
 configured runtime is treated as intentional and must itself be compatible.
 `CODEX_HOME` belongs to the versioned Codex child-environment contract; it is
 not part of Task Monki's portable process base and is never forwarded to
-OpenCode, Antigravity, or ACP children.
+OpenCode or ACP children.
 The selected runtime, all candidate versions, rejected candidates, missing
 capabilities, and probe failures are persisted on the App Server instance and
 shown only in provider diagnostics/debug surfaces.

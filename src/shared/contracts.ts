@@ -838,6 +838,7 @@ export interface UpdateAppSettingsRequest {
   sidebarCollapsed?: boolean;
   showMascot?: boolean;
   firstLaunchSetupCompleted?: boolean;
+  disabledRuntimeIds?: import('./agent').AgentRuntimeId[];
   defaultRuntimeId?: import('./agent').AgentRuntimeId;
   defaultModel?: string | null;
   defaultModelProvider?: import('./agent').AgentModelProviderId | null;

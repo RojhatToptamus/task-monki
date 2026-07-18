@@ -33,9 +33,19 @@ export class AppSettingsStore implements AppSettingsStorage {
 
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     await this.init();
-    this.settings = mergeAppSettings(this.settings, input);
-    await this.persistQueued();
-    return cloneSettings(this.settings);
+    const operation = this.writeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const candidate = mergeAppSettings(this.settings, input);
+        await this.persist(candidate);
+        this.settings = candidate;
+        return cloneSettings(candidate);
+      });
+    this.writeQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   private async init(): Promise<void> {
@@ -77,18 +87,10 @@ export class AppSettingsStore implements AppSettingsStorage {
     this.loaded = true;
   }
 
-  private async persistQueued(): Promise<void> {
-    const operation = this.writeQueue
-      .catch(() => undefined)
-      .then(() => this.persist());
-    this.writeQueue = operation.catch(() => undefined);
-    await operation;
-  }
-
-  private async persist(): Promise<void> {
+  private async persist(settings = this.settings): Promise<void> {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, serializeAppSettings(this.settings), {
+    await fs.writeFile(tmpPath, serializeAppSettings(settings), {
       encoding: 'utf8',
       mode: 0o600
     });
@@ -148,6 +150,7 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
       typeof record.firstLaunchSetupCompleted === 'boolean'
         ? record.firstLaunchSetupCompleted
         : DEFAULT_TASK_MANAGER_APP_SETTINGS.firstLaunchSetupCompleted,
+    disabledRuntimeIds: normalizeRuntimeIds(record.disabledRuntimeIds),
     defaultRuntimeId: normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
     defaultModel: normalizeOptionalString(record.defaultModel),
     defaultModelProvider: normalizeOptionalString(record.defaultModelProvider),
@@ -201,6 +204,9 @@ export function mergeAppSettings(
   }
   if (input.firstLaunchSetupCompleted !== undefined) {
     patch.firstLaunchSetupCompleted = input.firstLaunchSetupCompleted === true;
+  }
+  if (input.disabledRuntimeIds !== undefined) {
+    patch.disabledRuntimeIds = normalizeRuntimeIds(input.disabledRuntimeIds);
   }
   if (input.defaultRuntimeId !== undefined) {
     patch.defaultRuntimeId = normalizeOptionalString(input.defaultRuntimeId) ?? CODEX_RUNTIME_ID;
@@ -305,6 +311,11 @@ function normalizeRuntimeExecutablePaths(
       return [[runtimeId, normalizeExecutablePath(executable)]];
     })
   );
+}
+
+function normalizeRuntimeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return uniqueStrings(value.map((candidate) => normalizeOptionalString(candidate)));
 }
 
 function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {

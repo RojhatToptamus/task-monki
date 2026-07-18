@@ -21,6 +21,7 @@ const defaultSettings: TaskManagerAppSettings = {
   sidebarCollapsed: false,
   showMascot: true,
   firstLaunchSetupCompleted: true,
+  disabledRuntimeIds: [],
   codexExternalTools: {
     webSearchMode: 'disabled',
     mcpServers: 'disabled',

@@ -23,7 +23,6 @@ The initial runtime families are:
 
 - Codex App Server, through its native JSON-RPC protocol;
 - OpenCode, through its native authenticated loopback HTTP and SSE API;
-- Antigravity, through one documented non-interactive CLI process per turn;
 - registered ACP compatibility runtimes, through stable Agent Client Protocol
   v1 over stdio, with a separate durable runtime identity and exact launch
   profile for each agent product.
@@ -93,11 +92,9 @@ flowchart LR
   Orchestrator --> Registry["AgentRuntimeRegistry"]
   Registry --> Codex["Codex App Server adapter"]
   Registry --> OpenCode["OpenCode HTTP/SSE adapter"]
-  Registry --> Antigravity["Antigravity turn process adapter"]
   Registry --> ACP["ACP profile adapters"]
   Codex --> Journal["Structurally redacted protocol journals"]
   OpenCode --> Journal
-  Antigravity --> Journal
   ACP --> Journal
   Journal --> Store["FileTaskStore"]
   Service --> Evidence["Git / GitHub evidence services"]
@@ -123,10 +120,6 @@ Rules:
 - A detached review session/run may use a different runtime from the task.
 - A continuation never changes runtime underneath an existing session.
 - Provider session and turn IDs are unique only inside their owning runtime.
-- A `TURN`-scoped runtime may materialize a local Task Monki session without a
-  provider session ID when its public contract has no persistent session. Its
-  per-run correlation ID is process ownership metadata, not a provider
-  conversation that may be resumed, attached, or migrated.
 - Interaction responses route through the runtime recorded on the interaction,
   run, and session; the current UI default is irrelevant.
 - There is no automatic cross-runtime fallback after session creation.
@@ -192,6 +185,27 @@ Only `DISCOVERED`, `READY`, and `DEGRADED` have `canStart: true`. Product UI
 consumes that discriminant and shows detailed diagnostics in the provider
 inspector. It does not reconstruct health from provider text.
 
+### Provider enablement lifecycle
+
+An application-disabled runtime is absent from task/model choices and its
+catalog state is synthesized as `DISABLED`; Task Monki does not start its
+provider process or request provider models, native state, or session controls.
+Saving an executable path while disabled may update the adapter's dormant
+configuration, but cannot restart it. Active or recovery-required work prevents
+disablement. Runtime availability changes and application startup/shutdown take
+exclusive ownership through one lifecycle coordinator. Catalog discovery, task
+runtime release, session and turn startup, interaction responses, steering, and
+cancellation use concurrent operation leases, so unrelated discovery cannot
+delay a live run's control path. Exclusive changes wait for admitted operations
+to finish and block later ones until provider state is coherent. Once shutdown
+begins, new provider operations are rejected; provider teardown drains tracked
+post-run evidence before storage closes. A confirmed idle provider shutdown
+leaves the adapter restartable;
+enabling it initializes normal discovery again. If provider shutdown or settings
+persistence fails, the prior enabled state is retained and Task Monki restores
+every runtime whose termination was confirmed rather than publishing two
+availability authorities.
+
 ## Capabilities without a lowest common denominator
 
 Common capabilities exist so product workflow can make safe decisions. Each
@@ -254,17 +268,14 @@ before use. OpenCode resolves its authoritative catalog from the
 worktree-scoped server before each turn. ACP has no stable global model-list
 method, so its application catalog normally contains only the profile default;
 exact models advertised only by a live ACP session remain in that session's
-revisioned controls. Grok is the explicit exception: its versioned provider
-contract advertises the account/runtime catalog in ACP initialize metadata, so
-Task Monki exposes those exact choices and provider-selected default, then
-revalidates the selected ID against the worktree session response before
-submitting a prompt.
-
-Antigravity preserves the exact ordered labels returned by `agy models`; every
-entry is recorded with `isDefault: false` because the command does not declare
-a default. The New Task selector may initially select the first displayed
-entry, but execution still requires and durably records one exact advertised
-label. The adapter never applies a hidden server-side first-model fallback.
+revisioned controls. Two profiles opt into stronger contracts. Grok's versioned
+provider extension advertises the account/runtime catalog in ACP initialize
+metadata. Cursor's stable model-category selector is promoted only after a real
+Task Monki-owned session advertises it, then restored from the latest safe
+provider settings observation. Task Monki never creates a Cursor probe session,
+so the first Cursor task honestly uses Auto. Both profiles revalidate the exact
+selected value against the new worktree session before mutation or prompt
+submission.
 
 ## Runtime behavior
 
@@ -383,60 +394,6 @@ If Task Monki cannot publish ownership after OpenCode creates a fork, it deletes
 the unowned native session and accepts only an authoritative deletion result.
 Ambiguous cleanup quarantines the target runtime and disables automatic retry.
 
-### Antigravity
-
-Antigravity is a dedicated `TURN`-scoped runtime, not a Gemini ACP profile and
-not a scraped TUI integration. Discovery probes `agy --help` for the documented
-`models`, `--print`, `--model`, `--new-project`, `--sandbox`,
-`--print-timeout`, and `--mode` contract. Model discovery parses bounded
-`agy models` output as exact labels without inventing a provider default.
-Successful model reads are cached for 60 seconds; concurrent catalog requests
-share one bounded discovery process. An expired or forced refresh fails closed
-without returning stale labels. A selected label missing from a fresh cache
-gets one forced, coalesced refresh before execution rejects it, allowing
-account and catalog changes to surface without restarting Task Monki.
-
-Each supported Task Monki turn owns one process. Analysis uses `--mode plan`;
-implementation, follow-up, and retry use `--mode accept-edits`. Every command
-also includes `--new-project`, `--sandbox`, and a bounded print timeout. The
-canonical Task Monki worktree is the child cwd, and both stored session
-ownership and the requested worktree must resolve to that same directory.
-`--new-project` is mandatory because Antigravity's documented conversations are
-workspace-scoped and a reused project can retain provider context. Task Monki
-never passes `--dangerously-skip-permissions`.
-
-The public print contract accepts the prompt as `--print <prompt>` and exposes
-no documented stdin or prompt-file alternative. The full prompt is therefore
-present in the live Antigravity child argv and can be visible to same-user
-process inspection or endpoint telemetry. Task Monki persists `<prompt>` in
-the server argv and journals only the prompt artifact reference, but users must
-not put secrets in Antigravity task prompts.
-
-The print contract exposes bounded stdout/stderr and process exit, not typed
-tool, plan, approval, question, usage, or subagent events. Task Monki therefore
-persists assistant stdout and diagnostics as telemetry, uses exit code/process
-interruption as terminal truth, and does not claim native feature support it
-cannot observe. It does not use hidden APIs, OAuth interception, TUI/log
-scraping, or another product's ACP identity.
-
-Task Monki deliberately does not use Antigravity's interactive conversation
-resume or fork commands. The managed local session has no provider session ID,
-and every turn starts a new provider project. A lost process cannot be
-reattached, so uncertain work becomes `RECOVERY_REQUIRED` and is never replayed
-automatically. If process termination cannot be confirmed, Task Monki marks the
-server lost, fences all later callbacks from that child, and permanently blocks
-new Antigravity processes until the application restarts.
-
-An exited or fenced turn retains its in-memory cleanup ownership until Task
-Monki durably publishes either its terminal event or the complete
-`RECOVERY_REQUIRED`/`REQUIRES_USER_ACTION` boundary. Recovery publication
-errors are not suppressed. If that publication remains unavailable, the
-adapter retains the turn handle, reports readiness failed, rejects new process
-starts, and makes shutdown return without waiting on or re-canceling a child
-whose exit is already confirmed. A new application instance completes any
-persisted `RECONCILING` boundary during initialization without starting an
-Antigravity turn or replaying provider work.
-
 ### ACP agents
 
 ACP is an agent transport, not a model abstraction. Each executable profile is
@@ -460,6 +417,12 @@ and advertises the official v1.19 boolean config-option client capability. The
 agent remains responsible for its tools; Task Monki does not become a generic
 command-execution host through ACP. Unsupported client requests fail
 explicitly.
+
+Cursor Agent is the only current ACP profile allowed to surface a provider
+`allow_once` choice for an execute request that omits command text. That
+exception preserves Cursor's exact opaque option ID and never creates a session
+grant. Grok, Claude, and unrecognized ACP profiles fail closed when execution
+scope cannot be verified.
 
 ACP modes and configuration selectors are not flattened into common settings.
 The stable v1.19 schema does not define initialize model metadata, a session
@@ -691,8 +654,6 @@ also attests Task Monki's confidentiality boundary:
 - OpenCode native file parts remain a native protocol capability, but managed
   Task Monki attachments are disabled because the process cannot attest network
   isolation;
-- Antigravity's public print contract has no Task Monki-attested managed
-  attachment delivery path;
 - ACP image/resource blocks remain a negotiated native capability, but managed
   attachments are disabled for current full-access profiles.
 
@@ -759,35 +720,24 @@ after their leader has already exited. Task Monki does not claim that guarantee
 on Windows; reliable ownership there requires a native Job Object boundary and
 native-platform verification before it can be enabled.
 
-Antigravity has no reattachable transport generation. Its owned child process
-is the complete turn lifecycle: a known exit terminalizes the run, cancellation
-waits for that process to exit, and restart or loss without process ownership
-requires explicit user recovery. No conversation or prompt is automatically
-resubmitted.
-
 ## Security
 
 - Runtime processes receive only the portable base environment; arbitrary
-  application secrets are stripped. OpenCode, Antigravity, and ACP children
-  additionally
+  application secrets are stripped. OpenCode and ACP children additionally
   receive a versioned, exact provider environment contract covering supported
   provider credentials, cloud identity/config paths, and enterprise proxy/CA
   settings without using prefix or wildcard inheritance. OpenCode accepts its documented
   `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENCODE_CONFIG_CONTENT`
   inputs. Codex alone opts `CODEX_HOME` into its explicit environment contract;
   the portable base does not expose Codex configuration or authentication state
-  to OpenCode, Antigravity, or ACP. ACP executable-override keys are owned by
+  to OpenCode or ACP. ACP executable-override keys are owned by
   their provider profiles.
 - Exact key lists and sensitive-key classifications are executable contracts,
   not prose conventions: OpenCode uses
   `task-monki/opencode-environment@v1` in
   `src/core/agent/opencode/OpenCodeEnvironmentPolicy.ts`; Codex uses
   `task-monki/codex-environment@v1` in
-  `src/core/agent/codex/CodexEnvironmentPolicy.ts`; Antigravity uses
-  `task-monki/antigravity-environment@v3` in
-  `src/core/agent/antigravity/AntigravityEnvironmentPolicy.ts` and generates
-  the exact reviewed macOS XPC service identity rather than inheriting it;
-  Grok, Cursor, and
+  `src/core/agent/codex/CodexEnvironmentPolicy.ts`; Grok, Cursor, and
   Claude ACP use their corresponding `task-monki/*-acp-environment@v1` profile
   contracts in `src/core/agent/acp/AcpRuntimeProfiles.ts`. Changing an
   inherited key requires an explicit contract/version review and tests. Prefix
@@ -844,7 +794,3 @@ resubmitted.
 - [T3 Code ACP session runtime](https://github.com/pingdotgg/t3code/blob/c1ec1915fc16f3dc1ec5d47d9a97f6210a574526/apps/server/src/provider/acp/AcpSessionRuntime.ts)
 - [OpenClaw Codex harness runtime](https://github.com/openclaw/openclaw/blob/9bf994f399981fb8b52d4ed4ed28ab042c121609/docs/plugins/codex-harness-runtime.md)
 - [OpenClaw ACP agents](https://github.com/openclaw/openclaw/blob/9bf994f399981fb8b52d4ed4ed28ab042c121609/docs/tools/acp-agents.md)
-- [Antigravity CLI reference](https://antigravity.google/docs/cli-reference)
-- [Antigravity execution modes](https://antigravity.google/docs/cli/modes)
-- [Antigravity conversation lifecycle](https://antigravity.google/docs/cli-conversations)
-- [Gemini CLI to Antigravity transition announcement](https://github.com/google-gemini/gemini-cli/discussions/27274)

@@ -1,11 +1,10 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type {
   AgentInteractionDecision,
   InteractionRequestRecord,
   Task
 } from '../../shared/contracts';
 import {
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
   type AgentModel,
   type AgentRuntimeState,
   type ExternalToolId,
@@ -17,17 +16,20 @@ import {
 } from '../../shared/contracts';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
-import {
-  buildExecutableTestRequest,
-  selectExecutableDisplayStatus,
-  shouldShowExecutablePathControls
-} from '../model/executableSettings';
+import { shouldShowExecutablePathControls } from '../model/executableSettings';
 import type { RepositorySetupState } from '../model/repositories';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { describeTaskAttention } from './BoardView';
 import { humanizeEnum } from './display';
 import { Chip, dotStyle } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
+import {
+  ExecutablePathEditor,
+  ModelSettingRow,
+  SettingsView,
+  describeExternalToolAvailability,
+  selectSettingsModels
+} from './SettingsView';
 import type { ThemePreference } from './theme';
 import {
   BOARD_COLUMNS,
@@ -48,9 +50,14 @@ interface MainColumnProps {
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   appSettings: TaskManagerAppSettings;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
   externalToolStatus?: ExternalToolStatusReport;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  agentRuntimesLoading: boolean;
+  onRefreshExternalTools(): Promise<void>;
+  onRefreshAgentRuntimes(): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
@@ -94,7 +101,7 @@ const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): str
   },
   settings: {
     title: 'Settings',
-    subtitle: () => 'Workspace defaults and runtime configuration'
+    subtitle: () => 'Agents, models, tools, and appearance'
   }
 };
 
@@ -125,7 +132,9 @@ export function MainColumn({
   appSettings,
   onSetAppSettings,
   externalToolStatus,
+  agentRuntimesLoading,
   onRefreshExternalTools,
+  onRefreshAgentRuntimes,
   onTestExternalTool,
   error,
   models,
@@ -146,6 +155,14 @@ export function MainColumn({
     repositorySetupState === 'complete'
       ? SETUP_VIEW_TITLES.needsReview
       : SETUP_VIEW_TITLES[repositorySetupState];
+  const disabledRuntimeIds = new Set(appSettings.disabledRuntimeIds);
+  const enabledRuntimes = runtimes.filter(
+    (runtime) => !disabledRuntimeIds.has(runtime.preflight.runtime.id)
+  );
+  const enabledRuntimeIds = new Set(
+    enabledRuntimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  const enabledModels = models.filter((model) => enabledRuntimeIds.has(model.runtimeId));
 
   return (
     <main className="tm-main">
@@ -166,8 +183,8 @@ export function MainColumn({
           addingRepository={addingRepository}
           appSettings={appSettings}
           externalToolStatus={externalToolStatus}
-          models={models}
-          runtimes={runtimes}
+          models={enabledModels}
+          runtimes={enabledRuntimes}
           activeRepositoryPath={activeRepositoryPath}
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
@@ -202,17 +219,18 @@ export function MainColumn({
         />
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
-        <Settings
+        <SettingsView
           theme={theme}
           onSetTheme={onSetTheme}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
           externalToolStatus={externalToolStatus}
+          agentRuntimesLoading={agentRuntimesLoading}
           onRefreshExternalTools={onRefreshExternalTools}
+          onRefreshAgentRuntimes={onRefreshAgentRuntimes}
           onTestExternalTool={onTestExternalTool}
           models={models}
           runtimes={runtimes}
-          activeRepositoryPath={activeRepositoryPath}
         />
       ) : null}
     </main>
@@ -242,9 +260,12 @@ function FirstLaunchSetup({
   activeRepositoryPath: string;
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onRefreshExternalTools(): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
 }) {
   const [isRefreshingTools, setIsRefreshingTools] = useState(false);
   const [isFinishingSetup, setIsFinishingSetup] = useState(false);
@@ -450,7 +471,10 @@ function SetupToolList({
   appSettings: TaskManagerAppSettings;
   externalToolStatus?: ExternalToolStatusReport;
   selectedRuntime?: AgentRuntimeState;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
 }) {
   const runtimeReadiness = runtimeReadinessView(selectedRuntime);
@@ -522,20 +546,31 @@ function SetupToolList({
         </div>
       </div>
       {rows.map((row) => {
-        const badge = describeToolStatus(row.status);
+        const badge = describeExternalToolAvailability(row.status);
         const shouldConfigure = shouldShowExecutablePathControls(row.status, row.value);
         if (shouldConfigure) {
           return (
-            <ExecutableSettingRow
-              key={row.key}
-              tool={row.key}
-              label={row.label === 'GitHub CLI' ? 'GitHub CLI' : `${row.label} executable`}
-              hint={row.hint}
-              value={row.value}
-              status={row.status}
-              onSetPath={row.onSetPath}
-              onTest={onTestExternalTool}
-            />
+            <div className="tm-setup-tools__configuration" key={row.key}>
+              <div className="tm-setup-tools__row">
+                <span className={`tm-setup-tools__dot tm-setup-tools__dot--${badge.tone}`} />
+                <div className="tm-setup-tools__copy">
+                  <strong>{row.label}</strong>
+                  <span>{row.hint}</span>
+                </div>
+                <div className="tm-setup-tools__meta">
+                  <strong>{badge.label}</strong>
+                  <span>{describeToolStatusDetail(row.status)}</span>
+                </div>
+              </div>
+              <ExecutablePathEditor
+                label={`${row.label} executable`}
+                value={row.value}
+                tool={row.key}
+                status={row.status}
+                onSetPath={row.onSetPath}
+                onTest={onTestExternalTool}
+              />
+            </div>
           );
         }
         return (
@@ -884,811 +919,6 @@ function InboxDecisionCard({
   );
 }
 
-interface SelectedSettingsModels {
-  defaultRuntimeId: string;
-  promptRefinementRuntimeId: string;
-  reviewRuntimeId: string;
-  selectedDefaultModel?: AgentModel;
-  selectedPromptRefinementModel?: AgentModel;
-  selectedReviewModel?: AgentModel;
-  selectedDefaultEffort: string;
-  selectedReviewEffort: string;
-}
-
-function selectSettingsModels(
-  models: AgentModel[],
-  runtimes: AgentRuntimeState[],
-  appSettings: TaskManagerAppSettings
-): SelectedSettingsModels {
-  const availableRuntimeIds = new Set([
-    ...runtimes.map((runtime) => runtime.preflight.runtime.id),
-    ...models.map((model) => model.runtimeId)
-  ]);
-  const firstRuntimeId =
-    runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
-    runtimes[0]?.preflight.runtime.id ??
-    models[0]?.runtimeId ??
-    appSettings.defaultRuntimeId;
-  const defaultRuntimeId = availableRuntimeIds.has(appSettings.defaultRuntimeId)
-    ? appSettings.defaultRuntimeId
-    : firstRuntimeId;
-  const promptRefinementRuntimeIds = new Set(
-    runtimes
-      .filter(
-        (runtime) =>
-          runtime.preflight.readiness.canStart &&
-          runtime.preflight.capabilities.promptRefinement.maturity !==
-          'unsupported'
-      )
-      .map((runtime) => runtime.preflight.runtime.id)
-  );
-  const reviewRuntimeIds = new Set(
-    runtimes
-      .filter(
-        (runtime) =>
-          runtime.preflight.readiness.canStart &&
-          (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-            runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
-              'stable')
-      )
-      .map((runtime) => runtime.preflight.runtime.id)
-  );
-  const firstPromptRefinementRuntimeId =
-    [...promptRefinementRuntimeIds][0] ?? defaultRuntimeId;
-  const firstReviewRuntimeId = [...reviewRuntimeIds][0] ?? defaultRuntimeId;
-  const promptRefinementRuntimeId =
-    appSettings.promptRefinementRuntimeId &&
-    promptRefinementRuntimeIds.has(appSettings.promptRefinementRuntimeId)
-      ? appSettings.promptRefinementRuntimeId
-      : promptRefinementRuntimeIds.has(defaultRuntimeId)
-        ? defaultRuntimeId
-        : firstPromptRefinementRuntimeId;
-  const reviewRuntimeId =
-    appSettings.reviewRuntimeId && reviewRuntimeIds.has(appSettings.reviewRuntimeId)
-      ? appSettings.reviewRuntimeId
-      : reviewRuntimeIds.has(defaultRuntimeId)
-        ? defaultRuntimeId
-        : firstReviewRuntimeId;
-  const selectedDefaultModel = selectModel(
-    models,
-    appSettings.defaultModel,
-    defaultRuntimeId,
-    appSettings.defaultModelProvider
-  );
-  const selectedReviewModel = selectModel(
-    models,
-    appSettings.reviewModel,
-    reviewRuntimeId,
-    appSettings.reviewModelProvider
-  );
-  const selectedPromptRefinementModel = selectModel(
-    models,
-    appSettings.promptRefinementModel ?? DEFAULT_PROMPT_REFINEMENT_MODEL,
-    promptRefinementRuntimeId,
-    appSettings.promptRefinementModelProvider
-  );
-  const selectedDefaultEffort =
-    resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
-  const selectedReviewEffort =
-    resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '';
-
-  return {
-    defaultRuntimeId,
-    promptRefinementRuntimeId,
-    reviewRuntimeId,
-    selectedDefaultModel,
-    selectedPromptRefinementModel,
-    selectedReviewModel,
-    selectedDefaultEffort,
-    selectedReviewEffort
-  };
-}
-
-function Settings({
-  theme,
-  onSetTheme,
-  appSettings,
-  onSetAppSettings,
-  externalToolStatus,
-  onRefreshExternalTools,
-  onTestExternalTool,
-  models,
-  runtimes,
-  activeRepositoryPath
-}: {
-  theme: ThemePreference;
-  onSetTheme(theme: ThemePreference): void;
-  appSettings: TaskManagerAppSettings;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
-  externalToolStatus?: ExternalToolStatusReport;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
-  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-  models: AgentModel[];
-  runtimes: AgentRuntimeState[];
-  activeRepositoryPath: string;
-}) {
-  const selectedModels = selectSettingsModels(models, runtimes, appSettings);
-  const promptRefinementRuntimes = runtimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
-  );
-  const reviewRuntimes = runtimes.filter(
-    (runtime) =>
-      runtime.preflight.readiness.canStart &&
-      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity ===
-          'stable')
-  );
-  const rows: Array<{ k: string; hint: string; v: string }> = [
-    {
-      k: 'Repository',
-      hint: 'Active task context',
-      v: activeRepositoryPath ? repositoryName(activeRepositoryPath) : 'Not set'
-    }
-  ];
-
-  return (
-    <div className="tm-settings">
-      <SettingsGroup title="Appearance">
-        <div className="tm-settings__row">
-          <div style={{ minWidth: 0 }}>
-            <div className="tm-settings__k">Theme</div>
-          </div>
-          <div className="tm-segtoggle" role="group" aria-label="Theme">
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'light' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('light')}
-            >
-              Light
-            </button>
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'dark' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('dark')}
-            >
-              Dark
-            </button>
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'device' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('device')}
-            >
-              Device
-            </button>
-          </div>
-        </div>
-        <SettingsSwitchRow
-          label="Mascot animation"
-          hint="Show the task detail mascot"
-          checked={appSettings.showMascot}
-          onChange={(showMascot) => onSetAppSettings({ showMascot })}
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Models">
-        <ModelSettingRow
-          label="Default task model"
-          hint="Used for new implementation tasks"
-          runtimeId={selectedModels.defaultRuntimeId}
-          value={selectedModels.selectedDefaultModel?.id ?? ''}
-          effortValue={selectedModels.selectedDefaultEffort}
-          models={models}
-          runtimes={runtimes}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(models, undefined, runtimeId);
-            onSetAppSettings({
-              defaultRuntimeId: runtimeId,
-              defaultModel: nextModel?.model ?? null,
-              defaultModelProvider: nextModel?.modelProvider ?? null,
-              defaultReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
-            });
-          }}
-          onModelChange={(modelId) => {
-            const nextModel = models.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              defaultModel: nextModel?.model ?? null,
-              defaultModelProvider: nextModel?.modelProvider ?? null,
-              defaultReasoningEffort: resolveReasoningEffort(
-                nextModel,
-                appSettings.defaultReasoningEffort
-              ) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
-            onSetAppSettings({
-              defaultReasoningEffort: reasoningEffort || null
-            })
-          }
-        />
-        <ModelSettingRow
-          label="Prompt refinement model"
-          hint="Used when improving task descriptions"
-          runtimeId={selectedModels.promptRefinementRuntimeId}
-          value={selectedModels.selectedPromptRefinementModel?.id ?? ''}
-          models={models}
-          runtimes={promptRefinementRuntimes}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(models, undefined, runtimeId);
-            onSetAppSettings({
-              promptRefinementRuntimeId: runtimeId,
-              promptRefinementModel: nextModel?.model ?? null,
-              promptRefinementModelProvider: nextModel?.modelProvider ?? null
-            });
-          }}
-          onModelChange={(modelId) => {
-            const nextModel = models.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              promptRefinementModel: nextModel?.model ?? null,
-              promptRefinementModelProvider: nextModel?.modelProvider ?? null
-            });
-          }}
-        />
-        <ModelSettingRow
-          label="Review model"
-          hint="Used for AI quality-gate reviews"
-          runtimeId={selectedModels.reviewRuntimeId}
-          value={selectedModels.selectedReviewModel?.id ?? ''}
-          effortValue={selectedModels.selectedReviewEffort}
-          models={models}
-          runtimes={reviewRuntimes}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(models, undefined, runtimeId);
-            onSetAppSettings({
-              reviewRuntimeId: runtimeId,
-              reviewModel: nextModel?.model ?? null,
-              reviewModelProvider: nextModel?.modelProvider ?? null,
-              reviewReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
-            });
-          }}
-          onModelChange={(modelId) => {
-            const nextModel = models.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              reviewModel: nextModel?.model ?? null,
-              reviewModelProvider: nextModel?.modelProvider ?? null,
-              reviewReasoningEffort: resolveReasoningEffort(
-                nextModel,
-                appSettings.reviewReasoningEffort
-              ) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
-            onSetAppSettings({
-              reviewReasoningEffort: reasoningEffort || null
-            })
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Agent runtimes">
-        {runtimes
-          .filter((runtime) => runtime.preflight.runtime.id !== 'codex')
-          .map((runtime) => (
-            <RuntimeExecutableSettingRow
-              key={runtime.preflight.runtime.id}
-              runtime={runtime}
-              value={
-                appSettings.runtimeExecutablePaths[
-                  runtime.preflight.runtime.id
-                ] ?? null
-              }
-              onSetPath={(executablePath) =>
-                onSetAppSettings({
-                  runtimeExecutablePaths: {
-                    [runtime.preflight.runtime.id]: executablePath
-                  }
-                })
-              }
-            />
-          ))}
-      </SettingsGroup>
-
-      <SettingsGroup title="Codex tools">
-        <ExternalToolSettingRow
-          label="Web search"
-          hint="Codex search tool"
-          value={appSettings.codexExternalTools.webSearchMode}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'cached', label: 'Cached' },
-            { value: 'live', label: 'Live' }
-          ]}
-          onChange={(webSearchMode) =>
-            onSetAppSettings({
-              codexExternalTools: { webSearchMode }
-            })
-          }
-        />
-        <ExternalToolSettingRow
-          label="MCP servers"
-          hint="Configured Codex servers"
-          value={appSettings.codexExternalTools.mcpServers}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'all', label: 'All enabled' }
-          ]}
-          onChange={(mcpServers) =>
-            onSetAppSettings({
-              codexExternalTools: { mcpServers }
-            })
-          }
-        />
-        <ExternalToolSettingRow
-          label="Apps"
-          hint="Codex apps and connectors"
-          value={appSettings.codexExternalTools.apps}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'enabled', label: 'Enabled' }
-          ]}
-          onChange={(apps) =>
-            onSetAppSettings({
-              codexExternalTools: { apps }
-            })
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Executables">
-        <ExecutableSettingRow
-          tool="git"
-          label="Git executable"
-          hint="Required for repository evidence"
-          value={appSettings.externalExecutables.gitExecutablePath}
-          status={externalToolStatus?.tools.git}
-          onSetPath={(gitExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { gitExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <ExecutableSettingRow
-          tool="codex"
-          label="Codex executable"
-          hint="Required for agent runs"
-          value={appSettings.externalExecutables.codexExecutablePath}
-          status={externalToolStatus?.tools.codex}
-          onSetPath={(codexExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { codexExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <ExecutableSettingRow
-          tool="gh"
-          label="GitHub CLI"
-          hint="Optional for PR delivery"
-          value={appSettings.externalExecutables.ghExecutablePath}
-          status={externalToolStatus?.tools.gh}
-          onSetPath={(ghExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { ghExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <div className="tm-settings__row">
-          <div style={{ minWidth: 0 }}>
-            <div className="tm-settings__k">Tool status</div>
-            <div className="tm-settings__hint">
-              {externalToolStatus
-                ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}`
-                : 'Not checked'}
-            </div>
-          </div>
-          <button
-            type="button"
-            className="tm-settings__button"
-            onClick={() => void onRefreshExternalTools()}
-          >
-            Refresh
-          </button>
-        </div>
-      </SettingsGroup>
-
-      <SettingsGroup title="Workspace">
-        {rows.map((row) => (
-          <div className="tm-settings__row" key={row.k}>
-            <div style={{ minWidth: 0 }}>
-              <div className="tm-settings__k">{row.k}</div>
-              <div className="tm-settings__hint">{row.hint}</div>
-            </div>
-            <span className="tm-settings__v">{row.v}</span>
-          </div>
-        ))}
-      </SettingsGroup>
-    </div>
-  );
-}
-
-function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="tm-settings__group" aria-label={title}>
-      <h2 className="tm-settings__group-title">{title}</h2>
-      <div className="tm-settings__card">{children}</div>
-    </section>
-  );
-}
-
-function SettingsSwitchRow({
-  label,
-  hint,
-  checked,
-  onChange
-}: {
-  label: string;
-  hint: string;
-  checked: boolean;
-  onChange(checked: boolean): void;
-}) {
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">{hint}</div>
-      </div>
-      <button
-        type="button"
-        className={`network-toggle__switch ${checked ? 'network-toggle__switch--on' : ''}`}
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        onClick={() => onChange(!checked)}
-      >
-        <span />
-      </button>
-    </div>
-  );
-}
-
-function ExternalToolSettingRow<Value extends string>({
-  label,
-  hint,
-  value,
-  options,
-  onChange
-}: {
-  label: string;
-  hint: string;
-  value: Value;
-  options: Array<{ value: Value; label: string }>;
-  onChange(value: Value): void;
-}) {
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">{hint}</div>
-      </div>
-      <div className="tm-settings__controls">
-        <select
-          className="tm-settings__select tm-settings__select--effort"
-          value={value}
-          onChange={(event) => onChange(event.target.value as Value)}
-          aria-label={label}
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  );
-}
-
-function RuntimeExecutableSettingRow({
-  runtime,
-  value,
-  onSetPath
-}: {
-  runtime: AgentRuntimeState;
-  value: string | null;
-  onSetPath(path: string | null): void;
-}) {
-  const savedPath = value ?? '';
-  const [mode, setMode] = useState<'auto' | 'custom'>(
-    savedPath ? 'custom' : 'auto'
-  );
-  const [draftPath, setDraftPath] = useState(savedPath);
-
-  useEffect(() => {
-    setMode(savedPath ? 'custom' : 'auto');
-    setDraftPath(savedPath);
-  }, [savedPath]);
-
-  const normalizedDraft = draftPath.trim();
-  const canSave =
-    mode === 'auto'
-      ? value !== null
-      : Boolean(normalizedDraft) && normalizedDraft !== savedPath;
-  const readiness = runtimeReadinessView(runtime);
-  const statusDetail = readiness.nextAction ??
-    (readiness.canStart && runtime.preflight.runtimeVersion
-      ? `Version ${runtime.preflight.runtimeVersion}`
-      : readiness.detail);
-
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">
-          {runtime.preflight.runtime.displayName}
-        </div>
-        <div className="tm-settings__hint">
-          {readiness.label} · {statusDetail}
-        </div>
-      </div>
-      <div className="tm-settings__controls">
-        <select
-          className="tm-settings__select tm-settings__select--effort"
-          value={mode}
-          aria-label={`${runtime.preflight.runtime.displayName} executable mode`}
-          onChange={(event) => {
-            const nextMode = event.target.value as 'auto' | 'custom';
-            setMode(nextMode);
-            if (nextMode === 'auto') {
-              setDraftPath('');
-            }
-          }}
-        >
-          <option value="auto">Auto-detect</option>
-          <option value="custom">Custom path</option>
-        </select>
-        {mode === 'custom' ? (
-          <input
-            className="tm-settings__input"
-            value={draftPath}
-            placeholder="/path/to/executable"
-            aria-label={`${runtime.preflight.runtime.displayName} executable path`}
-            onChange={(event) => setDraftPath(event.target.value)}
-          />
-        ) : null}
-        <button
-          type="button"
-          className="outline-button"
-          disabled={!canSave}
-          onClick={() =>
-            onSetPath(mode === 'auto' ? null : normalizedDraft)
-          }
-        >
-          Save
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ExecutableSettingRow({
-  tool,
-  label,
-  hint,
-  value,
-  status,
-  onSetPath,
-  onTest
-}: {
-  tool: ExternalToolId;
-  label: string;
-  hint: string;
-  value: string | null;
-  status?: ExternalToolProbeResult;
-  onSetPath(path: string | null): void;
-  onTest(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-}) {
-  const savedPath = value ?? '';
-  const [mode, setMode] = useState<'auto' | 'custom'>(savedPath ? 'custom' : 'auto');
-  const [draftPath, setDraftPath] = useState(savedPath);
-  const [isTesting, setIsTesting] = useState(false);
-  const [testResult, setTestResult] = useState<ExternalToolProbeResult>();
-  // Feedback shown below the controls after the user clicks Test. Kept separate
-  // from `testResult` (which feeds the passive badge) so the outcome message is
-  // only tied to an explicit test action.
-  const [testFeedback, setTestFeedback] = useState<ExecutableTestFeedback>();
-
-  const resetTestFeedback = () => {
-    setTestResult(undefined);
-    setTestFeedback(undefined);
-  };
-
-  useEffect(() => {
-    setMode(savedPath ? 'custom' : 'auto');
-    setDraftPath(savedPath);
-    resetTestFeedback();
-  }, [savedPath]);
-
-  const isCustom = mode === 'custom';
-  const normalizedDraft = draftPath.trim();
-  const hasPendingCustomPath = isCustom && normalizedDraft !== savedPath;
-  const displayStatus = selectExecutableDisplayStatus(status, testResult);
-  const badge = describeToolStatus(displayStatus);
-  const resolvedMeta = displayStatus
-    ? compactSettingsText(displayStatus.resolvedPath ?? displayStatus.executable)
-    : null;
-  const versionMeta =
-    displayStatus?.status === 'ok' && displayStatus.version ? displayStatus.version : null;
-
-  const runTest = async () => {
-    setIsTesting(true);
-    setTestResult(undefined);
-    setTestFeedback({ state: 'running' });
-    try {
-      const result = await onTest(buildExecutableTestRequest(tool, mode, draftPath));
-      setTestResult(result);
-      setTestFeedback(
-        result.status === 'ok'
-          ? {
-              state: 'passed',
-              path: result.resolvedPath ?? result.executable,
-              version: result.version
-            }
-          : { state: 'failed', message: result.error ?? 'The tool could not be verified.' }
-      );
-    } catch (caught) {
-      setTestFeedback({
-        state: 'failed',
-        message: caught instanceof Error ? caught.message : 'The test could not be run.'
-      });
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
-  return (
-    <div className="tm-exec">
-      <div className="tm-exec__head">
-        <div className="tm-exec__title" style={{ minWidth: 0 }}>
-          <div className="tm-settings__k">{label}</div>
-          <div className="tm-settings__hint">{hint}</div>
-        </div>
-        <span className={`tm-exec__badge tm-exec__badge--${badge.tone}`}>
-          <span className="tm-exec__dot" aria-hidden="true" />
-          {badge.label}
-        </span>
-      </div>
-
-      {resolvedMeta ? (
-        <div className="tm-exec__meta">
-          <span className="tm-exec__source">{humanizeEnum(displayStatus!.source)}</span>
-          <span className="tm-exec__path">{resolvedMeta}</span>
-          {versionMeta ? <span className="tm-exec__version">{versionMeta}</span> : null}
-        </div>
-      ) : null}
-
-      <div className="tm-exec__controls">
-        <select
-          className="tm-settings__select tm-settings__select--mode"
-          value={mode}
-          onChange={(event) => {
-            const nextMode = event.target.value === 'custom' ? 'custom' : 'auto';
-            setMode(nextMode);
-            resetTestFeedback();
-            if (nextMode === 'auto') {
-              setDraftPath('');
-              onSetPath(null);
-            }
-          }}
-          aria-label={`${label} mode`}
-        >
-          <option value="auto">Auto</option>
-          <option value="custom">Custom</option>
-        </select>
-        <input
-          className="tm-settings__input"
-          value={draftPath}
-          onChange={(event) => {
-            setDraftPath(event.target.value);
-            resetTestFeedback();
-          }}
-          disabled={!isCustom}
-          placeholder={displayStatus?.resolvedPath ?? displayStatus?.executable ?? 'Auto-detect'}
-          aria-label={`${label} path`}
-        />
-        <div className="tm-exec__actions">
-          {hasPendingCustomPath ? (
-            <button
-              type="button"
-              className="tm-settings__button tm-settings__button--primary"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                resetTestFeedback();
-                onSetPath(normalizedDraft || null);
-              }}
-            >
-              Save
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="tm-settings__button"
-            disabled={isTesting}
-            aria-busy={isTesting}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => void runTest()}
-          >
-            Test
-          </button>
-          <button
-            type="button"
-            className="tm-settings__button"
-            disabled={!savedPath && !draftPath}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => {
-              setMode('auto');
-              setDraftPath('');
-              resetTestFeedback();
-              onSetPath(null);
-            }}
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {testFeedback ? <ExecutableTestFeedbackStrip feedback={testFeedback} /> : null}
-    </div>
-  );
-}
-
-type ExecutableTestFeedback =
-  | { state: 'running' }
-  | { state: 'passed'; path: string; version: string | null }
-  | { state: 'failed'; message: string };
-
-function ExecutableTestFeedbackStrip({ feedback }: { feedback: ExecutableTestFeedback }) {
-  if (feedback.state === 'running') {
-    return (
-      <div className="tm-exec__test tm-exec__test--running" role="status" aria-live="polite">
-        <span className="tm-exec__spinner" aria-hidden="true" />
-        <span>Testing…</span>
-      </div>
-    );
-  }
-
-  if (feedback.state === 'passed') {
-    return (
-      <div className="tm-exec__test tm-exec__test--passed" role="status" aria-live="polite">
-        <span className="tm-exec__test-icon" aria-hidden="true">
-          ✓
-        </span>
-        <span className="tm-exec__test-text">
-          <strong>Test passed</strong>
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="tm-exec__test tm-exec__test--failed" role="alert" aria-live="assertive">
-      <span className="tm-exec__test-icon" aria-hidden="true">
-        ✕
-      </span>
-      <span className="tm-exec__test-text">
-        <strong>Test failed</strong>
-        <span className="tm-exec__test-message">{feedback.message}</span>
-      </span>
-    </div>
-  );
-}
-
-function describeToolStatus(
-  status: ExternalToolProbeResult | undefined
-): { tone: 'ok' | 'error' | 'muted'; label: string } {
-  if (!status) {
-    return { tone: 'muted', label: 'Not checked' };
-  }
-  if (status.status === 'ok') {
-    return { tone: 'ok', label: 'Available' };
-  }
-  return {
-    tone: status.required ? 'error' : 'muted',
-    label: status.required ? 'Unavailable' : 'Optional'
-  };
-}
-
 function compactSettingsText(value: string, maxLength = 72): string {
   if (value.length <= maxLength) {
     return value;
@@ -1704,100 +934,4 @@ function formatSettingsTime(value: string): string {
     return 'recently';
   }
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function ModelSettingRow({
-  label,
-  hint,
-  runtimeId,
-  value,
-  effortValue = '',
-  models,
-  runtimes,
-  onRuntimeChange,
-  onModelChange,
-  onEffortChange
-}: {
-  label: string;
-  hint: string;
-  runtimeId: string;
-  value: string;
-  effortValue?: string;
-  models: AgentModel[];
-  runtimes: AgentRuntimeState[];
-  onRuntimeChange(value: string): void;
-  onModelChange(value: string): void;
-  onEffortChange?(value: string): void;
-}) {
-  const runtimeModels = models.filter((model) => model.runtimeId === runtimeId);
-  const selected = runtimeModels.find((model) => model.id === value);
-  const efforts = [
-    ...new Set(
-      [
-        ...(selected?.supportedReasoningEfforts ?? []),
-        selected?.defaultReasoningEffort,
-        effortValue
-      ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-    )
-  ];
-  return (
-    <div className="tm-settings__row tm-settings__row--models">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">
-          {hint}
-          {onEffortChange && effortValue ? ` · ${effortValue}` : ''}
-        </div>
-      </div>
-      <div className="tm-settings__controls">
-        <select
-          className="tm-settings__select tm-settings__select--model"
-          value={runtimeId}
-          onChange={(event) => onRuntimeChange(event.target.value)}
-          disabled={runtimes.length === 0}
-          aria-label={`${label} runtime`}
-        >
-          {runtimes.map((runtime) => (
-            <option
-              key={runtime.preflight.runtime.id}
-              value={runtime.preflight.runtime.id}
-            >
-              {runtime.preflight.runtime.displayName}
-              {runtimeReadinessView(runtime).optionSuffix}
-            </option>
-          ))}
-        </select>
-        <select
-          className="tm-settings__select tm-settings__select--model"
-          value={value}
-          onChange={(event) => onModelChange(event.target.value)}
-          disabled={runtimeModels.length === 0}
-          aria-label={`${label} model`}
-        >
-          {runtimeModels
-            .filter((model) => !model.hidden || model.id === value)
-            .map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.displayName}
-              </option>
-            ))}
-        </select>
-        {onEffortChange ? (
-          <select
-            className="tm-settings__select tm-settings__select--effort"
-            value={effortValue}
-            onChange={(event) => onEffortChange(event.target.value)}
-            disabled={efforts.length === 0}
-            aria-label={`${label} reasoning effort`}
-          >
-            {efforts.map((effort) => (
-              <option key={effort} value={effort}>
-                {effort}
-              </option>
-            ))}
-          </select>
-        ) : null}
-      </div>
-    </div>
-  );
 }

@@ -248,7 +248,7 @@ describe('NewTaskPanel', () => {
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details class="newtask-settings">');
-    expect(html).toContain('Agent runtime');
+    expect(html).toContain('>Agent<');
     expect(html).toContain('aria-label="Agent runtime"');
     expect(html).toContain('aria-label="Model"');
     expect(html).toContain('aria-label="Permission mode"');
@@ -259,6 +259,7 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('Provider commands run outside a Task Monki sandbox.');
     expect(html).toContain('The saved runtime change will apply after this turn.');
     expect(html).not.toContain('Internal ACP client-tool notice.');
+    expect(html).not.toContain('Reasoning effort');
 
     const gatedHtml = renderPanel(false);
     expect(gatedHtml).toContain('Unavailable in this build');

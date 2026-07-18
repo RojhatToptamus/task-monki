@@ -27,6 +27,9 @@ describe('ACP runtime profiles', () => {
     expect(CURSOR_ACP_PROFILE.argv).toEqual(['acp']);
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
+    expect(CURSOR_ACP_PROFILE.allowOpaqueExecuteOnce).toBe(true);
+    expect(GROK_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
+    expect(CLAUDE_AGENT_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
     expect(CLAUDE_AGENT_ACP_PROFILE.argv).toEqual([]);
   });
 
@@ -87,7 +90,7 @@ describe('ACP runtime profiles', () => {
     );
   });
 
-  it('gates the captured session-model extension to the Grok profile', () => {
+  it('gates model-catalog contracts to explicit profiles', () => {
     expect(GROK_SESSION_MODEL_EXTENSION).toEqual({
       contractId: 'grok-build-acp/session-models@v1',
       initializeResponseMetaField: 'modelState',
@@ -105,6 +108,11 @@ describe('ACP runtime profiles', () => {
     expect(
       acpCapabilities(GROK_ACP_PROFILE).extensions.grokSessionModels
     ).toMatchObject({ maturity: 'experimental' });
+    expect(
+      ACP_RUNTIME_PROFILES.filter((profile) => profile.promoteSessionModelSelector).map(
+        (profile) => profile.descriptor.id
+      )
+    ).toEqual(['cursor-agent-acp']);
   });
 
   it('enables optional lifecycle features only after negotiation', () => {

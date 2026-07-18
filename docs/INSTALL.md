@@ -15,7 +15,6 @@ Install these before using Task Monki:
 - at least one supported coding-agent runtime, installed and authenticated:
   - Codex CLI with a compatible App Server;
   - OpenCode `>=1.4.0` and `<2.0.0` with one or more configured model providers;
-  - Antigravity CLI (`agy`); or
   - an ACP profile: Grok Build, Cursor Agent, or `claude-agent-acp`;
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features
@@ -26,7 +25,7 @@ not prevent another from working. Authentication and upstream model-provider
 configuration remain owned by the selected runtime.
 
 Settings provides custom executable paths for Git, GitHub CLI, Codex CLI,
-OpenCode, Antigravity, and every registered ACP runtime. Use Auto-detect to
+OpenCode, and every registered ACP runtime. Use Auto-detect to
 return a saved path to environment-override and then PATH-based discovery.
 
 Environment variables are supported as debug overrides and take precedence over
@@ -36,7 +35,6 @@ saved Settings values:
 TASK_MANAGER_GIT_PATH=/path/to/git
 TASK_MONKI_CODEX_BIN=/path/to/codex
 TASK_MONKI_OPENCODE_BIN=/path/to/opencode
-TASK_MONKI_ANTIGRAVITY_BIN=/path/to/agy
 TASK_MONKI_GROK_ACP_BIN=/path/to/grok
 TASK_MONKI_CURSOR_AGENT_ACP_BIN=/path/to/cursor-agent
 TASK_MONKI_CLAUDE_AGENT_ACP_BIN=/path/to/claude-agent-acp
@@ -47,12 +45,11 @@ Git and one ready agent runtime are required to run a task. GitHub CLI is
 optional; GitHub delivery features report it as unavailable when `gh` cannot
 be resolved.
 
-Codex and OpenCode are native server integrations. Antigravity is a dedicated
-turn-scoped integration over its documented CLI print contract. ACP profiles
+Codex and OpenCode are native server integrations. ACP profiles
 remain distinct integrations, not interchangeable model-provider shims. The
 browser development server only enables runtimes that attest its stronger
-isolation boundary; use the packaged Electron app for Antigravity, OpenCode,
-and current ACP profiles.
+isolation boundary; use the packaged Electron app for OpenCode and current ACP
+profiles.
 
 ## Provider setup and readiness
 
@@ -80,32 +77,11 @@ custom path—must pass both a version command and a non-mutating, profile-owned
 launch-contract probe. A successful `--version` alone is not accepted as ACP
 support.
 
-Following Google's
-[Gemini CLI transition announcement](https://github.com/google-gemini/gemini-cli/discussions/27274),
-Antigravity replaces the former Gemini ACP product registration. It is not
-presented as ACP: Task Monki uses only public `agy models` and one documented
-`agy --print` process per turn. Every turn includes `--new-project` because cwd
-alone does not reliably bind Antigravity to the requested repository, plus
-`--sandbox` and a bounded `--print-timeout`. Implementation, follow-up, and
-retry turns use `--mode accept-edits`; analysis uses `--mode plan`. Task Monki
-never passes `--dangerously-skip-permissions`.
-
-The public Antigravity print command has no documented stdin or prompt-file
-input, so the full task prompt is present in the live `agy` process argument
-list and may be visible to same-user process inspection or endpoint telemetry.
-Task Monki stores a `<prompt>` placeholder instead of the prompt in durable
-command records. Do not put passwords, tokens, private keys, or other secrets
-in Antigravity task prompts.
-
-The exact lines from `agy models` are the selectable model values and are sent
-back unchanged through `--model`. The CLI does not mark a default, so Task
-Monki does not mark one either. New Task may initially select the first label in
-provider order, but execution requires and records that exact selection rather
-than applying a hidden adapter fallback. This integration has no provider
-session ID, resume/fork, structured
-tool events, Task Monki approval requests, managed attachments, prompt
-refinement, or detached review. Terminal-command permissions remain
-Antigravity-owned and may not be answerable in non-interactive print mode.
+Each provider can be enabled independently in Settings. A disabled provider is
+removed from task and model choices and its agent process remains stopped.
+Executable paths can still be saved while disabled, but take effect only when
+the provider is enabled. Providers with active or recovery-required work must
+finish or be explicitly recovered before they can be disabled.
 
 After an ACP session is attached, the task's Provider inspector shows only the
 schema-selected native model, mode, and configuration controls advertised by
@@ -125,12 +101,6 @@ directory tools, while Full access uses `approvalPolicy: never`. Provider,
 plugin, MCP, and process-level network activity remains provider-controlled in
 both modes.
 
-Antigravity uses a separate sandboxed-project preset. `--new-project` binds the
-turn to the canonical Task Monki worktree, `--sandbox` enables documented
-terminal restrictions, and `--mode accept-edits` permits implementation edits.
-The CLI still owns terminal permission decisions; Task Monki does not claim a
-structured approval bridge.
-
 ## Provider environment contracts
 
 Agent children do not inherit arbitrary host variables. They start with Task
@@ -140,7 +110,6 @@ Monki's minimal process environment plus a versioned, exact provider contract:
 | --- | --- |
 | Codex | `CODEX_HOME` only, through the Codex-owned environment contract; it is not exposed to other runtimes |
 | OpenCode | `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, inline OpenCode config, OpenAI/Azure OpenAI, Anthropic, xAI, Gemini/Google, AWS Bedrock, Google Vertex, and enterprise proxy/CA keys |
-| Antigravity | User config/data/state/cache roots plus enterprise proxy/CA keys; on macOS Task Monki supplies the fixed non-secret `XPC_SERVICE_NAME=application.com.google.antigravity`, while provider authentication remains in Antigravity's own configuration |
 | Grok Build ACP | xAI/Grok API keys and endpoint plus enterprise proxy/CA keys |
 | Cursor Agent ACP | Cursor API key plus enterprise proxy/CA keys |
 | Claude Agent ACP | Anthropic API/OAuth and endpoint settings, Claude config directory, Bedrock AWS credentials/profile/web-identity/container auth, Vertex Google credentials/project/region, and enterprise proxy/CA keys |
@@ -155,9 +124,6 @@ than relying on Task Monki to forward the entire host environment.
 The contracts follow the providers' documented configuration surfaces:
 [OpenCode CLI](https://opencode.ai/docs/cli/) and
 [config](https://opencode.ai/docs/config/),
-[Antigravity CLI reference](https://antigravity.google/docs/cli-reference),
-[execution modes](https://antigravity.google/docs/cli/modes),
-[conversation lifecycle](https://antigravity.google/docs/cli-conversations),
 [Claude gateway/cloud settings](https://docs.anthropic.com/en/docs/claude-code/llm-gateway),
 and the [AWS SDK environment reference](https://docs.aws.amazon.com/sdkref/latest/guide/settings-reference.html).
 

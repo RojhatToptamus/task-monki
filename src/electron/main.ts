@@ -572,6 +572,9 @@ void app.whenReady().then(async () => {
   );
   serviceCreated = true;
   await service.init();
+  if (shutdownPromise) {
+    return;
+  }
   service.events.on((event) => {
     broadcast(event);
   });

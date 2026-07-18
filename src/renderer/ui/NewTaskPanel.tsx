@@ -626,7 +626,7 @@ export function NewTaskPanel({
             <div className="newtask-settings__content">
               <div className="field-grid field-grid--two">
                 <label className="field">
-                  <span className="field__label">Agent runtime</span>
+                  <span className="field__label">Agent</span>
                   <select
                     aria-label="Agent runtime"
                     value={runtimeId}
@@ -674,29 +674,31 @@ export function NewTaskPanel({
                   </select>
                 </label>
               </div>
-              <div className="field-grid">
-                <div className="field">
-                  <span className="field__label">Reasoning effort</span>
-                  <div className="segmented-effort" role="group" aria-label="Reasoning effort">
-                    {reasoningEfforts.map((effort) => (
-                      <button
-                        key={effort}
-                        type="button"
-                        className={`segmented-effort__button ${
-                          effort === effectiveReasoningEffort
-                            ? 'segmented-effort__button--active'
-                            : ''
-                        }`}
-                        disabled={composerLocked || !selectedModel}
-                        aria-pressed={effort === effectiveReasoningEffort}
-                        onClick={() => setReasoningEffort(effort)}
-                      >
-                        {formatEffortLabel(effort)}
-                      </button>
-                    ))}
+              {reasoningEfforts.length > 0 ? (
+                <div className="field-grid">
+                  <div className="field">
+                    <span className="field__label">Reasoning effort</span>
+                    <div className="segmented-effort" role="group" aria-label="Reasoning effort">
+                      {reasoningEfforts.map((effort) => (
+                        <button
+                          key={effort}
+                          type="button"
+                          className={`segmented-effort__button ${
+                            effort === effectiveReasoningEffort
+                              ? 'segmented-effort__button--active'
+                              : ''
+                          }`}
+                          disabled={composerLocked || !selectedModel}
+                          aria-pressed={effort === effectiveReasoningEffort}
+                          onClick={() => setReasoningEffort(effort)}
+                        >
+                          {formatEffortLabel(effort)}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : null}
 
               <div className="field-grid">
                 <label className="field">

@@ -189,25 +189,22 @@ describe('ACP runtime resolution', () => {
     ]);
   });
 
-  it('rejects Antigravity agy as an unrelated ACP profile even when explicitly configured', async () => {
+  it('rejects an explicitly configured executable when only its version probe succeeds', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-resolver-'));
     temporaryDirectories.push(directory);
-    const agy = await writeNodeExecutable(
+    const executable = await writeNodeExecutable(
       directory,
-      'agy',
+      'unrelated-agent',
       [
-        'if (process.argv.includes("--version")) { console.log("agy 1.1.2"); process.exit(0); }',
-        'if (process.argv.includes("--help")) {',
-        '  console.error("Usage: agy [options] [command]\\nGoogle Antigravity CLI");',
-        '  process.exit(0);',
-        '}',
+        'if (process.argv.includes("--version")) { console.log("unrelated-agent 1.0.0"); process.exit(0); }',
+        'if (process.argv.includes("--help")) { console.log("Usage: unrelated-agent"); process.exit(0); }',
         'process.exit(2);'
       ].join('\n')
     );
 
     const error = await resolveAcpRuntime(TEST_ACP_PROFILE, {
       cwd: directory,
-      executable: agy
+      executable
     }).then(
       () => undefined,
       (cause: unknown) => cause
@@ -217,13 +214,13 @@ describe('ACP runtime resolution', () => {
     expect(error).toMatchObject({
       code: 'ACP_RUNTIME_INCOMPATIBLE',
       diagnostics: {
-        selectedExecutable: agy,
-        selectedVersion: 'agy 1.1.2',
+        selectedExecutable: executable,
+        selectedVersion: 'unrelated-agent 1.0.0',
         probes: [
           expect.objectContaining({
             explicit: true,
             compatible: false,
-            version: 'agy 1.1.2',
+            version: 'unrelated-agent 1.0.0',
             detail: expect.stringContaining('Test ACP launch contract failed')
           })
         ]
@@ -234,7 +231,7 @@ describe('ACP runtime resolution', () => {
     );
   });
 
-  it('distinguishes a missing executable from an incompatible one', async () => {
+  it('reports an explicitly missing executable as not found', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-resolver-'));
     temporaryDirectories.push(directory);
     const missingExecutable = path.join(directory, 'missing-test-acp');

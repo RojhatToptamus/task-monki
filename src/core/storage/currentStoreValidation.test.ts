@@ -73,6 +73,15 @@ describe('validateCurrentStoreRecords', () => {
     );
   });
 
+  it('accepts a native-agent kind retained in durable server evidence', () => {
+    const state = createEmptyState();
+    const server = validServer();
+    server.runtimeKind = 'NATIVE_AGENT';
+    state.agentServers = [server];
+
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+  });
+
   it('rejects a malformed provider permission request payload', () => {
     const state = createEmptyState();
     const interaction = validInteraction();

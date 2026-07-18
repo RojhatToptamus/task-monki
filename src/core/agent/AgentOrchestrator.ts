@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionSettings,
   AgentRuntimeCatalog,
+  AgentRuntimeId,
   AgentReviewTarget,
   AgentRunMode,
   AgentSessionRecord,
@@ -65,8 +66,7 @@ export interface StartOrchestratedTurn {
 function assertSessionPostcondition(
   actual: AgentSessionRecord,
   expected: AgentSessionRecord,
-  subject: string,
-  providerSessionRequired: boolean
+  subject: string
 ): void {
   if (
     actual.id !== expected.id ||
@@ -81,11 +81,8 @@ function assertSessionPostcondition(
       `${subject} returned by the runtime does not match its Task Monki ownership record.`
     );
   }
-  if (providerSessionRequired && !actual.providerSessionId) {
+  if (!actual.providerSessionId) {
     throw new Error(`${subject} did not return a provider session id.`);
-  }
-  if (!providerSessionRequired && actual.providerSessionId) {
-    throw new Error(`${subject} unexpectedly returned a provider session id.`);
   }
 }
 
@@ -124,7 +121,8 @@ export class AgentOrchestrator {
   }
 
   async initialize(
-    requiredRuntimeIds: readonly string[] = [this.runtimes.defaultRuntimeId]
+    requiredRuntimeIds: readonly string[] = [this.runtimes.defaultRuntimeId],
+    disabledRuntimeIds: ReadonlySet<AgentRuntimeId> = new Set()
   ): Promise<void> {
     if (this.options.providerStartupDisabledReason) {
       await this.store.reconcileRunAttachments();
@@ -140,9 +138,10 @@ export class AgentOrchestrator {
       .list()
       .filter(
         (adapter) =>
-          adapter.descriptor.startupPolicy !== 'ON_DEMAND' ||
-          requiredRuntimeIds.includes(adapter.descriptor.id) ||
-          recoveryRuntimeIds.has(adapter.descriptor.id)
+          !disabledRuntimeIds.has(adapter.descriptor.id) &&
+          (adapter.descriptor.startupPolicy !== 'ON_DEMAND' ||
+            requiredRuntimeIds.includes(adapter.descriptor.id) ||
+            recoveryRuntimeIds.has(adapter.descriptor.id))
       )
       .map((adapter) => adapter.descriptor.id);
     let browserUnsafeRuntimeIds = new Set<string>();
@@ -202,7 +201,9 @@ export class AgentOrchestrator {
     }
   }
 
-  async getRuntimeCatalog(): Promise<AgentRuntimeCatalog> {
+  async getRuntimeCatalog(
+    disabledRuntimeIds: ReadonlySet<AgentRuntimeId> = new Set()
+  ): Promise<AgentRuntimeCatalog> {
     if (this.options.providerStartupDisabledReason) {
       const refreshedAt = new Date().toISOString();
       const runtimes = await Promise.all(
@@ -236,10 +237,11 @@ export class AgentOrchestrator {
       };
     }
     if (this.options.allowNetworkAccess !== false) {
-      return this.runtimes.getCatalog();
+      return this.runtimes.getCatalog({ disabledRuntimeIds });
     }
     const { unsafeRuntimeIds } = await this.classifyBrowserRuntimeIsolation();
     return this.runtimes.getCatalog({
+      disabledRuntimeIds,
       excludedRuntimeIds: unsafeRuntimeIds,
       exclusionReason:
         'This runtime is unavailable in browser development because it does not attest the required process, filesystem, and network isolation.'
@@ -362,12 +364,7 @@ export class AgentOrchestrator {
           settings,
           attachments
         });
-        assertSessionPostcondition(
-          session,
-          localSession,
-          'Created session',
-          adapter.descriptor.lifecycleScope !== 'TURN'
-        );
+        assertSessionPostcondition(session, localSession, 'Created session');
         await this.assertBrowserDevSessionHistory(session, 'Created session');
       }
       await this.startProviderTurn(adapter, run, session, input, settings, attachments);
@@ -489,8 +486,7 @@ export class AgentOrchestrator {
         assertSessionPostcondition(
           reviewSession,
           localReviewSession,
-          'Created review session',
-          adapter.descriptor.lifecycleScope !== 'TURN'
+          'Created review session'
         );
         await this.assertBrowserDevSessionHistory(
           reviewSession,
@@ -636,7 +632,7 @@ export class AgentOrchestrator {
       assertBrowserDevRuntimeIsolation(adapter.descriptor, capabilities);
     }
     if (
-      (adapter.descriptor.lifecycleScope !== 'TURN' && !session.providerSessionId) ||
+      !session.providerSessionId ||
       capabilities.turnInterruption.maturity === 'unsupported' ||
       !adapter.interruptTurn
     ) {
@@ -823,12 +819,7 @@ export class AgentOrchestrator {
       settings,
       attachments
     });
-    assertSessionPostcondition(
-      recreated,
-      reset,
-      'Recreated session',
-      adapter.descriptor.lifecycleScope !== 'TURN'
-    );
+    assertSessionPostcondition(recreated, reset, 'Recreated session');
     return recreated;
   }
 

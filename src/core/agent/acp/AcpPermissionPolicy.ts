@@ -20,6 +20,7 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
+  allowOpaqueExecuteOnce?: boolean;
 }): MaterializedAcpPermission {
   const request: AgentCommandApprovalRequest = {
     startedAtMs: Date.now(),
@@ -36,6 +37,7 @@ export function materializeAcpPermission(input: {
   };
   const warnings: string[] = [];
   let localAllowed: AgentInteractionAction[];
+  let hardBlocked = false;
 
   if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
     const paths = pathsFromToolCall(input.toolCall);
@@ -56,8 +58,10 @@ export function materializeAcpPermission(input: {
     });
     localAllowed = policy.allowedActions;
     warnings.push(...policy.warnings);
+    hardBlocked = policy.warnings.length > 0;
     if (paths.length === 0) {
       warnings.push('ACP did not provide verifiable file scope for this tool call.');
+      hardBlocked = true;
     }
   } else if (input.toolCall.kind === 'execute') {
     const policy = buildInteractionPolicy({
@@ -68,8 +72,23 @@ export function materializeAcpPermission(input: {
     });
     localAllowed = policy.allowedActions;
     warnings.push(...policy.warnings);
+    hardBlocked = policy.warnings.length > 0;
     if (!request.command) {
       warnings.push('ACP did not provide a verifiable command for this execution request.');
+      if (input.allowOpaqueExecuteOnce) {
+        // Cursor's native ACP contract reports some terminal operations
+        // without command text. Retain only its exact, one-time decision;
+        // never turn opaque scope into a durable or policy-amending grant.
+        localAllowed = localAllowed.filter(
+          (action) =>
+            action === 'ACCEPT' ||
+            action === 'DECLINE' ||
+            action === 'DECLINE_FOR_SESSION' ||
+            action === 'CANCEL'
+        );
+      } else {
+        hardBlocked = true;
+      }
     }
   } else if (input.toolCall.kind === 'fetch' || input.toolCall.kind === 'search') {
     request.networkApprovalContext = networkContext(input.toolCall);
@@ -81,14 +100,16 @@ export function materializeAcpPermission(input: {
     });
     localAllowed = policy.allowedActions;
     warnings.push(...policy.warnings);
+    hardBlocked = policy.warnings.length > 0;
   } else {
     localAllowed = ['DECLINE', 'CANCEL'];
+    hardBlocked = true;
     warnings.push(
       `Task Monki cannot independently verify ACP tool kind ${input.toolCall.kind ?? 'unknown'}.`
     );
   }
 
-  if (warnings.length > 0) {
+  if (hardBlocked) {
     localAllowed = localAllowed.filter((action) => !isApproval(action));
   }
   const providerAllowed = interactionActionsForAcpOptions(input.options);

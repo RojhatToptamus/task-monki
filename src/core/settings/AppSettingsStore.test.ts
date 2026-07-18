@@ -23,6 +23,7 @@ describe('AppSettingsStore', () => {
       sidebarCollapsed: false,
       showMascot: true,
       firstLaunchSetupCompleted: false,
+      disabledRuntimeIds: [],
       externalExecutables: {
         gitExecutablePath: null,
         codexExecutablePath: null,
@@ -67,7 +68,7 @@ describe('AppSettingsStore', () => {
     const store = new MemoryAppSettingsStore({
       runtimeExecutablePaths: {
         opencode: '/opt/opencode',
-        antigravity: '/opt/agy'
+        'cursor-agent-acp': '/opt/cursor-agent'
       }
     });
 
@@ -80,8 +81,50 @@ describe('AppSettingsStore', () => {
 
     expect(settings.runtimeExecutablePaths).toEqual({
       opencode: null,
-      antigravity: '/opt/agy',
+      'cursor-agent-acp': '/opt/cursor-agent',
       'grok-acp': '/opt/grok'
+    });
+  });
+
+  it('normalizes disabled runtime identities as a unique ordered set', async () => {
+    const store = new MemoryAppSettingsStore();
+
+    const settings = await store.update({
+      disabledRuntimeIds: [' grok-acp ', 'cursor-agent-acp', 'grok-acp', '']
+    });
+
+    expect(settings.disabledRuntimeIds).toEqual(['grok-acp', 'cursor-agent-acp']);
+  });
+
+  it('publishes settings in memory only after the durable write succeeds', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-write-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const store = new AppSettingsStore(settingsPath);
+    const before = await store.get();
+    await fs.mkdir(`${settingsPath}.tmp`);
+
+    await expect(store.update({ theme: 'dark' })).rejects.toThrow();
+
+    await expect(store.get()).resolves.toEqual(before);
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(
+      `${JSON.stringify(before, null, 2)}\n`
+    );
+  });
+
+  it('serializes concurrent updates without losing either patch', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-queue-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    const store = new AppSettingsStore(settingsPath);
+    await store.get();
+
+    await Promise.all([
+      store.update({ theme: 'dark' }),
+      store.update({ disabledRuntimeIds: ['opencode'] })
+    ]);
+
+    await expect(store.get()).resolves.toMatchObject({
+      theme: 'dark',
+      disabledRuntimeIds: ['opencode']
     });
   });
 

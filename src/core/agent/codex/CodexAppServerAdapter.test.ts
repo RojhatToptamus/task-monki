@@ -24,6 +24,38 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
+  it('can initialize again after a confirmed idle shutdown', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-reenable-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toContainEqual(
+        expect.objectContaining({ model: 'fake-model' })
+      );
+      await adapter.shutdown();
+
+      await adapter.initialize();
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: { status: 'READY', canStart: true }
+      });
+      expect(
+        (await store.snapshot()).agentServers.filter(
+          (server) => server.runtimeId === 'codex' && server.status === 'READY'
+        )
+      ).toHaveLength(1);
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('does not report ready when the live Codex model catalog is empty', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-empty-models-'));
     const executable = await writeFakeCodexExecutable(dir, 'empty-models');
@@ -1966,6 +1998,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect((await store.snapshot()).agentServers).toEqual([
       expect.objectContaining({ status: 'EXITED' })
     ]);
+    await adapter.initialize();
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: { status: 'READY', canStart: true }
+    });
+    await adapter.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('rebinds a recovered running turn before accepting approval on a replacement server', async () => {

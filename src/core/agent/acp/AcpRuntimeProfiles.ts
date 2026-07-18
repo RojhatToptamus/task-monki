@@ -45,6 +45,19 @@ export interface AcpRuntimeProfile {
    * not define a session `models` field or `session/set_model`.
    */
   sessionModelExtension?: AcpSessionModelExtensionContract;
+  /**
+   * Allows this profile to promote the exact stable `category=model` selector
+   * observed from a real, Task Monki-owned session into its application model
+   * catalog. ACP has no global model-list method, so the selector must never be
+   * discovered by creating a probe session.
+   */
+  promoteSessionModelSelector?: true;
+  /**
+   * Allows this profile's documented permission contract to expose an exact
+   * provider `allow_once` choice when an execute request omits command text.
+   * All other profiles fail closed because Task Monki cannot verify scope.
+   */
+  allowOpaqueExecuteOnce?: true;
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
@@ -165,6 +178,8 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'cursor',
   defaultModel: 'default',
+  promoteSessionModelSelector: true,
+  allowOpaqueExecuteOnce: true,
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -177,7 +192,7 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   extensions: {
     cursorModelSelection: {
       maturity: 'inferred',
-      detail: 'Cursor model/provider choices are preserved from native ACP config selectors.'
+      detail: 'Cursor model choices are preserved exactly from the latest task-owned ACP model selector and revalidated per session.'
     },
     cursorAgentRules: {
       maturity: 'stable',
@@ -300,6 +315,8 @@ export function acpCapabilities(
       maturity: 'inferred',
       detail: profile.sessionModelExtension
         ? `${profile.descriptor.displayName} session models use the explicit ${profile.sessionModelExtension.contractId} provider extension; stable ACP model-category config selectors remain a separate path.`
+        : profile.promoteSessionModelSelector
+          ? 'The exact model-category selector from the latest task-owned session is retained for later selection and revalidated by every new session.'
         : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
     reasoningEffort: {
@@ -413,8 +430,12 @@ export function defaultAcpModel(
     runtimeId: profile.descriptor.id,
     modelProvider: profile.defaultModelProvider,
     model: profile.defaultModel,
-    displayName: `${profile.descriptor.displayName} default`,
-    description: 'The agent selects its configured default model. Native choices appear after session setup.',
+    displayName: profile.promoteSessionModelSelector
+      ? 'Auto'
+      : `${profile.descriptor.displayName} default`,
+    description: profile.promoteSessionModelSelector
+      ? 'The agent selects the model until a task-owned session advertises its exact choices.'
+      : 'The agent selects its configured default model. Native choices appear after session setup.',
     hidden: false,
     supportedReasoningEfforts: [],
     serviceTiers: [],
