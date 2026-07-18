@@ -92,7 +92,8 @@ describe('ACP runtime profiles', () => {
       contractId: 'grok-build-acp/session-models@v1',
       initializeResponseMetaField: 'modelState',
       setupResponseField: 'models',
-      setModelMethod: 'session/set_model'
+      setModelMethod: 'session/set_model',
+      modelUpdateNotification: '_x.ai/models/update'
     });
     expect(GROK_ACP_PROFILE.sessionModelExtension).toBe(GROK_SESSION_MODEL_EXTENSION);
     expect(

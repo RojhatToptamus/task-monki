@@ -324,13 +324,26 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
   }
 
   async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
-    const models = await this.listModels();
-    const model =
-      models.find((candidate) => candidate.id === input.settings.model) ??
-      models.find((candidate) => candidate.model === input.settings.model) ??
-      models.find((candidate) => candidate.isDefault);
+    const requestedModel = input.settings.model;
+    const explicitModel = Boolean(requestedModel && requestedModel !== 'default');
+    let models = await this.listModels();
+    let model = explicitModel
+      ? models.find((candidate) => candidate.id === requestedModel) ??
+        models.find((candidate) => candidate.model === requestedModel)
+      : models.find((candidate) => candidate.isDefault);
+    if (explicitModel && !model) {
+      await this.refreshModels();
+      models = structuredClone(this.models);
+      model =
+        models.find((candidate) => candidate.id === requestedModel) ??
+        models.find((candidate) => candidate.model === requestedModel);
+    }
     if (!model) {
-      throw new Error('Codex did not report an available model.');
+      throw new Error(
+        explicitModel
+          ? `Codex did not report requested model ${requestedModel}.`
+          : 'Codex did not report a default model.'
+      );
     }
     // `model/list` does not report the Codex model-provider dimension. Keep an
     // explicit provider selected by an existing task/session instead of
@@ -1353,7 +1366,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     };
   }
 
-  shutdown(): Promise<void> {
+  async shutdown(): Promise<void> {
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -1363,7 +1376,51 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     this.interruptTimers.clear();
     this.unmaterializedThreadAttestations.clear();
-    return this.supervisor.shutdown();
+    const serverInstanceId = this.supervisor.currentServer?.id;
+    let shutdownFailure: unknown;
+    try {
+      await this.supervisor.shutdown();
+    } catch (cause) {
+      shutdownFailure = cause;
+    }
+    let settlementFailure: unknown;
+    try {
+      if (!serverInstanceId) {
+        await this.drainInbound();
+      } else {
+        let ownershipEnded = !shutdownFailure || this.supervisor.currentClient === undefined;
+        if (!ownershipEnded) {
+          const storedServer = await this.store.getAgentServer(serverInstanceId);
+          ownershipEnded =
+            storedServer !== undefined &&
+            ['EXITED', 'FAILED', 'LOST'].includes(storedServer.status);
+        }
+        if (ownershipEnded) {
+          const settlement = this.inboundQueue.then(() =>
+            this.handleRuntimeLoss(serverInstanceId, {
+              reason: 'Codex App Server shut down.',
+              restarting: false
+            })
+          );
+          this.inboundQueue = settlement.catch((error: unknown) =>
+            this.handleInboundMaterializationFailure(error)
+          );
+          await settlement;
+        }
+      }
+    } catch (cause) {
+      settlementFailure = cause;
+    } finally {
+      this.boundClient = undefined;
+    }
+    if (shutdownFailure && settlementFailure) {
+      throw new AggregateError(
+        [shutdownFailure, settlementFailure],
+        'Codex App Server shutdown and ownership settlement both failed.'
+      );
+    }
+    if (shutdownFailure) throw shutdownFailure;
+    if (settlementFailure) throw settlementFailure;
   }
 
   async updateRuntimeConfig(input: {
@@ -3176,18 +3233,29 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private async recoverPersistedRuntimeLosses(): Promise<void> {
     const snapshot = await this.store.snapshot();
+    const serversWithActiveOwnership = new Set([
+      ...snapshot.runs
+        .filter((run) => ACTIVE_RUN_STATES.includes(run.status))
+        .map((run) => run.serverInstanceId),
+      ...snapshot.interactionRequests
+        .filter((request) => ['PENDING', 'RESPONDING'].includes(request.status))
+        .map((request) => request.serverInstanceId)
+    ]);
     const orphaned = snapshot.agentServers.filter(
       (server) =>
         server.runtimeId === this.descriptor.id &&
-        ['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status)
+        (['STARTING', 'READY', 'RUNNING', 'DEGRADED', 'STOPPING'].includes(server.status) ||
+          serversWithActiveOwnership.has(server.id))
     );
     for (const server of orphaned) {
-      await this.store.updateAgentServer(server.id, {
-        status: 'LOST',
-        disconnectedAt: new Date().toISOString(),
-        exitedAt: new Date().toISOString(),
-        exitReason: 'Task Monki restarted without the prior App Server process.'
-      });
+      if (!['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
+        await this.store.updateAgentServer(server.id, {
+          status: 'LOST',
+          disconnectedAt: new Date().toISOString(),
+          exitedAt: new Date().toISOString(),
+          exitReason: 'Task Monki restarted without the prior App Server process.'
+        });
+      }
       await this.handleRuntimeLoss(server.id);
     }
   }

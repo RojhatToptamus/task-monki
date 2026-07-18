@@ -3,7 +3,8 @@ import {
   mapOpenCodeInteractionResponse,
   mapOpenCodePermission,
   mapOpenCodeQuestion,
-  openCodePermissionRules
+  openCodePermissionRules,
+  openCodePermissionRulesEndWith
 } from './OpenCodeInteractionMapper';
 
 describe('OpenCodeInteractionMapper', () => {
@@ -16,6 +17,7 @@ describe('OpenCodeInteractionMapper', () => {
     });
     expect(rules).toContainEqual({ permission: 'edit', pattern: '*', action: 'ask' });
     expect(rules).toContainEqual({ permission: 'bash', pattern: '*', action: 'ask' });
+    expect(rules).toContainEqual({ permission: 'task', pattern: '*', action: 'deny' });
     expect(rules).toContainEqual({
       permission: 'external_directory',
       pattern: '*',
@@ -57,6 +59,7 @@ describe('OpenCodeInteractionMapper', () => {
     });
     expect(rules).toContainEqual({ permission: 'edit', pattern: '*', action: 'allow' });
     expect(rules).toContainEqual({ permission: 'bash', pattern: '*', action: 'allow' });
+    expect(rules).toContainEqual({ permission: 'task', pattern: '*', action: 'allow' });
     expect(rules).toContainEqual({
       permission: 'external_directory',
       pattern: '*',
@@ -79,6 +82,23 @@ describe('OpenCodeInteractionMapper', () => {
       pattern: '*',
       action: 'ask'
     });
+  });
+
+  it('attests only the effective native permission suffix', () => {
+    const desired = openCodePermissionRules({
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'on-request',
+      networkAccess: true
+    });
+    expect(openCodePermissionRulesEndWith(desired, desired)).toBe(true);
+    expect(openCodePermissionRulesEndWith([
+      { permission: 'edit', pattern: '*', action: 'allow' },
+      ...desired
+    ], desired)).toBe(true);
+    expect(openCodePermissionRulesEndWith([
+      ...desired,
+      { permission: 'edit', pattern: '*', action: 'allow' }
+    ], desired)).toBe(false);
   });
 
   it('maps command and file permissions with reviewable native context', () => {

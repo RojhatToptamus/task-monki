@@ -89,7 +89,7 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
     },
     subagents: {
       maturity: 'experimental',
-      detail: 'OpenCode child sessions are preserved when parent relationships are reported.'
+      detail: 'OpenCode child sessions are preserved when parent relationships are reported. Native task delegation is disabled by the approval-gated preset because child tool permissions cannot be independently attested.'
     },
     backgroundTerminals: {
       maturity: 'inferred',

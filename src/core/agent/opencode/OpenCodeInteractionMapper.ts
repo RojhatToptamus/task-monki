@@ -6,15 +6,10 @@ import type {
   InteractionRequestType
 } from '../../../shared/agent';
 import type {
+  OpenCodePermissionRule,
   OpenCodePermissionRequest,
   OpenCodeQuestionRequest
 } from './OpenCodeProtocol';
-
-export interface OpenCodePermissionRule {
-  permission: string;
-  pattern: string;
-  action: 'allow' | 'deny' | 'ask';
-}
 
 export interface MappedOpenCodeInteraction {
   type: InteractionRequestType;
@@ -35,6 +30,7 @@ export function openCodePermissionRules(
   assertOpenCodeExecutionSettings(settings);
   const mutationAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const externalDirectoryAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
+  const taskAction = settings.approvalPolicy === 'never' ? 'allow' : 'deny';
   const networkAction = settings.networkAccess === true ? 'allow' : 'deny';
   return [
     { permission: '*', pattern: '*', action: 'ask' },
@@ -44,13 +40,29 @@ export function openCodePermissionRules(
     { permission: 'list', pattern: '*', action: 'allow' },
     { permission: 'lsp', pattern: '*', action: 'allow' },
     { permission: 'question', pattern: '*', action: 'allow' },
-    { permission: 'task', pattern: '*', action: 'allow' },
+    { permission: 'task', pattern: '*', action: taskAction },
     { permission: 'external_directory', pattern: '*', action: externalDirectoryAction },
     { permission: 'edit', pattern: '*', action: mutationAction },
     { permission: 'bash', pattern: '*', action: mutationAction },
     { permission: 'webfetch', pattern: '*', action: networkAction },
     { permission: 'websearch', pattern: '*', action: networkAction }
   ];
+}
+
+/** OpenCode applies the last matching rule, so the desired suffix is effective. */
+export function openCodePermissionRulesEndWith(
+  actual: readonly OpenCodePermissionRule[] | undefined,
+  expected: readonly OpenCodePermissionRule[]
+): boolean {
+  if (!actual || actual.length < expected.length) return false;
+  const offset = actual.length - expected.length;
+  return expected.every((rule, index) => {
+    const candidate = actual[offset + index];
+    return candidate !== undefined &&
+      candidate.permission === rule.permission &&
+      candidate.pattern === rule.pattern &&
+      candidate.action === rule.action;
+  });
 }
 
 export function assertOpenCodeExecutionSettings(settings: AgentExecutionSettings): void {

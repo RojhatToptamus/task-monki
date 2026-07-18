@@ -4,10 +4,26 @@ import {
   mapOpenCodeTodoSteps,
   normalizeOpenCodeEvent,
   openCodeErrorDiagnostic,
+  parseOpenCodePermissionRules,
   parseOpenCodeProviderCatalog
 } from './OpenCodeProtocol';
 
 describe('OpenCodeProtocol', () => {
+  it('strictly parses native session permission rules', () => {
+    expect(parseOpenCodePermissionRules([
+      { permission: 'edit', pattern: '*', action: 'ask' }
+    ])).toEqual([{ permission: 'edit', pattern: '*', action: 'ask' }]);
+    expect(() => parseOpenCodePermissionRules({ edit: 'ask' })).toThrow(
+      'incompatible session permission policy'
+    );
+    expect(() => parseOpenCodePermissionRules([
+      { permission: 'edit', pattern: '*', action: 'sometimes' }
+    ])).toThrow('incompatible session permission policy');
+    expect(() => parseOpenCodePermissionRules([
+      { permission: 'edit', pattern: '*', action: 'ask', scope: 'unknown' }
+    ])).toThrow('incompatible session permission policy');
+  });
+
   it('preserves provider identity, variants, modalities, and native metadata', () => {
     const catalog = parseOpenCodeProviderCatalog({
       connected: ['anthropic', 'google'],

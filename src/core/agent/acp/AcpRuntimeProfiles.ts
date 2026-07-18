@@ -57,6 +57,7 @@ export interface AcpSessionModelExtensionContract {
   initializeResponseMetaField?: 'modelState';
   setupResponseField: 'models';
   setModelMethod: 'session/set_model';
+  modelUpdateNotification: '_x.ai/models/update';
 }
 
 /**
@@ -67,7 +68,8 @@ export const GROK_SESSION_MODEL_EXTENSION = {
   contractId: 'grok-build-acp/session-models@v1',
   initializeResponseMetaField: 'modelState',
   setupResponseField: 'models',
-  setModelMethod: 'session/set_model'
+  setModelMethod: 'session/set_model',
+  modelUpdateNotification: '_x.ai/models/update'
 } as const satisfies AcpSessionModelExtensionContract;
 
 const descriptor = (id: AgentRuntimeId, displayName: string): AgentRuntimeDescriptor => ({

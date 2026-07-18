@@ -24,8 +24,15 @@ export interface OpenCodeSession {
   title: string;
   version: string;
   model?: { providerID: string; modelID?: string; id?: string; variant?: string };
+  permission?: OpenCodePermissionRule[];
   metadata?: Record<string, unknown>;
   time?: { created?: number; updated?: number };
+}
+
+export interface OpenCodePermissionRule {
+  permission: string;
+  pattern: string;
+  action: 'allow' | 'deny' | 'ask';
 }
 
 export interface OpenCodeMessageInfo {
@@ -157,7 +164,39 @@ export function parseOpenCodeSession(value: unknown): OpenCodeSession {
   ) {
     throw new Error('OpenCode returned an incompatible session record.');
   }
-  return record as unknown as OpenCodeSession;
+  return {
+    ...(record as unknown as OpenCodeSession),
+    ...(record.permission === undefined
+      ? {}
+      : { permission: parseOpenCodePermissionRules(record.permission) })
+  };
+}
+
+export function parseOpenCodePermissionRules(value: unknown): OpenCodePermissionRule[] {
+  if (!Array.isArray(value)) {
+    throw new Error('OpenCode returned an incompatible session permission policy.');
+  }
+  return value.map((entry) => {
+    const rule = asRecord(entry);
+    if (
+      !rule ||
+      Object.keys(rule).some(
+        (key) => key !== 'permission' && key !== 'pattern' && key !== 'action'
+      ) ||
+      typeof rule.permission !== 'string' ||
+      rule.permission.length === 0 ||
+      typeof rule.pattern !== 'string' ||
+      rule.pattern.length === 0 ||
+      (rule.action !== 'allow' && rule.action !== 'deny' && rule.action !== 'ask')
+    ) {
+      throw new Error('OpenCode returned an incompatible session permission policy.');
+    }
+    return {
+      permission: rule.permission,
+      pattern: rule.pattern,
+      action: rule.action
+    };
+  });
 }
 
 export function parseOpenCodeSessions(value: unknown): OpenCodeSession[] {

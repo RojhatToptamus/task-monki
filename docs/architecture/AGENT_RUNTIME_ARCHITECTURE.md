@@ -286,8 +286,11 @@ provider/model data.
 Both OpenCode execution presets truthfully report `DANGER_FULL_ACCESS` because
 native permission rules do not confine the OpenCode process. The default
 `on-request` preset asks before mutation and external-directory tools; the
-`never` preset allows them. This approval distinction remains useful, but it is
-not represented as a workspace sandbox.
+`never` preset allows them. Native task delegation is denied under `on-request`
+because child permissions cannot be attested independently. Before each prompt
+and after a history fork, Task Monki patches when necessary, re-reads the
+session, and requires the exact effective permission-rule suffix. This approval
+distinction remains useful, but it is not represented as a workspace sandbox.
 
 The application-level provider catalog is discovery only. Before every turn,
 the worktree-scoped server's `/provider` response is authoritative for model
@@ -304,6 +307,10 @@ Monki records recovery-required state and never resends the prompt
 automatically. Reconnect first reconciles durable HTTP resources, then resumes
 streaming. OpenCode's provider registry is retained so Anthropic, Google, xAI,
 OpenAI, and other configured models remain first-class within that runtime.
+If an inbound SSE write fails, one coalesced, generation-fenced snapshot restores
+messages, parts, status, pending interactions, todos, and usage. An incomplete
+or unpersistable snapshot quarantines that session process; it is never reduced
+to telemetry while execution continues.
 
 OpenCode interruption is a bounded control flow, not an unbounded wait for SSE.
 Task Monki sends abort only through the exact session process that owns the run,

@@ -939,6 +939,48 @@ describe('AntigravityAdapter', () => {
     ).resolves.toBeUndefined();
     await fixture.adapter.shutdown();
   });
+
+  it.each(['outbound journal', 'process start'] as const)(
+    'terminalizes the server when %s fails before process ownership',
+    async (boundary) => {
+      const process = boundary === 'process start'
+        ? new FailingStartProcessSupervisor()
+        : new ControlledProcessSupervisor();
+      const fixture = await createFixture(true, { processSupervisor: process });
+      if (boundary === 'outbound journal') {
+        vi.spyOn(fixture.store, 'appendProtocolMessage').mockRejectedValueOnce(
+          new Error('simulated outbound journal failure')
+        );
+      }
+      const run = await createRun(fixture, fixture.session, 'WAIT');
+
+      await expect(
+        fixture.adapter.startTurn(turnInput(run, fixture.session, 'WAIT'))
+      ).rejects.toThrow(
+        boundary === 'process start'
+          ? 'simulated process start failure'
+          : 'simulated outbound journal failure'
+      );
+
+      const storedRun = await fixture.store.getRun(run.id);
+      const server = (await fixture.store.snapshot()).agentServers.find(
+        (candidate) => candidate.id === storedRun?.serverInstanceId
+      );
+      expect(server).toMatchObject({
+        status: 'FAILED',
+        exitReason:
+          boundary === 'process start'
+            ? 'simulated process start failure'
+            : 'simulated outbound journal failure'
+      });
+      expect(server?.exitedAt).toBeTruthy();
+      expect(process.startCount).toBe(boundary === 'process start' ? 1 : 0);
+      await expect(
+        fixture.adapter.releaseSession({ localSessionId: fixture.session.id })
+      ).resolves.toBeUndefined();
+      await fixture.adapter.shutdown();
+    }
+  );
 });
 
 interface Fixture {
@@ -1060,6 +1102,15 @@ class ControlledProcessSupervisor extends ProcessSupervisor {
     if (this.closed) return;
     this.closed = true;
     this.controlledEvents.emit('close', { exitCode, signal });
+  }
+}
+
+class FailingStartProcessSupervisor extends ProcessSupervisor {
+  startCount = 0;
+
+  override start(_spec: ProcessSpec): SupervisedProcess {
+    this.startCount += 1;
+    throw new Error('simulated process start failure');
   }
 }
 

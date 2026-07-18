@@ -149,8 +149,10 @@ Stable session features are negotiated independently:
   replayed history is isolated from live run output.
 - The stable `category=model` config selector remains the baseline model path.
   Only the Grok profile may use its captured session `models` catalog and
-  `session/set_model` extension. An explicit model fails clearly when the
-  profile exposes neither path or did not offer that exact ID.
+  `session/set_model` extension. Grok's versioned `_x.ai/models/update`
+  notification atomically replaces its pre-session catalog; removed models do
+  not remain available. An explicit model fails clearly when the profile
+  exposes neither path or did not offer that exact ID.
 
 Session setup preserves evidence at the boundary where it was observed.
 `session/new` is recorded as the provider-selected pre-configuration state
@@ -158,7 +160,11 @@ with that response's journal reference. Requested mode, model, and config
 mutations are applied afterward; their projected final state is recorded as a
 `TASK_MONKI_RESOLUTION`, optionally citing the final mutation response, and is
 never relabeled as provider-reported settings. A later real settings update or
-resume response can independently provide provider-confirmed state.
+resume response can independently provide provider-confirmed state. Immediately
+before every prompt, Task Monki revalidates the complete requested native state
+and applies only values that differ. An explicit reasoning effort requires an
+advertised `thought_level` selector; catalog metadata alone is not treated as a
+writable provider contract.
 
 Streaming materializes agent text/thoughts, tool calls and diffs, plans, usage,
 native config updates, artifacts, and structured app events. Every text delta
@@ -176,6 +182,9 @@ create an unbounded chunk array. A coalesced item publishes one activity event, 
 the provider's opaque option IDs. Task Monki intersects the offered choices
 with its own command/path/network policy and sends back the exact ID;
 unverifiable scope and reserved Git/GitHub delivery commands fail closed.
+Only `end_turn` completes a prompt successfully. `cancelled` interrupts it;
+`refusal`, `max_tokens`, and `max_turn_requests` fail it with a bounded provider
+diagnostic.
 
 ## Security and execution policy
 

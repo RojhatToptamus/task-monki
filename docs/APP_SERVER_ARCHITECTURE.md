@@ -227,7 +227,9 @@ Task and review execution settings stored on task/run records include:
 - approval reviewer;
 - network access.
 
-Settings are validated against the live model catalog before a turn starts.
+Settings are validated against the live model catalog before a turn starts. An
+explicit model must match that catalog exactly, including after one forced
+refresh; only an omitted or `default` selection may use the provider default.
 Renderer settings should update both implementation defaults and review defaults
 so the app uses the configured reasoning level consistently.
 
@@ -370,6 +372,12 @@ that loss sweep are diagnostic-only and do not recursively invoke notification
 recovery; a new application/runtime supervisor must reconcile the durable
 records later. Thus a dropped terminal write cannot leave a reusable provider
 generation silently running behind a local `RUNNING` record.
+
+Intentional shutdown uses the same serialized runtime-loss settlement before it
+returns. On application startup, active runs and actionable interactions are
+reconciled even when their owning server record already reached `EXITED`,
+`FAILED`, or `LOST`; a terminal process record never makes active ownership
+safe by itself.
 
 ## Verification
 

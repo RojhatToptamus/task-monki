@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   interactionActionsForAcpOptions,
+  mapAcpStopReason,
   modelsFromAcpConfig,
   observedSettingsFromAcpState,
   permissionOutcomeForDecision,
@@ -19,6 +20,16 @@ const options: AcpPermissionOption[] = [
 ];
 
 describe('ACP event mapping', () => {
+  it.each([
+    ['end_turn', 'completed'],
+    ['cancelled', 'interrupted'],
+    ['refusal', 'failed'],
+    ['max_tokens', 'failed'],
+    ['max_turn_requests', 'failed']
+  ] as const)('maps terminal stop reason %s to %s', (stopReason, status) => {
+    expect(mapAcpStopReason(stopReason)).toBe(status);
+  });
+
   it('advertises only provider-present permission actions', () => {
     expect(interactionActionsForAcpOptions([options[0]!, options[2]!])).toEqual([
       'ACCEPT',
@@ -105,7 +116,22 @@ describe('ACP event mapping', () => {
           {
             modelId: 'grok-build',
             name: 'Grok Build',
-            description: 'Best for advanced coding tasks'
+            description: 'Best for advanced coding tasks',
+            reasoningEffort: 'high',
+            reasoningEfforts: [
+              {
+                id: 'high',
+                value: 'high',
+                label: 'High Effort',
+                default: true
+              },
+              {
+                id: 'low',
+                value: 'low',
+                label: 'Low Effort',
+                default: false
+              }
+            ]
           }
         ]
       },
@@ -120,7 +146,8 @@ describe('ACP event mapping', () => {
       expect.objectContaining({
         id: 'grok-acp:xai/grok-build',
         model: 'grok-build',
-        isDefault: true
+        isDefault: true,
+        supportedReasoningEfforts: []
       }),
       expect.objectContaining({
         id: 'grok-acp:xai/grok-composer-2.5-fast',
@@ -140,6 +167,7 @@ describe('ACP event mapping', () => {
       runtimeId: 'grok-acp',
       model: 'grok-build',
       modelProvider: 'xai',
+      reasoningEffort: undefined,
       runtimeOptions: {
         'grok-acp': {
           models: { currentModelId: 'grok-build' }

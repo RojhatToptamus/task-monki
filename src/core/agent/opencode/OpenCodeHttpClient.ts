@@ -274,7 +274,7 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     while (!signal.aborted) {
       try {
         await this.consumeEventStream(signal, handlers.onEvent, async () => {
-          if (connected) await handlers.onReconnect().catch(() => undefined);
+          if (connected) await handlers.onReconnect();
           connected = true;
           attempt = 0;
         });
@@ -283,9 +283,9 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
       } catch (cause) {
         if (signal.aborted) return;
         const error = toError(cause);
-        // Adapter callbacks persist telemetry and may fail independently of
-        // the HTTP transport. A callback failure must not terminate the only
-        // reconnect loop while the caller still owns this stream handle.
+        // Event and reconnect callback failures enter the same disconnect
+        // path as transport loss. A failure in the disconnect diagnostic
+        // itself must not terminate the only reconnect loop.
         await handlers.onDisconnect(error).catch(() => undefined);
         attempt += 1;
         await abortableDelay(Math.min(10_000, 250 * 2 ** Math.min(attempt, 6)), signal);

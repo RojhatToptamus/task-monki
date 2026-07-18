@@ -512,31 +512,51 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
       runtimeResolution: runtime.diagnostics
     });
     const correlationId = `antigravity:${input.localRunId}`;
-    await this.store.updateRun(input.localRunId, {
-      providerTurnId: correlationId,
-      serverInstanceId: server.id,
-      status: 'STARTING',
-      lastEventAt: new Date().toISOString()
-    });
-    await this.store.appendProtocolMessage(
-      server.id,
-      'OUTBOUND',
-      JSON.stringify({
-        type: 'antigravity.print',
-        model: resolved.model.model,
-        mode: input.mode,
-        promptArtifact: (await this.store.getRun(input.localRunId))?.promptArtifactId
-      }),
-      { stream: 'command' }
-    );
-
-    const process = this.processSupervisor.start({
-      executable: runtime.executable,
-      argv,
-      cwd: worktreePath,
-      env: antigravityChildEnvironment(this.environment),
-      allowedEnvironmentKeys: ANTIGRAVITY_ENVIRONMENT_POLICY.allowedKeys
-    });
+    let process: SupervisedProcess;
+    try {
+      await this.store.updateRun(input.localRunId, {
+        providerTurnId: correlationId,
+        serverInstanceId: server.id,
+        status: 'STARTING',
+        lastEventAt: new Date().toISOString()
+      });
+      await this.store.appendProtocolMessage(
+        server.id,
+        'OUTBOUND',
+        JSON.stringify({
+          type: 'antigravity.print',
+          model: resolved.model.model,
+          mode: input.mode,
+          promptArtifact: (await this.store.getRun(input.localRunId))?.promptArtifactId
+        }),
+        { stream: 'command' }
+      );
+      process = this.processSupervisor.start({
+        executable: runtime.executable,
+        argv,
+        cwd: worktreePath,
+        env: antigravityChildEnvironment(this.environment),
+        allowedEnvironmentKeys: ANTIGRAVITY_ENVIRONMENT_POLICY.allowedKeys
+      });
+    } catch (cause) {
+      const reason = redactProcessDiagnostic(
+        cause instanceof Error ? cause.message : String(cause),
+        this.sensitiveValues
+      );
+      try {
+        await this.store.updateAgentServer(server.id, {
+          status: 'FAILED',
+          exitedAt: new Date().toISOString(),
+          exitReason: reason
+        });
+      } catch (terminalCause) {
+        throw new AggregateError(
+          [cause, terminalCause],
+          'Antigravity failed before process ownership and its server record could not be terminalized.'
+        );
+      }
+      throw cause;
+    }
     const active = createActiveTurn(
       input.localRunId,
       session.id,

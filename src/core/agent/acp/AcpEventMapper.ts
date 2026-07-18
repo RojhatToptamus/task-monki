@@ -15,6 +15,7 @@ import {
   type AcpSessionConfigOption,
   type AcpSessionModelState,
   type AcpSessionModeState,
+  type AcpStopReason,
   type AcpToolCallStatus,
   type AcpToolKind
 } from './AcpProtocol';
@@ -62,6 +63,21 @@ export function mapAcpToolKind(kind: AcpToolKind | null | undefined): AgentItemT
       return 'REASONING_SUMMARY';
     default:
       return 'OTHER';
+  }
+}
+
+export function mapAcpStopReason(
+  stopReason: AcpStopReason
+): 'completed' | 'failed' | 'interrupted' {
+  switch (stopReason) {
+    case 'end_turn':
+      return 'completed';
+    case 'cancelled':
+      return 'interrupted';
+    case 'refusal':
+    case 'max_tokens':
+    case 'max_turn_requests':
+      return 'failed';
   }
 }
 
@@ -229,16 +245,27 @@ export function observedSettingsFromAcpState(
     requested.model ??
     profile.defaultModel;
   const safeObservedModel = redactNativeString(observedModel);
+  const thoughtLevel = acpThoughtLevelSelector(state);
   return {
     ...requested,
     runtimeId: profile.descriptor.id,
     model: safeObservedModel === observedModel ? observedModel : undefined,
     modelProvider: requested.modelProvider ?? profile.defaultModelProvider,
+    reasoningEffort: thoughtLevel?.currentValue,
     runtimeOptions: {
       ...requested.runtimeOptions,
       [profile.descriptor.id]: nativeOptionsValue(state)
     }
   };
+}
+
+export function acpThoughtLevelSelector(
+  state: AcpNativeSessionState
+): Extract<AcpSessionConfigOption, { type: 'select' }> | undefined {
+  return state.configOptions.find(
+    (option): option is Extract<AcpSessionConfigOption, { type: 'select' }> =>
+      option.type === 'select' && option.category === 'thought_level'
+  );
 }
 
 export function nativeOptionsValue(state: AcpNativeSessionState): AgentJsonValue {

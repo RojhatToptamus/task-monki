@@ -190,7 +190,17 @@ export interface AcpSessionModel {
   modelId: string;
   name: string;
   description?: string | null;
+  reasoningEffort?: string | null;
+  reasoningEfforts?: AcpSessionModelReasoningEffort[];
   _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpSessionModelReasoningEffort {
+  id: string;
+  value: string;
+  label: string;
+  description?: string | null;
+  default: boolean;
 }
 
 export interface AcpSessionModelState {
@@ -367,6 +377,15 @@ export function parseInitializeModelExtension(
   const record = requireRecord(value, 'ACP initialize response');
   const meta = optionalMeta(record._meta);
   return parseModelState(meta?.[initializeResponseMetaField]);
+}
+
+/** Parses the captured Grok model-catalog notification payload. */
+export function parseSessionModelUpdateExtension(value: unknown): AcpSessionModelState {
+  const parsed = parseModelState(value);
+  if (!parsed) {
+    throw new Error('ACP provider extension model update has no model state.');
+  }
+  return parsed;
 }
 
 export function parsePromptResponse(value: unknown): AcpPromptResponse {
@@ -559,10 +578,12 @@ function parseModelState(value: unknown): AcpSessionModelState | null {
     ) {
       throw new Error('ACP provider extension session model is invalid.');
     }
+    const reasoning = parseModelReasoningEfforts(model._meta);
     return {
       modelId: model.modelId,
       name: model.name,
       description: typeof model.description === 'string' ? model.description : null,
+      ...reasoning,
       _meta: optionalMeta(model._meta)
     };
   });
@@ -579,6 +600,67 @@ function parseModelState(value: unknown): AcpSessionModelState | null {
     currentModelId: state.currentModelId,
     availableModels,
     _meta: optionalMeta(state._meta)
+  };
+}
+
+function parseModelReasoningEfforts(
+  value: unknown
+): Pick<AcpSessionModel, 'reasoningEffort' | 'reasoningEfforts'> {
+  const meta = optionalMeta(value);
+  if (!meta || meta.supportsReasoningEffort === undefined) return {};
+  if (typeof meta.supportsReasoningEffort !== 'boolean') {
+    throw new Error('ACP provider extension model reasoning support flag is invalid.');
+  }
+  if (!meta.supportsReasoningEffort) return {};
+  if (
+    typeof meta.reasoningEffort !== 'string' ||
+    !meta.reasoningEffort ||
+    !Array.isArray(meta.reasoningEfforts) ||
+    meta.reasoningEfforts.length === 0
+  ) {
+    throw new Error('ACP provider extension model reasoning catalog is invalid.');
+  }
+  const reasoningEfforts = meta.reasoningEfforts.map((candidate) => {
+    const effort = requireRecord(
+      candidate,
+      'ACP provider extension model reasoning effort'
+    );
+    if (
+      typeof effort.id !== 'string' ||
+      !effort.id ||
+      typeof effort.value !== 'string' ||
+      !effort.value ||
+      typeof effort.label !== 'string' ||
+      !effort.label ||
+      typeof effort.default !== 'boolean'
+    ) {
+      throw new Error('ACP provider extension model reasoning effort is invalid.');
+    }
+    return {
+      id: effort.id,
+      value: effort.value,
+      label: effort.label,
+      description: typeof effort.description === 'string' ? effort.description : null,
+      default: effort.default
+    };
+  });
+  const ids = new Set(reasoningEfforts.map((effort) => effort.id));
+  const values = new Set(reasoningEfforts.map((effort) => effort.value));
+  const defaults = reasoningEfforts.filter((effort) => effort.default);
+  if (
+    ids.size !== reasoningEfforts.length ||
+    values.size !== reasoningEfforts.length ||
+    !values.has(meta.reasoningEffort) ||
+    defaults.length !== 1 ||
+    defaults[0]?.value !== meta.reasoningEffort
+  ) {
+    throw new Error(
+      'ACP provider extension model reasoning catalog has duplicate or inconsistent values.'
+    );
+  }
+  return {
+    reasoningEffort: meta.reasoningEffort,
+    reasoningEfforts
   };
 }
 

@@ -26,6 +26,7 @@ import type {
   OpenCodeRequestOptions
 } from './OpenCodeHttpClient';
 import { OpenCodeAmbiguousMutationError } from './OpenCodeHttpClient';
+import { openCodePermissionRules } from './OpenCodeInteractionMapper';
 import type { OpenCodeMessage, OpenCodeSession } from './OpenCodeProtocol';
 import type {
   OpenCodeServerSupervisorOptions,
@@ -299,6 +300,91 @@ describe('OpenCodeAdapter', () => {
       rawMessage: expect.objectContaining({ direction: 'INBOUND' })
     });
     expect(fixture.harness.promptBodies).toHaveLength(1);
+    await fixture.adapter.shutdown();
+  });
+
+  it('keeps passive attach read-only and does not claim a drifted native approval policy', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    fixture.harness.sessions.get(session.providerSessionId!)!.permission!.push({
+      permission: 'edit',
+      pattern: '*',
+      action: 'allow'
+    });
+
+    const attached = await fixture.adapter.attachSession({
+      localSessionId: session.id,
+      providerSessionId: session.providerSessionId
+    });
+
+    expect(fixture.harness.permissionPatchBodies).toEqual([]);
+    expect(attached.observedSettings?.approvalPolicy).toBeUndefined();
+    await fixture.adapter.shutdown();
+  });
+
+  it('repairs and attests the effective native permission suffix before prompting', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    fixture.harness.sessions.get(session.providerSessionId!)!.permission!.push({
+      permission: 'edit',
+      pattern: '*',
+      action: 'allow'
+    });
+    const run = await createRun(fixture, session);
+
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+
+    expect(fixture.harness.permissionPatchBodies).toEqual([
+      { permission: openCodePermissionRules(SETTINGS) }
+    ]);
+    expect(fixture.harness.promptBodies).toHaveLength(1);
+    expect((await fixture.store.getAgentSession(session.id))?.observedSettings)
+      .toMatchObject({ approvalPolicy: 'on-request' });
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines an ambiguous permission mutation without submitting a prompt', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    fixture.harness.sessions.get(session.providerSessionId!)!.permission!.push({
+      permission: 'bash',
+      pattern: '*',
+      action: 'allow'
+    });
+    fixture.harness.failNextPermissionPatchAfterAccept = true;
+    const run = await createRun(fixture, session);
+
+    await expect(fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    })).rejects.toMatchObject({
+      name: 'AgentMutationAmbiguousError',
+      operation: 'session/update-permission'
+    });
+    expect(fixture.harness.promptBodies).toEqual([]);
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
     await fixture.adapter.shutdown();
   });
 
@@ -1214,7 +1300,7 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
-  it('ignores an in-flight terminal event from a quarantined server generation after replacement starts', async () => {
+  it('discards an in-flight recovery snapshot after its server generation is quarantined', async () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
     const session = await materializeSession(fixture);
@@ -1230,41 +1316,64 @@ describe('OpenCodeAdapter', () => {
       authoritativeGoal: fixture.task.prompt,
       settings: SETTINGS
     });
-    const oldServerId = (await fixture.store.getRun(oldRun.id))!.serverInstanceId!;
-
-    const originalSessionLookup =
-      fixture.store.getAgentSessionByProviderId.bind(fixture.store);
-    let releaseOldLookup!: () => void;
-    const oldLookupGate = new Promise<void>((resolve) => {
-      releaseOldLookup = resolve;
+    const startedOldRun = (await fixture.store.getRun(oldRun.id))!;
+    const oldServerId = startedOldRun.serverInstanceId!;
+    const messages = fixture.harness.messages.get(session.providerSessionId!)!;
+    messages.push({
+      info: {
+        id: 'msg_stale_snapshot',
+        sessionID: session.providerSessionId!,
+        role: 'assistant',
+        parentID: startedOldRun.providerTurnId,
+        finish: 'stop',
+        tokens: { input: 5, output: 2, reasoning: 1 },
+        time: { completed: Date.now() }
+      },
+      parts: [{
+        id: 'prt_stale_snapshot',
+        sessionID: session.providerSessionId!,
+        messageID: 'msg_stale_snapshot',
+        type: 'text',
+        text: 'Stale terminal snapshot.'
+      }]
     });
-    let markOldLookupEntered!: () => void;
-    const oldLookupEntered = new Promise<void>((resolve) => {
-      markOldLookupEntered = resolve;
-    });
-    let blockOldLookup = true;
-    fixture.store.getAgentSessionByProviderId = async (...args) => {
-      const found = await originalSessionLookup(...args);
-      if (
-        blockOldLookup &&
-        args[0] === 'opencode' &&
-        args[1] === session.providerSessionId
-      ) {
-        blockOldLookup = false;
-        markOldLookupEntered();
-        await oldLookupGate;
+    fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
+    const originalUpdateSession = fixture.store.updateAgentSession.bind(fixture.store);
+    let failInboundStatus = true;
+    fixture.store.updateAgentSession = async (sessionId, update) => {
+      if (sessionId === session.id && update.status === 'IDLE' && failInboundStatus) {
+        failInboundStatus = false;
+        throw new Error('simulated inbound status persistence failure');
       }
-      return found;
+      return originalUpdateSession(sessionId, update);
+    };
+    const originalItemLookup = fixture.store.getAgentItemByProviderId.bind(fixture.store);
+    let releaseOldSnapshot!: () => void;
+    const oldSnapshotGate = new Promise<void>((resolve) => {
+      releaseOldSnapshot = resolve;
+    });
+    let markOldSnapshotEntered!: () => void;
+    const oldSnapshotEntered = new Promise<void>((resolve) => {
+      markOldSnapshotEntered = resolve;
+    });
+    let blockOldSnapshot = true;
+    fixture.store.getAgentItemByProviderId = async (...args) => {
+      if (blockOldSnapshot && args[1] === 'prt_stale_snapshot') {
+        blockOldSnapshot = false;
+        markOldSnapshotEntered();
+        await oldSnapshotGate;
+      }
+      return originalItemLookup(...args);
     };
 
-    const oldTerminalEvent = fixture.harness.emit({
-      type: 'session.error',
+    const oldRecovery = fixture.harness.emit({
+      type: 'session.status',
       properties: {
         sessionID: session.providerSessionId,
-        error: { name: 'APIError', data: { message: 'late old-generation failure' } }
+        status: { type: 'idle' }
       }
     });
-    await oldLookupEntered;
+    await oldSnapshotEntered;
 
     const providerSession = fixture.harness.sessions.get(session.providerSessionId!)!;
     const expectedDirectory = providerSession.directory;
@@ -1300,22 +1409,29 @@ describe('OpenCodeAdapter', () => {
     expect(runningReplacement.status).toBe('RUNNING');
     expect(runningReplacement.serverInstanceId).not.toBe(oldServerId);
 
-    releaseOldLookup();
-    await oldTerminalEvent;
-    fixture.store.getAgentSessionByProviderId = originalSessionLookup;
+    releaseOldSnapshot();
+    await oldRecovery;
+    fixture.store.updateAgentSession = originalUpdateSession;
+    fixture.store.getAgentItemByProviderId = originalItemLookup;
 
     const snapshot = await fixture.store.snapshot();
     const storedReplacement = snapshot.runs.find((run) => run.id === replacementRun.id)!;
     expect(storedReplacement.status).toBe('RUNNING');
     expect(storedReplacement.finalArtifactId).toBeUndefined();
-    expect(snapshot.runs.find((run) => run.id === oldRun.id)).toMatchObject({
+    const storedOldRun = snapshot.runs.find((run) => run.id === oldRun.id)!;
+    expect(storedOldRun).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       serverInstanceId: oldServerId
     });
+    expect(storedOldRun.finalArtifactId).toBeUndefined();
+    expect(
+      snapshot.agentItems.some((item) => item.providerItemId === 'prt_stale_snapshot')
+    ).toBe(false);
+    expect(snapshot.agentUsageSnapshots.some((usage) => usage.runId === oldRun.id)).toBe(false);
     expect(
       snapshot.events.filter(
         (event) =>
-          event.runId === replacementRun.id &&
+          (event.runId === oldRun.id || event.runId === replacementRun.id) &&
           ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(event.type)
       )
     ).toHaveLength(0);
@@ -1776,6 +1892,178 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
+  it('coalesces failed inbound persistence into one authoritative session snapshot', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    const turn = await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    const messages = fixture.harness.messages.get(session.providerSessionId!)!;
+    const userMessage = messages.find((message) => message.info.id === turn.providerTurnId)!;
+    Object.assign(userMessage.info, {
+      providerID: 'anthropic',
+      modelID: 'claude-test',
+      variant: 'high'
+    });
+    userMessage.parts = [{
+      id: 'prt_recovered_user',
+      sessionID: session.providerSessionId!,
+      messageID: turn.providerTurnId!,
+      type: 'text',
+      text: fixture.task.prompt
+    }];
+    messages.push({
+      info: {
+        id: 'msg_recovered_assistant',
+        sessionID: session.providerSessionId!,
+        role: 'assistant',
+        parentID: turn.providerTurnId,
+        finish: 'stop',
+        tokens: { input: 7, output: 3, reasoning: 1 },
+        time: { completed: Date.now() }
+      },
+      parts: [{
+        id: 'prt_recovered_assistant',
+        sessionID: session.providerSessionId!,
+        messageID: 'msg_recovered_assistant',
+        type: 'text',
+        text: 'Recovered from the provider snapshot.'
+      }]
+    });
+    fixture.harness.todos.set(session.providerSessionId!, [
+      { content: 'Recover provider state', status: 'in_progress' }
+    ]);
+    fixture.harness.permissions = [{
+      id: 'per_recovered',
+      sessionID: session.providerSessionId!,
+      action: 'bash',
+      resources: ['npm test'],
+      source: { messageID: turn.providerTurnId }
+    }];
+    const baseline = {
+      session: fixture.harness.sessionReadCount,
+      messages: fixture.harness.messageReadCount,
+      status: fixture.harness.statusReadCount,
+      permission: fixture.harness.permissionReadCount,
+      question: fixture.harness.questionReadCount,
+      todo: fixture.harness.todoReadCount
+    };
+    const originalUpdate = fixture.store.updateAgentSession.bind(fixture.store);
+    let remainingFailures = 2;
+    fixture.store.updateAgentSession = async (sessionId, update) => {
+      if (sessionId === session.id && update.status === 'ACTIVE' && remainingFailures > 0) {
+        remainingFailures -= 1;
+        throw new Error('simulated inbound persistence failure');
+      }
+      return originalUpdate(sessionId, update);
+    };
+
+    await fixture.harness.emitConcurrent([
+      {
+        type: 'session.status',
+        properties: { sessionID: session.providerSessionId, status: { type: 'busy' } }
+      },
+      {
+        type: 'session.status',
+        properties: { sessionID: session.providerSessionId, status: { type: 'busy' } }
+      }
+    ]);
+    fixture.store.updateAgentSession = originalUpdate;
+
+    expect(remainingFailures).toBe(0);
+    expect(fixture.harness.sessionReadCount - baseline.session).toBe(1);
+    expect(fixture.harness.messageReadCount - baseline.messages).toBe(1);
+    expect(fixture.harness.statusReadCount - baseline.status).toBe(1);
+    expect(fixture.harness.permissionReadCount - baseline.permission).toBe(1);
+    expect(fixture.harness.questionReadCount - baseline.question).toBe(1);
+    expect(fixture.harness.todoReadCount - baseline.todo).toBe(1);
+    const snapshot = await fixture.store.snapshot();
+    expect(snapshot.agentItems.filter((item) => item.runId === run.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ providerItemId: 'prt_recovered_user' }),
+        expect.objectContaining({ providerItemId: 'prt_recovered_assistant' })
+      ])
+    );
+    expect(snapshot.agentPlanRevisions.filter((revision) => revision.runId === run.id))
+      .toHaveLength(1);
+    expect(snapshot.agentUsageSnapshots.filter((usage) => usage.runId === run.id))
+      .toHaveLength(1);
+    expect(snapshot.interactionRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerRequestId: 'per_recovered',
+          runId: run.id,
+          status: 'PENDING'
+        })
+      ])
+    );
+    expect(await fixture.store.getRun(run.id)).toMatchObject({
+      status: 'AWAITING_APPROVAL',
+      recoveryState: 'RECOVERED'
+    });
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'AWAITING_APPROVAL'
+    });
+    expect(fixture.harness.promptBodies).toHaveLength(1);
+    expect(fixture.harness.permissionReplies).toEqual([]);
+    await fixture.adapter.shutdown();
+  });
+
+  it('quarantines a generation when its one inbound recovery snapshot cannot persist', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    fixture.harness.todos.set(session.providerSessionId!, [
+      { content: 'Persist provider plan', status: 'in_progress' }
+    ]);
+    const originalRecordPlan = fixture.store.recordAgentPlanRevision.bind(fixture.store);
+    let remainingFailures = 2;
+    fixture.store.recordAgentPlanRevision = async (record) => {
+      if (record.runId === run.id && remainingFailures > 0) {
+        remainingFailures -= 1;
+        throw new Error('simulated repeated plan persistence failure');
+      }
+      return originalRecordPlan(record);
+    };
+
+    await expect(fixture.harness.emit({
+      type: 'todo.updated',
+      properties: {
+        sessionID: session.providerSessionId,
+        todos: [{ content: 'Persist provider plan', status: 'in_progress' }]
+      }
+    })).rejects.toThrow('inbound persistence recovery failed');
+    fixture.store.recordAgentPlanRevision = originalRecordPlan;
+
+    expect(remainingFailures).toBe(0);
+    expect(await fixture.store.getAgentSession(session.id)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
+    expect(await fixture.store.getRun(run.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    expect(fixture.harness.promptBodies).toHaveLength(1);
+    expect(fixture.harness.permissionReplies).toEqual([]);
+    await fixture.adapter.shutdown();
+  });
+
   it('selects from the worktree catalog and rejects an explicitly stale project model', async () => {
     const fixture = await createFixture();
     fixture.harness.catalogs.set(path.resolve(fixture.worktree.worktreePath), {
@@ -2036,6 +2324,14 @@ describe('OpenCodeAdapter', () => {
     expect(forked.providerForkedFromSessionId).toBe(source.providerSessionId);
     expect(forked.providerParentSessionId).toBeUndefined();
     expect(forked.providerSessionId).not.toBe(source.providerSessionId);
+    expect(fixture.harness.permissionPatchBodies).toEqual([
+      { permission: openCodePermissionRules(SETTINGS) }
+    ]);
+    expect(forked).toMatchObject({
+      status: 'IDLE',
+      materialized: true,
+      observedSettings: { approvalPolicy: 'on-request' }
+    });
     expect(
       fixture.harness.sessions.get(forked.providerSessionId!)?.directory
     ).toBe(targetWorktreePath);
@@ -2648,22 +2944,30 @@ async function createRun(
 class FakeOpenCodeHarness {
   readonly sessions = new Map<string, OpenCodeSession>();
   readonly messages = new Map<string, OpenCodeMessage[]>();
+  readonly todos = new Map<string, unknown[]>();
   readonly catalogs = new Map<string, unknown>();
   readonly statuses: Record<string, unknown> = {};
   permissions: unknown[] = [];
   questions: unknown[] = [];
   readonly promptBodies: unknown[] = [];
   readonly permissionReplies: unknown[] = [];
+  readonly permissionPatchBodies: unknown[] = [];
   readonly forkRequests: Array<{ sourceSessionId: string; directory: string }> = [];
   readonly supervisors: FakeOpenCodeSupervisor[] = [];
   readonly supervisorShutdownFailures = new Map<number, Error>();
   providerGetCount = 0;
   stoppedStreams = 0;
   failNextPromptAfterAccept = false;
+  failNextPermissionPatchAfterAccept = false;
+  ignorePermissionPatches = false;
   stallAbort = false;
   stallMessageReads = false;
   messageReadCount = 0;
   statusReadCount = 0;
+  sessionReadCount = 0;
+  permissionReadCount = 0;
+  questionReadCount = 0;
+  todoReadCount = 0;
   includeCrossDirectorySessions = false;
   sessionDirectoryTransform: (directory: string) => string = (directory) => directory;
   private nextSession = 0;
@@ -2697,19 +3001,42 @@ class FakeOpenCodeHarness {
     for (const client of clients) await client.emit(value);
   }
 
+  async emitConcurrent(values: readonly unknown[]): Promise<void> {
+    const clients = this.supervisors
+      .map((supervisor) => supervisor.client)
+      .filter((client): client is FakeOpenCodeClient => Boolean(client));
+    for (const client of clients) await client.emitConcurrent(values);
+  }
+
   createProviderSession(directory: string, body: unknown): OpenCodeSession {
-    const input = body as { title?: string; metadata?: Record<string, unknown> };
+    const input = body as {
+      title?: string;
+      metadata?: Record<string, unknown>;
+      model?: { id?: string; providerID?: string; variant?: string };
+      permission?: OpenCodeSession['permission'];
+    };
     const session: OpenCodeSession = {
       id: `ses_${++this.nextSession}`,
       directory: this.sessionDirectoryTransform(directory),
       title: input.title ?? 'Untitled',
       version: '1.17.18',
+      ...(input.model?.providerID
+        ? {
+            model: {
+              providerID: input.model.providerID,
+              ...(input.model.id ? { modelID: input.model.id } : {}),
+              ...(input.model.variant ? { variant: input.model.variant } : {})
+            }
+          }
+        : {}),
+      ...(input.permission ? { permission: structuredClone(input.permission) } : {}),
       metadata: input.metadata,
       time: { created: Date.now(), updated: Date.now() }
     };
     this.sessions.set(session.id, session);
     this.statuses[session.id] = { type: 'idle' };
     this.messages.set(session.id, []);
+    this.todos.set(session.id, []);
     return session;
   }
 
@@ -2850,8 +3177,10 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
       // object by reference lets a later mutation rewrite an in-flight read.
       data = structuredClone(this.harness.statuses);
     } else if (requestPath === '/permission') {
+      this.harness.permissionReadCount += 1;
       data = this.harness.permissions;
     } else if (requestPath === '/question') {
+      this.harness.questionReadCount += 1;
       data = this.harness.questions;
     } else if (requestPath.endsWith('/message')) {
       this.harness.messageReadCount += 1;
@@ -2862,7 +3191,11 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
         );
       }
       data = this.harness.messages.get(providerSessionId(requestPath)) ?? [];
+    } else if (requestPath.endsWith('/todo')) {
+      this.harness.todoReadCount += 1;
+      data = this.harness.todos.get(providerSessionId(requestPath)) ?? [];
     } else {
+      this.harness.sessionReadCount += 1;
       data = this.harness.sessions.get(providerSessionId(requestPath));
     }
     return { data: data as T, raw: await this.raw(data) };
@@ -2925,12 +3258,31 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
     return { data: data as T, raw: await this.raw(data) };
   }
 
-  patch<T>(
-    _path: string,
+  async patch<T>(
+    requestPath: string,
     body?: unknown,
     _options?: OpenCodeRequestOptions
   ): Promise<OpenCodeHttpResult<T>> {
-    return this.result(body as T);
+    const session = this.harness.sessions.get(providerSessionId(requestPath));
+    if (!session) throw new Error(`OpenCode session not found: ${requestPath}`);
+    const update = body as { permission?: OpenCodeSession['permission'] };
+    if (update.permission) {
+      this.harness.permissionPatchBodies.push(structuredClone(body));
+      if (!this.harness.ignorePermissionPatches) {
+        session.permission = [
+          ...(session.permission ?? []),
+          ...structuredClone(update.permission)
+        ];
+      }
+      if (this.harness.failNextPermissionPatchAfterAccept) {
+        this.harness.failNextPermissionPatchAfterAccept = false;
+        throw new OpenCodeAmbiguousMutationError(
+          'PATCH session',
+          'simulated permission patch response loss after provider acceptance'
+        );
+      }
+    }
+    return this.result(structuredClone(session) as T);
   }
 
   delete<T>(
@@ -2956,6 +3308,13 @@ class FakeOpenCodeClient implements OpenCodeClientTransport {
 
   async emit(value: unknown): Promise<void> {
     if (this.stream) await this.stream.onEvent(value, await this.raw(value));
+  }
+
+  async emitConcurrent(values: readonly unknown[]): Promise<void> {
+    if (!this.stream) return;
+    await Promise.all(
+      values.map(async (value) => this.stream!.onEvent(value, await this.raw(value)))
+    );
   }
 
   async emitLate(value: unknown): Promise<void> {

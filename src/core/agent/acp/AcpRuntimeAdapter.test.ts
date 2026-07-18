@@ -6,7 +6,9 @@ import { AgentInteractionService } from '../AgentInteractionService';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import type { AcpNativeSessionState } from './AcpEventMapper';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
+import type { AcpSessionConfigOption } from './AcpProtocol';
 import type { AcpRpcClient } from './AcpRpcClient';
 import {
   GROK_SESSION_MODEL_EXTENSION,
@@ -197,6 +199,124 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         }
       });
       expect((await store.snapshot()).agentServers).toEqual([]);
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('atomically replaces the Grok catalog from a validated model update', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-grok-model-update-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'agent.cjs');
+    const mutationMarker = path.join(directory, 'provider-mutations.txt');
+    await fs.writeFile(
+      agentScript,
+      invalidGrokCatalogAgentSource(mutationMarker, {
+        modelState: {
+          currentModelId: 'grok-build',
+          availableModels: [{ modelId: 'grok-build', name: 'Grok Build' }]
+        }
+      }),
+      { mode: 0o600 }
+    );
+    const runtimeId = 'test-grok-model-update';
+    const secret = 'test-grok-catalog-secret';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      defaultModelProvider: 'xai',
+      defaultModel: 'grok-build',
+      sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      environment: { ...process.env, TEST_ACP_API_KEY: secret },
+      requestTimeoutMs: 1_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'grok-build' })
+      ]);
+      const internals = adapter as unknown as {
+        boundClient?: AcpRpcClient;
+        inboundQueue: Promise<void>;
+      };
+      const client = internals.boundClient!;
+      const server = (await store.snapshot()).agentServers[0]!;
+      const validParams = {
+        currentModelId: 'grok-4.5',
+        availableModels: [
+          {
+            modelId: 'grok-4.5',
+            name: `Grok 4.5 ${secret}`,
+            description: `Frontier ${secret}`,
+            _meta: {
+              supportsReasoningEffort: true,
+              reasoningEffort: 'high',
+              reasoningEfforts: [
+                { id: 'high', value: 'high', label: 'High', default: true },
+                { id: 'medium', value: 'medium', label: 'Medium', default: false },
+                { id: 'low', value: 'low', label: 'Low', default: false }
+              ]
+            }
+          }
+        ]
+      };
+      const emitModelUpdate = async (params: unknown) => {
+        const raw = await store.appendProtocolMessage(
+          server.id,
+          'INBOUND',
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: '_x.ai/models/update',
+            params
+          })
+        );
+        client.events.emit('notification', '_x.ai/models/update', params, raw);
+        await internals.inboundQueue;
+      };
+
+      await emitModelUpdate(validParams);
+      const updated = await adapter.listModels();
+      expect(updated).toEqual([
+        expect.objectContaining({
+          model: 'grok-4.5',
+          displayName: 'Grok 4.5 [REDACTED]',
+          description: 'Frontier [REDACTED]',
+          supportedReasoningEfforts: [],
+          isDefault: true,
+          native: expect.objectContaining({
+            advertisedReasoningEfforts: ['high', 'medium', 'low'],
+            providerDefaultReasoningEffort: 'high'
+          })
+        })
+      ]);
+      expect(JSON.stringify(updated)).not.toContain(secret);
+
+      await emitModelUpdate({
+        ...validParams,
+        currentModelId: 'not-advertised'
+      });
+      expect(await adapter.listModels()).toEqual(updated);
     } finally {
       await adapter.shutdown();
     }
@@ -470,7 +590,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           attachments: []
         })
       ).rejects.toThrow(
-        'did not advertise model not-advertised in its grok-build-acp/session-models@v1 initialize catalog'
+        'did not advertise model not-advertised in its grok-build-acp/session-models@v1 provider catalog'
       );
       await expect(
         adapter.resolveExecution({
@@ -591,6 +711,35 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           }
         }
       });
+      const unsupportedReasoningRun = await store.createRun({
+        task,
+        session,
+        mode: 'FOLLOW_UP',
+        prompt: 'Do not submit without a native reasoning selector.',
+        requestedSettings: { ...settings, reasoningEffort: 'low' }
+      });
+      const promptCountBeforeReasoningRejection = await protocolMethodCount(
+        store,
+        'session/prompt'
+      );
+      await expect(
+        adapter.startTurn({
+          localRunId: unsupportedReasoningRun.id,
+          session: { localSessionId: session.id },
+          mode: 'FOLLOW_UP',
+          prompt: 'Do not submit without a native reasoning selector.',
+          authoritativeGoal: task.prompt,
+          settings: { ...settings, reasoningEffort: 'low' },
+          attachments: []
+        })
+      ).rejects.toThrow('did not advertise an ACP thought_level');
+      expect(
+        await protocolMethodCount(store, 'session/prompt')
+      ).toBe(promptCountBeforeReasoningRejection);
+      await store.updateRun(unsupportedReasoningRun.id, {
+        status: 'FAILED',
+        endedAt: new Date().toISOString()
+      });
       const creationServers = (await store.snapshot()).agentServers;
       expect(creationServers).toHaveLength(2);
       const activeCreationServer = creationServers.find((server) => server.status === 'READY');
@@ -626,7 +775,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           model: 'grok-composer-2.5-fast',
           isDefault: false,
           native: expect.objectContaining({
-            source: 'provider-initialize-extension'
+            source: 'provider-model-extension'
           })
         }),
         expect.objectContaining({
@@ -634,7 +783,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           model: 'grok-build',
           isDefault: true,
           native: expect.objectContaining({
-            source: 'provider-initialize-extension'
+            source: 'provider-model-extension'
           })
         })
       ]);
@@ -721,12 +870,21 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           expect.objectContaining({ id: 'telemetry', currentValue: false })
         ])
       });
+      const turnSettings = {
+        ...settings,
+        runtimeOptions: {
+          'test-acp': {
+            modeId: 'code',
+            configValues: { telemetry: true }
+          }
+        }
+      };
       const unsafePermissionRun = await store.createRun({
         task,
         session: (await store.getAgentSession(session.id))!,
         mode: 'FOLLOW_UP',
         prompt: 'unsafe permission identifiers',
-        requestedSettings: settings
+        requestedSettings: turnSettings
       });
       await adapter.startTurn({
         localRunId: unsafePermissionRun.id,
@@ -734,7 +892,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         mode: 'FOLLOW_UP',
         prompt: 'unsafe permission identifiers',
         authoritativeGoal: task.prompt,
-        settings
+        settings: turnSettings
       });
       await waitFor(async () =>
         (await store.getRun(unsafePermissionRun.id))?.status === 'COMPLETED'
@@ -746,6 +904,19 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           (interaction) => interaction.runId === unsafePermissionRun.id
         )
       ).toHaveLength(0);
+      expect(await adapter.readNativeState()).toMatchObject({
+        sessions: [
+          expect.objectContaining({
+            models: expect.objectContaining({
+              currentModelId: 'grok-composer-2.5-fast'
+            }),
+            modes: expect.objectContaining({ currentModeId: 'code' }),
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: 'telemetry', currentValue: true })
+            ])
+          })
+        ]
+      });
       const delayedRun = await store.createRun({
         task,
         session: (await store.getAgentSession(session.id))!,
@@ -775,10 +946,12 @@ describe('AcpRuntimeAdapter end-to-end', () => {
           expect.objectContaining({
             localSessionId: session.id,
             providerSessionId: session.providerSessionId,
-            models: expect.objectContaining({ currentModelId: 'grok-build' }),
-            modes: expect.objectContaining({ currentModeId: 'plan' }),
+            models: expect.objectContaining({
+              currentModelId: 'grok-composer-2.5-fast'
+            }),
+            modes: expect.objectContaining({ currentModeId: 'code' }),
             configOptions: expect.arrayContaining([
-              expect.objectContaining({ id: 'telemetry', currentValue: false })
+              expect.objectContaining({ id: 'telemetry', currentValue: true })
             ])
           })
         ]
@@ -1124,6 +1297,35 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const failedJournal = await fs.readFile(failedServer!.protocolJournalPath, 'utf8');
       expect(failedJournal).not.toContain(opaqueProviderSecret);
 
+      const tokenLimitedRun = await store.createRun({
+        task,
+        session: (await store.getAgentSession(session.id))!,
+        mode: 'FOLLOW_UP',
+        prompt: 'token limit terminal',
+        requestedSettings: settings
+      });
+      await adapter.startTurn({
+        localRunId: tokenLimitedRun.id,
+        session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+        mode: 'FOLLOW_UP',
+        prompt: 'token limit terminal',
+        authoritativeGoal: task.prompt,
+        settings
+      });
+      const tokenLimited = await waitFor(async () => {
+        const current = await store.getRun(tokenLimitedRun.id);
+        return current?.status === 'FAILED' ? current : undefined;
+      });
+      expect(tokenLimited.terminalReason).toBe(
+        'The ACP agent reached its token limit before completing the turn.'
+      );
+      const tokenLimitArtifact = (await store.snapshot()).artifacts.find(
+        (artifact) => artifact.id === tokenLimited.finalArtifactId
+      );
+      expect(await fs.readFile(tokenLimitArtifact!.path, 'utf8')).toContain(
+        'Failure: The ACP agent reached its token limit before completing the turn.'
+      );
+
       const malformedRun = await store.createRun({
         task,
         session: (await store.getAgentSession(session.id))!,
@@ -1357,7 +1559,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const submittedPrompts = protocolMessages.filter(
         (message) => message.method === 'session/prompt'
       );
-      expect(submittedPrompts).toHaveLength(10);
+      expect(submittedPrompts).toHaveLength(11);
       expect(
         protocolMessages.filter((message) => message.method === 'session/close')
       ).toHaveLength(2);
@@ -1427,6 +1629,102 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       adapter.configureRuntime({ executable: '/replacement/acp', restart: true })
     ).rejects.toThrow('safety-fenced until Task Monki restarts');
     expect(fakeSupervisor.shutdown).toHaveBeenCalledOnce();
+  });
+});
+
+describe('AcpRuntimeAdapter native reasoning settings', () => {
+  it('applies an explicit effort only through an advertised thought_level selector', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-acp-reasoning-selector-')
+    );
+    temporaryDirectories.push(directory);
+    const runtimeId = 'test-acp-reasoning-selector';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
+    };
+    const adapter = new AcpRuntimeAdapter(
+      new FileTaskStore(path.join(directory, 'store')),
+      new AppEventBus(),
+      profile,
+      { cwd: directory }
+    );
+    const raw = {
+      serverInstanceId: 'server-reasoning',
+      sequence: 1,
+      direction: 'INBOUND' as const,
+      recordedAt: new Date().toISOString(),
+      byteOffset: 0,
+      byteLength: 1,
+      sha256: '0'.repeat(64)
+    };
+    const configOptions: Array<
+      Extract<AcpSessionConfigOption, { type: 'select' }>
+    > = [
+      {
+        id: 'effort',
+        name: 'Reasoning effort',
+        category: 'thought_level',
+        type: 'select' as const,
+        currentValue: 'low',
+        options: [
+          { value: 'high', name: 'High' },
+          { value: 'low', name: 'Low' }
+        ]
+      }
+    ];
+    const requestMutation = vi.fn().mockResolvedValue({
+      result: { configOptions },
+      raw
+    });
+    const client = { requestMutation } as unknown as AcpRpcClient;
+    const apply = (
+      adapter as unknown as {
+        applyRequestedNativeSettings(
+          client: AcpRpcClient,
+          state: AcpNativeSessionState,
+          settings: Record<string, unknown>
+        ): Promise<unknown>;
+      }
+    ).applyRequestedNativeSettings.bind(adapter);
+    const state: AcpNativeSessionState = {
+      sessionId: 'session-reasoning',
+      modes: null,
+      models: null,
+      configOptions: [{ ...configOptions[0]!, currentValue: 'high' }]
+    };
+
+    await apply(client, state, { runtimeId, reasoningEffort: 'low' });
+    expect(requestMutation).toHaveBeenCalledWith(
+      'session/set_config_option',
+      {
+        sessionId: 'session-reasoning',
+        configId: 'effort',
+        value: 'low'
+      }
+    );
+    await expect(
+      apply(
+        client,
+        {
+          ...state,
+          modes: {
+            currentModeId: 'plan',
+            availableModes: [
+              { id: 'plan', name: 'Plan' },
+              { id: 'code', name: 'Code' }
+            ]
+          },
+          configOptions: []
+        },
+        {
+          runtimeId,
+          reasoningEffort: 'low',
+          runtimeOptions: { [runtimeId]: { modeId: 'code' } }
+        }
+      )
+    ).rejects.toThrow('did not advertise an ACP thought_level');
+    expect(requestMutation).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1857,6 +2155,27 @@ async function waitFor<T>(read: () => Promise<T | undefined>, timeoutMs = 10_000
   throw new Error('Timed out waiting for ACP test state.');
 }
 
+async function protocolMethodCount(
+  store: FileTaskStore,
+  method: string
+): Promise<number> {
+  const snapshot = await store.snapshot();
+  const messages = (
+    await Promise.all(
+      snapshot.agentServers.map((server) =>
+        fs.readFile(server.protocolJournalPath, 'utf8')
+      )
+    )
+  ).flatMap((journal) =>
+    journal
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(JSON.parse(line).raw) as { method?: string })
+  );
+  return messages.filter((message) => message.method === method).length;
+}
+
 function itemPayloadText(item: { payload: unknown } | undefined): string {
   if (!item || typeof item.payload !== 'object' || item.payload === null) return '';
   const text = (item.payload as { text?: unknown }).text;
@@ -2131,6 +2450,10 @@ input.on('line', (line) => {
     }
     if (JSON.stringify(message.params.prompt).includes('malformed terminal response')) {
       send({ jsonrpc: '2.0', id: message.id, result: {} });
+      return;
+    }
+    if (JSON.stringify(message.params.prompt).includes('token limit terminal')) {
+      send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'max_tokens' } });
       return;
     }
     if (JSON.stringify(message.params.prompt).includes('high volume stream')) {

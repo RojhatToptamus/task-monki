@@ -81,7 +81,8 @@ export function sanitizeAcpNativeSession(
             name: redactCredentialText(model.name, sensitiveValues),
             description: model.description
               ? redactCredentialText(model.description, sensitiveValues)
-              : null
+              : null,
+            ...projectReasoningEfforts(model, true, sensitiveValues)
           }))
         }
       : null,
@@ -167,7 +168,46 @@ function projectModelState(
         ? redact
           ? redactNativeString(model.description)
           : model.description
-        : null
+        : null,
+      ...projectReasoningEfforts(model, redact)
+    }))
+  };
+}
+
+function projectReasoningEfforts(
+  model: AcpSessionModelState['availableModels'][number],
+  redact: boolean,
+  sensitiveValues: readonly string[] = []
+): Pick<
+  AcpSessionModelState['availableModels'][number],
+  'reasoningEffort' | 'reasoningEfforts'
+> {
+  const efforts = (model.reasoningEfforts ?? []).filter(
+    (effort) =>
+      isSafeOperationalIdentifier(effort.id, sensitiveValues) &&
+      isSafeOperationalIdentifier(effort.value, sensitiveValues)
+  );
+  if (
+    !model.reasoningEffort ||
+    !isSafeOperationalIdentifier(model.reasoningEffort, sensitiveValues) ||
+    !efforts.some((effort) => effort.value === model.reasoningEffort)
+  ) {
+    return {};
+  }
+  return {
+    reasoningEffort: model.reasoningEffort,
+    reasoningEfforts: efforts.map((effort) => ({
+      id: effort.id,
+      value: effort.value,
+      label: redact
+        ? redactCredentialText(effort.label, sensitiveValues)
+        : effort.label,
+      description: effort.description
+        ? redact
+          ? redactCredentialText(effort.description, sensitiveValues)
+          : effort.description
+        : null,
+      default: effort.default
     }))
   };
 }

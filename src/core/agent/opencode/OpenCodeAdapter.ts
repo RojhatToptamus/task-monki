@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentExecutionSettings,
   AgentInteractionDecision,
@@ -54,6 +55,7 @@ import {
   mapOpenCodePermission,
   mapOpenCodeQuestion,
   openCodePermissionRules,
+  openCodePermissionRulesEndWith,
   assertOpenCodeExecutionSettings,
   type MappedOpenCodeInteraction
 } from './OpenCodeInteractionMapper';
@@ -132,6 +134,7 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_INTERRUPT_COMPLETION_TIMEOUT_MS = 6_000;
 const MAX_INTERRUPT_RECONCILIATION_WINDOW_MS = 1_500;
 const MAX_TRACKED_ASSISTANT_MESSAGES_PER_SESSION = 2_048;
+const MAX_INBOUND_RESYNC_MS = 15_000;
 const OPENCODE_CATALOG_EVENTS = new Set([
   'models-dev.refreshed',
   'catalog.updated',
@@ -221,6 +224,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private readonly sessionClosePromises = new Map<string, Promise<void>>();
   private readonly sessionRuntimeFences = new Map<string, Error>();
   private readonly assistantMessageParents = new Map<string, Map<string, string>>();
+  private readonly inboundResyncs = new Map<string, Promise<void>>();
   private catalogSupervisor?: OpenCodeSessionSupervisor;
   private catalogRefreshTimer?: NodeJS.Timeout;
   private catalogRefreshPromise?: Promise<void>;
@@ -476,6 +480,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         ),
         lastAttachedAt: new Date().toISOString()
       });
+      const verified = await this.synchronizeSessionPermissionPolicy(
+        session,
+        client,
+        selectedSettings,
+        'session/discovery-permission'
+      );
+      session = await this.persistPermissionAttestation(
+        session,
+        verified,
+        selectedSettings,
+        'session/discovery-permission'
+      );
       await this.bindEventStream(session, client, server.id);
       if (session.status === 'IDLE') this.scheduleSessionIdleEviction(session.id);
       return session;
@@ -552,6 +568,18 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         );
       }
     }
+    const verified = await this.synchronizeSessionPermissionPolicy(
+      session,
+      client,
+      selectedSettings,
+      'session/create-permission'
+    );
+    session = await this.persistPermissionAttestation(
+      session,
+      verified,
+      selectedSettings,
+      'session/create-permission'
+    );
     await this.recordSettingsObservation(
       session,
       'THREAD_START_RESPONSE',
@@ -755,6 +783,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     running = await this.ensureSessionRuntime(session);
     const { client, server } = running;
     await this.bindEventStream(session, client, server.id);
+    if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
+      throw new Error('OpenCode replaced the session runtime before prompt submission.');
+    }
+    const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
+      session,
+      client,
+      selectedModel.settings,
+      'session/pre-prompt-permission'
+    );
+    session = await this.persistPermissionAttestation(
+      session,
+      verifiedPermissionSession,
+      selectedModel.settings,
+      'session/pre-prompt-permission'
+    );
     if (!this.isCurrentSessionServerGeneration(session.id, server.id)) {
       throw new Error('OpenCode replaced the session runtime before prompt submission.');
     }
@@ -1267,8 +1310,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         providerSessionTreeId: forked.id,
         providerForkedFromSessionId: sourceProviderId,
         relationshipState: 'RESOLVED',
-        status: 'IDLE',
-        materialized: true,
+        status: 'NOT_LOADED',
+        materialized: false,
         requestedSettings: input.settings,
         observedSettings: this.safeObservedSettings(
           settingsFromSession(forked, input.settings)
@@ -1286,6 +1329,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         )
       );
     }
+    const verifiedPermissionSession = await this.synchronizeSessionPermissionPolicy(
+      stored,
+      client,
+      input.settings,
+      'session/fork-permission'
+    );
+    stored = await this.persistPermissionAttestation(
+      stored,
+      verifiedPermissionSession,
+      input.settings,
+      'session/fork-permission',
+      { status: 'IDLE', materialized: true }
+    );
     await this.bindEventStream(stored, client, server.id);
     this.scheduleSessionIdleEviction(stored.id);
     return stored;
@@ -1392,6 +1448,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       ...this.sessionOperationQueues.values(),
       ...this.retiredSessionOperationQueues
     ]);
+    await Promise.allSettled([...this.inboundResyncs.values()]);
+    this.inboundResyncs.clear();
     if (this.catalogRefreshPromise) await this.catalogRefreshPromise.catch(() => undefined);
     const failures: unknown[] = [];
     const quarantineResults = await Promise.allSettled([
@@ -1819,6 +1877,98 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     }
   }
 
+  private async synchronizeSessionPermissionPolicy(
+    session: AgentSessionRecord,
+    client: OpenCodeClientTransport,
+    settings: AgentExecutionSettings,
+    operation: string
+  ): Promise<OpenCodeSession> {
+    const providerSessionId = session.providerSessionId;
+    if (!providerSessionId) {
+      throw new Error('Cannot attest an unmaterialized OpenCode session permission policy.');
+    }
+    const desired = openCodePermissionRules(settings);
+    const deadlineAt = Date.now() + positiveTimeout(this.options.requestTimeoutMs, 30_000);
+    const readSession = async (): Promise<OpenCodeSession> => {
+      const providerSession = parseOpenCodeSession(
+        (await client.get<unknown>(sessionPath(providerSessionId), { deadlineAt })).data
+      );
+      if (
+        providerSession.id !== providerSessionId ||
+        !this.isSafeOperationalIdentifier(providerSession.id)
+      ) {
+        throw new Error(
+          'OpenCode returned a different or unsafe session identity during permission attestation.'
+        );
+      }
+      await assertSessionDirectory(providerSession, session.worktreePath);
+      return providerSession;
+    };
+
+    try {
+      let providerSession = await readSession();
+      if (!openCodePermissionRulesEndWith(providerSession.permission, desired)) {
+        try {
+          await client.patch<unknown>(
+            sessionPath(providerSessionId),
+            { permission: desired },
+            { deadlineAt }
+          );
+        } catch (cause) {
+          throw mapOpenCodeMutationError('session/update-permission', cause);
+        }
+        providerSession = await readSession();
+      }
+      if (!openCodePermissionRulesEndWith(providerSession.permission, desired)) {
+        throw new Error(
+          'OpenCode did not attest the requested permission policy after synchronization.'
+        );
+      }
+      return providerSession;
+    } catch (cause) {
+      const diagnostic = this.redactProviderText(errorMessage(cause));
+      try {
+        await this.quarantineSessionRuntime(
+          session.id,
+          operation,
+          `The OpenCode permission policy could not be attested: ${diagnostic}`
+        );
+      } catch (quarantineCause) {
+        throw new Error(
+          `${diagnostic} Task Monki fenced the session from reuse, but could not confirm process quarantine: ${this.redactProviderText(errorMessage(quarantineCause))}`,
+          { cause }
+        );
+      }
+      throw cause;
+    }
+  }
+
+  private async persistPermissionAttestation(
+    session: AgentSessionRecord,
+    providerSession: OpenCodeSession,
+    settings: AgentExecutionSettings,
+    operation: string,
+    update: Partial<Pick<AgentSessionRecord, 'status' | 'materialized'>> = {}
+  ): Promise<AgentSessionRecord> {
+    try {
+      return await this.store.updateAgentSession(session.id, {
+        ...update,
+        requestedSettings: settings,
+        observedSettings: this.safeObservedSettings(
+          settingsFromSession(providerSession, settings)
+        )
+      });
+    } catch (cause) {
+      const diagnostic = this.redactProviderText(errorMessage(cause));
+      await this.quarantineSessionRuntime(
+        session.id,
+        operation,
+        `Task Monki could not persist the attested OpenCode permission policy: ${diagnostic}`
+      );
+      throw new Error(diagnostic, { cause });
+    }
+  }
+
   private async performSessionQuarantine(
     sessionId: string,
     operation: string,
@@ -1888,12 +2038,13 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   private async runForInteractionMessage(
     session: AgentSessionRecord,
     providerMessageId: string,
-    serverId: string
+    serverId: string,
+    allowProviderRead = true
   ): Promise<RunRecord | undefined> {
     const direct = await this.runForProviderMessage(session, providerMessageId, serverId);
     if (direct) return direct;
     let parentId = this.assistantMessageParents.get(session.id)?.get(providerMessageId);
-    if (!parentId && session.providerSessionId) {
+    if (!parentId && allowProviderRead && session.providerSessionId) {
       const client = this.supervisors.get(session.id)?.currentClient;
       if (client) {
         try {
@@ -1977,22 +2128,21 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       },
       onDisconnect: async (error) => {
         if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
-        const reason = this.redactProviderText(error.message);
-        await supervisor?.markDegraded(reason);
-        if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
-        const run = await this.getCurrentRunForSession(session.id);
-        if (
-          run?.serverInstanceId === serverId &&
-          this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)
-        ) {
-          await this.recordRunActivity(run, 'runtime/sse/disconnected', { reason });
-        }
+        await this.enqueueInbound(session.id, async () => {
+          const reason = this.redactProviderText(error.message);
+          await supervisor?.markDegraded(reason);
+          if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
+          const run = await this.getCurrentRunForSession(session.id);
+          if (run?.serverInstanceId === serverId) {
+            await this.recordRunActivity(run, 'runtime/sse/disconnected', { reason });
+          }
+        }, serverId);
       },
       onReconnect: async () => {
         if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
         await supervisor?.markRunning();
         if (!this.isCurrentSessionRuntime(session.id, supervisor, client, serverId)) return;
-        await this.reconcileSession(session.id);
+        await this.scheduleInboundResync(session.id, serverId);
       }
     });
     this.eventStreams.set(session.id, stream);
@@ -2061,10 +2211,75 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     return this.enqueueSessionOperation(sessionId, operation).catch(async (cause) => {
       if (serverId && !this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
-      await this.recordProtocolIncident(sessionId, cause);
+      await this.recordProtocolIncident(sessionId, cause).catch(() => undefined);
+      if (serverId) await this.scheduleInboundResync(sessionId, serverId);
     });
   }
 
+  private scheduleInboundResync(sessionId: string, serverId: string): Promise<void> {
+    if (this.shuttingDown) return Promise.resolve();
+    const key = inboundGenerationKey(sessionId, serverId);
+    const existing = this.inboundResyncs.get(key);
+    if (existing) return existing;
+    const recovery = new Promise<void>((resolve) => setImmediate(resolve)).then(() =>
+      this.enqueueSessionOperation(sessionId, async () => {
+        if (!this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
+        try {
+          await this.recoverInboundGenerationOwned(sessionId, serverId);
+        } catch (cause) {
+          if (!this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
+          const diagnostic = openCodeErrorDiagnostic(cause, this.sensitiveValues);
+          const run = await this.getCurrentRunForSession(sessionId).catch(() => undefined);
+          await this.quarantineSessionRuntime(
+            sessionId,
+            'inbound/persistence-resync',
+            `OpenCode inbound persistence failed and its read-only recovery snapshot also failed: ${diagnostic}`
+          );
+          const current = run ? await this.store.getRun(run.id) : undefined;
+          if (current?.status === 'RECOVERY_REQUIRED') {
+            await this.recordReconciliation(
+              current,
+              'RECOVERY_REQUIRED',
+              'REQUIRES_USER_ACTION',
+              false
+            );
+          }
+          throw new Error(
+            `OpenCode inbound persistence recovery failed; the affected session generation was quarantined: ${diagnostic}`,
+            { cause }
+          );
+        }
+      })
+    );
+    const tracked = recovery.finally(() => {
+      if (this.inboundResyncs.get(key) === tracked) this.inboundResyncs.delete(key);
+    });
+    this.inboundResyncs.set(key, tracked);
+    return tracked;
+  }
+
+  private async recoverInboundGenerationOwned(
+    sessionId: string,
+    serverId: string
+  ): Promise<void> {
+    if (!this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
+    const run = await this.getCurrentRunForSession(sessionId);
+    if (run) {
+      const result = await this.reconcileRunOwned(run, serverId);
+      if (!this.isCurrentSessionServerGeneration(sessionId, serverId)) return;
+      if (result === 'recovery-required') {
+        throw new Error(
+          'OpenCode could not restore the active run from its authoritative provider snapshot.'
+        );
+      }
+      return;
+    }
+    const session = await this.requireSession(sessionId);
+    await this.readSession({
+      localSessionId: session.id,
+      providerSessionId: session.providerSessionId
+    });
+  }
   private async handleEvent(
     value: unknown,
     raw: AgentProtocolMessageReference,
@@ -2399,7 +2614,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     mapped: MappedOpenCodeInteraction,
     raw: AgentProtocolMessageReference,
     serverId: string,
-    providerMessageId?: string
+    providerMessageId?: string,
+    fromRecoverySnapshot = false
   ): Promise<void> {
     if (!providerMessageId) {
       await this.quarantineSessionRuntime(
@@ -2425,7 +2641,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     const run = await this.runForInteractionMessage(
       session,
       providerMessageId,
-      serverId
+      serverId,
+      !fromRecoverySnapshot
     );
     if (
       !run ||
@@ -2458,7 +2675,11 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       requestRawMessage: raw
     });
     this.emitInteractionUpdate(interaction);
-    if (mapped.type === 'USER_INPUT' && policy.allowedActions.length === 0) {
+    if (
+      !fromRecoverySnapshot &&
+      mapped.type === 'USER_INPUT' &&
+      policy.allowedActions.length === 0
+    ) {
       await this.resolveBlockedUserInput(interaction);
     }
   }
@@ -2629,14 +2850,15 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async reconcileRunOwned(
-    run: RunRecord
+    run: RunRecord,
+    expectedServerId?: string
   ): Promise<'reconciled' | 'recovery-required'> {
     this.reconciliationCounts.set(
       run.sessionId,
       (this.reconciliationCounts.get(run.sessionId) ?? 0) + 1
     );
     try {
-      return await this.reconcileRunInternal(run);
+      return await this.reconcileRunInternal(run, expectedServerId);
     } finally {
       const remaining = (this.reconciliationCounts.get(run.sessionId) ?? 1) - 1;
       if (remaining > 0) this.reconciliationCounts.set(run.sessionId, remaining);
@@ -2645,17 +2867,19 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
   }
 
   private async reconcileRunInternal(
-    run: RunRecord
+    run: RunRecord,
+    expectedServerId?: string
   ): Promise<'reconciled' | 'recovery-required'> {
     const storedRun = await this.store.getRun(run.id);
     if (!storedRun || TERMINAL_RUN_STATES.includes(storedRun.status)) return 'reconciled';
     run = storedRun;
-    const session = await this.requireSession(run.sessionId);
-    if (!session.providerSessionId) {
+    let session = await this.requireSession(run.sessionId);
+    const providerSessionId = session.providerSessionId;
+    if (!providerSessionId) {
       await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
       return 'recovery-required';
     }
-    if (!this.isSafeOperationalIdentifier(session.providerSessionId)) {
+    if (!this.isSafeOperationalIdentifier(providerSessionId)) {
       await this.quarantineSessionRuntime(
         session.id,
         'session/reconcile',
@@ -2669,6 +2893,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       const running = await this.ensureSessionRuntime(session);
       client = running.client;
       serverId = running.server.id;
+      if (expectedServerId && serverId !== expectedServerId) return 'recovery-required';
       if (run.serverInstanceId !== serverId) {
         run = await this.store.updateRun(run.id, { serverInstanceId: serverId });
       }
@@ -2676,64 +2901,280 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     } catch {
       return 'recovery-required';
     }
-    const messagesResult = await client.get<unknown>(`${sessionPath(session.providerSessionId)}/message`);
-    const messages = parseOpenCodeMessages(messagesResult.data);
-    const providerMessageId = run.providerTurnId;
-    const userMessage = providerMessageId
-      ? messages.find((message) => message.info.role === 'user' && message.info.id === providerMessageId)
+    const request = expectedServerId
+      ? {
+          deadlineAt:
+            Date.now() +
+            Math.min(
+              positiveTimeout(this.options.requestTimeoutMs, 30_000),
+              MAX_INBOUND_RESYNC_MS
+            )
+        }
       : undefined;
-    if (!userMessage) {
-      await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
-      await this.reconcilePendingInteractions(session, client, serverId);
+    const [
+      sessionResult,
+      messagesResult,
+      statusesResult,
+      permissionsResult,
+      questionsResult,
+      todosResult
+    ] = await Promise.all([
+      client.get<unknown>(sessionPath(providerSessionId), request),
+      client.get<unknown>(`${sessionPath(providerSessionId)}/message`, request),
+      client.get<unknown>('/session/status', request),
+      client.get<unknown>('/permission', request),
+      client.get<unknown>('/question', request),
+      client.get<unknown>(`${sessionPath(providerSessionId)}/todo`, request)
+    ]);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
-    const recoveredSettings = settingsObservedFromMessage(
-      userMessage.info,
-      run.requestedSettings
-    );
-    if (recoveredSettings) {
-      const observed = this.safeObservedSettings(recoveredSettings);
-      run = await this.store.updateRun(run.id, { observedSettings: observed });
-      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
-        return 'recovery-required';
-      }
-      await this.store.updateAgentSession(session.id, { observedSettings: observed });
-      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
-        return 'recovery-required';
-      }
-      await this.recordSettingsObservation(
-        session,
-        'RECOVERY_RESUME_RESPONSE',
-        observed,
-        run.id,
-        messagesResult.raw
-      );
+    const providerSession = parseOpenCodeSession(sessionResult.data);
+    if (
+      providerSession.id !== providerSessionId ||
+      !this.isSafeOperationalIdentifier(providerSession.id)
+    ) {
+      throw new Error('OpenCode returned an unsafe session identity during reconciliation.');
     }
-    const status = await this.readProviderSessionStatus(client, session.providerSessionId);
+    await assertSessionDirectory(providerSession, session.worktreePath);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
+    const messages = parseOpenCodeMessages(messagesResult.data);
+    const statuses = asRecord(statusesResult.data);
+    if (!statuses) throw new Error('OpenCode returned an incompatible session status snapshot.');
+    const permissions = parseOpenCodePermissions(permissionsResult.data);
+    const questions = parseOpenCodeQuestions(questionsResult.data);
+    const steps = this.redactProviderValue(mapOpenCodeTodoSteps(todosResult.data));
+    const status = mapOpenCodeSessionStatus(
+      statuses[providerSessionId] ?? { type: 'idle' }
+    );
+    const approvalPolicy = attestedApprovalPolicy(
+      providerSession,
+      session.requestedSettings
+    );
+    const providerMessageId = run.providerTurnId;
+    const userMessage = providerMessageId
+      ? messages.find(
+          (message) =>
+            message.info.role === 'user' && message.info.id === providerMessageId
+        )
+      : undefined;
+    const messageSettings = userMessage
+      ? settingsObservedFromMessage(userMessage.info, run.requestedSettings)
+      : undefined;
+    const recoveredSettings = messageSettings
+      ? { ...messageSettings, approvalPolicy }
+      : undefined;
+    const observed = this.safeObservedSettings(
+      recoveredSettings ??
+        settingsFromSession(providerSession, run.requestedSettings)
+    );
+    if (!isDeepStrictEqual(run.observedSettings, observed)) {
+      run = await this.store.updateRun(run.id, { observedSettings: observed });
+    }
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
+    session = await this.store.updateAgentSession(session.id, {
+      observedSettings: observed,
+      status,
+      materialized: true
+    });
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
+    if (recoveredSettings) {
+      const duplicate = (await this.store.snapshot()).agentSettingsObservations.some(
+        (observation) =>
+          observation.runId === run.id &&
+          observation.source === 'RECOVERY_RESUME_RESPONSE' &&
+          isDeepStrictEqual(observation.settings, observed)
+      );
+      if (!duplicate) {
+        await this.recordSettingsObservation(
+          session,
+          'RECOVERY_RESUME_RESPONSE',
+          observed,
+          run.id,
+          messagesResult.raw
+        );
+      }
+    }
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
+    if (userMessage) {
+      await this.materializeRecoveredMessages(
+        run,
+        session,
+        messages,
+        userMessage,
+        messagesResult.raw,
+        serverId
+      );
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+        return 'recovery-required';
+      }
+      const latestPlan = (await this.store.snapshot()).agentPlanRevisions
+        .filter((revision) => revision.runId === run.id)
+        .sort((left, right) => left.revision - right.revision)
+        .at(-1);
+      if (
+        (latestPlan && !isDeepStrictEqual(latestPlan.steps, steps)) ||
+        (!latestPlan && steps.length > 0)
+      ) {
+        await this.store.recordAgentPlanRevision({
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          sessionId: session.id,
+          runtimeId: this.descriptor.id,
+          steps,
+          rawMessage: todosResult.raw
+        });
+      }
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+        return 'recovery-required';
+      }
+    }
+    await this.materializePendingInteractionsSnapshot(
+      session,
+      permissions,
+      permissionsResult.raw,
+      questions,
+      questionsResult.raw,
+      serverId
+    );
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
+      return 'recovery-required';
+    }
+    if (!userMessage) {
+      await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
       return 'recovery-required';
     }
     const assistant = latestAssistantFor(messages, userMessage.info.id);
     if (assistant && status === 'IDLE') {
       await this.finalizeFromSnapshot(run, session, assistant, messagesResult.raw, serverId);
     } else if (status === 'ACTIVE') {
-      await this.recordReconciliation(
-        run,
-        run.status === 'INTERRUPTING' ? 'INTERRUPTING' : 'RUNNING',
-        'RECOVERED',
-        false
+      const currentRun = (await this.store.getRun(run.id)) ?? run;
+      const hasPendingInteraction = (await this.store.snapshot()).interactionRequests.some(
+        (interaction) =>
+          interaction.runId === run.id &&
+          interaction.serverInstanceId === serverId &&
+          (interaction.status === 'PENDING' || interaction.status === 'RESPONDING')
       );
+      const recoveredStatus =
+        run.status === 'INTERRUPTING'
+          ? 'INTERRUPTING'
+          : hasPendingInteraction &&
+              (currentRun.status === 'AWAITING_APPROVAL' ||
+                currentRun.status === 'AWAITING_USER_INPUT')
+            ? currentRun.status
+            : 'RUNNING';
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
         return 'recovery-required';
       }
-      await this.store.updateAgentSession(session.id, { status: 'ACTIVE', materialized: true });
+      await this.recordReconciliation(
+        currentRun,
+        recoveredStatus,
+        'RECOVERED',
+        false
+      );
     } else {
       await this.recordReconciliation(run, 'RECOVERY_REQUIRED', 'REQUIRES_USER_ACTION', false);
-      await this.reconcilePendingInteractions(session, client, serverId);
       return 'recovery-required';
     }
-    await this.reconcilePendingInteractions(session, client, serverId);
     return 'reconciled';
+  }
+
+  private async materializeRecoveredMessages(
+    run: RunRecord,
+    session: AgentSessionRecord,
+    messages: readonly OpenCodeMessage[],
+    userMessage: OpenCodeMessage,
+    raw: AgentProtocolMessageReference,
+    serverId: string
+  ): Promise<void> {
+    const related = messages.filter(
+      (message) =>
+        message.info.id === userMessage.info.id ||
+        (message.info.role === 'assistant' &&
+          message.info.parentID === userMessage.info.id)
+    );
+    for (const message of related) {
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      if (message.info.role === 'assistant' && message.info.parentID) {
+        this.rememberAssistantParent(session.id, message.info.id, message.info.parentID);
+      }
+      const terminal = Boolean(
+        message.info.role === 'assistant' &&
+        (message.info.time?.completed || message.info.finish || message.info.error)
+      );
+      for (const part of message.parts) {
+        const type = message.info.role === 'user' ? 'USER_MESSAGE' : mapOpenCodePartType(part);
+        const partStatus = terminal ? terminalPartStatus(part) : mapOpenCodePartStatus(part);
+        const payload = this.redactProviderValue(part);
+        const providerStartedAt = providerTimestamp(part.state?.time?.start);
+        const providerCompletedAt = providerTimestamp(
+          part.state?.time?.end ?? (terminal ? message.info.time?.completed : undefined)
+        );
+        const existing = await this.store.getAgentItemByProviderId(run.id, part.id);
+        if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+        if (
+          existing?.type === type &&
+          existing.status === partStatus &&
+          existing.providerStartedAt === providerStartedAt &&
+          existing.providerCompletedAt === providerCompletedAt &&
+          isDeepStrictEqual(existing.payload, payload)
+        ) {
+          continue;
+        }
+        await this.store.upsertAgentItem({
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          sessionId: session.id,
+          providerItemId: part.id,
+          type,
+          status: partStatus,
+          payload,
+          rawMessage: raw,
+          providerStartedAt,
+          providerCompletedAt
+        });
+      }
+    }
+    const assistant = latestAssistantFor(messages, userMessage.info.id);
+    if (
+      !assistant ||
+      !(assistant.info.time?.completed || assistant.info.finish || assistant.info.error)
+    ) {
+      return;
+    }
+    const usage = mapOpenCodeUsage(assistant.info);
+    const latestUsage = (await this.store.snapshot()).agentUsageSnapshots
+      .filter((snapshot) => snapshot.runId === run.id)
+      .sort((left, right) => left.observedAt.localeCompare(right.observedAt))
+      .at(-1);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+    if (
+      latestUsage &&
+      isDeepStrictEqual(latestUsage.total, usage) &&
+      isDeepStrictEqual(latestUsage.last, usage)
+    ) {
+      return;
+    }
+    await this.store.recordAgentUsageSnapshot({
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      sessionId: session.id,
+      runId: run.id,
+      runtimeId: this.descriptor.id,
+      total: usage,
+      last: usage,
+      rawMessage: raw
+    });
   }
 
   private reconcileSession(
@@ -2760,7 +3201,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     ) {
       return 'none';
     }
-    return run ? this.reconcileRunOwned(run) : 'none';
+    return run ? this.reconcileRunOwned(run, expectedServerId) : 'none';
   }
 
   private async reconcilePendingInteractions(
@@ -2773,29 +3214,85 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       client.get<unknown>('/question')
     ]);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-    for (const permission of parseOpenCodePermissions(permissionsResult.data)) {
-      if (permission.sessionID !== session.providerSessionId) continue;
+    await this.materializePendingInteractionsSnapshot(
+      session,
+      parseOpenCodePermissions(permissionsResult.data),
+      permissionsResult.raw,
+      parseOpenCodeQuestions(questionsResult.data),
+      questionsResult.raw,
+      serverId
+    );
+  }
+
+  private async materializePendingInteractionsSnapshot(
+    session: AgentSessionRecord,
+    permissions: readonly OpenCodePermissionRequest[],
+    permissionsRaw: AgentProtocolMessageReference,
+    questions: readonly OpenCodeQuestionRequest[],
+    questionsRaw: AgentProtocolMessageReference,
+    serverId: string
+  ): Promise<void> {
+    const pending = [
+      ...permissions
+        .filter((permission) => permission.sessionID === session.providerSessionId)
+        .map((permission) => ({
+          id: permission.id,
+          mapped: mapOpenCodePermission(permission, session.worktreePath),
+          raw: permissionsRaw,
+          messageId: permission.source?.messageID ?? permission.tool?.messageID
+        })),
+      ...questions
+        .filter((question) => question.sessionID === session.providerSessionId)
+        .map((question) => ({
+          id: question.id,
+          mapped: mapOpenCodeQuestion(question),
+          raw: questionsRaw,
+          messageId: question.tool?.messageID
+        }))
+    ];
+    const providerRequestIds = new Set(pending.map((request) => request.id));
+    for (const request of pending) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      const existing = await this.store.getInteractionRequestByProviderId(
+        serverId,
+        request.id
+      );
+      if (existing) {
+        if (existing.sessionId !== session.id || existing.type !== request.mapped.type) {
+          throw new Error(
+            'OpenCode reused a pending interaction identity with different ownership.'
+          );
+        }
+        continue;
+      }
       await this.materializeInteraction(
         session,
-        permission.id,
-        mapOpenCodePermission(permission, session.worktreePath),
-        permissionsResult.raw,
+        request.id,
+        request.mapped,
+        request.raw,
         serverId,
-        permission.source?.messageID ?? permission.tool?.messageID
+        request.messageId,
+        true
       );
     }
-    for (const question of parseOpenCodeQuestions(questionsResult.data)) {
-      if (question.sessionID !== session.providerSessionId) continue;
+    const snapshot = await this.store.snapshot();
+    for (const interaction of snapshot.interactionRequests.filter(
+      (candidate) =>
+        candidate.sessionId === session.id &&
+        candidate.serverInstanceId === serverId &&
+        (candidate.status === 'PENDING' || candidate.status === 'RESPONDING') &&
+        !providerRequestIds.has(String(candidate.providerRequestId))
+    )) {
       if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
-      await this.materializeInteraction(
-        session,
-        question.id,
-        mapOpenCodeQuestion(question),
-        questionsResult.raw,
-        serverId,
-        question.tool?.messageID
-      );
+      const current = await this.store.getInteractionRequest(interaction.id);
+      if (!current || (current.status !== 'PENDING' && current.status !== 'RESPONDING')) continue;
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      const stale = await this.store.transitionInteractionRequest(current.id, current.status, {
+        status: 'STALE',
+        resolution: { providerQueueAbsent: true },
+        resolvedAt: new Date().toISOString()
+      });
+      this.emitInteractionUpdate(stale);
     }
   }
 
@@ -2807,21 +3304,40 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     serverId: string
   ): Promise<void> {
     const current = await this.store.getRun(run.id);
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     if (!current || !ACTIVE_RUN_STATES.includes(current.status)) return;
     await this.flushBufferedStreamOutput(current.id);
     for (const part of assistant.parts) {
+      const type = mapOpenCodePartType(part);
+      const status = terminalPartStatus(part);
+      const payload = this.redactProviderValue(part);
+      const providerStartedAt = providerTimestamp(part.state?.time?.start);
+      const providerCompletedAt = providerTimestamp(
+        part.state?.time?.end ?? assistant.info.time?.completed
+      );
+      const existing = await this.store.getAgentItemByProviderId(current.id, part.id);
+      if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
+      if (
+        existing?.type === type &&
+        existing.status === status &&
+        existing.providerStartedAt === providerStartedAt &&
+        existing.providerCompletedAt === providerCompletedAt &&
+        isDeepStrictEqual(existing.payload, payload)
+      ) {
+        continue;
+      }
       await this.store.upsertAgentItem({
         taskId: current.taskId,
         iterationId: current.iterationId,
         runId: current.id,
         sessionId: session.id,
         providerItemId: part.id,
-        type: mapOpenCodePartType(part),
-        status: terminalPartStatus(part),
-        payload: this.redactProviderValue(part),
+        type,
+        status,
+        payload,
         rawMessage: raw,
-        providerStartedAt: providerTimestamp(part.state?.time?.start),
-        providerCompletedAt: providerTimestamp(part.state?.time?.end ?? assistant.info.time?.completed)
+        providerStartedAt,
+        providerCompletedAt
       });
     }
     this.discardStreamBuffer(current.id);
@@ -2839,10 +3355,12 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
         : providerDiagnostic
           ? 'FAILED'
           : 'COMPLETED';
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.recordRunActivity(current, 'message/completed', {
       messageText: finalMessage,
       providerMessageId: assistant.info.id
     });
+    if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.finalizeRun(current, status, providerDiagnostic, finalMessage);
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) return;
     await this.store.updateAgentSession(session.id, { status: 'IDLE', materialized: true });
@@ -3616,6 +4134,10 @@ function providerMessageIdForRun(localRunId: string): string {
   return `msg_taskmonki_${createHash('sha256').update(localRunId).digest('hex').slice(0, 32)}`;
 }
 
+function inboundGenerationKey(sessionId: string, serverId: string): string {
+  return `${sessionId}\u0000${serverId}`;
+}
+
 function openCodeOwnershipTitle(localSessionId: string): string {
   return `Task Monki session ${localSessionId}`;
 }
@@ -3664,8 +4186,19 @@ function settingsFromSession(
     runtimeId: OPENCODE_RUNTIME_ID,
     model,
     modelProvider: provider,
-    reasoningEffort: session.model?.variant ?? fallback.reasoningEffort
+    reasoningEffort: session.model?.variant ?? fallback.reasoningEffort,
+    approvalPolicy: attestedApprovalPolicy(session, fallback)
   };
+}
+
+function attestedApprovalPolicy(
+  session: OpenCodeSession,
+  requested: AgentExecutionSettings
+): AgentExecutionSettings['approvalPolicy'] | undefined {
+  const desired = openCodePermissionRules(requested);
+  return openCodePermissionRulesEndWith(session.permission, desired)
+    ? requested.approvalPolicy
+    : undefined;
 }
 
 function settingsObservedFromMessage(
@@ -3711,7 +4244,10 @@ async function canonicalExistingDirectory(candidate: string, label: string): Pro
   }
 }
 
-function latestAssistantFor(messages: OpenCodeMessage[], userMessageId: string): OpenCodeMessage | undefined {
+function latestAssistantFor(
+  messages: readonly OpenCodeMessage[],
+  userMessageId: string
+): OpenCodeMessage | undefined {
   return messages
     .filter((message) => message.info.role === 'assistant' && message.info.parentID === userMessageId)
     .sort((left, right) => (right.info.time?.created ?? 0) - (left.info.time?.created ?? 0))[0];

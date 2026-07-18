@@ -7,6 +7,7 @@ import {
   parseNewSessionResponse,
   parsePermissionRequest,
   parseSessionModelExtension,
+  parseSessionModelUpdateExtension,
   parseSessionNotification
 } from './AcpProtocol';
 
@@ -131,6 +132,79 @@ describe('ACP stable-v1 protocol codec', () => {
         { modelId: 'grok-build' }
       ]
     });
+  });
+
+  it('parses Grok model updates with exact reasoning metadata', () => {
+    expect(
+      parseSessionModelUpdateExtension({
+        currentModelId: 'grok-4.5',
+        availableModels: [
+          {
+            modelId: 'grok-4.5',
+            name: 'Grok 4.5',
+            description: 'Frontier model',
+            _meta: {
+              supportsReasoningEffort: true,
+              reasoningEffort: 'high',
+              reasoningEfforts: [
+                {
+                  id: 'high',
+                  value: 'high',
+                  label: 'High Effort',
+                  description: 'Extensive reasoning',
+                  default: true
+                },
+                {
+                  id: 'low',
+                  value: 'low',
+                  label: 'Low Effort',
+                  description: 'Fast implementation',
+                  default: false
+                }
+              ]
+            }
+          }
+        ]
+      })
+    ).toMatchObject({
+      currentModelId: 'grok-4.5',
+      availableModels: [
+        {
+          modelId: 'grok-4.5',
+          reasoningEffort: 'high',
+          reasoningEfforts: [
+            { id: 'high', value: 'high', default: true },
+            { id: 'low', value: 'low', default: false }
+          ]
+        }
+      ]
+    });
+  });
+
+  it('rejects inconsistent Grok reasoning metadata', () => {
+    expect(() =>
+      parseSessionModelUpdateExtension({
+        currentModelId: 'grok-4.5',
+        availableModels: [
+          {
+            modelId: 'grok-4.5',
+            name: 'Grok 4.5',
+            _meta: {
+              supportsReasoningEffort: true,
+              reasoningEffort: 'low',
+              reasoningEfforts: [
+                {
+                  id: 'high',
+                  value: 'high',
+                  label: 'High Effort',
+                  default: true
+                }
+              ]
+            }
+          }
+        ]
+      })
+    ).toThrow('duplicate or inconsistent values');
   });
 
   it('rejects model state whose current ID was not advertised', () => {

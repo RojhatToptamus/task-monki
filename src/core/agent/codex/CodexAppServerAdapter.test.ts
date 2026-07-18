@@ -85,6 +85,42 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
+  it('rejects an explicit model that is absent after a forced catalog refresh', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-app-server-missing-model-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const adapter = new CodexAppServerAdapter(
+      new FileTaskStore(path.join(dir, 'store')),
+      new AppEventBus(),
+      {
+        cwd: dir,
+        executable,
+        requestTimeoutMs: 2_000,
+        restartDelaysMs: []
+      }
+    );
+
+    try {
+      await adapter.initialize();
+      await expect(
+        adapter.resolveExecution({
+          settings: {
+            runtimeId: 'codex',
+            model: 'removed-model',
+            modelProvider: 'openai',
+            sandbox: 'WORKSPACE_WRITE',
+            networkAccess: false,
+            approvalPolicy: 'on-request'
+          },
+          attachments: []
+        })
+      ).rejects.toThrow('Codex did not report requested model removed-model.');
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('replaces a one-way supervisor for an explicit safe runtime restart', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
     const executable = await writeFakeCodexExecutable(dir);
@@ -1414,6 +1450,54 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     await orchestrator.shutdown();
   });
 
+  it('settles active ownership when shutdown reports a failure after process exit', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-shutdown-'));
+    const executable = await writeFakeCodexExecutable(dir, 'approval');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {});
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const supervisor = (adapter as unknown as {
+      supervisor: { shutdown(): Promise<void> };
+    }).supervisor;
+    const shutdown = supervisor.shutdown.bind(supervisor);
+    vi.spyOn(supervisor, 'shutdown').mockImplementation(async () => {
+      await shutdown();
+      throw new Error('simulated post-exit shutdown failure');
+    });
+
+    await expect(adapter.shutdown()).rejects.toThrow('simulated post-exit shutdown failure');
+
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    expect(await store.getInteractionRequest(interaction.id)).toMatchObject({
+      status: 'ABORTED_SERVER_LOST',
+      resolution: { reason: 'Codex App Server exited.' }
+    });
+    expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
+    expect((await store.snapshot()).agentServers).toEqual([
+      expect.objectContaining({ status: 'EXITED' })
+    ]);
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('rebinds a recovered running turn before accepting approval on a replacement server', async () => {
     const dir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-recovered-approval-')
@@ -1454,8 +1538,28 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       providerTurnId: 'turn-1',
       status: 'RUNNING'
     });
+    const priorInteractionRaw = await store.appendProtocolMessage(
+      priorServer.id,
+      'INBOUND',
+      '{"method":"item/commandExecution/requestApproval","id":41}'
+    );
+    const priorInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
+      serverInstanceId: priorServer.id,
+      providerRequestId: 41,
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      providerTurnId: 'turn-1',
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: Date.now() },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage: priorInteractionRaw
+    });
     await store.updateAgentServer(priorServer.id, {
-      status: 'LOST',
+      status: 'EXITED',
       disconnectedAt: new Date().toISOString(),
       exitedAt: new Date().toISOString(),
       exitReason: 'Injected prior App Server crash.'
@@ -1473,6 +1577,9 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     const interaction = await waitForInteraction(store, 'PENDING');
     const recoveredRun = await store.getRun(run.id);
+    expect(await store.getInteractionRequest(priorInteraction.id)).toMatchObject({
+      status: 'ABORTED_SERVER_LOST'
+    });
     expect(interaction.runId).toBe(run.id);
     expect(interaction.serverInstanceId).not.toBe(priorServer.id);
     expect(recoveredRun).toMatchObject({

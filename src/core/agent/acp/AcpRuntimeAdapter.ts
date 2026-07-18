@@ -61,6 +61,7 @@ import {
   parsePermissionRequest,
   parsePromptResponse,
   parseSessionModelExtension,
+  parseSessionModelUpdateExtension,
   parseSessionNotification,
   parseSessionSetupResponse,
   type AcpInitializeResponse,
@@ -79,7 +80,9 @@ import {
 } from './AcpRpcClient';
 import {
   acpTextBlock,
+  acpThoughtLevelSelector,
   mapAcpPlanEntries,
+  mapAcpStopReason,
   mapAcpToolKind,
   mapAcpToolStatus,
   observedSettingsFromAcpState,
@@ -104,6 +107,7 @@ import { AcpStdioSupervisor } from './AcpStdioSupervisor';
 import { materializeAcpPermission } from './AcpPermissionPolicy';
 import {
   acpInitializeNativeView,
+  normalizeAcpOperationalModelState,
   normalizeAcpOperationalSession,
   redactAcpNativeValue,
   redactNativeString,
@@ -490,7 +494,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       (input.settings.model &&
         !isSafeProviderIdentifier(input.settings.model, this.sensitiveValues)) ||
       (input.settings.modelProvider &&
-        !isSafeProviderIdentifier(input.settings.modelProvider, this.sensitiveValues))
+        !isSafeProviderIdentifier(input.settings.modelProvider, this.sensitiveValues)) ||
+      (input.settings.reasoningEffort &&
+        !isSafeProviderIdentifier(input.settings.reasoningEffort, this.sensitiveValues))
     ) {
       throw new Error(
         'ACP rejected a model selection whose operational identifier matches a runtime credential.'
@@ -502,7 +508,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       modelExtension?.initializeResponseMetaField &&
       !this.profileModelState
     ) {
-      // A profile-owned initialize catalog is authoritative. Resolve execution
+      // A profile-owned model catalog is authoritative. Resolve execution
       // only after it has replaced the provisional profile model so a missing
       // or malformed provider catalog can never become an executable fallback.
       await this.ensureClient();
@@ -528,7 +534,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       providerModels.length === 0
     ) {
       throw new Error(
-        `${this.descriptor.displayName} did not advertise model provider ${requestedProvider} in its ${authoritativeModelContract.contractId} initialize catalog.`
+        `${this.descriptor.displayName} did not advertise model provider ${requestedProvider} in its ${authoritativeModelContract.contractId} provider catalog.`
       );
     }
     if (
@@ -541,7 +547,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       )
     ) {
       throw new Error(
-        `${this.descriptor.displayName} did not advertise model ${requestedModel} in its ${authoritativeModelContract.contractId} initialize catalog.`
+        `${this.descriptor.displayName} did not advertise model ${requestedModel} in its ${authoritativeModelContract.contractId} provider catalog.`
       );
     }
     let model =
@@ -567,13 +573,24 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         native: { source: 'explicit-runtime-setting' }
       };
     }
+    const reasoningEffort = input.settings.reasoningEffort;
+    if (
+      reasoningEffort &&
+      model.supportedReasoningEfforts.length > 0 &&
+      !model.supportedReasoningEfforts.includes(reasoningEffort)
+    ) {
+      throw new Error(
+        `${this.descriptor.displayName} model ${model.model} does not advertise reasoning effort ${reasoningEffort}.`
+      );
+    }
     const settings: AgentExecutionSettings = {
       ...input.settings,
       runtimeId: this.descriptor.id,
       model: model.model,
       modelProvider: authoritativeModelContract
         ? model.modelProvider
-        : input.settings.modelProvider ?? model.modelProvider
+        : input.settings.modelProvider ?? model.modelProvider,
+      reasoningEffort
     };
     return { settings, model };
   }
@@ -1005,6 +1022,37 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         providerSessionId: session.providerSessionId
       });
       client = await this.ensureClient();
+    }
+    const providerSessionId = session.providerSessionId;
+    if (!providerSessionId) throw new Error('ACP session setup did not return an ID.');
+    const nativeState = this.nativeSessions.get(providerSessionId);
+    if (!nativeState) {
+      throw new Error(`ACP session ${session.providerSessionId} is not loaded.`);
+    }
+    const applied = await this.applyRequestedNativeSettings(client, nativeState, settings);
+    const observedSettings = this.projectObservedSettings(applied.state, settings);
+    try {
+      session = await this.store.updateAgentSession(session.id, {
+        requestedSettings: settings,
+        observedSettings,
+        lastAttachedAt: new Date().toISOString()
+      });
+      await this.recordSettingsObservation(
+        session,
+        'TASK_MONKI_RESOLUTION',
+        observedSettings,
+        applied.finalMutationResponse,
+        'Task Monki re-applied and durably recorded explicit ACP session settings immediately before prompt submission.'
+      );
+    } catch (cause) {
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/configure',
+        `Provider session ${nativeState.sessionId} was configured for a turn, but its resulting state was not durably recorded.`
+      );
+      throw new AgentMutationAmbiguousError(
+        'session/configure',
+        `ACP configured session ${nativeState.sessionId} for a turn, but Task Monki could not persist the resulting state: ${errorMessage(cause)}`
+      );
     }
     const server = this.supervisor?.currentServer;
     if (!server) throw new Error('ACP runtime is not ready.');
@@ -1844,32 +1892,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const native = settings.runtimeOptions?.[this.descriptor.id];
     const nativeRecord = isRecord(native) ? native : {};
     const requestedMode = typeof nativeRecord.modeId === 'string' ? nativeRecord.modeId : undefined;
-    if (requestedMode) {
-      if (!state.modes?.availableModes.some((mode) => mode.id === requestedMode)) {
-        throw new Error(`ACP session did not advertise requested mode ${requestedMode}.`);
-      }
-      try {
-        const response = await this.requestBoundedMutation(
-          client,
-          'session/set_mode',
-          { sessionId: state.sessionId, modeId: requestedMode },
-          `The requested mode ${requestedMode} may have been applied during session setup.`
-        );
-        finalMutationResponse = response.raw;
-      } catch (cause) {
-        throw mapMutationError('session/set_mode', cause);
-      }
-      state = { ...state, modes: { ...state.modes, currentModeId: requestedMode } };
-    }
-
     const values = requestedNativeConfigValues(this.descriptor.id, settings);
     const modelOption = state.configOptions.find(
       (option) => option.type === 'select' && option.category === 'model'
     );
+    const modelExtension = this.profile.sessionModelExtension;
+    if (
+      requestedMode &&
+      !state.modes?.availableModes.some((mode) => mode.id === requestedMode)
+    ) {
+      throw new Error(`ACP session did not advertise requested mode ${requestedMode}.`);
+    }
     if (settings.model && settings.model !== 'default') {
       if (state.models) {
-        const extension = this.profile.sessionModelExtension;
-        if (!extension) {
+        if (!modelExtension) {
           throw new Error(
             `${this.descriptor.displayName} returned session models without an enabled provider extension.`
           );
@@ -1877,24 +1913,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         if (!state.models.availableModels.some((model) => model.modelId === settings.model)) {
           throw new Error(`ACP session did not advertise requested model ${settings.model}.`);
         }
-        if (state.models.currentModelId !== settings.model) {
-          try {
-            const response = await this.requestBoundedMutation(
-              client,
-              extension.setModelMethod,
-              { sessionId: state.sessionId, modelId: settings.model },
-              `The requested model ${settings.model} may have been applied during session setup.`
-            );
-            finalMutationResponse = response.raw;
-          } catch (cause) {
-            throw mapMutationError(extension.setModelMethod, cause);
-          }
-        }
-        state = normalizeAcpOperationalSession({
-          ...state,
-          models: { ...state.models, currentModelId: settings.model }
-        });
-        this.nativeSessions.set(state.sessionId, state);
       } else if (!modelOption) {
         throw new Error(
           `${this.descriptor.displayName} did not expose provider-native session models or an ACP model configuration selector.`
@@ -1903,53 +1921,130 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         values[modelOption.id] = settings.model;
       }
     }
+    if (settings.reasoningEffort) {
+      const thoughtLevel = acpThoughtLevelSelector(state);
+      if (!thoughtLevel) {
+        throw new Error(
+          `${this.descriptor.displayName} did not advertise an ACP thought_level session configuration selector for reasoning effort ${settings.reasoningEffort}.`
+        );
+      }
+      const requestedConfigValue = values[thoughtLevel.id];
+      if (
+        requestedConfigValue !== undefined &&
+        requestedConfigValue !== settings.reasoningEffort
+      ) {
+        throw new Error(
+          `ACP config option ${thoughtLevel.id} conflicts with requested reasoning effort ${settings.reasoningEffort}.`
+        );
+      }
+      values[thoughtLevel.id] = settings.reasoningEffort;
+    }
     for (const [configId, value] of Object.entries(values)) {
-      const option = state.configOptions.find((candidate) => candidate.id === configId);
-      if (!option) throw new Error(`ACP session did not advertise config option ${configId}.`);
-      if ((option.type === 'boolean') !== (typeof value === 'boolean')) {
-        throw new Error(`ACP config option ${configId} received the wrong value type.`);
+      validateAcpConfigValue(state, configId, value);
+    }
+
+    try {
+      if (requestedMode) {
+        const modes = state.modes;
+        if (!modes) {
+          throw new Error(`ACP session did not advertise requested mode ${requestedMode}.`);
+        }
+        if (modes.currentModeId !== requestedMode) {
+          try {
+            const response = await this.requestBoundedMutation(
+              client,
+              'session/set_mode',
+              { sessionId: state.sessionId, modeId: requestedMode },
+              `The requested mode ${requestedMode} may have been applied during session setup.`
+            );
+            finalMutationResponse = response.raw;
+          } catch (cause) {
+            throw mapMutationError('session/set_mode', cause);
+          }
+        }
+        state = { ...state, modes: { ...modes, currentModeId: requestedMode } };
       }
-      if (option.type === 'select' && !selectHasValue(option, String(value))) {
-        throw new Error(`ACP config option ${configId} does not offer value ${String(value)}.`);
-      }
-      let response: AcpRpcResult<unknown>;
-      try {
-        response = await this.requestBoundedMutation<unknown>(
-          client,
-          'session/set_config_option',
-          {
-            sessionId: state.sessionId,
-            configId,
-            ...(typeof value === 'boolean' ? { type: 'boolean', value } : { value })
-          },
-          `The requested config option ${configId} may have been applied during session setup.`
-        );
-      } catch (cause) {
-        throw mapMutationError('session/set_config_option', cause);
-      }
-      finalMutationResponse = response.raw;
-      try {
-        const record = requireRecord(response.result, 'ACP config response');
-        state = {
+
+      if (settings.model && settings.model !== 'default' && state.models) {
+        if (!modelExtension) {
+          throw new Error(
+            `${this.descriptor.displayName} returned session models without an enabled provider extension.`
+          );
+        }
+        if (state.models.currentModelId !== settings.model) {
+          try {
+            const response = await this.requestBoundedMutation(
+              client,
+              modelExtension.setModelMethod,
+              { sessionId: state.sessionId, modelId: settings.model },
+              `The requested model ${settings.model} may have been applied during session setup.`
+            );
+            finalMutationResponse = response.raw;
+          } catch (cause) {
+            throw mapMutationError(modelExtension.setModelMethod, cause);
+          }
+        }
+        state = normalizeAcpOperationalSession({
           ...state,
-          configOptions: parseConfigOptions(record.configOptions) ?? state.configOptions
-        };
-      } catch (cause) {
-        await this.quarantineRuntimeAfterAmbiguousMutation(
-          'session/set_config_option',
-          `The provider replied after changing ${configId}, but its resulting state was invalid.`
-        );
-        throw new AgentMutationAmbiguousError(
-          'session/set_config_option',
-          `ACP may have applied config option ${configId}, but its resulting state could not be read: ${errorMessage(cause)}`
-        );
+          models: { ...state.models, currentModelId: settings.model }
+        });
+        this.nativeSessions.set(state.sessionId, state);
+      }
+
+      for (const [configId, value] of Object.entries(values)) {
+        const option = validateAcpConfigValue(state, configId, value);
+        if (option.currentValue === value) continue;
+        let response: AcpRpcResult<unknown>;
+        try {
+          response = await this.requestBoundedMutation<unknown>(
+            client,
+            'session/set_config_option',
+            {
+              sessionId: state.sessionId,
+              configId,
+              ...(typeof value === 'boolean' ? { type: 'boolean', value } : { value })
+            },
+            `The requested config option ${configId} may have been applied during session setup.`
+          );
+        } catch (cause) {
+          throw mapMutationError('session/set_config_option', cause);
+        }
+        finalMutationResponse = response.raw;
+        try {
+          const record = requireRecord(response.result, 'ACP config response');
+          state = {
+            ...state,
+            configOptions: parseConfigOptions(record.configOptions) ?? state.configOptions
+          };
+        } catch (cause) {
+          await this.quarantineRuntimeAfterAmbiguousMutation(
+            'session/set_config_option',
+            `The provider replied after changing ${configId}, but its resulting state was invalid.`
+          );
+          throw new AgentMutationAmbiguousError(
+            'session/set_config_option',
+            `ACP may have applied config option ${configId}, but its resulting state could not be read: ${errorMessage(cause)}`
+          );
+        }
+        state = normalizeAcpOperationalSession(state);
+        this.nativeSessions.set(state.sessionId, state);
       }
       state = normalizeAcpOperationalSession(state);
       this.nativeSessions.set(state.sessionId, state);
+      return { state, finalMutationResponse };
+    } catch (cause) {
+      if (finalMutationResponse && !(cause instanceof AgentMutationAmbiguousError)) {
+        await this.quarantineRuntimeAfterAmbiguousMutation(
+          'session/configure',
+          `ACP acknowledged part of the requested session configuration before a later setting failed.`
+        );
+        throw new AgentMutationAmbiguousError(
+          'session/configure',
+          `ACP partially applied requested session settings that Task Monki could not durably record: ${errorMessage(cause)}`
+        );
+      }
+      throw cause;
     }
-    state = normalizeAcpOperationalSession(state);
-    this.nativeSessions.set(state.sessionId, state);
-    return { state, finalMutationResponse };
   }
 
   private async handleNotification(
@@ -1960,6 +2055,35 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
+    const modelExtension = this.profile.sessionModelExtension;
+    if (method === modelExtension?.modelUpdateNotification) {
+      let nextModelState: AcpSessionModelState;
+      try {
+        const normalized = normalizeAcpOperationalModelState(
+          parseSessionModelUpdateExtension(params)
+        );
+        if (!normalized) {
+          throw new Error('ACP provider model update normalized to an empty model state.');
+        }
+        nextModelState = normalized;
+        if (!hasSafeProfileModelIdentifiers(nextModelState, this.sensitiveValues)) {
+          throw new Error(
+            'ACP provider model update contained an identifier matching a runtime credential.'
+          );
+        }
+      } catch (cause) {
+        await this.recordProtocolIncident(
+          `${modelExtension.contractId} model update was rejected: ${errorMessage(cause)}`,
+          raw
+        );
+        return;
+      }
+      if (!this.isCurrentClientEvent(client, generation, raw)) return;
+      this.profileModelState = nextModelState;
+      this.refreshModels();
+      this.emitRuntimeUpdate();
+      return;
+    }
     if (method !== 'session/update') {
       await this.recordExtensionTelemetry(method, params, raw);
       return;
@@ -2581,14 +2705,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       const finalArtifact = await this.store.writeFinalArtifact(
         run.taskId,
         run.id,
-        formatFinalArtifact(this.profile.descriptor.displayName, prompt.stopReason, finalMessage)
+        formatFinalArtifact(
+          this.profile.descriptor.displayName,
+          prompt.stopReason,
+          finalMessage,
+          acpStopFailureDiagnostic(prompt.stopReason)
+        )
       );
-      terminal =
-        prompt.stopReason === 'cancelled'
-          ? 'interrupted'
-          : prompt.stopReason === 'refusal'
-            ? 'failed'
-            : 'completed';
+      terminal = mapAcpStopReason(prompt.stopReason);
+      const failureDiagnostic = acpStopFailureDiagnostic(prompt.stopReason);
       const type =
         terminal === 'completed'
           ? 'AGENT_RUN_COMPLETED'
@@ -2613,6 +2738,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           payload: {
             terminalStatus: terminal,
             terminalReason: prompt.stopReason,
+            ...(failureDiagnostic ? { error: failureDiagnostic } : {}),
             finalArtifactId: finalArtifact.id,
             codexReviewStatus: agentReviewStatusFromResult(reviewResult),
             codexReviewResult: reviewResult
@@ -3514,6 +3640,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (extension?.initializeResponseMetaField && profileModels) {
       const models = profileModels.availableModels.flatMap((model): AgentModel[] => {
         if (!isSafeProviderIdentifier(model.modelId, this.sensitiveValues)) return [];
+        const supportedReasoningEfforts = (model.reasoningEfforts ?? [])
+          .map((effort) => effort.value)
+          .filter((effort) =>
+            isSafeProviderIdentifier(effort, this.sensitiveValues)
+          );
+        const providerDefaultReasoningEffort =
+          model.reasoningEffort &&
+          supportedReasoningEfforts.includes(model.reasoningEffort)
+            ? model.reasoningEffort
+            : undefined;
         return [{
           id: `${this.descriptor.id}:${this.profile.defaultModelProvider}/${model.modelId}`,
           runtimeId: this.descriptor.id,
@@ -3524,13 +3660,22 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             ? this.redactProviderText(model.description)
             : undefined,
           hidden: false,
+          // The model update advertises available effort values but does not
+          // define a writable session contract. Publishing them as common
+          // selectable efforts would cause callers to send one implicitly.
           supportedReasoningEfforts: [],
           serviceTiers: [],
           inputModalities: modalities,
           isDefault: model.modelId === profileModels.currentModelId,
           native: {
-            source: 'provider-initialize-extension',
-            contractId: extension.contractId
+            source: 'provider-model-extension',
+            contractId: extension.contractId,
+            ...(supportedReasoningEfforts.length > 0
+              ? { advertisedReasoningEfforts: supportedReasoningEfforts }
+              : {}),
+            ...(providerDefaultReasoningEffort
+              ? { providerDefaultReasoningEffort }
+              : {})
           }
         }];
       });
@@ -3544,7 +3689,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       this.noteSensitiveIdentifierOmission();
     }
     // Stable ACP model selectors are scoped to a provider session and remain
-    // in its native controls. Only an explicit profile-owned initialize
+    // in its native controls. Only an explicit profile-owned model
     // catalog can be promoted to application model selection.
     this.models = [defaultAcpModel(this.profile, modalities)];
   }
@@ -3930,6 +4075,22 @@ function selectHasValue(
   );
 }
 
+function validateAcpConfigValue(
+  state: AcpNativeSessionState,
+  configId: string,
+  value: string | boolean
+): AcpSessionConfigOption {
+  const option = state.configOptions.find((candidate) => candidate.id === configId);
+  if (!option) throw new Error(`ACP session did not advertise config option ${configId}.`);
+  if ((option.type === 'boolean') !== (typeof value === 'boolean')) {
+    throw new Error(`ACP config option ${configId} received the wrong value type.`);
+  }
+  if (option.type === 'select' && !selectHasValue(option, String(value))) {
+    throw new Error(`ACP config option ${configId} does not offer value ${String(value)}.`);
+  }
+  return option;
+}
+
 function itemText(item: AgentItemRecord | undefined): string {
   return isRecord(item?.payload) && typeof item.payload.text === 'string' ? item.payload.text : '';
 }
@@ -3966,16 +4127,31 @@ function emptyUsage(totalTokens: number) {
 function formatFinalArtifact(
   runtimeName: string,
   stopReason: string,
-  finalMessage: string
+  finalMessage: string,
+  failureDiagnostic?: string
 ): string {
   return [
     `# ${runtimeName} turn`,
     '',
     `ACP stop reason: ${stopReason}`,
     '',
+    ...(failureDiagnostic ? [`Failure: ${failureDiagnostic}`, ''] : []),
     finalMessage || '_The agent returned no final text message._',
     ''
   ].join('\n');
+}
+
+function acpStopFailureDiagnostic(stopReason: string): string | undefined {
+  switch (stopReason) {
+    case 'refusal':
+      return 'The ACP agent refused the prompt.';
+    case 'max_tokens':
+      return 'The ACP agent reached its token limit before completing the turn.';
+    case 'max_turn_requests':
+      return 'The ACP agent reached its turn-request limit before completing the turn.';
+    default:
+      return undefined;
+  }
 }
 
 function jsonSafe(value: unknown): import('../../../shared/agent').AgentJsonValue {
@@ -4134,6 +4310,10 @@ function hasUnsafeAcpActionableIdentifier(
     state.sessionId,
     state.models?.currentModelId,
     ...(state.models?.availableModels.map((model) => model.modelId) ?? []),
+    ...(state.models?.availableModels.flatMap((model) => [
+      model.reasoningEffort,
+      ...(model.reasoningEfforts?.flatMap((effort) => [effort.id, effort.value]) ?? [])
+    ]) ?? []),
     state.modes?.currentModeId,
     ...(state.modes?.availableModes.map((mode) => mode.id) ?? []),
     ...state.configOptions.flatMap((option) => [
@@ -4146,6 +4326,23 @@ function hasUnsafeAcpActionableIdentifier(
     (value) =>
       typeof value === 'string' &&
       !isSafeProviderIdentifier(value, sensitiveValues)
+  );
+}
+
+function hasSafeProfileModelIdentifiers(
+  state: AcpSessionModelState,
+  sensitiveValues: readonly string[]
+): boolean {
+  return [
+    state.currentModelId,
+    ...state.availableModels.flatMap((model) => [
+      model.modelId,
+      model.reasoningEffort,
+      ...(model.reasoningEfforts?.flatMap((effort) => [effort.id, effort.value]) ?? [])
+    ])
+  ].every(
+    (value) =>
+      value == null || isSafeProviderIdentifier(value, sensitiveValues)
   );
 }
 

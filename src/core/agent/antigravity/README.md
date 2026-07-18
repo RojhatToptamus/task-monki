@@ -85,7 +85,9 @@ Task Monki loses process ownership, cannot persist terminal state, or restarts
 during a live turn, it marks the outcome recovery-required and never
 automatically replays the prompt. Startup persistence failure rejects the
 caller promptly while ownership remains tracked until bounded cancellation and
-recovery publication finish.
+recovery publication finish. A definite failure before process ownership
+terminalizes the created server record as failed and rejects without creating
+an active turn.
 
 ## Capability boundary
 
