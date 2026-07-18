@@ -10,7 +10,13 @@ import type { FileTaskStore } from '../storage/FileTaskStore';
 import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 
 const scenarios: TaskMonkiScenario[] = [];
+const controlledHttpServers: http.Server[] = [];
 afterEach(async () => {
+  await Promise.allSettled(controlledHttpServers.splice(0).map((server) =>
+    server.listening
+      ? new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+      : Promise.resolve()
+  ));
   await Promise.allSettled(
     scenarios.splice(0).map(async (scenario) => {
       await scenario.service.shutdown().catch(() => undefined);
@@ -22,6 +28,130 @@ afterEach(async () => {
 const describeMac = process.platform === 'darwin' ? describe : describe.skip;
 
 describeMac('TaskManagerService native preview scenarios', () => {
+  it('returns exact local-binding requirements and resolves the same scenario after configuration', async () => {
+    const scenario = await previewScenario('task-monki-preview-local-binding');
+    const backend = http.createServer((request, response) => {
+      const origin = request.headers.origin;
+      if (origin) {
+        response.setHeader('access-control-allow-origin', origin);
+        response.setHeader('access-control-allow-credentials', 'true');
+      }
+      response.end('controlled backend');
+    });
+    controlledHttpServers.push(backend);
+    await new Promise<void>((resolve, reject) => {
+      backend.once('error', reject);
+      backend.listen(0, '127.0.0.1', resolve);
+    });
+    const backendPort = (backend.address() as { port: number }).port;
+    await fs.writeFile(
+      path.join(scenario.repositoryPath, '.taskmonki', 'preview.yaml'),
+      `version: 1
+attachments:
+  backend:
+    label: Competitions API
+    type: http
+    target: { type: local }
+services:
+  web:
+    command: [node, server.mjs]
+    env:
+      NEXT_PUBLIC_API_URL: { type: attached-http-origin, attachment: backend }
+    ports: { http: { env: PORT } }
+    ready: { type: http, port: http, path: /health/ready }
+routes:
+  app: { service: web, port: http, primary: true }
+scenarios:
+  frontend: { jobs: [], resources: [] }
+  alternate: { jobs: [], resources: [] }
+defaultScenario: frontend
+`
+    );
+    await fs.writeFile(
+      path.join(scenario.repositoryPath, 'server.mjs'),
+      `import http from 'node:http';
+const server = http.createServer((request, response) => {
+  response.statusCode = request.url === '/health/ready' ? 204 : 200;
+  response.end(request.url === '/health/ready' ? '' : process.env.NEXT_PUBLIC_API_URL ?? 'missing');
+});
+server.listen(Number(process.env.PORT), '127.0.0.1');
+`
+    );
+    await git(scenario.repositoryPath, ['add', '.taskmonki/preview.yaml', 'server.mjs']);
+    await git(scenario.repositoryPath, ['commit', '-m', 'Use local backend binding']);
+    const task = await scenario.createTask({ title: 'Frontend binding' });
+    await scenario.service.prepareWorktree({ taskId: task.id });
+
+    const required = await scenario.service.resolvePreview({
+      taskId: task.id,
+      scenarioId: 'alternate'
+    });
+    expect(required).toEqual({
+      status: 'CONFIGURATION_REQUIRED',
+      reason: 'Local preview bindings are required for: backend.',
+      selectedScenarioId: 'alternate',
+      requirements: [{
+        attachmentId: 'backend',
+        label: 'Competitions API',
+        attachmentType: 'http',
+        allowedTargetTypes: ['endpoint', 'task-preview-route'],
+        usages: [{
+          kind: 'ENVIRONMENT', recipient: 'PROCESS', nodeKind: 'SERVICE', nodeId: 'web',
+          environmentKeys: ['NEXT_PUBLIC_API_URL']
+        }]
+      }]
+    });
+
+    await scenario.service.setPreviewLocalAttachmentBinding({
+      taskId: task.id,
+      attachmentId: 'backend',
+      target: {
+        type: 'endpoint', scheme: 'http', host: '127.0.0.1', port: backendPort, basePath: '/'
+      }
+    });
+    const resolved = await scenario.service.resolvePreview({
+      taskId: task.id,
+      scenarioId: required.status === 'CONFIGURATION_REQUIRED'
+        ? required.selectedScenarioId
+        : 'frontend'
+    });
+    expect(resolved.status).toBe('PLAN');
+    if (resolved.status !== 'PLAN') throw new Error('Expected configured plan.');
+    expect(resolved.plan.executionPlan.selectedScenarioId).toBe('alternate');
+    expect(resolved.plan.executionPlan.attachments?.[0]?.target).toEqual({
+      type: 'endpoint', scheme: 'http', host: '127.0.0.1', port: backendPort, basePath: '/'
+    });
+    await scenario.service.approvePreviewPlan({
+      taskId: task.id,
+      planId: resolved.plan.id,
+      executionDigest: resolved.plan.executionDigest
+    });
+    const generation = await scenario.service.startPreview({
+      taskId: task.id,
+      scenarioId: 'alternate'
+    });
+    const expectedBackendOrigin = `http://127.0.0.1:${backendPort}`;
+    await expect(requestRoute(
+      generation.routes[0].gatewayPort,
+      generation.routes[0].hostname,
+      '/'
+    )).resolves.toMatchObject({ status: 200, body: expectedBackendOrigin });
+    const previewOrigin = `http://${generation.routes[0].hostname}:${generation.routes[0].gatewayPort}`;
+    await expect(requestRoute(
+      backendPort,
+      '127.0.0.1',
+      '/',
+      { origin: previewOrigin }
+    )).resolves.toMatchObject({
+      status: 200,
+      headers: {
+        'access-control-allow-origin': previewOrigin,
+        'access-control-allow-credentials': 'true'
+      }
+    });
+    await scenario.service.stopPreview({ taskId: task.id, generationId: generation.id });
+  }, 20_000);
+
   it('runs resolve → approve → dirty capture → job → ready → stale → stop without touching the worktree', async () => {
     const scenario = await previewScenario('task-monki-preview-service');
     const task = await scenario.createTask({ title: 'Preview vertical slice' });
@@ -1054,15 +1184,28 @@ async function prepareApprovedPreview(scenario: TaskMonkiScenario) {
   return task;
 }
 
-function requestRoute(port: number, hostname: string, requestPath: string) {
-  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+function requestRoute(
+  port: number,
+  hostname: string,
+  requestPath: string,
+  headers: Record<string, string> = {}
+) {
+  return new Promise<{
+    status: number;
+    body: string;
+    headers: http.IncomingHttpHeaders;
+  }>((resolve, reject) => {
     const request = http.request(
-      { host: '127.0.0.1', port, path: requestPath, headers: { host: hostname } },
+      { host: '127.0.0.1', port, path: requestPath, headers: { host: hostname, ...headers } },
       (response) => {
         let body = '';
         response.setEncoding('utf8');
         response.on('data', (chunk) => (body += chunk));
-        response.once('end', () => resolve({ status: response.statusCode ?? 0, body }));
+        response.once('end', () => resolve({
+          status: response.statusCode ?? 0,
+          body,
+          headers: response.headers
+        }));
       }
     );
     request.once('error', reject);

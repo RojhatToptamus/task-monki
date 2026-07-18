@@ -3,6 +3,7 @@ import path from 'node:path';
 import type {
   PreviewAttachmentPlan,
   PreviewExecutionPlan,
+  PreviewLocalAttachmentRequirement,
   PreviewOciEngineCapability,
   PreviewPlanRecord,
   WorktreeRecord
@@ -10,6 +11,7 @@ import type {
 import type { Task, TaskIteration } from '../../shared/contracts';
 import {
   activePreviewAttachmentIds,
+  activePreviewLocalAttachmentRequirements,
   previewExecutionDigest,
   type ParsedPreviewRecipe
 } from './PreviewRecipeLoader';
@@ -125,7 +127,13 @@ export class PreviewPlanResolver {
     plan: PreviewExecutionPlan
   ): Promise<PreviewExecutionPlan> {
     const activeIds = new Set(activePreviewAttachmentIds(plan));
-    const missing: string[] = [];
+    const requirementsById = new Map(
+      activePreviewLocalAttachmentRequirements(plan).map((requirement) => [
+        requirement.attachmentId,
+        requirement
+      ])
+    );
+    const missing: PreviewLocalAttachmentRequirement[] = [];
     const attachments: PreviewAttachmentPlan[] = [];
     for (const attachment of plan.attachments ?? []) {
       if (attachment.target.type !== 'local' || !activeIds.has(attachment.id)) {
@@ -134,21 +142,27 @@ export class PreviewPlanResolver {
       }
       const binding = await this.store?.getPreviewLocalBinding(taskId, attachment.id);
       if (!binding) {
-        missing.push(attachment.id);
+        const requirement = requirementsById.get(attachment.id);
+        if (requirement) missing.push(requirement);
         attachments.push(attachment);
         continue;
       }
       assertTargetMatchesAttachment(attachment, binding.target);
       attachments.push({ ...attachment, target: binding.target } as PreviewAttachmentPlan);
     }
-    if (missing.length > 0) throw new PreviewLocalBindingRequiredError(missing);
+    if (missing.length > 0) {
+      throw new PreviewLocalBindingRequiredError(plan.selectedScenarioId, missing);
+    }
     return { ...plan, attachments };
   }
 }
 
 export class PreviewLocalBindingRequiredError extends Error {
-  constructor(readonly attachmentIds: string[]) {
-    super(`Local preview bindings are required for: ${attachmentIds.join(', ')}.`);
+  constructor(
+    readonly selectedScenarioId: string,
+    readonly requirements: PreviewLocalAttachmentRequirement[]
+  ) {
+    super(`Local preview bindings are required for: ${requirements.map((item) => item.attachmentId).join(', ')}.`);
   }
 }
 

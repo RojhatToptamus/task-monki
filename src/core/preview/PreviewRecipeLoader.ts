@@ -17,6 +17,8 @@ import type {
   PreviewExecutionPlan,
   PreviewJobPlan,
   PreviewLivenessPlan,
+  PreviewLocalAttachmentRequirement,
+  PreviewLocalAttachmentUsage,
   PreviewOciResourceLimits,
   PreviewOciResourcePlan,
   PreviewPrivateInputPlan,
@@ -1351,6 +1353,33 @@ export function activePreviewAttachmentIds(plan: PreviewExecutionPlan): string[]
   return [...collectActiveBindingAuthority(plan, activeJobs).activeAttachmentIds].sort();
 }
 
+export function activePreviewLocalAttachmentRequirements(
+  plan: PreviewExecutionPlan
+): PreviewLocalAttachmentRequirement[] {
+  if (plan.adapter === 'COMPOSE') return [];
+  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
+  if (!scenario) return [];
+  const activeJobs = new Set([
+    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+    ...scenario.jobs
+  ]);
+  const authority = collectActiveBindingAuthority(plan, activeJobs);
+  return (plan.attachments ?? [])
+    .filter(
+      (attachment) =>
+        attachment.target.type === 'local' && authority.activeAttachmentIds.has(attachment.id)
+    )
+    .map((attachment) => ({
+      attachmentId: attachment.id,
+      label: attachment.label,
+      attachmentType: attachment.type,
+      allowedTargetTypes: attachment.type === 'http'
+        ? ['endpoint', 'task-preview-route']
+        : ['endpoint'],
+      usages: authority.attachmentUsages.get(attachment.id) ?? []
+    }));
+}
+
 export function activePreviewInputIds(plan: PreviewExecutionPlan): string[] {
   if (plan.adapter === 'COMPOSE') return [];
   const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
@@ -1369,31 +1398,68 @@ function collectActiveBindingAuthority(
   activeAttachmentIds: Set<string>;
   checkedAttachmentIds: Set<string>;
   activeInputIds: Set<string>;
+  attachmentUsages: Map<string, PreviewLocalAttachmentUsage[]>;
 } {
-  const activeNodes = [
-    ...plan.jobs.filter((job) => activeJobs.has(job.id)),
-    ...plan.services,
-    ...plan.workers
+  const activeNodes: Array<{
+    kind: 'JOB' | 'SERVICE' | 'WORKER';
+    node: PreviewJobPlan | PreviewServicePlan | PreviewWorkerPlan;
+  }> = [
+    ...plan.jobs.filter((job) => activeJobs.has(job.id)).map((node) => ({ kind: 'JOB' as const, node })),
+    ...plan.services.map((node) => ({ kind: 'SERVICE' as const, node })),
+    ...plan.workers.map((node) => ({ kind: 'WORKER' as const, node }))
   ];
   const activeAttachmentIds = new Set<string>();
   const checkedAttachmentIds = new Set<string>();
   const activeInputIds = new Set<string>();
-  for (const node of activeNodes) {
+  const attachmentUsages = new Map<string, PreviewLocalAttachmentUsage[]>();
+  const attachmentIds = new Set((plan.attachments ?? []).map((attachment) => attachment.id));
+  const addEnvironmentUsages = (
+    nodeKind: 'JOB' | 'SERVICE' | 'WORKER',
+    nodeId: string,
+    recipient: 'PROCESS' | 'READINESS_PROBE' | 'LIVENESS_PROBE',
+    environment: Record<string, PreviewEnvironmentValue>
+  ) => {
+    const keysByAttachment = new Map<string, string[]>();
+    for (const [key, value] of Object.entries(environment)) {
+      if (typeof value === 'string') continue;
+      if (value.type === 'private-input') {
+        activeInputIds.add(value.input);
+        continue;
+      }
+      if (!('attachment' in value)) continue;
+      activeAttachmentIds.add(value.attachment);
+      const keys = keysByAttachment.get(value.attachment) ?? [];
+      keys.push(key);
+      keysByAttachment.set(value.attachment, keys);
+    }
+    for (const [attachmentId, environmentKeys] of keysByAttachment) {
+      const usages = attachmentUsages.get(attachmentId) ?? [];
+      usages.push({
+        kind: 'ENVIRONMENT',
+        recipient,
+        nodeKind,
+        nodeId,
+        environmentKeys: environmentKeys.sort()
+      });
+      attachmentUsages.set(attachmentId, usages);
+    }
+  };
+  for (const { kind, node } of activeNodes) {
     for (const dependencyId of Object.keys(node.needs)) {
-      if ((plan.attachments ?? []).some((attachment) => attachment.id === dependencyId)) {
+      if (attachmentIds.has(dependencyId)) {
         activeAttachmentIds.add(dependencyId);
         checkedAttachmentIds.add(dependencyId);
+        const usages = attachmentUsages.get(dependencyId) ?? [];
+        usages.push({ kind: 'READINESS_DEPENDENCY', nodeKind: kind, nodeId: node.id });
+        attachmentUsages.set(dependencyId, usages);
       }
     }
-    for (const environment of [node.env, ...('ready' in node ? [
-      node.ready.type === 'argv' ? node.ready.env ?? {} : {},
-      node.liveness?.probe.type === 'argv' ? node.liveness.probe.env ?? {} : {}
-    ] : [])]) {
-      for (const value of Object.values(environment)) {
-        if (typeof value === 'string') continue;
-        if (value.type === 'private-input') activeInputIds.add(value.input);
-        if ('attachment' in value) activeAttachmentIds.add(value.attachment);
-      }
+    addEnvironmentUsages(kind, node.id, 'PROCESS', node.env);
+    if ('ready' in node && node.ready.type === 'argv') {
+      addEnvironmentUsages(kind, node.id, 'READINESS_PROBE', node.ready.env ?? {});
+    }
+    if ('liveness' in node && node.liveness?.probe.type === 'argv') {
+      addEnvironmentUsages(kind, node.id, 'LIVENESS_PROBE', node.liveness.probe.env ?? {});
     }
   }
   for (const attachment of plan.attachments ?? []) {
@@ -1402,7 +1468,7 @@ function collectActiveBindingAuthority(
       activeInputIds.add(passwordInput);
     }
   }
-  return { activeAttachmentIds, checkedAttachmentIds, activeInputIds };
+  return { activeAttachmentIds, checkedAttachmentIds, activeInputIds, attachmentUsages };
 }
 
 function attachmentPasswordInput(attachment: PreviewAttachmentPlan): string | undefined {

@@ -61,6 +61,27 @@ describe('preview view model', () => {
       actions: []
     });
 
+    const configurationRequired = buildPreviewViewModel({
+      task,
+      worktree: uncheckedWorktree(),
+      plans: [],
+      approvals: [],
+      generations: [],
+      attempts: [],
+      resolution: {
+        status: 'CONFIGURATION_REQUIRED',
+        reason: 'A backend target is required.',
+        selectedScenarioId: 'frontend',
+        requirements: []
+      }
+    });
+    expect(configurationRequired).toMatchObject({
+      status: 'Configuration required',
+      tone: 'action',
+      summary: 'A backend target is required.',
+      actions: []
+    });
+
     const plan = {
       id: 'plan-1', taskId: task.id, iterationId: 'iteration-1', worktreeId: 'worktree-1',
       recipePath: '.taskmonki/preview.yaml' as const, recipeVersion: 1 as const,

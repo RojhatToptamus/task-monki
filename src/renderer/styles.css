@@ -7222,6 +7222,79 @@ textarea:focus-visible {
   line-height: 1.45;
 }
 
+.tm-preview-binding-editor,
+.tm-preview-binding-usage {
+  align-self: start;
+}
+
+.tm-preview-binding-editor {
+  display: grid;
+  gap: 16px;
+}
+
+.tm-preview-binding-editor form {
+  display: grid;
+  gap: 14px;
+}
+
+.tm-preview-binding-editor .tm-field {
+  display: grid;
+  gap: 6px;
+}
+
+.tm-preview-binding-editor .tm-field > span {
+  color: var(--text-soft);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.tm-preview-binding-editor .tm-field input,
+.tm-preview-binding-editor .tm-field select {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text);
+  font: 12px var(--font-mono);
+}
+
+.tm-preview-binding-editor__identity,
+.tm-preview-binding-editor__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tm-preview-binding-editor__identity > span {
+  color: var(--faint);
+  font: 10.5px var(--font-mono);
+}
+
+.tm-preview-binding-editor__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 10px;
+}
+
+.tm-preview-binding-editor__note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tm-preview-binding-usage .tm-preview-workspace__sectionhead {
+  display: block;
+}
+
+.tm-preview-binding-usage .tm-preview-workspace__sectionhead p {
+  margin-top: 4px;
+  text-align: left;
+}
+
 .tm-preview-recipe-modal {
   padding: 18px;
 }
@@ -11087,6 +11160,10 @@ textarea:focus-visible {
   }
 
   .tm-preview-input__entry {
+    grid-template-columns: 1fr;
+  }
+
+  .tm-preview-binding-editor__pair {
     grid-template-columns: 1fr;
   }
 

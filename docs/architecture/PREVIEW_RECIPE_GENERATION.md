@@ -32,7 +32,7 @@ The generator receives versioned support material from
 `PreviewRecipeGenerationSupport.ts`:
 
 - a stable behavioral instruction;
-- the machine-readable `task-monki-preview-recipe-generation/v2` authoring
+- the machine-readable `task-monki-preview-recipe-generation/v3` authoring
   contract;
 - deterministic `task-monki-preview-framework-capabilities/v2` compatibility
   facts derived from sanitized repository manifests;
@@ -72,7 +72,21 @@ YAML draft or `insufficient-evidence`, plus:
 - evidence paths and specific findings;
 - assumptions;
 - omissions;
-- unresolved decisions.
+- unresolved decisions;
+- exactly one structured decision for every detected browser-facing public
+  environment candidate: HTTP attachment, intentional source default, or
+  intentional omission.
+
+Task Monki derives those candidates in trusted code. It lexes bounded
+production JavaScript/TypeScript evidence for direct `process.env` access and
+may inspect only explicitly named, Git-tracked templates such as
+`.env.example` or `example.env`. It never reads actual or ignored `.env` files.
+Template contents never leave the trusted parser; the agent sees only the
+tracked relative evidence path, key metadata, and a URL target after strict
+credential-free validation.
+Conflicting or absent target evidence deterministically requires
+`target: local`; generated output cannot override that policy with a guessed
+literal endpoint.
 
 Every evidence path must exist in the sanitized bundle. Outputs are bounded,
 unknown fields are rejected, secret canary patterns are rejected, and a draft
@@ -140,10 +154,12 @@ Generated and user-edited YAML follows the same acceptance checks:
 4. no implicit package-acquisition command;
 5. every trusted framework command has its exact generic lockfile install job,
    lifecycle review comment, package-root cwd, and explicit success edge;
-6. draft ID still matches the current task draft and its transient capability
+6. every public-environment decision has one exact active recipe recipient and
+   obeys the derived literal-versus-local target policy;
+7. draft ID still matches the current task draft and its transient capability
    facts, including after user edits;
-7. task worktree and `.taskmonki` directory still resolve safely;
-8. target file does not already exist.
+8. task worktree and `.taskmonki` directory still resolve safely;
+9. target file does not already exist.
 
 Validation returns fixed safe issue messages rather than reflecting YAML
 source snippets through errors. Agent stderr and raw malformed output are not

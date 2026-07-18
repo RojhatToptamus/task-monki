@@ -34,6 +34,9 @@ describe('Preview recipe generation support', () => {
     expect(instruction).toContain('Never use npm exec, npx, pnpm dlx, or yarn dlx');
     expect(instruction).toContain('copy those lines exactly');
     expect(instruction).toContain('Do not report the listed port, protocol, or hostname conflicts as unresolved');
+    expect(instruction).toContain('exactly one publicEnvironmentDecision');
+    expect(instruction).toContain('target: local rather than silently choosing either endpoint');
+    expect(instruction).toContain('Do not model NEXT_PUBLIC values as private inputs');
     expect(instruction).toContain('insufficient-evidence');
     expect(instruction).toContain('Every evidence path must exist');
   });

@@ -50,6 +50,13 @@ facts require an explicit lockfile installation job and success dependency so
 the isolated captured source does not depend on the live worktree's ignored
 `node_modules` directory.
 
+For browser-facing API origins, Task Monki may also derive public key metadata
+from bounded source code and Git-tracked templates such as `.env.example` or
+`example.env`. It never inspects actual or ignored `.env` files. Generation
+must explicitly choose an HTTP attachment, the evidenced source default, or an
+intentional omission for every detected candidate. Conflicting targets produce
+a local public target for you to configure instead of a guessed endpoint.
+
 The modal displays the complete YAML alongside evidence, assumptions,
 omissions, and unresolved decisions. You may edit, regenerate, discard, or
 close. Close and Discard do not change the repository. Only **Accept & save
@@ -525,12 +532,18 @@ the producer. Environment-only delivery may resolve to a stable URL that
 returns 503 while the producer is absent; explicit readiness requires its
 current route to be active and ready.
 
-The desktop workspace currently displays resolved local bindings and missing
-public-target requirements but does not yet include a general target editor.
-Repository authors can use literal endpoints today. Task-local binding
-operations are available to trusted integrated clients through the
-TaskManager service/API; until a desktop editor ships, this is an advanced
-integration surface rather than a normal UI flow.
+For browser applications, the selected backend must also allow the stable
+Preview origin through its own CORS and cookie policy. Delivering a URL proves
+configuration, not browser authorization; Task Monki does not rewrite the
+backend's cross-origin policy.
+
+When an active local target is missing, the desktop workspace shows the exact
+process or probe recipients and environment keys before asking for the public
+endpoint. HTTP targets can use a literal endpoint or a declared route from
+another task. Producer routes remain selectable while stopped; selecting one
+does not start it. Saving uses the task-owned binding operation and rechecks
+the same scenario. The resolved public target remains part of the immutable
+plan and approval digest; changing it requires a newly resolved approval.
 
 ## Compose preview
 

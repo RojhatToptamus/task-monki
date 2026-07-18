@@ -114,7 +114,8 @@ describe('PreviewRecipeGenerationService', () => {
         evidence: [{ path: 'package.json', finding: 'No runnable preview script is declared.' }],
         assumptions: [],
         omissions: ['No command was guessed.'],
-        unresolvedDecisions: ['Choose the application command and listening port.']
+        unresolvedDecisions: ['Choose the application command and listening port.'],
+        publicEnvironmentDecisions: []
       })),
       cancel: async () => {}
     }));
@@ -184,6 +185,84 @@ describe('PreviewRecipeGenerationService', () => {
     expect(result.status).toBe('READY');
     expect(result.report).toBeUndefined();
     expect(result.draft?.report.unresolvedDecisions).toEqual([]);
+  });
+
+  it('requires a structured HTTP attachment decision for an evidenced public API origin', async () => {
+    const root = await nextWorktreeWithPublicApi();
+    const service = new PreviewRecipeGenerationService(async ({ cwd }) => {
+      const evidence = JSON.parse(
+        await fs.readFile(path.join(cwd, 'repository-evidence.json'), 'utf8')
+      ) as { publicEnvironment: { candidates: Array<Record<string, unknown>> } };
+      expect(evidence.publicEnvironment.candidates).toEqual([
+        expect.objectContaining({
+          id: 'next-public:NEXT_PUBLIC_API_URL',
+          key: 'NEXT_PUBLIC_API_URL',
+          sourceDefault: expect.objectContaining({ host: 'api.dev.example' })
+        })
+      ]);
+      return { result: Promise.resolve(publicApiAgentDraft()), cancel: async () => {} };
+    });
+
+    const result = await service.generate({ taskId: 'task-next', worktreePath: root });
+
+    expect(result.status).toBe('READY');
+    expect(result.draft?.report.publicEnvironmentDecisions).toEqual([{
+      candidateId: 'next-public:NEXT_PUBLIC_API_URL',
+      key: 'NEXT_PUBLIC_API_URL',
+      decision: 'HTTP_ATTACHMENT',
+      reason: 'The browser API origin must be selected explicitly.',
+      attachmentId: 'backend'
+    }]);
+    expect(result.draft?.yaml).toContain('type: attached-http-origin');
+  });
+
+  it('rejects missing or YAML-inconsistent public environment decisions', async () => {
+    const root = await nextWorktreeWithPublicApi();
+    const missing = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(nextAgentDraft()),
+      cancel: async () => {}
+    }));
+    const inconsistent = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(publicApiAgentDraft('other')),
+      cancel: async () => {}
+    }));
+    const mixedRecipients = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(publicApiAgentDraftWithMixedRecipient()),
+      cancel: async () => {}
+    }));
+
+    await expect(missing.generate({ taskId: 'task-missing', worktreePath: root })).resolves.toMatchObject({
+      status: 'FAILED', failureCode: 'INVALID_AGENT_OUTPUT'
+    });
+    await expect(inconsistent.generate({ taskId: 'task-inconsistent', worktreePath: root })).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'INVALID_AGENT_OUTPUT',
+      message: 'The generated public environment decision does not match the Preview recipe.'
+    });
+    await expect(mixedRecipients.generate({ taskId: 'task-mixed', worktreePath: root })).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'INVALID_AGENT_OUTPUT',
+      message: 'The generated public environment decision does not match the Preview recipe.'
+    });
+  });
+
+  it('enforces local selection when trusted public URL evidence conflicts', async () => {
+    const root = await nextWorktreeWithPublicApi();
+    const service = new PreviewRecipeGenerationService(async () => ({
+      result: Promise.resolve(
+        publicApiAgentDraft().replace(
+          'target: { type: local }',
+          'target: { type: endpoint, scheme: https, host: api.staging.example, port: 443, basePath: / }'
+        )
+      ),
+      cancel: async () => {}
+    }));
+
+    await expect(service.generate({ taskId: 'task-conflict', worktreePath: root })).resolves.toMatchObject({
+      status: 'FAILED',
+      failureCode: 'INVALID_AGENT_OUTPUT',
+      message: 'The generated public environment decision does not match the Preview recipe.'
+    });
   });
 
   it.each([
@@ -384,6 +463,17 @@ async function nextWorktree(
   return root;
 }
 
+async function nextWorktreeWithPublicApi(): Promise<string> {
+  const root = await nextWorktree('next dev --turbopack', '16.2.3');
+  await fs.mkdir(path.join(root, 'src'));
+  await fs.writeFile(
+    path.join(root, 'src', 'heyapi.ts'),
+    "export const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.dev.example';\n",
+    'utf8'
+  );
+  return root;
+}
+
 function agentDraft(): string {
   return JSON.stringify({
     schemaVersion: PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION,
@@ -408,7 +498,8 @@ routes:
     ],
     assumptions: ['The application reads the generated PORT environment variable.'],
     omissions: ['No health endpoint was evidenced.'],
-    unresolvedDecisions: []
+    unresolvedDecisions: [],
+    publicEnvironmentDecisions: []
   });
 }
 
@@ -451,8 +542,62 @@ routes:
     ],
     assumptions: [],
     omissions: [],
-    unresolvedDecisions: []
+    unresolvedDecisions: [],
+    publicEnvironmentDecisions: []
   });
+}
+
+function publicApiAgentDraft(decisionAttachmentId = 'backend'): string {
+  const base = JSON.parse(nextAgentDraft('[npm, run, dev]', '')) as Record<string, unknown>;
+  base.yaml = `version: 1
+
+jobs:
+  install:
+${nextInstallComment()}
+    command: [npm, ci, --no-audit, --no-fund]
+
+attachments:
+  backend:
+    type: http
+    target: { type: local }
+
+services:
+  web:
+    command: [npm, run, dev]
+    needs: { install: succeeded }
+    env:
+      NEXT_PUBLIC_API_URL: { type: attached-http-origin, attachment: backend }
+    ports: { http: { env: PORT } }
+    ready: { type: tcp, port: http }
+
+routes:
+  app: { service: web, port: http, primary: true }
+`;
+  base.publicEnvironmentDecisions = [{
+    candidateId: 'next-public:NEXT_PUBLIC_API_URL',
+    key: 'NEXT_PUBLIC_API_URL',
+    decision: 'HTTP_ATTACHMENT',
+    reason: 'The browser API origin must be selected explicitly.',
+    attachmentId: decisionAttachmentId
+  }];
+  return JSON.stringify(base);
+}
+
+function publicApiAgentDraftWithMixedRecipient(): string {
+  const draft = JSON.parse(publicApiAgentDraft()) as Record<string, unknown>;
+  draft.yaml = (draft.yaml as string).replace(
+    '\nroutes:',
+    `
+workers:
+  monitor:
+    command: [node, monitor.mjs]
+    env:
+      NEXT_PUBLIC_API_URL: https://different.example
+    ready: { type: argv, command: [node, monitor-ready.mjs] }
+
+routes:`
+  );
+  return JSON.stringify(draft);
 }
 
 function nextInstallComment(): string {

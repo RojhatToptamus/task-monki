@@ -41,7 +41,8 @@ routes:
         ],
         assumptions: [],
         omissions: ['No HTTP health endpoint was evidenced.'],
-        unresolvedDecisions: []
+        unresolvedDecisions: [],
+        publicEnvironmentDecisions: []
       })),
       cancel: async () => {}
     }));

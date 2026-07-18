@@ -5,10 +5,13 @@ import path from 'node:path';
 import {
   DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   DEFAULT_PROMPT_REFINEMENT_MODEL,
+  type PreviewAttachmentPlan,
+  type PreviewEnvironmentValue,
   type PreviewExecutionPlan,
   type PreviewRecipeGenerationDraft,
   type PreviewRecipeGenerationReport,
   type PreviewRecipeGenerationSnapshot,
+  type PreviewPublicEnvironmentDecision,
   type PreviewRecipeValidation
 } from '../../../shared/contracts';
 import {
@@ -19,6 +22,7 @@ import {
 import {
   MAX_PREVIEW_RECIPE_BYTES,
   PREVIEW_RECIPE_PATH,
+  activePreviewAttachmentIds,
   parsePreviewRecipe
 } from '../PreviewRecipeLoader';
 import {
@@ -27,6 +31,10 @@ import {
 } from './PreviewRecipeGenerationSupport';
 import type { PreviewFrameworkCapabilities } from './PreviewFrameworkCapabilities';
 import { preparePreviewRecipeEvidenceBundle } from './PreviewRecipeEvidenceBundle';
+import type {
+  PreviewPublicEnvironmentCandidate,
+  PreviewPublicEnvironmentEvidence
+} from './PreviewPublicEnvironmentEvidence';
 
 const GENERATION_TIMEOUT_MS = 120_000;
 const MAX_REPORT_ITEMS = 40;
@@ -249,7 +257,11 @@ export class PreviewRecipeGenerationService {
       );
       let parsed: ParsedAgentGeneration;
       try {
-        parsed = parseAgentGeneration(output, evidence.includedPaths);
+        parsed = parseAgentGeneration(
+          output,
+          evidence.includedPaths,
+          evidence.publicEnvironment
+        );
       } catch {
         throw new InvalidAgentGenerationError();
       }
@@ -272,9 +284,11 @@ export class PreviewRecipeGenerationService {
           input.onUpdate
         );
       }
-      const validation = validateGeneratedPreviewRecipeDraft(
+      const validation = validateAgentGeneratedPreviewRecipeDraft(
         parsed.yaml ?? '',
-        evidence.frameworkCapabilities
+        evidence.frameworkCapabilities,
+        evidence.publicEnvironment.candidates,
+        parsed.report.publicEnvironmentDecisions
       );
       if (validation.status !== 'VALID') {
         return this.finish(
@@ -430,6 +444,91 @@ export function validatePreviewRecipeDraft(yaml: string): PreviewRecipeValidatio
     };
   }
   return { status: 'VALID' };
+}
+
+function validateAgentGeneratedPreviewRecipeDraft(
+  yaml: string,
+  capabilities: PreviewFrameworkCapabilities,
+  candidates: readonly PreviewPublicEnvironmentCandidate[],
+  decisions: readonly PreviewPublicEnvironmentDecision[]
+): PreviewRecipeValidation {
+  const validation = validateGeneratedPreviewRecipeDraft(yaml, capabilities);
+  if (validation.status !== 'VALID') return validation;
+  const plan = parsePreviewRecipe(yaml).executionPlan;
+  const activeAttachmentIds = new Set(activePreviewAttachmentIds(plan));
+  const scenario = plan.scenarios.find((candidate) => candidate.id === plan.selectedScenarioId);
+  const activeJobIds = new Set([
+    ...plan.jobs.filter((job) => job.role === 'generic').map((job) => job.id),
+    ...(scenario?.jobs ?? [])
+  ]);
+  const activeNodes = [
+    ...plan.jobs.filter((job) => activeJobIds.has(job.id)),
+    ...plan.services,
+    ...plan.workers
+  ];
+  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  for (const decision of decisions) {
+    const candidate = candidateById.get(decision.candidateId);
+    if (!candidate) return invalidPublicEnvironmentDecision();
+    const recipientValues = activeNodes.flatMap((node): PreviewEnvironmentValue[] => {
+      const environments = [node.env];
+      if ('ready' in node && node.ready.type === 'argv') environments.push(node.ready.env ?? {});
+      if ('liveness' in node && node.liveness?.probe.type === 'argv') {
+        environments.push(node.liveness.probe.env ?? {});
+      }
+      return environments.flatMap((environment) =>
+        environment[candidate.key] === undefined ? [] : [environment[candidate.key]]
+      );
+    });
+    if (decision.decision === 'HTTP_ATTACHMENT') {
+      const attachment = plan.attachments?.find(
+        (candidate) => candidate.id === decision.attachmentId
+      );
+      if (
+        !decision.attachmentId || recipientValues.length === 0 ||
+        recipientValues.some(
+          (value) =>
+            typeof value === 'string' || value.type !== 'attached-http-origin' ||
+            value.attachment !== decision.attachmentId
+        ) ||
+        !activeAttachmentIds.has(decision.attachmentId) ||
+        attachment?.type !== 'http' ||
+        !publicTargetMatchesPolicy(attachment.target, candidate)
+      ) return invalidPublicEnvironmentDecision();
+    } else if (decision.decision === 'SOURCE_DEFAULT') {
+      if (!candidate.sourceDefault || recipientValues.length > 0) {
+        return invalidPublicEnvironmentDecision();
+      }
+    } else if (recipientValues.length > 0) {
+      return invalidPublicEnvironmentDecision();
+    }
+  }
+  return validation;
+}
+
+function publicTargetMatchesPolicy(
+  target: PreviewAttachmentPlan['target'],
+  candidate: PreviewPublicEnvironmentCandidate
+): boolean {
+  if (target.type === 'local') return true;
+  if (
+    candidate.targetPolicy.kind !== 'LITERAL_ALLOWED' ||
+    target.type !== 'endpoint' ||
+    !('scheme' in target)
+  ) return false;
+  const evidenced = candidate.targetPolicy.publicHttpTarget;
+  return target.scheme === evidenced.scheme && target.host === evidenced.host &&
+    target.port === evidenced.port && target.basePath === evidenced.basePath;
+}
+
+function invalidPublicEnvironmentDecision(): PreviewRecipeValidation {
+  return {
+    status: 'INVALID',
+    issues: [{
+      code: 'PUBLIC_ENVIRONMENT_DECISION_INVALID',
+      message: 'The generated public environment decision does not match the Preview recipe.'
+    }]
+  };
 }
 
 function validateGeneratedPreviewRecipeDraft(
@@ -609,7 +708,8 @@ function containsSecretLiteral(plan: PreviewExecutionPlan): boolean {
 
 function parseAgentGeneration(
   output: string,
-  includedPaths: ReadonlySet<string>
+  includedPaths: ReadonlySet<string>,
+  publicEnvironment: PreviewPublicEnvironmentEvidence
 ): ParsedAgentGeneration {
   const normalized = output
     .trim()
@@ -624,7 +724,8 @@ function parseAgentGeneration(
     'evidence',
     'assumptions',
     'omissions',
-    'unresolvedDecisions'
+    'unresolvedDecisions',
+    'publicEnvironmentDecisions'
   ]);
   if (
     !value ||
@@ -651,6 +752,10 @@ function parseAgentGeneration(
     unresolvedDecisions: normalizeReportList(
       value.unresolvedDecisions,
       'unresolvedDecisions'
+    ),
+    publicEnvironmentDecisions: normalizePublicEnvironmentDecisions(
+      value.publicEnvironmentDecisions,
+      publicEnvironment.candidates
     )
   };
   if (status === 'draft' && evidence.length === 0) {
@@ -664,6 +769,47 @@ function parseAgentGeneration(
     yaml: status === 'draft' ? (value.yaml as string) : undefined,
     report
   };
+}
+
+function normalizePublicEnvironmentDecisions(
+  value: unknown,
+  candidates: readonly PreviewPublicEnvironmentCandidate[]
+): PreviewPublicEnvironmentDecision[] {
+  if (!Array.isArray(value) || value.length !== candidates.length) {
+    throw new Error('Every public environment candidate requires one decision.');
+  }
+  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const seen = new Set<string>();
+  const decisions = value.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('Invalid public environment decision.');
+    const record = item as Record<string, unknown>;
+    const allowed = new Set(['candidateId', 'key', 'decision', 'reason', 'attachmentId']);
+    if (Object.keys(record).some((key) => !allowed.has(key))) {
+      throw new Error('Invalid public environment decision.');
+    }
+    const candidateId = normalizeSafeReportText(record.candidateId, 'candidateId');
+    const key = normalizeSafeReportText(record.key, 'public environment key');
+    const candidate = candidateById.get(candidateId);
+    if (!candidate || candidate.key !== key || seen.has(candidateId)) {
+      throw new Error('Invalid public environment decision candidate.');
+    }
+    seen.add(candidateId);
+    const decision = record.decision as PreviewPublicEnvironmentDecision['decision'];
+    if (decision !== 'HTTP_ATTACHMENT' && decision !== 'SOURCE_DEFAULT' && decision !== 'OMIT') {
+      throw new Error('Invalid public environment decision type.');
+    }
+    const reason = normalizeSafeReportText(record.reason, 'public environment decision reason');
+    const attachmentId = record.attachmentId === undefined
+      ? undefined
+      : normalizeSafeReportText(record.attachmentId, 'attachmentId');
+    if (
+      (decision === 'HTTP_ATTACHMENT' && (!attachmentId || !/^[a-z][a-z0-9-]{0,47}$/.test(attachmentId))) ||
+      (decision !== 'HTTP_ATTACHMENT' && attachmentId !== undefined) ||
+      (decision === 'SOURCE_DEFAULT' && !candidate.sourceDefault)
+    ) throw new Error('Invalid public environment decision authority.');
+    return { candidateId, key, decision, reason, attachmentId };
+  });
+  return decisions.sort((left, right) => left.candidateId.localeCompare(right.candidateId));
 }
 
 function normalizeEvidence(

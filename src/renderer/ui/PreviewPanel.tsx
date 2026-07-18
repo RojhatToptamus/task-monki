@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+  type RefObject
+} from 'react';
 import type {
   PreviewApprovalRecord,
   PreviewComposeProjectRecord,
@@ -10,6 +17,7 @@ import type {
   PreviewPlanRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
+  PreviewResolvedAttachmentTarget,
   PreviewResourceRecord,
   PreviewRouteRecord,
   ReadPreviewLogResult,
@@ -21,8 +29,8 @@ import type {
   PreviewAttachmentPlan,
   PreviewExecutionBlocker,
   PreviewExecutionReadiness,
-  PreviewPrivateInputOperationResult,
-  PreviewResolvedAttachmentTarget
+  PreviewLocalAttachmentRequirement,
+  PreviewPrivateInputOperationResult
 } from '../../shared/preview';
 import {
   buildPreviewPlanGroups,
@@ -34,6 +42,12 @@ import {
   type PreviewActionModel,
   type PreviewViewModel
 } from '../model/preview';
+import {
+  createPreviewAttachmentBindingDraft,
+  materializePreviewAttachmentTarget,
+  type PreviewAttachmentBindingDraft,
+  type PreviewTaskRouteOption
+} from '../model/previewBindings';
 import { Chip } from './StatusBadge';
 
 export interface PreviewPanelProps {
@@ -47,11 +61,18 @@ export interface PreviewPanelProps {
   managedResources: PreviewManagedResourceRecord[];
   composeProjects: PreviewComposeProjectRecord[];
   localBindings: PreviewLocalAttachmentBindingRecord[];
+  taskRouteOptions: PreviewTaskRouteOption[];
   runtimeResources: PreviewResourceRecord[];
   executionReadiness?: PreviewExecutionReadiness;
   resolution?: ResolvePreviewResult;
   recipeGeneration?: PreviewRecipeGenerationSnapshot;
   onResolve(taskId: string, scenarioId?: string): Promise<void>;
+  onSetLocalBinding(
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ): Promise<void>;
   onGetRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onGenerateRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onValidateRecipeDraft(
@@ -255,6 +276,9 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
     controller.view.status === 'Cleanup incomplete' ||
     Boolean(controller.view.failedReplacementGeneration)
   );
+  const localConfiguration = props.resolution?.status === 'CONFIGURATION_REQUIRED'
+    ? props.resolution
+    : undefined;
 
   useEffect(() => {
     if (!readinessPending || !plan) return;
@@ -385,11 +409,19 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
         </div>
       </header>
 
-      {plan && approvalRequired ? (
+      {localConfiguration ? (
+        <PreviewLocalAttachmentConfiguration
+          taskId={props.task.id}
+          selectedScenarioId={localConfiguration.selectedScenarioId}
+          requirements={localConfiguration.requirements}
+          routeOptions={props.taskRouteOptions}
+          onSave={props.onSetLocalBinding}
+        />
+      ) : plan && approvalRequired ? (
         <PreviewPlanAuthority plan={plan} approval={controller.view.approval} />
       ) : null}
 
-      {plan && configurationRequired ? (
+      {!localConfiguration && plan && configurationRequired ? (
         <PreviewConfigurationRequired
           taskId={props.task.id}
           plan={plan}
@@ -403,7 +435,7 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
             plan.executionPlan.selectedScenarioId
           )}
         />
-      ) : plan && !approvalRequired ? <div className="tm-preview-workspace__columns">
+      ) : !localConfiguration && plan && !approvalRequired ? <div className="tm-preview-workspace__columns">
         <div className="tm-preview-workspace__column">
           {showOperationalEvidence ? (
             <PreviewApplicationSection
@@ -482,6 +514,235 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
         />
       ) : null}
     </section>
+  );
+}
+
+function PreviewLocalAttachmentConfiguration({
+  taskId,
+  selectedScenarioId,
+  requirements,
+  routeOptions,
+  onSave
+}: {
+  taskId: string;
+  selectedScenarioId: string;
+  requirements: PreviewLocalAttachmentRequirement[];
+  routeOptions: PreviewTaskRouteOption[];
+  onSave(
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ): Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState(requirements[0]?.attachmentId ?? '');
+  const requirement = requirements.find((candidate) => candidate.attachmentId === selectedId) ??
+    requirements[0];
+  const [draft, setDraft] = useState<PreviewAttachmentBindingDraft>(() =>
+    requirement
+      ? createPreviewAttachmentBindingDraft(requirement, routeOptions)
+      : createPreviewAttachmentBindingDraft({
+          attachmentId: 'unknown', attachmentType: 'http', allowedTargetTypes: ['endpoint'], usages: []
+        }, routeOptions)
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    if (!requirement) return;
+    setDraft(createPreviewAttachmentBindingDraft(requirement, routeOptions));
+    setError(undefined);
+  }, [requirement?.attachmentId]);
+
+  if (!requirement) return null;
+  const taskRouteAllowed = requirement.allowedTargetTypes.includes('task-preview-route');
+  const selectedRouteValue = `${draft.targetTaskId}\u0000${draft.routeId}`;
+  const update = (fields: Partial<PreviewAttachmentBindingDraft>) => {
+    setDraft((current) => ({ ...current, ...fields }));
+    setError(undefined);
+  };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(undefined);
+    try {
+      const target = materializePreviewAttachmentTarget(requirement, draft);
+      setBusy(true);
+      await onSave(taskId, requirement.attachmentId, target, selectedScenarioId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save this target.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="tm-preview-workspace__columns tm-preview-configuration">
+      <section className="tm-preview-surface tm-preview-binding-editor" aria-labelledby="preview-public-targets">
+        <SectionHeading
+          id="preview-public-targets"
+          title="Public targets"
+          detail="Configure public connection details for this scenario. Task Monki never owns or mutates attached targets."
+        />
+        {requirements.length > 1 ? (
+          <label className="tm-field">
+            <span>Attachment</span>
+            <select value={requirement.attachmentId} onChange={(event) => setSelectedId(event.target.value)}>
+              {requirements.map((candidate) => (
+                <option key={candidate.attachmentId} value={candidate.attachmentId}>
+                  {candidate.label ?? candidate.attachmentId} · {candidate.attachmentType}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <form onSubmit={(event) => void submit(event)}>
+          <div className="tm-preview-binding-editor__identity">
+            <strong>{requirement.label ?? requirement.attachmentId}</strong>
+            <span>{requirement.attachmentType.toUpperCase()}</span>
+          </div>
+          {taskRouteAllowed ? (
+            <label className="tm-field">
+              <span>Target source</span>
+              <select
+                value={draft.mode}
+                onChange={(event) => update({ mode: event.target.value as PreviewAttachmentBindingDraft['mode'] })}
+              >
+                <option value="endpoint">Public endpoint</option>
+                <option value="task-preview-route">Another task’s Preview route</option>
+              </select>
+            </label>
+          ) : null}
+          {draft.mode === 'task-preview-route' ? (
+            <>
+              <label className="tm-field">
+                <span>Preview route</span>
+                <select
+                  value={selectedRouteValue}
+                  disabled={routeOptions.length === 0}
+                  onChange={(event) => {
+                    const [targetTaskId, routeId] = event.target.value.split('\u0000');
+                    update({ targetTaskId, routeId });
+                  }}
+                >
+                  {routeOptions.length === 0 ? <option value="">No routes available</option> : null}
+                  {routeOptions.map((option) => (
+                    <option key={`${option.taskId}:${option.routeId}`} value={`${option.taskId}\u0000${option.routeId}`}>
+                      {option.taskTitle} · {option.routeId}{option.available ? ' · running' : ' · stopped'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <TextBindingField label="Base path" value={draft.basePath} onChange={(basePath) => update({ basePath })} />
+              <p className="tm-preview-binding-editor__note">
+                A stopped producer can still be selected. Availability is checked only when the recipe explicitly requires attachment readiness.
+              </p>
+            </>
+          ) : (
+            <PreviewEndpointFields requirement={requirement} draft={draft} update={update} />
+          )}
+          {error ? <p className="tm-preview-input__feedback tm-preview-input__feedback--error" role="alert">{error}</p> : null}
+          <div className="tm-preview-binding-editor__actions">
+            <button type="submit" className="primary-button" disabled={busy || (draft.mode === 'task-preview-route' && routeOptions.length === 0)}>
+              {busy ? 'Saving…' : 'Save target'}
+            </button>
+          </div>
+        </form>
+      </section>
+      <aside className="tm-preview-surface tm-preview-binding-usage" aria-labelledby="preview-target-recipients">
+        <SectionHeading
+          id="preview-target-recipients"
+          title="Recipient scope"
+          detail="Saving the target re-resolves this same scenario. Approval will cover the exact public target and recipients."
+        />
+        <div className="tm-preview-rows">
+          {requirement.usages.map((usage, index) => (
+            <OperationalRow
+              key={`${usage.kind}:${usage.nodeId}:${index}`}
+              title={`${humanize(usage.nodeKind)} · ${usage.nodeId}`}
+              kind={usage.kind === 'READINESS_DEPENDENCY' ? 'STARTUP CHECK' : humanize(usage.recipient)}
+              detail={usage.kind === 'ENVIRONMENT'
+                ? usage.environmentKeys.join(', ')
+                : 'Must pass the declared one-shot attachment check'}
+              state="Declared by recipe"
+            />
+          ))}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function PreviewEndpointFields({
+  requirement,
+  draft,
+  update
+}: {
+  requirement: PreviewLocalAttachmentRequirement;
+  draft: PreviewAttachmentBindingDraft;
+  update(fields: Partial<PreviewAttachmentBindingDraft>): void;
+}) {
+  return (
+    <>
+      {requirement.attachmentType === 'http' ? (
+        <label className="tm-field">
+          <span>Scheme</span>
+          <select value={draft.scheme} onChange={(event) => update({ scheme: event.target.value as PreviewAttachmentBindingDraft['scheme'] })}>
+            <option value="" disabled>Select scheme</option>
+            <option value="http">http</option>
+            <option value="https">https</option>
+          </select>
+        </label>
+      ) : null}
+      <div className="tm-preview-binding-editor__pair">
+        <TextBindingField label="Host" value={draft.host} onChange={(host) => update({ host })} />
+        <TextBindingField label="Port" value={draft.port} inputMode="numeric" onChange={(port) => update({ port })} />
+      </div>
+      {requirement.attachmentType === 'http' ? (
+        <TextBindingField label="Base path" value={draft.basePath} onChange={(basePath) => update({ basePath })} />
+      ) : null}
+      {requirement.attachmentType === 'postgres' || requirement.attachmentType === 'redis' ? (
+        <>
+          <TextBindingField
+            label={requirement.attachmentType === 'redis' ? 'Database number' : 'Database'}
+            value={draft.database}
+            inputMode={requirement.attachmentType === 'redis' ? 'numeric' : undefined}
+            onChange={(database) => update({ database })}
+          />
+          <TextBindingField
+            label={requirement.attachmentType === 'redis' ? 'Username (optional)' : 'Username'}
+            value={draft.username}
+            onChange={(username) => update({ username })}
+          />
+          <label className="tm-field">
+            <span>TLS</span>
+            <select value={draft.tls} onChange={(event) => update({ tls: event.target.value as PreviewAttachmentBindingDraft['tls'] })}>
+              <option value="" disabled>Select TLS mode</option>
+              <option value="disabled">Disabled</option>
+              <option value="system-verified">System verified</option>
+            </select>
+          </label>
+        </>
+      ) : null}
+    </>
+  );
+}
+
+function TextBindingField({
+  label,
+  value,
+  inputMode,
+  onChange
+}: {
+  label: string;
+  value: string;
+  inputMode?: 'numeric';
+  onChange(value: string): void;
+}) {
+  return (
+    <label className="tm-field">
+      <span>{label}</span>
+      <input value={value} inputMode={inputMode} onChange={(event) => onChange(event.target.value)} />
+    </label>
   );
 }
 
@@ -852,6 +1113,9 @@ function PreviewRecipeGenerationReportView({
     ['Evidence', report.evidence.map((item) => `${item.path} — ${item.finding}`)],
     ['Assumptions', report.assumptions],
     ['Omissions', report.omissions],
+    ['Public environment', report.publicEnvironmentDecisions.map((item) =>
+      `${item.key} — ${humanize(item.decision)}: ${item.reason}`
+    )],
     ['Unresolved', report.unresolvedDecisions]
   ] as const;
   return (
@@ -1795,7 +2059,10 @@ function PreviewBindingsSection({
               key={attachment.id}
               title={attachment.label ?? attachment.id}
               kind={attachment.type.toUpperCase()}
-              detail={formatAttachmentTarget(attachment, localBinding?.target)}
+              detail={formatAttachmentTarget(
+                attachment,
+                attachment.target.type === 'local' ? localBinding?.target : undefined
+              )}
               state={evidence
                 ? evidence.status === 'PASSED' ? 'Startup check passed' : humanize(evidence.failureCode ?? 'Check failed')
                 : attachment.check

@@ -463,6 +463,14 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const plan = plans[0];
   if (!plan) {
+    if (input.resolution?.status === 'CONFIGURATION_REQUIRED') {
+      return {
+        status: 'Configuration required',
+        tone: 'action',
+        summary: input.resolution.reason,
+        actions: []
+      };
+    }
     if (
       input.resolution?.status === 'UNAVAILABLE' &&
       input.resolution.reasonCode === 'RECIPE_MISSING'

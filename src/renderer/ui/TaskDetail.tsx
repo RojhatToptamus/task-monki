@@ -37,6 +37,7 @@ import type {
   PreviewPlanRecord,
   PreviewRecipeGenerationSnapshot,
   PreviewRecipeValidation,
+  PreviewResolvedAttachmentTarget,
   ResolvePreviewResult,
   PreviewResourceRecord,
   ReviewRollupRecord,
@@ -121,6 +122,7 @@ import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
 import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
+import type { PreviewTaskRouteOption } from '../model/previewBindings';
 
 interface TaskDetailProps {
   error?: string;
@@ -157,6 +159,7 @@ interface TaskDetailProps {
   previewNodeAttempts: PreviewNodeAttemptRecord[];
   previewComposeProjects: PreviewComposeProjectRecord[];
   previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewTaskRoutes: PreviewTaskRouteOption[];
   previewRuntimeResources: PreviewResourceRecord[];
   previewExecutionReadiness?: PreviewExecutionReadiness;
   previewResolution?: ResolvePreviewResult;
@@ -178,6 +181,12 @@ interface TaskDetailProps {
   onCreatePullRequest(taskId: string, title?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
   onResolvePreview(taskId: string, scenarioId?: string): Promise<void>;
+  onSetPreviewLocalBinding(
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ): Promise<void>;
   onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onGeneratePreviewRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
   onValidatePreviewRecipeDraft(
@@ -725,11 +734,13 @@ export function TaskDetail(props: TaskDetailProps) {
     attempts: props.previewNodeAttempts,
     composeProjects: props.previewComposeProjects,
     localBindings: props.previewLocalBindings,
+    taskRouteOptions: props.previewTaskRoutes,
     runtimeResources: props.previewRuntimeResources,
     executionReadiness: props.previewExecutionReadiness,
     resolution: props.previewResolution,
     recipeGeneration: props.previewRecipeGeneration,
     onResolve: props.onResolvePreview,
+    onSetLocalBinding: props.onSetPreviewLocalBinding,
     onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
     onGenerateRecipe: props.onGeneratePreviewRecipe,
     onValidateRecipeDraft: props.onValidatePreviewRecipeDraft,

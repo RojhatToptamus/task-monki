@@ -732,6 +732,28 @@ export interface PreviewExecutionReadiness {
   blockers: PreviewExecutionBlocker[];
 }
 
+export type PreviewLocalAttachmentUsage =
+  | {
+      kind: 'ENVIRONMENT';
+      recipient: 'PROCESS' | 'READINESS_PROBE' | 'LIVENESS_PROBE';
+      nodeKind: 'JOB' | 'SERVICE' | 'WORKER';
+      nodeId: string;
+      environmentKeys: string[];
+    }
+  | {
+      kind: 'READINESS_DEPENDENCY';
+      nodeKind: 'JOB' | 'SERVICE' | 'WORKER';
+      nodeId: string;
+    };
+
+export interface PreviewLocalAttachmentRequirement {
+  attachmentId: string;
+  label?: string;
+  attachmentType: PreviewAttachmentPlan['type'];
+  allowedTargetTypes: Array<'endpoint' | 'task-preview-route'>;
+  usages: PreviewLocalAttachmentUsage[];
+}
+
 export type ResolvePreviewResult =
   | {
       status: 'UNAVAILABLE';
@@ -741,7 +763,8 @@ export type ResolvePreviewResult =
   | {
       status: 'CONFIGURATION_REQUIRED';
       reason: string;
-      attachmentIds: string[];
+      selectedScenarioId: string;
+      requirements: PreviewLocalAttachmentRequirement[];
     }
   | {
       status: 'PLAN';
@@ -766,6 +789,15 @@ export interface PreviewRecipeGenerationReport {
   assumptions: string[];
   omissions: string[];
   unresolvedDecisions: string[];
+  publicEnvironmentDecisions: PreviewPublicEnvironmentDecision[];
+}
+
+export interface PreviewPublicEnvironmentDecision {
+  candidateId: string;
+  key: string;
+  decision: 'HTTP_ATTACHMENT' | 'SOURCE_DEFAULT' | 'OMIT';
+  reason: string;
+  attachmentId?: string;
 }
 
 export type PreviewRecipeValidationIssueCode =
@@ -774,7 +806,8 @@ export type PreviewRecipeValidationIssueCode =
   | 'INVALID_RECIPE'
   | 'SECRET_LITERAL'
   | 'INCOMPATIBLE_COMMAND'
-  | 'DEPENDENCY_PREPARATION_REQUIRED';
+  | 'DEPENDENCY_PREPARATION_REQUIRED'
+  | 'PUBLIC_ENVIRONMENT_DECISION_INVALID';
 
 export interface PreviewRecipeValidationIssue {
   code: PreviewRecipeValidationIssueCode;

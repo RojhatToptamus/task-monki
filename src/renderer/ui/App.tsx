@@ -12,6 +12,7 @@ import {
   type InteractionRequestRecord,
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
+  type PreviewResolvedAttachmentTarget,
   type ResolvePreviewResult,
   type Task,
   type TaskManagerAppSettings,
@@ -49,6 +50,7 @@ import {
   tasksForRepository
 } from '../model/repositories';
 import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
+import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
@@ -500,6 +502,17 @@ export function App() {
   const selectedPreviewNodeAttempts = selectedTask
     ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
     : [];
+  const selectedPreviewTaskRoutes = useMemo(
+    () => selectedTask
+      ? selectPreviewTaskRouteOptions(
+          snapshot.tasks,
+          snapshot.previewPlans,
+          snapshot.previewGenerations,
+          selectedTask.id
+        )
+      : [],
+    [selectedTask, snapshot.previewGenerations, snapshot.previewPlans, snapshot.tasks]
+  );
   const selectedGitSnapshots = useMemo(
     () =>
       selectedTask
@@ -653,7 +666,10 @@ export function App() {
       const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
       setPreviewResolutions((current) => ({ ...current, [taskId]: result }));
       if (result.status === 'UNAVAILABLE') return;
-      if (result.status === 'CONFIGURATION_REQUIRED') throw new Error(result.reason);
+      if (result.status === 'CONFIGURATION_REQUIRED') {
+        await refresh();
+        return;
+      }
       setPreviewExecutionReadiness((current) => ({
         ...current,
         [taskId]: result.executionReadiness
@@ -661,6 +677,23 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Could not resolve preview configuration.');
+      throw caught;
+    }
+  };
+
+  const setPreviewLocalBinding = async (
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target });
+      await resolvePreview(taskId, scenarioId);
+      notify('Preview target configured.', 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Could not configure the Preview target.');
       throw caught;
     }
   };
@@ -1315,6 +1348,7 @@ export function App() {
             previewManagedResources={selectedPreviewManagedResources}
             previewComposeProjects={selectedPreviewComposeProjects}
             previewLocalBindings={selectedPreviewLocalBindings}
+            previewTaskRoutes={selectedPreviewTaskRoutes}
             previewRuntimeResources={selectedPreviewRuntimeResources}
             previewNodeAttempts={selectedPreviewNodeAttempts}
             previewExecutionReadiness={selectedTask
@@ -1338,6 +1372,7 @@ export function App() {
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
             onResolvePreview={resolvePreview}
+            onSetPreviewLocalBinding={setPreviewLocalBinding}
             onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
             onGeneratePreviewRecipe={generatePreviewRecipe}
             onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}

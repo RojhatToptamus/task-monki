@@ -336,10 +336,22 @@ otherwise be unknown. An HTTP slot may bind to `{targetTaskId, routeId,
 basePath}`; TCP/PostgreSQL/Redis slots accept only their matching endpoint
 shape. Self-bindings are rejected.
 
+Missing local slots return execution-derived configuration requirements rather
+than a generic resolver error. Each requirement identifies the selected
+scenario and exact active process, readiness-probe, liveness-probe, environment
+key, or startup-check recipient. The desktop writes through the existing
+task-scoped binding operation and re-resolves that same scenario; it does not
+create a renderer-owned binding authority or bypass approval.
+
 Cross-task identity deliberately excludes producer generation, process, port,
 and worktree. Environment-only delivery derives the producer's stable preview
 hostname even when its route is absent. Task Monki never starts the producer or
 builds a cross-task lifecycle graph.
+
+The route picker is based on declared current task plans, not running
+generations. A stopped producer remains selectable; current availability is
+display information and becomes authority only for an explicit readiness
+check.
 
 Attachment environment references do not imply availability checks. A check
 runs only when an active node explicitly declares `needs: { attachment:

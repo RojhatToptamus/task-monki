@@ -125,7 +125,8 @@ export class PreviewManager {
         return {
           status: 'CONFIGURATION_REQUIRED',
           reason: error.message,
-          attachmentIds: error.attachmentIds
+          selectedScenarioId: error.selectedScenarioId,
+          requirements: error.requirements
         };
       }
       throw error;

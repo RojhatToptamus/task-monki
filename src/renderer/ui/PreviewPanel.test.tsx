@@ -16,6 +16,38 @@ import {
 } from './PreviewPanel';
 
 describe('Preview surfaces', () => {
+  it('renders exact public-target recipients instead of surfacing configuration as a global error', () => {
+    const props = previewProps({ includePlan: false });
+    const html = renderToStaticMarkup(
+      <PreviewWorkspace
+        {...props}
+        resolution={{
+          status: 'CONFIGURATION_REQUIRED',
+          reason: 'Local preview bindings are required for: backend.',
+          selectedScenarioId: 'frontend',
+          requirements: [{
+            attachmentId: 'backend',
+            label: 'Competitions API',
+            attachmentType: 'http',
+            allowedTargetTypes: ['endpoint', 'task-preview-route'],
+            usages: [{
+              kind: 'ENVIRONMENT',
+              recipient: 'PROCESS',
+              nodeKind: 'SERVICE',
+              nodeId: 'web',
+              environmentKeys: ['NEXT_PUBLIC_API_URL']
+            }]
+          }]
+        }}
+      />
+    );
+
+    expect(html).toContain('Public targets');
+    expect(html).toContain('Competitions API');
+    expect(html).toContain('NEXT_PUBLIC_API_URL');
+    expect(html).toContain('Another task’s Preview route');
+  });
+
   it('keeps Overview compact and routes approval through the detailed workspace', () => {
     const html = renderToStaticMarkup(
       <PreviewOverviewCard {...previewProps()} onShowDetails={() => {}} />
@@ -98,7 +130,8 @@ routes:
               evidence: [{ path: 'package.json', finding: 'The dev script runs server.mjs.' }],
               assumptions: ['The server reads PORT.'],
               omissions: ['No HTTP health path was evidenced.'],
-              unresolvedDecisions: []
+              unresolvedDecisions: [],
+              publicEnvironmentDecisions: []
             }
           }
         }}
@@ -477,9 +510,11 @@ function previewProps(options: {
     managedResources: [],
     composeProjects: [],
     localBindings: [],
+    taskRouteOptions: [],
     runtimeResources: [],
     executionReadiness: options.approved ? { status: 'READY', blockers: [] } : undefined,
     onResolve: async () => {},
+    onSetLocalBinding: async () => {},
     onGetRecipeGeneration: async () => ({ taskId: 'task-1', status: 'EMPTY' }),
     onGenerateRecipe: async () => ({ taskId: 'task-1', status: 'EMPTY' }),
     onValidateRecipeDraft: async () => ({ status: 'VALID' }),

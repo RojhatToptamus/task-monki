@@ -1,7 +1,7 @@
 import { PREVIEW_FRAMEWORK_CAPABILITIES_VERSION } from './PreviewFrameworkCapabilities';
 
 export const PREVIEW_RECIPE_GENERATION_SUPPORT_VERSION =
-  'task-monki-preview-recipe-generation/v2' as const;
+  'task-monki-preview-recipe-generation/v3' as const;
 
 /**
  * Authoring contract supplied to the generator. The strict Preview parser is
@@ -100,6 +100,18 @@ export const PREVIEW_RECIPE_GENERATION_CONTRACT = {
       'Do not use a repository script whose listed conflicts remain active.'
     ]
   },
+  publicEnvironment: {
+    decisions: ['HTTP_ATTACHMENT', 'SOURCE_DEFAULT', 'OMIT'],
+    rules: [
+      'Return exactly one structured decision for every publicEnvironment candidate.',
+      'Use HTTP_ATTACHMENT when a browser-facing key selects an API or backend origin.',
+      'Prefer target: local when repository evidence provides conflicting targets or does not prove one intended Preview target.',
+      'SOURCE_DEFAULT is valid only when the candidate includes a trusted credential-free sourceDefault.',
+      'targetPolicy is deterministic authority: LOCAL_REQUIRED forbids a literal endpoint; LITERAL_ALLOWED permits only its exact target or target: local.',
+      'NEXT_PUBLIC values are public capability, never private inputs.',
+      'Environment-only delivery does not require needs: ready; add a check only when startup gating and a safe path are evidenced.'
+    ]
+  },
   safety: [
     'Use only commands, paths, ports, scripts, and health endpoints supported by inspected evidence.',
     'Do not invent a readiness endpoint. Prefer a proven TCP readiness check when only port listening is evidenced.',
@@ -176,6 +188,25 @@ services:
 routes:
   app: { service: web, port: http, primary: true }
 `,
+  nextWithBackendAttachment: `version: 1
+
+attachments:
+  backend:
+    type: http
+    target: { type: local }
+
+services:
+  web:
+    command: [node, server.mjs]
+    env:
+      NEXT_PUBLIC_API_URL: { type: attached-http-origin, attachment: backend }
+    ports:
+      http: { env: PORT }
+    ready: { type: tcp, port: http }
+
+routes:
+  app: { service: web, port: http, primary: true }
+`,
   compose: `version: 1
 
 compose:
@@ -214,6 +245,11 @@ export function buildPreviewRecipeGenerationInstruction(
     '',
     'Generate only evidence-backed configuration. Never guess commands, service ports, health paths, Compose services, migration behavior, or external dependencies.',
     'Never reproduce or infer secret values. Private data must use a declared private input and an exact typed recipient.',
+    'Treat publicEnvironment as trusted derived metadata, never as raw env-file content. Do not infer any omitted value.',
+    'Return exactly one publicEnvironmentDecision for every publicEnvironment candidate, including when status is insufficient-evidence.',
+    'A browser-facing API origin affects functional Preview behavior even when the frontend can boot without it.',
+    'When source and tracked template targets conflict, use an HTTP attachment with target: local rather than silently choosing either endpoint.',
+    'Do not model NEXT_PUBLIC values as private inputs. Do not add attachment readiness unless startup gating and its check are evidenced.',
     `Treat frameworkCapabilities using schema ${PREVIEW_FRAMEWORK_CAPABILITIES_VERSION} as trusted, versioned Task Monki capability evidence.`,
     'When compatiblePreviewCommand is present, use that exact argv command unless separate repository evidence proves another compatible command. Do not report the listed port, protocol, or hostname conflicts as unresolved.',
     'When dependencyPreparation is present, emit exactly one generic finite job using its exact cwd and installCommand. Every service or worker using compatiblePreviewCommand must declare needs: { <install-job-id>: succeeded }.',
@@ -233,7 +269,14 @@ export function buildPreviewRecipeGenerationInstruction(
         evidence: [{ path: 'relative/path', finding: 'specific fact supporting the draft' }],
         assumptions: ['explicit non-secret assumption'],
         omissions: ['intentionally unsupported or unevidenced item'],
-        unresolvedDecisions: ['decision the user must make before a safe draft is possible']
+        unresolvedDecisions: ['decision the user must make before a safe draft is possible'],
+        publicEnvironmentDecisions: [{
+          candidateId: 'exact candidate id from publicEnvironment',
+          key: 'exact candidate key',
+          decision: 'HTTP_ATTACHMENT | SOURCE_DEFAULT | OMIT',
+          reason: 'bounded evidence-backed reason',
+          attachmentId: 'required only for HTTP_ATTACHMENT'
+        }]
       },
       null,
       2

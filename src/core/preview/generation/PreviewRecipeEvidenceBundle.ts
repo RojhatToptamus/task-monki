@@ -7,6 +7,10 @@ import {
   inspectPreviewFrameworkRepositoryFacts,
   type PreviewFrameworkCapabilities
 } from './PreviewFrameworkCapabilities';
+import {
+  inspectPreviewPublicEnvironmentEvidence,
+  type PreviewPublicEnvironmentEvidence
+} from './PreviewPublicEnvironmentEvidence';
 
 const EVIDENCE_FILE_NAME = 'repository-evidence.json';
 const MAX_DISCOVERED_ENTRIES = 20_000;
@@ -70,6 +74,7 @@ export interface PreparedPreviewRecipeEvidenceBundle {
   includedPaths: ReadonlySet<string>;
   safeOmissions: string[];
   frameworkCapabilities: PreviewFrameworkCapabilities;
+  publicEnvironment: PreviewPublicEnvironmentEvidence;
   dispose(): Promise<void>;
 }
 
@@ -180,19 +185,22 @@ export async function preparePreviewRecipeEvidenceBundle(
     const safeOmissions = describeOmissions(omissions);
     const repositoryFacts = await inspectPreviewFrameworkRepositoryFacts(root);
     const frameworkCapabilities = analyzePreviewFrameworkCapabilities(files, repositoryFacts);
+    const publicEnvironment = await inspectPreviewPublicEnvironmentEvidence(root, files);
     for (const analysis of frameworkCapabilities.analyses) {
       if (analysis.dependencyPreparation) {
         includedPaths.add(analysis.dependencyPreparation.lockfilePath);
       }
     }
+    for (const template of publicEnvironment.templates) includedPaths.add(template.path);
     await fs.writeFile(
       path.join(directoryPath, EVIDENCE_FILE_NAME),
       JSON.stringify(
         {
-          schemaVersion: 'task-monki-preview-repository-evidence/v1',
+          schemaVersion: 'task-monki-preview-repository-evidence/v2',
           source: 'sanitized task worktree snapshot',
           files,
           frameworkCapabilities,
+          publicEnvironment,
           omissions: safeOmissions
         },
         null,
@@ -206,6 +214,7 @@ export async function preparePreviewRecipeEvidenceBundle(
       includedPaths,
       safeOmissions,
       frameworkCapabilities,
+      publicEnvironment,
       dispose: () => fs.rm(directoryPath, { recursive: true, force: true })
     };
   } catch (error) {

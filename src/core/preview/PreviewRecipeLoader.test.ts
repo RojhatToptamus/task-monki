@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  activePreviewLocalAttachmentRequirements,
   parsePreviewRecipe,
   PreviewRecipeLoader,
   selectPreviewScenario
@@ -338,6 +339,60 @@ routes:
     expect(parsed.executionPlan.inputs).toEqual([{ id: 'token', type: 'private', label: 'API token' }]);
     expect(parsed.executionDigest).not.toContain('API token');
     expect(JSON.stringify(parsed.executionPlan)).not.toContain('secret');
+  });
+
+  it('reports exact active recipient scopes for required local attachment bindings', () => {
+    const parsed = parsePreviewRecipe(`
+version: 1
+attachments:
+  backend:
+    type: http
+    target: { type: local }
+    check: { path: /health, timeoutSeconds: 3 }
+services:
+  web:
+    command: [node, server.mjs]
+    needs: { backend: ready }
+    env:
+      API_ORIGIN: { type: attached-http-origin, attachment: backend }
+    ports: { http: { env: PORT } }
+    ready:
+      type: argv
+      command: [node, ready.mjs]
+      env:
+        READY_ORIGIN: { type: attached-http-origin, attachment: backend }
+    liveness:
+      type: argv
+      command: [node, live.mjs]
+      env:
+        LIVE_ORIGIN: { type: attached-http-origin, attachment: backend }
+      timeoutSeconds: 2
+      intervalSeconds: 5
+      failureThreshold: 2
+routes:
+  app: { service: web, port: http, primary: true }
+`);
+
+    expect(activePreviewLocalAttachmentRequirements(parsed.executionPlan)).toEqual([{
+      attachmentId: 'backend',
+      attachmentType: 'http',
+      allowedTargetTypes: ['endpoint', 'task-preview-route'],
+      usages: [
+        { kind: 'READINESS_DEPENDENCY', nodeKind: 'SERVICE', nodeId: 'web' },
+        {
+          kind: 'ENVIRONMENT', recipient: 'PROCESS', nodeKind: 'SERVICE', nodeId: 'web',
+          environmentKeys: ['API_ORIGIN']
+        },
+        {
+          kind: 'ENVIRONMENT', recipient: 'READINESS_PROBE', nodeKind: 'SERVICE', nodeId: 'web',
+          environmentKeys: ['READY_ORIGIN']
+        },
+        {
+          kind: 'ENVIRONMENT', recipient: 'LIVENESS_PROBE', nodeKind: 'SERVICE', nodeId: 'web',
+          environmentKeys: ['LIVE_ORIGIN']
+        }
+      ]
+    }]);
   });
 
   it('rejects dead attachment checks and attached credentials in setup jobs', () => {
