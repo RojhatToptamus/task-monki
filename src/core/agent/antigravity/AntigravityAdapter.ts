@@ -641,6 +641,13 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
           await this.handleOutput(active, 'stderr', `${error.message}\n`);
         }).catch((cause) => this.handleProcessQueueFailure(active, cause));
       });
+      process.events.once('terminationUnconfirmed', ({ error }) => {
+        void this.enqueueProcessEvent(active, async () => {
+          if (!this.ownsProcessEvents(active)) return;
+          const fence = this.latchRuntimeSafetyFence(error);
+          await this.retireAfterUnconfirmedTermination(active, fence);
+        }).catch((cause) => this.handleProcessQueueFailure(active, cause));
+      });
       process.events.once('close', ({ exitCode, signal }) => {
         void this.enqueueProcessEvent(active, async () => {
           if (!this.ownsProcessEvents(active)) return;
@@ -714,8 +721,9 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
         needsAntigravityRecovery(candidate) &&
         !this.activeTurns.has(candidate.id)
     )) {
+      let expectedStatus = run.status;
       if (ACTIVE_RUN_STATUSES.includes(run.status)) {
-        await this.store.appendEvent(
+        const runtimeLossClaimed = await this.store.appendRunEventIfStatus(
           createDomainEvent({
             type: 'AGENT_RUNTIME_LOST',
             taskId: run.taskId,
@@ -730,10 +738,13 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
                 'Task Monki no longer owns this turn-scoped Antigravity process. Its outcome is ambiguous and will not be replayed automatically.',
               automaticReplay: false
             }
-          })
+          }),
+          [run.status]
         );
+        if (!runtimeLossClaimed) continue;
+        expectedStatus = 'RECOVERY_REQUIRED';
       }
-      await this.store.appendEvent(
+      const reconciliationClaimed = await this.store.appendRunEventIfStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_RECONCILED',
           taskId: run.taskId,
@@ -748,8 +759,10 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
             recoveryState: 'REQUIRES_USER_ACTION',
             terminal: false
           }
-        })
+        }),
+        [expectedStatus]
       );
+      if (!reconciliationClaimed) continue;
       await this.store.updateAgentSession(run.sessionId, {
         status: 'IDLE',
         materialized: true
@@ -1278,10 +1291,6 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     const run = await this.requireRun(active.runId);
     const server = await this.store.getAgentServer(active.serverId);
-    await this.store.updateAgentSession(active.sessionId, {
-      status: 'IDLE',
-      materialized: true
-    });
     if (server && !['EXITED', 'FAILED', 'LOST'].includes(server.status)) {
       await this.store.updateAgentServer(active.serverId, {
         status: 'LOST',
@@ -1290,8 +1299,10 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
         exitReason: reason
       });
     }
+    if (!needsAntigravityRecovery(run)) return;
+    let expectedStatus = run.status;
     if (ACTIVE_RUN_STATUSES.includes(run.status)) {
-      await this.store.appendEvent(
+      const runtimeLossClaimed = await this.store.appendRunEventIfStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: run.taskId,
@@ -1302,28 +1313,35 @@ export class AntigravityAdapter implements AgentRuntimeAdapter {
           serverInstanceId: active.serverId,
           source: 'process',
           payload: { reason, automaticReplay: false }
-        })
+        }),
+        [run.status]
       );
+      if (!runtimeLossClaimed) return;
+      expectedStatus = 'RECOVERY_REQUIRED';
     }
-    if (needsAntigravityRecovery(run)) {
-      await this.store.appendEvent(
-        createDomainEvent({
-          type: 'AGENT_RUNTIME_RECONCILED',
-          taskId: run.taskId,
-          iterationId: run.iterationId,
-          runId: run.id,
-          worktreeId: run.worktreeId,
-          agentSessionId: run.sessionId,
-          serverInstanceId: active.serverId,
-          source: 'process',
-          payload: {
-            status: 'RECOVERY_REQUIRED',
-            recoveryState: 'REQUIRES_USER_ACTION',
-            terminal: false
-          }
-        })
-      );
-    }
+    const reconciliationClaimed = await this.store.appendRunEventIfStatus(
+      createDomainEvent({
+        type: 'AGENT_RUNTIME_RECONCILED',
+        taskId: run.taskId,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        serverInstanceId: active.serverId,
+        source: 'process',
+        payload: {
+          status: 'RECOVERY_REQUIRED',
+          recoveryState: 'REQUIRES_USER_ACTION',
+          terminal: false
+        }
+      }),
+      [expectedStatus]
+    );
+    if (!reconciliationClaimed) return;
+    await this.store.updateAgentSession(active.sessionId, {
+      status: 'IDLE',
+      materialized: true
+    });
   }
 
   private handleProcessQueueFailure(

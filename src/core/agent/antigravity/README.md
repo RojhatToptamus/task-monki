@@ -120,18 +120,15 @@ performs a new discovery attempt instead of latching the original result for
 the life of the application. An expired refresh never falls back to the prior
 catalog: its models are cleared and readiness reports the catalog failure.
 
-## Settings and history migration
+## Settings
 
-App-settings schema 6 replaces a default `gemini-acp` selection with
-`antigravity` but clears the old model/provider/reasoning values and executable
-path because the protocols are incompatible. Review and refinement selections
-fall back to Codex because this runtime does not support those operations.
-Historical tasks, sessions, runs, events, and artifacts keep `gemini-acp`; they
-are immutable evidence and cannot be resumed as Antigravity.
+Antigravity is selected and configured as its own runtime. Task Monki does not
+reinterpret another provider's settings, model identifiers, executable paths,
+or sessions as Antigravity state. Unsupported app-settings schemas are rejected
+without rewriting the file.
 
 References:
 
 - [Antigravity CLI reference](https://antigravity.google/docs/cli-reference)
 - [Execution modes](https://antigravity.google/docs/cli/modes)
 - [Conversation lifecycle](https://antigravity.google/docs/cli-conversations)
-- [Gemini CLI transition announcement](https://github.com/google-gemini/gemini-cli/discussions/27274)

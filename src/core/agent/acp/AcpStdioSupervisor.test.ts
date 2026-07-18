@@ -12,6 +12,7 @@ import {
 } from './AcpStdioSupervisor';
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
+import { spawnPortable } from '../../process/portableChildProcess';
 
 const temporaryDirectories: string[] = [];
 
@@ -48,7 +49,7 @@ describe('AcpStdioSupervisor', () => {
         '          promptCapabilities: { image: true },',
         '          sessionCapabilities: { resume: {} }',
         '        },',
-        "        agentInfo: { name: 'fake-acp', title: 'Fake ACP', version: '9.1.0' }",
+        "        agentInfo: { name: 'fake-acp', title: 'Fake ACP', version: process.env.GEMINI_API_KEY }",
         '      }',
         "    }) + '\\n');",
         '  }',
@@ -97,7 +98,7 @@ describe('AcpStdioSupervisor', () => {
       const running = await supervisor.start();
       expect(running.initialize).toMatchObject({
         protocolVersion: 1,
-        agentInfo: { name: 'fake-acp', version: '9.1.0' },
+        agentInfo: { name: 'fake-acp', version: '[REDACTED]' },
         agentCapabilities: { sessionCapabilities: { resume: {} } }
       });
       expect(running.server).toMatchObject({
@@ -106,8 +107,11 @@ describe('AcpStdioSupervisor', () => {
         transport: 'STDIO',
         status: 'READY',
         schemaVersion: '1.19.0',
-        runtimeVersion: '9.1.0'
+        runtimeVersion: '[REDACTED]'
       });
+      expect(JSON.stringify(await store.snapshot())).not.toContain(
+        'allowed-provider-secret'
+      );
       const journal = await fs.readFile(running.server.protocolJournalPath, 'utf8');
       const entries = journal.trim().split('\n').map((line) => JSON.parse(line) as {
         direction: string;
@@ -181,6 +185,258 @@ describe('AcpStdioSupervisor', () => {
     const persistedTail = server?.exitReason?.split(' Diagnostics: ')[1] ?? '';
     expect(Buffer.byteLength(persistedTail, 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
+
+  it('drains an accepted terminal response before publishing process loss', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-close-drain-'));
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeAcpChild({ closeOnKill: true });
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile: testProfile('test-acp-close-drain'),
+      runtime: testRuntime(),
+      cwd: directory,
+      spawnProcess: fakeSpawn(child),
+      requestTimeoutMs: 500,
+      closeHandlingTimeoutMs: 500
+    });
+    const running = await supervisor.start();
+    const originalAppend = store.appendProtocolMessage.bind(store);
+    let releaseJournal!: () => void;
+    const journalGate = new Promise<void>((resolve) => {
+      releaseJournal = resolve;
+    });
+    let acceptedResolve!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      acceptedResolve = resolve;
+    });
+    store.appendProtocolMessage = async (serverId, direction, raw, metadata) => {
+      if (direction === 'INBOUND' && raw.includes('accepted-before-close')) {
+        acceptedResolve();
+        await journalGate;
+      }
+      return originalAppend(serverId, direction, raw, metadata);
+    };
+    const exit = vi.fn();
+    supervisor.events.on('exit', exit);
+    child.stdin.on('data', (chunk: Buffer) => {
+      const request = JSON.parse(chunk.toString('utf8').trim()) as {
+        id: string | number;
+        method: string;
+      };
+      if (request.method !== 'session/test') return;
+      (child.stdout as PassThrough).write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          result: { terminal: 'accepted-before-close' }
+        })}\n`
+      );
+      (child as unknown as { exitCode: number | null }).exitCode = 0;
+      (child.stdout as PassThrough).end();
+      (child.stderr as PassThrough).end();
+      child.emit('close', 0, null);
+    });
+
+    const response = running.client.request<{ terminal: string }>('session/test', {});
+    await accepted;
+    await Promise.resolve();
+    expect(exit).not.toHaveBeenCalled();
+    releaseJournal();
+
+    await expect(response).resolves.toMatchObject({
+      result: { terminal: 'accepted-before-close' }
+    });
+    await waitForCondition(() => exit.mock.calls.length === 1);
+    expect(exit).toHaveBeenCalledWith(expect.objectContaining({ status: 'LOST' }), true);
+    expect(supervisor.currentClient).toBeUndefined();
+    store.appendProtocolMessage = originalAppend;
+  });
+
+  it('safety-fences the runtime when accepted inbound dispatch cannot drain', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-drain-failure-'));
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeAcpChild({ closeOnKill: true });
+    const supervisor = new AcpStdioSupervisor(store, {
+      profile: testProfile('test-acp-drain-failure'),
+      runtime: testRuntime(),
+      cwd: directory,
+      spawnProcess: fakeSpawn(child),
+      requestTimeoutMs: 500,
+      closeHandlingTimeoutMs: 500
+    });
+    const running = await supervisor.start();
+    let notificationCount = 0;
+    running.client.events.on('notification', () => {
+      notificationCount += 1;
+      if (notificationCount === 1) {
+        throw new Error('simulated inbound materialization failure');
+      }
+    });
+    const protocolError = vi.fn();
+    supervisor.events.on('protocolError', protocolError);
+
+    (child.stdout as PassThrough).write(
+      [1, 2]
+        .map((sequence) =>
+          JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [{ name: `command-${sequence}` }]
+              }
+            }
+          })
+        )
+        .join('\n') + '\n'
+    );
+    (child as unknown as { exitCode: number | null }).exitCode = 0;
+    (child.stdout as PassThrough).end();
+    (child.stderr as PassThrough).end();
+    child.emit('close', 0, null);
+
+    await waitForCondition(() => supervisor.currentServer?.status === 'LOST');
+    expect(notificationCount).toBe(2);
+    expect(supervisor.safetyFenceReason).toContain('simulated inbound materialization failure');
+    expect(protocolError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('inbound dispatch failed') })
+    );
+    await expect(supervisor.start()).rejects.toThrow('safety-fenced until app restart');
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'waits for descendants after leader exit before starting a replacement',
+    async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-acp-leader-exit-')
+      );
+      temporaryDirectories.push(directory);
+      const agentScript = path.join(directory, 'agent.cjs');
+      const descendantPidFile = path.join(directory, 'descendant.pid');
+      const descendantReadyFile = path.join(directory, 'descendant.ready');
+      const descendantSignalFile = path.join(directory, 'descendant.signal');
+      const descendantScript = [
+        "const fs = require('node:fs');",
+        `const readyFile = ${JSON.stringify(descendantReadyFile)};`,
+        `const signalFile = ${JSON.stringify(descendantSignalFile)};`,
+        "const leaderPid = Number(process.env.TASK_MONKI_TEST_LEADER_PID);",
+        'let stopping = false;',
+        "process.on('SIGTERM', () => {",
+        '  if (stopping) return;',
+        '  stopping = true;',
+        "  let leaderState = 'alive';",
+        "  try { process.kill(leaderPid, 0); } catch (error) {",
+        "    if (error.code !== 'ESRCH') throw error;",
+        "    leaderState = 'exited';",
+        '  }',
+        "  fs.writeFileSync(signalFile, leaderState);",
+        '  setTimeout(() => process.exit(0), 75);',
+        '});',
+        "fs.writeFileSync(readyFile, 'ready');",
+        'setInterval(() => undefined, 30_000);'
+      ].join('\n');
+      await fs.writeFile(
+        agentScript,
+        [
+          "const fs = require('node:fs');",
+          "const readline = require('node:readline');",
+          "const { spawn } = require('node:child_process');",
+          `const descendantCode = ${JSON.stringify(descendantScript)};`,
+          `const descendantPidFile = ${JSON.stringify(descendantPidFile)};`,
+          `const descendantReadyFile = ${JSON.stringify(descendantReadyFile)};`,
+          'const input = readline.createInterface({ input: process.stdin });',
+          "input.on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method !== 'initialize') return;",
+          '  fs.rmSync(descendantReadyFile, { force: true });',
+          '  const descendant = spawn(process.execPath, [\'-e\', descendantCode], {',
+          "    stdio: 'ignore',",
+          '    env: { ...process.env, TASK_MONKI_TEST_LEADER_PID: String(process.pid) }',
+          '  });',
+          '  fs.writeFileSync(descendantPidFile, String(descendant.pid));',
+          '  const ready = setInterval(() => {',
+          '    if (!fs.existsSync(descendantReadyFile)) return;',
+          '    clearInterval(ready);',
+          '    process.stdout.write(JSON.stringify({',
+          "      jsonrpc: '2.0',",
+          '      id: message.id,',
+          '      result: {',
+          '        protocolVersion: 1,',
+          '        agentCapabilities: {},',
+          "        agentInfo: { name: 'fake-acp', version: '1.0.0' }",
+          '      }',
+          "    }) + '\\n');",
+          '    setTimeout(() => process.exit(0), 50);',
+          '  }, 5);',
+          '});'
+        ].join('\n'),
+        { mode: 0o600 }
+      );
+
+      let firstChild: ChildProcessWithoutNullStreams | undefined;
+      let firstDescendantPid: number | undefined;
+      let spawnCount = 0;
+      let replacementOverlapped = false;
+      const spawnProcess: NonNullable<AcpStdioSupervisorOptions['spawnProcess']> = (
+        executable,
+        argv,
+        options
+      ) => {
+        spawnCount += 1;
+        if (spawnCount === 2 && firstDescendantPid !== undefined) {
+          replacementOverlapped = isProcessRunning(firstDescendantPid);
+        }
+        const child = spawnPortable(executable, argv, options) as ChildProcessWithoutNullStreams;
+        if (spawnCount === 1) firstChild = child;
+        return child;
+      };
+      const store = new FileTaskStore(path.join(directory, 'store'));
+      const supervisor = new AcpStdioSupervisor(store, {
+        profile: {
+          ...testProfile('test-acp-leader-exit'),
+          executableCandidates: [process.execPath],
+          argv: [agentScript]
+        },
+        runtime: {
+          ...testRuntime(),
+          executable: process.execPath,
+          diagnostics: {
+            ...testRuntime().diagnostics,
+            selectedExecutable: process.execPath,
+            selectedLaunchArgv: [agentScript]
+          }
+        },
+        cwd: directory,
+        spawnProcess,
+        requestTimeoutMs: 1_000,
+        shutdownGraceTimeoutMs: 1_000,
+        shutdownKillTimeoutMs: 1_000,
+        closeHandlingTimeoutMs: 2_000
+      });
+
+      try {
+        const first = await supervisor.start();
+        firstDescendantPid = Number(await fs.readFile(descendantPidFile, 'utf8'));
+        await waitForCondition(
+          () => firstChild?.exitCode !== null && firstChild?.exitCode !== undefined,
+          2_000
+        );
+
+        const replacement = await supervisor.start();
+
+        expect(replacement.server.id).not.toBe(first.server.id);
+        expect(spawnCount).toBe(2);
+        expect(replacementOverlapped).toBe(false);
+        expect(await fs.readFile(descendantSignalFile, 'utf8')).toBe('exited');
+        expect(isProcessRunning(firstDescendantPid)).toBe(false);
+      } finally {
+        await supervisor.shutdown();
+      }
+    }
+  );
 
   it('does not spawn or leave STARTING state when shutdown wins server creation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-supervisor-'));
@@ -518,4 +774,14 @@ async function waitForCondition(read: () => boolean, timeoutMs = 500): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error('Timed out waiting for ACP supervisor test state.');
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
 }

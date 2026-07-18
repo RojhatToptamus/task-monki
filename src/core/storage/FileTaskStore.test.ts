@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,14 +6,301 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   CiChecksStatus,
   MergeStatus,
+  RunRecord,
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
-import { FileTaskStore } from './FileTaskStore';
+import { ArtifactAppendAmbiguousError, FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
 describe('FileTaskStore', () => {
+  it('allows exactly one live owner for a store root', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-owner-'));
+    const first = new FileTaskStore(dir);
+    const second = new FileTaskStore(dir);
+    await first.snapshot();
+
+    await expect(second.snapshot()).rejects.toThrow(
+      `already owned by process ${process.pid}`
+    );
+    const task = await first.createTask({
+      title: 'Single durable owner',
+      prompt: 'Prevent lost updates from a second writer.',
+      repositoryPath: dir
+    });
+    await first.close();
+
+    await expect(second.getTask(task.id)).resolves.toMatchObject({ id: task.id });
+    await second.close();
+  });
+
+  it('does not let a delayed stale-lease contender evict the new owner', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-reclaim-'));
+    const stale = await writeStaleStoreLease(dir);
+    const first = new FileTaskStore(dir);
+    const second = new FileTaskStore(dir);
+    const renameFile = fs.rename.bind(fs);
+    let releaseRename!: () => void;
+    let signalRenameStarted!: () => void;
+    const renameGate = new Promise<void>((resolve) => { releaseRename = resolve; });
+    const renameStarted = new Promise<void>((resolve) => { signalRenameStarted = resolve; });
+    let delayed = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (
+        !delayed &&
+        String(source) === stale.ownerPath &&
+        String(destination).startsWith(`${stale.canonicalPath}.${stale.token}.reclaim.`)
+      ) {
+        delayed = true;
+        signalRenameStarted();
+        await renameGate;
+      }
+      await renameFile(source, destination);
+    });
+
+    try {
+      const delayedInitialization = first.snapshot();
+      await renameStarted;
+      await expect(second.snapshot()).resolves.toMatchObject({ tasks: [] });
+      releaseRename();
+      await expect(delayedInitialization).rejects.toThrow(
+        `already owned by process ${process.pid}`
+      );
+      await expect(
+        second.createTask({
+          title: 'Reclaim winner',
+          prompt: 'Keep the new live lease intact.',
+          repositoryPath: dir
+        })
+      ).resolves.toMatchObject({ title: 'Reclaim winner' });
+    } finally {
+      releaseRename();
+      rename.mockRestore();
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it('recovers a stale lease after its reclaimer exits mid-takeover', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-reclaim-crash-'));
+    const stale = await writeStaleStoreLease(dir);
+    const abandonedReclaim = `${stale.canonicalPath}.${stale.token}.reclaim.${randomUUID()}`;
+    await fs.rename(stale.ownerPath, abandonedReclaim);
+
+    const store = new FileTaskStore(dir);
+    await expect(store.snapshot()).resolves.toMatchObject({ tasks: [] });
+    await expect(fs.access(abandonedReclaim)).rejects.toMatchObject({ code: 'ENOENT' });
+    await store.close();
+  });
+
+  it('drains an admitted mutation before terminal close and rejects late work', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-close-'));
+    const store = new FileTaskStore(dir);
+    const creation = store.createTask({
+      title: 'Admitted before close',
+      prompt: 'Publish this mutation before releasing ownership.',
+      repositoryPath: dir
+    });
+    const closing = store.close();
+
+    expect(store.close()).toBe(closing);
+    await expect(creation).resolves.toMatchObject({ title: 'Admitted before close' });
+    await expect(closing).resolves.toBeUndefined();
+    await expect(store.snapshot()).rejects.toThrow('Task store is closed');
+    await expect(
+      store.createTask({
+        title: 'Too late',
+        prompt: 'Do not admit work after shutdown begins.',
+        repositoryPath: dir
+      })
+    ).rejects.toThrow('Task store is closed');
+
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.snapshot()).resolves.toMatchObject({
+      tasks: [expect.objectContaining({ title: 'Admitted before close' })]
+    });
+    await restarted.close();
+  });
+
+  it('waits for an admitted mutation while the store is still opening', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-opening-read-'));
+    const store = new FileTaskStore(dir);
+    const storePath = path.join(dir, 'store.json');
+    const renameFile = fs.rename.bind(fs);
+    let signalInitializationRename!: () => void;
+    let signalMutationRename!: () => void;
+    let releaseInitializationRename!: () => void;
+    let releaseMutationRename!: () => void;
+    const initializationRenameStarted = new Promise<void>((resolve) => {
+      signalInitializationRename = resolve;
+    });
+    const mutationRenameStarted = new Promise<void>((resolve) => {
+      signalMutationRename = resolve;
+    });
+    const initializationRenameGate = new Promise<void>((resolve) => {
+      releaseInitializationRename = resolve;
+    });
+    const mutationRenameGate = new Promise<void>((resolve) => {
+      releaseMutationRename = resolve;
+    });
+    let storeRenameCount = 0;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (String(destination) === storePath) {
+        storeRenameCount += 1;
+        if (storeRenameCount === 1) {
+          signalInitializationRename();
+          await initializationRenameGate;
+        } else if (storeRenameCount === 2) {
+          signalMutationRename();
+          await mutationRenameGate;
+        }
+      }
+      await renameFile(source, destination);
+    });
+    const creation = store.createTask({
+      title: 'Visible after opening',
+      prompt: 'Wait for the admitted mutation before reading.',
+      repositoryPath: dir
+    });
+    let reading: ReturnType<FileTaskStore['snapshot']> | undefined;
+
+    try {
+      await initializationRenameStarted;
+      reading = store.snapshot();
+      releaseInitializationRename();
+      await mutationRenameStarted;
+      let readFinished = false;
+      void reading.then(() => {
+        readFinished = true;
+      });
+      await Promise.resolve();
+      expect(readFinished).toBe(false);
+
+      releaseMutationRename();
+      await expect(creation).resolves.toMatchObject({ title: 'Visible after opening' });
+      await expect(reading).resolves.toMatchObject({
+        tasks: [expect.objectContaining({ title: 'Visible after opening' })]
+      });
+    } finally {
+      releaseInitializationRename();
+      releaseMutationRename();
+      rename.mockRestore();
+      await Promise.allSettled([creation, ...(reading ? [reading] : [])]);
+      await store.close();
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'makes canonical lease release durable before removing its owner anchor',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-lease-release-'));
+      const store = new FileTaskStore(dir);
+      await store.snapshot();
+      const canonicalPath = path.join(dir, '.task-monki-owner.lock');
+      const ownerName = (await fs.readdir(dir)).find(
+        (entry) =>
+          entry.startsWith('.task-monki-owner.lock.') && entry.endsWith('.owner')
+      );
+      expect(ownerName).toBeDefined();
+      const ownerPath = path.join(dir, ownerName!);
+      const openFile = fs.open.bind(fs);
+      let signalDirectorySync!: () => void;
+      let releaseDirectorySync!: () => void;
+      const directorySyncStarted = new Promise<void>((resolve) => {
+        signalDirectorySync = resolve;
+      });
+      const directorySyncGate = new Promise<void>((resolve) => {
+        releaseDirectorySync = resolve;
+      });
+      let delayed = false;
+      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await openFile(...args);
+        if (!delayed && String(args[0]) === dir) {
+          delayed = true;
+          vi.spyOn(handle, 'sync').mockImplementationOnce(async () => {
+            signalDirectorySync();
+            await directorySyncGate;
+          });
+        }
+        return handle;
+      });
+      const closing = store.close();
+
+      try {
+        await directorySyncStarted;
+        await expect(fs.access(canonicalPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(fs.access(ownerPath)).resolves.toBeUndefined();
+        releaseDirectorySync();
+        await expect(closing).resolves.toBeUndefined();
+        await expect(fs.access(ownerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        releaseDirectorySync();
+        open.mockRestore();
+        await closing;
+      }
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'does not report a published run as retryable when directory sync fails',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-run-publish-'));
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Publish one run',
+        prompt: 'Do not duplicate a committed run.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/run-publish',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex'
+      });
+
+      const originalOpen = fs.open.bind(fs);
+      let injectedFailure = false;
+      const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+        const handle = await originalOpen(...args);
+        if (!injectedFailure && String(args[0]) === dir) {
+          injectedFailure = true;
+          vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+            new Error('Injected post-publication directory sync failure.')
+          );
+        }
+        return handle;
+      });
+      let run: RunRecord;
+      try {
+        run = await store.createRun({
+          task,
+          session,
+          mode: 'IMPLEMENTATION',
+          prompt: task.prompt
+        });
+      } finally {
+        open.mockRestore();
+      }
+
+      expect(injectedFailure).toBe(true);
+      expect((await store.snapshot()).runs.map((candidate) => candidate.id)).toEqual([
+        run.id
+      ]);
+      await store.close();
+      const restarted = new FileTaskStore(dir);
+      await expect(restarted.getRun(run.id)).resolves.toMatchObject({ id: run.id });
+      expect((await restarted.snapshot()).runs).toHaveLength(1);
+      await restarted.close();
+    }
+  );
+
   it.runIf(process.platform === 'win32')(
     'accepts the existing managed artifact directory with different Windows casing',
     async () => {
@@ -61,6 +349,40 @@ describe('FileTaskStore', () => {
     ]);
   });
 
+  it('rejects a mutation before publishing a snapshot too large to reload', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-limit-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Bound the store file',
+      prompt: 'Reject an oversized snapshot before publication.',
+      repositoryPath: dir
+    });
+    const originalByteLength = Buffer.byteLength.bind(Buffer);
+    const byteLength = vi.spyOn(Buffer, 'byteLength').mockImplementation(
+      (value, encoding) =>
+        typeof value === 'string' && value.includes('"workflowPhase": "BACKLOG"')
+          ? Number.MAX_SAFE_INTEGER
+          : originalByteLength(value, encoding)
+    );
+    try {
+      await expect(
+        store.transitionTask(task.id, 'BACKLOG', 'exercise snapshot size boundary')
+      ).rejects.toThrow('snapshot exceeds its durable size limit');
+    } finally {
+      byteLength.mockRestore();
+    }
+
+    await expect(store.getTask(task.id)).resolves.toMatchObject({
+      workflowPhase: 'READY'
+    });
+    await store.close();
+    const reloaded = new FileTaskStore(dir);
+    await expect(reloaded.getTask(task.id)).resolves.toMatchObject({
+      workflowPhase: 'READY'
+    });
+    await reloaded.close();
+  });
+
   it('persists tasks, runs, events, and artifacts', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-'));
     const store = new FileTaskStore(dir);
@@ -92,6 +414,7 @@ describe('FileTaskStore', () => {
     await store.appendArtifact(run.outputArtifactId, '{"type":"turn.started"}\n');
     const final = await store.writeFinalArtifact(task.id, run.id, '# Final\n');
 
+    await store.close();
     const reloaded = new FileTaskStore(dir);
     const snapshot = await reloaded.snapshot();
 
@@ -163,6 +486,7 @@ describe('FileTaskStore', () => {
       'FINAL_MESSAGE_PRESENT'
     );
 
+    await store.close();
     const reloaded = new FileTaskStore(dir);
     const restartRetry = await reloaded.writeFinalArtifact(
       task.id,
@@ -177,17 +501,26 @@ describe('FileTaskStore', () => {
   });
 
   it.runIf(process.platform !== 'win32')(
-    'reconciles managed artifact orphans after a published delete survives restart',
+    'reconciles managed file orphans after a published delete survives restart',
     async () => {
       const dir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'task-manager-artifact-reconcile-')
       );
       const store = new FileTaskStore(dir);
+      const draft = await store.createAttachmentDraft();
+      await store.stageTaskAttachment({
+        draftId: draft.id,
+        displayName: 'context.txt',
+        bytes: Buffer.from('durable task context')
+      });
       const task = await store.createTask({
         title: 'Artifact crash cleanup',
         prompt: 'Leave artifacts until restart can resolve publication.',
-        repositoryPath: dir
+        repositoryPath: dir,
+        attachmentDraftId: draft.id
       });
+      const attachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
+        .absolutePath;
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
         branchName: 'codex/artifact-crash-cleanup',
@@ -243,6 +576,7 @@ describe('FileTaskStore', () => {
       for (const artifactPath of artifactPaths) {
         await expect(fs.access(artifactPath)).resolves.toBeUndefined();
       }
+      await expect(fs.access(attachmentPath)).resolves.toBeUndefined();
       await store.close();
 
       const restarted = new FileTaskStore(dir);
@@ -250,12 +584,52 @@ describe('FileTaskStore', () => {
       for (const artifactPath of artifactPaths) {
         await expect(fs.access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
       }
+      await expect(fs.access(attachmentPath)).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(fs.readFile(unknownFile, 'utf8')).resolves.toBe('preserve me');
       await expect(fs.readFile(almostManaged, 'utf8')).resolves.toBe('also preserve me');
       expect((await fs.stat(unknownDirectory)).isDirectory()).toBe(true);
       await restarted.close();
     }
   );
+
+  it('does not report failure after task deletion is durably published', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-delete-cleanup-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Durable deletion',
+      prompt: 'Treat post-publication cleanup as recoverable maintenance.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'orphan until restart'
+    );
+    const unlinkFile = fs.unlink.bind(fs);
+    let injected = false;
+    const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async (filePath) => {
+      if (!injected && String(filePath) === artifact.path) {
+        injected = true;
+        throw new Error('Injected post-publication cleanup failure.');
+      }
+      await unlinkFile(filePath);
+    });
+    try {
+      await expect(store.deleteTask(task.id)).resolves.toBeUndefined();
+    } finally {
+      unlink.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await expect(store.getTask(task.id)).resolves.toBeUndefined();
+    await expect(fs.access(artifact.path)).resolves.toBeUndefined();
+    await store.close();
+
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.snapshot()).resolves.toMatchObject({ tasks: [] });
+    await expect(fs.access(artifact.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await restarted.close();
+  });
 
   it.runIf(process.platform !== 'win32')(
     'fails closed on unsafe artifact entries without following or removing them',
@@ -325,6 +699,559 @@ describe('FileTaskStore', () => {
     await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
   });
 
+  it('rejects a run whose required artifact record is missing', async () => {
+    const fixture = await createRunFixture('missing-run-artifact');
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      artifacts: Array<{ id: string }>;
+    };
+    persisted.artifacts = persisted.artifacts.filter(
+      (artifact) => artifact.id !== fixture.run.promptArtifactId
+    );
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'run artifact ownership is inconsistent'
+    );
+  });
+
+  it('rejects a run whose task differs from its session and worktree', async () => {
+    const fixture = await createRunFixture('cross-task-run');
+    const otherTask = await fixture.store.createTask({
+      title: 'Unrelated task',
+      prompt: 'Must not own the first task run.',
+      repositoryPath: fixture.dir
+    });
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      runs: Array<{ id: string; taskId: string }>;
+    };
+    persisted.runs = persisted.runs.map((run) =>
+      run.id === fixture.run.id ? { ...run, taskId: otherTask.id } : run
+    );
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'run ownership is inconsistent'
+    );
+  });
+
+  it('rejects a Git snapshot that does not belong to its recorded worktree', async () => {
+    const fixture = await createRunFixture('cross-worktree-git-snapshot');
+    await fixture.store.recordGitSnapshot(
+      {
+        taskId: fixture.task.id,
+        iterationId: fixture.iteration.id,
+        worktreeId: fixture.worktree.id,
+        worktreePath: fixture.worktree.worktreePath,
+        repoRoot: fixture.dir,
+        gitCommonDir: path.join(fixture.dir, '.git'),
+        headSha: 'head',
+        branch: fixture.worktree.branchName,
+        baseSha: fixture.worktree.baseSha,
+        aheadCount: 0,
+        behindCount: 0,
+        stagedCount: 0,
+        unstagedCount: 0,
+        untrackedCount: 0,
+        conflictedCount: 0,
+        commitsAheadOfBase: 0,
+        committedDiffFileCount: 0,
+        workingDiffFileCount: 0,
+        diffStat: '',
+        dirtyFingerprint: 'clean',
+        status: 'CLEAN'
+      },
+      ''
+    );
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      gitSnapshots: Array<{ worktreeId: string }>;
+    };
+    persisted.gitSnapshots[0]!.worktreeId = randomUUID();
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'git snapshot ownership is inconsistent'
+    );
+  });
+
+  it('rejects GitHub evidence that does not belong to its recorded worktree', async () => {
+    const fixture = await createRunFixture('cross-worktree-github-evidence');
+    await recordOpenPullRequest(
+      fixture.store,
+      fixture.task.id,
+      fixture.iteration,
+      fixture.worktree
+    );
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      ciRollups: Array<{ worktreeId: string }>;
+    };
+    persisted.ciRollups[0]!.worktreeId = randomUUID();
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'CI rollup ownership is inconsistent'
+    );
+  });
+
+  it('fails closed when durable evidence is missing or shorter than its record', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-missing-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Require durable evidence',
+      prompt: 'Do not reinterpret missing evidence as empty output.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(task.id, 'git-snapshot', 'verified evidence');
+
+    await fs.unlink(artifact.path);
+    await expect(store.readArtifact(artifact.id)).rejects.toThrow(
+      'artifact file is missing'
+    );
+    await store.close();
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'referenced task artifact file is missing'
+    );
+
+    await fs.writeFile(artifact.path, 'short', { mode: 0o600 });
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'artifact is missing referenced bytes'
+    );
+  });
+
+  it('discards an uncommitted artifact tail during crash reconciliation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-tail-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Fence crash tails',
+      prompt: 'Keep only artifact bytes named by the durable snapshot.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(task.id, 'git-snapshot', 'committed');
+    await fs.appendFile(artifact.path, '-uncommitted');
+    await expect(store.readArtifact(artifact.id)).rejects.toThrow(
+      'artifact changed during read'
+    );
+    await expect(store.appendArtifact(artifact.id, '-later')).rejects.toThrow(
+      'artifact changed during append'
+    );
+    await store.close();
+
+    const restarted = new FileTaskStore(dir);
+    await expect(restarted.readArtifact(artifact.id)).resolves.toBe('committed');
+  });
+
+  it('serializes artifact reads with legitimate appends', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-read-append-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Read committed artifact evidence',
+      prompt: 'Do not expose an artifact while its durable metadata is changing.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const openFile = fs.open.bind(fs);
+    const lstatFile = fs.lstat.bind(fs);
+    let signalReadStarted!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let readPaused = false;
+    let appendOverlappedRead = false;
+    let artifactOpenCount = 0;
+    const lstat = vi.spyOn(fs, 'lstat').mockImplementation(async (...args) => {
+      if (String(args[0]) === artifact.path && readPaused) {
+        appendOverlappedRead = true;
+      }
+      return lstatFile(...args);
+    });
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (String(args[0]) !== artifact.path) return handle;
+      artifactOpenCount += 1;
+      if (artifactOpenCount === 1) {
+        const readFile = handle.readFile.bind(handle);
+        vi.spyOn(handle, 'readFile').mockImplementationOnce(async (...readArgs) => {
+          readPaused = true;
+          signalReadStarted();
+          try {
+            await readGate;
+            return await readFile(...readArgs);
+          } finally {
+            readPaused = false;
+          }
+        });
+      }
+      return handle;
+    });
+
+    let reading: Promise<string> | undefined;
+    let appending: Promise<void> | undefined;
+    try {
+      reading = store.readArtifact(artifact.id);
+      await readStarted;
+      appending = store.appendArtifact(artifact.id, '-appended');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(appendOverlappedRead).toBe(false);
+      expect(artifactOpenCount).toBe(1);
+
+      releaseRead();
+      await expect(reading).resolves.toBe('committed');
+      await expect(appending).resolves.toBeUndefined();
+      expect(artifactOpenCount).toBe(2);
+    } finally {
+      releaseRead();
+      open.mockRestore();
+      lstat.mockRestore();
+      await Promise.allSettled([reading, appending].filter(Boolean));
+    }
+
+    await expect(store.readArtifact(artifact.id)).resolves.toBe(
+      'committed-appended'
+    );
+    await store.close();
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects live access after artifact permissions become unsafe',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-mode-'));
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Protect live artifacts',
+        prompt: 'Fail closed if artifact permissions change.',
+        repositoryPath: dir
+      });
+      const artifact = await store.writeTextArtifact(
+        task.id,
+        'git-snapshot',
+        'private evidence'
+      );
+
+      await fs.chmod(artifact.path, 0o644);
+      await expect(store.readArtifact(artifact.id)).rejects.toThrow(
+        'artifact entry has unsafe permissions'
+      );
+      await expect(store.appendArtifact(artifact.id, 'more')).rejects.toThrow(
+        'artifact entry has unsafe permissions'
+      );
+      await store.close();
+
+      const restarted = new FileTaskStore(dir);
+      await expect(restarted.readArtifact(artifact.id)).resolves.toBe('private evidence');
+      expect((await fs.stat(artifact.path)).mode & 0o777).toBe(0o600);
+      await restarted.close();
+    }
+  );
+
+  it('retains a visible truncation marker when an artifact reaches its budget', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-budget-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Bound retained evidence',
+      prompt: 'Keep artifact growth finite.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'pr-body',
+      'x'.repeat(300 * 1024)
+    );
+
+    expect(artifact.byteCount).toBeLessThanOrEqual(256 * 1024);
+    await expect(store.readArtifact(artifact.id)).resolves.toMatch(
+      /Task Monki truncated pr-body/u
+    );
+  });
+
+  it('preserves committed artifact bytes when overflow metadata publication fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-rollback-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Rollback bounded evidence',
+      prompt: 'Never rewrite bytes named by the durable snapshot.',
+      repositoryPath: dir
+    });
+    const limit = 256 * 1024;
+    const marker = Buffer.from(
+      `\n[Task Monki truncated pr-body after ${limit} retained bytes.]\n`
+    );
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'pr-body',
+      'x'.repeat(limit - marker.byteLength - 1)
+    );
+    const committed = await fs.readFile(artifact.path);
+    const renameFile = fs.rename.bind(fs);
+    let injected = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (!injected && String(destination) === path.join(dir, 'store.json')) {
+        injected = true;
+        throw new Error('Injected artifact metadata publication failure.');
+      }
+      await renameFile(source, destination);
+    });
+    try {
+      await expect(store.appendArtifact(artifact.id, 'yz')).rejects.toThrow(
+        'Injected artifact metadata publication failure'
+      );
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    expect(await fs.readFile(artifact.path)).toEqual(committed);
+    await store.appendArtifact(artifact.id, 'yz');
+    await expect(store.readArtifact(artifact.id)).resolves.toMatch(
+      /Task Monki truncated pr-body/u
+    );
+    await store.close();
+  });
+
+  it('distinguishes an artifact append whose metadata and file rollback both fail', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-ambiguous-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Surface ambiguous artifact bytes',
+      prompt: 'Do not retry an append whose bytes could not be rolled back.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const renameFile = fs.rename.bind(fs);
+    const openFile = fs.open.bind(fs);
+    let metadataFailureInjected = false;
+    let artifactOpenCount = 0;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (!metadataFailureInjected && String(destination) === path.join(dir, 'store.json')) {
+        metadataFailureInjected = true;
+        throw new Error('Injected ambiguous metadata failure.');
+      }
+      await renameFile(source, destination);
+    });
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (String(args[0]) === artifact.path) {
+        artifactOpenCount += 1;
+        if (artifactOpenCount === 2) {
+          vi.spyOn(handle, 'truncate').mockRejectedValueOnce(
+            new Error('Injected artifact rollback failure.')
+          );
+        }
+      }
+      return handle;
+    });
+
+    try {
+      const failure = await store.appendArtifact(artifact.id, '-possibly-retained').catch(
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(ArtifactAppendAmbiguousError);
+      expect(failure).toMatchObject({ artifactId: artifact.id });
+    } finally {
+      open.mockRestore();
+      rename.mockRestore();
+    }
+
+    expect(metadataFailureInjected).toBe(true);
+    expect(artifactOpenCount).toBe(2);
+    await store.close();
+  });
+
+  it('removes appended artifact bytes when the file flush fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-flush-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Rollback failed artifact flush',
+      prompt: 'Do not retain an uncommitted append.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const openFile = fs.open.bind(fs);
+    let injected = false;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (!injected && String(args[0]) === artifact.path) {
+        injected = true;
+        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+          new Error('Injected artifact flush failure.')
+        );
+      }
+      return handle;
+    });
+    try {
+      await expect(store.appendArtifact(artifact.id, '-uncommitted')).rejects.toThrow(
+        'Injected artifact flush failure'
+      );
+    } finally {
+      open.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await expect(fs.readFile(artifact.path, 'utf8')).resolves.toBe('committed');
+    await expect(store.readArtifact(artifact.id)).resolves.toBe('committed');
+    await store.close();
+  });
+
+  it('restores retry-safe artifact bytes when close fails after a successful append', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-close-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Recover an artifact close failure',
+      prompt: 'Keep a failed append safe to retry.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const openFile = fs.open.bind(fs);
+    let injected = false;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (!injected && String(args[0]) === artifact.path) {
+        injected = true;
+        const closeFile = handle.close.bind(handle);
+        vi.spyOn(handle, 'close').mockImplementationOnce(async () => {
+          await closeFile();
+          throw new Error('Injected artifact close failure.');
+        });
+      }
+      return handle;
+    });
+
+    try {
+      const failure = await store.appendArtifact(artifact.id, '-retryable').catch(
+        (error: unknown) => error
+      );
+      expect(failure).not.toBeInstanceOf(ArtifactAppendAmbiguousError);
+      expect(failure).toMatchObject({ message: 'Injected artifact close failure.' });
+    } finally {
+      open.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await expect(store.readArtifact(artifact.id)).resolves.toBe('committed');
+    await store.appendArtifact(artifact.id, '-retryable');
+    await expect(store.readArtifact(artifact.id)).resolves.toBe('committed-retryable');
+    await store.close();
+  });
+
+  it('preserves the write failure after close also fails on a completed rollback', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-rollback-close-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Recover a rolled-back close failure',
+      prompt: 'Keep the original append failure retry-safe.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const openFile = fs.open.bind(fs);
+    let injected = false;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (!injected && String(args[0]) === artifact.path) {
+        injected = true;
+        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+          new Error('Injected artifact write flush failure.')
+        );
+        const closeFile = handle.close.bind(handle);
+        vi.spyOn(handle, 'close').mockImplementationOnce(async () => {
+          await closeFile();
+          throw new Error('Injected artifact rollback close failure.');
+        });
+      }
+      return handle;
+    });
+
+    try {
+      const failure = await store.appendArtifact(artifact.id, '-retryable').catch(
+        (error: unknown) => error
+      );
+      expect(failure).not.toBeInstanceOf(ArtifactAppendAmbiguousError);
+      expect(failure).toMatchObject({
+        message: 'Injected artifact write flush failure.'
+      });
+    } finally {
+      open.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await expect(store.readArtifact(artifact.id)).resolves.toBe('committed');
+    await store.appendArtifact(artifact.id, '-retryable');
+    await expect(store.readArtifact(artifact.id)).resolves.toBe('committed-retryable');
+    await store.close();
+  });
+
+  it('distinguishes an artifact append whose partial bytes cannot be removed', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-write-ambiguous-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Surface ambiguous partial bytes',
+      prompt: 'Do not retry a partial append whose rollback failed.',
+      repositoryPath: dir
+    });
+    const artifact = await store.writeTextArtifact(
+      task.id,
+      'git-snapshot',
+      'committed'
+    );
+    const openFile = fs.open.bind(fs);
+    let injected = false;
+    const open = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await openFile(...args);
+      if (!injected && String(args[0]) === artifact.path) {
+        injected = true;
+        vi.spyOn(handle, 'sync').mockRejectedValueOnce(
+          new Error('Injected partial artifact flush failure.')
+        );
+        vi.spyOn(handle, 'truncate').mockRejectedValueOnce(
+          new Error('Injected partial artifact rollback failure.')
+        );
+      }
+      return handle;
+    });
+
+    try {
+      const failure = await store.appendArtifact(artifact.id, '-possibly-partial').catch(
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(ArtifactAppendAmbiguousError);
+      expect(failure).toMatchObject({ artifactId: artifact.id });
+    } finally {
+      open.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    await store.close();
+  });
+
   it('recovers queued persistence after a write failure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-retry-'));
     const store = new FileTaskStore(dir);
@@ -380,6 +1307,7 @@ describe('FileTaskStore', () => {
       repositoryPath: dir
     });
 
+    await store.close();
     const reloaded = new FileTaskStore(dir);
     const snapshot = await reloaded.snapshot();
     expect(snapshot.tasks.map((task) => task.title)).toContain('Initial task');
@@ -434,6 +1362,30 @@ describe('FileTaskStore', () => {
     );
   });
 
+  it('rejects malformed current-schema task primitives before domain use', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-shape-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({
+      title: 'Validate durable primitives',
+      prompt: 'Reject values that would crash downstream services.',
+      repositoryPath: dir
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      tasks: Array<{ prompt: unknown }>;
+    };
+    persisted.tasks[0]!.prompt = 42;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
+      mode: 0o600
+    });
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'tasks contains a malformed record'
+    );
+  });
+
   it('rejects duplicate persisted task-creation retry tokens', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-create-duplicate-'));
     const store = new FileTaskStore(dir);
@@ -461,46 +1413,6 @@ describe('FileTaskStore', () => {
     await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
       'tasks contains invalid creation retry metadata'
     );
-  });
-
-  it('migrates schema 8 stores by dropping the legacy testRuns collection', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema8-'));
-    const store = new FileTaskStore(dir);
-    await store.createTask({
-      title: 'Existing schema 8 task',
-      prompt: 'Keep this task after migration.',
-      repositoryPath: dir
-    });
-
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    await fs.writeFile(
-      storePath,
-      `${JSON.stringify(
-        {
-          ...persisted,
-          schemaVersion: 8,
-          testRuns: [{ id: 'legacy-test-run' }]
-        },
-        null,
-        2
-      )}\n`,
-      'utf8'
-    );
-
-    const migrated = await new FileTaskStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(migrated.tasks[0]?.title).toBe('Existing schema 8 task');
-
-    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(rewritten.testRuns).toBeUndefined();
   });
 
   it('links forked alternative tasks to their source task and run', async () => {
@@ -662,6 +1574,7 @@ describe('FileTaskStore', () => {
           ? { ...task, completionPolicy: 'MANUAL' }
           : task
     );
+    await store.close();
     await fs.writeFile(storePath, JSON.stringify(persisted, null, 2));
 
     const reloaded = new FileTaskStore(dir);
@@ -761,6 +1674,7 @@ describe('FileTaskStore', () => {
           ? { ...task, completionPolicy: 'MANUAL' }
           : task
     );
+    await store.close();
     await fs.writeFile(storePath, JSON.stringify(persisted, null, 2));
 
     const reloaded = new FileTaskStore(dir);
@@ -987,9 +1901,12 @@ describe('FileTaskStore', () => {
         status: 'MERGEABLE'
       }
     });
-    const promptArtifactPath = await store.getArtifactPath(alternativeRun.promptArtifactId);
-    const finalArtifactPath = await store.getArtifactPath(finalArtifact.id);
-    const diffArtifactPath = await store.getArtifactPath(gitSnapshot.diffArtifactId!);
+    const artifactsBeforeDelete = (await store.snapshot()).artifacts;
+    const artifactPath = (artifactId: string) =>
+      artifactsBeforeDelete.find((artifact) => artifact.id === artifactId)!.path;
+    const promptArtifactPath = artifactPath(alternativeRun.promptArtifactId);
+    const finalArtifactPath = artifactPath(finalArtifact.id);
+    const diffArtifactPath = artifactPath(gitSnapshot.diffArtifactId!);
 
     await store.deleteTask(alternativeTask.id);
 
@@ -1089,31 +2006,6 @@ describe('FileTaskStore', () => {
     expect(alternativeAfterDelete?.forkedFromRunId).toBeUndefined();
   });
 
-  it('repairs schema-current task records missing alternative ids', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-repair-'));
-    const store = new FileTaskStore(dir);
-
-    const task = await store.createTask({
-      title: 'Repair task shape',
-      prompt: 'Keep current records loadable.',
-      repositoryPath: dir
-    });
-    const storePath = path.join(dir, 'store.json');
-    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    raw.tasks = raw.tasks.map((candidate: any) => {
-      if (candidate.id !== task.id) {
-        return candidate;
-      }
-      const withoutAlternatives = { ...candidate };
-      delete withoutAlternatives.forkedAlternativeTaskIds;
-      return withoutAlternatives;
-    });
-    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
-
-    const repaired = await new FileTaskStore(dir).snapshot();
-    expect(repaired.tasks[0]?.forkedAlternativeTaskIds).toEqual([]);
-  });
-
   it('preserves structured terminal review status when reloading', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-status-'));
     const store = new FileTaskStore(dir);
@@ -1193,6 +2085,7 @@ describe('FileTaskStore', () => {
     );
 
     expect((await store.getTask(task.id))?.projection.codexReview?.status).toBe('PASSED');
+    await store.close();
     const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
     expect(reloadedTask.projection.codexReview?.status).toBe('PASSED');
     expect(reloadedTask.projection.codexReview?.result?.verdict).toBe('PASSED');
@@ -1273,6 +2166,7 @@ describe('FileTaskStore', () => {
           ? { ...candidate, workflowPhase: 'REVIEW' }
           : candidate
       );
+      await store.close();
       await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
       const repairedStore = new FileTaskStore(dir);
@@ -1399,6 +2293,7 @@ describe('FileTaskStore', () => {
       expect(beforeRestart.currentRunId).toBe(currentRun.id);
       expect(beforeRestart.projection.codexReview?.status).toBe('STALE');
 
+      await store.close();
       const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
       expect(reloadedTask.workflowPhase).toBe(expectedPhase);
       expect(reloadedTask.currentRunId).toBe(currentRun.id);
@@ -1536,6 +2431,7 @@ describe('FileTaskStore', () => {
           }
         : candidate
     );
+    await store.close();
     await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
     const repaired = await new FileTaskStore(dir).snapshot();
@@ -1638,6 +2534,7 @@ describe('FileTaskStore', () => {
           }
         : candidate
     );
+    await store.close();
     await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
     const repaired = await new FileTaskStore(dir).snapshot();
@@ -1744,6 +2641,7 @@ describe('FileTaskStore', () => {
           }
         : candidate
     );
+    await store.close();
     await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
     const repaired = await new FileTaskStore(dir).snapshot();
@@ -1858,6 +2756,7 @@ describe('FileTaskStore', () => {
           }
         : candidate
     );
+    await store.close();
     await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
     const repaired = await new FileTaskStore(dir).snapshot();
@@ -1969,6 +2868,7 @@ Full review comments:
           }
         : candidate
     );
+    await store.close();
     await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`);
 
     const repaired = await new FileTaskStore(dir).snapshot();
@@ -1990,6 +2890,56 @@ Full review comments:
     });
   });
 });
+
+async function createRunFixture(suffix: string) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), `task-manager-${suffix}-`));
+  const store = new FileTaskStore(dir);
+  const task = await store.createTask({
+    title: 'Durable run fixture',
+    prompt: 'Keep record ownership consistent.',
+    repositoryPath: dir
+  });
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task,
+    branchName: `codex/${suffix}`,
+    worktreePath: dir,
+    baseSha: 'base'
+  });
+  const session = await store.createAgentSession({
+    task,
+    iteration,
+    worktree,
+    runtimeId: 'codex'
+  });
+  const run = await store.createRun({
+    task,
+    session,
+    mode: 'IMPLEMENTATION',
+    prompt: task.prompt
+  });
+  return { dir, store, task, iteration, worktree, run };
+}
+
+async function writeStaleStoreLease(directory: string): Promise<{
+  canonicalPath: string;
+  ownerPath: string;
+  token: string;
+}> {
+  const token = randomUUID();
+  const canonicalPath = path.join(directory, '.task-monki-owner.lock');
+  const ownerPath = `${canonicalPath}.${token}.owner`;
+  await fs.writeFile(
+    ownerPath,
+    `${JSON.stringify({
+      token,
+      pid: 2_147_483_647,
+      acquiredAt: '2026-07-18T00:00:00.000Z'
+    })}\n`,
+    { flag: 'wx', mode: 0o600 }
+  );
+  await fs.link(ownerPath, canonicalPath);
+  return { canonicalPath, ownerPath, token };
+}
 
 async function recordOpenPullRequest(
   store: FileTaskStore,

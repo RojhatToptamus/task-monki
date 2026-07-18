@@ -1,4 +1,4 @@
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
 import { AcpAmbiguousMutationError, AcpRpcClient } from './AcpRpcClient';
@@ -149,11 +149,98 @@ describe('AcpRpcClient', () => {
     });
     expect(harness.journal.map((entry) => entry.raw).join('\n')).not.toContain(opaque);
 
-    const protocolError = new Promise<string | undefined>((resolve) => {
-      harness.client.events.once('protocolError', (_error, rawLine) => resolve(rawLine));
+    const malformedFrames: string[] = [];
+    const protocolErrors = new Promise<void>((resolve) => {
+      harness.client.events.on('protocolError', (_error, rawLine) => {
+        malformedFrames.push(rawLine ?? '');
+        if (malformedFrames.length === 2) resolve();
+      });
     });
-    harness.agentOutput.write(`not-json-${opaque}\n`);
-    await expect(protocolError).resolves.toBe('not-json-[REDACTED]');
+    harness.agentOutput.write(`not-json-${opaque.slice(0, 7)}\n${opaque.slice(7)}\n`);
+    await protocolErrors;
+    expect(malformedFrames).toEqual([
+      '[REDACTED MALFORMED ACP FRAME]',
+      '[REDACTED MALFORMED ACP FRAME]'
+    ]);
+    expect(malformedFrames.join('\n')).not.toContain(opaque.slice(0, 7));
+    expect(malformedFrames.join('\n')).not.toContain(opaque.slice(7));
+  });
+
+  it('structurally masks free-form session updates while preserving decoded stream events', async () => {
+    const secret = 'opaque-acp-stream-credential';
+    const harness = rpcHarness(1_000, [secret]);
+    const received: string[] = [];
+    harness.client.events.on('notification', (_method, params) => {
+      const update = (params as { update?: { content?: { text?: string } } }).update;
+      if (update?.content?.text) received.push(update.content.text);
+    });
+
+    for (const text of ['opaque-acp-stream-', 'credential']) {
+      harness.agentOutput.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              messageId: 'message-1',
+              content: { type: 'text', text }
+            }
+          }
+        })}\n`
+      );
+    }
+    await harness.client.drainInbound();
+
+    expect(received).toEqual(['opaque-acp-stream-', 'credential']);
+    const journal = harness.journal.map((entry) => entry.raw).join('\n');
+    expect(journal).not.toContain('opaque-acp-stream-');
+    expect(journal).not.toContain('credential');
+    expect(journal).toContain('[REDACTED PROVIDER STREAM CONTENT]');
+  });
+
+  it('redacts exact credentials from query and mutation write failures', async () => {
+    const secret = 'opaque-acp-write-credential-752';
+    const createFailingClient = () => {
+      let sequence = 0;
+      return new AcpRpcClient(
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            callback(new Error(`write failed with ${secret}`));
+          }
+        }),
+        new PassThrough(),
+        async (direction, raw) => {
+          sequence += 1;
+          return {
+            serverInstanceId: 'server-write-failure',
+            sequence,
+            direction,
+            recordedAt: new Date(0).toISOString(),
+            byteOffset: 0,
+            byteLength: Buffer.byteLength(raw),
+            sha256: `${sequence}`.padStart(64, '0')
+          };
+        },
+        'server-write-failure',
+        1_000,
+        [secret]
+      );
+    };
+
+    await expect(createFailingClient().request('session/list', {})).rejects.toThrow(
+      'write failed with [REDACTED]'
+    );
+    await expect(
+      createFailingClient().requestMutation('session/prompt', {
+        sessionId: 'session-1',
+        prompt: []
+      })
+    ).rejects.toMatchObject({
+      name: 'AcpAmbiguousMutationError',
+      message: 'ACP mutation delivery is ambiguous: write failed with [REDACTED]'
+    });
   });
 });
 

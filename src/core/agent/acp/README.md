@@ -26,7 +26,9 @@ ACP and explicitly profile-gated extensions can prove.
   per-server journal retention, and diagnostic tails are bounded; known
   credentials, authorization headers, named environment/header values, URL
   userinfo, and credential-shaped stderr values are structurally redacted at
-  the durable journal boundary.
+  the durable journal boundary. Free-form session stream fields are replaced by
+  a structural marker in the journal, while malformed frames expose only a
+  generic marker to diagnostics rather than provider-controlled bytes.
 
 The official `@agentclientprotocol/sdk` is ESM-only while Task Monki's main
 process is currently CommonJS. `AcpProtocol.ts` and `AcpRpcClient.ts` therefore
@@ -43,8 +45,10 @@ therefore isolated behind the profile-owned
 `grok-build-acp/session-models@v1` contract: initialize `_meta.modelState`
 supplies the pre-session catalog, session setup revalidates
 `currentModelId`/`availableModels` for the worktree, and selection uses
-`session/set_model({sessionId, modelId})`. Task Monki treats that captured
-vendor contract as experimental and never enables it for another ACP profile.
+`session/set_model({sessionId, modelId})`. When that catalog advertises
+reasoning efforts, the same profile-gated mutation carries an explicit effort
+in `_meta.reasoningEffort`. Task Monki treats that captured vendor contract as
+experimental and never enables it for another ACP profile.
 
 ## Provider profiles
 
@@ -151,8 +155,11 @@ Stable session features are negotiated independently:
   Only the Grok profile may use its captured session `models` catalog and
   `session/set_model` extension. Grok's versioned `_x.ai/models/update`
   notification atomically replaces its pre-session catalog; removed models do
-  not remain available. An explicit model fails clearly when the profile
-  exposes neither path or did not offer that exact ID.
+  not remain available. Notifications arriving beside the initialize response
+  are buffered until the server's initialized state is durable, so the initial
+  catalog cannot overwrite a newer provider update. An explicit model or
+  reasoning effort fails clearly when the profile did not offer that exact
+  value.
 
 Session setup preserves evidence at the boundary where it was observed.
 `session/new` is recorded as the provider-selected pre-configuration state
@@ -162,9 +169,11 @@ mutations are applied afterward; their projected final state is recorded as a
 never relabeled as provider-reported settings. A later real settings update or
 resume response can independently provide provider-confirmed state. Immediately
 before every prompt, Task Monki revalidates the complete requested native state
-and applies only values that differ. An explicit reasoning effort requires an
-advertised `thought_level` selector; catalog metadata alone is not treated as a
-writable provider contract.
+and applies only values that differ. Config mutations are accepted only when
+the response returns the complete configuration and confirms the requested
+value. An explicit reasoning effort uses an advertised stable
+`thought_level` selector or Grok's profile-gated model-mutation metadata; no
+other catalog metadata is assumed writable.
 
 Streaming materializes agent text/thoughts, tool calls and diffs, plans, usage,
 native config updates, artifacts, and structured app events. Every text delta
@@ -172,13 +181,20 @@ remains an individual protocol journal entry. The normalized projection uses
 one ordered per-run buffer instead of rewriting the full item and run snapshot
 per token: output is appended at a 75 ms or 64 KiB boundary, while item records
 are materialized at prompt terminal, runtime loss, shutdown, or an explicit
-memory bound. A 256-transition output bound also flushes pathological streams
-that alternate text and reasoning on every delta. The adapter retains at most
-eight live text parts per run and 4 MiB of text across the runtime; capacity
-eviction materializes the oldest part without dropping its journal evidence.
-Buffered text is stored in bounded-size segments so tiny or empty deltas cannot
-create an unbounded chunk array. A coalesced item publishes one activity event, whose
-`coalescedEvents` count makes the compaction visible. Permission choices retain
+memory bound. Exact inherited credentials are redacted across delta boundaries;
+an unresolved terminal prefix becomes a marker in its owning item rather than
+being persisted as provider text. A 256-transition output bound also flushes
+pathological streams that alternate text and reasoning on every delta. The
+adapter retains at most eight live text parts per run and 4 MiB across the
+runtime, counting normalized item text, its artifact copy, and redaction carry.
+Capacity eviction materializes the oldest part without dropping its journal
+evidence. Buffered text is stored in bounded-size segments so tiny or empty
+deltas cannot create an unbounded chunk array. Ordinary artifact append failures
+are attempted at most three times. An append whose outcome is ambiguous is
+never retried; either exhausted path discards retained bytes, quarantines that
+process generation, and requires explicit run recovery. A coalesced item
+publishes one activity event, whose `coalescedEvents` count makes the compaction
+visible. Permission choices retain
 the provider's opaque option IDs. Task Monki intersects the offered choices
 with its own command/path/network policy and sends back the exact ID;
 unverifiable scope and reserved Git/GitHub delivery commands fail closed.
@@ -241,6 +257,11 @@ client generation and server instance. Once quarantine or replacement
 invalidates that generation, queued or late messages from the old process are
 ignored even after a new process starts. They cannot append output, complete a
 run, change a plan, or create an interaction on the replacement generation.
+Process exit and orderly shutdown first drain every complete frame already
+accepted from stdout. A failed drain safety-fences the runtime instead of
+publishing a clean shutdown or allowing a replacement process to start. After
+an unexpected exit, a replacement process also waits for the exact prior
+client's already-accepted adapter callbacks and loss reconciliation to settle.
 
 Application startup passively reconciles persisted ACP runs independently of
 executable discovery. Stale process records become lost and ambiguous runs

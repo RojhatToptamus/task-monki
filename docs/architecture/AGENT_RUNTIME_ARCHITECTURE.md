@@ -131,11 +131,10 @@ Rules:
   run, and session; the current UI default is irrelevant.
 - There is no automatic cross-runtime fallback after session creation.
 
-Schema 11 records are migrated by deriving runtime identity from existing
-session/provider ownership, then rewriting settings and dependent records. The
-migration removes the legacy `provider` field. Older supported store migrations
-run first. Invalid cross-record ownership is rejected on load rather than
-silently reinterpreted.
+The durable store accepts only its current schema. Older schemas and retired
+provider-shaped records are rejected instead of carrying compatibility
+migrations into the runtime. Invalid cross-record ownership is rejected on load
+rather than silently reinterpreted.
 
 ## Adapter contract
 
@@ -152,6 +151,12 @@ Every `AgentRuntimeAdapter` provides:
   review, goal sync, and prompt refinement;
 - optional typed session-control discovery and revision-checked mutation for
   provider-owned selectors that do not have universal semantics.
+
+Task Monki's shared turn prompt keeps the worktree and Git-publication boundary
+always applicable. Engineering and progress guidance is default behavior for
+non-trivial repository work, not an override of task-specific no-tool,
+read-only, or exact-output instructions. The authoritative goal and any current
+user direction come after those defaults without trailing generic guidance.
 
 The registry validates that advertised optional capabilities have matching
 methods. One unavailable runtime degrades only its catalog row. Duplicate
@@ -286,7 +291,11 @@ provider/model data.
 Both OpenCode execution presets truthfully report `DANGER_FULL_ACCESS` because
 native permission rules do not confine the OpenCode process. The default
 `on-request` preset asks before mutation and external-directory tools; the
-`never` preset allows them. Native task delegation is denied under `on-request`
+`never` preset allows all permission names while later specific rules retain
+their precedence. OpenCode permission replies are per request: Task Monki does
+not offer session-wide grants because OpenCode's native `always` reply is
+process-local and does not provide the durable scope that action promises.
+Native task delegation is denied under `on-request`
 because child permissions cannot be attested independently. Before each prompt
 and after a history fork, Task Monki patches when necessary, re-reads the
 session, and requires the exact effective permission-rule suffix. This approval
@@ -310,7 +319,8 @@ OpenAI, and other configured models remain first-class within that runtime.
 If an inbound SSE write fails, one coalesced, generation-fenced snapshot restores
 messages, parts, status, pending interactions, todos, and usage. An incomplete
 or unpersistable snapshot quarantines that session process; it is never reduced
-to telemetry while execution continues.
+to telemetry while execution continues. Interaction-owned waiting states take
+precedence over provider busy/idle telemetry until the interaction is resolved.
 
 OpenCode interruption is a bounded control flow, not an unbounded wait for SSE.
 Task Monki sends abort only through the exact session process that owns the run,
@@ -343,10 +353,13 @@ macOS `/var` and `/private/var` are accepted only when both paths resolve to the
 same directory; unresolved paths and different directories fail closed.
 
 Raw SSE messages remain append-only protocol evidence. Text and reasoning
-deltas are coalesced in bounded, ordered per-run buffers for output updates;
-normalized item records are materialized at part terminal, run terminal,
-runtime loss, or shutdown. This avoids rewriting the durable store once per
-token without sacrificing native evidence or terminal state.
+parts begin with a full part record; native flat `message.part.delta` events are
+folded into that record and coalesced in bounded, ordered per-run buffers for
+output updates; normalized item records are materialized at part terminal, run
+terminal, runtime loss, or shutdown. Assistant-message usage is accumulated
+across every step in a tool-loop turn, while the last-step counters remain
+separately available. This avoids rewriting the durable store once per token
+without sacrificing native evidence or terminal state.
 
 OpenCode executable overrides are resolved through the same version and
 protocol probes as automatic discovery. A change is applied immediately when
@@ -366,6 +379,9 @@ Monki records a fork origin but does not misclassify it as an OpenCode child
 session. Product-level fork alternatives remain new tasks and may instead use a
 different runtime, in which case they start a fresh provider session from the
 explicit alternative prompt.
+If Task Monki cannot publish ownership after OpenCode creates a fork, it deletes
+the unowned native session and accepts only an authoritative deletion result.
+Ambiguous cleanup quarantines the target runtime and disables automatic retry.
 
 ### Antigravity
 
@@ -409,9 +425,7 @@ and every turn starts a new provider project. A lost process cannot be
 reattached, so uncertain work becomes `RECOVERY_REQUIRED` and is never replayed
 automatically. If process termination cannot be confirmed, Task Monki marks the
 server lost, fences all later callbacks from that child, and permanently blocks
-new Antigravity processes until the application restarts. Historical
-`gemini-acp` records retain their old runtime identity and never become
-Antigravity sessions.
+new Antigravity processes until the application restarts.
 
 An exited or fenced turn retains its in-memory cleanup ownership until Task
 Monki durably publishes either its terminal event or the complete
@@ -569,10 +583,9 @@ emitted a credential must rotate that credential and continue to treat the old
 private application data as sensitive.
 
 Each server instance has monotonically numbered NDJSON segments and one global
-message sequence. Segment zero retains the historical
-`<server-instance-id>.ndjson` name, so schema-12 references without a segment
-continue to resolve. Rotated references persist their segment number and never
-derive a path from provider-controlled input.
+message sequence. Segment zero uses `<server-instance-id>.ndjson` and omits the
+segment field from its references. Rotated references persist their segment
+number and never derive a path from provider-controlled input.
 
 The production defaults bound a serialized entry to 24 MiB, a segment to
 64 MiB, and retained segments to 256 MiB per server instance. Rotation happens
@@ -600,8 +613,13 @@ deleted by whole-server collection.
 Appends for one server are serialized. Outbound messages sync before append
 returns. Inbound stream traffic uses bounded byte/time batching, and any store
 publication that can persist a raw-message reference flushes the journal first.
-`FileTaskStore.close()` flushes queued input and closes all writer handles.
-Inactive handles also sync and close automatically. Journal directories and
+`FileTaskStore.close()` synchronously stops admitting mutations and managed
+attachment or journal I/O, drains work already admitted, closes every owned
+writer, and only then releases the store lease. Inactive handles also sync and
+close automatically. The lease is published by hard-linking a complete,
+token-bearing owner file to the canonical lease path. Stale reclamation must
+atomically claim and revalidate that exact file identity and token, so a delayed
+contender cannot remove a replacement owner's lease. Journal directories and
 files use private `0700`/`0600` POSIX modes, reject unsafe IDs, symlinks,
 non-regular files, wrong ownership, and hard links, and validate sequence,
 direction, timestamp, segment, and content hash when a reference is read.
@@ -616,6 +634,14 @@ A crash-truncated final line can be removed during restart because it was never
 a complete referenced entry. A complete malformed entry is an integrity error,
 not a repair candidate. The journal assumes the application-wide single store
 owner; it does not claim cross-process append locking.
+
+Managed text artifacts are bounded, private, and append-only after publication.
+The writer reserves space for the truncation marker before accepting content
+and removes only an uncommitted tail when an append or snapshot publication
+fails. Startup repairs recoverable private-mode drift through a verified file
+handle before exposing the artifact again. Task deletion publishes the durable
+record removal before best-effort file cleanup; startup removes a managed orphan
+left by an interrupted cleanup.
 
 ## Permissions and interactions
 
@@ -686,16 +712,14 @@ Recovery is runtime-owned but follows common invariants:
 5. mark uncertain submitted mutations `RECOVERY_REQUIRED`;
 6. never replay an ambiguous prompt, approval, or command automatically.
 
-An adapter may durably establish recovery or a terminal result before its
-startup promise rejects. Orchestration fallback events are therefore appended
-only while the run is still active, using an atomic projection guard; a stale
-caller must never downgrade provider recovery or terminal evidence to a generic
-start failure. The guarded terminal event is the ownership claim: only its
-winner may materialize the singleton final artifact, whose creation then links
-the artifact to both the run and any detached-review projection. Artifact
-materialization is supplementary after that claim: its failure is diagnostic
-and must neither suppress the terminal notification nor replace the original
-provider startup error.
+An adapter may durably establish recovery or a terminal result before another
+asynchronous writer finishes. Terminal, runtime-loss, and ambiguous-mutation
+events are therefore appended through an atomic run-status guard; a stale
+caller must never downgrade terminal evidence or replace a newer recovery
+decision. The guarded event is the ownership claim. Only its winner may publish
+terminal/recovery UI events or follow-on session state. A provider may prepare
+an idempotent final artifact before that claim, but the artifact is telemetry
+and does not itself make the run terminal.
 
 The user may explicitly retry or continue after Task Monki closes the uncertain
 run. Provider IDs from another runtime are never consulted.
@@ -715,6 +739,25 @@ and fenced before its session can be reused; ACP additionally invalidates its
 client generation synchronously when quarantine starts. Late output, terminal
 events, plans, permissions, questions, or usage from a replaced process are
 ignored and cannot mutate a replacement run.
+
+Generation replacement distinguishes late input from accepted input. A frame
+that the old transport already parsed, journaled, and delivered to its adapter
+must finish adapter-level materialization while that client remains
+authoritative. Codex and ACP fence replacement binding on that exact inbound
+tail; OpenCode stops the old SSE stream and awaits its accepted callbacks.
+Only input arriving after the generation fence is discarded as late.
+
+On POSIX, detached runtimes remain owned until their entire process group has
+exited, even when the group leader exits first. Cancellation, terminal
+publication, and replacement startup wait for that process-tree boundary.
+If Task Monki cannot confirm that boundary, the process supervisor publishes a
+distinct termination failure instead of a normal close or spawn error. The
+runtime records the server as lost, moves active work to recovery, and fences
+replacement startup until the application restarts.
+Windows' `taskkill` interface cannot prove the fate of orphaned descendants
+after their leader has already exited. Task Monki does not claim that guarantee
+on Windows; reliable ownership there requires a native Job Object boundary and
+native-platform verification before it can be enabled.
 
 Antigravity has no reattachable transport generation. Its owned child process
 is the complete turn lifecycle: a known exit terminalizes the run, cancellation

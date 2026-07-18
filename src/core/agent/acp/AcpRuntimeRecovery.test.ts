@@ -146,4 +146,177 @@ describe('ACP cold recovery', () => {
       await recoveredStore.close();
     }
   });
+
+  it('does not downgrade a run when terminalization wins the reconciliation race', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-reconcile-race-'));
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const settings = {
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      model: 'default',
+      modelProvider: 'google',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const task = await store.createTask({
+      title: 'ACP reconciliation race',
+      prompt: 'Finish before stale reconciliation.',
+      repositoryPath: directory,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-reconcile-race',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      requestedSettings: settings
+    });
+    const createdRun = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings
+    });
+    const server = await store.createAgentServer({
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: 'test-acp',
+      argv: ['--acp'],
+      runtimeVersion: '1.0.0',
+      schemaVersion: '1.19.0'
+    });
+    const run = await store.updateRun(createdRun.id, {
+      providerTurnId: `${server.id}:1`,
+      serverInstanceId: server.id,
+      status: 'RUNNING'
+    });
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), TEST_ACP_PROFILE, {
+      cwd: directory
+    });
+    const appendIfStatus = store.appendRunEventIfStatus.bind(store);
+    let terminalized = false;
+    store.appendRunEventIfStatus = async (event, expectedStatuses) => {
+      if (event.type === 'AGENT_RUNTIME_RECONCILED' && !terminalized) {
+        terminalized = true;
+        await store.updateRun(run.id, {
+          status: 'COMPLETED',
+          endedAt: new Date().toISOString()
+        });
+      }
+      return appendIfStatus(event, expectedStatuses);
+    };
+
+    const result = await adapter.reconcile();
+    const snapshot = await store.snapshot();
+
+    expect(terminalized).toBe(true);
+    expect(result.recoveryRequiredSessionIds).toEqual([]);
+    expect(snapshot.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+      status: 'COMPLETED'
+    });
+    expect(snapshot.events.map((event) => event.type)).not.toContain(
+      'AGENT_RUNTIME_RECONCILED'
+    );
+  });
+
+  it('does not publish runtime loss when terminalization wins after the loss snapshot', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-loss-race-'));
+    temporaryDirectories.push(directory);
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const settings = {
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      model: 'default',
+      modelProvider: 'google',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const task = await store.createTask({
+      title: 'ACP runtime-loss race',
+      prompt: 'Finish before stale process loss.',
+      repositoryPath: directory,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/acp-loss-race',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const createdSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      requestedSettings: settings
+    });
+    const session = await store.updateAgentSession(createdSession.id, { status: 'ACTIVE' });
+    const server = await store.createAgentServer({
+      runtimeId: TEST_ACP_PROFILE.descriptor.id,
+      runtimeKind: 'ACP_AGENT',
+      transport: 'STDIO',
+      executable: 'test-acp',
+      argv: ['--acp'],
+      runtimeVersion: '1.0.0',
+      schemaVersion: '1.19.0'
+    });
+    const createdRun = await store.createRun({
+      task,
+      session,
+      serverInstanceId: server.id,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: settings
+    });
+    const run = await store.updateRun(createdRun.id, {
+      providerTurnId: `${server.id}:1`,
+      status: 'RUNNING'
+    });
+    const observedEvents: string[] = [];
+    const appEvents = new AppEventBus();
+    appEvents.on((event) => observedEvents.push(event.type));
+    const adapter = new AcpRuntimeAdapter(store, appEvents, TEST_ACP_PROFILE, {
+      cwd: directory
+    });
+    const appendIfStatus = store.appendRunEventIfStatus.bind(store);
+    let expectedStatuses: readonly string[] | undefined;
+    store.appendRunEventIfStatus = async (event, statuses) => {
+      if (event.type === 'AGENT_RUNTIME_LOST') {
+        expectedStatuses = statuses;
+        await store.updateRun(run.id, {
+          status: 'COMPLETED',
+          endedAt: new Date().toISOString()
+        });
+      }
+      return appendIfStatus(event, statuses);
+    };
+
+    await (
+      adapter as unknown as {
+        handleRuntimeLoss(serverInstanceId: string, reason: string): Promise<void>;
+      }
+    ).handleRuntimeLoss(server.id, 'Injected process loss.');
+    const snapshot = await store.snapshot();
+
+    expect(expectedStatuses).toEqual(['RUNNING']);
+    expect(snapshot.runs.find((candidate) => candidate.id === run.id)).toMatchObject({
+      status: 'COMPLETED'
+    });
+    expect(snapshot.events.map((event) => event.type)).not.toContain('AGENT_RUNTIME_LOST');
+    expect((await store.getAgentSession(session.id))?.status).toBe('ACTIVE');
+    expect(observedEvents).not.toContain('run.activity');
+  });
 });

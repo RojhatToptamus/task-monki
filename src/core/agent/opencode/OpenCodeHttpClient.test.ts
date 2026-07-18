@@ -113,6 +113,143 @@ describe('OpenCodeHttpClient', () => {
     expect(rows.join('\n')).not.toContain(opaque);
   });
 
+  it('masks streaming text per SSE record while preserving operational identity', async () => {
+    const secret = 'opaque-provider-credential-1742';
+    const first = 'opaque-provider-';
+    const second = 'credential-1742';
+    const rows: string[] = [];
+    const client = new OpenCodeHttpClient({
+      baseUrl: 'http://127.0.0.1:4096',
+      username: 'task-monki',
+      password: 'secret',
+      directory: '/repo',
+      sensitiveValues: [secret],
+      fetch: vi.fn<typeof fetch>(async () =>
+        new Response(
+          [first, second]
+            .map((delta, index) =>
+              `data: ${JSON.stringify({
+                type: 'message.part.delta',
+                properties: {
+                  sessionID: 'ses_stream',
+                  messageID: 'msg_stream',
+                  partID: 'prt_stream',
+                  field: 'text',
+                  delta,
+                  index
+                }
+              })}\n\n`
+            )
+            .join(''),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } }
+        )
+      ),
+      journal: async (_direction, raw) => {
+        rows.push(raw);
+        return reference(rows.length, raw);
+      }
+    });
+    const deltas: string[] = [];
+    let stream: ReturnType<OpenCodeHttpClient['startEventStream']>;
+    stream = client.startEventStream({
+      onEvent: async (value) => {
+        deltas.push(
+          (value as { properties: { delta: string } }).properties.delta
+        );
+        if (deltas.length === 2) stream.stop();
+      },
+      onDisconnect: async () => undefined,
+      onReconnect: async () => undefined
+    });
+
+    await stream.settled;
+
+    expect(deltas).toEqual([first, second]);
+    expect(rows).toHaveLength(2);
+    expect(rows.join('\n')).not.toContain(secret);
+    expect(rows.join('\n')).not.toContain(first);
+    expect(rows.join('\n')).not.toContain(second);
+    expect(rows.map((row) => JSON.parse(row))).toEqual([
+      expect.objectContaining({
+        properties: expect.objectContaining({
+          sessionID: 'ses_stream',
+          messageID: 'msg_stream',
+          partID: 'prt_stream',
+          field: 'text',
+          delta: '[REDACTED]'
+        })
+      }),
+      expect.objectContaining({
+        properties: expect.objectContaining({
+          sessionID: 'ses_stream',
+          messageID: 'msg_stream',
+          partID: 'prt_stream',
+          field: 'text',
+          delta: '[REDACTED]'
+        })
+      })
+    ]);
+  });
+
+  it('journals malformed SSE records without retaining provider-controlled bytes', async () => {
+    vi.useFakeTimers();
+    try {
+      const secret = 'opaque-provider-credential-1742';
+      const fragments = ['opaque-provider-', 'credential-1742'];
+      const rows: Array<{ raw: string; metadata?: Record<string, unknown> }> = [];
+      let connection = 0;
+      const client = new OpenCodeHttpClient({
+        baseUrl: 'http://127.0.0.1:4096',
+        username: 'task-monki',
+        password: 'secret',
+        directory: '/repo',
+        sensitiveValues: [secret],
+        fetch: vi.fn<typeof fetch>(async () => {
+          const fragment = fragments[Math.min(connection, fragments.length - 1)]!;
+          connection += 1;
+          return new Response(`data: ${fragment}\n\n`, {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' }
+          });
+        }),
+        journal: async (_direction, raw, metadata) => {
+          rows.push({ raw, metadata });
+          return reference(rows.length, raw);
+        }
+      });
+      const diagnostics: string[] = [];
+      const stream = client.startEventStream({
+        onEvent: async () => undefined,
+        onDisconnect: async (error) => {
+          diagnostics.push(error.message);
+        },
+        onReconnect: async () => undefined
+      });
+
+      await vi.waitFor(() => expect(rows).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.waitFor(() => expect(rows).toHaveLength(2));
+      stream.stop();
+      await stream.settled;
+
+      expect(rows).toEqual([
+        {
+          raw: JSON.stringify({ type: 'opencode.sse.malformed' }),
+          metadata: expect.objectContaining({ malformed: true })
+        },
+        {
+          raw: JSON.stringify({ type: 'opencode.sse.malformed' }),
+          metadata: expect.objectContaining({ malformed: true })
+        }
+      ]);
+      expect(JSON.stringify({ rows, diagnostics })).not.toContain(secret);
+      expect(JSON.stringify({ rows, diagnostics })).not.toContain(fragments[0]);
+      expect(JSON.stringify({ rows, diagnostics })).not.toContain(fragments[1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('never retries an ambiguously delivered mutation', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => {
       throw new TypeError('connection reset');

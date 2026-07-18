@@ -5,6 +5,7 @@ import type { AgentServerInstance } from '../../../shared/agent';
 import {
   ProcessSupervisor,
   redactProcessDiagnostic,
+  type ProcessTerminationUnconfirmed,
   type SupervisedProcess
 } from '../../process/ProcessSupervisor';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
@@ -71,6 +72,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
   private startPromise?: Promise<RunningOpenCodeServer>;
   private shuttingDown = false;
   private closePromise?: Promise<void>;
+  private safetyFence?: Error;
   private rawDiagnosticTail = '';
   private sensitiveValues: string[] = [];
   private readonly closedProcesses = new WeakSet<SupervisedProcess>();
@@ -90,6 +92,9 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
   }
 
   start(): Promise<RunningOpenCodeServer> {
+    if (this.safetyFence) {
+      return Promise.reject(this.safetyFence);
+    }
     if (this.shuttingDown) {
       return Promise.reject(new Error('OpenCode supervisor has been shut down.'));
     }
@@ -278,6 +283,20 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
     child.events.on('stdout', (chunk) => this.appendDiagnostic(chunk));
     child.events.on('stderr', (chunk) => this.appendDiagnostic(chunk));
     child.events.once('error', (error) => this.appendDiagnostic(Buffer.from(error.message)));
+    child.events.once('terminationUnconfirmed', (failure) => {
+      const wasReadyProcess = this.readyProcess === child;
+      const fence = this.latchTerminationFence(child, failure.error);
+      if (this.startingProcesses.has(child)) return;
+      const closing = this.handleTerminationUnconfirmed(
+        child,
+        server.id,
+        failure,
+        fence,
+        wasReadyProcess
+      );
+      this.closePromise = closing;
+      void closing.catch(() => undefined);
+    });
     child.events.once('close', ({ exitCode, signal }) => {
       this.closedProcesses.add(child);
       if (this.startingProcesses.has(child)) return;
@@ -376,6 +395,7 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
   }
 
   private assertStartupActive(): void {
+    if (this.safetyFence) throw this.safetyFence;
     if (this.shuttingDown) throw new Error('OpenCode startup was canceled.');
   }
 
@@ -467,6 +487,10 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
         cleanup();
         reject(error);
       };
+      const onTerminationUnconfirmed = ({ error }: ProcessTerminationUnconfirmed) => {
+        cleanup();
+        reject(error);
+      };
       const onClose = ({
         exitCode,
         signal
@@ -486,11 +510,13 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
         child.events.off('stdout', onOutput);
         child.events.off('stderr', onOutput);
         child.events.off('error', onError);
+        child.events.off('terminationUnconfirmed', onTerminationUnconfirmed);
         child.events.off('close', onClose);
       };
       child.events.on('stdout', onOutput);
       child.events.on('stderr', onOutput);
       child.events.once('error', onError);
+      child.events.once('terminationUnconfirmed', onTerminationUnconfirmed);
       child.events.once('close', onClose);
     });
   }
@@ -522,6 +548,46 @@ export class OpenCodeServerSupervisor implements OpenCodeSessionSupervisor {
     });
     if (this.server?.id === serverId) this.server = updated;
     this.events.emit('exit', updated, unexpected);
+  }
+
+  private latchTerminationFence(child: SupervisedProcess, cause: Error): Error {
+    if (!this.safetyFence) {
+      const detail = redactProcessDiagnostic(cause.message, this.sensitiveValues);
+      this.safetyFence = new Error(
+        `OpenCode is safety-fenced until Task Monki restarts because process termination is unconfirmed. ${detail}`
+      );
+    }
+    if (this.process === child) {
+      this.client = undefined;
+      this.readyProcess = undefined;
+    }
+    return this.safetyFence;
+  }
+
+  private async handleTerminationUnconfirmed(
+    child: SupervisedProcess,
+    serverId: string,
+    failure: ProcessTerminationUnconfirmed,
+    fence: Error,
+    wasReadyProcess: boolean
+  ): Promise<void> {
+    // Retain `process` as the owned unsafe generation. A replacement must never
+    // overlap descendants whose termination could not be proved.
+    if (this.process !== child) return;
+    const stored = await this.store.getAgentServer(serverId);
+    let updated = stored;
+    if (stored && !['EXITED', 'FAILED', 'LOST'].includes(stored.status)) {
+      updated = await this.store.updateAgentServer(serverId, {
+        status: 'LOST',
+        disconnectedAt: new Date().toISOString(),
+        exitCode: failure.leaderExit.exitCode,
+        signal: failure.leaderExit.signal,
+        exitReason: boundedDiagnostic(fence.message, this.redactedDiagnosticTail())
+      });
+    }
+    if (!updated) return;
+    if (this.server?.id === serverId) this.server = updated;
+    if (wasReadyProcess) this.events.emit('exit', updated, true);
   }
 
   private appendDiagnostic(chunk: Buffer): void {

@@ -28,12 +28,13 @@ export function openCodePermissionRules(
   settings: AgentExecutionSettings
 ): OpenCodePermissionRule[] {
   assertOpenCodeExecutionSettings(settings);
+  const fallbackAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const mutationAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const externalDirectoryAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const taskAction = settings.approvalPolicy === 'never' ? 'allow' : 'deny';
   const networkAction = settings.networkAccess === true ? 'allow' : 'deny';
   return [
-    { permission: '*', pattern: '*', action: 'ask' },
+    { permission: '*', pattern: '*', action: fallbackAction },
     { permission: 'read', pattern: '*', action: 'allow' },
     { permission: 'glob', pattern: '*', action: 'allow' },
     { permission: 'grep', pattern: '*', action: 'allow' },
@@ -119,7 +120,7 @@ export function mapOpenCodePermission(
     };
   }
   const network = action.includes('web') || action.includes('network');
-  const readOnly = action.includes('read') || action.includes('external_directory');
+  const readOnly = action.includes('read');
   return {
     type: 'PERMISSION_APPROVAL',
     providerItemId,
@@ -177,17 +178,23 @@ export function mapOpenCodeInteractionResponse(
     };
   }
   const action = decision.action;
+  if (
+    action === 'ACCEPT_FOR_SESSION' ||
+    action === 'GRANT_SESSION' ||
+    action === 'DECLINE_FOR_SESSION'
+  ) {
+    throw new Error(
+      'OpenCode does not expose a session-scoped permission reply through its public API.'
+    );
+  }
   return {
     path: 'permission',
     body: {
       reply:
-        action === 'ACCEPT_FOR_SESSION' || action === 'GRANT_SESSION'
-          ? 'always'
-          : action === 'DECLINE' ||
-              action === 'DECLINE_FOR_SESSION' ||
-              action === 'CANCEL'
-            ? 'reject'
-            : 'once'
+        action === 'DECLINE' ||
+        action === 'CANCEL'
+          ? 'reject'
+          : 'once'
     }
   };
 }

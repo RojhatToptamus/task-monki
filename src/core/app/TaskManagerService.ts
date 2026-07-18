@@ -135,7 +135,6 @@ export class TaskManagerService {
       acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
-      agentProviderAdapter?: AgentRuntimeAdapter;
       agentRuntimeAdapters?: readonly AgentRuntimeAdapter[];
       defaultAgentRuntimeId?: string;
       openTargetHost?: OpenTargetHost;
@@ -172,17 +171,15 @@ export class TaskManagerService {
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
     const runtimeAdapters = options.agentRuntimeAdapters ??
-      (options.agentProviderAdapter
-        ? [options.agentProviderAdapter]
-        : createBuiltInAgentRuntimes(store, events, {
-            cwd: agentCwd,
-            codexExecutable: options.codexPath,
-            openCodeExecutable: options.openCodePath,
-            antigravityExecutable: options.antigravityPath,
-            acpExecutablePaths: options.acpExecutablePaths,
-            browserDevBoundary: this.browserDevAgentBoundary,
-            codexToolSettings: this.appSettings.codexExternalTools
-          }));
+      createBuiltInAgentRuntimes(store, events, {
+        cwd: agentCwd,
+        codexExecutable: options.codexPath,
+        openCodeExecutable: options.openCodePath,
+        antigravityExecutable: options.antigravityPath,
+        acpExecutablePaths: options.acpExecutablePaths,
+        browserDevBoundary: this.browserDevAgentBoundary,
+        codexToolSettings: this.appSettings.codexExternalTools
+      });
     this.codexAdapter = runtimeAdapters.find(
       (adapter): adapter is CodexAppServerAdapter =>
         adapter instanceof CodexAppServerAdapter
@@ -1254,21 +1251,18 @@ export class TaskManagerService {
     assertPublishReady(latestGit);
     const title = normalizePullRequestTitle(input.title, task.title);
 
-    const prBodyContent = await this.github.writePullRequestBody({
-      filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
+    const prBodyContent = this.github.buildPullRequestBody({
       task,
       gitDiffStat: latestGit.diffStat,
       agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
-    const bodyPath = await this.store.getArtifactPath(bodyArtifact.id);
 
     await this.store.recordPullRequestCreateRequested(task, worktree);
     const sync = await this.github.createOrFindDraftPullRequest({
-      task,
       worktree,
       baseRef: worktree.baseRef,
-      bodyFilePath: bodyPath,
+      body: prBodyContent,
       title
     });
     sync.pullRequest.bodyArtifactId = bodyArtifact.id;

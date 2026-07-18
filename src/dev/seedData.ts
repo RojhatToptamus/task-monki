@@ -534,6 +534,7 @@ export async function seedTaskMonkiDevelopmentData(
     encoding: 'utf8',
     mode: 0o600
   });
+  await store.close();
   return manifest;
 }
 
@@ -1411,7 +1412,7 @@ async function createInteraction(
           },
     allowedActions:
       type === 'USER_INPUT'
-        ? ['ANSWER', 'CANCEL']
+        ? ['ANSWER']
         : ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL'],
     policyWarnings: type === 'USER_INPUT' ? [] : ['Seeded approval warning.'],
     requestRawMessage

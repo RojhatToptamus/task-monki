@@ -57,6 +57,8 @@ export interface AcpSessionModelExtensionContract {
   initializeResponseMetaField?: 'modelState';
   setupResponseField: 'models';
   setModelMethod: 'session/set_model';
+  /** Provider metadata field accepted by session/set_model for exact effort selection. */
+  setModelReasoningEffortMetaField?: 'reasoningEffort';
   modelUpdateNotification: '_x.ai/models/update';
 }
 
@@ -69,6 +71,7 @@ export const GROK_SESSION_MODEL_EXTENSION = {
   initializeResponseMetaField: 'modelState',
   setupResponseField: 'models',
   setModelMethod: 'session/set_model',
+  setModelReasoningEffortMetaField: 'reasoningEffort',
   modelUpdateNotification: '_x.ai/models/update'
 } as const satisfies AcpSessionModelExtensionContract;
 
@@ -301,7 +304,9 @@ export function acpCapabilities(
     },
     reasoningEffort: {
       maturity: 'inferred',
-      detail: 'Preserved through native thought-level/model-config selectors when an agent exposes them.'
+      detail: profile.sessionModelExtension?.setModelReasoningEffortMetaField
+        ? `Preserved through the explicit ${profile.sessionModelExtension.contractId} model mutation metadata when advertised; stable thought-level selectors remain a separate path.`
+        : 'Preserved through native thought-level selectors when an agent exposes them.'
     },
     persistentSessions: negotiated?.resume || negotiated?.loadSession
       ? {

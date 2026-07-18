@@ -775,7 +775,7 @@ function evaluateResult(input: {
   errors: Array<string | undefined>;
 }): ProviderSmokeResult {
   const { target, run, snapshot } = input;
-  const receivedSentinel = run?.finalMessage?.includes(SMOKE_SENTINEL) ?? false;
+  const receivedSentinel = run?.finalMessage?.trim() === SMOKE_SENTINEL;
   const interactionRequested = Boolean(
     run && snapshot?.interactionRequests.some((request) => request.runId === run.id)
   );

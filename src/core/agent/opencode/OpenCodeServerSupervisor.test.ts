@@ -210,6 +210,59 @@ describe('OpenCodeServerSupervisor', () => {
     }
   });
 
+  it('persists runtime loss and permanently fences replacement when process-tree termination is unconfirmed', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-opencode-supervisor-')
+    );
+    temporaryDirectories.push(directory);
+    vi.stubGlobal('fetch', compatibleOpenCodeFetch);
+    const processSupervisor = new ListeningProcessSupervisor();
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const supervisor = new OpenCodeServerSupervisor(store, {
+      runtime: resolvedRuntime(),
+      cwd: directory,
+      environment: { PATH: process.env.PATH },
+      requestTimeoutMs: 500,
+      startupTimeoutMs: 1_000,
+      eventProbeTimeoutMs: 500,
+      processSupervisor,
+      portAllocator: async () => 45207
+    });
+
+    try {
+      await supervisor.start();
+      const exited = new Promise<{ server: Awaited<ReturnType<FileTaskStore['getAgentServer']>>; unexpected: boolean }>(
+        (resolve) => {
+          supervisor.events.once('exit', (server, unexpected) => resolve({ server, unexpected }));
+        }
+      );
+
+      processSupervisor.terminationUnconfirmed(
+        new Error('simulated descendant termination failure')
+      );
+      const loss = await exited;
+
+      expect(loss.unexpected).toBe(true);
+      expect(loss.server).toEqual(
+        expect.objectContaining({
+          status: 'LOST',
+          exitCode: 0,
+          signal: null,
+          exitReason: expect.stringContaining('process termination is unconfirmed')
+        })
+      );
+      expect(loss.server?.exitedAt).toBeUndefined();
+      expect(supervisor.currentClient).toBeUndefined();
+      await expect(supervisor.start()).rejects.toThrow(
+        'safety-fenced until Task Monki restarts'
+      );
+      expect(processSupervisor.startCount).toBe(1);
+    } finally {
+      await supervisor.shutdown().catch(() => undefined);
+      await store.close();
+    }
+  });
+
   it('bounds early-exit retries and redacts every persisted attempt', async () => {
     const directory = await fs.mkdtemp(
       path.join(os.tmpdir(), 'task-monki-opencode-supervisor-')
@@ -523,9 +576,14 @@ class ListeningProcessSupervisor extends ProcessSupervisor {
   generatedPassword = '';
   launchArgv: string[] = [];
   cancelCount = 0;
+  startCount = 0;
+  private currentEvents?: SupervisedProcess['events'];
+  private terminationFailure?: Error;
 
   override start(spec: ProcessSpec): SupervisedProcess {
+    this.startCount += 1;
     const events = new EventEmitter() as SupervisedProcess['events'];
+    this.currentEvents = events;
     this.generatedPassword = spec.env?.OPENCODE_SERVER_PASSWORD ?? '';
     this.launchArgv = [...spec.argv];
     const port = launchPort(spec);
@@ -541,12 +599,21 @@ class ListeningProcessSupervisor extends ProcessSupervisor {
       pid: 4343,
       events,
       cancel: async () => {
+        if (this.terminationFailure) throw this.terminationFailure;
         if (closed) return;
         this.cancelCount += 1;
         closed = true;
         events.emit('close', { exitCode: null, signal: 'SIGTERM' });
       }
     };
+  }
+
+  terminationUnconfirmed(error: Error): void {
+    this.terminationFailure = error;
+    this.currentEvents?.emit('terminationUnconfirmed', {
+      error,
+      leaderExit: { exitCode: 0, signal: null }
+    });
   }
 }
 
@@ -677,3 +744,30 @@ function launchPort(spec: ProcessSpec): number {
   }
   return port;
 }
+
+const compatibleOpenCodeFetch: typeof fetch = async (input) => {
+  const url = new URL(
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url
+  );
+  if (url.pathname === '/event') {
+    return new Response('data: {"type":"server.connected","properties":{}}\n\n', {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' }
+    });
+  }
+  const responseBody: Record<string, unknown> | unknown[] = {
+    '/global/health': { healthy: true, version: '1.17.20' },
+    '/provider': { all: [], connected: [], default: {} },
+    '/permission': [],
+    '/question': [],
+    '/session/status': {}
+  }[url.pathname] ?? [];
+  return new Response(JSON.stringify(responseBody), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+};

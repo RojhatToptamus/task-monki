@@ -2,12 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   interactionActionsForAcpOptions,
   mapAcpStopReason,
-  modelsFromAcpConfig,
-  observedSettingsFromAcpState,
   permissionOutcomeForDecision,
   requestedNativeConfigValues
 } from './AcpEventMapper';
-import { GROK_ACP_PROFILE } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { assertAcpExecutionPolicy } from './AcpRuntimeAdapter';
 import type { AcpPermissionOption } from './AcpProtocol';
@@ -61,221 +58,6 @@ describe('ACP event mapping', () => {
     ).toEqual({ outcome: 'cancelled' });
   });
 
-  it('derives runtime-qualified models from native ACP selectors losslessly', () => {
-    const models = modelsFromAcpConfig(
-      TEST_ACP_PROFILE,
-      [
-        {
-          sessionId: 'session-1',
-          modes: null,
-          models: null,
-          configOptions: [
-            {
-              id: 'model',
-              name: 'Model',
-              category: 'model',
-              type: 'select',
-              currentValue: 'test-model-pro',
-              options: [
-                {
-                  value: 'test-model-pro',
-                  name: 'Test Model Pro',
-                  description: 'Provider description',
-                  _meta: { tier: 'native' }
-                }
-              ]
-            }
-          ]
-        }
-      ],
-      ['text', 'image']
-    );
-    expect(models).toEqual([
-      expect.objectContaining({
-        id: 'test-acp:test-provider/test-model-pro',
-        modelProvider: 'test-provider',
-        model: 'test-model-pro',
-        inputModalities: ['text', 'image'],
-        native: expect.objectContaining({ configId: 'model' })
-      })
-    ]);
-  });
-
-  it('maps and observes captured Grok session models as first-class models', () => {
-    const state = {
-      sessionId: 'session-grok',
-      modes: null,
-      models: {
-        currentModelId: 'grok-build',
-        availableModels: [
-          {
-            modelId: 'grok-composer-2.5-fast',
-            name: 'Composer 2.5',
-            description: 'Cursor latest coding model'
-          },
-          {
-            modelId: 'grok-build',
-            name: 'Grok Build',
-            description: 'Best for advanced coding tasks',
-            reasoningEffort: 'high',
-            reasoningEfforts: [
-              {
-                id: 'high',
-                value: 'high',
-                label: 'High Effort',
-                default: true
-              },
-              {
-                id: 'low',
-                value: 'low',
-                label: 'Low Effort',
-                default: false
-              }
-            ]
-          }
-        ]
-      },
-      configOptions: []
-    };
-    const profile = {
-      ...GROK_ACP_PROFILE,
-      defaultModel: 'grok-build'
-    };
-
-    expect(modelsFromAcpConfig(profile, [state], ['text'])).toEqual([
-      expect.objectContaining({
-        id: 'grok-acp:xai/grok-build',
-        model: 'grok-build',
-        isDefault: true,
-        supportedReasoningEfforts: []
-      }),
-      expect.objectContaining({
-        id: 'grok-acp:xai/grok-composer-2.5-fast',
-        modelProvider: 'xai',
-        model: 'grok-composer-2.5-fast',
-        displayName: 'Composer 2.5',
-        isDefault: false,
-        native: expect.objectContaining({ source: 'session-models' })
-      })
-    ]);
-    expect(
-      observedSettingsFromAcpState(profile, state, {
-        model: 'grok-composer-2.5-fast',
-        modelProvider: 'xai'
-      })
-    ).toMatchObject({
-      runtimeId: 'grok-acp',
-      model: 'grok-build',
-      modelProvider: 'xai',
-      reasoningEffort: undefined,
-      runtimeOptions: {
-        'grok-acp': {
-          models: { currentModelId: 'grok-build' }
-        }
-      }
-    });
-  });
-
-  it('keeps the model union and fallback stable across live-session order', () => {
-    const profile = {
-      ...GROK_ACP_PROFILE,
-      defaultModel: 'provider-default-not-advertised'
-    };
-    const sessions: Parameters<typeof modelsFromAcpConfig>[1] = [
-      {
-        sessionId: 'session-z',
-        modes: null,
-        models: {
-          currentModelId: 'model-z',
-          availableModels: [
-            { modelId: 'model-z', name: 'Model Z' },
-            { modelId: 'model-a', name: 'Native Model A' }
-          ]
-        },
-        configOptions: []
-      },
-      {
-        sessionId: 'session-a',
-        modes: null,
-        models: null,
-        configOptions: [
-          {
-            id: 'model',
-            name: 'Model',
-            category: 'model',
-            type: 'select',
-            currentValue: 'model-b',
-            options: [
-              { value: 'model-b', name: 'Model B' },
-              { value: 'model-a', name: 'Config Model A' }
-            ]
-          }
-        ]
-      }
-    ];
-
-    const forward = modelsFromAcpConfig(profile, sessions, ['text']);
-    const reversed = modelsFromAcpConfig(profile, [...sessions].reverse(), ['text']);
-
-    expect(reversed).toEqual(forward);
-    expect(forward.map((model) => model.model)).toEqual([
-      'model-a',
-      'model-b',
-      'model-z'
-    ]);
-    expect(forward.every((model) => !model.isDefault)).toBe(true);
-    expect(forward[0]).toMatchObject({
-      displayName: 'Native Model A',
-      native: { source: 'session-models' }
-    });
-  });
-
-  it('never promotes credential-bearing provider values into model routing or settings', () => {
-    const profile = {
-      ...GROK_ACP_PROFILE,
-      defaultModel: 'safe-model'
-    };
-    const state: Parameters<typeof modelsFromAcpConfig>[1][number] = {
-      sessionId: 'session-sensitive-models',
-      modes: null,
-      models: {
-        currentModelId: 'AWS_SESSION_TOKEN=secret-marker',
-        availableModels: [
-          { modelId: 'safe-model', name: 'Safe model' },
-          {
-            modelId: 'HASHICORP_TOKEN=secret-marker',
-            name: 'Credential-shaped model'
-          }
-        ]
-      },
-      configOptions: [
-        {
-          id: 'model',
-          name: 'Model',
-          category: 'model',
-          type: 'select',
-          currentValue: 'AWS_SESSION_TOKEN=secret-marker',
-          options: [
-            { value: 'safe-config-model', name: 'Safe config model' },
-            {
-              value: 'HASURA_GRAPHQL_ADMIN_SECRET=secret-marker',
-              name: 'Credential-shaped option'
-            }
-          ]
-        }
-      ]
-    };
-
-    const models = modelsFromAcpConfig(profile, [state], ['text']);
-    expect(models.map((model) => model.model)).toEqual([
-      'safe-config-model',
-      'safe-model'
-    ]);
-    const observed = observedSettingsFromAcpState(profile, state, {});
-    expect(observed.model).toBeUndefined();
-    expect(JSON.stringify({ models, observed })).not.toContain('secret-marker');
-  });
-
   it('keeps runtime-native values scoped to their runtime', () => {
     expect(
       requestedNativeConfigValues(TEST_ACP_PROFILE.descriptor.id, {
@@ -287,6 +69,13 @@ describe('ACP event mapping', () => {
         }
       })
     ).toEqual({ model: 'test-model', telemetry: false });
+    expect(
+      requestedNativeConfigValues(TEST_ACP_PROFILE.descriptor.id, {
+        runtimeOptions: {
+          [TEST_ACP_PROFILE.descriptor.id]: { telemetry: false }
+        }
+      })
+    ).toEqual({});
   });
 
   it('fails closed instead of silently downgrading Task Monki security settings', () => {

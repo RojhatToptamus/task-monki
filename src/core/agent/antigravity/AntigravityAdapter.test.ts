@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentExecutionSettings, AgentSessionRecord, RunRecord } from '../../../shared/contracts';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { AppEventBus } from '../../runner/AppEventBus';
+import { createDomainEvent } from '../../storage/domainEvent';
 import {
   ProcessSupervisor,
   type ProcessSpec,
@@ -613,6 +614,44 @@ describe('AntigravityAdapter', () => {
     expect(process.cancel).toHaveBeenCalledOnce();
   });
 
+  it('recovers the run and fences replacement when the owned process tree cannot be reaped', async () => {
+    const process = new ControlledProcessSupervisor();
+    const fixture = await createFixture(true, { processSupervisor: process });
+    const run = await createRun(fixture, fixture.session, 'CONTROLLED');
+    await fixture.adapter.startTurn(turnInput(run, fixture.session, 'CONTROLLED'));
+    const outputBeforeFailure = await fixture.store.readArtifact(run.outputArtifactId);
+
+    process.terminationUnconfirmed(new Error('simulated descendant termination failure'));
+
+    const recovered = await waitForRecovery(fixture.store, run.id);
+    expect((await fixture.store.getAgentSession(fixture.session.id))?.status).toBe('IDLE');
+    const server = await fixture.store.getAgentServer(recovered.serverInstanceId!);
+    expect(server).toEqual(
+      expect.objectContaining({
+        status: 'LOST',
+        exitReason: expect.stringContaining('process termination is unconfirmed')
+      })
+    );
+    expect(server?.exitedAt).toBeUndefined();
+    expect((await fixture.adapter.preflight()).readiness).toMatchObject({
+      status: 'FAILED',
+      canStart: false,
+      diagnostics: [
+        expect.objectContaining({ code: 'PROCESS_TERMINATION_UNCONFIRMED' })
+      ]
+    });
+
+    process.stdout('late output from the unsafe process tree\n');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await fixture.store.readArtifact(run.outputArtifactId)).toBe(outputBeforeFailure);
+    const retry = await createRun(fixture, fixture.session, 'CONTROLLED');
+    await expect(
+      fixture.adapter.startTurn(turnInput(retry, fixture.session, 'CONTROLLED'))
+    ).rejects.toThrow('safety-fenced until Task Monki restarts');
+    expect(process.startCount).toBe(1);
+    await fixture.adapter.shutdown();
+  });
+
   it('does not mark a natural exit interrupted when the durable interrupt transition fails', async () => {
     const fixture = await createFixture();
     const run = await createRun(fixture, fixture.session, 'SLOW_SUCCESS');
@@ -767,10 +806,53 @@ describe('AntigravityAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
+  it('does not resurrect a run terminalized after reconciliation snapshots it', async () => {
+    const fixture = await createFixture();
+    const run = await createRun(fixture, fixture.session, 'STALE SNAPSHOT');
+    const snapshot = fixture.store.snapshot.bind(fixture.store);
+    let terminalPublished = false;
+    vi.spyOn(fixture.store, 'snapshot').mockImplementation(async () => {
+      const stale = await snapshot();
+      if (!terminalPublished) {
+        terminalPublished = true;
+        await fixture.store.appendEvent(
+          createDomainEvent({
+            type: 'AGENT_RUN_COMPLETED',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            serverInstanceId: run.serverInstanceId,
+            source: 'provider',
+            payload: { terminalStatus: 'completed' }
+          })
+        );
+      }
+      return stale;
+    });
+    const updateAgentSession = vi.spyOn(fixture.store, 'updateAgentSession');
+
+    const result = await fixture.adapter.reconcile();
+    const current = await fixture.store.getRun(run.id);
+    const events = (await snapshot()).events.filter((event) => event.runId === run.id);
+
+    expect(current?.status).toBe('COMPLETED');
+    expect(
+      events.filter((event) =>
+        ['AGENT_RUNTIME_LOST', 'AGENT_RUNTIME_RECONCILED'].includes(event.type)
+      )
+    ).toHaveLength(0);
+    expect(updateAgentSession).not.toHaveBeenCalled();
+    expect(result).toEqual({ reconciledSessionIds: [], recoveryRequiredSessionIds: [] });
+    await fixture.adapter.shutdown();
+  });
+
   it('fails closed into recoverable state if terminal persistence fails and releases session ownership', async () => {
     const fixture = await createFixture();
     const originalUpdateRun = fixture.store.updateRun.bind(fixture.store);
-    const originalAppendEvent = fixture.store.appendEvent.bind(fixture.store);
+    const originalAppendRunEventIfStatus =
+      fixture.store.appendRunEventIfStatus.bind(fixture.store);
     let failedOnce = false;
     let continueCleanup!: () => void;
     let markRecoveryPublished!: () => void;
@@ -787,9 +869,9 @@ describe('AntigravityAdapter', () => {
       }
       return originalUpdateRun(runId, update);
     });
-    vi.spyOn(fixture.store, 'appendEvent').mockImplementation(
-      async (event, publish) => {
-        const stored = await originalAppendEvent(event, publish);
+    vi.spyOn(fixture.store, 'appendRunEventIfStatus').mockImplementation(
+      async (event, statuses) => {
+        const stored = await originalAppendRunEventIfStatus(event, statuses);
         if (event.type === 'AGENT_RUNTIME_RECONCILED') {
           markRecoveryPublished();
           await cleanupGate;
@@ -803,7 +885,7 @@ describe('AntigravityAdapter', () => {
     await recoveryPublished;
 
     expect(recovery.recoveryState).toBe('REQUIRES_USER_ACTION');
-    expect((await fixture.store.getAgentSession(fixture.session.id))?.status).toBe('IDLE');
+    expect((await fixture.store.getAgentSession(fixture.session.id))?.status).toBe('ACTIVE');
     const release = fixture.adapter.releaseSession({ localSessionId: fixture.session.id });
     let releaseSettled = false;
     void release.then(
@@ -814,6 +896,7 @@ describe('AntigravityAdapter', () => {
     expect(releaseSettled).toBe(false);
     continueCleanup();
     await expect(release).resolves.toBeUndefined();
+    expect((await fixture.store.getAgentSession(fixture.session.id))?.status).toBe('IDLE');
     await fixture.adapter.shutdown();
   });
 
@@ -821,7 +904,8 @@ describe('AntigravityAdapter', () => {
     const process = new ControlledProcessSupervisor();
     const fixture = await createFixture(true, { processSupervisor: process });
     const originalUpdateRun = fixture.store.updateRun.bind(fixture.store);
-    const originalAppendEvent = fixture.store.appendEvent.bind(fixture.store);
+    const originalAppendRunEventIfStatus =
+      fixture.store.appendRunEventIfStatus.bind(fixture.store);
     let terminalPersistenceFailed = false;
     const updateRun = vi.spyOn(fixture.store, 'updateRun').mockImplementation(
       async (runId, update) => {
@@ -832,12 +916,12 @@ describe('AntigravityAdapter', () => {
         return originalUpdateRun(runId, update);
       }
     );
-    const appendEvent = vi.spyOn(fixture.store, 'appendEvent').mockImplementation(
-      async (event, publish) => {
+    const appendEvent = vi.spyOn(fixture.store, 'appendRunEventIfStatus').mockImplementation(
+      async (event, statuses) => {
         if (event.type === 'AGENT_RUNTIME_RECONCILED') {
           throw new Error('persistent recovery publication failure');
         }
-        return originalAppendEvent(event, publish);
+        return originalAppendRunEventIfStatus(event, statuses);
       }
     );
     const run = await createRun(fixture, fixture.session, 'CONTROLLED');
@@ -1073,8 +1157,10 @@ function resolvedRuntime(executable: string): ResolvedAntigravityRuntime {
 class ControlledProcessSupervisor extends ProcessSupervisor {
   private readonly controlledEvents = new EventEmitter() as SupervisedProcess['events'];
   private closed = false;
+  private terminationFailure?: Error;
   startCount = 0;
   readonly cancel = vi.fn(async () => {
+    if (this.terminationFailure) throw this.terminationFailure;
     this.close(null, 'SIGINT');
   });
 
@@ -1096,6 +1182,16 @@ class ControlledProcessSupervisor extends ProcessSupervisor {
 
   stderr(value: string): void {
     this.controlledEvents.emit('stderr', Buffer.from(value));
+  }
+
+  terminationUnconfirmed(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.terminationFailure = error;
+    this.controlledEvents.emit('terminationUnconfirmed', {
+      error,
+      leaderExit: { exitCode: 0, signal: null }
+    });
   }
 
   close(exitCode: number | null, signal: NodeJS.Signals | null): void {

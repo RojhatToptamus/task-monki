@@ -249,6 +249,7 @@ describe('Codex App Server launch configuration', () => {
     const child = fakeCodexChild();
     const diagnostics: string[] = [];
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
+    let detached: boolean | undefined;
     const supervisor = new CodexAppServerSupervisor(store, {
       cwd: directory,
       appVersion: 'test',
@@ -268,6 +269,7 @@ describe('Codex App Server launch configuration', () => {
       ],
       spawnProcess: (_executable, _argv, options) => {
         spawnedEnvironment = options.env;
+        detached = options.detached;
         queueMicrotask(() => child.emit('spawn'));
         return child;
       }
@@ -285,6 +287,7 @@ describe('Codex App Server launch configuration', () => {
       PATH: process.env.PATH,
       CODEX_HOME: path.join(directory, 'codex-home')
     });
+    expect(detached).toBe(process.platform !== 'win32');
     expect(durable).toContain('[REDACTED]');
     for (const secret of [
       'codex-environment-secret',
@@ -296,6 +299,97 @@ describe('Codex App Server launch configuration', () => {
       expect(durable).not.toContain(secret);
       expect(diagnostics.join('\n')).not.toContain(secret);
     }
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('delivers journaled notifications before emitting process exit', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild();
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      }
+    });
+    const client = await supervisor.start();
+    const appendProtocolMessage = store.appendProtocolMessage.bind(store);
+    let releaseNotificationAppend!: () => void;
+    let markNotificationAppendStarted!: () => void;
+    const notificationAppendGate = new Promise<void>((resolve) => {
+      releaseNotificationAppend = resolve;
+    });
+    const notificationAppendStarted = new Promise<void>((resolve) => {
+      markNotificationAppendStarted = resolve;
+    });
+    vi.spyOn(store, 'appendProtocolMessage').mockImplementation(
+      async (serverId, direction, raw, metadata) => {
+        if (direction === 'INBOUND' && raw.includes('thread/closed')) {
+          markNotificationAppendStarted();
+          await notificationAppendGate;
+        }
+        return appendProtocolMessage(serverId, direction, raw, metadata);
+      }
+    );
+    const lifecycleOrder: string[] = [];
+    client.events.on('notification', () => lifecycleOrder.push('notification'));
+    const exited = new Promise<void>((resolve) => {
+      supervisor.events.once('exit', () => {
+        lifecycleOrder.push('exit');
+        resolve();
+      });
+    });
+
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({
+        method: 'thread/closed',
+        params: { threadId: 'thread-1' }
+      })}\n`
+    );
+    await notificationAppendStarted;
+    child.emit('close', 17, null);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(lifecycleOrder).toEqual([]);
+
+    releaseNotificationAppend();
+    await exited;
+    expect(lifecycleOrder).toEqual(['notification', 'exit']);
+
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('fences replacement startup when inbound delivery cannot be drained', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-drain-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild();
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      }
+    });
+    const client = await supervisor.start();
+    vi.spyOn(client, 'drainInbound').mockRejectedValue(
+      new Error('injected inbound drain failure')
+    );
+    const exited = new Promise<void>((resolve) => {
+      supervisor.events.once('exit', () => resolve());
+    });
+
+    child.emit('close', 17, null);
+    await exited;
+
+    await expect(supervisor.start()).rejects.toThrow('lifecycle is fenced');
     await store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
@@ -373,6 +467,37 @@ describe('Codex App Server launch configuration', () => {
     expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
     await expect(supervisor.start()).rejects.toThrow('lifecycle is fenced');
     expect(supervisor.currentServer).toMatchObject({ status: 'LOST' });
+
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('refuses a replacement generation when prior exit cleanup cannot confirm termination', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-prior-tree-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild({ closeOnKill: false });
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    });
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess,
+      shutdownGraceTimeoutMs: 10,
+      shutdownKillTimeoutMs: 10,
+      closeHandlingTimeoutMs: 50
+    });
+
+    await supervisor.start();
+    child.emit('close', 0, null);
+
+    await expect(supervisor.start()).rejects.toThrow(
+      /Timed out finalizing the prior Codex App Server exit|did not exit|lifecycle is fenced/
+    );
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
 
     await store.close();
     await fs.rm(directory, { recursive: true, force: true });

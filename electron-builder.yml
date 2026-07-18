@@ -7,7 +7,9 @@ directories:
   output: release
 
 files:
-  - dist-electron/**
+  - dist-electron/core/**
+  - dist-electron/electron/**
+  - dist-electron/shared/**
   - dist-renderer/**
   - package.json
 

@@ -67,6 +67,7 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
+    assertPersistedSettingsSchema(parsed);
     this.settings = normalizeAppSettings(parsed);
 
     if (raw !== serializeAppSettings(this.settings)) {
@@ -132,23 +133,6 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
   const record = isRecord(value) ? value : {};
   assertSupportedSchemaVersion(record.schemaVersion);
   const repositories = normalizeRepositories(record.repositories);
-  const migratesLegacyDefaultRuntime = record.defaultRuntimeId === 'gemini-acp';
-  const migratesLegacyRefinementRuntime =
-    record.promptRefinementRuntimeId === 'gemini-acp';
-  const migratesLegacyReviewRuntime = record.reviewRuntimeId === 'gemini-acp';
-  const promptRefinementModel = migratesLegacyRefinementRuntime
-    ? undefined
-    : normalizeOptionalString(record.promptRefinementModel);
-  const reviewModel = migratesLegacyReviewRuntime
-    ? undefined
-    : normalizeOptionalString(record.reviewModel);
-  const runtimeExecutablePaths = normalizeRuntimeExecutablePaths(
-    record.runtimeExecutablePaths
-  );
-  // Gemini ACP is no longer a product runtime. Keep historical task/run IDs
-  // untouched, but do not carry its executable into the distinct `agy`
-  // integration or expose a dead settings entry.
-  delete runtimeExecutablePaths['gemini-acp'];
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
     theme: normalizeTheme(record.theme),
@@ -160,58 +144,43 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
       typeof record.showMascot === 'boolean'
         ? record.showMascot
         : DEFAULT_TASK_MANAGER_APP_SETTINGS.showMascot,
-    firstLaunchSetupCompleted: normalizeFirstLaunchSetupCompleted(
-      record.firstLaunchSetupCompleted,
-      repositories
+    firstLaunchSetupCompleted:
+      typeof record.firstLaunchSetupCompleted === 'boolean'
+        ? record.firstLaunchSetupCompleted
+        : DEFAULT_TASK_MANAGER_APP_SETTINGS.firstLaunchSetupCompleted,
+    defaultRuntimeId: normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
+    defaultModel: normalizeOptionalString(record.defaultModel),
+    defaultModelProvider: normalizeOptionalString(record.defaultModelProvider),
+    defaultReasoningEffort: normalizeOptionalString(record.defaultReasoningEffort),
+    promptRefinementModel: normalizeOptionalString(record.promptRefinementModel),
+    promptRefinementRuntimeId: normalizeOptionalString(record.promptRefinementRuntimeId),
+    promptRefinementModelProvider: normalizeOptionalString(
+      record.promptRefinementModelProvider
     ),
-    defaultRuntimeId: migratesLegacyDefaultRuntime
-      ? 'antigravity'
-      : normalizeOptionalString(record.defaultRuntimeId) ?? CODEX_RUNTIME_ID,
-    defaultModel: migratesLegacyDefaultRuntime
-      ? undefined
-      : normalizeOptionalString(record.defaultModel),
-    defaultModelProvider: migratesLegacyDefaultRuntime
-      ? undefined
-      : normalizeOptionalString(record.defaultModelProvider),
-    defaultReasoningEffort: migratesLegacyDefaultRuntime
-      ? undefined
-      : normalizeOptionalString(record.defaultReasoningEffort),
-    promptRefinementModel,
-    promptRefinementRuntimeId:
-      (migratesLegacyRefinementRuntime
-        ? CODEX_RUNTIME_ID
-        : normalizeOptionalString(record.promptRefinementRuntimeId)) ??
-      (promptRefinementModel ? CODEX_RUNTIME_ID : undefined),
-    promptRefinementModelProvider: migratesLegacyRefinementRuntime
-      ? undefined
-      : normalizeOptionalString(record.promptRefinementModelProvider),
-    reviewModel,
-    reviewRuntimeId:
-      (migratesLegacyReviewRuntime
-        ? CODEX_RUNTIME_ID
-        : normalizeOptionalString(record.reviewRuntimeId)) ??
-      (reviewModel ? CODEX_RUNTIME_ID : undefined),
-    reviewModelProvider: migratesLegacyReviewRuntime
-      ? undefined
-      : normalizeOptionalString(record.reviewModelProvider),
-    reviewReasoningEffort: migratesLegacyReviewRuntime
-      ? undefined
-      : normalizeOptionalString(record.reviewReasoningEffort),
+    reviewModel: normalizeOptionalString(record.reviewModel),
+    reviewRuntimeId: normalizeOptionalString(record.reviewRuntimeId),
+    reviewModelProvider: normalizeOptionalString(record.reviewModelProvider),
+    reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    runtimeExecutablePaths,
+    runtimeExecutablePaths: normalizeRuntimeExecutablePaths(record.runtimeExecutablePaths),
     repositories
   };
 }
 
 function assertSupportedSchemaVersion(value: unknown): void {
   if (value === undefined) return;
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
-    throw new Error('App settings contain an invalid schema version.');
-  }
-  if (value > TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+  if (value !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
     throw new Error(
-      `App settings schema ${String(value)} is newer than supported schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}. Upgrade Task Monki before opening this settings file.`
+      `Unsupported app settings schema ${String(value)}. This build accepts only schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}.`
+    );
+  }
+}
+
+function assertPersistedSettingsSchema(value: unknown): void {
+  if (!isRecord(value) || value.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported app settings schema ${String(isRecord(value) ? value.schemaVersion : undefined)}. This build accepts only schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}.`
     );
   }
 }
@@ -348,16 +317,6 @@ function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
     knownPaths,
     selectedPath
   };
-}
-
-function normalizeFirstLaunchSetupCompleted(
-  value: unknown,
-  repositories: TaskManagerRepositorySettings
-): boolean {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  return Boolean(repositories.selectedPath || repositories.knownPaths.length > 0);
 }
 
 function normalizeExecutablePath(value: unknown): string | null {

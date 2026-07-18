@@ -1,6 +1,7 @@
 import type {
   InteractionRequestRecord,
-  RespondToInteractionRequest
+  RespondToInteractionRequest,
+  RunRecord
 } from '../../shared/contracts';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { FileTaskStore } from '../storage/FileTaskStore';
@@ -107,7 +108,7 @@ export class AgentInteractionService {
             }
           );
           this.emitUpdate(stale);
-          await this.store.appendEvent(
+          const recorded = await this.store.appendRunEventIfStatus(
             createDomainEvent({
               type: 'AGENT_MUTATION_AMBIGUOUS',
               taskId: run.taskId,
@@ -122,20 +123,23 @@ export class AgentInteractionService {
                 reason,
                 automaticResubmission: false
               }
-            })
+            }),
+            ACTIVE_RUN_STATUSES
           );
-          this.events.emit({
-            type: 'run.activity',
-            taskId: run.taskId,
-            iterationId: run.iterationId,
-            runId: run.id,
-            worktreeId: run.worktreeId,
-            payload: {
-              eventType: 'mutation/ambiguous',
-              operation: error.operation
-            },
-            at: new Date().toISOString()
-          });
+          if (recorded) {
+            this.events.emit({
+              type: 'run.activity',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              payload: {
+                eventType: 'mutation/ambiguous',
+                operation: error.operation
+              },
+              at: new Date().toISOString()
+            });
+          }
         } else {
           const pending = await this.store.transitionInteractionRequest(
             latest.id,
@@ -168,6 +172,15 @@ export class AgentInteractionService {
     });
   }
 }
+
+const ACTIVE_RUN_STATUSES: readonly RunRecord['status'][] = [
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'AWAITING_APPROVAL',
+  'AWAITING_USER_INPUT',
+  'INTERRUPTING'
+];
 
 function isNonGrantingDecision(
   action: RespondToInteractionRequest['decision']['action']

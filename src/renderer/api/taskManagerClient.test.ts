@@ -176,7 +176,7 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
     const result = {
       taskId: 'task-1',
       sessionId: 'session-1',
-      runtimeId: 'gemini-acp',
+      runtimeId: 'grok-acp',
       native: { modes: { currentModeId: 'plan' } },
       controls: {
         localSessionId: 'session-1',
@@ -198,7 +198,7 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
       api.updateAgentNativeSession({
         taskId: 'task-1',
         sessionId: 'session-1',
-        runtimeId: 'gemini-acp',
+        runtimeId: 'grok-acp',
         controlId: 'mode',
         value: 'plan',
         revision: 'revision-1'
@@ -212,7 +212,7 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
           body: JSON.stringify({
             taskId: 'task-1',
             sessionId: 'session-1',
-            runtimeId: 'gemini-acp',
+            runtimeId: 'grok-acp',
             controlId: 'mode',
             value: 'plan',
             revision: 'revision-1'

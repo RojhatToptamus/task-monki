@@ -6,8 +6,10 @@ import {
   sanitizeEnvironment
 } from '../../process/ProcessSupervisor';
 import {
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { sensitiveEnvironmentValues } from '../ProviderEnvironmentPolicy';
@@ -24,12 +26,14 @@ import { AcpRpcClient } from './AcpRpcClient';
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
 import type { ResolvedAcpRuntime } from './AcpRuntimeResolver';
 import {
+  hasSafeAcpModelIdentifiers,
   normalizeAcpOperationalModelState,
   sanitizeAcpInitializeResponse
 } from './AcpNativeRedaction';
 
 const MAX_DIAGNOSTIC_TAIL_BYTES = 64 * 1024;
 interface AcpSupervisorEvents {
+  client: [client: AcpRpcClient];
   ready: [server: AgentServerInstance, initialize: AcpInitializeResponse];
   exit: [server: AgentServerInstance, unexpected: boolean];
   protocolError: [error: Error];
@@ -52,6 +56,8 @@ export interface AcpStdioSupervisorOptions {
   shutdownGraceTimeoutMs?: number;
   shutdownKillTimeoutMs?: number;
   closeHandlingTimeoutMs?: number;
+  /** Runs after the prior close is finalized and before a replacement is spawned. */
+  beforeClientReplacementStart?(priorServerInstanceId: string): Promise<void>;
 }
 
 export interface RunningAcpAgent {
@@ -142,12 +148,20 @@ export class AcpStdioSupervisor {
     }
     if (!this.startPromise) {
       const priorChild = this.child;
+      const priorServerInstanceId = this.server?.id;
       this.startPromise = (priorChild
         ? this.waitForHandledClose(priorChild).then((handled) => {
             if (!handled) throw new Error('Timed out finalizing the prior ACP process exit.');
           })
         : Promise.resolve()
-      ).then(() => this.startInternal()).finally(() => {
+      )
+        .then(async () => {
+          if (priorServerInstanceId) {
+            await this.options.beforeClientReplacementStart?.(priorServerInstanceId);
+          }
+          return this.startInternal();
+        })
+        .finally(() => {
           this.startPromise = undefined;
         });
     }
@@ -165,7 +179,6 @@ export class AcpStdioSupervisor {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    this.client?.close('Task Monki is shutting down the ACP runtime.');
     const failures: unknown[] = [];
     const starting = this.startPromise;
     const childAtShutdown = this.child;
@@ -234,6 +247,10 @@ export class AcpStdioSupervisor {
     const profile = this.options.profile;
     const argv = [...profile.argv];
     const environment = this.options.environment ?? process.env;
+    const sensitiveValues = sensitiveEnvironmentValues(
+      profile.environmentPolicy,
+      environment
+    );
     let server: AgentServerInstance | undefined;
     let child: ChildProcessWithoutNullStreams | undefined;
     let client: AcpRpcClient | undefined;
@@ -299,7 +316,7 @@ export class AcpStdioSupervisor {
       this.closeHandlings.set(child, closeHandling);
       void promise.catch(() => undefined);
       const onClose = (exitCode: number | null, signal: NodeJS.Signals | null) => {
-        void this.handleClose(child!, client, server!, exitCode, signal).then(
+        void this.handleProcessClose(child!, client, server!, exitCode, signal).then(
           closeHandling.resolve,
           closeHandling.reject
         );
@@ -320,7 +337,7 @@ export class AcpStdioSupervisor {
           this.store.appendProtocolMessage(server!.id, direction, raw, metadata),
         server.id,
         this.options.requestTimeoutMs,
-        sensitiveEnvironmentValues(profile.environmentPolicy, environment)
+        sensitiveValues
       );
       this.client = client;
       client.events.on('protocolError', (error) => {
@@ -329,6 +346,9 @@ export class AcpStdioSupervisor {
         this.events.emit('protocolError', safeError);
         void this.terminateProtocolViolation(safeError, child!, client!, server!.id);
       });
+      // The adapter must subscribe before initialize because providers may send
+      // extension notifications in the same stdout batch as the response.
+      this.events.emit('client', client);
 
       const initialized = await client.request<unknown>('initialize', {
         protocolVersion: ACP_PROTOCOL_VERSION,
@@ -339,6 +359,11 @@ export class AcpStdioSupervisor {
           version: this.options.appVersion ?? '0.1.0'
         }
       });
+      // A provider may place extension notifications immediately after the
+      // initialize response in the same stdout batch. Dispatch that complete
+      // batch into the adapter's bounded startup buffer before publishing the
+      // initial catalog so callers cannot observe an already-stale response.
+      await client.drainInbound();
       this.assertStartupActive();
       const extension = profile.sessionModelExtension;
       const profileModelState = extension?.initializeResponseMetaField
@@ -354,8 +379,17 @@ export class AcpStdioSupervisor {
           `${profile.descriptor.displayName} did not provide the required ${extension.contractId} initialize catalog.`
         );
       }
+      if (
+        profileModelState &&
+        !hasSafeAcpModelIdentifiers(profileModelState, sensitiveValues)
+      ) {
+        throw new Error(
+          'ACP provider initialize catalog contained an identifier matching a runtime credential.'
+        );
+      }
       const initialize = sanitizeAcpInitializeResponse(
-        parseInitializeResponse(initialized.result)
+        parseInitializeResponse(initialized.result),
+        sensitiveValues
       );
       if (initialize.protocolVersion !== ACP_PROTOCOL_VERSION) {
         throw new Error(
@@ -476,8 +510,25 @@ export class AcpStdioSupervisor {
     signal: NodeJS.Signals | null
   ): Promise<void> {
     const wasCurrent = this.child === child && this.server?.id === server.id;
-    client?.close('ACP agent process exited.');
-    const unexpected = wasCurrent && !this.shuttingDown;
+    let inboundFailure: unknown;
+    if (client) {
+      try {
+        await client.drainInbound();
+      } catch (cause) {
+        inboundFailure = cause;
+      }
+    }
+    const inboundFailureReason = inboundFailure === undefined
+      ? undefined
+      : this.redactDiagnostic(
+          `ACP inbound dispatch failed while the process was closing: ${errorMessage(inboundFailure)}`
+        );
+    if (inboundFailureReason) {
+      this.latchSafetyFence(child, inboundFailureReason);
+      this.events.emit('protocolError', new Error(inboundFailureReason, { cause: inboundFailure }));
+    }
+    client?.close(inboundFailureReason ?? 'ACP agent process exited.');
+    const unexpected = wasCurrent && (!this.shuttingDown || inboundFailure !== undefined);
     const diagnosticTail = this.redactedDiagnosticTail(child);
     let emittedServer = server;
     let storageFailure: unknown;
@@ -492,7 +543,7 @@ export class AcpStdioSupervisor {
           exitCode,
           signal,
           exitReason: unexpected
-            ? `ACP agent exited unexpectedly.${diagnosticTail ? ` Diagnostics: ${diagnosticTail}` : ''}`
+            ? `${inboundFailureReason ?? 'ACP agent exited unexpectedly.'}${diagnosticTail ? ` Diagnostics: ${diagnosticTail}` : ''}`
             : undefined
         });
       }
@@ -512,7 +563,39 @@ export class AcpStdioSupervisor {
         }
       }
     }
+    if (storageFailure && inboundFailure) {
+      throw new AggregateError(
+        [inboundFailure, storageFailure],
+        'ACP process close could not be finalized safely.'
+      );
+    }
+    if (inboundFailure) throw inboundFailure;
     if (storageFailure) throw storageFailure;
+  }
+
+  private async handleProcessClose(
+    child: ChildProcessWithoutNullStreams,
+    client: AcpRpcClient | undefined,
+    server: AgentServerInstance,
+    exitCode: number | null,
+    signal: NodeJS.Signals | null
+  ): Promise<void> {
+    try {
+      // `close` observes the stdio leader, not necessarily every descendant in
+      // the detached process group. Do not release this generation for reuse
+      // until the owned tree has been reaped.
+      if (isPortableProcessTreeRunning(child)) {
+        await terminateAndConfirm(
+          child,
+          this.options.shutdownGraceTimeoutMs ?? 3_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      }
+    } catch (cause) {
+      await this.fenceUnconfirmedProcess(child, cause);
+      return;
+    }
+    await this.handleClose(child, client, server, exitCode, signal);
   }
 
   /**
@@ -640,21 +723,6 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   });
 }
 
-function waitForClose(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
-  });
-}
-
 function waitForPromise(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -676,12 +744,12 @@ async function terminateAndConfirm(
   gracefulTimeoutMs: number,
   killTimeoutMs: number
 ): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!isPortableProcessTreeRunning(child)) return;
   await terminatePortableProcessTree(child, 'SIGTERM');
-  if (await waitForClose(child, gracefulTimeoutMs)) return;
+  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
   await terminatePortableProcessTree(child, 'SIGKILL');
-  if (!(await waitForClose(child, killTimeoutMs))) {
-    throw new Error(`ACP agent process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
+  if (!(await waitForPortableProcessTreeExit(child, killTimeoutMs))) {
+    throw new Error(`ACP agent process tree ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
   }
 }
 

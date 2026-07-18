@@ -94,11 +94,11 @@ describe('AgentRuntimeRegistry', () => {
   });
 
   it('requires typed discovery and mutation for stable session controls', async () => {
-    const incomplete = runtime('gemini-acp');
-    const capabilities = unsupportedCapabilities('gemini-acp');
+    const incomplete = runtime('grok-acp');
+    const capabilities = unsupportedCapabilities('grok-acp');
     capabilities.sessionControls = { maturity: 'stable' };
     incomplete.capabilities = vi.fn().mockResolvedValue(capabilities);
-    const registry = new AgentRuntimeRegistry([incomplete], 'gemini-acp');
+    const registry = new AgentRuntimeRegistry([incomplete], 'grok-acp');
 
     const [failure] = await registry.initializeAll();
 

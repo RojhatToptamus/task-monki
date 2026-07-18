@@ -136,10 +136,9 @@ describe('GitHubService pull request creation', () => {
     const service = new GitHubService(ghPath);
 
     const sync = await service.createOrFindDraftPullRequest({
-      task: taskFixture(dir),
       worktree: worktreeFixture(dir),
       baseRef: 'main',
-      bodyFilePath: path.join(dir, 'body.md'),
+      body: '## Summary\n\nPrivate draft body.\n',
       title: 'Custom PR title'
     });
 
@@ -148,7 +147,10 @@ describe('GitHubService pull request creation', () => {
       (args) => args[0] === 'pr' && args[1] === 'create'
     );
     expect(createInvocation).toEqual(
-      expect.arrayContaining(['--title', 'Custom PR title'])
+      expect.arrayContaining(['--title', 'Custom PR title', '--body-file', '-'])
+    );
+    await expect(fs.readFile(`${logPath}.body`, 'utf8')).resolves.toBe(
+      '## Summary\n\nPrivate draft body.\n'
     );
   });
 
@@ -175,10 +177,9 @@ describe('GitHubService pull request creation', () => {
     const service = new GitHubService(ghPath);
 
     const sync = await service.createOrFindDraftPullRequest({
-      task: taskFixture(dir),
       worktree: worktreeFixture(dir),
       baseRef: 'main',
-      bodyFilePath: path.join(dir, 'body.md'),
+      body: 'unused because the PR exists',
       title: 'Edited title'
     });
 
@@ -302,10 +303,14 @@ if (args[0] === 'pr' && args[1] === 'list') {
   process.exit(0);
 }
 if (args[0] === 'pr' && args[1] === 'create') {
-  console.log('https://github.com/example/repo/pull/14');
-  process.exit(0);
-}
-if (args[0] === 'pr' && args[1] === 'view') {
+  let body = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { body += chunk; });
+  process.stdin.on('end', () => {
+    fs.writeFileSync(${JSON.stringify(`${logPath}.body`)}, body);
+    console.log('https://github.com/example/repo/pull/14');
+  });
+} else if (args[0] === 'pr' && args[1] === 'view') {
   console.log(JSON.stringify({
     number: 14,
     url: 'https://github.com/example/repo/pull/14',
@@ -319,13 +324,13 @@ if (args[0] === 'pr' && args[1] === 'view') {
     statusCheckRollup: []
   }));
   process.exit(0);
-}
-if (args[0] === 'pr' && args[1] === 'checks') {
+} else if (args[0] === 'pr' && args[1] === 'checks') {
   console.log('[]');
   process.exit(0);
+} else {
+  console.error('Unexpected gh invocation: ' + args.join(' '));
+  process.exit(1);
 }
-console.error('Unexpected gh invocation: ' + args.join(' '));
-process.exit(1);
 `
   );
 }

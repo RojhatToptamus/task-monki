@@ -93,6 +93,7 @@ describe('ACP runtime profiles', () => {
       initializeResponseMetaField: 'modelState',
       setupResponseField: 'models',
       setModelMethod: 'session/set_model',
+      setModelReasoningEffortMetaField: 'reasoningEffort',
       modelUpdateNotification: '_x.ai/models/update'
     });
     expect(GROK_ACP_PROFILE.sessionModelExtension).toBe(GROK_SESSION_MODEL_EXTENSION);

@@ -145,7 +145,7 @@ describe('ACP stable-v1 protocol codec', () => {
             description: 'Frontier model',
             _meta: {
               supportsReasoningEffort: true,
-              reasoningEffort: 'high',
+              reasoningEffort: 'low',
               reasoningEfforts: [
                 {
                   id: 'high',
@@ -171,7 +171,7 @@ describe('ACP stable-v1 protocol codec', () => {
       availableModels: [
         {
           modelId: 'grok-4.5',
-          reasoningEffort: 'high',
+          reasoningEffort: 'low',
           reasoningEfforts: [
             { id: 'high', value: 'high', default: true },
             { id: 'low', value: 'low', default: false }

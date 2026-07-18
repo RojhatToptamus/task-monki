@@ -105,7 +105,7 @@ describe('AgentInteractionService permission decisions', () => {
     const session = sessionFixture();
     let interaction = interactionFixture('/tmp/worktree/file.txt');
     interaction = { ...interaction, allowedActions: ['DECLINE'] };
-    const appendEvent = vi.fn().mockResolvedValue(undefined);
+    const appendRunEventIfStatus = vi.fn().mockResolvedValue(true);
     const store = {
       getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
       getRun: vi.fn().mockResolvedValue(run),
@@ -118,7 +118,7 @@ describe('AgentInteractionService permission decisions', () => {
         interaction = { ...interaction, ...update } as InteractionRequestRecord;
         return interaction;
       }),
-      appendEvent
+      appendRunEventIfStatus
     } as unknown as FileTaskStore;
     const adapter = {
       respondToInteraction: vi.fn().mockRejectedValue(
@@ -143,10 +143,65 @@ describe('AgentInteractionService permission decisions', () => {
     ).rejects.toThrow('reply may have reached the runtime');
 
     expect(interaction.status).toBe('STALE');
-    expect(appendEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id })
+    expect(appendRunEventIfStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'AGENT_MUTATION_AMBIGUOUS', runId: run.id }),
+      expect.arrayContaining(['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'])
     );
     expect(updates).toContain('run.activity');
+  });
+
+  it('preserves a terminal run when it wins an ambiguous interaction response race', async () => {
+    const run = runFixture();
+    const session = sessionFixture();
+    let interaction = {
+      ...interactionFixture('/tmp/worktree/file.txt'),
+      allowedActions: ['DECLINE'] as const
+    };
+    const appendRunEventIfStatus = vi.fn().mockImplementation(
+      async (_event: unknown, allowedStatuses: readonly RunRecord['status'][]) =>
+        allowedStatuses.includes(run.status)
+    );
+    const store = {
+      getInteractionRequest: vi.fn().mockImplementation(async () => interaction),
+      getRun: vi.fn().mockResolvedValue(run),
+      getAgentSession: vi.fn().mockResolvedValue(session),
+      transitionInteractionRequest: vi.fn().mockImplementation(async (
+        _id: string,
+        _status: string,
+        update: Partial<InteractionRequestRecord>
+      ) => {
+        interaction = { ...interaction, ...update } as typeof interaction;
+        return interaction;
+      }),
+      appendRunEventIfStatus
+    } as unknown as FileTaskStore;
+    const adapter = {
+      respondToInteraction: vi.fn().mockImplementation(async () => {
+        run.status = 'COMPLETED';
+        throw new AgentMutationAmbiguousError(
+          'permission/reply',
+          'reply may have reached the runtime'
+        );
+      })
+    } as unknown as AgentRuntimeAdapter;
+    const emitted: string[] = [];
+    const events = new AppEventBus();
+    events.on((event) => emitted.push(event.type));
+    const service = new AgentInteractionService(store, events, () => adapter);
+
+    await expect(
+      service.respond({
+        taskId: run.taskId,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: { interactionType: 'PERMISSION_APPROVAL', action: 'DECLINE' }
+      })
+    ).rejects.toThrow('reply may have reached the runtime');
+
+    expect(run.status).toBe('COMPLETED');
+    expect(interaction.status).toBe('STALE');
+    expect(appendRunEventIfStatus).toHaveBeenCalledOnce();
+    expect(emitted).not.toContain('run.activity');
   });
 
   it('never sends a positive decision after the run has started interrupting', async () => {

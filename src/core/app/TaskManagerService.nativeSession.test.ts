@@ -48,7 +48,7 @@ describe('TaskManagerService provider-native session configuration', () => {
     }));
     adapter.applySessionControl = applySessionControl;
     const service = new TaskManagerService(store, directory, undefined, {
-      agentProviderAdapter: adapter
+      agentRuntimeAdapters: [adapter]
     });
     const settings = {
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
@@ -230,7 +230,7 @@ describe('TaskManagerService provider-native session configuration', () => {
       acpCapabilities(TEST_ACP_PROFILE)
     );
     const browserService = new TaskManagerService(store, directory, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false
     });
     await expect(

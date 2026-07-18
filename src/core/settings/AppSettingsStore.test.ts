@@ -85,7 +85,7 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('preserves explicit mascot visibility and defaults legacy settings to enabled', async () => {
+  it('preserves explicit mascot visibility and defaults it to enabled', async () => {
     expect(normalizeAppSettings({}).showMascot).toBe(true);
     expect(normalizeAppSettings({ showMascot: false }).showMascot).toBe(false);
 
@@ -110,30 +110,6 @@ describe('AppSettingsStore', () => {
     expect(settings.repositories).toEqual({
       knownPaths: ['/repos/current'],
       selectedPath: '/repos/current'
-    });
-  });
-
-  it('infers first-launch setup as completed for legacy configs that already have repositories', () => {
-    expect(
-      normalizeAppSettings({
-        repositories: {
-          knownPaths: ['/repos/current'],
-          selectedPath: '/repos/current'
-        }
-      }).firstLaunchSetupCompleted
-    ).toBe(true);
-  });
-
-  it('infers first-launch setup for memory stores initialized with legacy repositories', async () => {
-    const store = new MemoryAppSettingsStore({
-      repositories: {
-        knownPaths: ['/repos/current'],
-        selectedPath: '/repos/current'
-      }
-    });
-
-    await expect(store.get()).resolves.toMatchObject({
-      firstLaunchSetupCompleted: true
     });
   });
 
@@ -165,112 +141,27 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('scopes legacy refinement and review models to Codex instead of a later default runtime', () => {
-    expect(
-      normalizeAppSettings({
-        defaultRuntimeId: 'opencode',
-        promptRefinementModel: 'gpt-refine',
-        reviewModel: 'gpt-review'
-      })
-    ).toMatchObject({
-      defaultRuntimeId: 'opencode',
-      promptRefinementRuntimeId: 'codex',
-      promptRefinementModel: 'gpt-refine',
-      reviewRuntimeId: 'codex',
-      reviewModel: 'gpt-review'
-    });
-  });
+  it.each([5, TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION + 1])(
+    'rejects and preserves unsupported app settings schema %s',
+    async (schemaVersion) => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-settings-future-')
+      );
+      const settingsPath = path.join(dir, 'app-settings.json');
+      const raw = `${JSON.stringify({
+        schemaVersion,
+        defaultRuntimeId: 'future-runtime',
+        futureProviderSettings: { retained: true }
+      }, null, 2)}\n`;
+      await fs.writeFile(settingsPath, raw, 'utf8');
 
-  it('migrates Gemini ACP selections without treating Antigravity as protocol-compatible', () => {
-    expect(
-      normalizeAppSettings({
-        schemaVersion: 5,
-        defaultRuntimeId: 'gemini-acp',
-        defaultModel: 'gemini-default',
-        defaultModelProvider: 'google',
-        defaultReasoningEffort: 'high',
-        promptRefinementRuntimeId: 'gemini-acp',
-        promptRefinementModel: 'gemini-refine',
-        promptRefinementModelProvider: 'google',
-        reviewRuntimeId: 'gemini-acp',
-        reviewModel: 'gemini-review',
-        reviewModelProvider: 'google',
-        reviewReasoningEffort: 'high',
-        runtimeExecutablePaths: {
-          'gemini-acp': '/opt/gemini',
-          opencode: '/opt/opencode'
-        }
-      })
-    ).toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      defaultRuntimeId: 'antigravity',
-      defaultModel: undefined,
-      defaultModelProvider: undefined,
-      defaultReasoningEffort: undefined,
-      promptRefinementRuntimeId: 'codex',
-      promptRefinementModel: undefined,
-      promptRefinementModelProvider: undefined,
-      reviewRuntimeId: 'codex',
-      reviewModel: undefined,
-      reviewModelProvider: undefined,
-      reviewReasoningEffort: undefined,
-      runtimeExecutablePaths: { opencode: '/opt/opencode' }
-    });
-  });
-
-  it('persists the Gemini ACP migration during the first successful load', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-migration-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    await fs.writeFile(
-      settingsPath,
-      JSON.stringify({
-        schemaVersion: 5,
-        defaultRuntimeId: 'gemini-acp',
-        defaultModel: 'gemini-default',
-        runtimeExecutablePaths: {
-          'gemini-acp': '/opt/gemini',
-          opencode: '/opt/opencode'
-        }
-      }),
-      'utf8'
-    );
-
-    const loaded = await new AppSettingsStore(settingsPath).get();
-    const persisted = JSON.parse(await fs.readFile(settingsPath, 'utf8')) as Record<
-      string,
-      unknown
-    >;
-
-    expect(loaded).toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      defaultRuntimeId: 'antigravity',
-      defaultModel: undefined,
-      runtimeExecutablePaths: { opencode: '/opt/opencode' }
-    });
-    expect(persisted).toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      defaultRuntimeId: 'antigravity',
-      runtimeExecutablePaths: { opencode: '/opt/opencode' }
-    });
-    expect(JSON.stringify(persisted)).not.toContain('gemini-acp');
-  });
-
-  it('rejects and preserves settings written by a newer application schema', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-future-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const raw = `${JSON.stringify({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION + 1,
-      defaultRuntimeId: 'future-runtime',
-      futureProviderSettings: { retained: true }
-    }, null, 2)}\n`;
-    await fs.writeFile(settingsPath, raw, 'utf8');
-
-    await expect(new AppSettingsStore(settingsPath).get()).rejects.toThrow(
-      'newer than supported'
-    );
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
-    await expect(fs.readdir(dir)).resolves.toEqual(['app-settings.json']);
-  });
+      await expect(new AppSettingsStore(settingsPath).get()).rejects.toThrow(
+        'accepts only schema'
+      );
+      await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
+      await expect(fs.readdir(dir)).resolves.toEqual(['app-settings.json']);
+    }
+  );
 
   it('moves invalid JSON aside and recreates normalized defaults', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-invalid-'));

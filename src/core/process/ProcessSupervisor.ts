@@ -1,8 +1,10 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from './portableChildProcess';
 
 export interface ProcessSpec {
@@ -24,6 +26,11 @@ export interface ProcessTerminal {
   signal: NodeJS.Signals | null;
 }
 
+export interface ProcessTerminationUnconfirmed {
+  error: Error;
+  leaderExit: ProcessTerminal;
+}
+
 export interface SupervisedProcess {
   pid?: number;
   events: EventEmitter<{
@@ -32,6 +39,7 @@ export interface SupervisedProcess {
     stderr: [Buffer];
     close: [ProcessTerminal];
     error: [Error];
+    terminationUnconfirmed: [ProcessTerminationUnconfirmed];
   }>;
   cancel(): Promise<void>;
 }
@@ -44,6 +52,7 @@ export class ProcessSupervisor {
       stderr: [Buffer];
       close: [ProcessTerminal];
       error: [Error];
+      terminationUnconfirmed: [ProcessTerminationUnconfirmed];
     }>();
 
     const child = spawnPortable(spec.executable, spec.argv, {
@@ -64,37 +73,68 @@ export class ProcessSupervisor {
     child.stdout.on('data', (chunk: Buffer) => events.emit('stdout', chunk));
     child.stderr.on('data', (chunk: Buffer) => events.emit('stderr', chunk));
     child.once('error', (error) => events.emit('error', error));
-    child.once('close', (exitCode, signal) => events.emit('close', { exitCode, signal }));
+    let treeExit: Promise<void> | undefined;
+    const ensureTreeExit = () => {
+      treeExit ??= cancelProcess(child);
+      return treeExit;
+    };
+    let resolveTerminal!: () => void;
+    let rejectTerminal!: (cause: unknown) => void;
+    const terminal = new Promise<void>((resolve, reject) => {
+      resolveTerminal = resolve;
+      rejectTerminal = reject;
+    });
+    void terminal.catch(() => undefined);
+    child.once('close', (exitCode, signal) => {
+      // A detached POSIX leader can exit while descendants continue running in
+      // its process group. Reap that owned tree before publishing the terminal
+      // event that allows runtime supervisors to launch a replacement.
+      void ensureTreeExit().then(
+        () => {
+          resolveTerminal();
+          events.emit('close', { exitCode, signal });
+        },
+        (error: unknown) => {
+          const failure = toError(error);
+          rejectTerminal(failure);
+          events.emit('terminationUnconfirmed', {
+            error: failure,
+            leaderExit: { exitCode, signal }
+          });
+        }
+      );
+    });
 
     return {
       get pid() {
         return child.pid;
       },
       events,
-      cancel: () => cancelProcess(child)
+      cancel: async () => {
+        await ensureTreeExit();
+        await terminal;
+      }
     };
   }
 }
 
 async function cancelProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
+  if (!isPortableProcessTreeRunning(child)) return;
 
   await signalChild(child, 'SIGINT');
-  if (await waitForExit(child, 3000)) {
+  if (await waitForPortableProcessTreeExit(child, 3000)) {
     return;
   }
 
   await signalChild(child, 'SIGTERM');
-  if (await waitForExit(child, 3000)) {
+  if (await waitForPortableProcessTreeExit(child, 3000)) {
     return;
   }
 
   await signalChild(child, 'SIGKILL');
-  if (!(await waitForExit(child, 3000))) {
+  if (!(await waitForPortableProcessTreeExit(child, 3000))) {
     throw new Error(
-      `Process ${child.pid ?? '<unknown>'} did not exit after SIGINT, SIGTERM, and SIGKILL.`
+      `Process tree ${child.pid ?? '<unknown>'} did not exit after SIGINT, SIGTERM, and SIGKILL.`
     );
   }
 }
@@ -104,10 +144,6 @@ async function signalChild(
   signal: NodeJS.Signals
 ): Promise<void> {
   try {
-    if (process.platform !== 'win32' && child.pid) {
-      process.kill(-child.pid, signal);
-      return;
-    }
     await terminatePortableProcessTree(child, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
@@ -116,29 +152,8 @@ async function signalChild(
   }
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
-  }
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve(false);
-    }, timeoutMs);
-
-    const onClose = () => {
-      cleanup();
-      resolve(true);
-    };
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      child.off('close', onClose);
-    };
-
-    child.once('close', onClose);
-  });
+function toError(cause: unknown): Error {
+  return cause instanceof Error ? cause : new Error(String(cause));
 }
 
 export function sanitizeEnvironment(

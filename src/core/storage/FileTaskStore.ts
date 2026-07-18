@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -71,12 +72,14 @@ import {
   parseCodexReviewResult
 } from '../review/CodexReviewContract';
 import {
+  AttachmentAdoptionAmbiguousError,
   AttachmentFileStore,
   AttachmentStoreError,
   validateTaskAttachmentRecords,
   type PreparedAttachmentDraft,
   type VerifiedTaskAttachment
 } from './AttachmentFileStore';
+import { validateCurrentStoreRecords } from './currentStoreValidation';
 
 export interface CreateAgentSessionInput {
   task: Task;
@@ -173,6 +176,81 @@ interface PrSyncInput {
   merge: Omit<MergeSnapshotRecord, 'id' | 'observedAt'>;
 }
 
+type RunUpdate = Partial<
+  Pick<
+    RunRecord,
+    | 'providerTurnId'
+    | 'serverInstanceId'
+    | 'status'
+    | 'observedSettings'
+    | 'recoveryState'
+    | 'afterGitSnapshotId'
+    | 'terminalReason'
+    | 'providerTerminalSource'
+    | 'providerTerminalRawMessage'
+    | 'lastEventAt'
+    | 'endedAt'
+    | 'finalArtifactId'
+    | 'finalMessage'
+    | 'attachmentSubmissions'
+  >
+>;
+
+type AgentServerUpdate = Partial<
+  Pick<
+    AgentServerInstance,
+    | 'status'
+    | 'pid'
+    | 'runtimeVersion'
+    | 'schemaVersion'
+    | 'schemaHash'
+    | 'initializedAt'
+    | 'lastHealthAt'
+    | 'disconnectedAt'
+    | 'exitedAt'
+    | 'exitCode'
+    | 'signal'
+    | 'exitReason'
+  >
+>;
+
+type AgentSessionUpdate = Partial<
+  Pick<
+    AgentSessionRecord,
+    | 'providerSessionId'
+    | 'providerSessionTreeId'
+    | 'parentSessionId'
+    | 'forkedFromSessionId'
+    | 'providerParentSessionId'
+    | 'providerForkedFromSessionId'
+    | 'parentRunId'
+    | 'relationshipState'
+    | 'relationshipDetail'
+    | 'providerNickname'
+    | 'providerRole'
+    | 'delegatedPrompt'
+    | 'agentPath'
+    | 'subagentStatus'
+    | 'status'
+    | 'materialized'
+    | 'observedSettings'
+    | 'requestedSettings'
+    | 'lastAttachedAt'
+  >
+>;
+
+type InteractionRequestUpdate = Partial<
+  Pick<
+    InteractionRequestRecord,
+    | 'status'
+    | 'decision'
+    | 'responseRawMessage'
+    | 'resolution'
+    | 'respondedAt'
+    | 'resolvedAt'
+  >
+>;
+
 function completionPolicyAfterPullRequestSync(
   task: Task,
   pullRequestStatus: PullRequestSnapshotRecord['status']
@@ -225,6 +303,8 @@ const CREATE_TASK_COMPLETION_POLICIES: Task['completionPolicy'][] = [
   'MANUAL'
 ];
 const MAX_STORE_FILE_BYTES = 256 * 1024 * 1024;
+const STORE_LEASE_FILE = '.task-monki-owner.lock';
+const STORE_LEASE_MAX_BYTES = 4 * 1024;
 const ARTIFACT_KINDS: readonly ArtifactKind[] = [
   'agent-prompt',
   'agent-output',
@@ -234,6 +314,15 @@ const ARTIFACT_KINDS: readonly ArtifactKind[] = [
   'git-snapshot',
   'pr-body'
 ];
+const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
+  'agent-prompt': 8 * 1024 * 1024,
+  'agent-output': 32 * 1024 * 1024,
+  'agent-diagnostics': 16 * 1024 * 1024,
+  'agent-final': 8 * 1024 * 1024,
+  diff: 32 * 1024 * 1024,
+  'git-snapshot': 8 * 1024 * 1024,
+  'pr-body': 256 * 1024
+};
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const UUID_FILE_SEGMENT_PATTERN = new RegExp(`^${UUID_FILE_SEGMENT}$`, 'u');
@@ -384,7 +473,6 @@ function isCanonicalStoreTimestamp(value: unknown): value is string {
 
 type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
   schemaVersion?: unknown;
-  testRuns?: unknown;
 };
 
 export type TaskCreationRequestErrorCode =
@@ -403,24 +491,50 @@ export class TaskCreationRequestError extends Error {
   }
 }
 
-class StorePublishedError extends Error {
-  readonly name = 'StorePublishedError';
+/**
+ * The artifact bytes may have been appended even though their metadata could
+ * not be published or rolled back. Callers must not retry the same chunk.
+ */
+export class ArtifactAppendAmbiguousError extends AggregateError {
+  readonly name = 'ArtifactAppendAmbiguousError';
 
-  constructor(readonly cause: unknown) {
-    super('Task store snapshot was published but its directory sync did not complete.');
+  constructor(
+    readonly artifactId: string,
+    persistenceError: unknown,
+    rollbackError: unknown
+  ) {
+    super(
+      [persistenceError, rollbackError],
+      'Artifact append failed and its durable file state could not be proven.'
+    );
   }
 }
 
+interface StoreOwnershipLease {
+  token: string;
+  pid: number;
+  acquiredAt: string;
+}
+
+type StoreLifecycle = 'NEW' | 'OPENING' | 'OPEN' | 'CLOSING' | 'CLOSED';
+
 export class FileTaskStore {
   private readonly storePath: string;
+  private readonly leasePath: string;
   private readonly artifactsDir: string;
   private readonly protocolJournal: AgentProtocolJournal;
   private readonly attachmentFiles: AttachmentFileStore;
   private state: StoreState = createEmptyState();
+  private publishedState: StoreState = this.state;
   private loaded = false;
-  private writeQueue: Promise<unknown> = Promise.resolve();
-  private taskCreationQueue: Promise<unknown> = Promise.resolve();
-  private finalArtifactQueue: Promise<unknown> = Promise.resolve();
+  private lifecycle: StoreLifecycle = 'NEW';
+  private initialization?: Promise<void>;
+  private closePromise?: Promise<void>;
+  private lease?: StoreOwnershipLease;
+  private mutationQueue: Promise<unknown> = Promise.resolve();
+  private readonly mutationContext = new AsyncLocalStorage<boolean>();
+  private readonly ownedIoContext = new AsyncLocalStorage<boolean>();
+  private readonly activeOwnedIo = new Set<Promise<unknown>>();
   private readonly maxUnreferencedTerminalAgentServers: number;
 
   constructor(
@@ -441,82 +555,174 @@ export class FileTaskStore {
     this.maxUnreferencedTerminalAgentServers =
       maxUnreferencedTerminalAgentServers;
     this.storePath = path.join(baseDir, 'store.json');
+    this.leasePath = path.join(baseDir, STORE_LEASE_FILE);
     this.artifactsDir = path.join(baseDir, 'artifacts');
     this.protocolJournal = new AgentProtocolJournal(path.join(baseDir, 'protocol-journals'));
     this.attachmentFiles = new AttachmentFileStore(baseDir);
   }
 
   async init(): Promise<void> {
-    if (this.loaded) {
+    const admitted = this.mutationContext.getStore() || this.ownedIoContext.getStore();
+    if ((this.lifecycle === 'CLOSING' || this.lifecycle === 'CLOSED') && !admitted) {
+      throw new Error('Task store is closed.');
+    }
+    const initialization = this.ensureInitialized();
+    if (admitted) {
+      await initialization;
       return;
     }
+    const admittedMutations = this.mutationQueue.catch(() => undefined);
+    await initialization;
+    await admittedMutations;
+  }
 
+  private ensureInitialized(): Promise<void> {
+    if (this.loaded) return Promise.resolve();
+    if (this.initialization) return this.initialization;
+    this.lifecycle = 'OPENING';
+    const initialization = (async () => {
+      try {
+        await this.initialize();
+        if (this.lifecycle === 'OPENING') this.lifecycle = 'OPEN';
+      } catch (error) {
+        if (this.lifecycle === 'OPENING') this.lifecycle = 'NEW';
+        throw error;
+      } finally {
+        this.initialization = undefined;
+      }
+    })();
+    this.initialization = initialization;
+    return initialization;
+  }
+
+  private async initialize(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
     const baseEntry = await fs.lstat(this.baseDir);
     if (!baseEntry.isDirectory() || baseEntry.isSymbolicLink()) {
       throw new Error('Task store root failed its directory integrity check.');
     }
-    await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
-    await this.attachmentFiles.init();
-    await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
+    this.lease = await acquireStoreOwnershipLease(this.baseDir, this.leasePath);
     try {
-      const raw = await readPrivateStoreFile(this.storePath);
-      const persisted = JSON.parse(raw) as PersistedState;
-      const migrated = migratePersistedState(persisted);
-      const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
-      this.state = normalized.state;
-      const attachments = await this.attachmentFiles.migrateLegacyRecords(
-        this.state.attachments
-      );
-      const attachmentsMigrated = attachments.some(
-        (attachment, index) =>
-          attachment.storageKey !== this.state.attachments[index]?.storageKey
-      );
-      if (attachmentsMigrated) {
-        this.state = { ...this.state, attachments };
+      await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
+      await this.attachmentFiles.init();
+      await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
+      let raw: string | undefined;
+      try {
+        raw = await readPrivateStoreFile(this.storePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
       }
-      await this.attachmentFiles.reconcile(this.state.attachments);
-      await this.reconcileArtifacts();
-      const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
-      if (
-        migrated.changed ||
-        normalized.changed ||
-        attachmentsMigrated ||
-        prunedServerIds.length > 0
-      ) {
+      if (raw === undefined) {
+        this.state = createEmptyState();
+        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.reconcileArtifacts();
         await this.persist();
+      } else {
+        const persisted = JSON.parse(raw) as PersistedState;
+        const normalized = normalizeLoadedState(requireCurrentState(persisted));
+        this.state = normalized.state;
+        await this.attachmentFiles.reconcile(this.state.attachments);
+        await this.reconcileArtifacts();
+        const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
+        if (
+          normalized.changed ||
+          prunedServerIds.length > 0
+        ) {
+          await this.persist();
+        }
       }
-      if (
-        persisted.schemaVersion === 10 ||
-        persisted.schemaVersion === 11 ||
-        persisted.schemaVersion === TASK_STORE_SCHEMA_VERSION
-      ) {
-        await this.attachmentFiles.cleanupLegacyStorage();
-      }
+      await this.protocolJournal.reconcileServers(
+        this.state.agentServers.map((server) => server.id)
+      );
+      this.publishedState = this.state;
+      this.loaded = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-      this.state = createEmptyState();
-      await this.attachmentFiles.reconcile(this.state.attachments);
-      await this.reconcileArtifacts();
-      await this.persist();
+      await this.releaseLease().catch(() => undefined);
+      throw error;
     }
-    await this.protocolJournal.reconcileServers(
-      this.state.agentServers.map((server) => server.id)
-    );
-    this.loaded = true;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.lifecycle = 'CLOSING';
+    this.closePromise = this.closeOwnedResources();
+    return this.closePromise;
+  }
+
+  private async closeOwnedResources(): Promise<void> {
+    await this.initialization?.catch(() => undefined);
+    await this.mutationQueue.catch(() => undefined);
+    await Promise.allSettled([...this.activeOwnedIo]);
+    const closeResults = await Promise.allSettled([
+      this.attachmentFiles.close(),
+      this.protocolJournal.close()
+    ]);
+    const failures = closeResults.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    );
+    this.loaded = false;
     try {
-      await this.taskCreationQueue.catch(() => undefined);
-      await this.finalArtifactQueue.catch(() => undefined);
-      await this.writeQueue.catch(() => undefined);
-      await this.protocolJournal.close();
+      await this.releaseLease();
+    } catch (error) {
+      failures.push(error);
     } finally {
-      this.loaded = false;
+      this.lifecycle = 'CLOSED';
     }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Task store shutdown did not complete cleanly.');
+    }
+  }
+
+  private async releaseLease(): Promise<void> {
+    if (!this.lease) return;
+    const lease = this.lease;
+    this.lease = undefined;
+    await releaseStoreOwnershipLease(this.baseDir, this.leasePath, lease);
+  }
+
+  private serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.mutationContext.getStore()) return operation();
+    if (this.lifecycle === 'CLOSING' || this.lifecycle === 'CLOSED') {
+      return Promise.reject(new Error('Task store is closed.'));
+    }
+    const initialization = this.ensureInitialized();
+    const queued = this.mutationQueue.catch(() => undefined).then(() =>
+      this.mutationContext.run(true, async () => {
+        await initialization;
+        try {
+          return await operation();
+        } catch (error) {
+          this.state = this.publishedState;
+          throw error;
+        }
+      })
+    );
+    this.mutationQueue = queued.catch(() => undefined);
+    return queued;
+  }
+
+  private withOwnedIo<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.ownedIoContext.getStore()) return operation();
+    if (this.lifecycle === 'CLOSING' || this.lifecycle === 'CLOSED') {
+      return Promise.reject(new Error('Task store is closed.'));
+    }
+    const initialization = this.ensureInitialized();
+    const admittedMutations = this.mutationContext.getStore()
+      ? Promise.resolve()
+      : this.mutationQueue.catch(() => undefined);
+    const running = this.ownedIoContext.run(true, async () => {
+      await initialization;
+      await admittedMutations;
+      return operation();
+    });
+    this.activeOwnedIo.add(running);
+    void running.then(
+      () => this.activeOwnedIo.delete(running),
+      () => this.activeOwnedIo.delete(running)
+    );
+    return running;
   }
 
   private async reconcileArtifacts(): Promise<void> {
@@ -551,7 +757,8 @@ export class FileTaskStore {
         if (!stat.isFile()) {
           throw new Error('Stored task artifact path is not a regular file.');
         }
-        await secureArtifactFile(entryPath);
+        await reconcileArtifactFile(entryPath, expected.byteCount);
+        expectedByName.delete(entry.name);
         continue;
       }
       if (!MANAGED_ARTIFACT_FILE_PATTERN.test(entry.name)) {
@@ -566,6 +773,9 @@ export class FileTaskStore {
       await fs.unlink(entryPath);
       removedOrphans += 1;
     }
+    if (expectedByName.size > 0) {
+      throw new Error('A referenced task artifact file is missing.');
+    }
     if (removedOrphans > 0) await syncDirectoryIfSupported(this.artifactsDir);
   }
 
@@ -574,24 +784,20 @@ export class FileTaskStore {
     return clone(this.state);
   }
 
-  async createAttachmentDraft(): Promise<AttachmentDraftSnapshot> {
-    await this.init();
-    return this.attachmentFiles.createDraft();
+  createAttachmentDraft(): Promise<AttachmentDraftSnapshot> {
+    return this.withOwnedIo(() => this.attachmentFiles.createDraft());
   }
 
-  async stageTaskAttachment(input: StageAttachmentBytesInput): Promise<StagedAttachmentRecord> {
-    await this.init();
-    return this.attachmentFiles.stageBytes(input);
+  stageTaskAttachment(input: StageAttachmentBytesInput): Promise<StagedAttachmentRecord> {
+    return this.withOwnedIo(() => this.attachmentFiles.stageBytes(input));
   }
 
-  async listAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
-    await this.init();
-    return this.attachmentFiles.listDraft(draftId);
+  listAttachmentDraft(draftId: string): Promise<AttachmentDraftSnapshot> {
+    return this.withOwnedIo(() => this.attachmentFiles.listDraft(draftId));
   }
 
-  async discardAttachmentDraft(draftId: string): Promise<void> {
-    await this.init();
-    return this.attachmentFiles.discardDraft(draftId);
+  discardAttachmentDraft(draftId: string): Promise<void> {
+    return this.withOwnedIo(() => this.attachmentFiles.discardDraft(draftId));
   }
 
   async getTaskAttachments(taskId: string): Promise<TaskAttachmentRecord[]> {
@@ -603,38 +809,51 @@ export class FileTaskStore {
     );
   }
 
-  async verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
-    const records = await this.getTaskAttachments(taskId);
-    return records.length === 0 ? [] : this.attachmentFiles.verifyTask(taskId, records);
+  verifyTaskAttachments(taskId: string): Promise<VerifiedTaskAttachment[]> {
+    return this.withOwnedIo(async () => {
+      const records = await this.getTaskAttachments(taskId);
+      return records.length === 0 ? [] : this.attachmentFiles.verifyTask(taskId, records);
+    });
   }
 
   /** Returns verified immutable task-owned files for provider delivery. */
-  async prepareRunAttachments(
+  prepareRunAttachments(
     runId: string,
     taskId: string
   ): Promise<VerifiedTaskAttachment[]> {
-    const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-    const attachments = await this.verifyTaskAttachments(taskId);
-    assertAttachmentsOutsideWorktree(attachments, worktreePath);
-    return attachments;
+    return this.withOwnedIo(async () => {
+      const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
+      const attachments = await this.verifyTaskAttachments(taskId);
+      assertAttachmentsOutsideWorktree(attachments, worktreePath);
+      return attachments;
+    });
   }
 
   /** Revalidates task-owned files immediately before provider submission. */
-  async verifyRunAttachments(
+  verifyRunAttachments(
     runId: string,
     taskId: string
   ): Promise<VerifiedTaskAttachment[]> {
-    const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
-    const attachments = await this.verifyTaskAttachments(taskId);
-    assertAttachmentsOutsideWorktree(attachments, worktreePath);
-    return attachments;
+    return this.withOwnedIo(async () => {
+      const worktreePath = await this.requireRunAttachmentWorktree(runId, taskId);
+      const attachments = await this.verifyTaskAttachments(taskId);
+      assertAttachmentsOutsideWorktree(attachments, worktreePath);
+      return attachments;
+    });
   }
 
   /**
    * Crash recovery verifies attachments for active runs without creating a
    * second filesystem representation.
    */
-  async reconcileRunAttachments(): Promise<{
+  reconcileRunAttachments(): Promise<{
+    preparedRunIds: string[];
+    failedRunIds: string[];
+  }> {
+    return this.withOwnedIo(() => this.reconcileRunAttachmentsOwned());
+  }
+
+  private async reconcileRunAttachmentsOwned(): Promise<{
     preparedRunIds: string[];
     failedRunIds: string[];
   }> {
@@ -681,20 +900,22 @@ export class FileTaskStore {
     return worktree.worktreePath;
   }
 
-  async readTaskAttachment(attachmentId: string): Promise<AttachmentContent> {
-    await this.init();
-    const record = this.state.attachments.find((attachment) => attachment.id === attachmentId);
-    if (!record) {
-      throw new AttachmentStoreError('ATTACHMENT_NOT_FOUND', 'Attachment not found.', 404);
-    }
-    const stored = await this.attachmentFiles.readTask(record);
-    return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
+  readTaskAttachment(attachmentId: string): Promise<AttachmentContent> {
+    return this.withOwnedIo(async () => {
+      const record = this.state.attachments.find((attachment) => attachment.id === attachmentId);
+      if (!record) {
+        throw new AttachmentStoreError('ATTACHMENT_NOT_FOUND', 'Attachment not found.', 404);
+      }
+      const stored = await this.attachmentFiles.readTask(record);
+      return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
+    });
   }
 
-  async readDraftAttachment(draftId: string, attachmentId: string): Promise<AttachmentContent> {
-    await this.init();
-    const stored = await this.attachmentFiles.readDraft(draftId, attachmentId);
-    return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
+  readDraftAttachment(draftId: string, attachmentId: string): Promise<AttachmentContent> {
+    return this.withOwnedIo(async () => {
+      const stored = await this.attachmentFiles.readDraft(draftId, attachmentId);
+      return { ...stored, bytes: exactArrayBuffer(stored.bytes) };
+    });
   }
 
   async getTask(taskId: string): Promise<Task | undefined> {
@@ -739,25 +960,14 @@ export class FileTaskStore {
 
   async updateRun(
     runId: string,
-    update: Partial<
-      Pick<
-        RunRecord,
-        | 'providerTurnId'
-        | 'serverInstanceId'
-        | 'status'
-        | 'observedSettings'
-        | 'recoveryState'
-        | 'afterGitSnapshotId'
-        | 'terminalReason'
-        | 'providerTerminalSource'
-        | 'providerTerminalRawMessage'
-        | 'lastEventAt'
-        | 'endedAt'
-        | 'finalArtifactId'
-        | 'finalMessage'
-        | 'attachmentSubmissions'
-      >
-    >
+    update: RunUpdate
+  ): Promise<RunRecord> {
+    return this.serializeMutation(() => this.updateRunInternal(runId, update));
+  }
+
+  private async updateRunInternal(
+    runId: string,
+    update: RunUpdate
   ): Promise<RunRecord> {
     await this.init();
     const existing = this.state.runs.find((run) => run.id === runId);
@@ -790,7 +1000,7 @@ export class FileTaskStore {
       ...this.state,
       runs: this.state.runs.map((run) => (run.id === runId ? stored : run))
     };
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
@@ -939,11 +1149,11 @@ export class FileTaskStore {
   }
 
   async createTask(input: CreateTaskStoreInput): Promise<Task> {
-    return this.enqueueTaskCreation(() => this.createTaskRecord(input, 'ui'));
+    return this.serializeMutation(() => this.createTaskRecord(input, 'ui'));
   }
 
   async createForkedAlternativeTask(input: CreateForkedAlternativeTaskInput): Promise<Task> {
-    return this.enqueueTaskCreation(() =>
+    return this.serializeMutation(() =>
       this.createTaskRecord(input, 'ui', {
         sourceTaskId: input.sourceTaskId,
         sourceRunId: input.sourceRunId
@@ -958,11 +1168,14 @@ export class FileTaskStore {
    */
   async resolveTaskCreationRetry(input: CreateTaskRequest): Promise<Task | undefined> {
     await this.init();
-    await this.taskCreationQueue.catch(() => undefined);
     return clone(this.resolveTaskCreationRetryFromState(input));
   }
 
   async deleteTask(taskId: string): Promise<void> {
+    return this.serializeMutation(() => this.deleteTaskInternal(taskId));
+  }
+
+  private async deleteTaskInternal(taskId: string): Promise<void> {
     await this.init();
 
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
@@ -1067,22 +1280,19 @@ export class FileTaskStore {
       };
       prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
 
-      await this.persistQueued();
+      publishedWithoutDirectorySync = !(await this.persistSnapshot());
     } catch (error) {
-      if (error instanceof StorePublishedError) {
-        publishedWithoutDirectorySync = true;
-      } else {
-        this.state = previousState;
-        throw error;
-      }
+      this.state = previousState;
+      throw error;
     }
-    // Blobs are immutable and shared by metadata reference. Once deletion is
-    // durable, unreferenced objects can be collected without a trash/restore
-    // transaction; startup reconciliation retries any failed cleanup.
-    await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
     if (!publishedWithoutDirectorySync) {
+      // Files are removed only after the parent-directory sync proves the
+      // record deletion durable. Startup retries cleanup after later failures.
+      await this.attachmentFiles.discardTaskFiles(taskId).catch(() => undefined);
       await this.cleanupPrunedServerJournals(prunedServerIds);
-      await Promise.all(artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path)));
+      await Promise.allSettled(
+        artifactsToDelete.map((artifact) => unlinkIfExists(artifact.path))
+      );
     }
   }
 
@@ -1182,7 +1392,7 @@ export class FileTaskStore {
               ? {
                   ...existing,
                   forkedAlternativeTaskIds: uniqueIds([
-                    ...(existing.forkedAlternativeTaskIds ?? []),
+                    ...existing.forkedAlternativeTaskIds,
                     task.id
                   ]),
                   updatedAt: now
@@ -1225,32 +1435,28 @@ export class FileTaskStore {
         );
       }
 
-      await this.persistQueued();
+      publishedWithoutDirectorySync = !(await this.persistSnapshot());
     } catch (error) {
-      if (error instanceof StorePublishedError) {
-        // The snapshot is already visible. Keep the draft until a later
-        // startup can compare it with the durable attachment records.
-        publishedWithoutDirectorySync = true;
-      } else {
-        this.state = previousState;
-        if (preparedDraft) {
-          await this.attachmentFiles.rollbackDraftForTask(preparedDraft).catch(
-            () => undefined
-          );
-        } else if (fork && attachmentRecords.length > 0) {
-          await this.attachmentFiles.discardTaskFiles(task.id).catch(() => undefined);
-        }
-        throw error;
-      }
-    }
-    if (!publishedWithoutDirectorySync) {
+      this.state = previousState;
       if (preparedDraft) {
-        await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(() => undefined);
-      } else if (attachmentRecords.length > 0) {
-        await this.attachmentFiles.syncTaskRecords(this.state.attachments).catch(
-          () => undefined
-        );
+        try {
+          await this.attachmentFiles.rollbackDraftForTask(preparedDraft);
+        } catch (rollbackError) {
+          throw new AttachmentAdoptionAmbiguousError(
+            preparedDraft,
+            error,
+            rollbackError
+          );
+        }
+      } else if (fork && attachmentRecords.length > 0) {
+        await this.attachmentFiles.discardTaskFiles(task.id).catch(() => undefined);
       }
+      throw error;
+    }
+    if (!publishedWithoutDirectorySync && preparedDraft) {
+      await this.attachmentFiles.finalizeDraftForTask(preparedDraft).catch(
+        () => undefined
+      );
     }
     return clone(task);
   }
@@ -1278,13 +1484,13 @@ export class FileTaskStore {
     return existing;
   }
 
-  private async enqueueTaskCreation<T>(operation: () => Promise<T>): Promise<T> {
-    const queued = this.taskCreationQueue.catch(() => undefined).then(operation);
-    this.taskCreationQueue = queued.catch(() => undefined);
-    return queued;
+  async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
+    return this.serializeMutation(() => this.createAgentServerInternal(input));
   }
 
-  async createAgentServer(input: CreateAgentServerInput): Promise<AgentServerInstance> {
+  private async createAgentServerInternal(
+    input: CreateAgentServerInput
+  ): Promise<AgentServerInstance> {
     await this.init();
     if (!isRuntimeId(input.runtimeId)) {
       throw new Error('Agent server runtime id is invalid.');
@@ -1312,29 +1518,22 @@ export class FileTaskStore {
       ...this.state,
       agentServers: [server, ...this.state.agentServers]
     };
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(server);
   }
 
   async updateAgentServer(
     serverInstanceId: string,
-    update: Partial<
-      Pick<
-        AgentServerInstance,
-        | 'status'
-        | 'pid'
-        | 'runtimeVersion'
-        | 'schemaVersion'
-        | 'schemaHash'
-        | 'initializedAt'
-        | 'lastHealthAt'
-        | 'disconnectedAt'
-        | 'exitedAt'
-        | 'exitCode'
-        | 'signal'
-        | 'exitReason'
-      >
-    >
+    update: AgentServerUpdate
+  ): Promise<AgentServerInstance> {
+    return this.serializeMutation(() =>
+      this.updateAgentServerInternal(serverInstanceId, update)
+    );
+  }
+
+  private async updateAgentServerInternal(
+    serverInstanceId: string,
+    update: AgentServerUpdate
   ): Promise<AgentServerInstance> {
     await this.init();
     const existing = this.state.agentServers.find((server) => server.id === serverInstanceId);
@@ -1350,43 +1549,45 @@ export class FileTaskStore {
       )
     };
     const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
-    await this.persistQueued();
+    await this.persistSnapshot();
     await this.cleanupPrunedServerJournals(prunedServerIds);
     return clone(stored);
   }
 
-  async appendProtocolMessage(
+  appendProtocolMessage(
     serverInstanceId: string,
     direction: AgentProtocolMessageReference['direction'],
     raw: string,
     metadata?: Record<string, unknown>
   ): Promise<AgentProtocolMessageReference> {
-    await this.init();
-    if (!this.state.agentServers.some((server) => server.id === serverInstanceId)) {
-      throw new Error('Protocol journal server instance is not owned by this store.');
-    }
-    return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
+    return this.withOwnedIo(() => {
+      if (!this.state.agentServers.some((server) => server.id === serverInstanceId)) {
+        throw new Error('Protocol journal server instance is not owned by this store.');
+      }
+      return this.protocolJournal.append(serverInstanceId, direction, raw, metadata);
+    });
   }
 
-  async readProtocolMessage(reference: AgentProtocolMessageReference) {
-    await this.init();
-    if (
-      !Number.isInteger(reference.sequence) ||
-      reference.sequence <= 0 ||
-      !Number.isInteger(reference.byteOffset) ||
-      reference.byteOffset < 0 ||
-      !Number.isInteger(reference.byteLength) ||
-      reference.byteLength <= 0 ||
-      reference.byteLength > DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS.maxEntryBytes ||
-      (reference.segment !== undefined &&
-        (!Number.isSafeInteger(reference.segment) || reference.segment < 0))
-    ) {
-      throw new Error('Protocol journal reference is invalid.');
-    }
-    if (!this.state.agentServers.some((server) => server.id === reference.serverInstanceId)) {
-      throw new Error('Protocol journal server instance is not owned by this store.');
-    }
-    return this.protocolJournal.read(reference);
+  readProtocolMessage(reference: AgentProtocolMessageReference) {
+    return this.withOwnedIo(() => {
+      if (
+        !Number.isInteger(reference.sequence) ||
+        reference.sequence <= 0 ||
+        !Number.isInteger(reference.byteOffset) ||
+        reference.byteOffset < 0 ||
+        !Number.isInteger(reference.byteLength) ||
+        reference.byteLength <= 0 ||
+        reference.byteLength > DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS.maxEntryBytes ||
+        (reference.segment !== undefined &&
+          (!Number.isSafeInteger(reference.segment) || reference.segment < 0))
+      ) {
+        throw new Error('Protocol journal reference is invalid.');
+      }
+      if (!this.state.agentServers.some((server) => server.id === reference.serverInstanceId)) {
+        throw new Error('Protocol journal server instance is not owned by this store.');
+      }
+      return this.protocolJournal.read(reference);
+    });
   }
 
   async getLatestAgentGoalSnapshot(
@@ -1401,6 +1602,12 @@ export class FileTaskStore {
   }
 
   async recordAgentGoalSnapshot(
+    record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
+  ): Promise<AgentGoalSnapshotRecord> {
+    return this.serializeMutation(() => this.recordAgentGoalSnapshotInternal(record));
+  }
+
+  private async recordAgentGoalSnapshotInternal(
     record: Omit<AgentGoalSnapshotRecord, 'id' | 'observedAt'>
   ): Promise<AgentGoalSnapshotRecord> {
     await this.init();
@@ -1434,11 +1641,17 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async recordAgentPlanRevision(
+    record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
+  ): Promise<AgentPlanRevisionRecord> {
+    return this.serializeMutation(() => this.recordAgentPlanRevisionInternal(record));
+  }
+
+  private async recordAgentPlanRevisionInternal(
     record: Omit<AgentPlanRevisionRecord, 'id' | 'revision' | 'observedAt'>
   ): Promise<AgentPlanRevisionRecord> {
     await this.init();
@@ -1468,11 +1681,17 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async recordAgentUsageSnapshot(
+    record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
+  ): Promise<AgentUsageSnapshotRecord> {
+    return this.serializeMutation(() => this.recordAgentUsageSnapshotInternal(record));
+  }
+
+  private async recordAgentUsageSnapshotInternal(
     record: Omit<AgentUsageSnapshotRecord, 'id' | 'observedAt'>
   ): Promise<AgentUsageSnapshotRecord> {
     await this.init();
@@ -1501,11 +1720,19 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async recordAgentSettingsObservation(
+    record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
+  ): Promise<AgentSettingsObservationRecord> {
+    return this.serializeMutation(() =>
+      this.recordAgentSettingsObservationInternal(record)
+    );
+  }
+
+  private async recordAgentSettingsObservationInternal(
     record: Omit<AgentSettingsObservationRecord, 'id' | 'observedAt'>
   ): Promise<AgentSettingsObservationRecord> {
     await this.init();
@@ -1542,11 +1769,17 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async createAgentSession(input: CreateAgentSessionInput): Promise<AgentSessionRecord> {
+    return this.serializeMutation(() => this.createAgentSessionInternal(input));
+  }
+
+  private async createAgentSessionInternal(
+    input: CreateAgentSessionInput
+  ): Promise<AgentSessionRecord> {
     await this.init();
     if (input.iteration.taskId !== input.task.id || input.worktree.taskId !== input.task.id) {
       throw new Error('Agent session task, iteration, and worktree must have the same owner.');
@@ -1627,36 +1860,22 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(session);
   }
 
   async updateAgentSession(
     sessionId: string,
-    update: Partial<
-      Pick<
-        AgentSessionRecord,
-        | 'providerSessionId'
-        | 'providerSessionTreeId'
-        | 'parentSessionId'
-        | 'forkedFromSessionId'
-        | 'providerParentSessionId'
-        | 'providerForkedFromSessionId'
-        | 'parentRunId'
-        | 'relationshipState'
-        | 'relationshipDetail'
-        | 'providerNickname'
-        | 'providerRole'
-        | 'delegatedPrompt'
-        | 'agentPath'
-        | 'subagentStatus'
-        | 'status'
-        | 'materialized'
-        | 'observedSettings'
-        | 'requestedSettings'
-        | 'lastAttachedAt'
-      >
-    >
+    update: AgentSessionUpdate
+  ): Promise<AgentSessionRecord> {
+    return this.serializeMutation(() =>
+      this.updateAgentSessionInternal(sessionId, update)
+    );
+  }
+
+  private async updateAgentSessionInternal(
+    sessionId: string,
+    update: AgentSessionUpdate
   ): Promise<AgentSessionRecord> {
     await this.init();
     const existing = this.state.agentSessions.find((session) => session.id === sessionId);
@@ -1695,11 +1914,20 @@ export class FileTaskStore {
         session.id === sessionId ? stored : session
       )
     };
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async observeSubagent(
+    input: ObserveSubagentInput
+  ): Promise<{
+    session: AgentSessionRecord;
+    observation: AgentSubagentObservationRecord;
+  }> {
+    return this.serializeMutation(() => this.observeSubagentInternal(input));
+  }
+
+  private async observeSubagentInternal(
     input: ObserveSubagentInput
   ): Promise<{
     session: AgentSessionRecord;
@@ -1902,11 +2130,15 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return { session: clone(stored), observation: clone(observation) };
   }
 
   async createRun(input: CreateRunInput): Promise<RunRecord> {
+    return this.serializeMutation(() => this.createRunInternal(input));
+  }
+
+  private async createRunInternal(input: CreateRunInput): Promise<RunRecord> {
     await this.init();
 
     const persistedSession = this.state.agentSessions.find(
@@ -1947,12 +2179,11 @@ export class FileTaskStore {
     const diagnosticArtifact = await this.createArtifactRecord(input.task.id, 'agent-diagnostics', {
       runId
     });
-    await Promise.all([
-      fs.writeFile(promptArtifact.path, input.prompt, { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
+    await writeNewArtifactFiles(this.artifactsDir, [
+      { artifact: promptArtifact, content: input.prompt },
+      { artifact: outputArtifact, content: '' },
+      { artifact: diagnosticArtifact, content: '' }
     ]);
-    promptArtifact.byteCount = Buffer.byteLength(input.prompt);
 
     const run: RunRecord = {
       id: runId,
@@ -2055,11 +2286,26 @@ export class FileTaskStore {
       false
     );
 
-    await this.persistQueued();
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([
+        promptArtifact,
+        outputArtifact,
+        diagnosticArtifact
+      ]);
+      throw error;
+    }
     return clone(run);
   }
 
   async createObservedSubagentRun(
+    input: CreateObservedSubagentRunInput
+  ): Promise<RunRecord> {
+    return this.serializeMutation(() => this.createObservedSubagentRunInternal(input));
+  }
+
+  private async createObservedSubagentRunInternal(
     input: CreateObservedSubagentRunInput
   ): Promise<RunRecord> {
     await this.init();
@@ -2117,12 +2363,11 @@ export class FileTaskStore {
       'agent-diagnostics',
       { runId }
     );
-    await Promise.all([
-      fs.writeFile(promptArtifact.path, prompt, { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(outputArtifact.path, '', { encoding: 'utf8', mode: 0o600 }),
-      fs.writeFile(diagnosticArtifact.path, '', { encoding: 'utf8', mode: 0o600 })
+    await writeNewArtifactFiles(this.artifactsDir, [
+      { artifact: promptArtifact, content: prompt },
+      { artifact: outputArtifact, content: '' },
+      { artifact: diagnosticArtifact, content: '' }
     ]);
-    promptArtifact.byteCount = Buffer.byteLength(prompt);
 
     const run: RunRecord = {
       id: runId,
@@ -2181,11 +2426,26 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([
+        promptArtifact,
+        outputArtifact,
+        diagnosticArtifact
+      ]);
+      throw error;
+    }
     return clone(run);
   }
 
   async upsertAgentItem(
+    item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
+  ): Promise<AgentItemRecord> {
+    return this.serializeMutation(() => this.upsertAgentItemInternal(item));
+  }
+
+  private async upsertAgentItemInternal(
     item: Omit<AgentItemRecord, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
   ): Promise<AgentItemRecord> {
     await this.init();
@@ -2205,6 +2465,18 @@ export class FileTaskStore {
         item.rawMessage,
         'Agent item'
       );
+    }
+    if (item.outputArtifactId) {
+      const outputArtifact = this.state.artifacts.find(
+        (artifact) => artifact.id === item.outputArtifactId
+      );
+      if (
+        !outputArtifact ||
+        outputArtifact.taskId !== item.taskId ||
+        outputArtifact.runId !== item.runId
+      ) {
+        throw new Error('Agent item output artifact ownership does not match its run.');
+      }
     }
 
     const existing = this.state.agentItems.find(
@@ -2257,7 +2529,7 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
@@ -2266,6 +2538,12 @@ export class FileTaskStore {
    * exact owning session awaiting state as one durable store boundary.
    */
   async createInteractionRequest(
+    input: CreateInteractionRequestInput
+  ): Promise<InteractionRequestRecord> {
+    return this.serializeMutation(() => this.createInteractionRequestInternal(input));
+  }
+
+  private async createInteractionRequestInternal(
     input: CreateInteractionRequestInput
   ): Promise<InteractionRequestRecord> {
     await this.init();
@@ -2300,34 +2578,36 @@ export class FileTaskStore {
       input.requestRawMessage,
       'Interaction request'
     );
-    const duplicate = this.state.interactionRequests.find(
+    if (
+      input.requestRawMessage.serverInstanceId !== input.serverInstanceId ||
+      input.requestRawMessage.direction !== 'INBOUND'
+    ) {
+      throw new Error('Interaction request raw message does not match its server.');
+    }
+    const priorOccurrences = this.state.interactionRequests.filter(
       (request) =>
         request.serverInstanceId === input.serverInstanceId &&
         request.providerRequestId === input.providerRequestId
     );
-    if (duplicate) {
-      const sameOccurrence =
-        duplicate.requestRawMessage.sequence === input.requestRawMessage.sequence;
-      if (sameOccurrence) {
-        if (
-          duplicate.runtimeId !== input.runtimeId ||
-          duplicate.taskId !== input.taskId ||
-          duplicate.iterationId !== input.iterationId ||
-          duplicate.runId !== input.runId ||
-          duplicate.sessionId !== input.sessionId ||
-          duplicate.type !== input.type
-        ) {
-          throw new Error(
-            'Duplicate interaction request does not match its original ownership.'
-          );
-        }
-        return clone(duplicate);
-      }
-      if (duplicate.status === 'PENDING' || duplicate.status === 'RESPONDING') {
+    const sameOccurrence = priorOccurrences.find(
+      (request) => request.requestRawMessage.sequence === input.requestRawMessage.sequence
+    );
+    if (sameOccurrence) {
+      if (!sameInteractionOccurrenceInput(sameOccurrence, input)) {
         throw new Error(
-          'Provider reused an interaction request id while its previous occurrence is still active.'
+          'Duplicate interaction request does not match its original immutable fields.'
         );
       }
+      return clone(sameOccurrence);
+    }
+    if (
+      priorOccurrences.some(
+        (request) => request.status === 'PENDING' || request.status === 'RESPONDING'
+      )
+    ) {
+      throw new Error(
+        'Provider reused an interaction request id while its previous occurrence is still active.'
+      );
     }
 
     const stored: InteractionRequestRecord = {
@@ -2369,24 +2649,28 @@ export class FileTaskStore {
       )
     };
     this.state = nextState;
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async transitionInteractionRequest(
     interactionRequestId: string,
     expectedStatus: InteractionRequestStatus,
-    update: Partial<
-      Pick<
-        InteractionRequestRecord,
-        | 'status'
-        | 'decision'
-        | 'responseRawMessage'
-        | 'resolution'
-        | 'respondedAt'
-        | 'resolvedAt'
-      >
-    >
+    update: InteractionRequestUpdate
+  ): Promise<InteractionRequestRecord> {
+    return this.serializeMutation(() =>
+      this.transitionInteractionRequestInternal(
+        interactionRequestId,
+        expectedStatus,
+        update
+      )
+    );
+  }
+
+  private async transitionInteractionRequestInternal(
+    interactionRequestId: string,
+    expectedStatus: InteractionRequestStatus,
+    update: InteractionRequestUpdate
   ): Promise<InteractionRequestRecord> {
     await this.init();
     const existing = this.state.interactionRequests.find(
@@ -2409,6 +2693,12 @@ export class FileTaskStore {
         update.responseRawMessage,
         'Interaction response'
       );
+      if (
+        update.responseRawMessage.serverInstanceId !==
+        existing.serverInstanceId
+      ) {
+        throw new Error('Interaction response raw message does not match its server.');
+      }
     }
     const stored: InteractionRequestRecord = { ...existing, ...update, status: nextStatus };
     this.state = {
@@ -2437,11 +2727,23 @@ export class FileTaskStore {
       );
     }
 
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async createIterationAndWorktree(input: {
+    task: Task;
+    branchName: string;
+    worktreePath: string;
+    baseRef?: string;
+    baseSha: string;
+  }): Promise<{ iteration: TaskIteration; worktree: WorktreeRecord }> {
+    return this.serializeMutation(() =>
+      this.createIterationAndWorktreeInternal(input)
+    );
+  }
+
+  private async createIterationAndWorktreeInternal(input: {
     task: Task;
     branchName: string;
     worktreePath: string;
@@ -2526,11 +2828,20 @@ export class FileTaskStore {
       false
     );
 
-    await this.persistQueued();
+    await this.persistSnapshot();
     return { iteration: clone(storedIteration), worktree: clone(worktree) };
   }
 
   async updateWorktree(worktree: WorktreeRecord, eventType: 'WORKTREE_CREATED' | 'WORKTREE_VERIFIED' | 'WORKTREE_FAILED'): Promise<WorktreeRecord> {
+    return this.serializeMutation(() =>
+      this.updateWorktreeInternal(worktree, eventType)
+    );
+  }
+
+  private async updateWorktreeInternal(
+    worktree: WorktreeRecord,
+    eventType: 'WORKTREE_CREATED' | 'WORKTREE_VERIFIED' | 'WORKTREE_FAILED'
+  ): Promise<WorktreeRecord> {
     await this.init();
     const now = new Date().toISOString();
     const stored: WorktreeRecord = {
@@ -2563,14 +2874,23 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
   async recordGitSnapshot(snapshot: Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>, diffEvidence: string): Promise<GitSnapshotRecord> {
+    return this.serializeMutation(() =>
+      this.recordGitSnapshotInternal(snapshot, diffEvidence)
+    );
+  }
+
+  private async recordGitSnapshotInternal(
+    snapshot: Omit<GitSnapshotRecord, 'id' | 'capturedAt' | 'diffArtifactId'>,
+    diffEvidence: string
+  ): Promise<GitSnapshotRecord> {
     await this.init();
 
-    const diffArtifact = await this.writeTextArtifact(snapshot.taskId, 'diff', diffEvidence);
+    const diffArtifact = await this.createTextArtifact(snapshot.taskId, 'diff', diffEvidence);
     const stored: GitSnapshotRecord = {
       id: randomUUID(),
       ...snapshot,
@@ -2607,11 +2927,26 @@ export class FileTaskStore {
       false
     );
 
-    await this.persistQueued();
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([diffArtifact]);
+      throw error;
+    }
     return clone(stored);
   }
 
   async transitionTask(taskId: string, toPhase: Task['workflowPhase'], reason: string): Promise<Task> {
+    return this.serializeMutation(() =>
+      this.transitionTaskInternal(taskId, toPhase, reason)
+    );
+  }
+
+  private async transitionTaskInternal(
+    taskId: string,
+    toPhase: Task['workflowPhase'],
+    reason: string
+  ): Promise<Task> {
     await this.init();
 
     const task = this.state.tasks.find((candidate) => candidate.id === taskId);
@@ -2646,7 +2981,7 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
 
     const updated = this.state.tasks.find((candidate) => candidate.id === taskId);
     if (!updated) {
@@ -2671,6 +3006,12 @@ export class FileTaskStore {
   async recordGitHubPreflight(
     record: Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>
   ): Promise<GitHubRepositoryRecord> {
+    return this.serializeMutation(() => this.recordGitHubPreflightInternal(record));
+  }
+
+  private async recordGitHubPreflightInternal(
+    record: Omit<GitHubRepositoryRecord, 'id' | 'checkedAt'>
+  ): Promise<GitHubRepositoryRecord> {
     await this.init();
     const stored: GitHubRepositoryRecord = {
       id: randomUUID(),
@@ -2692,7 +3033,7 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
@@ -2710,6 +3051,12 @@ export class FileTaskStore {
   }
 
   async recordBranchPublication(
+    record: Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>
+  ): Promise<BranchPublicationRecord> {
+    return this.serializeMutation(() => this.recordBranchPublicationInternal(record));
+  }
+
+  private async recordBranchPublicationInternal(
     record: Omit<BranchPublicationRecord, 'id' | 'requestedAt' | 'updatedAt'>
   ): Promise<BranchPublicationRecord> {
     await this.init();
@@ -2736,7 +3083,7 @@ export class FileTaskStore {
       }),
       false
     );
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(stored);
   }
 
@@ -2754,7 +3101,16 @@ export class FileTaskStore {
   }
 
   async recordPullRequestBodyArtifact(task: Task, content: string): Promise<ArtifactRecord> {
-    const artifact = await this.writeTextArtifact(task.id, 'pr-body', content);
+    return this.serializeMutation(() =>
+      this.recordPullRequestBodyArtifactInternal(task, content)
+    );
+  }
+
+  private async recordPullRequestBodyArtifactInternal(
+    task: Task,
+    content: string
+  ): Promise<ArtifactRecord> {
+    const artifact = await this.createTextArtifact(task.id, 'pr-body', content);
     await this.appendEvent(
       createDomainEvent({
         type: 'PR_BODY_ARTIFACT_CREATED',
@@ -2763,12 +3119,25 @@ export class FileTaskStore {
         worktreeId: task.currentWorktreeId,
         source: 'storage',
         payload: { artifactId: artifact.id, byteCount: artifact.byteCount }
-      })
+      }),
+      false
     );
-    return artifact;
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([artifact]);
+      throw error;
+    }
+    return clone(artifact);
   }
 
   async recordPullRequestSync(input: PrSyncInput): Promise<PullRequestSnapshotRecord> {
+    return this.serializeMutation(() => this.recordPullRequestSyncInternal(input));
+  }
+
+  private async recordPullRequestSyncInternal(
+    input: PrSyncInput
+  ): Promise<PullRequestSnapshotRecord> {
     await this.init();
     const observedAt = new Date().toISOString();
     const pullRequest: PullRequestSnapshotRecord = {
@@ -2877,15 +3246,22 @@ export class FileTaskStore {
       };
     }
 
-    await this.persistQueued();
+    await this.persistSnapshot();
     return clone(pullRequest);
   }
 
   async appendEvent(event: DomainEvent, persist = true): Promise<void> {
+    if (!persist && !this.mutationContext.getStore()) {
+      throw new Error('Non-publishing store events are internal to a serialized mutation.');
+    }
+    return this.serializeMutation(() => this.appendEventInternal(event, persist));
+  }
+
+  private async appendEventInternal(event: DomainEvent, persist: boolean): Promise<void> {
     await this.init();
     this.state = applyEventToState(this.state, event);
     if (persist) {
-      await this.persistQueued();
+      await this.persistSnapshot();
     }
   }
 
@@ -2894,6 +3270,15 @@ export class FileTaskStore {
    * yielding between the status guard and projection update.
    */
   async appendRunEventIfStatus(
+    event: DomainEvent,
+    allowedStatuses: readonly RunRecord['status'][]
+  ): Promise<boolean> {
+    return this.serializeMutation(() =>
+      this.appendRunEventIfStatusInternal(event, allowedStatuses)
+    );
+  }
+
+  private async appendRunEventIfStatusInternal(
     event: DomainEvent,
     allowedStatuses: readonly RunRecord['status'][]
   ): Promise<boolean> {
@@ -2906,11 +3291,15 @@ export class FileTaskStore {
       return false;
     }
     this.state = applyEventToState(this.state, event);
-    await this.persistQueued();
+    await this.persistSnapshot();
     return true;
   }
 
   async appendArtifact(artifactId: string, chunk: string): Promise<void> {
+    return this.serializeMutation(() => this.appendArtifactInternal(artifactId, chunk));
+  }
+
+  private async appendArtifactInternal(artifactId: string, chunk: string): Promise<void> {
     await this.init();
 
     const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
@@ -2918,80 +3307,130 @@ export class FileTaskStore {
       throw new Error(`Artifact not found: ${artifactId}`);
     }
 
-    await fs.mkdir(path.dirname(artifact.path), { recursive: true, mode: 0o700 });
-    await fs.appendFile(artifact.path, chunk, { encoding: 'utf8', mode: 0o600 });
-
-    const byteCount = Buffer.byteLength(chunk);
+    const byteCount = await appendBoundedArtifactFile(artifact, chunk);
     const updatedAt = new Date().toISOString();
     this.state = {
       ...this.state,
       artifacts: this.state.artifacts.map((candidate) =>
         candidate.id === artifactId
-          ? { ...candidate, byteCount: candidate.byteCount + byteCount, updatedAt }
+          ? { ...candidate, byteCount, updatedAt }
           : candidate
       )
     };
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      const published = this.publishedState.artifacts.find(
+        (candidate) => candidate.id === artifactId
+      );
+      if (published) {
+        try {
+          await reconcileArtifactFile(published.path, published.byteCount);
+        } catch (rollbackError) {
+          throw new ArtifactAppendAmbiguousError(
+            artifactId,
+            error,
+            rollbackError
+          );
+        }
+      }
+      throw error;
+    }
   }
 
   async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
+    return this.serializeMutation(() =>
+      this.writeFinalArtifactInternal(taskId, runId, content)
+    );
+  }
+
+  private async writeFinalArtifactInternal(
+    taskId: string,
+    runId: string,
+    content: string
+  ): Promise<ArtifactRecord> {
     await this.init();
 
-    const queued = this.finalArtifactQueue.catch(() => undefined).then(async () => {
-      const run = this.state.runs.find((candidate) => candidate.id === runId);
-      if (!run || run.taskId !== taskId) {
-        throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
-      }
-      const existing = this.state.artifacts.find(
-        (artifact) => artifact.runId === runId && artifact.kind === 'agent-final'
-      );
-      if (existing) {
-        // A prior attempt may have updated memory before its snapshot publish
-        // failed. Republish before reporting an idempotent retry as durable.
-        await this.persistQueued();
-        return clone(existing);
-      }
+    const run = this.state.runs.find((candidate) => candidate.id === runId);
+    if (!run || run.taskId !== taskId) {
+      throw new Error(`Run ${runId} does not belong to task ${taskId}.`);
+    }
+    const existing = this.state.artifacts.find(
+      (artifact) => artifact.runId === runId && artifact.kind === 'agent-final'
+    );
+    if (existing) return clone(existing);
 
-      const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
-      await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
+    const artifact = await this.createArtifactRecord(taskId, 'agent-final', { runId });
+    await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content }]);
 
-      const hash = createHash('sha256').update(content).digest('hex');
-      const stored: ArtifactRecord = {
-        ...artifact,
-        byteCount: Buffer.byteLength(content),
-        updatedAt: new Date().toISOString()
-      };
+    const storedContent = await readPrivateArtifactFile(
+      artifact.path,
+      artifact.byteCount
+    );
+    const hash = createHash('sha256').update(storedContent).digest('hex');
+    const stored: ArtifactRecord = {
+      ...artifact,
+      updatedAt: new Date().toISOString()
+    };
 
-      const stateWithArtifact = {
-        ...this.state,
-        artifacts: [stored, ...this.state.artifacts]
-      };
-      this.state = applyEventToState(
-        stateWithArtifact,
-        createDomainEvent({
-          type: 'ARTIFACT_CREATED',
-          taskId,
-          runId,
-          source: 'storage',
-          payload: { artifactId: stored.id, kind: stored.kind, hash }
-        })
-      );
+    const stateWithArtifact = {
+      ...this.state,
+      artifacts: [stored, ...this.state.artifacts]
+    };
+    this.state = applyEventToState(
+      stateWithArtifact,
+      createDomainEvent({
+        type: 'ARTIFACT_CREATED',
+        taskId,
+        runId,
+        source: 'storage',
+        payload: { artifactId: stored.id, kind: stored.kind, hash }
+      })
+    );
 
-      await this.persistQueued();
-      return clone(stored);
-    });
-    this.finalArtifactQueue = queued.catch(() => undefined);
-    return queued;
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([stored]);
+      throw error;
+    }
+    return clone(stored);
   }
 
   async writeTextArtifact(taskId: string, kind: ArtifactKind, content: string): Promise<ArtifactRecord> {
+    return this.serializeMutation(() =>
+      this.writeTextArtifactInternal(taskId, kind, content)
+    );
+  }
+
+  private async writeTextArtifactInternal(
+    taskId: string,
+    kind: ArtifactKind,
+    content: string
+  ): Promise<ArtifactRecord> {
     await this.init();
 
+    const stored = await this.createTextArtifact(taskId, kind, content);
+    try {
+      await this.persistSnapshot();
+    } catch (error) {
+      await this.cleanupUnpublishedArtifacts([stored]);
+      throw error;
+    }
+    return clone(stored);
+  }
+
+  private async createTextArtifact(
+    taskId: string,
+    kind: ArtifactKind,
+    content: string
+  ): Promise<ArtifactRecord> {
+
     const artifact = await this.createArtifactRecord(taskId, kind);
-    await fs.writeFile(artifact.path, content, { encoding: 'utf8', mode: 0o600 });
+    await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content }]);
 
     const stored: ArtifactRecord = {
       ...artifact,
-      byteCount: Buffer.byteLength(content),
       updatedAt: new Date().toISOString()
     };
 
@@ -2999,34 +3438,19 @@ export class FileTaskStore {
       ...this.state,
       artifacts: [stored, ...this.state.artifacts]
     };
-
-    await this.persistQueued();
-    return clone(stored);
+    return stored;
   }
 
-  async readArtifact(artifactId: string): Promise<string> {
-    await this.init();
-    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-    if (!artifact) {
-      throw new Error(`Artifact not found: ${artifactId}`);
-    }
-    try {
-      return await fs.readFile(artifact.path, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return '';
+  readArtifact(artifactId: string): Promise<string> {
+    // The file bytes and recorded byte count are one durable unit. Use the
+    // store's exclusive queue so an append cannot change either during a read.
+    return this.serializeMutation(() => {
+      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+      if (!artifact) {
+        throw new Error(`Artifact not found: ${artifactId}`);
       }
-      throw error;
-    }
-  }
-
-  async getArtifactPath(artifactId: string): Promise<string> {
-    await this.init();
-    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
-    if (!artifact) {
-      throw new Error(`Artifact not found: ${artifactId}`);
-    }
-    return artifact.path;
+      return readPrivateArtifactFile(artifact.path, artifact.byteCount);
+    });
   }
 
   private pruneUnreferencedTerminalAgentServers(): string[] {
@@ -3061,38 +3485,72 @@ export class FileTaskStore {
     );
   }
 
+  private async cleanupUnpublishedArtifacts(
+    artifacts: readonly ArtifactRecord[]
+  ): Promise<void> {
+    const publishedIds = new Set(this.publishedState.artifacts.map((artifact) => artifact.id));
+    const unpublished = artifacts.filter((artifact) => !publishedIds.has(artifact.id));
+    if (unpublished.length === 0) return;
+    await Promise.allSettled(unpublished.map((artifact) => fs.unlink(artifact.path)));
+    await syncDirectoryIfSupported(this.artifactsDir).catch(() => undefined);
+  }
+
   private async createArtifactRecord(
     taskId: string,
     kind: ArtifactKind,
     ids: { runId?: string } = {}
   ): Promise<ArtifactRecord> {
+    if (!UUID_FILE_SEGMENT_PATTERN.test(taskId)) {
+      throw new Error('Task artifact owner id is invalid.');
+    }
+    const task = this.state.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) {
+      throw new Error(`Task not found: ${taskId}`);
+    }
+    if (ids.runId && !UUID_FILE_SEGMENT_PATTERN.test(ids.runId)) {
+      throw new Error('Task artifact run id is invalid.');
+    }
     const now = new Date().toISOString();
     const id = randomUUID();
     const ownerId = ids.runId ?? 'task';
     const fileName = `${taskId}-${ownerId}-${kind}-${id}.log`;
+    const artifactPath = path.resolve(this.artifactsDir, fileName);
+    if (
+      !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
+      !sameAbsolutePath(path.dirname(artifactPath), path.resolve(this.artifactsDir))
+    ) {
+      throw new Error('Task artifact path escaped its managed directory.');
+    }
     return {
       id,
       taskId,
       runId: ids.runId,
       kind,
-      path: path.join(this.artifactsDir, fileName),
+      path: artifactPath,
       byteCount: 0,
       createdAt: now,
       updatedAt: now
     };
   }
 
-  private async persistQueued(): Promise<void> {
-    const operation = this.writeQueue.catch(() => undefined).then(() => this.persist());
-    this.writeQueue = operation.catch(() => undefined);
-    await operation;
+  private async persistSnapshot(): Promise<boolean> {
+    return this.persist();
   }
 
-  private async persist(): Promise<void> {
+  private async persist(): Promise<boolean> {
+    const lease = this.lease;
+    if (!lease) {
+      throw new Error('Task store persistence requires an active ownership lease.');
+    }
+    await assertStoreOwnershipLease(this.leasePath, lease);
     // A durable store record must never be published ahead of the raw protocol
     // entry it references. High-volume unmaterialized input remains batch-synced.
     await this.protocolJournal.flush();
     await fs.mkdir(this.baseDir, { recursive: true });
+    const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_FILE_BYTES) {
+      throw new Error('Task store snapshot exceeds its durable size limit.');
+    }
     const tmpPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
     let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
     let published = false;
@@ -3105,22 +3563,382 @@ export class FileTaskStore {
           (fsConstants.O_NOFOLLOW ?? 0),
         0o600
       );
-      await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
+      await handle.writeFile(serialized, 'utf8');
       await handle.sync();
       await enforcePosixMode(handle, 0o600);
       await handle.sync();
       await handle.close();
       handle = undefined;
+      await assertStoreOwnershipLease(this.leasePath, lease);
       await fs.rename(tmpPath, this.storePath);
       published = true;
+      this.publishedState = this.state;
       await syncDirectoryIfSupported(this.baseDir);
+      return true;
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await fs.unlink(tmpPath).catch(() => undefined);
-      if (published) throw new StorePublishedError(error);
+      if (published) return false;
       throw error;
     }
   }
+}
+
+async function acquireStoreOwnershipLease(
+  baseDir: string,
+  leasePath: string
+): Promise<StoreOwnershipLease> {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const lease: StoreOwnershipLease = {
+      token: randomUUID(),
+      pid: process.pid,
+      acquiredAt: new Date().toISOString()
+    };
+    const ownerPath = storeLeaseOwnerPath(baseDir, path.basename(leasePath), lease.token);
+    await writeStoreLeaseFile(ownerPath, lease);
+    let linked = false;
+    try {
+      await syncDirectoryIfSupported(baseDir);
+      await fs.link(ownerPath, leasePath);
+      linked = true;
+      await syncDirectoryIfSupported(baseDir);
+      await assertStoreOwnershipLease(leasePath, lease);
+      await cleanupOrphanedStoreLeaseFiles(
+        baseDir,
+        path.basename(leasePath),
+        lease
+      );
+      return lease;
+    } catch (error) {
+      if (linked) {
+        try {
+          await releaseStoreOwnershipLease(baseDir, leasePath, lease);
+        } catch (releaseError) {
+          throw new AggregateError(
+            [error, releaseError],
+            'Task store ownership initialization failed and its lease could not be released.'
+          );
+        }
+        throw error;
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        await fs.unlink(ownerPath).catch(() => undefined);
+        throw error;
+      }
+      await fs.unlink(ownerPath).catch(() => undefined);
+    }
+
+    let existing: StoreLeaseInspection;
+    try {
+      existing = await inspectStoreOwnershipLease(leasePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    if (processIsAlive(existing.lease.pid)) {
+      throw new Error(
+        `Task store is already owned by process ${existing.lease.pid}. Close the other Task Monki instance first.`
+      );
+    }
+    await reclaimStoreOwnershipLease(baseDir, leasePath, existing);
+  }
+  throw new Error('Task store ownership changed repeatedly during initialization.');
+}
+
+async function assertStoreOwnershipLease(
+  leasePath: string,
+  expected: StoreOwnershipLease
+): Promise<void> {
+  const inspected = await inspectStoreOwnershipLease(leasePath).catch(() => undefined);
+  const ownerPath = storeLeaseOwnerPath(
+    path.dirname(leasePath),
+    path.basename(leasePath),
+    expected.token
+  );
+  const owner = await inspectStoreOwnershipLease(ownerPath).catch(() => undefined);
+  if (
+    !inspected ||
+    !owner ||
+    inspected.lease.token !== expected.token ||
+    inspected.lease.pid !== expected.pid ||
+    inspected.lease.acquiredAt !== expected.acquiredAt ||
+    owner.lease.token !== expected.token ||
+    owner.lease.pid !== expected.pid ||
+    owner.lease.acquiredAt !== expected.acquiredAt ||
+    !sameFileIdentity(inspected.stat, owner.stat)
+  ) {
+    throw new Error('Task store ownership lease was lost before publication.');
+  }
+}
+
+async function releaseStoreOwnershipLease(
+  baseDir: string,
+  leasePath: string,
+  expected: StoreOwnershipLease
+): Promise<void> {
+  await assertStoreOwnershipLease(leasePath, expected);
+  const ownerPath = storeLeaseOwnerPath(
+    baseDir,
+    path.basename(leasePath),
+    expected.token
+  );
+  await fs.unlink(leasePath);
+  await syncDirectoryIfSupported(baseDir);
+  await fs.unlink(ownerPath);
+  await syncDirectoryIfSupported(baseDir);
+}
+
+type StoreLeaseStat = Awaited<ReturnType<typeof fs.lstat>>;
+
+interface StoreLeaseInspection {
+  lease: StoreOwnershipLease;
+  stat: StoreLeaseStat;
+}
+
+async function inspectStoreOwnershipLease(
+  leasePath: string
+): Promise<StoreLeaseInspection> {
+  const before = await fs.lstat(leasePath);
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    !isOwnedByCurrentUser(before) ||
+    !posixModeMatches(before, 0o600) ||
+    before.size > STORE_LEASE_MAX_BYTES
+  ) {
+    throw new Error('Task store ownership lease failed its integrity check.');
+  }
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      leasePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Task store ownership lease could not be opened safely.');
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.dev !== before.dev ||
+      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino) ||
+      stat.size !== before.size
+    ) {
+      throw new Error('Task store ownership lease changed while it was inspected.');
+    }
+    const raw = await handle.readFile('utf8');
+    try {
+      const value = JSON.parse(raw) as Partial<StoreOwnershipLease>;
+      if (
+        typeof value.token !== 'string' ||
+        !UUID_FILE_SEGMENT_PATTERN.test(value.token) ||
+        !Number.isSafeInteger(value.pid) ||
+        (value.pid ?? 0) <= 0 ||
+        !isCanonicalStoreTimestamp(value.acquiredAt)
+      ) {
+        throw new Error('Task store ownership lease failed its integrity check.');
+      }
+      return {
+        lease: value as StoreOwnershipLease,
+        stat
+      };
+    } catch {
+      throw new Error('Task store ownership lease failed its integrity check.');
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+async function writeStoreLeaseFile(
+  filePath: string,
+  lease: StoreOwnershipLease
+): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o600
+    );
+    await handle.writeFile(`${JSON.stringify(lease)}\n`, 'utf8');
+    await handle.sync();
+    await enforcePosixMode(handle, 0o600);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(filePath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function reclaimStoreOwnershipLease(
+  baseDir: string,
+  leasePath: string,
+  expected: StoreLeaseInspection
+): Promise<boolean> {
+  const leaseName = path.basename(leasePath);
+  const anchor = await findStoreLeaseAnchor(baseDir, leaseName, expected);
+  if (!anchor) return false;
+  const reclaimPath = storeLeaseReclaimPath(
+    baseDir,
+    leaseName,
+    expected.lease.token,
+    randomUUID()
+  );
+  try {
+    await fs.rename(anchor, reclaimPath);
+    await syncDirectoryIfSupported(baseDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    const [canonical, claimed] = await Promise.all([
+      inspectStoreOwnershipLease(leasePath),
+      inspectStoreOwnershipLease(reclaimPath)
+    ]);
+    if (
+      !sameStoreLease(canonical.lease, expected.lease) ||
+      !sameStoreLease(claimed.lease, expected.lease) ||
+      !sameFileIdentity(canonical.stat, expected.stat) ||
+      !sameFileIdentity(claimed.stat, expected.stat)
+    ) {
+      throw new Error('Task store ownership changed during stale-lease reclamation.');
+    }
+    await fs.unlink(leasePath);
+    await syncDirectoryIfSupported(baseDir);
+    await fs.unlink(reclaimPath);
+    await syncDirectoryIfSupported(baseDir);
+    return true;
+  } catch (error) {
+    const canonical = await fs.lstat(leasePath).catch(() => undefined);
+    if (canonical && sameFileIdentity(canonical, expected.stat)) {
+      try {
+        await fs.rename(reclaimPath, anchor);
+        await syncDirectoryIfSupported(baseDir);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          'Task store stale-lease reclamation failed and its anchor could not be restored.'
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+async function findStoreLeaseAnchor(
+  baseDir: string,
+  leaseName: string,
+  expected: StoreLeaseInspection
+): Promise<string | undefined> {
+  const candidates: string[] = [];
+  for (const entry of await fs.readdir(baseDir, { withFileTypes: true })) {
+    if (!isStoreLeaseAnchorName(entry.name, leaseName, expected.lease.token)) continue;
+    const entryPath = path.join(baseDir, entry.name);
+    const inspected = await inspectStoreOwnershipLease(entryPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!inspected) continue;
+    if (
+      sameStoreLease(inspected.lease, expected.lease) &&
+      sameFileIdentity(inspected.stat, expected.stat)
+    ) {
+      candidates.push(entryPath);
+    }
+  }
+  if (candidates.length > 1) {
+    throw new Error('Task store ownership lease has multiple reclaim anchors.');
+  }
+  return candidates[0];
+}
+
+async function cleanupOrphanedStoreLeaseFiles(
+  baseDir: string,
+  leaseName: string,
+  active: StoreOwnershipLease
+): Promise<void> {
+  let removed = false;
+  for (const entry of await fs.readdir(baseDir, { withFileTypes: true })) {
+    const token = storeLeaseArtifactToken(entry.name, leaseName);
+    if (!token || token === active.token) continue;
+    const entryPath = path.join(baseDir, entry.name);
+    const inspected = await inspectStoreOwnershipLease(entryPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!inspected || processIsAlive(inspected.lease.pid)) continue;
+    await fs.unlink(entryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    removed = true;
+  }
+  if (removed) await syncDirectoryIfSupported(baseDir);
+}
+
+function storeLeaseOwnerPath(baseDir: string, leaseName: string, token: string): string {
+  return path.join(baseDir, `${leaseName}.${token}.owner`);
+}
+
+function storeLeaseReclaimPath(
+  baseDir: string,
+  leaseName: string,
+  token: string,
+  reclaimToken: string
+): string {
+  return path.join(baseDir, `${leaseName}.${token}.reclaim.${reclaimToken}`);
+}
+
+function storeLeaseArtifactToken(name: string, leaseName: string): string | undefined {
+  const prefix = `${leaseName}.`;
+  if (!name.startsWith(prefix)) return undefined;
+  const parts = name.slice(prefix.length).split('.');
+  if (!UUID_FILE_SEGMENT_PATTERN.test(parts[0] ?? '')) return undefined;
+  if (parts.length === 2 && parts[1] === 'owner') return parts[0];
+  if (
+    parts.length === 3 &&
+    parts[1] === 'reclaim' &&
+    UUID_FILE_SEGMENT_PATTERN.test(parts[2] ?? '')
+  ) {
+    return parts[0];
+  }
+  return undefined;
+}
+
+function isStoreLeaseAnchorName(name: string, leaseName: string, token: string): boolean {
+  return storeLeaseArtifactToken(name, leaseName) === token;
+}
+
+function sameStoreLease(left: StoreOwnershipLease, right: StoreOwnershipLease): boolean {
+  return (
+    left.token === right.token &&
+    left.pid === right.pid &&
+    left.acquiredAt === right.acquiredAt
+  );
+}
+
+function sameFileIdentity(left: StoreLeaseStat, right: StoreLeaseStat): boolean {
+  return (
+    left.dev === right.dev &&
+    (left.ino === 0 || right.ino === 0 || left.ino === right.ino)
+  );
 }
 
 async function readPrivateStoreFile(storePath: string): Promise<string> {
@@ -3260,6 +4078,7 @@ function validateArtifactRecord(
     !ARTIFACT_KINDS.includes(artifact.kind) ||
     !Number.isSafeInteger(artifact.byteCount) ||
     artifact.byteCount < 0 ||
+    artifact.byteCount > ARTIFACT_BYTE_LIMITS[artifact.kind] ||
     !isCanonicalStoreTimestamp(artifact.createdAt) ||
     !isCanonicalStoreTimestamp(artifact.updatedAt) ||
     artifact.updatedAt < artifact.createdAt ||
@@ -3279,7 +4098,10 @@ function validateArtifactRecord(
   return fileName;
 }
 
-async function secureArtifactFile(filePath: string): Promise<void> {
+async function reconcileArtifactFile(
+  filePath: string,
+  expectedByteCount: number
+): Promise<void> {
   const before = await fs.lstat(filePath);
   if (!before.isFile() || before.isSymbolicLink()) {
     throw new Error('Stored task artifact is not a regular file.');
@@ -3289,7 +4111,7 @@ async function secureArtifactFile(filePath: string): Promise<void> {
   try {
     handle = await fs.open(
       filePath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
     );
   } catch {
     throw new Error('Stored task artifact could not be opened safely.');
@@ -3304,11 +4126,289 @@ async function secureArtifactFile(filePath: string): Promise<void> {
       throw new Error('Stored task artifact changed during validation.');
     }
     assertArtifactOwnedByCurrentUser(stat);
+    if (stat.size < expectedByteCount) {
+      throw new Error('Stored task artifact is missing referenced bytes.');
+    }
+    if (stat.size > expectedByteCount) {
+      await handle.truncate(expectedByteCount);
+      await handle.sync();
+    }
     if (!posixModeMatches(stat, 0o600)) {
       await enforcePosixMode(handle, 0o600);
       await handle.sync();
     }
     assertArtifactPrivateMode(await handle.stat(), 0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeNewArtifactFiles(
+  artifactsDir: string,
+  entries: Array<{ artifact: ArtifactRecord; content: string }>
+): Promise<void> {
+  const createdPaths: string[] = [];
+  try {
+    for (const entry of entries) {
+      const bytes = boundedArtifactBytes(entry.artifact.kind, entry.content);
+      let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+      try {
+        handle = await fs.open(
+          entry.artifact.path,
+          fsConstants.O_WRONLY |
+            fsConstants.O_CREAT |
+            fsConstants.O_EXCL |
+            (fsConstants.O_NOFOLLOW ?? 0),
+          0o600
+        );
+        createdPaths.push(entry.artifact.path);
+        await handle.writeFile(bytes);
+        await handle.sync();
+        await enforcePosixMode(handle, 0o600);
+        await handle.sync();
+      } finally {
+        await handle?.close().catch(() => undefined);
+      }
+      entry.artifact.byteCount = bytes.byteLength;
+    }
+    await syncDirectoryIfSupported(artifactsDir);
+  } catch (error) {
+    await Promise.allSettled(createdPaths.map((filePath) => fs.unlink(filePath)));
+    await syncDirectoryIfSupported(artifactsDir).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function appendBoundedArtifactFile(
+  artifact: ArtifactRecord,
+  chunk: string
+): Promise<number> {
+  if (!chunk) return artifact.byteCount;
+  const before = await fs.lstat(artifact.path);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error('Stored task artifact is not a regular file.');
+  }
+  assertArtifactOwnedByCurrentUser(before);
+
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      artifact.path,
+      fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Stored task artifact could not be opened safely.');
+  }
+  let appendAttempted = false;
+  let operationFailed = false;
+  let operationError: unknown;
+  let byteCount: number | undefined;
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.dev !== before.dev ||
+      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino) ||
+      stat.size !== artifact.byteCount
+    ) {
+      throw new Error('Stored task artifact changed during append.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    assertArtifactPrivateMode(stat, 0o600);
+
+    const incoming = Buffer.from(chunk, 'utf8');
+    const limit = ARTIFACT_BYTE_LIMITS[artifact.kind];
+    const marker = artifactTruncationMarker(artifact.kind, limit);
+    if (artifact.byteCount >= marker.byteLength) {
+      const tail = Buffer.alloc(marker.byteLength);
+      await readAllAt(handle, tail, artifact.byteCount - marker.byteLength);
+      if (tail.equals(marker)) byteCount = artifact.byteCount;
+    }
+    if (byteCount === undefined) {
+      const contentLimit = limit - marker.byteLength;
+      if (artifact.byteCount > contentLimit) {
+        throw new Error('Stored task artifact exceeds its appendable content budget.');
+      }
+
+      const available = contentLimit - artifact.byteCount;
+      const append = incoming.byteLength <= available
+        ? incoming
+        : Buffer.concat([truncateUtf8Buffer(incoming, available), marker]);
+      appendAttempted = true;
+      try {
+        await writeAllAt(handle, append, artifact.byteCount);
+        await handle.sync();
+        byteCount = artifact.byteCount + append.byteLength;
+      } catch (error) {
+        try {
+          await handle.truncate(artifact.byteCount);
+          await handle.sync();
+        } catch (rollbackError) {
+          throw new ArtifactAppendAmbiguousError(
+            artifact.id,
+            error,
+            rollbackError
+          );
+        }
+        throw error;
+      }
+    }
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+
+  let closeError: unknown;
+  try {
+    await handle.close();
+  } catch (error) {
+    closeError = error;
+  }
+  if (closeError !== undefined) {
+    if (operationError instanceof ArtifactAppendAmbiguousError) {
+      throw operationError;
+    }
+    if (appendAttempted) {
+      try {
+        await reconcileArtifactFile(artifact.path, artifact.byteCount);
+      } catch (rollbackError) {
+        const appendError = operationFailed
+          ? new AggregateError(
+              [operationError, closeError],
+              'Artifact append and close both failed.'
+            )
+          : closeError;
+        throw new ArtifactAppendAmbiguousError(
+          artifact.id,
+          appendError,
+          rollbackError
+        );
+      }
+    }
+    if (operationFailed) throw operationError;
+    throw closeError;
+  }
+  if (operationFailed) throw operationError;
+  return byteCount!;
+}
+
+function boundedArtifactBytes(kind: ArtifactKind, content: string): Buffer {
+  const bytes = Buffer.from(content, 'utf8');
+  const limit = ARTIFACT_BYTE_LIMITS[kind];
+  const marker = artifactTruncationMarker(kind, limit);
+  const contentLimit = limit - marker.byteLength;
+  if (bytes.byteLength <= contentLimit) return bytes;
+  return Buffer.concat([
+    truncateUtf8Buffer(bytes, contentLimit),
+    marker
+  ]);
+}
+
+function artifactTruncationMarker(kind: ArtifactKind, limit: number): Buffer {
+  return Buffer.from(
+    `\n[Task Monki truncated ${kind} after ${limit} retained bytes.]\n`,
+    'utf8'
+  );
+}
+
+function truncateUtf8Buffer(bytes: Buffer, maxBytes: number): Buffer {
+  if (maxBytes <= 0) return Buffer.alloc(0);
+  if (bytes.byteLength <= maxBytes) return bytes;
+  let end = maxBytes;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  while (end > Math.max(0, maxBytes - 4)) {
+    const candidate = bytes.subarray(0, end);
+    try {
+      decoder.decode(candidate);
+      return candidate;
+    } catch {
+      end -= 1;
+    }
+  }
+  throw new Error('Task artifact content is not valid UTF-8.');
+}
+
+async function writeAllAt(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  bytes: Buffer,
+  position: number
+): Promise<void> {
+  let written = 0;
+  while (written < bytes.byteLength) {
+    const result = await handle.write(
+      bytes,
+      written,
+      bytes.byteLength - written,
+      position + written
+    );
+    if (result.bytesWritten <= 0) {
+      throw new Error('Task artifact write made no progress.');
+    }
+    written += result.bytesWritten;
+  }
+}
+
+async function readAllAt(
+  handle: Awaited<ReturnType<typeof fs.open>>,
+  bytes: Buffer,
+  position: number
+): Promise<void> {
+  let read = 0;
+  while (read < bytes.byteLength) {
+    const result = await handle.read(
+      bytes,
+      read,
+      bytes.byteLength - read,
+      position + read
+    );
+    if (result.bytesRead <= 0) {
+      throw new Error('Task artifact changed while it was being read.');
+    }
+    read += result.bytesRead;
+  }
+}
+
+async function readPrivateArtifactFile(
+  filePath: string,
+  expectedByteCount: number
+): Promise<string> {
+  const before = await fs.lstat(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') {
+      throw new Error('Stored task artifact file is missing.');
+    }
+    throw error;
+  });
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error('Stored task artifact is not a regular file.');
+  }
+  assertArtifactOwnedByCurrentUser(before);
+  assertArtifactPrivateMode(before, 0o600);
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+    );
+  } catch {
+    throw new Error('Stored task artifact could not be opened safely.');
+  }
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.dev !== before.dev ||
+      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino) ||
+      stat.size !== expectedByteCount
+    ) {
+      throw new Error('Stored task artifact changed during read.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    assertArtifactPrivateMode(stat, 0o600);
+    const bytes = await handle.readFile();
+    if (bytes.byteLength !== stat.size) {
+      throw new Error('Stored task artifact changed while it was being read.');
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } finally {
     await handle.close();
   }
@@ -3343,7 +4443,7 @@ function requireCurrentState(state: PersistedState): StoreState {
   if (state.schemaVersion !== TASK_STORE_SCHEMA_VERSION) {
     throw new Error(
       `Unsupported Task Monki store schema ${String(state.schemaVersion)}. ` +
-        `Delete the local store and restart; migrations are intentionally not supported.`
+        `This build accepts only schema ${TASK_STORE_SCHEMA_VERSION}.`
     );
   }
   const requiredCollections: Array<keyof StoreState> = [
@@ -3377,10 +4477,314 @@ function requireCurrentState(state: PersistedState): StoreState {
     }
   }
   const current = state as StoreState;
+  validateCurrentStoreRecords(current);
+  validatePersistedRelationships(current);
   validatePersistedRuntimeIdentity(current);
   validatePersistedTaskCreationMetadata(current);
   validatePersistedAttachments(current);
   return current;
+}
+
+function validatePersistedRelationships(state: StoreState): void {
+  const tasks = indexUniqueRecords(state.tasks, 'tasks');
+  const iterations = indexUniqueRecords(state.iterations, 'iterations');
+  const worktrees = indexUniqueRecords(state.worktrees, 'worktrees');
+  const sessions = indexUniqueRecords(state.agentSessions, 'agentSessions');
+  const runs = indexUniqueRecords(state.runs, 'runs');
+  const artifacts = indexUniqueRecords(state.artifacts, 'artifacts');
+  const gitSnapshots = indexUniqueRecords(state.gitSnapshots, 'gitSnapshots');
+  const githubRepositories = indexUniqueRecords(
+    state.githubRepositories,
+    'githubRepositories'
+  );
+  const branchPublications = indexUniqueRecords(
+    state.branchPublications,
+    'branchPublications'
+  );
+  const pullRequests = indexUniqueRecords(state.pullRequests, 'pullRequests');
+  const ciRollups = indexUniqueRecords(state.ciRollups, 'ciRollups');
+  const reviewRollups = indexUniqueRecords(state.reviewRollups, 'reviewRollups');
+  const mergeSnapshots = indexUniqueRecords(state.mergeSnapshots, 'mergeSnapshots');
+  indexUniqueRecords(state.interactionRequests, 'interactionRequests');
+
+  for (const iteration of state.iterations) {
+    const worktree = iteration.worktreeId
+      ? worktrees.get(iteration.worktreeId)
+      : undefined;
+    if (
+      !tasks.has(iteration.taskId) ||
+      (iteration.worktreeId &&
+        (!worktree ||
+          worktree.taskId !== iteration.taskId ||
+          worktree.iterationId !== iteration.id))
+    ) {
+      invalidPersistedRelationship('iteration ownership');
+    }
+  }
+
+  for (const worktree of state.worktrees) {
+    const iteration = iterations.get(worktree.iterationId);
+    if (
+      !tasks.has(worktree.taskId) ||
+      !iteration ||
+      iteration.taskId !== worktree.taskId
+    ) {
+      invalidPersistedRelationship('worktree ownership');
+    }
+  }
+
+  for (const session of state.agentSessions) {
+    const iteration = iterations.get(session.iterationId);
+    const worktree = worktrees.get(session.worktreeId);
+    if (
+      !tasks.has(session.taskId) ||
+      !iteration ||
+      iteration.taskId !== session.taskId ||
+      !worktree ||
+      worktree.taskId !== session.taskId ||
+      worktree.iterationId !== session.iterationId ||
+      worktree.worktreePath !== session.worktreePath
+    ) {
+      invalidPersistedRelationship('agent session ownership');
+    }
+  }
+
+  for (const run of state.runs) {
+    const iteration = iterations.get(run.iterationId);
+    const worktree = worktrees.get(run.worktreeId);
+    const session = sessions.get(run.sessionId);
+    if (
+      !tasks.has(run.taskId) ||
+      !iteration ||
+      iteration.taskId !== run.taskId ||
+      !worktree ||
+      worktree.taskId !== run.taskId ||
+      worktree.iterationId !== run.iterationId ||
+      !session ||
+      session.taskId !== run.taskId ||
+      session.iterationId !== run.iterationId ||
+      session.worktreeId !== run.worktreeId
+    ) {
+      invalidPersistedRelationship('run ownership');
+    }
+    assertRunArtifact(artifacts, run, run.promptArtifactId, 'agent-prompt');
+    assertRunArtifact(artifacts, run, run.outputArtifactId, 'agent-output');
+    assertRunArtifact(
+      artifacts,
+      run,
+      run.diagnosticArtifactId,
+      'agent-diagnostics'
+    );
+    if (run.finalArtifactId) {
+      assertRunArtifact(artifacts, run, run.finalArtifactId, 'agent-final');
+    }
+    if (run.beforeGitSnapshotId) {
+      assertRunGitSnapshot(gitSnapshots, run, run.beforeGitSnapshotId);
+    }
+    if (run.afterGitSnapshotId) {
+      assertRunGitSnapshot(gitSnapshots, run, run.afterGitSnapshotId);
+    }
+  }
+
+  for (const artifact of state.artifacts) {
+    const run = artifact.runId ? runs.get(artifact.runId) : undefined;
+    if (
+      !tasks.has(artifact.taskId) ||
+      (artifact.runId && (!run || run.taskId !== artifact.taskId))
+    ) {
+      invalidPersistedRelationship('artifact ownership');
+    }
+  }
+
+  for (const item of state.agentItems) {
+    if (!item.outputArtifactId) continue;
+    const artifact = artifacts.get(item.outputArtifactId);
+    if (
+      !artifact ||
+      artifact.taskId !== item.taskId ||
+      artifact.runId !== item.runId
+    ) {
+      invalidPersistedRelationship('agent item output artifact ownership');
+    }
+  }
+
+  for (const snapshot of gitSnapshots.values()) {
+    const worktree = assertEvidenceOwnership(
+      tasks,
+      iterations,
+      worktrees,
+      snapshot,
+      'git snapshot ownership'
+    );
+    if (snapshot.worktreePath !== worktree.worktreePath) {
+      invalidPersistedRelationship('git snapshot ownership');
+    }
+    if (snapshot.diffArtifactId) {
+      assertTaskArtifact(
+        artifacts,
+        snapshot.taskId,
+        snapshot.diffArtifactId,
+        'diff',
+        'git snapshot artifact ownership'
+      );
+    }
+  }
+
+  for (const [records, label] of [
+    [githubRepositories, 'GitHub repository ownership'],
+    [branchPublications, 'branch publication ownership'],
+    [pullRequests, 'pull request ownership'],
+    [ciRollups, 'CI rollup ownership'],
+    [reviewRollups, 'review rollup ownership'],
+    [mergeSnapshots, 'merge snapshot ownership']
+  ] as const) {
+    for (const record of records.values()) {
+      assertEvidenceOwnership(tasks, iterations, worktrees, record, label);
+    }
+  }
+
+  for (const pullRequest of pullRequests.values()) {
+    if (pullRequest.bodyArtifactId) {
+      assertTaskArtifact(
+        artifacts,
+        pullRequest.taskId,
+        pullRequest.bodyArtifactId,
+        'pr-body',
+        'pull request body artifact ownership'
+      );
+    }
+  }
+
+  for (const task of state.tasks) {
+    const iteration = task.currentIterationId
+      ? iterations.get(task.currentIterationId)
+      : undefined;
+    const worktree = task.currentWorktreeId
+      ? worktrees.get(task.currentWorktreeId)
+      : undefined;
+    const session = task.currentAgentSessionId
+      ? sessions.get(task.currentAgentSessionId)
+      : undefined;
+    const run = task.currentRunId ? runs.get(task.currentRunId) : undefined;
+    if (
+      (task.currentIterationId && (!iteration || iteration.taskId !== task.id)) ||
+      (task.currentWorktreeId &&
+        (!worktree ||
+          worktree.taskId !== task.id ||
+          (iteration && worktree.iterationId !== iteration.id))) ||
+      (task.currentAgentSessionId &&
+        (!session ||
+          session.taskId !== task.id ||
+          (iteration && session.iterationId !== iteration.id) ||
+          (worktree && session.worktreeId !== worktree.id))) ||
+      (task.currentRunId &&
+        (!run ||
+          run.taskId !== task.id ||
+          (iteration && run.iterationId !== iteration.id) ||
+          (worktree && run.worktreeId !== worktree.id) ||
+          (session && run.sessionId !== session.id))) ||
+      (task.projection.codexReview?.reviewedGitSnapshotId &&
+        gitSnapshots.get(task.projection.codexReview.reviewedGitSnapshotId)?.taskId !==
+          task.id)
+    ) {
+      invalidPersistedRelationship('task current record');
+    }
+  }
+}
+
+function indexUniqueRecords<T extends { id: string }>(
+  records: readonly T[],
+  collection: string
+): Map<string, T> {
+  const indexed = new Map<string, T>();
+  for (const record of records) {
+    if (indexed.has(record.id)) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${collection} contains duplicate identifiers.`
+      );
+    }
+    indexed.set(record.id, record);
+  }
+  return indexed;
+}
+
+function assertRunArtifact(
+  artifacts: ReadonlyMap<string, ArtifactRecord>,
+  run: RunRecord,
+  artifactId: string,
+  kind: ArtifactKind
+): void {
+  const artifact = artifacts.get(artifactId);
+  if (
+    !artifact ||
+    artifact.taskId !== run.taskId ||
+    artifact.runId !== run.id ||
+    artifact.kind !== kind
+  ) {
+    invalidPersistedRelationship('run artifact ownership');
+  }
+}
+
+function assertTaskArtifact(
+  artifacts: ReadonlyMap<string, ArtifactRecord>,
+  taskId: string,
+  artifactId: string,
+  kind: ArtifactKind,
+  label: string
+): void {
+  const artifact = artifacts.get(artifactId);
+  if (
+    !artifact ||
+    artifact.taskId !== taskId ||
+    artifact.runId !== undefined ||
+    artifact.kind !== kind
+  ) {
+    invalidPersistedRelationship(label);
+  }
+}
+
+function assertRunGitSnapshot(
+  snapshots: ReadonlyMap<string, GitSnapshotRecord>,
+  run: RunRecord,
+  snapshotId: string
+): void {
+  const snapshot = snapshots.get(snapshotId);
+  if (
+    !snapshot ||
+    snapshot.taskId !== run.taskId ||
+    snapshot.iterationId !== run.iterationId ||
+    snapshot.worktreeId !== run.worktreeId
+  ) {
+    invalidPersistedRelationship('run git snapshot ownership');
+  }
+}
+
+function assertEvidenceOwnership(
+  tasks: ReadonlyMap<string, Task>,
+  iterations: ReadonlyMap<string, TaskIteration>,
+  worktrees: ReadonlyMap<string, WorktreeRecord>,
+  record: { taskId: string; iterationId: string; worktreeId: string },
+  label: string
+): WorktreeRecord {
+  const iteration = iterations.get(record.iterationId);
+  const worktree = worktrees.get(record.worktreeId);
+  if (
+    !tasks.has(record.taskId) ||
+    !iteration ||
+    iteration.taskId !== record.taskId ||
+    !worktree ||
+    worktree.taskId !== record.taskId ||
+    worktree.iterationId !== record.iterationId
+  ) {
+    invalidPersistedRelationship(label);
+  }
+  return worktree;
+}
+
+function invalidPersistedRelationship(label: string): never {
+  throw new Error(
+    `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: ${label} is inconsistent.`
+  );
 }
 
 function validatePersistedRuntimeIdentity(state: StoreState): void {
@@ -3389,6 +4793,7 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
   const runs = new Map(state.runs.map((run) => [run.id, run]));
   const providerSessionOwners = new Set<string>();
   const providerTurnOwners = new Set<string>();
+  const interactionOccurrences = new Set<string>();
   const serverIds = new Set<string>();
   for (const server of state.agentServers) {
     if (
@@ -3414,7 +4819,8 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
     if (
       !task ||
       !isRuntimeId(session.runtimeId) ||
-      (session.role !== 'REVIEW' && session.runtimeId !== task.runtimeId) ||
+      (session.runtimeId !== task.runtimeId &&
+        !belongsToDetachedReviewLineage(session, sessions)) ||
       session.requestedSettings.runtimeId !== session.runtimeId ||
       (session.observedSettings?.runtimeId !== undefined &&
         session.observedSettings.runtimeId !== session.runtimeId)
@@ -3442,7 +4848,12 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       !isRuntimeId(run.runtimeId) ||
       run.runtimeId !== session.runtimeId ||
       (run.runtimeId !== task.runtimeId &&
-        !(run.mode === 'REVIEW' && session.role === 'REVIEW')) ||
+        !(
+          (run.mode === 'REVIEW' && session.role === 'REVIEW') ||
+          (run.mode === 'SUBAGENT' &&
+            session.role === 'SUBAGENT' &&
+            belongsToDetachedReviewLineage(session, sessions))
+        )) ||
       run.requestedSettings.runtimeId !== run.runtimeId ||
       (run.observedSettings?.runtimeId !== undefined &&
         run.observedSettings.runtimeId !== run.runtimeId)
@@ -3465,13 +4876,29 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
     }
   }
   for (const interaction of state.interactionRequests) {
+    const occurrence = interactionOccurrenceIdentity(interaction);
+    if (interactionOccurrences.has(occurrence)) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: interaction occurrence identity is duplicated.`
+      );
+    }
+    interactionOccurrences.add(occurrence);
     const run = runs.get(interaction.runId);
     const session = sessions.get(interaction.sessionId);
     if (
       !run ||
       !session ||
       interaction.runtimeId !== run.runtimeId ||
-      interaction.runtimeId !== session.runtimeId
+      interaction.runtimeId !== session.runtimeId ||
+      interaction.taskId !== run.taskId ||
+      interaction.taskId !== session.taskId ||
+      interaction.iterationId !== run.iterationId ||
+      interaction.iterationId !== session.iterationId ||
+      interaction.sessionId !== run.sessionId ||
+      interaction.serverInstanceId !== run.serverInstanceId ||
+      interaction.requestRawMessage.serverInstanceId !== interaction.serverInstanceId ||
+      (interaction.responseRawMessage !== undefined &&
+        interaction.responseRawMessage.serverInstanceId !== interaction.serverInstanceId)
     ) {
       throw new Error(
         `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: interaction runtime ownership is inconsistent.`
@@ -3575,6 +5002,34 @@ function validatePersistedRuntimeIdentity(state: StoreState): void {
       'Persisted subagent observation'
     );
   }
+}
+
+function belongsToDetachedReviewLineage(
+  session: AgentSessionRecord,
+  sessions: ReadonlyMap<string, AgentSessionRecord>
+): boolean {
+  if (session.role === 'REVIEW') return true;
+  if (session.role !== 'SUBAGENT') return false;
+
+  const visited = new Set<string>([session.id]);
+  let child = session;
+  while (child.role === 'SUBAGENT' && child.parentSessionId) {
+    const parent = sessions.get(child.parentSessionId);
+    if (
+      !parent ||
+      visited.has(parent.id) ||
+      parent.taskId !== child.taskId ||
+      parent.iterationId !== child.iterationId ||
+      parent.worktreeId !== child.worktreeId ||
+      parent.runtimeId !== child.runtimeId
+    ) {
+      return false;
+    }
+    if (parent.role === 'REVIEW') return true;
+    visited.add(parent.id);
+    child = parent;
+  }
+  return false;
 }
 
 function assertRuntimeOwnedAgentRecord(
@@ -3709,174 +5164,6 @@ function validatePersistedAttachments(state: StoreState): void {
   }
 }
 
-function migratePersistedState(state: PersistedState): {
-  state: PersistedState;
-  changed: boolean;
-} {
-  let schema11: PersistedState;
-  if (state.schemaVersion === 11) {
-    schema11 = state;
-  } else if (state.schemaVersion === 10) {
-    schema11 = { ...state, schemaVersion: 11 };
-  } else if (state.schemaVersion === 9) {
-    schema11 = { ...state, schemaVersion: 11, attachments: [] };
-  } else if (state.schemaVersion === 8) {
-    // Schema 8 differs from schema 9 only by this retired collection.
-    const { testRuns: _legacyTestRuns, ...currentState } = state;
-    schema11 = { ...currentState, schemaVersion: 11, attachments: [] };
-  } else {
-    return { state, changed: false };
-  }
-
-  return { state: migrateSchema11RuntimeIdentity(schema11), changed: true };
-}
-
-function migrateSchema11RuntimeIdentity(state: PersistedState): PersistedState {
-  const legacySessions = recordArray(state.agentSessions, 'agentSessions');
-  const sessions: Record<string, unknown>[] = legacySessions.map((session) => {
-    const runtimeId = legacyRuntimeId(session);
-    return withoutLegacyProvider({
-      ...session,
-      runtimeId,
-      requestedSettings: settingsWithRuntime(session.requestedSettings, runtimeId),
-      observedSettings: optionalSettingsWithRuntime(session.observedSettings, runtimeId)
-    });
-  });
-  const runtimeBySessionId = new Map(
-    sessions.flatMap((session) =>
-      typeof session.id === 'string' && typeof session.runtimeId === 'string'
-        ? [[session.id, session.runtimeId] as const]
-        : []
-    )
-  );
-  const tasks: Record<string, unknown>[] = recordArray(state.tasks, 'tasks').map((task) => {
-    const settings = recordOrEmpty(task.agentSettings);
-    const runtimeId =
-      stringValue(task.runtimeId) ??
-      stringValue(settings.runtimeId) ??
-      (typeof task.currentAgentSessionId === 'string'
-        ? runtimeBySessionId.get(task.currentAgentSessionId)
-        : undefined) ??
-      CODEX_RUNTIME_ID;
-    return {
-      ...task,
-      runtimeId,
-      agentSettings: settingsWithRuntime(settings, runtimeId)
-    };
-  });
-  const runtimeByTaskId = new Map(
-    tasks.flatMap((task) =>
-      typeof task.id === 'string' && typeof task.runtimeId === 'string'
-        ? [[task.id, task.runtimeId] as const]
-        : []
-    )
-  );
-  const runs: Record<string, unknown>[] = recordArray(state.runs, 'runs').map((run) => {
-    const runtimeId =
-      stringValue(run.runtimeId) ??
-      (typeof run.sessionId === 'string' ? runtimeBySessionId.get(run.sessionId) : undefined) ??
-      (typeof run.taskId === 'string' ? runtimeByTaskId.get(run.taskId) : undefined) ??
-      CODEX_RUNTIME_ID;
-    return {
-      ...run,
-      runtimeId,
-      requestedSettings: settingsWithRuntime(run.requestedSettings, runtimeId),
-      observedSettings: optionalSettingsWithRuntime(run.observedSettings, runtimeId)
-    };
-  });
-  const runtimeByRunId = new Map(
-    runs.flatMap((run) =>
-      typeof run.id === 'string' && typeof run.runtimeId === 'string'
-        ? [[run.id, run.runtimeId] as const]
-        : []
-    )
-  );
-  const migrateRuntimeRecord = (record: Record<string, unknown>) =>
-    withoutLegacyProvider({ ...record, runtimeId: legacyRuntimeId(record) });
-  const migrateSessionOwnedRecord = (record: Record<string, unknown>) => {
-    const runtimeId =
-      stringValue(record.runtimeId) ??
-      (typeof record.sessionId === 'string'
-        ? runtimeBySessionId.get(record.sessionId)
-        : undefined) ??
-      legacyRuntimeId(record);
-    return withoutLegacyProvider({ ...record, runtimeId });
-  };
-  const interactions = recordArray(state.interactionRequests, 'interactionRequests').map((request) => ({
-    ...request,
-    runtimeId:
-      stringValue(request.runtimeId) ??
-      (typeof request.runId === 'string' ? runtimeByRunId.get(request.runId) : undefined) ??
-      (typeof request.sessionId === 'string'
-        ? runtimeBySessionId.get(request.sessionId)
-        : undefined) ??
-      CODEX_RUNTIME_ID
-  }));
-
-  return {
-    ...state,
-    schemaVersion: TASK_STORE_SCHEMA_VERSION,
-    tasks: tasks as unknown as Task[],
-    runs: runs as unknown as RunRecord[],
-    agentServers: recordArray(state.agentServers, 'agentServers').map(migrateRuntimeRecord) as unknown as AgentServerInstance[],
-    agentSessions: sessions as unknown as AgentSessionRecord[],
-    agentGoalSnapshots: recordArray(state.agentGoalSnapshots, 'agentGoalSnapshots').map(migrateSessionOwnedRecord) as unknown as AgentGoalSnapshotRecord[],
-    agentPlanRevisions: recordArray(state.agentPlanRevisions, 'agentPlanRevisions').map(migrateSessionOwnedRecord) as unknown as AgentPlanRevisionRecord[],
-    agentUsageSnapshots: recordArray(state.agentUsageSnapshots, 'agentUsageSnapshots').map(migrateSessionOwnedRecord) as unknown as AgentUsageSnapshotRecord[],
-    agentSettingsObservations: recordArray(state.agentSettingsObservations, 'agentSettingsObservations').map(migrateSessionOwnedRecord) as unknown as AgentSettingsObservationRecord[],
-    agentSubagentObservations: recordArray(state.agentSubagentObservations, 'agentSubagentObservations').map(migrateSessionOwnedRecord) as unknown as AgentSubagentObservationRecord[],
-    interactionRequests: interactions as unknown as InteractionRequestRecord[]
-  };
-}
-
-function recordArray(value: unknown, collection: string): Record<string, unknown>[] {
-  if (!Array.isArray(value)) {
-    throw new Error(
-      `Task Monki store schema migration is invalid: ${collection} is missing.`
-    );
-  }
-  if (
-    value.some(
-      (item) => !item || typeof item !== 'object' || Array.isArray(item)
-    )
-  ) {
-    throw new Error(
-      `Task Monki store schema migration is invalid: ${collection} contains a malformed record.`
-    );
-  }
-  return value as Record<string, unknown>[];
-}
-
-function recordOrEmpty(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
-}
-
-function legacyRuntimeId(record: Record<string, unknown>): string {
-  return stringValue(record.runtimeId) ?? stringValue(record.provider) ?? CODEX_RUNTIME_ID;
-}
-
-function withoutLegacyProvider(record: Record<string, unknown>): Record<string, unknown> {
-  const { provider: _legacyProvider, ...current } = record;
-  return current;
-}
-
-function settingsWithRuntime(value: unknown, runtimeId: string): Record<string, unknown> {
-  return { ...recordOrEmpty(value), runtimeId };
-}
-
-function optionalSettingsWithRuntime(
-  value: unknown,
-  runtimeId: string
-): Record<string, unknown> | undefined {
-  return value === undefined ? undefined : settingsWithRuntime(value, runtimeId);
-}
-
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
   let changed = false;
   const activeRunStatuses: RunRecord['status'][] = [
@@ -3914,16 +5201,6 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     };
   });
   const tasks = state.tasks.map((task) => {
-    const taskWithDefaults =
-      Array.isArray(task.forkedAlternativeTaskIds)
-        ? task
-        : {
-            ...task,
-            forkedAlternativeTaskIds: []
-          };
-    if (taskWithDefaults !== task) {
-      changed = true;
-    }
     const taskCurrentRun = task.currentRunId
       ? runs.find((run) => run.id === task.currentRunId)
       : undefined;
@@ -3933,11 +5210,11 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
         ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
           taskCurrentRun.status
         ) &&
-        taskWithDefaults.workflowPhase === 'REVIEW'
+        task.workflowPhase === 'REVIEW'
     );
     const normalizedTask = shouldRepairImplementationPhase
-      ? { ...taskWithDefaults, workflowPhase: 'IN_PROGRESS' as const }
-      : taskWithDefaults;
+      ? { ...task, workflowPhase: 'IN_PROGRESS' as const }
+      : task;
     if (shouldRepairImplementationPhase) {
       changed = true;
     }
@@ -4048,7 +5325,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
           updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? currentReview?.updatedAt
         }
       },
-      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? taskWithDefaults.updatedAt
+      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? task.updatedAt
     };
   });
 
@@ -4056,11 +5333,11 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
 }
 
 function removeTaskLink(task: Task, deletedTaskId: string, now: string): Task {
-  const forkedAlternativeTaskIds = (task.forkedAlternativeTaskIds ?? []).filter(
+  const forkedAlternativeTaskIds = task.forkedAlternativeTaskIds.filter(
     (alternativeTaskId) => alternativeTaskId !== deletedTaskId
   );
   const removedAlternative =
-    forkedAlternativeTaskIds.length !== (task.forkedAlternativeTaskIds ?? []).length;
+    forkedAlternativeTaskIds.length !== task.forkedAlternativeTaskIds.length;
   const removedSource = task.forkedFromTaskId === deletedTaskId;
 
   if (!removedAlternative && !removedSource) {
@@ -4302,6 +5579,68 @@ function branchPublicationEventType(
     return 'BRANCH_PUBLISH_REQUESTED';
   }
   return 'BRANCH_PUBLISH_FAILED';
+}
+
+function sameInteractionOccurrenceInput(
+  existing: InteractionRequestRecord,
+  input: CreateInteractionRequestInput
+): boolean {
+  let sameRequest: boolean;
+  try {
+    sameRequest = stableJsonStringify(existing.request) === stableJsonStringify(input.request);
+  } catch {
+    return false;
+  }
+  return (
+    existing.runtimeId === input.runtimeId &&
+    existing.serverInstanceId === input.serverInstanceId &&
+    existing.providerRequestId === input.providerRequestId &&
+    existing.taskId === input.taskId &&
+    existing.iterationId === input.iterationId &&
+    existing.runId === input.runId &&
+    existing.sessionId === input.sessionId &&
+    existing.providerTurnId === input.providerTurnId &&
+    existing.providerItemId === input.providerItemId &&
+    existing.type === input.type &&
+    sameRequest &&
+    sameStringArray(existing.allowedActions, input.allowedActions) &&
+    sameStringArray(existing.policyWarnings, input.policyWarnings) &&
+    sameProtocolReference(existing.requestRawMessage, input.requestRawMessage)
+  );
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameProtocolReference(
+  left: AgentProtocolMessageReference,
+  right: AgentProtocolMessageReference
+): boolean {
+  return (
+    left.serverInstanceId === right.serverInstanceId &&
+    left.segment === right.segment &&
+    left.sequence === right.sequence &&
+    left.direction === right.direction &&
+    left.recordedAt === right.recordedAt &&
+    left.byteOffset === right.byteOffset &&
+    left.byteLength === right.byteLength &&
+    left.sha256 === right.sha256
+  );
+}
+
+function interactionOccurrenceIdentity(
+  interaction: Pick<
+    InteractionRequestRecord,
+    'serverInstanceId' | 'providerRequestId' | 'requestRawMessage'
+  >
+): string {
+  return JSON.stringify([
+    interaction.serverInstanceId,
+    typeof interaction.providerRequestId,
+    interaction.providerRequestId,
+    interaction.requestRawMessage.sequence
+  ]);
 }
 
 function validateInteractionTransition(

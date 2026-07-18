@@ -103,7 +103,7 @@ describe('TaskManagerService task deletion', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
     const task = await service.createTask({
       title: 'Dirty delete guard',
@@ -130,7 +130,7 @@ describe('TaskManagerService task deletion', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
     const task = await service.createTask({
       title: 'Clean delete removal',

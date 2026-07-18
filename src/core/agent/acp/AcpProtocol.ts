@@ -651,8 +651,7 @@ function parseModelReasoningEfforts(
     ids.size !== reasoningEfforts.length ||
     values.size !== reasoningEfforts.length ||
     !values.has(meta.reasoningEffort) ||
-    defaults.length !== 1 ||
-    defaults[0]?.value !== meta.reasoningEffort
+    defaults.length !== 1
   ) {
     throw new Error(
       'ACP provider extension model reasoning catalog has duplicate or inconsistent values.'

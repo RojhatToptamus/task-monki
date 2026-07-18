@@ -5,11 +5,9 @@ import type {
   AgentItemStatus,
   AgentItemType,
   AgentJsonValue,
-  AgentModel,
   AgentPlanStep
 } from '../../../shared/agent';
 import {
-  flattenSelectOptions,
   type AcpContentBlock,
   type AcpPermissionOption,
   type AcpSessionConfigOption,
@@ -137,99 +135,6 @@ export function permissionOutcomeForDecision(
   return { outcome: 'selected', optionId: selected.optionId };
 }
 
-export function modelsFromAcpConfig(
-  profile: AcpRuntimeProfile,
-  sessions: readonly AcpNativeSessionState[],
-  inputModalities: string[]
-): AgentModel[] {
-  const models = new Map<string, AgentModel>();
-  const orderedSessions = [...sessions].sort((left, right) =>
-    compareStableText(left.sessionId, right.sessionId)
-  );
-
-  // Prefer the first-class ACP model catalog over the compatibility config
-  // selector, independent of the order in which live sessions were observed.
-  for (const session of orderedSessions) {
-    const availableModels = [...(session.models?.availableModels ?? [])].sort(
-      (left, right) =>
-        compareStableText(left.modelId, right.modelId) ||
-        compareStableText(left.name, right.name) ||
-        compareStableText(left.description ?? '', right.description ?? '')
-    );
-    for (const model of availableModels) {
-      // Model IDs become durable routing identifiers and renderer text. Drop a
-      // provider value if credential redaction would alter it; a redacted ID
-      // must never become an executable model selection.
-      if (redactNativeString(model.modelId) !== model.modelId) continue;
-      if (models.has(model.modelId)) continue;
-      models.set(model.modelId, {
-        id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${model.modelId}`,
-        runtimeId: profile.descriptor.id,
-        modelProvider: profile.defaultModelProvider,
-        model: model.modelId,
-        displayName: redactNativeString(model.name),
-        description: model.description
-          ? redactNativeString(model.description)
-          : undefined,
-        hidden: false,
-        supportedReasoningEfforts: [],
-        serviceTiers: [],
-        inputModalities,
-        isDefault: profile.defaultModel === model.modelId,
-        native: redactAcpNativeValue({ source: 'session-models', model })
-      });
-    }
-  }
-
-  for (const session of orderedSessions) {
-    const modelConfigs = session.configOptions
-      .filter(
-        (config): config is Extract<AcpSessionConfigOption, { type: 'select' }> =>
-          config.type === 'select' && config.category === 'model'
-      )
-      .sort((left, right) => compareStableText(left.id, right.id));
-    for (const config of modelConfigs) {
-      const options = flattenSelectOptions(config).sort(
-        (left, right) =>
-          compareStableText(left.value, right.value) ||
-          compareStableText(left.name, right.name)
-      );
-      for (const option of options) {
-        if (redactNativeString(option.value) !== option.value) continue;
-        if (models.has(option.value)) continue;
-        models.set(option.value, {
-          id: `${profile.descriptor.id}:${profile.defaultModelProvider}/${option.value}`,
-          runtimeId: profile.descriptor.id,
-          modelProvider: profile.defaultModelProvider,
-          model: option.value,
-          displayName: redactNativeString(option.name),
-          description: option.description
-            ? redactNativeString(option.description)
-            : undefined,
-          hidden: false,
-          supportedReasoningEfforts: [],
-          serviceTiers: [],
-          inputModalities,
-          isDefault: profile.defaultModel === option.value,
-          native: redactAcpNativeValue({
-            configId: config.id,
-            category: config.category,
-            option
-          })
-        });
-      }
-    }
-  }
-  return [...models.values()].sort(
-    (left, right) =>
-      compareStableText(left.model, right.model) || compareStableText(left.id, right.id)
-  );
-}
-
-function compareStableText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
 export function observedSettingsFromAcpState(
   profile: AcpRuntimeProfile,
   state: AcpNativeSessionState,
@@ -246,12 +151,16 @@ export function observedSettingsFromAcpState(
     profile.defaultModel;
   const safeObservedModel = redactNativeString(observedModel);
   const thoughtLevel = acpThoughtLevelSelector(state);
+  const providerModelReasoningEffort = state.models?.availableModels.find(
+    (model) => model.modelId === state.models?.currentModelId
+  )?.reasoningEffort;
   return {
     ...requested,
     runtimeId: profile.descriptor.id,
     model: safeObservedModel === observedModel ? observedModel : undefined,
     modelProvider: requested.modelProvider ?? profile.defaultModelProvider,
-    reasoningEffort: thoughtLevel?.currentValue,
+    reasoningEffort:
+      thoughtLevel?.currentValue ?? providerModelReasoningEffort ?? undefined,
     runtimeOptions: {
       ...requested.runtimeOptions,
       [profile.descriptor.id]: nativeOptionsValue(state)
@@ -283,7 +192,7 @@ export function requestedNativeConfigValues(
 ): Record<string, string | boolean> {
   const value = settings.runtimeOptions?.[runtimeId];
   if (!isRecord(value)) return {};
-  const configValues = isRecord(value.configValues) ? value.configValues : value;
+  const configValues = isRecord(value.configValues) ? value.configValues : {};
   return Object.fromEntries(
     Object.entries(configValues).filter(
       (entry): entry is [string, string | boolean] =>

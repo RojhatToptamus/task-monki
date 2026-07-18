@@ -30,7 +30,10 @@ import {
   taskCreationNeedsUnchangedRetry,
   type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
-import { selectModel } from '../model/agentExecutionSettings';
+import {
+  resolveReasoningEffort,
+  selectModel
+} from '../model/agentExecutionSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { useTaskAttachments } from './useTaskAttachments';
 
@@ -163,6 +166,8 @@ export function NewTaskPanel({
   const effectiveAttachmentsEnabled = attachmentsEnabled && runtimeSupportsAttachments;
   const runtimeModels = models.filter((candidate) => candidate.runtimeId === runtimeId);
   const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
+  const effectiveReasoningEffort =
+    resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
   const repositoryPath = defaultRepositoryPath.trim();
   const networkDisabledByPreset = permissionPreset?.networkAccess === 'DISABLED';
   const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
@@ -171,8 +176,7 @@ export function NewTaskPanel({
     ...new Set(
       [
         ...(selectedModel?.supportedReasoningEfforts ?? []),
-        selectedModel?.defaultReasoningEffort,
-        reasoningEffort
+        selectedModel?.defaultReasoningEffort
       ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
     )
   ];
@@ -310,7 +314,7 @@ export function NewTaskPanel({
             runtimeId: runtimeId || undefined,
             model: selectedModel?.model,
             modelProvider: selectedModel?.modelProvider,
-            reasoningEffort: reasoningEffort || undefined,
+            reasoningEffort: effectiveReasoningEffort || undefined,
             ...permissionSettings
           },
           runtimeId: runtimeId || undefined
@@ -612,7 +616,9 @@ export function NewTaskPanel({
               <span className="newtask-settings__summary">
                 {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
                 {selectedModel ? ` · ${selectedModel.displayName}` : ''}
-                {reasoningEffort ? ` · ${formatEffortLabel(reasoningEffort)}` : ''}
+                {effectiveReasoningEffort
+                  ? ` · ${formatEffortLabel(effectiveReasoningEffort)}`
+                  : ''}
               </span>
               <ChevronIcon />
             </summary>
@@ -677,10 +683,12 @@ export function NewTaskPanel({
                         key={effort}
                         type="button"
                         className={`segmented-effort__button ${
-                          effort === reasoningEffort ? 'segmented-effort__button--active' : ''
+                          effort === effectiveReasoningEffort
+                            ? 'segmented-effort__button--active'
+                            : ''
                         }`}
                         disabled={composerLocked || !selectedModel}
-                        aria-pressed={effort === reasoningEffort}
+                        aria-pressed={effort === effectiveReasoningEffort}
                         onClick={() => setReasoningEffort(effort)}
                       >
                         {formatEffortLabel(effort)}

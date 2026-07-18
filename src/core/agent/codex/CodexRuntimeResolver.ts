@@ -6,8 +6,10 @@ import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
   execFilePortable,
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import {
   compareCodexVersions,
@@ -351,7 +353,7 @@ async function probeJsonRpcCapabilities(
       CODEX_HOME: codexHome
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-    detached: false
+    detached: process.platform !== 'win32'
   }) as ChildProcessWithoutNullStreams;
 
   let stderr = '';
@@ -487,13 +489,24 @@ async function probeJsonRpcCapabilities(
   } finally {
     reader.close();
     child.stdin.destroy();
-    if (child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
-      if (!(await waitForClose(child, 1_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
+    let cleanupFailure: unknown;
+    try {
+      if (isPortableProcessTreeRunning(child)) {
+        await terminatePortableProcessTree(child, 'SIGTERM');
+        if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+          await terminatePortableProcessTree(child, 'SIGKILL');
+          if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+            throw new Error(
+              `Codex capability probe process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
+            );
+          }
+        }
       }
+    } catch (cause) {
+      cleanupFailure = cause;
     }
     await fs.rm(codexHome, { recursive: true, force: true });
+    if (cleanupFailure) throw cleanupFailure;
   }
 }
 
@@ -779,25 +792,5 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
-  });
-}
-
-function waitForClose(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
-): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
   });
 }

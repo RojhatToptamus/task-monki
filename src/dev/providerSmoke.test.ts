@@ -269,6 +269,24 @@ describe('runProviderSmoke', () => {
     expect(report.results[0]?.error).toContain('interaction request');
   });
 
+  it('rejects a final message that only mentions the smoke sentinel', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const candidate = model('codex:openai/verbose-response');
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [catalogWith([runtime('codex', 'READY', true, [candidate])])],
+      finalMessage:
+        'The requested response was "TASK_MONKI_PROVIDER_SMOKE_OK".'
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths);
+
+    expect(report.results[0]).toMatchObject({
+      verdict: 'FAILED',
+      receivedSentinel: false
+    });
+    expect(report.results[0]?.error).toContain('did not return');
+  });
+
   it('uses the exact explicit post-run Git snapshot', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('codex:openai/git-evidence');
@@ -581,6 +599,7 @@ function catalogWith(runtimes: ReturnType<typeof runtime>[]): AgentRuntimeCatalo
 
 interface FakeProviderBehavior {
   catalogs: Array<AgentRuntimeCatalog | Error>;
+  finalMessage?: string;
   observation?:
     | 'provider'
     | 'adapter'
@@ -672,7 +691,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       eventCount: 1,
       finalMessage: this.behavior.hangStart || timesOut
         ? undefined
-        : 'TASK_MONKI_PROVIDER_SMOKE_OK'
+        : (this.behavior.finalMessage ?? 'TASK_MONKI_PROVIDER_SMOKE_OK')
     } as RunRecord;
     this.snapshot.runs.push(run);
     this.startedModels.push({

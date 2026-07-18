@@ -65,6 +65,8 @@ describe('OpenCodeInteractionMapper', () => {
       pattern: '*',
       action: 'allow'
     });
+    expect(rules[0]).toEqual({ permission: '*', pattern: '*', action: 'allow' });
+    expect(rules.some((rule) => rule.action === 'ask')).toBe(false);
     expect(() =>
       openCodePermissionRules({
         sandbox: 'DANGER_FULL_ACCESS',
@@ -135,6 +137,28 @@ describe('OpenCodeInteractionMapper', () => {
         providerItemPayload: { changes: [{ path: 'src/app.ts', kind: 'edit', diff: '' }] }
       })
     );
+    expect(
+      mapOpenCodePermission(
+        {
+          id: 'per_3',
+          sessionID: 'ses_1',
+          permission: 'external_directory',
+          patterns: ['/outside/repo']
+        },
+        '/repo'
+      )
+    ).toEqual(
+      expect.objectContaining({
+        type: 'PERMISSION_APPROVAL',
+        request: expect.objectContaining({
+          permissions: {
+            fileSystem: {
+              entries: [{ path: { path: '/outside/repo' }, access: 'write' }]
+            }
+          }
+        })
+      })
+    );
   });
 
   it('keeps question answer ordering stable for the native reply endpoint', () => {
@@ -162,6 +186,36 @@ describe('OpenCodeInteractionMapper', () => {
         mapped.request
       )
     ).toEqual({ path: 'question', body: { answers: [['one'], ['two']] } });
+  });
+
+  it('maps only per-request native permission replies', () => {
+    const mapped = mapOpenCodePermission(
+      {
+        id: 'per_reply',
+        sessionID: 'ses_1',
+        action: 'bash',
+        resources: ['npm test']
+      },
+      '/repo'
+    );
+    expect(
+      mapOpenCodeInteractionResponse(
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' },
+        mapped.request
+      )
+    ).toEqual({ path: 'permission', body: { reply: 'once' } });
+    expect(
+      mapOpenCodeInteractionResponse(
+        { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE' },
+        mapped.request
+      )
+    ).toEqual({ path: 'permission', body: { reply: 'reject' } });
+    expect(() =>
+      mapOpenCodeInteractionResponse(
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT_FOR_SESSION' },
+        mapped.request
+      )
+    ).toThrow('does not expose a session-scoped permission reply');
   });
 
   it('fails closed for questions that may contain credentials', () => {

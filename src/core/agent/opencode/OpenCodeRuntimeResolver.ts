@@ -16,6 +16,7 @@ export const REQUIRED_OPENCODE_HTTP_CAPABILITIES = [
   'GET /event (SSE)',
   'POST /session',
   'GET /session/{id}',
+  'DELETE /session/{id}',
   'GET /session/{id}/message',
   'POST /session/{id}/fork',
   'POST /session/{id}/prompt_async',

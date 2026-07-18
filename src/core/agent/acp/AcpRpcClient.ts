@@ -41,6 +41,8 @@ interface AcpRpcEvents {
   close: [reason: string];
 }
 
+const MALFORMED_ACP_FRAME = '[REDACTED MALFORMED ACP FRAME]';
+
 export interface AcpRpcResult<T> {
   result: T;
   raw: AgentProtocolMessageReference;
@@ -86,6 +88,7 @@ export class AcpRpcClient {
   private readonly expiredRequestIds = new Set<AcpJsonRpcId>();
   private inbound = Buffer.alloc(0);
   private inboundQueue: Promise<void> = Promise.resolve();
+  private inboundFailure?: Error;
   private outboundQueue: Promise<unknown> = Promise.resolve();
   private nextRequestId = 1;
   private closed = false;
@@ -132,6 +135,12 @@ export class AcpRpcClient {
 
   async notify(method: string, params: unknown): Promise<AgentProtocolMessageReference> {
     return this.write({ jsonrpc: '2.0', method, params });
+  }
+
+  /** Waits for every complete message already received from stdout to be dispatched. */
+  async drainInbound(): Promise<void> {
+    await this.inboundQueue;
+    if (this.inboundFailure) throw this.inboundFailure;
   }
 
   respond(
@@ -223,27 +232,22 @@ export class AcpRpcClient {
       const outbound = await this.write({ jsonrpc: '2.0', id: requestId, method, params });
       return { requestId, response, outbound };
     } catch (cause) {
+      const safeMessage = this.redactText(errorMessage(cause));
+      const deliveryError = mutation
+        ? new AcpAmbiguousMutationError(
+            method,
+            `ACP mutation delivery is ambiguous: ${safeMessage}`
+          )
+        : new Error(safeMessage);
       if (this.pending.get(requestId) === settle) {
         if (settle.timer) clearTimeout(settle.timer);
         this.pending.delete(requestId);
-        settle.reject(
-          mutation
-            ? new AcpAmbiguousMutationError(
-                method,
-                `ACP mutation delivery is ambiguous: ${errorMessage(cause)}`
-              )
-            : asError(cause)
-        );
+        settle.reject(deliveryError);
       }
       // The response promise has now been rejected, but callers of startRequest
       // need the direct delivery error and must not receive an unhandled promise.
       void response.catch(() => undefined);
-      throw mutation
-        ? new AcpAmbiguousMutationError(
-            method,
-            `ACP mutation delivery is ambiguous: ${errorMessage(cause)}`
-          )
-        : asError(cause);
+      throw deliveryError;
     }
   }
 
@@ -269,10 +273,7 @@ export class AcpRpcClient {
       }
       const rawLine = line.toString('utf8').trim();
       if (!rawLine) continue;
-      this.inboundQueue = this.inboundQueue.then(
-        () => this.handleLine(rawLine),
-        () => this.handleLine(rawLine)
-      );
+      this.enqueueInboundLine(rawLine);
     }
   };
 
@@ -281,13 +282,16 @@ export class AcpRpcClient {
       const rawLine = this.inbound.toString('utf8').trim();
       this.inbound = Buffer.alloc(0);
       if (rawLine) {
-        this.inboundQueue = this.inboundQueue.then(
-          () => this.handleLine(rawLine),
-          () => this.handleLine(rawLine)
-        );
+        this.enqueueInboundLine(rawLine);
       }
     }
-    void this.inboundQueue.finally(() => this.close('ACP stdout ended.'));
+    // `close` rejects every pending request. Do not let stream teardown win a
+    // race with a complete response that was already accepted from stdout but
+    // is still waiting for its durable journal append.
+    void this.drainInbound().then(
+      () => this.close('ACP stdout ended.'),
+      () => this.close('ACP stdout ended after inbound dispatch failed.')
+    );
   };
 
   private readonly onOutputError = (error: Error): void => {
@@ -311,14 +315,18 @@ export class AcpRpcClient {
       this.events.emit(
         'protocolError',
         new Error(this.redactText(errorMessage(cause)), { cause }),
-        safeRawLine
+        MALFORMED_ACP_FRAME
       );
       return;
     }
 
     let raw: AgentProtocolMessageReference;
     try {
-      raw = await this.appendJournal('INBOUND', rawLine, rpcMetadata(message));
+      raw = await this.appendJournal(
+        'INBOUND',
+        journalSafeInboundMessage(message, rawLine),
+        rpcMetadata(message)
+      );
     } catch (cause) {
       const error = new Error(
         this.redactText(`Could not durably journal ACP input: ${errorMessage(cause)}`),
@@ -368,6 +376,14 @@ export class AcpRpcClient {
     if (isNotification(message)) {
       this.events.emit('notification', message.method, message.params, raw);
     }
+  }
+
+  private enqueueInboundLine(rawLine: string): void {
+    this.inboundQueue = this.inboundQueue
+      .then(() => this.handleLine(rawLine))
+      .catch((cause) => {
+        this.inboundFailure ??= new Error(this.redactText(errorMessage(cause)), { cause });
+      });
   }
 
   private write(
@@ -420,6 +436,53 @@ function rpcMetadata(message: AcpJsonRpcMessage): Record<string, unknown> {
   };
 }
 
+const MASKED_ACP_STREAM_CONTENT = '[REDACTED PROVIDER STREAM CONTENT]';
+const ACP_STREAM_CONTENT_FIELDS = new Set([
+  'content',
+  'data',
+  'rawInput',
+  'rawOutput',
+  'text',
+  'title'
+]);
+
+/**
+ * Protocol journals are correlation evidence, not provider transcripts. ACP
+ * session updates can split one credential across otherwise innocuous JSON-RPC
+ * messages, which a record-local exact-value redactor cannot recognize. Keep
+ * routing/status fields and remove free-form stream payloads structurally.
+ */
+function journalSafeInboundMessage(message: AcpJsonRpcMessage, rawLine: string): string {
+  if (!isNotification(message) || message.method !== 'session/update') return rawLine;
+  if (!isRecord(message.params)) return rawLine;
+  const update = message.params.update;
+  if (!isRecord(update)) return rawLine;
+  return JSON.stringify({
+    ...message,
+    params: {
+      ...message.params,
+      update: maskAcpStreamContent(update)
+    }
+  });
+}
+
+function maskAcpStreamContent(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskAcpStreamContent);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      ACP_STREAM_CONTENT_FIELDS.has(key)
+        ? MASKED_ACP_STREAM_CONTENT
+        : maskAcpStreamContent(entry)
+    ])
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function writeWithBackpressure(stream: Writable, value: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (error: Error) => {
@@ -444,10 +507,6 @@ function writeWithBackpressure(stream: Writable, value: string): Promise<void> {
     });
     if (!accepted) stream.once('drain', onDrain);
   });
-}
-
-function asError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
 }
 
 function errorMessage(value: unknown): string {

@@ -13,7 +13,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-service-0001', 'notes.txt', 'same bytes'),
@@ -31,7 +31,7 @@ describe('TaskManagerService attachments', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const adapter = new ScriptedAgentRuntimeAdapter(store);
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [{
       clientToken: 'client-token-image-0001',
@@ -61,7 +61,7 @@ describe('TaskManagerService attachments', () => {
     const adapter = new ScriptedAgentRuntimeAdapter(store);
     vi.spyOn(adapter, 'listModels').mockResolvedValue([imageModel()]);
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [{
       clientToken: 'client-token-image-0002',
@@ -90,7 +90,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-create-retry-0001', 'context.json', '{"safe":true}')
@@ -122,7 +122,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
     });
 
     await expect(
@@ -143,7 +143,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
     });
     const draft = await service.stageTaskAttachmentBatch({ attachments: [
       batchFile('client-token-full-access-0001', 'notes.txt', 'private context')
@@ -179,7 +179,7 @@ describe('TaskManagerService attachments', () => {
     const dir = await temporaryDirectory();
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store),
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)],
     });
     await expect(
       service.stageTaskAttachmentBatch({ attachments: [{

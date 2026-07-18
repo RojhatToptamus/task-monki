@@ -56,7 +56,7 @@ If there are no findings, return an empty findings array.`;
 export const CODEX_REVIEW_DEVELOPER_INSTRUCTIONS =
   AGENT_REVIEW_DEVELOPER_INSTRUCTIONS;
 
-export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract:
+export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract (defaults for non-trivial repository work):
 - For non-trivial implementation, follow-up, retry, or alternative work, maintain a concise provider plan as progress telemetry.
 - If the runtime exposes a plan, todo, or update_plan mechanism, use it after a brief read-only discovery pass and keep it current.
 - Use 3-6 high-level outcome steps. Do not create steps for routine operations such as searching files, opening files, or running a single command.
@@ -66,10 +66,11 @@ export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract:
 - Task Monki derives routine read/search/edit/run activity from provider tool telemetry. Use Progress: messages only for meaningful milestones, blockers, risks, and transitions; do not narrate every file read, search, command, or protocol event.
 - If no plan/progress mechanism is available, write short progress messages beginning with "Progress:" at the same milestones.
 - Do not claim verification until commands, tests, or checks actually ran.
-- For trivial or read-only turns, skip the plan and briefly say why.
+- For trivial, read-only, or exact-response turns, skip plans and progress messages silently unless the authoritative goal asks for them.
 - Do not treat provider plan progress as proof; Task Monki independently verifies Git, tests, reviews, and delivery.`;
 
-export const TASK_MONKI_ENGINEERING_QUALITY_CONTRACT = `Task Monki engineering quality contract:
+export const TASK_MONKI_ENGINEERING_QUALITY_CONTRACT = `Task Monki engineering quality contract (defaults for non-trivial repository work):
+- Apply these defaults only when relevant to the authoritative goal. They do not require tools, edits, tests, progress messages, or a summary when the goal forbids them or requires an exact response.
 - Before editing, inspect the relevant code, tests, and nearby patterns. Understand the source of truth, existing invariants, and why the issue happens.
 - For bugs, identify the failure mode before changing code: why it happens now, why it did not happen before, and what state, lifecycle, timing, dependency, or data change caused it.
 - Prefer existing architecture, helpers, selectors, state transitions, components, and style patterns over one-off logic.
@@ -77,9 +78,9 @@ export const TASK_MONKI_ENGINEERING_QUALITY_CONTRACT = `Task Monki engineering q
 - Keep changes scoped to the requested behavior. Do not create new files, docs, abstractions, dependencies, comments, or UI patterns unless they are necessary for the fix.
 - After implementing, simplify the change. Remove dead code, duplicated logic, temporary guards, unnecessary comments, and conversation-driven scaffolding.
 - Add or update tests that exercise the actual behavior, edge case, or regression risk. Do not add tests that merely assert implementation details or exist only to produce a green result.
-- Run relevant verification commands when practical. If verification cannot run, say exactly what was not verified and why.
+- Run relevant verification commands when practical and allowed by the goal. If verification cannot run and the goal does not require an exact response, say what was not verified and why.
 - Do not claim tests, builds, checks, commits, pushes, reviews, or delivery succeeded unless you actually performed or observed them.
-- In the final response, summarize what changed, why it fixes the underlying issue, and what was verified.`;
+- Unless the goal requires an exact response, summarize what changed, why it fixes the underlying issue, and what was verified.`;
 
 const RUN_CONTEXT_EXCERPT_LIMIT = 900;
 
@@ -92,22 +93,22 @@ export function buildInitialRunPrompt(input: {
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`,
-    '',
+    'Always-applicable Task Monki execution boundary:',
     input.readOnlyMode
-      ? 'Analyze this task in an isolated Git worktree without modifying files.'
-      : 'You are implementing this task in an isolated Git worktree.',
+      ? 'Perform this task in an isolated Git worktree without modifying files.'
+      : 'Perform this task in an isolated Git worktree.',
     `Repository root: ${input.worktree.worktreePath}`,
     input.readOnlyMode
       ? 'Do not modify repository files.'
       : 'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
+    'This execution boundary remains authoritative even when task-specific instructions conflict.',
     '',
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
-    'When finished, summarize the files changed and verification you performed.'
+    `Authoritative Task Monki goal:\n${input.task.prompt}`
   ].join('\n');
 }
 
@@ -122,23 +123,25 @@ export function buildContinuationPrompt(input: {
   return [
     TASK_MONKI_CONTEXT_LINE,
     '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`,
-    '',
     previousRunContext(input.run, `This is a ${input.kind} after run ${input.run.id}.`),
     `Current independent Git evidence: status=${input.gitSnapshot.status}, head=${input.gitSnapshot.headSha ?? 'unknown'}, dirtyFingerprint=${input.gitSnapshot.dirtyFingerprint}.`,
-    instruction ? `Additional user instruction:\n${instruction}` : undefined,
     '',
+    'Always-applicable Task Monki execution boundary:',
     `Repository root: ${input.gitSnapshot.worktreePath}`,
     'Continue in the existing isolated task worktree.',
     'Only modify files inside this worktree.',
     'Do not commit, push, merge, close PRs, change remotes, or modify repository settings.',
-    'Reinspect the current repository state instead of assuming the prior turn completed every step.',
+    'This execution boundary remains authoritative even when task-specific instructions conflict.',
+    '',
+    'For repository work, reinspect the current state instead of assuming the prior turn completed every step.',
     '',
     TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
     '',
     TASK_MONKI_PROGRESS_CONTRACT,
     '',
-    'When finished, summarize the files changed and verification you performed.'
+    `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    instruction ? '' : undefined,
+    instruction ? `Additional user instruction:\n${instruction}` : undefined
   ]
     .filter((line): line is string => line !== undefined)
     .join('\n');
@@ -152,11 +155,7 @@ export function buildForkAlternativeTaskPrompt(input: {
 }): string {
   const instruction = input.instruction?.trim();
   return [
-    TASK_MONKI_CONTEXT_LINE,
-    '',
     'Alternative attempt for this Task Monki goal.',
-    '',
-    `Authoritative Task Monki goal:\n${input.task.prompt}`,
     '',
     `Source task: ${input.task.id}`,
     previousRunContext(input.run, `Source run: ${input.run.id}.`),
@@ -165,10 +164,8 @@ export function buildForkAlternativeTaskPrompt(input: {
     'Start fresh from the source task base revision in this new isolated worktree.',
     'Do not assume files changed by the source attempt are present.',
     '',
-    TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
-    '',
-    TASK_MONKI_PROGRESS_CONTRACT,
-    '',
+    `Authoritative Task Monki goal:\n${input.task.prompt}`,
+    instruction ? '' : undefined,
     instruction ? `Alternative direction:\n${instruction}` : undefined
   ]
     .filter((line): line is string => line !== undefined)

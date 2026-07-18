@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,10 +18,202 @@ describe('FileTaskStore agent persistence', () => {
     );
 
     assertCompleteAwaitingBoundary(await fixture.store.snapshot(), fixture, interaction.id);
+    await fixture.store.close();
     assertCompleteAwaitingBoundary(
       await new FileTaskStore(fixture.dir).snapshot(),
       fixture,
       interaction.id
+    );
+  });
+
+  it('rejects a persisted interaction whose task does not own its run and session', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    await fixture.store.createInteractionRequest(fixture.interaction);
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      interactionRequests: Array<{ taskId: string }>;
+    };
+    persisted.interactionRequests[0]!.taskId = randomUUID();
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'interaction runtime ownership is inconsistent'
+    );
+  });
+
+  it('rejects duplicate persisted interaction identifiers', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    await fixture.store.createInteractionRequest(fixture.interaction);
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      interactionRequests: Array<Record<string, unknown>>;
+    };
+    persisted.interactionRequests.push({ ...persisted.interactionRequests[0]! });
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'interactionRequests contains duplicate identifiers'
+    );
+  });
+
+  it('rejects duplicate persisted interaction occurrences with distinct record ids', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    await fixture.store.createInteractionRequest(fixture.interaction);
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      interactionRequests: Array<Record<string, unknown>>;
+    };
+    persisted.interactionRequests.push({
+      ...persisted.interactionRequests[0]!,
+      id: randomUUID()
+    });
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'interaction occurrence identity is duplicated'
+    );
+  });
+
+  it('rejects an interaction request whose raw message belongs to another server', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    const otherServer = await fixture.store.createAgentServer({
+      runtimeId: fixture.interaction.runtimeId,
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const otherRaw = await fixture.store.appendProtocolMessage(
+      otherServer.id,
+      'INBOUND',
+      '{"method":"session/request_permission","id":"wrong-server"}'
+    );
+
+    await expect(
+      fixture.store.createInteractionRequest({
+        ...fixture.interaction,
+        requestRawMessage: otherRaw
+      })
+    ).rejects.toThrow('raw message does not match its server');
+    expect((await fixture.store.snapshot()).interactionRequests).toEqual([]);
+    await fixture.store.close();
+  });
+
+  it('rejects an interaction response whose raw message belongs to another server', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    const interaction = await fixture.store.createInteractionRequest(
+      fixture.interaction
+    );
+    const otherServer = await fixture.store.createAgentServer({
+      runtimeId: fixture.interaction.runtimeId,
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable: 'codex',
+      argv: ['app-server', '--stdio']
+    });
+    const otherRaw = await fixture.store.appendProtocolMessage(
+      otherServer.id,
+      'OUTBOUND',
+      '{"id":"atomic-approval-request","result":"accept"}'
+    );
+
+    await expect(
+      fixture.store.transitionInteractionRequest(interaction.id, 'PENDING', {
+        status: 'RESPONDING',
+        responseRawMessage: otherRaw
+      })
+    ).rejects.toThrow('response raw message does not match its server');
+    const unchanged = await fixture.store.getInteractionRequest(interaction.id);
+    expect(unchanged?.status).toBe('PENDING');
+    expect(unchanged?.responseRawMessage).toBeUndefined();
+    await fixture.store.close();
+  });
+
+  it('replays the exact occurrence after terminal provider request id reuse', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    const first = await fixture.store.createInteractionRequest(fixture.interaction);
+    await fixture.store.transitionInteractionRequest(first.id, 'PENDING', {
+      status: 'DECLINED',
+      resolvedAt: new Date().toISOString()
+    });
+    const secondRaw = await fixture.store.appendProtocolMessage(
+      fixture.interaction.serverInstanceId,
+      'INBOUND',
+      '{"method":"session/request_permission","id":"atomic-approval-request","occurrence":2}'
+    );
+    const secondInput: CreateInteractionRequestInput = {
+      ...fixture.interaction,
+      requestRawMessage: secondRaw
+    };
+    const second = await fixture.store.createInteractionRequest(secondInput);
+    await fixture.store.close();
+
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      interactionRequests: Array<Record<string, unknown>>;
+    };
+    persisted.interactionRequests.reverse();
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const restarted = new FileTaskStore(fixture.dir);
+    const thirdRaw = await restarted.appendProtocolMessage(
+      fixture.interaction.serverInstanceId,
+      'INBOUND',
+      '{"method":"session/request_permission","id":"atomic-approval-request","occurrence":3}'
+    );
+    await expect(
+      restarted.createInteractionRequest({
+        ...fixture.interaction,
+        requestRawMessage: thirdRaw
+      })
+    ).rejects.toThrow('previous occurrence is still active');
+    await expect(
+      restarted.createInteractionRequest({
+        ...secondInput,
+        request: { command: 'npm run build', startedAtMs: Date.now() }
+      })
+    ).rejects.toThrow('does not match its original immutable fields');
+    await expect(restarted.createInteractionRequest(secondInput)).resolves.toMatchObject({
+      id: second.id,
+      status: 'PENDING'
+    });
+    expect((await restarted.snapshot()).interactionRequests).toHaveLength(2);
+    await restarted.close();
+  });
+
+  it('rejects an agent item output artifact owned outside its run', async () => {
+    const fixture = await createAwaitingInteractionFixture();
+    const run = (await fixture.store.getRun(fixture.runId))!;
+    const item = await fixture.store.upsertAgentItem({
+      taskId: run.taskId,
+      iterationId: run.iterationId,
+      runId: run.id,
+      sessionId: run.sessionId,
+      providerItemId: 'artifact-owner-item',
+      type: 'COMMAND_EXECUTION',
+      status: 'COMPLETED',
+      payload: {},
+      outputArtifactId: run.outputArtifactId
+    });
+    const taskArtifact = await fixture.store.writeTextArtifact(
+      run.taskId,
+      'diff',
+      'Task-owned artifact outside the run.'
+    );
+    await fixture.store.close();
+    const storePath = path.join(fixture.dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      agentItems: Array<{ id: string; outputArtifactId?: string }>;
+    };
+    persisted.agentItems.find((candidate) => candidate.id === item.id)!.outputArtifactId =
+      taskArtifact.id;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(fixture.dir).snapshot()).rejects.toThrow(
+      'agent item output artifact ownership is inconsistent'
     );
   });
 
@@ -35,13 +228,14 @@ describe('FileTaskStore agent persistence', () => {
       failWrite = reject;
     });
     const internals = fixture.store as unknown as {
-      persistQueued(): Promise<void>;
+      persistSnapshot(): Promise<boolean>;
     };
     const persist = vi
-      .spyOn(internals, 'persistQueued')
+      .spyOn(internals, 'persistSnapshot')
       .mockImplementationOnce(async () => {
         markWriteEntered();
         await failedWrite;
+        return true;
       });
 
     const activation = fixture.store.createInteractionRequest(
@@ -52,25 +246,24 @@ describe('FileTaskStore agent persistence', () => {
     );
     await writeEntered;
 
-    const live = await fixture.store.snapshot();
-    const interactionId = live.interactionRequests.find(
-      (candidate) => candidate.providerRequestId === fixture.interaction.providerRequestId
-    )?.id;
-    expect(interactionId).toBeTruthy();
-    assertCompleteAwaitingBoundary(live, fixture, interactionId!);
+    let readSettled = false;
+    const live = fixture.store.snapshot().then((snapshot) => {
+      readSettled = true;
+      return snapshot;
+    });
+    await Promise.resolve();
+    expect(readSettled).toBe(false);
 
     failWrite(new Error('injected awaiting-boundary write failure'));
     await rejected;
     persist.mockRestore();
 
-    // A failed pre-publication write leaves the prior durable snapshot intact;
-    // the in-memory snapshot also contains a complete boundary for the adapter
-    // to stale during its cancellation/quarantine recovery path.
-    assertCompleteAwaitingBoundary(
-      await fixture.store.snapshot(),
-      fixture,
-      interactionId!
-    );
+    const rolledBack = await live;
+    expect(rolledBack.interactionRequests).toHaveLength(0);
+    expect(rolledBack.runs.find((run) => run.id === fixture.runId)?.status).toBe('RUNNING');
+    expect(rolledBack.agentSessions.find((session) => session.id === fixture.sessionId)?.status)
+      .toBe('ACTIVE');
+    await fixture.store.close();
     const durable = await new FileTaskStore(fixture.dir).snapshot();
     expect(durable.interactionRequests).toHaveLength(0);
     expect(durable.runs.find((run) => run.id === fixture.runId)?.status).toBe('RUNNING');
@@ -143,9 +336,12 @@ describe('FileTaskStore agent persistence', () => {
       prompt: task.prompt,
       requestedSettings: session.requestedSettings
     });
-    const storeBeforeOutput = await fs.readFile(path.join(dir, 'store.json'), 'utf8');
     await store.appendArtifact(run.outputArtifactId, 'streamed output\n');
-    expect(await fs.readFile(path.join(dir, 'store.json'), 'utf8')).toBe(storeBeforeOutput);
+    expect(
+      JSON.parse(await fs.readFile(path.join(dir, 'store.json'), 'utf8')).artifacts.find(
+        (artifact: { id: string }) => artifact.id === run.outputArtifactId
+      )
+    ).toMatchObject({ byteCount: Buffer.byteLength('streamed output\n') });
     const rawRequest = await store.appendProtocolMessage(
       server.id,
       'INBOUND',
@@ -209,9 +405,17 @@ describe('FileTaskStore agent persistence', () => {
       resolution: { accepted: true },
       resolvedAt: new Date().toISOString()
     });
+    await store.updateAgentServer(server.id, {
+      status: 'EXITED',
+      exitCode: 1,
+      signal: null,
+      exitedAt: new Date().toISOString()
+    });
 
+    await store.close();
     const reloaded = await new FileTaskStore(dir).snapshot();
     expect(reloaded.agentServers).toHaveLength(1);
+    expect(reloaded.agentServers[0]).toMatchObject({ exitCode: 1, signal: null });
     expect(reloaded.agentServers[0]?.runtimeResolution).toMatchObject({
       selectedExecutable: '/Applications/Codex.app/Contents/Resources/codex',
       selectedVersion: '0.142.4',
@@ -249,6 +453,14 @@ describe('FileTaskStore agent persistence', () => {
     const before = await fs.readFile(storePath, 'utf8');
 
     const first = await store.appendProtocolMessage(server.id, 'INBOUND', '{"id":1}');
+    const closing = store.close();
+    await expect(
+      store.appendProtocolMessage(server.id, 'OUTBOUND', '{"event":"too-late"}')
+    ).rejects.toThrow('Task store is closed');
+    await expect(store.readProtocolMessage(first)).rejects.toThrow(
+      'Task store is closed'
+    );
+    await closing;
     const secondStore = new FileTaskStore(dir);
     await secondStore.init();
     const second = await secondStore.appendProtocolMessage(server.id, 'OUTBOUND', '{"id":2}');
@@ -371,161 +583,78 @@ describe('FileTaskStore agent persistence', () => {
         prompt: task.prompt
       })
     ).rejects.toThrow('Only detached review runs may use a runtime other than the task runtime');
-    await expect(
-      store.createRun({
-        task,
-        session: reviewSession,
-        mode: 'REVIEW',
-        prompt: 'Review the implementation.'
-      })
-    ).resolves.toMatchObject({ runtimeId: 'opencode', mode: 'REVIEW' });
-  });
-
-  it('migrates schema 11 provider identity into runtime-owned records and settings', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-schema11-runtime-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      title: 'Legacy runtime identity',
-      prompt: 'Preserve the owning runtime.',
-      repositoryPath: dir
-    });
-    const { iteration, worktree } = await store.createIterationAndWorktree({
-      task,
-      branchName: 'codex/schema11-runtime',
-      worktreePath: dir,
-      baseSha: 'base'
-    });
-    const session = await store.createAgentSession({
-      task,
-      iteration,
-      worktree,
-      runtimeId: 'codex'
-    });
     const server = await store.createAgentServer({
-      runtimeId: 'codex',
-      runtimeKind: 'APP_SERVER',
-      transport: 'STDIO',
-      executable: 'legacy-agent',
+      runtimeId: 'opencode',
+      runtimeKind: 'HTTP_AGENT',
+      transport: 'HTTP_SSE',
+      executable: 'opencode',
       argv: ['serve']
     });
-    const run = await store.createRun({
+    const reviewRun = await store.createRun({
       task,
-      session,
+      session: reviewSession,
       serverInstanceId: server.id,
-      mode: 'IMPLEMENTATION',
-      prompt: task.prompt
+      mode: 'REVIEW',
+      prompt: 'Review the implementation.'
     });
-    const rawRequest = await store.appendProtocolMessage(
+    expect(reviewRun).toMatchObject({ runtimeId: 'opencode', mode: 'REVIEW' });
+
+    const raw = await store.appendProtocolMessage(
       server.id,
       'INBOUND',
-      '{"method":"permission","id":1}'
+      '{"type":"session.updated","properties":{"info":{"id":"child"}}}'
     );
-    await store.createInteractionRequest({
-      runtimeId: 'codex',
+    const child = await store.observeSubagent({
+      parentSessionId: reviewSession.id,
+      parentRunId: reviewRun.id,
+      providerChildSessionId: 'opencode-review-child',
+      source: 'SUBAGENT_ACTIVITY',
+      rawMessage: raw
+    });
+    const childRun = await store.createObservedSubagentRun({
+      session: child.session,
+      providerTurnId: 'opencode-review-child-turn',
       serverInstanceId: server.id,
-      providerRequestId: 1,
-      taskId: task.id,
-      iterationId: iteration.id,
-      runId: run.id,
-      sessionId: session.id,
-      type: 'COMMAND_APPROVAL',
-      request: { command: 'npm test', startedAtMs: 1 },
-      allowedActions: ['ACCEPT', 'DECLINE'],
-      policyWarnings: [],
-      requestRawMessage: rawRequest
+      parentRunId: reviewRun.id
     });
     await store.close();
 
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      schemaVersion: number;
-      tasks: Array<Record<string, unknown>>;
-      runs: Array<Record<string, unknown>>;
-      agentServers: Array<Record<string, unknown>>;
-      agentSessions: Array<Record<string, unknown>>;
-      interactionRequests: Array<Record<string, unknown>>;
-    };
-    persisted.schemaVersion = 11;
-    for (const record of [
-      persisted.tasks[0]!,
-      persisted.runs[0]!,
-      persisted.agentServers[0]!,
-      persisted.agentSessions[0]!
-    ]) {
-      delete record.runtimeId;
-    }
-    persisted.agentSessions[0]!.provider = 'opencode';
-    persisted.agentServers[0]!.provider = 'opencode';
-    delete persisted.interactionRequests[0]!.runtimeId;
-    delete (persisted.tasks[0]!.agentSettings as Record<string, unknown>).runtimeId;
-    delete (persisted.runs[0]!.requestedSettings as Record<string, unknown>).runtimeId;
-    delete (persisted.agentSessions[0]!.requestedSettings as Record<string, unknown>).runtimeId;
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-
-    const migrated = await new FileTaskStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(migrated.tasks[0]).toMatchObject({
+    const reloaded = await new FileTaskStore(dir).snapshot();
+    expect(
+      reloaded.agentSessions.find((session) => session.id === child.session.id)
+    ).toMatchObject({ runtimeId: 'opencode', role: 'SUBAGENT' });
+    expect(reloaded.runs.find((run) => run.id === childRun.id)).toMatchObject({
       runtimeId: 'opencode',
-      agentSettings: { runtimeId: 'opencode' }
+      mode: 'SUBAGENT'
     });
-    expect(migrated.agentSessions[0]).toMatchObject({
-      runtimeId: 'opencode',
-      requestedSettings: { runtimeId: 'opencode' }
-    });
-    expect(migrated.runs[0]).toMatchObject({
-      runtimeId: 'opencode',
-      requestedSettings: { runtimeId: 'opencode' }
-    });
-    expect(migrated.agentServers[0]).toMatchObject({ runtimeId: 'opencode' });
-    expect(migrated.interactionRequests[0]).toMatchObject({ runtimeId: 'opencode' });
-    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      schemaVersion: number;
-      agentSessions: Array<Record<string, unknown>>;
-    };
-    expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(rewritten.agentSessions[0]).not.toHaveProperty('provider');
   });
 
-  it('rejects malformed schema 11 collections instead of dropping durable records', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-schema11-malformed-'));
+  it.each([
+    ['the preceding schema', TASK_STORE_SCHEMA_VERSION - 1],
+    ['a missing schema', undefined]
+  ])('rejects %s instead of maintaining compatibility code', async (_label, version) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-old-store-'));
     const store = new FileTaskStore(dir);
     await store.createTask({
-      title: 'Do not lose records',
-      prompt: 'Reject corrupt migration input.',
+      title: 'Current schema only',
+      prompt: 'Reject legacy durable state.',
       repositoryPath: dir
     });
     await store.close();
-
     const storePath = path.join(dir, 'store.json');
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
       string,
       unknown
     >;
-    persisted.schemaVersion = 11;
-    persisted.agentSessions = [null];
+    if (version === undefined) delete persisted.schemaVersion;
+    else persisted.schemaVersion = version;
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600
     });
 
     await expect(new FileTaskStore(dir).init()).rejects.toThrow(
-      'agentSessions contains a malformed record'
-    );
-  });
-
-  it('rejects old store formats instead of maintaining compatibility code', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-old-store-'));
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, 'store.json'), JSON.stringify({ tasks: [] }), {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-
-    await expect(new FileTaskStore(dir).init()).rejects.toThrow(
-      'migrations are intentionally not supported'
+      `This build accepts only schema ${TASK_STORE_SCHEMA_VERSION}`
     );
   });
 });

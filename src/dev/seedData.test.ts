@@ -38,7 +38,7 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
+    snapshot = await readStoreSnapshot(manifest.storeDir);
   }, 90_000);
 
   afterAll(async () => {
@@ -313,7 +313,7 @@ describe('Task Monki development seed data', () => {
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
       codexPath: path.join(rootDir, 'missing-codex')
@@ -453,6 +453,15 @@ function prView(snapshot: TaskSnapshot, task: Task) {
     reviewRollup: selectLatestReviewRollup(snapshot, task),
     mergeSnapshot: selectLatestMergeSnapshot(snapshot, task)
   });
+}
+
+async function readStoreSnapshot(storeDir: string): Promise<TaskSnapshot> {
+  const store = new FileTaskStore(storeDir);
+  try {
+    return await store.snapshot();
+  } finally {
+    await store.close();
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

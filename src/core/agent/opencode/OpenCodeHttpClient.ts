@@ -1,5 +1,8 @@
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
-import { redactCredentialText } from '../AgentCredentialRedaction';
+import {
+  REDACTED_CREDENTIAL,
+  redactCredentialText
+} from '../AgentCredentialRedaction';
 import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -63,6 +66,12 @@ export interface OpenCodeEventStreamHandlers {
   onReconnect(): Promise<void>;
 }
 
+export interface OpenCodeEventStream {
+  stop(): void;
+  /** Resolves after the transport has stopped and every accepted callback has finished. */
+  settled: Promise<void>;
+}
+
 export interface OpenCodeClientTransport {
   get<T>(path: string, options?: OpenCodeRequestOptions): Promise<OpenCodeHttpResult<T>>;
   post<T>(
@@ -76,7 +85,7 @@ export interface OpenCodeClientTransport {
     options?: OpenCodeRequestOptions
   ): Promise<OpenCodeHttpResult<T>>;
   delete<T>(path: string, options?: OpenCodeRequestOptions): Promise<OpenCodeHttpResult<T>>;
-  startEventStream(handlers: OpenCodeEventStreamHandlers): { stop(): void };
+  startEventStream(handlers: OpenCodeEventStreamHandlers): OpenCodeEventStream;
 }
 
 export class OpenCodeHttpClient implements OpenCodeClientTransport {
@@ -117,14 +126,14 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     return this.request<T>('DELETE', path, undefined, true, options);
   }
 
-  startEventStream(handlers: OpenCodeEventStreamHandlers): { stop(): void } {
+  startEventStream(handlers: OpenCodeEventStreamHandlers): OpenCodeEventStream {
     const controller = new AbortController();
-    void this.runEventStream(controller.signal, handlers).catch(async (cause) => {
+    const settled = this.runEventStream(controller.signal, handlers).catch(async (cause) => {
       if (!controller.signal.aborted) {
         await handlers.onDisconnect(toError(cause)).catch(() => undefined);
       }
     });
-    return { stop: () => controller.abort() };
+    return { stop: () => controller.abort(), settled };
   }
 
   private async request<T>(
@@ -320,16 +329,27 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
     await onConnected();
     const parser = new OpenCodeSseParser(async (data) => {
       if (data === '[DONE]') return;
-      const raw = await this.appendJournal('INBOUND', data, {
-        transport: 'SSE',
-        operation: 'GET /event'
-      });
       let parsed: unknown;
       try {
         parsed = JSON.parse(data);
-      } catch (cause) {
-        throw new Error('OpenCode emitted invalid SSE JSON.', { cause });
+      } catch {
+        await this.appendJournal('INBOUND', JSON.stringify({
+          type: 'opencode.sse.malformed'
+        }), {
+          transport: 'SSE',
+          operation: 'GET /event',
+          malformed: true
+        });
+        throw new Error('OpenCode emitted invalid SSE JSON.');
       }
+      const raw = await this.appendJournal(
+        'INBOUND',
+        JSON.stringify(maskOpenCodeStreamingJournalContent(parsed)),
+        {
+          transport: 'SSE',
+          operation: 'GET /event'
+        }
+      );
       await onEvent(parsed, raw);
     });
     const reader = response.body.getReader();
@@ -367,6 +387,65 @@ export class OpenCodeHttpClient implements OpenCodeClientTransport {
   private redactText(value: string): string {
     return redactCredentialText(value, this.options.sensitiveValues);
   }
+}
+
+/**
+ * Streaming text can split an exact inherited credential across otherwise
+ * independent SSE records. Keep routing and lifecycle fields useful while
+ * preventing free-form content from reaching the durable protocol journal.
+ */
+function maskOpenCodeStreamingJournalContent(value: unknown): unknown {
+  if (!isRecord(value) || !isRecord(value.properties)) return value;
+  if (value.type === 'message.part.delta') {
+    return {
+      ...value,
+      properties: {
+        ...value.properties,
+        ...(typeof value.properties.delta === 'string'
+          ? { delta: REDACTED_CREDENTIAL }
+          : {})
+      }
+    };
+  }
+  if (value.type !== 'message.part.updated' || !isRecord(value.properties.part)) {
+    return value;
+  }
+
+  const part = value.properties.part;
+  const state = isRecord(part.state)
+    ? {
+        ...part.state,
+        ...maskPresentField(part.state, 'input'),
+        ...maskPresentField(part.state, 'output'),
+        ...maskPresentField(part.state, 'error'),
+        ...maskPresentField(part.state, 'title'),
+        ...maskPresentField(part.state, 'metadata')
+      }
+    : part.state;
+  return {
+    ...value,
+    properties: {
+      ...value.properties,
+      part: {
+        ...part,
+        ...maskPresentField(part, 'text'),
+        ...(state === undefined ? {} : { state })
+      }
+    }
+  };
+}
+
+function maskPresentField(
+  record: Record<string, unknown>,
+  field: string
+): Record<string, unknown> {
+  return Object.prototype.hasOwnProperty.call(record, field)
+    ? { [field]: REDACTED_CREDENTIAL }
+    : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export class OpenCodeSseParser {

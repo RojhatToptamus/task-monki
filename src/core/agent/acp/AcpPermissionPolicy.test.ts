@@ -108,12 +108,12 @@ async function ownership(networkAccess = true) {
   temporaryDirectories.push(worktreePath);
   const session = {
     id: 'session-local',
-    runtimeId: 'gemini-acp',
+    runtimeId: 'grok-acp',
     worktreePath
   } as AgentSessionRecord;
   const run = {
     id: 'run-1',
-    runtimeId: 'gemini-acp',
+    runtimeId: 'grok-acp',
     requestedSettings: { networkAccess }
   } as RunRecord;
   return { session, run };

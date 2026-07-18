@@ -215,6 +215,31 @@ describe('ACP native-state redaction', () => {
     expect(JSON.stringify(view)).not.toContain('authorization');
   });
 
+  it('removes exact runtime credentials echoed by initialize metadata', () => {
+    const credential = 'opaque-runtime-credential-7Qm2';
+    const view = acpInitializeNativeView(
+      {
+        protocolVersion: 1,
+        agentCapabilities: {},
+        authMethods: [
+          {
+            id: 'provider-login',
+            name: `Login ${credential}`,
+            description: credential
+          }
+        ],
+        agentInfo: {
+          name: credential,
+          title: `Provider ${credential}`,
+          version: credential
+        }
+      },
+      [credential]
+    );
+
+    expect(JSON.stringify(view)).not.toContain(credential);
+  });
+
   it('omits sensitive actionable IDs instead of publishing redacted substitutes', () => {
     const opaque = 'm7Qp4Vz9Lk2Nc8';
     const safe = sanitizeAcpNativeSession({

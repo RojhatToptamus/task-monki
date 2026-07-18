@@ -87,7 +87,7 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(snapshot.agentSessions).toHaveLength(0);
   });
 
-  it('normalizes legacy codex adapter provider settings before starting a turn', async () => {
+  it('uses the adapter-resolved provider identity before starting a turn', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-provider-normalize-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
@@ -96,11 +96,11 @@ describe('AgentOrchestrator Phase 4', () => {
     const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
     const task = await store.createTask({
       title: 'Normalize provider',
-      prompt: 'Start with legacy settings.',
+      prompt: 'Start with resolved settings.',
       repositoryPath: repositoryDir,
       agentSettings: {
         model: 'test-model',
-        modelProvider: 'codex',
+        modelProvider: 'openai',
         reasoningEffort: 'high'
       }
     });

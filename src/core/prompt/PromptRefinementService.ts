@@ -31,7 +31,16 @@ export interface PromptRefinementRunRequest {
 
 export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Promise<string>;
 
+export class PromptRefinementTerminationUnconfirmedError extends Error {
+  constructor(cause: unknown) {
+    super('Prompt refinement process termination could not be confirmed.', { cause });
+    this.name = 'PromptRefinementTerminationUnconfirmedError';
+  }
+}
+
 export class PromptRefinementService {
+  private terminationFence?: PromptRefinementTerminationUnconfirmedError;
+
   constructor(private readonly runModel: PromptRefinementRunner = runCodexRefinement) {}
 
   async refine(
@@ -45,6 +54,9 @@ export class PromptRefinementService {
     const trimmed = input.trim();
     if (!trimmed) {
       throw new Error('Prompt text is required.');
+    }
+    if (this.terminationFence) {
+      return buildDeterministicFallback(repositoryPath, trimmed);
     }
 
     try {
@@ -61,7 +73,10 @@ export class PromptRefinementService {
         ...refined,
         source: 'model'
       };
-    } catch {
+    } catch (cause) {
+      if (cause instanceof PromptRefinementTerminationUnconfirmedError) {
+        this.terminationFence = cause;
+      }
       return buildDeterministicFallback(repositoryPath, trimmed);
     }
   }
@@ -142,8 +157,10 @@ async function runCodexRefinement({
         return;
       }
       settled = true;
-      void process.cancel();
-      reject(new Error('Prompt refinement timed out.'));
+      void process.cancel().then(
+        () => reject(new Error('Prompt refinement timed out.')),
+        (cause) => reject(new PromptRefinementTerminationUnconfirmedError(cause))
+      );
     }, REFINEMENT_TIMEOUT_MS);
 
     const finish = (callback: () => void) => {
@@ -162,6 +179,9 @@ async function runCodexRefinement({
       stderr = appendBounded(stderr, chunk.toString('utf8'));
     });
     process.events.once('error', (error) => finish(() => reject(error)));
+    process.events.once('terminationUnconfirmed', ({ error }) =>
+      finish(() => reject(new PromptRefinementTerminationUnconfirmedError(error)))
+    );
     process.events.once('close', ({ exitCode, signal }) => {
       finish(() => {
         if (exitCode !== 0) {

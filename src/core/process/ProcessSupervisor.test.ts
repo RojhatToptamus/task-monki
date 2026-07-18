@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
+import * as portableChildProcess from './portableChildProcess';
 import {
   ProcessSupervisor,
   redactProcessDiagnostic,
@@ -10,6 +11,10 @@ import {
 } from './ProcessSupervisor';
 
 describe('ProcessSupervisor', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('only forwards explicitly named runtime environment keys', () => {
     expect(
       sanitizeEnvironment(
@@ -112,6 +117,112 @@ describe('ProcessSupervisor', () => {
     expect(result.exitCode !== null || result.signal !== null).toBe(true);
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'does not publish close until descendants are reaped after the leader exits',
+    async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'task-monki-process-leader-exit-')
+      );
+      const signalFile = path.join(directory, 'descendant-signal.txt');
+      const readyFile = path.join(directory, 'descendant-ready');
+      const descendantScript = [
+        "const fs = require('node:fs');",
+        `const readyFile = ${JSON.stringify(readyFile)};`,
+        `const signalFile = ${JSON.stringify(signalFile)};`,
+        "const leaderPid = Number(process.env.TASK_MONKI_TEST_LEADER_PID);",
+        "process.on('SIGINT', () => {",
+        "  let leaderState = 'alive';",
+        "  try { process.kill(leaderPid, 0); } catch (error) {",
+        "    if (error.code !== 'ESRCH') throw error;",
+        "    leaderState = 'exited';",
+        '  }',
+        "  fs.writeFileSync(signalFile, leaderState);",
+        '  process.exit(0);',
+        '});',
+        "fs.writeFileSync(readyFile, 'ready');",
+        'setInterval(() => undefined, 30_000);'
+      ].join('\n');
+      const leaderScript = [
+        "const fs = require('node:fs');",
+        "const { spawn } = require('node:child_process');",
+        `const readyFile = ${JSON.stringify(readyFile)};`,
+        `const descendantScript = ${JSON.stringify(descendantScript)};`,
+        'const descendant = spawn(process.execPath, [\'-e\', descendantScript], {',
+        "  stdio: 'ignore',",
+        '  env: { ...process.env, TASK_MONKI_TEST_LEADER_PID: String(process.pid) }',
+        '});',
+        'const ready = setInterval(() => {',
+        '  if (!fs.existsSync(readyFile)) return;',
+        '  clearInterval(ready);',
+        "  process.stdout.write(String(descendant.pid) + '\\n');",
+        '  process.exit(0);',
+        '}, 5);'
+      ].join('\n');
+      const supervisor = new ProcessSupervisor();
+      const child = supervisor.start({
+        executable: process.execPath,
+        argv: ['-e', leaderScript],
+        cwd: directory
+      });
+
+      try {
+        const terminal = collect(child);
+        const descendantPid = Number(await readFirstStdoutLine(child));
+        await terminal;
+
+        expect(await fs.readFile(signalFile, 'utf8')).toBe('exited');
+        await expectProcessToExit(descendantPid);
+      } finally {
+        await child.cancel().catch(() => undefined);
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'publishes a distinct terminal failure when descendant termination cannot be confirmed',
+    async () => {
+      vi.spyOn(portableChildProcess, 'waitForPortableProcessTreeExit').mockResolvedValue(false);
+      const leaderScript = [
+        "const { spawn } = require('node:child_process');",
+        "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => undefined, 30000)'], { stdio: 'ignore' });",
+        "process.stdout.write(String(descendant.pid) + '\\n');",
+        'setTimeout(() => process.exit(0), 20);'
+      ].join('\n');
+      const child = new ProcessSupervisor().start({
+        executable: process.execPath,
+        argv: ['-e', leaderScript],
+        cwd: process.cwd()
+      });
+      const onError = vi.fn();
+      const onClose = vi.fn();
+      child.events.on('error', onError);
+      child.events.on('close', onClose);
+      const termination = new Promise<{
+        error: Error;
+        leaderExit: { exitCode: number | null; signal: NodeJS.Signals | null };
+      }>((resolve) => child.events.once('terminationUnconfirmed', resolve));
+
+      const descendantPid = Number(await readFirstStdoutLine(child));
+      try {
+        const failure = await termination;
+
+        expect(failure.error).toBeInstanceOf(Error);
+        expect(failure.error.message).not.toBe('');
+        expect(failure.leaderExit).toEqual({ exitCode: 0, signal: null });
+        expect(onError).not.toHaveBeenCalled();
+        expect(onClose).not.toHaveBeenCalled();
+        await expect(child.cancel()).rejects.toBe(failure.error);
+      } finally {
+        try {
+          process.kill(descendantPid, 'SIGKILL');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        }
+      }
+    }
+  );
+
   it.runIf(process.platform === 'win32')(
     'cancels the real descendant launched by a Windows cmd shim',
     async () => {
@@ -159,7 +270,7 @@ async function expectProcessToExit(pid: number): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`Windows descendant process ${pid} is still running.`);
+  throw new Error(`Descendant process ${pid} is still running.`);
 }
 
 function collect(child: ReturnType<ProcessSupervisor['start']>): Promise<{

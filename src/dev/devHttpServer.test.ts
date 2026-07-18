@@ -132,7 +132,7 @@ describe('development HTTP server', () => {
     const request = {
       taskId: 'task-1',
       sessionId: 'session-1',
-      runtimeId: 'gemini-acp',
+      runtimeId: 'grok-acp',
       controlId: 'mode',
       value: 'plan',
       revision: 'revision-1'
@@ -147,7 +147,7 @@ describe('development HTTP server', () => {
     expect(response.status).toBe(200);
     expect(updateAgentNativeSession).toHaveBeenCalledWith(request);
     await expect(response.json()).resolves.toMatchObject({
-      runtimeId: 'gemini-acp',
+      runtimeId: 'grok-acp',
       native: { modes: { currentModeId: 'plan' } }
     });
   });

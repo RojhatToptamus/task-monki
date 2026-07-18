@@ -53,7 +53,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       );
       const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
       const service = new TaskManagerService(store, dir, undefined, {
-        agentProviderAdapter: adapter
+        agentRuntimeAdapters: [adapter]
       });
 
       const task = await service.createTask({
@@ -125,7 +125,7 @@ describe('TaskManagerService runtime execution defaults', () => {
       runtimeExecutablePaths: { opencode: '/opt/agents/opencode' }
     });
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       appSettingsStore: settingsStore,
       agentProviderStartupDisabledReason: 'settings-only test'
     });
@@ -162,7 +162,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     const configureRuntime = vi.fn(async () => undefined);
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       openCodePath: '/debug/overrides/opencode',
       appSettingsStore: new MemoryAppSettingsStore({
         runtimeExecutablePaths: { opencode: '/saved/opencode' }
@@ -190,7 +190,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
     const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false
     });
 
@@ -221,7 +221,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
     const settingsStore = new MemoryAppSettingsStore();
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       appSettingsStore: settingsStore,
       allowAgentNetworkAccess: false
     });
@@ -243,7 +243,7 @@ describe('TaskManagerService runtime execution defaults', () => {
     );
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, dir, undefined, {
-      agentProviderAdapter: new ScriptedAgentRuntimeAdapter(store)
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
 
     await expect(

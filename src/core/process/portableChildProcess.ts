@@ -15,6 +15,8 @@ const execFileAsync = promisify(execFile);
 const windowsCmdMetaCharacters = /([()\][%!^"`<>&|;, *?])/g;
 const WINDOWS_BATCH_INSPECTION_BYTES = 64 * 1024;
 const WINDOWS_PROCESS_TREE_TIMEOUT_MS = 10_000;
+const PROCESS_TREE_POLL_INTERVAL_MS = 20;
+const ownedPosixProcessGroups = new WeakSet<ChildProcess>();
 
 export interface PreparedProcessCommand {
   executable: string;
@@ -60,13 +62,22 @@ export function spawnPortable(
   options: SpawnOptions
 ): ChildProcess {
   const command = prepareProcessCommand(executable, argv, process.platform, options.env);
-  return spawn(command.executable, command.argv, withPreparedProcessOptions(command, options));
+  const child = spawn(
+    command.executable,
+    command.argv,
+    withPreparedProcessOptions(command, options)
+  );
+  if (process.platform !== 'win32' && options.detached === true) {
+    ownedPosixProcessGroups.add(child);
+  }
+  return child;
 }
 
 export function execFilePortable(
   executable: string,
   argv: string[],
-  options: ExecFileOptions
+  options: ExecFileOptions,
+  stdin?: string | Buffer
 ): Promise<{ stdout: string; stderr: string }> {
   const command = prepareProcessCommand(executable, argv, process.platform, options.env);
   return new Promise((resolve, reject) => {
@@ -88,22 +99,30 @@ export function execFilePortable(
         resolve({ stdout: String(stdout), stderr: String(stderr) });
       }
     );
-    // execFile is used for complete noninteractive commands. Explicit EOF is
-    // part of that contract: some CLIs wait for piped stdin before exiting,
-    // even for discovery subcommands that never consume input.
-    child.stdin?.end();
+    // Complete commands always receive EOF. A caller may provide exact stdin
+    // bytes for CLIs whose supported secret/body transport is `--file -`.
+    child.stdin?.end(stdin);
   });
 }
 
-/**
- * Windows does not propagate ChildProcess.kill() through a cmd.exe process
- * tree. taskkill /T provides the process-tree boundary that batch launchers
- * need; other platforms retain their ordinary signal behavior.
- */
+/** Terminates an owned POSIX process group or a Windows task tree. */
 export async function terminatePortableProcessTree(
   child: ChildProcess,
   signal: NodeJS.Signals = 'SIGTERM'
 ): Promise<void> {
+  if (
+    process.platform !== 'win32' &&
+    ownedPosixProcessGroups.has(child) &&
+    child.pid
+  ) {
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+    return;
+  }
+
   if (child.exitCode !== null || child.signalCode !== null) return;
 
   if (process.platform === 'win32' && child.pid) {
@@ -125,6 +144,54 @@ export async function terminatePortableProcessTree(
   }
 
   child.kill(signal);
+}
+
+/**
+ * A detached POSIX child owns a process group, so leader exit alone is not a
+ * sufficient lifecycle boundary. Other launch forms retain Node's ordinary
+ * leader-process semantics.
+ */
+export function isPortableProcessTreeRunning(child: ChildProcess): boolean {
+  if (
+    process.platform !== 'win32' &&
+    ownedPosixProcessGroups.has(child) &&
+    child.pid
+  ) {
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPERM') return true;
+      if (code !== 'ESRCH') throw error;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        ownedPosixProcessGroups.delete(child);
+        return false;
+      }
+      // The detached child may not have completed setsid() yet. Preserve group
+      // ownership so later termination still targets its descendants.
+      return true;
+    }
+  }
+  return child.exitCode === null && child.signalCode === null;
+}
+
+export async function waitForPortableProcessTreeExit(
+  child: ChildProcess,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isPortableProcessTreeRunning(child)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise<void>((resolve) => {
+      setTimeout(
+        resolve,
+        Math.min(PROCESS_TREE_POLL_INTERVAL_MS, remaining)
+      );
+    });
+  }
+  return true;
 }
 
 function withPreparedProcessOptions<T extends SpawnOptions | ExecFileOptions>(

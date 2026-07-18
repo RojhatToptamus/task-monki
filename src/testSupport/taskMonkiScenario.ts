@@ -88,7 +88,7 @@ export async function createTaskMonkiScenario(
   const service = new TaskManagerService(store, repositoryPath, events, {
     worktreeRoot,
     ghPath: options.ghPath,
-    agentProviderAdapter: agent
+    agentRuntimeAdapters: [agent]
   });
   await service.init();
 

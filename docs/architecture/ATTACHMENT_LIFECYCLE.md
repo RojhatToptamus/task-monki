@@ -96,19 +96,24 @@ Node's directory-handle synchronization is unsupported on Windows, so Windows
 keeps the atomic temporary-write/link-or-rename publication boundary without
 claiming the additional POSIX directory-flush guarantee.
 
-Task creation verifies the staging directory and atomically renames it to the
-task id before publishing `store.json`. If publication fails before becoming
-visible, the directory is renamed back so the request can be retried. If the
-snapshot is visible but final manifest cleanup is interrupted, startup verifies
-the task-owned files and removes the stale manifest. An adopted directory with
-no durable task record is an orphan and is removed at startup.
+Store shutdown stops admitting attachment operations synchronously, drains
+every operation already admitted, closes the attachment store, and only then
+releases the application-wide store lease. A caller cannot begin attachment I/O
+against a closing or closed store.
 
-Schema 10 content-addressed records migrate once to schema 11. Migration copies
-each legacy blob into its owning task directory, verifies the resulting bytes,
-and removes `storageKey` from durable metadata. Task Monki durably publishes and
-synchronizes the schema 11 store snapshot before removing the legacy managed
-directories. An already-verified task-owned copy makes an interrupted migration
-safe to repeat even if the corresponding legacy blob is no longer present.
+Task creation verifies the staging directory and atomically renames it to the
+task id, then synchronizes both parent directories before publishing
+`store.json`. A synchronization or store-publication failure renames the
+directory back and synchronizes that rollback before reporting a retry-safe
+failure. If rollback cannot be proven, adoption fails explicitly as ambiguous
+and must not be retried automatically. If the snapshot is visible but final
+manifest cleanup is interrupted, startup verifies the task-owned files and
+removes the stale manifest. An adopted directory with no durable task record is
+an orphan and is removed at startup.
+
+The current schema stores only task-owned attachment records. Retired
+content-addressed fields such as `storageKey` are rejected on load; Task Monki
+does not retain a second blob authority or an older attachment migration path.
 
 Fork alternatives receive independent task-owned copies. This intentionally
 avoids shared-reference accounting and garbage collection at the small bounded

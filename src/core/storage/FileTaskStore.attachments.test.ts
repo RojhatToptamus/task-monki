@@ -2,8 +2,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
-import { AttachmentFileStore } from './AttachmentFileStore';
+import {
+  AttachmentAdoptionAmbiguousError,
+  AttachmentFileStore
+} from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
 
 function createStore(storeDir: string): FileTaskStore {
@@ -76,7 +78,7 @@ describe('FileTaskStore attachments', () => {
     });
   });
 
-  it('rejects forged legacy blob keys on reload', async () => {
+  it('rejects retired blob storage fields on reload', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
     const { draftId } = await stageText(store, 'context.json', '{"scope":"task"}');
@@ -97,9 +99,9 @@ describe('FileTaskStore attachments', () => {
       mode: 0o600
     });
 
-    await expect(createStore(dir).snapshot()).rejects.toMatchObject({
-      code: 'ATTACHMENT_INTEGRITY_MISMATCH'
-    });
+    await expect(createStore(dir).snapshot()).rejects.toThrow(
+      'attachments contains an invalid record'
+    );
   });
 
   it('leaves the draft retryable when task persistence fails', async () => {
@@ -130,6 +132,60 @@ describe('FileTaskStore attachments', () => {
       attachments: [expect.objectContaining({ displayName: 'notes.txt' })]
     });
     expect((await store.snapshot()).tasks).toEqual([]);
+  });
+
+  it('reports ambiguous adoption when task persistence rollback cannot be proven', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const { draftId } = await stageText(store, 'notes.txt', 'keep me recoverable');
+    const storePath = path.join(dir, 'store.json');
+    const draftPath = path.join(dir, 'attachments', 'staging', draftId);
+    const tasksRoot = path.join(dir, 'attachments', 'tasks');
+    const renameFile = fs.rename.bind(fs);
+    let publicationFailureInjected = false;
+    let rollbackFailureInjected = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (!publicationFailureInjected && String(destination) === storePath) {
+        publicationFailureInjected = true;
+        throw new Error('Injected task publication failure.');
+      }
+      if (
+        !rollbackFailureInjected &&
+        path.dirname(String(source)) === tasksRoot &&
+        String(destination) === draftPath
+      ) {
+        rollbackFailureInjected = true;
+        throw new Error('Injected task attachment rollback failure.');
+      }
+      await renameFile(source, destination);
+    });
+
+    let failure: unknown;
+    try {
+      failure = await store.createTask({
+        title: 'Ambiguous attachment task',
+        prompt: 'Do not report this create as retryable.',
+        repositoryPath: dir,
+        attachmentDraftId: draftId
+      }).catch((error: unknown) => error);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(publicationFailureInjected).toBe(true);
+    expect(rollbackFailureInjected).toBe(true);
+    expect(failure).toBeInstanceOf(AttachmentAdoptionAmbiguousError);
+    const receipt = (failure as AttachmentAdoptionAmbiguousError).receipt;
+    await expect(
+      fs.access(path.join(tasksRoot, receipt.taskId))
+    ).resolves.toBeUndefined();
+    expect((await store.snapshot()).tasks).toEqual([]);
+    await store.close();
+
+    const recovery = new AttachmentFileStore(dir);
+    await recovery.rollbackDraftForTask(receipt);
+    await expect(recovery.listDraft(draftId)).resolves.toMatchObject({ id: draftId });
+    await recovery.close();
   });
 
   it('reconciles a durable task when draft cleanup was interrupted', async () => {
@@ -258,10 +314,53 @@ describe('FileTaskStore attachments', () => {
     await fs.writeFile(delivery.absolutePath, 'tampered');
     if (process.platform !== 'win32') await fs.chmod(delivery.absolutePath, 0o400);
 
+    await store.close();
     const restarted = createStore(dir);
     await expect(restarted.reconcileRunAttachments()).rejects.toMatchObject({
       code: 'ATTACHMENT_INTEGRITY_MISMATCH'
     });
+  });
+
+  it('preserves durable task records when a referenced attachment is missing at startup', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const { draftId } = await stageText(store, 'missing.txt', 'authoritative bytes');
+    const attachedTask = await store.createTask({
+      title: 'Attached task',
+      prompt: 'Use the attachment.',
+      repositoryPath: dir,
+      attachmentDraftId: draftId
+    });
+    const siblingTask = await store.createTask({
+      title: 'Sibling task',
+      prompt: 'Remain durable.',
+      repositoryPath: dir
+    });
+    const [delivery] = await store.verifyTaskAttachments(attachedTask.id);
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persistedBeforeRestart = await fs.readFile(storePath, 'utf8');
+    await fs.unlink(delivery.absolutePath);
+
+    const restarted = createStore(dir);
+    try {
+      await expect(restarted.snapshot()).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await restarted.close();
+    }
+
+    expect(await fs.readFile(storePath, 'utf8')).toBe(persistedBeforeRestart);
+    const persisted = JSON.parse(persistedBeforeRestart) as {
+      tasks: Array<{ id: string }>;
+      attachments: Array<{ taskId: string }>;
+    };
+    expect(persisted.tasks.map((task) => task.id)).toEqual(
+      expect.arrayContaining([attachedTask.id, siblingTask.id])
+    );
+    expect(persisted.attachments).toContainEqual(
+      expect.objectContaining({ taskId: attachedTask.id })
+    );
   });
 
   it.runIf(process.platform !== 'win32')('fails closed when a task-owned attachment is writable at restart', async () => {
@@ -279,145 +378,63 @@ describe('FileTaskStore attachments', () => {
     const [delivery] = await store.prepareRunAttachments(run.id, task.id);
     await fs.chmod(delivery.absolutePath, 0o600);
 
+    await store.close();
     await expect(createStore(dir).reconcileRunAttachments()).rejects.toMatchObject({
       code: 'ATTACHMENT_INTEGRITY_MISMATCH'
     });
   });
 
-  it('migrates schema 9 by adding an empty attachment collection', async () => {
+  it('holds store ownership until admitted attachment I/O finishes', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
-    await store.createTask({ title: 'Legacy', prompt: 'Keep me.', repositoryPath: dir });
-    await store.close();
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    delete persisted.attachments;
-    persisted.schemaVersion = 9;
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-
-    const migrated = await createStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(migrated.attachments).toEqual([]);
-  });
-
-  it('migrates schema 10 blobs into path-free task-owned storage', async () => {
-    const fixture = await createSchema10AttachmentFixture();
-
-    const migrated = createStore(fixture.dir);
-    const snapshot = await migrated.snapshot();
-    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(snapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await migrated.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
-    await expect(fs.access(fixture.blobRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('recovers and repeats schema 10 migration after snapshot publication is interrupted', async () => {
-    const fixture = await createSchema10AttachmentFixture();
-    const originalRename = fs.rename.bind(fs);
-    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination) === fixture.storePath) {
-        throw new Error('injected migration publication failure');
+    const draft = await store.createAttachmentDraft();
+    const linkFile = fs.link.bind(fs);
+    let signalLinkStarted!: () => void;
+    let releaseLink!: () => void;
+    const linkStarted = new Promise<void>((resolve) => { signalLinkStarted = resolve; });
+    const linkGate = new Promise<void>((resolve) => { releaseLink = resolve; });
+    let delayed = false;
+    const link = vi.spyOn(fs, 'link').mockImplementation(async (source, destination) => {
+      if (
+        !delayed &&
+        String(destination).startsWith(
+          path.join(dir, 'attachments', 'staging', draft.id, path.sep)
+        )
+      ) {
+        delayed = true;
+        signalLinkStarted();
+        await linkGate;
       }
-      return originalRename(source, destination);
+      await linkFile(source, destination);
     });
+    const contender = createStore(dir);
 
     try {
-      await expect(createStore(fixture.dir).snapshot()).rejects.toThrow(
-        'injected migration publication failure'
+      const staging = store.stageTaskAttachment({
+        draftId: draft.id,
+        displayName: 'drain.txt',
+        bytes: bytes('finish admitted attachment work')
+      });
+      await linkStarted;
+      const closing = store.close();
+
+      await expect(contender.snapshot()).rejects.toThrow(
+        `already owned by process ${process.pid}`
       );
+      await expect(store.createAttachmentDraft()).rejects.toThrow('Task store is closed');
+      releaseLink();
+      await expect(staging).resolves.toMatchObject({ displayName: 'drain.txt' });
+      await expect(closing).resolves.toBeUndefined();
+      await expect(contender.snapshot()).resolves.toMatchObject({ tasks: [] });
     } finally {
-      rename.mockRestore();
+      releaseLink();
+      link.mockRestore();
+      await store.close();
+      await contender.close();
     }
-
-    const interrupted = JSON.parse(await fs.readFile(fixture.storePath, 'utf8')) as {
-      schemaVersion: number;
-      attachments: Array<{ storageKey?: string }>;
-    };
-    expect(interrupted.schemaVersion).toBe(10);
-    expect(interrupted.attachments[0]).toHaveProperty('storageKey');
-    await expect(fs.access(fixture.taskOwnedPath)).resolves.toBeUndefined();
-    await expect(fs.access(fixture.blobPath)).resolves.toBeUndefined();
-
-    // Simulate the old interrupted ordering, where cleanup removed the source
-    // blob before the schema-11 snapshot was published.
-    await fs.rm(fixture.blobRoot, { recursive: true });
-
-    const restarted = createStore(fixture.dir);
-    const restartedSnapshot = await restarted.snapshot();
-    expect(restartedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(restartedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await restarted.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
-    await expect(fs.access(fixture.blobRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-    await restarted.close();
-
-    const repeated = createStore(fixture.dir);
-    const repeatedSnapshot = await repeated.snapshot();
-    expect(repeatedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(repeatedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await repeated.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
   });
+
 });
-
-async function createSchema10AttachmentFixture(): Promise<{
-  dir: string;
-  storePath: string;
-  blobRoot: string;
-  blobPath: string;
-  taskOwnedPath: string;
-  attachmentId: string;
-}> {
-  const dir = await temporaryDirectory();
-  const store = createStore(dir);
-  const { draftId } = await stageText(store, 'legacy.txt', 'legacy bytes');
-  const task = await store.createTask({
-    title: 'Legacy attachments',
-    prompt: 'Use the attachment.',
-    repositoryPath: dir,
-    attachmentDraftId: draftId
-  });
-  const [verified] = await store.verifyTaskAttachments(task.id);
-  await store.close();
-
-  const blobRoot = path.join(dir, 'attachment-blobs');
-  await fs.mkdir(blobRoot, { mode: 0o700 });
-  const blobPath = path.join(blobRoot, verified!.record.sha256);
-  await fs.copyFile(verified!.absolutePath, blobPath);
-  if (process.platform !== 'win32') await fs.chmod(blobPath, 0o400);
-  await fs.rm(path.join(dir, 'attachments'), { recursive: true });
-
-  const storePath = path.join(dir, 'store.json');
-  const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-    schemaVersion: number;
-    attachments: Array<{ storageKey?: string }>;
-  };
-  persisted.schemaVersion = 10;
-  persisted.attachments[0]!.storageKey =
-    `attachment-blobs/${verified!.record.sha256}`;
-  await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
-    mode: 0o600
-  });
-
-  return {
-    dir,
-    storePath,
-    blobRoot,
-    blobPath,
-    taskOwnedPath: verified!.absolutePath,
-    attachmentId: verified!.record.id
-  };
-}
 
 async function stageText(
   store: FileTaskStore,

@@ -7,8 +7,10 @@ import type {
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
@@ -46,7 +48,11 @@ export const CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS = [
 
 interface SupervisorEvents {
   ready: [server: AgentServerInstance];
-  exit: [server: AgentServerInstance, unexpected: boolean];
+  exit: [
+    server: AgentServerInstance,
+    unexpected: boolean,
+    processTreeExited: boolean
+  ];
   protocolError: [error: Error];
   diagnostic: [text: string];
 }
@@ -128,8 +134,10 @@ export class CodexAppServerSupervisor {
   private server?: AgentServerInstance;
   private startPromise?: Promise<CodexRpcClient>;
   private readonly closeHandlings = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+  private readonly closingChildren = new WeakSet<ChildProcessWithoutNullStreams>();
   private readonly diagnosticTails = new WeakMap<ChildProcessWithoutNullStreams, string>();
   private readonly diagnosticLineBuffers = new WeakMap<ChildProcessWithoutNullStreams, string>();
+  private readonly terminationReasons = new WeakMap<ChildProcessWithoutNullStreams, string>();
   private shuttingDown = false;
   private lifecycleFailure?: Error;
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
@@ -145,6 +153,10 @@ export class CodexAppServerSupervisor {
 
   get currentClient(): CodexRpcClient | undefined {
     return this.client;
+  }
+
+  get processTreeRunning(): boolean {
+    return this.child ? isPortableProcessTreeRunning(this.child) : false;
   }
 
   get lastRuntimeDiagnostics(): readonly CodexRuntimeProbeResult[] {
@@ -174,9 +186,11 @@ export class CodexAppServerSupervisor {
     if (
       this.client &&
       this.child &&
+      !this.closingChildren.has(this.child) &&
       !this.child.killed &&
       this.child.exitCode === null &&
-      this.child.signalCode === null
+      this.child.signalCode === null &&
+      isPortableProcessTreeRunning(this.child)
     ) {
       return Promise.resolve(this.client);
     }
@@ -189,6 +203,11 @@ export class CodexAppServerSupervisor {
           ).then((handled) => {
             if (!handled) {
               throw new Error('Timed out finalizing the prior Codex App Server exit.');
+            }
+            if (isPortableProcessTreeRunning(priorChild)) {
+              throw new Error(
+                `Refusing to start Codex App Server while prior process tree ${priorChild.pid ?? '<unknown>'} may still be alive.`
+              );
             }
           })
         : Promise.resolve()
@@ -271,9 +290,14 @@ export class CodexAppServerSupervisor {
     const child = this.child;
     const safeReason = this.redactDiagnostic(reason);
     const handledClose = child ? this.closeHandlings.get(child) : undefined;
+    if (child) this.terminationReasons.set(child, safeReason);
     this.client?.close(safeReason);
-    if (child && child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
+    if (child && isPortableProcessTreeRunning(child)) {
+      await terminateAndConfirm(
+        child,
+        this.options.shutdownGraceTimeoutMs ?? 1_000,
+        this.options.shutdownKillTimeoutMs ?? 2_000
+      );
     }
 
     if (this.server) {
@@ -285,16 +309,6 @@ export class CodexAppServerSupervisor {
         await this.store
           .updateAgentServer(this.server.id, { status: 'STOPPING', exitReason: safeReason })
           .catch(() => undefined);
-      }
-    }
-    if (child && child.exitCode === null && child.signalCode === null) {
-      if (!(await waitForClose(child, this.options.shutdownGraceTimeoutMs ?? 1_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
-        if (!(await waitForClose(child, this.options.shutdownKillTimeoutMs ?? 2_000))) {
-          throw new Error(
-            `Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
-          );
-        }
       }
     }
     if (handledClose) {
@@ -311,10 +325,11 @@ export class CodexAppServerSupervisor {
     const safeReason = this.redactDiagnostic(reason);
     const child = this.child;
     const failures: unknown[] = [];
+    if (child) this.terminationReasons.set(child, safeReason);
     // Closing and terminating the process is the safety boundary. It must not
     // depend on a diagnostic store write succeeding.
     this.client?.close(safeReason);
-    if (child && child.exitCode === null && child.signalCode === null) {
+    if (child && isPortableProcessTreeRunning(child)) {
       try {
         await terminateAndConfirm(
           child,
@@ -414,7 +429,7 @@ export class CodexAppServerSupervisor {
           CODEX_ENVIRONMENT_POLICY.allowedKeys
         ),
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: false
+        detached: process.platform !== 'win32'
       }) as ChildProcessWithoutNullStreams;
       this.child = child;
       this.diagnosticTails.set(child, '');
@@ -429,6 +444,7 @@ export class CodexAppServerSupervisor {
       this.closeHandlings.set(child, handledClose);
       void handledClose.catch(() => undefined);
       child.once('close', (exitCode, signal) => {
+        this.closingChildren.add(child!);
         void this.handleClose(child!, client, server!, exitCode, signal).then(
           resolveHandledClose,
           rejectHandledClose
@@ -454,7 +470,8 @@ export class CodexAppServerSupervisor {
         child.stdout,
         this.store,
         server.id,
-        this.options.requestTimeoutMs
+        this.options.requestTimeoutMs,
+        codexSensitiveEnvironmentValues(this.options.environment ?? process.env)
       );
       this.client = client;
       client.events.on('protocolError', (error) => {
@@ -500,7 +517,7 @@ export class CodexAppServerSupervisor {
       const cleanupFailures: unknown[] = [];
       client?.close(message);
       if (this.client === client) this.client = undefined;
-      if (child && child.exitCode === null && child.signalCode === null) {
+      if (child && isPortableProcessTreeRunning(child)) {
         try {
           await terminateAndConfirm(
             child,
@@ -529,7 +546,7 @@ export class CodexAppServerSupervisor {
         cleanupFailures.length === 0 &&
         this.child === child &&
         child &&
-        (child.exitCode !== null || child.signalCode !== null)
+        !isPortableProcessTreeRunning(child)
       ) {
         this.child = undefined;
       }
@@ -573,7 +590,7 @@ export class CodexAppServerSupervisor {
     const safeMessage = this.redactDiagnostic(error.message, child);
     client.close(`Protocol error: ${safeMessage}`);
     const termination =
-      child.exitCode === null && child.signalCode === null
+      isPortableProcessTreeRunning(child)
         ? terminateAndConfirm(
             child,
             this.options.shutdownGraceTimeoutMs ?? 1_000,
@@ -626,10 +643,36 @@ export class CodexAppServerSupervisor {
     this.flushDiagnosticBuffer(child);
     const wasCurrent = this.child === child && this.server?.id === server.id;
     const unexpected = wasCurrent && !this.shuttingDown;
+    let inboundDrainFailure: unknown;
+    try {
+      await client?.drainInbound();
+    } catch (cause) {
+      inboundDrainFailure = cause;
+      this.lifecycleFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+    }
     client?.close(
       unexpected ? 'Codex App Server exited unexpectedly.' : 'Codex App Server stopped.'
     );
-    const terminalStatus = unexpected && exitCode !== 0 ? 'FAILED' : 'EXITED';
+    let processTreeFailure: unknown;
+    if (isPortableProcessTreeRunning(child)) {
+      try {
+        await terminateAndConfirm(
+          child,
+          this.options.shutdownGraceTimeoutMs ?? 1_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      } catch (cause) {
+        processTreeFailure = cause;
+        this.lifecycleFailure = cause instanceof Error ? cause : new Error(String(cause));
+      }
+    }
+    const processTreeExited = !isPortableProcessTreeRunning(child);
+    const terminalStatus = !processTreeExited
+      ? 'LOST'
+      : unexpected && exitCode !== 0
+        ? 'FAILED'
+        : 'EXITED';
     let emittedServer = server;
     let storageFailure: unknown;
     try {
@@ -640,7 +683,10 @@ export class CodexAppServerSupervisor {
             exitedAt: new Date().toISOString(),
             exitCode,
             signal,
-            exitReason: this.redactedDiagnosticTail(child) || undefined
+            exitReason:
+              this.redactedDiagnosticTail(child) ||
+              this.terminationReasons.get(child) ||
+              undefined
           })
         : current ?? server;
       emittedServer = stored;
@@ -649,11 +695,20 @@ export class CodexAppServerSupervisor {
       this.lifecycleFailure = cause instanceof Error ? cause : new Error(String(cause));
     } finally {
       if (this.client === client) this.client = undefined;
-      if (this.child === child) this.child = undefined;
+      if (this.child === child && processTreeExited) this.child = undefined;
       if (wasCurrent && this.server?.id === server.id) this.server = emittedServer;
     }
-    if (wasCurrent) this.events.emit('exit', emittedServer, unexpected);
-    if (storageFailure) throw storageFailure;
+    if (wasCurrent) {
+      this.events.emit('exit', emittedServer, unexpected, processTreeExited);
+    }
+    const failures: unknown[] = [];
+    if (inboundDrainFailure !== undefined) failures.push(inboundDrainFailure);
+    if (processTreeFailure !== undefined) failures.push(processTreeFailure);
+    if (storageFailure !== undefined) failures.push(storageFailure);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Codex App Server exit cleanup was incomplete.');
+    }
   }
 
   private assertStartupActive(): void {
@@ -705,7 +760,7 @@ export class CodexAppServerSupervisor {
     _child?: ChildProcessWithoutNullStreams
   ): string {
     let redacted = redactCredentialText(value);
-    for (const sensitive of sensitiveEnvironmentValues(
+    for (const sensitive of codexSensitiveEnvironmentValues(
       this.options.environment ?? process.env
     )) {
       redacted = redacted.split(sensitive).join(REDACTED_CREDENTIAL);
@@ -752,7 +807,9 @@ function redactCodexArgv(argv: readonly string[]): string[] {
   });
 }
 
-function sensitiveEnvironmentValues(environment: NodeJS.ProcessEnv): string[] {
+export function codexSensitiveEnvironmentValues(
+  environment: NodeJS.ProcessEnv
+): string[] {
   return Object.entries(environment)
     .filter(([key, value]) => Boolean(value) && isSensitiveCredentialFieldName(key))
     .map(([, value]) => value!)
@@ -775,11 +832,11 @@ async function terminateAndConfirm(
   gracefulTimeoutMs: number,
   killTimeoutMs: number
 ): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!isPortableProcessTreeRunning(child)) return;
   await terminatePortableProcessTree(child, 'SIGTERM');
-  if (await waitForClose(child, gracefulTimeoutMs)) return;
+  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
   await terminatePortableProcessTree(child, 'SIGKILL');
-  if (!(await waitForClose(child, killTimeoutMs))) {
+  if (!(await waitForPortableProcessTreeExit(child, killTimeoutMs))) {
     throw new Error(`Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
   }
 }
@@ -788,26 +845,6 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
-  });
-}
-
-function waitForClose(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
-): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
   });
 }
 

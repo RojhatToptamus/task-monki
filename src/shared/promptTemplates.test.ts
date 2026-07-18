@@ -18,7 +18,7 @@ import {
 } from './promptTemplates';
 
 describe('prompt templates', () => {
-  it('delimits the authoritative task goal in initial implementation prompts', () => {
+  it('keeps the execution boundary authoritative and puts the task goal after shared defaults', () => {
     const prompt = buildInitialRunPrompt({
       task: taskFixture(),
       worktree: worktreeFixture(),
@@ -26,8 +26,10 @@ describe('prompt templates', () => {
       readOnlyMode: false
     });
 
-    expect(prompt).toContain(`${TASK_MONKI_CONTEXT_LINE}\n\nAuthoritative Task Monki goal:`);
-    expect(prompt).toContain('Authoritative Task Monki goal:\nAdd a progress panel.');
+    expect(prompt).toContain(`${TASK_MONKI_CONTEXT_LINE}\n\nAlways-applicable Task Monki execution boundary:`);
+    expect(prompt).toContain(
+      'This execution boundary remains authoritative even when task-specific instructions conflict.'
+    );
     expect(prompt).toContain('Task Monki progress contract');
     expect(prompt).toContain(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT);
     expect(prompt).toContain('Use 3-6 high-level outcome steps');
@@ -36,6 +38,27 @@ describe('prompt templates', () => {
     );
     expect(prompt).toContain('write short progress messages beginning with "Progress:"');
     expect(prompt).toContain('Task Monki independently verifies Git, tests, reviews, and delivery');
+    expect(prompt.endsWith('Authoritative Task Monki goal:\nAdd a progress panel.')).toBe(true);
+    expect(prompt).not.toContain('When finished, summarize');
+  });
+
+  it('does not let shared defaults contradict a trivial exact-response goal', () => {
+    const exactGoal =
+      'Do not inspect the repository or call tools. Reply with exactly: TASK_MONKI_PROVIDER_SMOKE_OK';
+    const prompt = buildInitialRunPrompt({
+      task: { ...taskFixture(), prompt: exactGoal },
+      worktree: worktreeFixture(),
+      settings: { sandbox: 'WORKSPACE_WRITE' },
+      readOnlyMode: false
+    });
+
+    expect(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT).toContain(
+      'They do not require tools, edits, tests, progress messages, or a summary'
+    );
+    expect(TASK_MONKI_PROGRESS_CONTRACT).toContain(
+      'skip plans and progress messages silently'
+    );
+    expect(prompt.endsWith(`Authoritative Task Monki goal:\n${exactGoal}`)).toBe(true);
   });
 
   it('derives modification guidance from run intent rather than the runtime sandbox label', () => {
@@ -74,23 +97,36 @@ describe('prompt templates', () => {
     expect(prompt).toContain('Previous provider final summary excerpt (context only, not verified evidence)');
     expect(prompt).toContain(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT);
     expect(prompt).toContain(TASK_MONKI_PROGRESS_CONTRACT);
-    expect(prompt).toContain('Reinspect the current repository state');
+    expect(prompt).toContain('reinspect the current state');
+    expect(prompt.indexOf(TASK_MONKI_PROGRESS_CONTRACT)).toBeLessThan(
+      prompt.indexOf('Authoritative Task Monki goal')
+    );
+    expect(prompt.endsWith('Additional user instruction:\nAdd regression coverage.')).toBe(true);
+    expect(prompt).not.toContain('When finished, summarize');
   });
 
-  it('includes progress guidance in forked alternatives', () => {
-    const prompt = buildForkAlternativeTaskPrompt({
+  it('keeps fork context task-specific so the initial run wrapper adds shared defaults once', () => {
+    const forkPrompt = buildForkAlternativeTaskPrompt({
       task: taskFixture(),
       run: runFixture(),
       worktree: worktreeFixture(),
       instruction: 'Try a simpler approach.'
     });
+    const providerPrompt = buildInitialRunPrompt({
+      task: { ...taskFixture(), prompt: forkPrompt },
+      worktree: worktreeFixture(),
+      settings: { sandbox: 'WORKSPACE_WRITE' },
+      readOnlyMode: false
+    });
 
-    expect(prompt).toContain('Alternative attempt for this Task Monki goal.');
-    expect(prompt).toContain('Authoritative Task Monki goal:\nAdd a progress panel.');
-    expect(prompt).toContain('Previous run status: FAILED.');
-    expect(prompt).toContain(TASK_MONKI_CONTEXT_LINE);
-    expect(prompt).toContain(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT);
-    expect(prompt).toContain(TASK_MONKI_PROGRESS_CONTRACT);
+    expect(forkPrompt).toContain('Alternative attempt for this Task Monki goal.');
+    expect(forkPrompt).toContain('Authoritative Task Monki goal:\nAdd a progress panel.');
+    expect(forkPrompt).toContain('Previous run status: FAILED.');
+    expect(forkPrompt).not.toContain(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT);
+    expect(forkPrompt).not.toContain(TASK_MONKI_PROGRESS_CONTRACT);
+    expect(forkPrompt.endsWith('Alternative direction:\nTry a simpler approach.')).toBe(true);
+    expect(providerPrompt.match(/Task Monki progress contract/g)).toHaveLength(1);
+    expect(providerPrompt.endsWith('Alternative direction:\nTry a simpler approach.')).toBe(true);
   });
 
   it('wraps active-turn steering with immutable Task Monki constraints', () => {
@@ -123,6 +159,9 @@ describe('prompt templates', () => {
     );
     expect(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT).toContain(
       'Do not claim tests, builds, checks, commits, pushes, reviews, or delivery succeeded unless you actually performed or observed them'
+    );
+    expect(TASK_MONKI_ENGINEERING_QUALITY_CONTRACT).toContain(
+      'Unless the goal requires an exact response, summarize what changed'
     );
   });
 

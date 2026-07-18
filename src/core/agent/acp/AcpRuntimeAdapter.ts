@@ -18,7 +18,10 @@ import type {
 } from '../../../shared/contracts';
 import type { AppEventBus } from '../../runner/AppEventBus';
 import { createDomainEvent } from '../../storage/domainEvent';
-import type { FileTaskStore } from '../../storage/FileTaskStore';
+import {
+  ArtifactAppendAmbiguousError,
+  type FileTaskStore
+} from '../../storage/FileTaskStore';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
@@ -34,6 +37,7 @@ import {
   type StartAgentTurn
 } from '../AgentRuntimeAdapter';
 import {
+  REDACTED_CREDENTIAL,
   redactCredentialText,
   redactCredentialValue
 } from '../AgentCredentialRedaction';
@@ -55,6 +59,7 @@ import {
 } from '../../review/CodexReviewContract';
 import {
   ACP_CLIENT_CAPABILITIES,
+  ACP_MAX_MESSAGE_BYTES,
   flattenSelectOptions,
   parseConfigOptions,
   parseNewSessionResponse,
@@ -107,6 +112,7 @@ import { AcpStdioSupervisor } from './AcpStdioSupervisor';
 import { materializeAcpPermission } from './AcpPermissionPolicy';
 import {
   acpInitializeNativeView,
+  hasSafeAcpModelIdentifiers,
   normalizeAcpOperationalModelState,
   normalizeAcpOperationalSession,
   redactAcpNativeValue,
@@ -144,6 +150,10 @@ const STREAM_TEXT_SEGMENT_BYTES = 8 * 1024;
 const MAX_BUFFERED_OUTPUT_GROUPS = 256;
 const MAX_BUFFERED_STREAM_PARTS_PER_RUN = 8;
 const MAX_BUFFERED_STREAM_BYTES = 4 * 1024 * 1024;
+const MAX_STREAM_OUTPUT_APPEND_ATTEMPTS = 3;
+const MAX_STREAM_CREDENTIAL_CARRY_BYTES = 64 * 1024;
+const MAX_STARTUP_EVENTS = 256;
+const MAX_STARTUP_EVENT_BYTES = 2 * ACP_MAX_MESSAGE_BYTES;
 
 interface BufferedAcpTextSegment {
   text: string;
@@ -173,7 +183,19 @@ interface AcpRunStreamBuffer {
   partBytes: number;
   output: BufferedAcpOutput[];
   outputBytes: number;
+  credentialCarries: Map<string, BufferedAcpCredentialCarry>;
+  credentialCarryBytes: number;
+  outputAppendFailures: number;
+  persistenceRecoveryStarted: boolean;
   timer?: NodeJS.Timeout;
+}
+
+interface BufferedAcpCredentialCarry {
+  text: string;
+  messageId: string;
+  updateType: string;
+  itemType: AgentItemRecord['type'];
+  raw: AgentProtocolMessageReference;
 }
 
 interface AppliedAcpSessionSettings {
@@ -184,6 +206,27 @@ interface AppliedAcpSessionSettings {
    * define that response as an authoritative settings observation.
    */
   finalMutationResponse?: AgentProtocolMessageReference;
+}
+
+type BufferedAcpStartupEvent =
+  | {
+      kind: 'notification';
+      method: string;
+      params: unknown;
+      raw: AgentProtocolMessageReference;
+    }
+  | {
+      kind: 'request';
+      request: AcpJsonRpcRequest;
+      raw: AgentProtocolMessageReference;
+    };
+
+interface BufferedAcpStartupDispatch {
+  client: AcpRpcClient;
+  generation: number;
+  events: BufferedAcpStartupEvent[];
+  byteCount: number;
+  overflow?: Error;
 }
 
 export interface AcpRuntimeAdapterOptions
@@ -211,6 +254,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private boundClient?: AcpRpcClient;
   private clientGeneration = 0;
   private boundClientGeneration = 0;
+  private startupDispatch?: BufferedAcpStartupDispatch;
   private initializeResponse?: AcpInitializeResponse;
   private profileModelState?: AcpSessionModelState;
   private initialized = false;
@@ -223,12 +267,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private provisionalProviderSessionIds = new Map<string, string>();
   private replayingProviderSessionIds = new Set<string>();
   private streamBuffers = new Map<string, AcpRunStreamBuffer>();
-  private bufferedStreamBytes = 0;
   private readonly interruptCompletionTimeoutMs: number;
   private configuredExecutable?: string;
   private runtimeReconfigurationPending = false;
   private runtimeResetTimer?: NodeJS.Timeout;
   private runtimeQuarantinePromise?: Promise<void>;
+  private clientReplacementFence?: {
+    serverInstanceId: string;
+    tail: Promise<void>;
+  };
   private runtimeSafetyFence?: Error;
   private readonly sensitiveValues: readonly string[];
 
@@ -344,7 +391,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     });
     return this.redactProviderValue(redactAcpNativeValue({
       protocol: { wireVersion: 1, schemaArtifactVersion: '1.19.0' },
-      initialize: acpInitializeNativeView(this.initializeResponse),
+      initialize: acpInitializeNativeView(this.initializeResponse, this.sensitiveValues),
       clientCapabilities: ACP_CLIENT_CAPABILITIES,
       sessions: [
         ...liveSessions,
@@ -576,7 +623,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const reasoningEffort = input.settings.reasoningEffort;
     if (
       reasoningEffort &&
-      model.supportedReasoningEfforts.length > 0 &&
+      (authoritativeModelContract || model.supportedReasoningEfforts.length > 0) &&
       !model.supportedReasoningEfforts.includes(reasoningEffort)
     ) {
       throw new Error(
@@ -1210,14 +1257,35 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
       );
     } catch (cause) {
-      await this.quarantineRuntimeAfterAmbiguousMutation(
-        'session/request_permission',
-        `The provider accepted interaction ${interaction.id}, but local completion persistence failed.`
-      );
-      throw new AgentMutationAmbiguousError(
+      const reason =
+        `The provider accepted interaction ${interaction.id}, but local completion persistence failed.`;
+      const ambiguity = new AgentMutationAmbiguousError(
         'session/request_permission',
         `ACP permission response was delivered, but local completion persistence failed: ${errorMessage(cause)}`
       );
+      const recoveryFailures: unknown[] = [];
+      const run = await this.store.getRun(interaction.runId).catch((failure) => {
+        recoveryFailures.push(failure);
+        return undefined;
+      });
+      if (run) {
+        await this.staleRunInteractions(run, reason).catch((failure) => {
+          recoveryFailures.push(failure);
+        });
+      }
+      await this.quarantineRuntimeAfterAmbiguousMutation(
+        'session/request_permission',
+        reason
+      ).catch((failure) => {
+        recoveryFailures.push(failure);
+      });
+      if (recoveryFailures.length > 0) {
+        throw new AggregateError(
+          [ambiguity, ...recoveryFailures],
+          'ACP permission response was ambiguous and safe recovery was incomplete.'
+        );
+      }
+      throw ambiguity;
     }
     this.emitInteractionUpdate(resolved);
   }
@@ -1243,8 +1311,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         reconciledSessionIds.add(run.sessionId);
         continue;
       }
-      recoveryRequiredSessionIds.add(run.sessionId);
-      await this.store.appendEvent(
+      const published = await this.store.appendRunEventIfStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_RECONCILED',
           taskId: run.taskId,
@@ -1260,8 +1327,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             terminal: false,
             reason: 'ACP has no prompt-status read method. Task Monki will not replay an ambiguous prompt.'
           }
-        })
+        }),
+        [run.status]
       );
+      if (!published) continue;
+      recoveryRequiredSessionIds.add(run.sessionId);
       this.appEvents.emit({
         type: 'run.activity',
         taskId: run.taskId,
@@ -1354,8 +1424,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
     let configOptions: AcpNativeSessionState['configOptions'];
     try {
-      const record = requireRecord(response.result, 'ACP config response');
-      configOptions = parseConfigOptions(record.configOptions) ?? [];
+      configOptions = acknowledgedConfigOptions(response.result, configId, value);
     } catch (cause) {
       await this.quarantineRuntimeAfterAmbiguousMutation(
         'session/set_config_option',
@@ -1510,15 +1579,31 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         cwd: this.options.cwd,
         environment: this.options.environment,
         appVersion: this.options.appVersion,
-        requestTimeoutMs: this.options.requestTimeoutMs
+        requestTimeoutMs: this.options.requestTimeoutMs,
+        beforeClientReplacementStart: (priorServerInstanceId) =>
+          this.waitForClientReplacementFence(priorServerInstanceId)
       });
       this.supervisor = supervisor;
+      supervisor.events.on('client', (client) => {
+        this.bindClient(client, true);
+      });
       supervisor.events.on('exit', (server, unexpected) => {
         if (supervisor.safetyFenceReason) {
           this.latchRuntimeSafetyFence(supervisor.safetyFenceReason);
         }
         if (unexpected && !this.runtimeQuarantinePromise) {
           this.enqueueInbound(() => this.handleRuntimeLoss(server.id));
+          // RPC close has drained parsing and journaling, but accepted adapter
+          // callbacks can still be materializing. Capture this exact tail before
+          // a replacement is allowed to become authoritative.
+          const fence = { serverInstanceId: server.id, tail: this.inboundQueue };
+          this.clientReplacementFence = fence;
+          const clearFence = () => {
+            if (this.clientReplacementFence === fence) {
+              this.clientReplacementFence = undefined;
+            }
+          };
+          void fence.tail.then(clearFence, clearFence);
         }
       });
       supervisor.events.on('protocolError', (error) => {
@@ -1551,46 +1636,36 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
     }
     let running: Awaited<ReturnType<AcpStdioSupervisor['start']>>;
+    const supervisor = this.supervisor;
     try {
-      running = await this.supervisor.start();
+      running = await supervisor.start();
     } catch (cause) {
-      if (this.supervisor.safetyFenceReason) {
-        this.latchRuntimeSafetyFence(this.supervisor.safetyFenceReason);
-      }
-      const detail =
-        this.supervisor.currentServer?.exitReason ?? errorMessage(cause);
-      this.preflightState = {
-        ...this.preflightState,
-        readiness: createRuntimeReadiness(
-          /protocol negotiation selected|protocol violation/iu.test(detail)
-            ? 'INCOMPATIBLE'
-            : 'FAILED',
-          detail,
-          {
-            checks: {
-              discovery: 'FOUND',
-              compatibility: /protocol negotiation selected|protocol violation/iu.test(detail)
-                ? 'INCOMPATIBLE'
-                : 'UNKNOWN',
-              initialization: 'FAILED'
-            },
-            diagnostics: [
-              errorDiagnostic(
-                'ACP_INITIALIZATION_FAILED',
-                'INITIALIZATION',
-                detail
-              )
-            ],
-            nextAction: { kind: 'CONFIGURE', label: 'Review executable details' }
-          }
-        )
-      };
-      this.emitRuntimeUpdate();
+      this.recordInitializationFailure(cause, supervisor);
       throw cause;
     }
-    this.initializeResponse = running.initialize;
-    this.profileModelState = running.profileModelState;
-    this.bindClient(running.client);
+    try {
+      this.initializeResponse = running.initialize;
+      this.profileModelState = running.profileModelState;
+      this.bindClient(running.client);
+    } catch (cause) {
+      this.invalidateBoundClient(running.client);
+      this.initializeResponse = undefined;
+      this.profileModelState = undefined;
+      let failure: unknown = cause;
+      try {
+        await supervisor.shutdown();
+      } catch (cleanupCause) {
+        failure = new AggregateError(
+          [cause, cleanupCause],
+          'ACP initialization event dispatch failed and process cleanup was incomplete.'
+        );
+      }
+      if (this.supervisor === supervisor && !supervisor.safetyFenceReason) {
+        this.supervisor = undefined;
+      }
+      this.recordInitializationFailure(failure, supervisor);
+      throw failure;
+    }
     this.refreshModels();
     const hasProfileCatalog = Boolean(
       this.profile.sessionModelExtension?.initializeResponseMetaField &&
@@ -1622,7 +1697,47 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         running.initialize.agentInfo?.title ?? running.initialize.agentInfo?.name ?? ''
       ) || undefined
     };
+    await this.inboundQueue;
     return running.client;
+  }
+
+  private recordInitializationFailure(
+    cause: unknown,
+    supervisor: AcpStdioSupervisor
+  ): void {
+    this.invalidateBoundClient(supervisor.currentClient);
+    if (supervisor.safetyFenceReason) {
+      this.latchRuntimeSafetyFence(supervisor.safetyFenceReason);
+    }
+    const detail = this.redactProviderText(
+      supervisor.currentServer?.exitReason ?? errorMessage(cause)
+    );
+    const incompatible = /protocol negotiation selected|protocol violation/iu.test(detail);
+    this.preflightState = {
+      ...this.preflightState,
+      readiness: createRuntimeReadiness(
+        incompatible ? 'INCOMPATIBLE' : 'FAILED',
+        detail,
+        {
+          checks: {
+            discovery: 'FOUND',
+            compatibility: incompatible ? 'INCOMPATIBLE' : 'UNKNOWN',
+            initialization: 'FAILED'
+          },
+          diagnostics: [
+            errorDiagnostic(
+              'ACP_INITIALIZATION_FAILED',
+              'INITIALIZATION',
+              detail
+            )
+          ],
+          nextAction: incompatible
+            ? { kind: 'CONFIGURE', label: 'Choose a compatible executable' }
+            : { kind: 'RETRY', label: 'Retry runtime initialization' }
+        }
+      )
+    };
+    this.emitRuntimeUpdate();
   }
 
   private ensureResolvedRuntime(): Promise<ResolvedAcpRuntime> {
@@ -1837,19 +1952,96 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     this.emitRuntimeUpdate();
   }
 
-  private bindClient(client: AcpRpcClient): void {
-    if (this.boundClient === client) return;
+  private bindClient(client: AcpRpcClient, deferUntilInitialized = false): void {
+    if (this.boundClient === client) {
+      if (!deferUntilInitialized) this.activateStartupDispatch(client);
+      return;
+    }
     this.boundClient = client;
     const generation = ++this.clientGeneration;
     this.boundClientGeneration = generation;
+    this.startupDispatch = deferUntilInitialized
+      ? { client, generation, events: [], byteCount: 0 }
+      : undefined;
     client.events.on('notification', (method, params, raw) => {
-      this.enqueueInbound(() =>
-        this.handleNotification(client, generation, method, params, raw)
-      );
+      this.dispatchClientEvent(client, generation, {
+        kind: 'notification',
+        method,
+        params,
+        raw
+      });
     });
     client.events.on('request', (request, raw) => {
-      this.enqueueInbound(() => this.handleServerRequest(client, generation, request, raw));
+      this.dispatchClientEvent(client, generation, { kind: 'request', request, raw });
     });
+  }
+
+  private async waitForClientReplacementFence(
+    priorServerInstanceId: string
+  ): Promise<void> {
+    const fence = this.clientReplacementFence;
+    if (fence?.serverInstanceId === priorServerInstanceId) await fence.tail;
+  }
+
+  private dispatchClientEvent(
+    client: AcpRpcClient,
+    generation: number,
+    event: BufferedAcpStartupEvent
+  ): void {
+    const startup = this.startupDispatch;
+    if (startup?.client === client && startup.generation === generation) {
+      // The journal reference describes the redacted durable record. Startup
+      // retains the decoded provider payload, which can be materially larger
+      // when credential fields were redacted before journaling.
+      const nextBytes = startup.byteCount + Buffer.byteLength(
+        JSON.stringify(event),
+        'utf8'
+      );
+      if (
+        startup.events.length >= MAX_STARTUP_EVENTS ||
+        nextBytes > MAX_STARTUP_EVENT_BYTES
+      ) {
+        if (!startup.overflow) {
+          startup.overflow = new Error(
+            'ACP exceeded the bounded event buffer while initialization was completing.'
+          );
+          client.close(startup.overflow.message);
+        }
+        return;
+      }
+      startup.events.push(event);
+      startup.byteCount = nextBytes;
+      return;
+    }
+    this.enqueueDispatchedClientEvent(client, generation, event);
+  }
+
+  private activateStartupDispatch(client: AcpRpcClient): void {
+    const startup = this.startupDispatch;
+    if (!startup || startup.client !== client) return;
+    this.startupDispatch = undefined;
+    if (startup.overflow) throw startup.overflow;
+    for (const event of startup.events) {
+      this.enqueueDispatchedClientEvent(client, startup.generation, event);
+    }
+  }
+
+  private enqueueDispatchedClientEvent(
+    client: AcpRpcClient,
+    generation: number,
+    event: BufferedAcpStartupEvent
+  ): void {
+    this.enqueueInbound(() =>
+      event.kind === 'notification'
+        ? this.handleNotification(
+            client,
+            generation,
+            event.method,
+            event.params,
+            event.raw
+          )
+        : this.handleServerRequest(client, generation, event.request, event.raw)
+    );
   }
 
   /**
@@ -1873,6 +2065,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (client && this.boundClient !== client) return;
     this.boundClient = undefined;
     this.boundClientGeneration = ++this.clientGeneration;
+    this.startupDispatch = undefined;
   }
 
   private parseSessionModels(value: unknown): AcpNativeSessionState['models'] {
@@ -1897,6 +2090,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       (option) => option.type === 'select' && option.category === 'model'
     );
     const modelExtension = this.profile.sessionModelExtension;
+    let requestedSessionModelId =
+      settings.model && settings.model !== 'default' ? settings.model : undefined;
+    let requestedModelReasoningEffort: string | undefined;
     if (
       requestedMode &&
       !state.modes?.availableModes.some((mode) => mode.id === requestedMode)
@@ -1923,21 +2119,40 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
     if (settings.reasoningEffort) {
       const thoughtLevel = acpThoughtLevelSelector(state);
-      if (!thoughtLevel) {
+      if (thoughtLevel) {
+        const requestedConfigValue = values[thoughtLevel.id];
+        if (
+          requestedConfigValue !== undefined &&
+          requestedConfigValue !== settings.reasoningEffort
+        ) {
+          throw new Error(
+            `ACP config option ${thoughtLevel.id} conflicts with requested reasoning effort ${settings.reasoningEffort}.`
+          );
+        }
+        values[thoughtLevel.id] = settings.reasoningEffort;
+      } else if (
+        state.models &&
+        modelExtension?.setModelReasoningEffortMetaField
+      ) {
+        requestedSessionModelId ??= state.models.currentModelId;
+        const requestedModel = state.models.availableModels.find(
+          (model) => model.modelId === requestedSessionModelId
+        );
+        if (
+          !requestedModel?.reasoningEfforts?.some(
+            (effort) => effort.value === settings.reasoningEffort
+          )
+        ) {
+          throw new Error(
+            `${this.descriptor.displayName} model ${requestedSessionModelId} did not advertise reasoning effort ${settings.reasoningEffort}.`
+          );
+        }
+        requestedModelReasoningEffort = settings.reasoningEffort;
+      } else {
         throw new Error(
           `${this.descriptor.displayName} did not advertise an ACP thought_level session configuration selector for reasoning effort ${settings.reasoningEffort}.`
         );
       }
-      const requestedConfigValue = values[thoughtLevel.id];
-      if (
-        requestedConfigValue !== undefined &&
-        requestedConfigValue !== settings.reasoningEffort
-      ) {
-        throw new Error(
-          `ACP config option ${thoughtLevel.id} conflicts with requested reasoning effort ${settings.reasoningEffort}.`
-        );
-      }
-      values[thoughtLevel.id] = settings.reasoningEffort;
     }
     for (const [configId, value] of Object.entries(values)) {
       validateAcpConfigValue(state, configId, value);
@@ -1965,19 +2180,38 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         state = { ...state, modes: { ...modes, currentModeId: requestedMode } };
       }
 
-      if (settings.model && settings.model !== 'default' && state.models) {
+      if (requestedSessionModelId && state.models) {
         if (!modelExtension) {
           throw new Error(
             `${this.descriptor.displayName} returned session models without an enabled provider extension.`
           );
         }
-        if (state.models.currentModelId !== settings.model) {
+        const requestedModel = state.models.availableModels.find(
+          (model) => model.modelId === requestedSessionModelId
+        );
+        const shouldMutate =
+          state.models.currentModelId !== requestedSessionModelId ||
+          (requestedModelReasoningEffort !== undefined &&
+            requestedModel?.reasoningEffort !== requestedModelReasoningEffort);
+        if (shouldMutate) {
           try {
             const response = await this.requestBoundedMutation(
               client,
               modelExtension.setModelMethod,
-              { sessionId: state.sessionId, modelId: settings.model },
-              `The requested model ${settings.model} may have been applied during session setup.`
+              {
+                sessionId: state.sessionId,
+                modelId: requestedSessionModelId,
+                ...(requestedModelReasoningEffort &&
+                modelExtension.setModelReasoningEffortMetaField
+                  ? {
+                      _meta: {
+                        [modelExtension.setModelReasoningEffortMetaField]:
+                          requestedModelReasoningEffort
+                      }
+                    }
+                  : {})
+              },
+              `The requested model ${requestedSessionModelId} may have been applied during session setup.`
             );
             finalMutationResponse = response.raw;
           } catch (cause) {
@@ -1986,7 +2220,15 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
         state = normalizeAcpOperationalSession({
           ...state,
-          models: { ...state.models, currentModelId: settings.model }
+          models: {
+            ...state.models,
+            currentModelId: requestedSessionModelId,
+            availableModels: state.models.availableModels.map((model) =>
+              model.modelId === requestedSessionModelId && requestedModelReasoningEffort
+                ? { ...model, reasoningEffort: requestedModelReasoningEffort }
+                : model
+            )
+          }
         });
         this.nativeSessions.set(state.sessionId, state);
       }
@@ -2011,10 +2253,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
         finalMutationResponse = response.raw;
         try {
-          const record = requireRecord(response.result, 'ACP config response');
           state = {
             ...state,
-            configOptions: parseConfigOptions(record.configOptions) ?? state.configOptions
+            configOptions: acknowledgedConfigOptions(response.result, configId, value)
           };
         } catch (cause) {
           await this.quarantineRuntimeAfterAmbiguousMutation(
@@ -2066,16 +2307,29 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           throw new Error('ACP provider model update normalized to an empty model state.');
         }
         nextModelState = normalized;
-        if (!hasSafeProfileModelIdentifiers(nextModelState, this.sensitiveValues)) {
+        if (!hasSafeAcpModelIdentifiers(nextModelState, this.sensitiveValues)) {
           throw new Error(
             'ACP provider model update contained an identifier matching a runtime credential.'
           );
         }
       } catch (cause) {
-        await this.recordProtocolIncident(
-          `${modelExtension.contractId} model update was rejected: ${errorMessage(cause)}`,
-          raw
+        const detail = `${modelExtension.contractId} model update was rejected: ${errorMessage(cause)}`;
+        // A rejected replacement invalidates the whole catalog for this
+        // process generation. Keeping the previous catalog selectable would
+        // falsely attribute stale model state to a provider that just replaced
+        // it with an unreadable or unsafe update.
+        this.profileModelState = undefined;
+        this.models = [];
+        this.emitRuntimeUpdate();
+        const quarantine = this.quarantineRuntimeGeneration(
+          `Task Monki quarantined the ACP process after a rejected provider model catalog update. ${detail}`,
+          false
         );
+        try {
+          await this.recordProtocolIncident(detail, raw);
+        } finally {
+          await quarantine;
+        }
         return;
       }
       if (!this.isCurrentClientEvent(client, generation, raw)) return;
@@ -2266,10 +2520,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     const providerText = textFromAcpContent(update.content);
-    const text = providerText === undefined
-      ? undefined
-      : this.redactProviderText(providerText);
-    if (text === undefined) return;
+    if (providerText === undefined) return;
     const messageId = typeof update.messageId === 'string'
       ? update.messageId
       : `${run.id}:${update.sessionUpdate}`;
@@ -2279,52 +2530,35 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         : update.sessionUpdate === 'agent_thought_chunk'
           ? 'REASONING_SUMMARY'
           : 'USER_MESSAGE';
-    const byteCount = Buffer.byteLength(text, 'utf8');
-
-    await this.flushBufferedContentForCapacity(byteCount, run.id, messageId);
     let buffer = this.getOrCreateStreamBuffer(run);
-    let part = buffer.parts.get(messageId);
-    if (!part && buffer.parts.size >= MAX_BUFFERED_STREAM_PARTS_PER_RUN) {
-      const oldestPartId = buffer.parts.keys().next().value as string | undefined;
-      if (oldestPartId) {
-        await this.materializeBufferedContentParts(run.id, [oldestPartId], false);
-        buffer = this.getOrCreateStreamBuffer(run);
-      }
+    let priorCarry = buffer.credentialCarries.get(update.sessionUpdate);
+    if (priorCarry && priorCarry.messageId !== messageId) {
+      await this.materializeCredentialCarry(run, update.sessionUpdate, priorCarry);
+      buffer = this.getOrCreateStreamBuffer(run);
+      priorCarry = undefined;
     }
-    part = buffer.parts.get(messageId);
-    if (!part) {
-      part = {
-        messageId,
-        updateType: update.sessionUpdate,
-        itemType: type,
-        chunks: [],
-        byteCount: 0,
-        raw,
-        eventCount: 0
-      };
-      buffer.parts.set(messageId, part);
-    }
-    appendBufferedText(part.chunks, text, byteCount);
-    part.byteCount += byteCount;
-    part.raw = raw;
-    part.eventCount += 1;
-    buffer.partBytes += byteCount;
-    this.bufferedStreamBytes += byteCount;
-
-    if (update.sessionUpdate !== 'user_message_chunk' && byteCount > 0) {
-      const previousOutput = buffer.output.at(-1);
-      if (previousOutput?.source === update.sessionUpdate) {
-        appendBufferedText(previousOutput.chunks, text, byteCount);
-        previousOutput.byteCount += byteCount;
-      } else {
-        buffer.output.push({
-          source: update.sessionUpdate,
-          chunks: [{ text, byteCount }],
-          byteCount
-        });
-      }
-      buffer.outputBytes += byteCount;
-    }
+    const redacted = redactAcpStreamChunk(
+      priorCarry?.text ?? '',
+      providerText,
+      this.sensitiveValues
+    );
+    await this.updateCredentialCarry(buffer, run, update.sessionUpdate, {
+      text: redacted.carry,
+      messageId,
+      updateType: update.sessionUpdate,
+      itemType: type,
+      raw
+    });
+    await this.bufferRedactedContent(
+      run,
+      messageId,
+      update.sessionUpdate,
+      type,
+      raw,
+      redacted.text,
+      true
+    );
+    buffer = this.getOrCreateStreamBuffer(run);
 
     if (
       buffer.outputBytes >= STREAM_OUTPUT_FLUSH_BYTES ||
@@ -2337,6 +2571,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async flushRunContent(runId: string, terminal: boolean): Promise<void> {
+    if (terminal) await this.flushCredentialCarries(runId);
     await this.flushBufferedStreamOutput(runId);
     await this.materializeBufferedContentParts(runId, undefined, terminal);
     if (!terminal) return;
@@ -2364,14 +2599,187 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       parts: new Map(),
       partBytes: 0,
       output: [],
-      outputBytes: 0
+      outputBytes: 0,
+      credentialCarries: new Map(),
+      credentialCarryBytes: 0,
+      outputAppendFailures: 0,
+      persistenceRecoveryStarted: false
     };
     this.streamBuffers.set(run.id, buffer);
     return buffer;
   }
 
+  private async updateCredentialCarry(
+    buffer: AcpRunStreamBuffer,
+    run: RunRecord,
+    source: string,
+    next: BufferedAcpCredentialCarry
+  ): Promise<void> {
+    const previousBytes = Buffer.byteLength(
+      buffer.credentialCarries.get(source)?.text ?? '',
+      'utf8'
+    );
+    const nextBytes = Buffer.byteLength(next.text, 'utf8');
+    if (nextBytes > previousBytes) {
+      await this.ensureStreamCapacity(nextBytes - previousBytes, run, run.id, next.messageId);
+    }
+    buffer = this.getOrCreateStreamBuffer(run);
+    if (next.text) buffer.credentialCarries.set(source, next);
+    else buffer.credentialCarries.delete(source);
+    buffer.credentialCarryBytes = [...buffer.credentialCarries.values()].reduce(
+      (total, carry) => total + Buffer.byteLength(carry.text, 'utf8'),
+      0
+    );
+  }
+
+  private async bufferRedactedContent(
+    run: RunRecord,
+    messageId: string,
+    updateType: string,
+    itemType: AgentItemRecord['type'],
+    raw: AgentProtocolMessageReference,
+    text: string,
+    countEvent: boolean
+  ): Promise<void> {
+    const segments = text ? splitUtf8Text(text, STREAM_TEXT_SEGMENT_BYTES) : [''];
+    let eventCounted = false;
+    for (const segment of segments) {
+      const byteCount = Buffer.byteLength(segment, 'utf8');
+      const outputCopies = updateType === 'user_message_chunk' ? 1 : 2;
+      await this.ensureStreamCapacity(
+        byteCount * outputCopies,
+        run,
+        run.id,
+        messageId
+      );
+      let buffer = this.getOrCreateStreamBuffer(run);
+      let part = buffer.parts.get(messageId);
+      if (!part && buffer.parts.size >= MAX_BUFFERED_STREAM_PARTS_PER_RUN) {
+        const oldestPartId = buffer.parts.keys().next().value as string | undefined;
+        if (oldestPartId) {
+          await this.materializeBufferedContentParts(run.id, [oldestPartId], false);
+          buffer = this.getOrCreateStreamBuffer(run);
+        }
+      }
+      part = buffer.parts.get(messageId);
+      if (!part) {
+        part = {
+          messageId,
+          updateType,
+          itemType,
+          chunks: [],
+          byteCount: 0,
+          raw,
+          eventCount: 0
+        };
+        buffer.parts.set(messageId, part);
+      }
+      if (countEvent && !eventCounted) {
+        part.eventCount += 1;
+        eventCounted = true;
+      }
+      part.raw = raw;
+      appendBufferedText(part.chunks, segment, byteCount);
+      part.byteCount += byteCount;
+      buffer.partBytes += byteCount;
+
+      if (updateType !== 'user_message_chunk' && byteCount > 0) {
+        const previousOutput = buffer.output.at(-1);
+        if (previousOutput?.source === updateType) {
+          appendBufferedText(previousOutput.chunks, segment, byteCount);
+          previousOutput.byteCount += byteCount;
+        } else {
+          buffer.output.push({
+            source: updateType,
+            chunks: [{ text: segment, byteCount }],
+            byteCount
+          });
+        }
+        buffer.outputBytes += byteCount;
+      }
+    }
+  }
+
+  private async flushCredentialCarries(runId: string): Promise<void> {
+    const buffer = this.streamBuffers.get(runId);
+    if (!buffer || buffer.credentialCarries.size === 0) return;
+    const run = await this.store.getRun(runId);
+    if (!run) {
+      this.discardStreamBuffer(runId);
+      return;
+    }
+    // A trailing exact-secret prefix can never be proven safe without another
+    // provider chunk. Terminal, loss, and shutdown therefore materialize only
+    // a marker and discard the raw suffix.
+    for (const [source, carry] of [...buffer.credentialCarries.entries()]) {
+      await this.materializeCredentialCarry(run, source, carry);
+    }
+  }
+
+  private async materializeCredentialCarry(
+    run: RunRecord,
+    source: string,
+    carry: BufferedAcpCredentialCarry
+  ): Promise<void> {
+    await this.updateCredentialCarry(
+      this.getOrCreateStreamBuffer(run),
+      run,
+      source,
+      { ...carry, text: '' }
+    );
+    await this.bufferRedactedContent(
+      run,
+      carry.messageId,
+      carry.updateType,
+      carry.itemType,
+      carry.raw,
+      REDACTED_CREDENTIAL,
+      false
+    );
+  }
+
+  private retainedStreamBytes(): number {
+    let total = 0;
+    for (const buffer of this.streamBuffers.values()) {
+      total += buffer.partBytes + buffer.outputBytes + buffer.credentialCarryBytes;
+    }
+    return total;
+  }
+
+  private async recoverStreamOutputPersistenceFailure(
+    buffer: AcpRunStreamBuffer,
+    run: RunRecord,
+    cause: unknown
+  ): Promise<void> {
+    if (buffer.persistenceRecoveryStarted) return;
+    buffer.persistenceRecoveryStarted = true;
+    const ambiguity = cause instanceof ArtifactAppendAmbiguousError;
+    const reason = this.redactProviderText(
+      ambiguity
+        ? `Task Monki cannot prove the ACP output artifact after an ambiguous append for run ${run.id}. The same bytes will not be retried.`
+        : buffer.outputAppendFailures > 0
+          ? `Task Monki could not persist ACP output for run ${run.id} after ${buffer.outputAppendFailures} artifact append attempts: ${errorMessage(cause)}`
+          : `Task Monki could not persist buffered ACP output for run ${run.id}: ${errorMessage(cause)}`
+    );
+    // Discard before quarantine yields so no timer, late callback, or runtime
+    // loss flush can retry the same bytes or retain unbounded provider output.
+    this.discardStreamBuffer(run.id);
+    this.preflightState = appendRuntimeDiagnostic(
+      this.preflightState,
+      errorDiagnostic(
+        'ACP_OUTPUT_PERSISTENCE_FAILED',
+        'HEALTH',
+        'ACP output could not be persisted safely.',
+        reason
+      ),
+      'DEGRADED'
+    );
+    this.emitRuntimeUpdate();
+    await this.quarantineRuntimeGeneration(reason, false);
+  }
+
   private scheduleBufferedStreamOutputFlush(buffer: AcpRunStreamBuffer): void {
-    if (buffer.timer || buffer.outputBytes === 0) return;
+    if (buffer.timer || buffer.outputBytes === 0 || buffer.persistenceRecoveryStarted) return;
     const timer = setTimeout(() => {
       if (buffer.timer === timer) buffer.timer = undefined;
       this.enqueueInbound(() => this.flushBufferedStreamOutput(buffer.runId));
@@ -2383,6 +2791,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   private async flushBufferedStreamOutput(runId: string): Promise<void> {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer) return;
+    if (buffer.persistenceRecoveryStarted) {
+      throw new Error(`ACP output persistence recovery is already active for run ${runId}.`);
+    }
     if (buffer.timer) clearTimeout(buffer.timer);
     buffer.timer = undefined;
     if (buffer.outputBytes === 0) return;
@@ -2402,11 +2813,20 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     try {
       if (artifactText) await this.store.appendArtifact(run.outputArtifactId, artifactText);
     } catch (cause) {
-      this.scheduleBufferedStreamOutputFlush(buffer);
+      buffer.outputAppendFailures += 1;
+      if (
+        cause instanceof ArtifactAppendAmbiguousError ||
+        buffer.outputAppendFailures >= MAX_STREAM_OUTPUT_APPEND_ATTEMPTS
+      ) {
+        await this.recoverStreamOutputPersistenceFailure(buffer, run, cause);
+      } else {
+        this.scheduleBufferedStreamOutputFlush(buffer);
+      }
       throw cause;
     }
     buffer.output = [];
     buffer.outputBytes = 0;
+    buffer.outputAppendFailures = 0;
     for (const entry of output) {
       const text = bufferedText(entry.chunks);
       if (!text) continue;
@@ -2420,7 +2840,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         at: new Date().toISOString()
       });
     }
-    if (buffer.parts.size === 0) this.discardStreamBuffer(runId);
+    if (buffer.parts.size === 0 && buffer.credentialCarries.size === 0) {
+      this.discardStreamBuffer(runId);
+    }
   }
 
   private async materializeBufferedContentParts(
@@ -2458,22 +2880,42 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       });
       buffer.parts.delete(partId);
       buffer.partBytes = Math.max(0, buffer.partBytes - part.byteCount);
-      this.bufferedStreamBytes = Math.max(0, this.bufferedStreamBytes - part.byteCount);
     }
-    if (buffer.parts.size === 0 && buffer.outputBytes === 0) {
+    if (
+      buffer.parts.size === 0 &&
+      buffer.outputBytes === 0 &&
+      buffer.credentialCarries.size === 0
+    ) {
       this.discardStreamBuffer(runId);
     }
   }
 
-  private async flushBufferedContentForCapacity(
-    incomingBytes: number,
+  private async ensureStreamCapacity(
+    requiredBytes: number,
+    run: RunRecord,
     currentRunId: string,
     currentPartId: string
   ): Promise<void> {
-    while (
-      this.bufferedStreamBytes > 0 &&
-      this.bufferedStreamBytes + incomingBytes > MAX_BUFFERED_STREAM_BYTES
-    ) {
+    if (requiredBytes > MAX_BUFFERED_STREAM_BYTES) {
+      throw new Error('ACP stream segment exceeds the retained-output limit.');
+    }
+    while (this.retainedStreamBytes() + requiredBytes > MAX_BUFFERED_STREAM_BYTES) {
+      const output = [...this.streamBuffers.values()].find(
+        (candidate) => candidate.outputBytes > 0 && !candidate.persistenceRecoveryStarted
+      );
+      if (output) {
+        try {
+          await this.flushBufferedStreamOutput(output.runId);
+        } catch (cause) {
+          const current = this.streamBuffers.get(output.runId);
+          const outputRun = await this.store.getRun(output.runId);
+          if (current && outputRun) {
+            await this.recoverStreamOutputPersistenceFailure(current, outputRun, cause);
+          }
+          throw cause;
+        }
+        continue;
+      }
       const candidates = [...this.streamBuffers.values()].flatMap((buffer) =>
         [...buffer.parts.keys()].map((partId) => ({ runId: buffer.runId, partId }))
       );
@@ -2483,7 +2925,27 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             candidate.runId !== currentRunId || candidate.partId !== currentPartId
         ) ?? candidates[0];
       if (!oldest) break;
-      await this.materializeBufferedContentParts(oldest.runId, [oldest.partId], false);
+      try {
+        await this.materializeBufferedContentParts(oldest.runId, [oldest.partId], false);
+      } catch (cause) {
+        const current = this.streamBuffers.get(oldest.runId);
+        const bufferedRun = await this.store.getRun(oldest.runId);
+        if (current && bufferedRun) {
+          await this.recoverStreamOutputPersistenceFailure(current, bufferedRun, cause);
+        }
+        throw cause;
+      }
+    }
+    if (this.retainedStreamBytes() + requiredBytes > MAX_BUFFERED_STREAM_BYTES) {
+      const buffer = this.streamBuffers.get(currentRunId);
+      if (buffer) {
+        await this.recoverStreamOutputPersistenceFailure(
+          buffer,
+          run,
+          new Error('ACP could not free enough bounded stream capacity.')
+        );
+      }
+      throw new Error('ACP could not retain provider output within its hard memory limit.');
     }
   }
 
@@ -2491,7 +2953,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     const buffer = this.streamBuffers.get(runId);
     if (!buffer) return;
     if (buffer.timer) clearTimeout(buffer.timer);
-    this.bufferedStreamBytes = Math.max(0, this.bufferedStreamBytes - buffer.partBytes);
     this.streamBuffers.delete(runId);
   }
 
@@ -2559,6 +3020,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     raw: AgentProtocolMessageReference
   ): Promise<void> {
     if (!session.providerSessionId) return;
+    let configOptions: AcpSessionConfigOption[];
+    try {
+      const parsed = parseConfigOptions(update.configOptions);
+      if (!parsed) {
+        throw new Error('ACP config update did not include configOptions.');
+      }
+      configOptions = parsed;
+    } catch (cause) {
+      await this.recordProtocolIncident(errorMessage(cause), raw);
+      return;
+    }
     const current = this.nativeSessions.get(session.providerSessionId) ?? {
       sessionId: session.providerSessionId,
       modes: null,
@@ -2567,7 +3039,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     };
     const state = {
       ...current,
-      configOptions: parseConfigOptions(update.configOptions) ?? []
+      configOptions
     };
     await this.persistNativeState(
       session,
@@ -2696,7 +3168,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     let finalArtifactId: string;
     try {
       await this.flushRunContent(run.id, true);
-      const items = await this.store.getAgentItemsForRun(run.id);
+      const items = [...await this.store.getAgentItemsForRun(run.id)].reverse();
       const finalMessage = items
         .filter((item) => item.type === 'AGENT_MESSAGE')
         .map(itemText)
@@ -3173,6 +3645,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     detail: string,
     drainInboundBeforeReplacement = true
   ): Promise<void> {
+    await this.quarantineRuntimeGeneration(
+      `Task Monki quarantined the ACP process after ambiguous ${operation}. ${detail}`,
+      drainInboundBeforeReplacement
+    );
+  }
+
+  private async quarantineRuntimeGeneration(
+    reason: string,
+    drainInboundBeforeReplacement: boolean
+  ): Promise<void> {
     if (this.runtimeSafetyFence) throw this.runtimeSafetyFence;
     if (this.runtimeQuarantinePromise) {
       // An inbound callback can discover the same ambiguity while a foreground
@@ -3182,8 +3664,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       return;
     }
     const quarantine = this.quarantineRuntime(
-      operation,
-      detail,
+      reason,
       drainInboundBeforeReplacement
     );
     this.runtimeQuarantinePromise = quarantine;
@@ -3201,8 +3682,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async quarantineRuntime(
-    operation: string,
-    detail: string,
+    reason: string,
     drainInboundBeforeReplacement: boolean
   ): Promise<void> {
     const supervisor = this.supervisor;
@@ -3226,7 +3706,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     // generation invalidation provides the same logical drain and the callback
     // must unwind before later queued work can execute.
     if (drainInboundBeforeReplacement) await inboundAtFence;
-    const reason = `Task Monki quarantined the ACP process after ambiguous ${operation}. ${detail}`;
     await this.handleRuntimeLoss(server.id, reason);
     await this.reconcile();
     const safetyFenceReason = supervisor.safetyFenceReason;
@@ -3305,7 +3784,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     );
     for (const run of affectedRuns) {
       await this.flushRunContent(run.id, true);
-      await this.store.appendEvent(
+      const lossPublished = await this.store.appendRunEventIfStatus(
         createDomainEvent({
           type: 'AGENT_RUNTIME_LOST',
           taskId: run.taskId,
@@ -3318,8 +3797,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           payload: {
             reason: `${reason} Prompt outcome is ambiguous and will not be replayed.`
           }
-        })
+        }),
+        [run.status]
       );
+      if (!lossPublished) continue;
       await this.store.updateAgentSession(run.sessionId, { status: 'NOT_LOADED' });
       this.appEvents.emit({
         type: 'run.activity',
@@ -3645,10 +4126,13 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
           .filter((effort) =>
             isSafeProviderIdentifier(effort, this.sensitiveValues)
           );
+        const advertisedDefaultReasoningEffort = model.reasoningEfforts?.find(
+          (effort) => effort.default
+        )?.value;
         const providerDefaultReasoningEffort =
-          model.reasoningEffort &&
-          supportedReasoningEfforts.includes(model.reasoningEffort)
-            ? model.reasoningEffort
+          advertisedDefaultReasoningEffort &&
+          supportedReasoningEfforts.includes(advertisedDefaultReasoningEffort)
+            ? advertisedDefaultReasoningEffort
             : undefined;
         return [{
           id: `${this.descriptor.id}:${this.profile.defaultModelProvider}/${model.modelId}`,
@@ -3660,10 +4144,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             ? this.redactProviderText(model.description)
             : undefined,
           hidden: false,
-          // The model update advertises available effort values but does not
-          // define a writable session contract. Publishing them as common
-          // selectable efforts would cause callers to send one implicitly.
-          supportedReasoningEfforts: [],
+          supportedReasoningEfforts,
+          defaultReasoningEffort: providerDefaultReasoningEffort,
           serviceTiers: [],
           inputModalities: modalities,
           isDefault: model.modelId === profileModels.currentModelId,
@@ -4091,8 +4573,101 @@ function validateAcpConfigValue(
   return option;
 }
 
+function acknowledgedConfigOptions(
+  result: unknown,
+  configId: string,
+  requestedValue: string | boolean
+): AcpSessionConfigOption[] {
+  const record = requireRecord(result, 'ACP config response');
+  const configOptions = parseConfigOptions(record.configOptions);
+  if (!configOptions) {
+    throw new Error('ACP config response did not acknowledge the resulting configOptions.');
+  }
+  const acknowledged = configOptions.filter((option) => option.id === configId);
+  if (
+    acknowledged.length !== 1 ||
+    acknowledged[0]?.currentValue !== requestedValue
+  ) {
+    throw new Error(
+      `ACP config response did not acknowledge ${configId}=${String(requestedValue)}.`
+    );
+  }
+  return configOptions;
+}
+
 function itemText(item: AgentItemRecord | undefined): string {
   return isRecord(item?.payload) && typeof item.payload.text === 'string' ? item.payload.text : '';
+}
+
+function redactAcpStreamChunk(
+  carry: string,
+  text: string,
+  sensitiveValues: readonly string[]
+): { text: string; carry: string } {
+  const combined = carry + text;
+  if (!combined) return { text: '', carry: '' };
+  const sensitive = [...new Set(sensitiveValues)].filter(Boolean);
+  if (
+    sensitive.some(
+      (value) => Buffer.byteLength(value, 'utf8') > MAX_STREAM_CREDENTIAL_CARRY_BYTES
+    )
+  ) {
+    // Retaining enough prefix state for an unusually large inherited secret
+    // would violate the adapter's memory bound. Mask this free-form stream
+    // instead of weakening exact-secret protection.
+    return { text: REDACTED_CREDENTIAL, carry: '' };
+  }
+
+  const redacted = redactCredentialText(combined, sensitive);
+  let carryLength = 0;
+  for (const secret of sensitive) {
+    carryLength = Math.max(carryLength, longestSecretPrefixSuffix(redacted, secret));
+  }
+  const nextCarry = carryLength === 0 ? '' : redacted.slice(-carryLength);
+  const safe = carryLength === 0 ? redacted : redacted.slice(0, -carryLength);
+  return {
+    text: safe,
+    carry: nextCarry
+  };
+}
+
+/** Longest proper prefix of `secret` that is also a suffix of `value`. */
+function longestSecretPrefixSuffix(value: string, secret: string): number {
+  if (secret.length <= 1 || value.length === 0) return 0;
+  const prefix = new Array<number>(secret.length).fill(0);
+  for (let index = 1, matched = 0; index < secret.length; index += 1) {
+    while (matched > 0 && secret[index] !== secret[matched]) matched = prefix[matched - 1]!;
+    if (secret[index] === secret[matched]) matched += 1;
+    prefix[index] = matched;
+  }
+  const suffix = value.slice(-(secret.length - 1));
+  let matched = 0;
+  for (let index = 0; index < suffix.length; index += 1) {
+    const character = suffix[index]!;
+    while (matched > 0 && character !== secret[matched]) matched = prefix[matched - 1]!;
+    if (character === secret[matched]) matched += 1;
+    if (matched === secret.length) matched = prefix[matched - 1]!;
+  }
+  return Math.min(matched, secret.length - 1);
+}
+
+function splitUtf8Text(value: string, maxBytes: number): string[] {
+  const parts: string[] = [];
+  let rest = value;
+  while (rest) {
+    const bytes = Buffer.from(rest, 'utf8');
+    if (bytes.byteLength <= maxBytes) {
+      parts.push(rest);
+      break;
+    }
+    let end = maxBytes;
+    while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    const part = bytes.subarray(0, end).toString('utf8');
+    if (!part) break;
+    parts.push(part);
+    rest = rest.slice(part.length);
+  }
+  return parts;
 }
 
 function appendBufferedText(
@@ -4326,23 +4901,6 @@ function hasUnsafeAcpActionableIdentifier(
     (value) =>
       typeof value === 'string' &&
       !isSafeProviderIdentifier(value, sensitiveValues)
-  );
-}
-
-function hasSafeProfileModelIdentifiers(
-  state: AcpSessionModelState,
-  sensitiveValues: readonly string[]
-): boolean {
-  return [
-    state.currentModelId,
-    ...state.availableModels.flatMap((model) => [
-      model.modelId,
-      model.reasoningEffort,
-      ...(model.reasoningEfforts?.flatMap((effort) => [effort.id, effort.value]) ?? [])
-    ])
-  ].every(
-    (value) =>
-      value == null || isSafeProviderIdentifier(value, sensitiveValues)
   );
 }
 

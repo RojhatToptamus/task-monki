@@ -18,15 +18,21 @@ const MAX_NATIVE_COLLECTION = 500;
 const MAX_NATIVE_STRING = 4_096;
 
 /** Renderer/persistence-safe view; opaque data remains in the redacted 0600 journal. */
-export function redactAcpNativeValue(value: unknown, depth = 0): AgentJsonValue {
+export function redactAcpNativeValue(
+  value: unknown,
+  sensitiveValues: readonly string[] = [],
+  depth = 0
+): AgentJsonValue {
   if (depth > MAX_NATIVE_DEPTH) return '[TRUNCATED]';
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
-  if (typeof value === 'string') return redactNativeString(value).slice(0, MAX_NATIVE_STRING);
+  if (typeof value === 'string') {
+    return redactNativeString(value, sensitiveValues).slice(0, MAX_NATIVE_STRING);
+  }
   if (Array.isArray(value)) {
     return value
       .slice(0, MAX_NATIVE_COLLECTION)
-      .map((entry) => redactAcpNativeValue(entry, depth + 1));
+      .map((entry) => redactAcpNativeValue(entry, sensitiveValues, depth + 1));
   }
   if (typeof value !== 'object' || value === undefined) return String(value);
   const record = value as Record<string, unknown>;
@@ -37,7 +43,7 @@ export function redactAcpNativeValue(value: unknown, depth = 0): AgentJsonValue 
     if (key === '_meta') continue;
     result[key] = shouldRedactCredentialRecordEntry(record, key, nested)
       ? REDACTED_CREDENTIAL
-      : redactAcpNativeValue(nested, depth + 1);
+      : redactAcpNativeValue(nested, sensitiveValues, depth + 1);
   }
   return result;
 }
@@ -219,7 +225,27 @@ export function normalizeAcpOperationalModelState(
   return projectModelState(models, false);
 }
 
-export function acpInitializeNativeView(initialize: AcpInitializeResponse | undefined): AgentJsonValue {
+export function hasSafeAcpModelIdentifiers(
+  state: AcpSessionModelState,
+  sensitiveValues: readonly string[]
+): boolean {
+  return [
+    state.currentModelId,
+    ...state.availableModels.flatMap((model) => [
+      model.modelId,
+      model.reasoningEffort,
+      ...(model.reasoningEfforts?.flatMap((effort) => [effort.id, effort.value]) ?? [])
+    ])
+  ].every(
+    (value) =>
+      value == null || isSafeOperationalIdentifier(value, sensitiveValues)
+  );
+}
+
+export function acpInitializeNativeView(
+  initialize: AcpInitializeResponse | undefined,
+  sensitiveValues: readonly string[] = []
+): AgentJsonValue {
   if (!initialize) return null;
   const capabilities = initialize.agentCapabilities;
   return redactAcpNativeValue({
@@ -253,13 +279,14 @@ export function acpInitializeNativeView(initialize: AcpInitializeResponse | unde
       }
     },
     authMethods: initialize.authMethods.map(schemaSelectedAuthMethod)
-  });
+  }, sensitiveValues);
 }
 
 export function sanitizeAcpInitializeResponse(
-  initialize: AcpInitializeResponse
+  initialize: AcpInitializeResponse,
+  sensitiveValues: readonly string[] = []
 ): AcpInitializeResponse {
-  const view = acpInitializeNativeView(initialize) as {
+  const view = acpInitializeNativeView(initialize, sensitiveValues) as {
     protocolVersion: number;
     agentInfo: AcpInitializeResponse['agentInfo'];
     agentCapabilities: {
@@ -291,8 +318,11 @@ export function sanitizeAcpInitializeResponse(
   };
 }
 
-export function redactNativeString(value: string): string {
-  return redactCredentialText(value);
+export function redactNativeString(
+  value: string,
+  sensitiveValues: readonly string[] = []
+): string {
+  return redactCredentialText(value, sensitiveValues);
 }
 
 function projectConfigOption(

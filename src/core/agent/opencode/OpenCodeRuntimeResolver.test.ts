@@ -60,5 +60,6 @@ describe('OpenCodeRuntimeResolver', () => {
     ]);
     expect(resolved.diagnostics.requiredCapabilities).toContain('GET /event (SSE)');
     expect(resolved.diagnostics.requiredCapabilities).toContain('POST /session/{id}/fork');
+    expect(resolved.diagnostics.requiredCapabilities).toContain('DELETE /session/{id}');
   });
 });

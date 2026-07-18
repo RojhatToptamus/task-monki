@@ -73,6 +73,16 @@ describe('resolveReasoningEffort', () => {
     expect(resolveReasoningEffort({ ...models[0]!, defaultReasoningEffort: undefined }, undefined))
       .toBe('low');
   });
+
+  it('drops a stale effort when a same-id provider catalog update changes support', () => {
+    const updated = {
+      ...models[0]!,
+      supportedReasoningEfforts: ['low'],
+      defaultReasoningEffort: 'low'
+    };
+
+    expect(resolveReasoningEffort(updated, 'high')).toBe('low');
+  });
 });
 
 const models: AgentModel[] = [

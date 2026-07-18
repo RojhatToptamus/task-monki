@@ -76,6 +76,14 @@ export interface OpenCodePart {
   [key: string]: unknown;
 }
 
+export interface OpenCodePartDelta {
+  sessionID: string;
+  messageID: string;
+  partID: string;
+  field: string;
+  delta: string;
+}
+
 export interface OpenCodeMessage {
   info: OpenCodeMessageInfo;
   parts: OpenCodePart[];
@@ -221,6 +229,27 @@ export function parseOpenCodeMessages(value: unknown): OpenCodeMessage[] {
     }
     return record as unknown as OpenCodeMessage;
   });
+}
+
+export function parseOpenCodePartDelta(value: unknown): OpenCodePartDelta {
+  const record = asRecord(value);
+  if (
+    !record ||
+    typeof record.sessionID !== 'string' ||
+    typeof record.messageID !== 'string' ||
+    typeof record.partID !== 'string' ||
+    typeof record.field !== 'string' ||
+    typeof record.delta !== 'string'
+  ) {
+    throw new Error('OpenCode emitted an incompatible message part delta.');
+  }
+  return {
+    sessionID: record.sessionID,
+    messageID: record.messageID,
+    partID: record.partID,
+    field: record.field,
+    delta: record.delta
+  };
 }
 
 export function parseOpenCodePermissions(value: unknown): OpenCodePermissionRequest[] {

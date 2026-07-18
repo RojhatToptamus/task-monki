@@ -21,6 +21,15 @@ describe('TaskManagerService progress harness', () => {
       expect(providerPrompt).toContain('Keep exactly one step in progress');
       expect(providerPrompt).toContain('provider tool telemetry');
       expect(providerPrompt).toContain('Progress:');
+      expect(providerPrompt.indexOf('Task Monki progress contract')).toBeLessThan(
+        providerPrompt.indexOf('Authoritative Task Monki goal')
+      );
+      expect(
+        providerPrompt.endsWith(
+          'Authoritative Task Monki goal:\nAdd a hello.txt file and verify the repository status.'
+        )
+      ).toBe(true);
+      expect(providerPrompt).not.toContain('When finished, summarize');
 
       const startedRun = await requireRun(scenario.store.getRun(run.id));
       await scenario.store.upsertAgentItem({

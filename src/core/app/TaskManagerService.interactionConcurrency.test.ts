@@ -26,7 +26,7 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     const store = new FileTaskStore(path.join(directory, 'store'));
     const adapter = new ScriptedAgentRuntimeAdapter(store);
     const service = new TaskManagerService(store, directory, undefined, {
-      agentProviderAdapter: adapter
+      agentRuntimeAdapters: [adapter]
     });
     const settings: AgentExecutionSettings = {
       runtimeId: 'codex',
