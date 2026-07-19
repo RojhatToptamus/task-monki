@@ -118,7 +118,17 @@ export async function terminatePortableProcessTree(
     try {
       process.kill(-child.pid, signal);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ESRCH') return;
+      if (
+        code === 'EPERM' &&
+        child.exitCode === null &&
+        child.signalCode === null
+      ) {
+        child.kill(signal);
+        return;
+      }
+      throw error;
     }
     return;
   }
