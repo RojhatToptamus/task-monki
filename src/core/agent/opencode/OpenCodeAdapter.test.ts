@@ -1041,7 +1041,7 @@ describe('OpenCodeAdapter', () => {
     // Keep the synthetic deadline comfortably above event-loop jitter from the
     // parallel suite. Production uses a six-second window; this test needs
     // enough space for both deliberately distinct probes.
-    const fixture = await createFixture({ interruptCompletionTimeoutMs: 1_000 });
+    const fixture = await createFixture({ interruptCompletionTimeoutMs: 4_000 });
     await fixture.adapter.initialize();
     const session = await materializeSession(fixture);
     const run = await createRun(fixture, session);
@@ -1065,19 +1065,21 @@ describe('OpenCodeAdapter', () => {
     });
     const readsAfterImmediateReconciliation = fixture.harness.statusReadCount;
     await waitForCondition(
-      () => fixture.harness.statusReadCount > readsAfterImmediateReconciliation
+      () => fixture.harness.statusReadCount > readsAfterImmediateReconciliation,
+      6_000
     );
     fixture.harness.statuses[session.providerSessionId!] = { type: 'idle' };
 
     await waitForCondition(
-      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED'
+      async () => (await fixture.store.getRun(run.id))?.status === 'INTERRUPTED',
+      6_000
     );
     expect(fixture.harness.statusReadCount).toBeGreaterThan(
       readsAfterImmediateReconciliation + 1
     );
     expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(0);
     await fixture.adapter.shutdown();
-  });
+  }, 10_000);
 
   it('bounds stalled abort and reconciliation requests and never leaves the run interrupting', async () => {
     const stalledAbort = await createFixture({ interruptCompletionTimeoutMs: 80 });

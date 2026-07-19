@@ -627,7 +627,6 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
       cwd: dir,
       environment: {
-        ...process.env,
         OPENAI_API_KEY: 'opaque-provider-credential-1742'
       },
       restartDelaysMs: []

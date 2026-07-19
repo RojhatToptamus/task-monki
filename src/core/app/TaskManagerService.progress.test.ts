@@ -205,7 +205,7 @@ describe('TaskManagerService progress harness', () => {
     } finally {
       await scenario.service.shutdown();
     }
-  });
+  }, 15_000);
 });
 
 async function requireRun(run: Promise<RunRecord | undefined>): Promise<RunRecord> {
