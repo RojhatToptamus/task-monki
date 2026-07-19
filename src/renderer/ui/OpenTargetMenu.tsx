@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   OpenTargetAction,
   OpenTargetAppIcon,
@@ -10,6 +11,12 @@ import {
   buildOpenTargetMenuModel,
   type OpenTargetMenuItem
 } from '../model/openTargetMenu';
+import {
+  focusMenuItem,
+  focusOwningMenu,
+  handleMenuBlur,
+  handleMenuKeyDown
+} from './menuKeyboard';
 
 interface OpenTargetContextMenuProps {
   target: OpenTargetRef;
@@ -20,6 +27,7 @@ interface OpenTargetContextMenuProps {
 interface OpenTargetMenuItemsProps {
   target: OpenTargetRef;
   onActionComplete?(): void;
+  autoFocusFirst?: boolean;
 }
 
 export function OpenTargetContextMenu({
@@ -28,8 +36,12 @@ export function OpenTargetContextMenu({
   onClose
 }: OpenTargetContextMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(
+    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)
+  );
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => focusMenuItem(rootRef.current));
     const onPointerDown = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) {
         onClose();
@@ -38,11 +50,13 @@ export function OpenTargetContextMenu({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         onClose();
+        returnFocusRef.current?.focus();
       }
     };
     window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('keydown', onKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('keydown', onKeyDown);
     };
@@ -54,20 +68,36 @@ export function OpenTargetContextMenu({
   };
 
   return (
-    <div className="tm-pathmenu tm-pathmenu--floating" role="menu" style={style} ref={rootRef}>
-      <OpenTargetMenuItems target={target} onActionComplete={onClose} />
+    <div
+      className="tm-pathmenu tm-pathmenu--floating"
+      role="menu"
+      tabIndex={-1}
+      aria-label="Open target"
+      style={style}
+      ref={rootRef}
+      onKeyDown={(event) =>
+        handleMenuKeyDown(event, {
+          onClose,
+          returnFocus: returnFocusRef.current
+        })
+      }
+      onBlur={(event) => handleMenuBlur(event, onClose)}
+    >
+      <OpenTargetMenuItems target={target} onActionComplete={onClose} autoFocusFirst />
     </div>
   );
 }
 
 export function OpenTargetMenuItems({
   target,
-  onActionComplete
+  onActionComplete,
+  autoFocusFirst = false
 }: OpenTargetMenuItemsProps) {
   const targetKey = useMemo(() => JSON.stringify(target), [target]);
   const [inspection, setInspection] = useState<OpenTargetInspection>();
   const [error, setError] = useState<string>();
   const [busyAction, setBusyAction] = useState<string>();
+  const firstItemRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     let canceled = false;
@@ -91,10 +121,27 @@ export function OpenTargetMenuItems({
     };
   }, [targetKey]);
 
+  useEffect(() => {
+    if (!autoFocusFirst || !inspection) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const firstItem = firstItemRef.current;
+      const menu = firstItem?.closest<HTMLElement>('[role="menu"]');
+      if (firstItem && menu && document.activeElement === menu) {
+        firstItem.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocusFirst, inspection]);
+
   const runAction = async (item: OpenTargetMenuItem) => {
     if (item.disabled || busyAction) {
       return;
     }
+    const activeItem =
+      document.activeElement instanceof Element ? document.activeElement : firstItemRef.current;
+    focusOwningMenu(activeItem);
     setBusyAction(item.id);
     setError(undefined);
     try {
@@ -118,10 +165,24 @@ export function OpenTargetMenuItems({
   };
 
   if (error && !inspection) {
-    return <div className="tm-pathmenu__message">{error}</div>;
+    return (
+      <>
+        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true">
+          {error}
+        </div>
+        <OpenTargetLiveAnnouncement tone="error">{error}</OpenTargetLiveAnnouncement>
+      </>
+    );
   }
   if (!inspection) {
-    return <div className="tm-pathmenu__message">Loading...</div>;
+    return (
+      <>
+        <div className="tm-pathmenu__message" role="menuitem" aria-disabled="true">
+          Loading...
+        </div>
+        <OpenTargetLiveAnnouncement>Loading open target.</OpenTargetLiveAnnouncement>
+      </>
+    );
   }
 
   const model = buildOpenTargetMenuModel(inspection);
@@ -130,15 +191,16 @@ export function OpenTargetMenuItems({
   return (
     <>
       <MenuButton
+        buttonRef={firstItemRef}
         item={model.primary}
         busy={busyAction === model.primary.id}
         disabled={menuBusy}
         onRun={runAction}
       />
       {model.openWith.length > 0 ? (
-        <details className="tm-pathmenu__submenu">
-          <summary>Open with</summary>
-          <div className="tm-pathmenu__submenu-body" role="group" aria-label="Open with">
+        <div className="tm-pathmenu__submenu" role="group" aria-label="Open with">
+          <span className="tm-pathmenu__submenu-label" aria-hidden="true">Open with</span>
+          <div className="tm-pathmenu__submenu-body">
             {model.openWith.map((item) => (
               <MenuButton
                 key={item.id}
@@ -149,9 +211,9 @@ export function OpenTargetMenuItems({
               />
             ))}
           </div>
-        </details>
+        </div>
       ) : null}
-      <div className="tm-pathmenu__separator" />
+      <div className="tm-pathmenu__separator" role="separator" />
       {model.utilities.map((item) => (
         <MenuButton
           key={item.id}
@@ -161,17 +223,48 @@ export function OpenTargetMenuItems({
           onRun={runAction}
         />
       ))}
-      {error ? <div className="tm-pathmenu__message tm-pathmenu__message--error">{error}</div> : null}
+      {error ? (
+        <>
+          <div
+            className="tm-pathmenu__message tm-pathmenu__message--error"
+            role="menuitem"
+            aria-disabled="true"
+          >
+            {error}
+          </div>
+          <OpenTargetLiveAnnouncement tone="error">{error}</OpenTargetLiveAnnouncement>
+        </>
+      ) : null}
     </>
   );
 }
 
+function OpenTargetLiveAnnouncement({
+  tone = 'status',
+  children
+}: {
+  tone?: 'status' | 'error';
+  children: string;
+}) {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+  return createPortal(
+    <span className="tm-visually-hidden" role={tone === 'error' ? 'alert' : 'status'}>
+      {children}
+    </span>,
+    document.body
+  );
+}
+
 function MenuButton({
+  buttonRef,
   item,
   busy,
   disabled,
   onRun
 }: {
+  buttonRef?: Ref<HTMLButtonElement>;
   item: OpenTargetMenuItem;
   busy: boolean;
   disabled: boolean;
@@ -180,8 +273,10 @@ function MenuButton({
   const title = item.disabled ? item.disabledReason : item.label;
   return (
     <button
+      ref={buttonRef}
       type="button"
       role="menuitem"
+      tabIndex={-1}
       className="tm-taskmenu__item tm-pathmenu__item"
       disabled={item.disabled || disabled}
       title={title}

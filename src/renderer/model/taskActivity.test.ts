@@ -570,7 +570,7 @@ function taskFixture(input: Partial<Task> = {}): Task {
     runtimeId: 'codex',
     title: 'Add task activity',
     prompt: 'Build a useful overview history.',
-    repositoryPath: '/repo',
+    repositoryId: '/repo',
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

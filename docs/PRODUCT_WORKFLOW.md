@@ -1,13 +1,13 @@
 # Product Workflow
 
-Date: 2026-07-14
+Date: 2026-07-18
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
 
 ## Product model
 
-1. User creates a task in the active repository with a goal, model, and
+1. User creates a task in one repository with a goal, model, and
    reasoning effort.
 2. Task Monki prepares an isolated Git worktree.
 3. The selected coding-agent runtime runs in that worktree.
@@ -18,10 +18,17 @@ is not just an AI chat UI.
 
 ## Repository context
 
-The sidebar repository selector defines the active task context. It filters the
-board, counts, settings summary, and new-task defaults to the selected
-repository. Adding a repository opens the local folder picker and validates the
-selected folder before it is saved as a selectable repository.
+Each repository has a stable Task Monki ID. Tasks and worktrees reference that
+ID; the checkout path is a mutable repository attribute. Moving or reconnecting
+a checkout updates the repository record without changing task identity.
+
+The sidebar repository selector sets the default for new tasks and provides
+repository lifecycle controls. It does not filter global workflow views,
+counts, or task detail. Adding a repository opens the local folder picker,
+validates the selected Git checkout, and stores a new repository record.
+Refresh can mark a checkout missing or invalid. Disconnect preserves every
+task and evidence record, while repository-dependent actions stay unavailable
+until the same repository ID is reconnected to a valid path.
 
 On first launch, when no repository has been configured, the main workflow area
 shows setup instead of an empty board. Adding a repository completes only the
@@ -34,13 +41,22 @@ on-demand runtime is startable but is not labeled Ready until its runtime-owned
 live check succeeds. Authentication, account incompatibility, and protocol
 failure remain distinct states with explicit next actions.
 
-New tasks inherit the active sidebar repository automatically. The creation
-flow should not ask for a repository path when a repository is already selected.
+New tasks default to the selected sidebar repository. The composer selects a
+repository by ID and never accepts a repository path as task identity.
 Capturing a text-only task is a local operation and remains available when the
 selected agent runtime is unavailable; live model resolution is deferred until
 Start. Attachment-backed creation still requires a runtime/model with an
 attested attachment boundary because Task Monki must validate modality and
 isolation before adopting the draft.
+
+## Saved views
+
+All tasks is the global workflow view. A board is only a named saved filter over
+current tasks, using zero or more repository IDs and workflow phases. Empty
+filter lists mean all repositories or all phases. Boards never store task IDs,
+own task membership, or carry workflow state. A board color is presentation
+metadata used to distinguish saved views in navigation; it does not affect the
+filter. Editing or deleting a board does not mutate any task.
 
 The new-task attachment flow accepts a bounded set of PNG,
 JPEG, and still WebP images plus UTF-8 text, data, configuration, and source-code
@@ -79,12 +95,10 @@ cleanup, and privacy semantics.
 
 Task Monki attachment runs require read-only or managed workspace access.
 
-Task records remain bound to the repository path they were created with. Runs,
-worktrees, Git evidence, GitHub delivery, and provider sessions continue
-to resolve through the task and iteration records rather than the currently
-selected sidebar repository. Switching repositories must therefore close task
-detail views from the previous repository instead of mutating those task
-records.
+Task records remain bound to exactly one repository ID. Runs, worktrees, Git
+evidence, GitHub delivery, and provider sessions resolve through task and
+iteration records rather than the current sidebar default or a saved view.
+Switching the default repository never closes or mutates an open task.
 
 ## UI priority
 
@@ -167,7 +181,7 @@ Debug, because delivery/review facts such as exact failed checks, stale
 evidence, blocked transitions, and merge state must be interpreted consistently
 across surfaces.
 
-## Board phases
+## Workflow phases
 
 - Backlog / Ready
   - Task exists and can be prepared or started.
@@ -210,7 +224,7 @@ flowchart LR
 There are two separate review concepts:
 
 - Review phase
-  - Board workflow state. The work is ready to inspect or ship.
+  - Task workflow state. The work is ready to inspect or ship.
 - Agent review gate
   - Detached AI quality check on the current diff.
 
@@ -347,9 +361,8 @@ history, or provider remote thread data.
     task-scoped policy transition, not a provider verdict.
   - PR evidence must not downgrade stricter or explicit policies such as
     `MERGED_AND_VERIFIED` or `MANUAL`.
-  - `LOCAL_ACCEPTANCE` remains the local-only path. If legacy or manually
-    repaired state has PR evidence while still using `LOCAL_ACCEPTANCE`, Mark
-    done records local acceptance and leaves that PR unchanged.
+  - `LOCAL_ACCEPTANCE` remains the local-only path. Mark done records local
+    acceptance and does not reinterpret any separately observed PR evidence.
   - For `MERGED` tasks, GitHub merge evidence is a hard requirement. The Finish
     panel should show a Merge requirement and keep Mark done disabled until
     merge evidence is `MERGED`.

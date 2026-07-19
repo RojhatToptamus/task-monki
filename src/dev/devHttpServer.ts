@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
-import type { AppUpdateEvent } from '../shared/contracts';
+import type {
+  AppUpdateEvent,
+  CreateBoardRequest,
+  UpdateBoardRequest
+} from '../shared/contracts';
 import {
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -248,11 +252,6 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
     const readJson = () => readBoundedJson(request, maxJsonBodyBytes);
 
     try {
-      if (request.method === 'GET' && url.pathname === '/api/defaultRepositoryPath') {
-        sendJson(response, requestId, 200, await options.service.getDefaultRepositoryPath());
-        return;
-      }
-
       if (request.method === 'GET' && url.pathname === '/api/agent/runtimes') {
         sendJson(response, requestId, 200, await options.service.getAgentRuntimeCatalog());
         return;
@@ -387,13 +386,92 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/repository/validate') {
+      if (request.method === 'POST' && url.pathname === '/api/repositories') {
         const body = (await readJson()) as { path: string };
         sendJson(
           response,
           requestId,
           200,
-          await options.service.validateRepository(body.path)
+          await options.service.addRepository(body.path)
+        );
+        return;
+      }
+
+      const repositoryRoute = /^\/api\/repositories\/([^/]+)\/(impact|disconnect|reconnect|refresh)$/u.exec(
+        url.pathname
+      );
+      if (repositoryRoute) {
+        const repositoryId = decodeURIComponent(repositoryRoute[1]!);
+        const action = repositoryRoute[2];
+        if (request.method === 'GET' && action === 'impact') {
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.getRepositoryImpact(repositoryId)
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'disconnect') {
+          const body = (await readJson()) as { confirmed: boolean };
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.disconnectRepository({ repositoryId, confirmed: body.confirmed })
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'reconnect') {
+          const body = (await readJson()) as { path: string };
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.reconnectRepository({ repositoryId, path: body.path })
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'refresh') {
+          await readJson();
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.refreshRepository(repositoryId)
+          );
+          return;
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/boards') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createBoard((await readJson()) as CreateBoardRequest)
+        );
+        return;
+      }
+
+      const boardRoute = /^\/api\/boards\/([^/]+)(?:\/(delete))?$/u.exec(url.pathname);
+      if (request.method === 'POST' && boardRoute) {
+        const boardId = decodeURIComponent(boardRoute[1]!);
+        if (boardRoute[2] === 'delete') {
+          await readJson();
+          await options.service.deleteBoard(boardId);
+          sendJson(response, requestId, 200, null);
+          return;
+        }
+        const input = (await readJson()) as UpdateBoardRequest;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.updateBoard({
+            ...input,
+            boardId
+          })
         );
         return;
       }

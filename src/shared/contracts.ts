@@ -66,7 +66,7 @@ export * from './agent';
 export * from './attachments';
 export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 17 as const;
+export const TASK_STORE_SCHEMA_VERSION = 19 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -167,7 +167,7 @@ export type ProcessStatus =
   | 'ORPHANED'
   | 'UNKNOWN';
 
-export type RepositoryPreflightStatus = 'VALID' | 'INVALID' | 'UNKNOWN';
+export type RepositoryPreflightStatus = 'VALID' | 'MISSING' | 'INVALID' | 'UNKNOWN';
 
 export type ArtifactStatus = 'NONE' | 'FINAL_MESSAGE_PRESENT' | 'MISSING';
 
@@ -447,10 +447,10 @@ export interface Task {
   runtimeId: AgentRuntimeId;
   title: string;
   prompt: string;
-  repositoryPath: string;
+  repositoryId: string;
   /**
    * Present only for tasks created through an idempotent client request.
-   * Older tasks and internally-created alternatives intentionally omit it.
+   * Internally-created alternatives intentionally omit it.
    */
   creationToken?: string;
   /** SHA-256 of the normalized request paired with `creationToken`. */
@@ -490,7 +490,7 @@ export interface WorktreeRecord {
   id: string;
   taskId: string;
   iterationId: string;
-  repositoryPath: string;
+  repositoryId: string;
   worktreePath: string;
   branchName: string;
   baseRef?: string;
@@ -722,8 +722,79 @@ export interface RepositoryPreflight {
   checkedAt: string;
 }
 
+export type RepositoryStatus = 'AVAILABLE' | 'MISSING' | 'INVALID' | 'DISCONNECTED';
+
+/** Durable repository identity. The filesystem path is mutable connection metadata. */
+export interface Repository {
+  id: string;
+  name: string;
+  path: string;
+  status: RepositoryStatus;
+  headSha?: string;
+  branch?: string;
+  remotes: RepositoryPreflight['remotes'];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  checkedAt?: string;
+}
+
+export interface RepositoryImpact {
+  repositoryId: string;
+  taskCount: number;
+  activeRunCount: number;
+  worktreeCount: number;
+  openPullRequestCount: number;
+  blockingReason?: string;
+}
+
+/** A saved filter over authoritative tasks; boards never own task membership. */
+export const BOARD_COLORS = [
+  'NEUTRAL',
+  'BLUE',
+  'AMBER',
+  'GREEN',
+  'ROSE',
+  'VIOLET'
+] as const;
+
+export type BoardColor = (typeof BOARD_COLORS)[number];
+
+export interface Board {
+  id: string;
+  name: string;
+  color: BoardColor;
+  repositoryIds: string[];
+  workflowPhases: WorkflowPhase[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateBoardRequest {
+  name: string;
+  color: BoardColor;
+  repositoryIds: string[];
+  workflowPhases: WorkflowPhase[];
+}
+
+export interface UpdateBoardRequest extends CreateBoardRequest {
+  boardId: string;
+}
+
+export interface DisconnectRepositoryRequest {
+  repositoryId: string;
+  confirmed: boolean;
+}
+
+export interface ReconnectRepositoryRequest {
+  repositoryId: string;
+  path: string;
+}
+
 export interface TaskSnapshot {
   schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
+  repositories: Repository[];
+  boards: Board[];
   tasks: Task[];
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
@@ -762,7 +833,7 @@ export interface TaskSnapshot {
 export interface CreateTaskRequest {
   title: string;
   prompt: string;
-  repositoryPath: string;
+  repositoryId: string;
   /** Stable across retries of one logical create action. */
   creationToken?: string;
   completionPolicy?: CompletionPolicy;
@@ -879,7 +950,7 @@ export interface ProtocolMessageRecord {
 }
 
 export interface RefinePromptRequest {
-  repositoryPath: string;
+  repositoryId: string;
   input: string;
   runtimeId?: AgentRuntimeId;
   model?: string;
@@ -912,7 +983,7 @@ export interface UpdateAppSettingsRequest {
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;
-  repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+  selectedRepositoryId?: string | null;
   previewGateway?: Partial<import('./agent').PreviewGatewaySettings>;
 }
 
@@ -964,7 +1035,7 @@ export interface OpenTargetDetectedApp {
 export type OpenTargetRef =
   | {
       type: 'repository';
-      repositoryPath: string;
+      repositoryId: string;
     }
   | {
       type: 'worktree';
@@ -1046,6 +1117,9 @@ export interface AppUpdateEvent {
     | 'run.diagnostic'
     | 'run.terminal'
     | 'interaction.updated'
+    | 'repository.updated'
+    | 'board.updated'
+    | 'board.deleted'
     | 'worktree.updated'
     | 'git.updated'
     | 'github.updated'
@@ -1067,9 +1141,15 @@ export interface AppUpdateEvent {
 }
 
 export interface TaskManagerApi {
-  getDefaultRepositoryPath(): Promise<string>;
   chooseRepositoryFolder(): Promise<string | undefined>;
-  validateRepository(path: string): Promise<RepositoryPreflight>;
+  addRepository(path: string): Promise<Repository>;
+  getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact>;
+  disconnectRepository(input: DisconnectRepositoryRequest): Promise<Repository>;
+  reconnectRepository(input: ReconnectRepositoryRequest): Promise<Repository>;
+  refreshRepository(repositoryId: string): Promise<Repository>;
+  createBoard(input: CreateBoardRequest): Promise<Board>;
+  updateBoard(input: UpdateBoardRequest): Promise<Board>;
+  deleteBoard(boardId: string): Promise<void>;
   getAppSettings(): Promise<import('./agent').TaskManagerAppSettings>;
   updateAppSettings(
     input: UpdateAppSettingsRequest

@@ -41,6 +41,7 @@ import {
   OPENCODE_RUNTIME_DESCRIPTOR,
   opencodeCapabilities
 } from './opencode/opencodeCapabilities';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('AgentOrchestrator Phase 4', () => {
   it('rejects image delivery before creating a run when the selected model is text-only', async () => {
@@ -60,7 +61,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Text-only model',
       prompt: 'Inspect the screenshot.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       attachmentDraftId: draft.id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
@@ -97,7 +98,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Normalize provider',
       prompt: 'Start with resolved settings.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: {
         model: 'test-model',
         modelProvider: 'openai',
@@ -122,7 +123,6 @@ describe('AgentOrchestrator Phase 4', () => {
 
     expect(adapter.lastStart?.settings?.modelProvider).toBe('openai');
   });
-
   it('preserves session lineage across steer, continue, and detached review', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -133,7 +133,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Phase 4',
       prompt: 'Implement continuation controls.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -197,7 +197,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Missing provider thread',
       prompt: 'Continue even when provider session storage was evicted.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -257,7 +257,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Ambiguous start',
       prompt: 'Do not duplicate this mutation.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -311,7 +311,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Provider startup recovery',
       prompt: 'Preserve provider recovery evidence.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -403,7 +403,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Review startup failure',
       prompt: 'Keep failed review evidence coherent.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -482,7 +482,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Startup artifact failure',
       prompt: 'Preserve the original provider error.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -541,7 +541,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Keep dev API isolated',
       prompt: 'Do not expose the browser development API.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', networkAccess: true }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -613,7 +613,7 @@ describe('AgentOrchestrator Phase 4', () => {
     ).rejects.toThrow('automated approval reviewer');
     expect((await store.snapshot()).runs).toHaveLength(0);
 
-    const legacySession = await store.createAgentSession({
+    const existingSession = await store.createAgentSession({
       task,
       iteration,
       worktree,
@@ -642,7 +642,7 @@ describe('AgentOrchestrator Phase 4', () => {
         }
       })
     ).rejects.toThrow('Selected session is unsafe');
-    await store.updateAgentSession(legacySession.id, {
+    await store.updateAgentSession(existingSession.id, {
       requestedSettings: {
         model: 'test-model',
         sandbox: 'WORKSPACE_WRITE',
@@ -675,11 +675,11 @@ describe('AgentOrchestrator Phase 4', () => {
         settings: safeSettings
       })
     ).rejects.toThrow('Selected session observed settings is unsafe');
-    await store.updateAgentSession(legacySession.id, { observedSettings: safeSettings });
+    await store.updateAgentSession(existingSession.id, { observedSettings: safeSettings });
     await store.recordAgentSettingsObservation({
       taskId: task.id,
       iterationId: iteration.id,
-      sessionId: legacySession.id,
+      sessionId: existingSession.id,
       runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: { ...safeSettings, sandbox: 'DANGER_FULL_ACCESS' }
@@ -697,7 +697,7 @@ describe('AgentOrchestrator Phase 4', () => {
     await store.recordAgentSettingsObservation({
       taskId: task.id,
       iterationId: iteration.id,
-      sessionId: legacySession.id,
+      sessionId: existingSession.id,
       runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: safeSettings
@@ -740,7 +740,7 @@ describe('AgentOrchestrator Phase 4', () => {
       runtimeId: 'opencode',
       title: 'Reject unattested runtime',
       prompt: 'Do not probe the provider.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: {
         runtimeId: 'opencode',
         sandbox: 'WORKSPACE_WRITE',
@@ -961,7 +961,7 @@ describe('AgentOrchestrator Phase 4', () => {
       const task = await store.createTask({
         title: input.title,
         prompt: input.title,
-        repositoryPath: repositoryDir,
+        repositoryId: (await addTestRepository(store, repositoryDir)).id,
         agentSettings: input.runSettings,
         attachmentDraftId
       });
@@ -1432,7 +1432,7 @@ async function createPhase4TaskContext(
   const task = await store.createTask({
     title: 'Browser development boundary',
     prompt: 'Keep this turn inside the restricted boundary.',
-    repositoryPath: repositoryDir,
+    repositoryId: (await addTestRepository(store, repositoryDir)).id,
     agentSettings: settings
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({

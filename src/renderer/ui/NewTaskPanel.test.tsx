@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentModel } from '../../shared/contracts';
+import type { AgentModel, Repository } from '../../shared/contracts';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import {
   CODEX_RUNTIME_DESCRIPTOR,
@@ -170,7 +170,18 @@ describe('NewTaskPanel', () => {
     const capabilities = codexCapabilities();
     const html = renderToStaticMarkup(
       <NewTaskPanel
-        defaultRepositoryPath="/tmp/project"
+        repositoryId="repository-1"
+        repositories={[
+          {
+            id: 'repository-1',
+            name: 'project',
+            path: '/tmp/project',
+            status: 'AVAILABLE',
+            remotes: [],
+            createdAt: '2026-07-18T00:00:00.000Z',
+            updatedAt: '2026-07-18T00:00:00.000Z'
+          }
+        ]}
         models={[]}
         runtimes={[
           {
@@ -252,90 +263,119 @@ describe('NewTaskPanel', () => {
 
     const capabilities = codexCapabilities();
     const discoverAgentRuntimeModels = vi.fn(async () => undefined);
-    const renderPanel = (
+    const defaultRepositories: Repository[] = [
+      {
+        id: 'repository-1',
+        name: 'project',
+        path: '/tmp/project',
+        status: 'AVAILABLE',
+        remotes: [],
+        createdAt: '2026-07-10T00:00:00.000Z',
+        updatedAt: '2026-07-10T00:00:00.000Z'
+      }
+    ];
+    const renderPanel = ({
       attachmentsEnabled = true,
-      defaultPresetId = capabilities.executionPolicy.defaultPresetId
-    ) => renderToStaticMarkup(
-      <NewTaskPanel
-        defaultRepositoryPath="/tmp/project"
-        models={models}
-        runtimes={[
-          {
-            preflight: {
-              runtime: CODEX_RUNTIME_DESCRIPTOR,
-              readiness: createRuntimeReadiness('READY', 'Codex is ready.', {
-                diagnostics: [
-                  {
-                    code: 'PROVIDER_PROCESS_NOT_SANDBOXED',
-                    severity: 'WARNING',
-                    stage: 'SECURITY',
-                    message: 'Provider commands run outside a Task Monki sandbox.'
-                  },
-                  {
-                    code: 'RUNTIME_RESTART_REQUIRED',
-                    severity: 'WARNING',
-                    stage: 'CONFIGURATION',
-                    message: 'The saved runtime change will apply after this turn.'
-                  },
-                  {
-                    code: 'ACP_CLIENT_TOOLS_DISABLED',
-                    severity: 'INFO',
-                    stage: 'SECURITY',
-                    message: 'Internal ACP client-tool notice.'
+      defaultPresetId = capabilities.executionPolicy.defaultPresetId,
+      repositoryId = 'repository-1',
+      repositories = defaultRepositories
+    }: {
+      attachmentsEnabled?: boolean;
+      defaultPresetId?: string;
+      repositoryId?: string;
+      repositories?: Repository[];
+    } = {}) =>
+      renderToStaticMarkup(
+        <NewTaskPanel
+          repositoryId={repositoryId}
+          repositories={repositories}
+          models={models}
+          runtimes={[
+            {
+              preflight: {
+                runtime: CODEX_RUNTIME_DESCRIPTOR,
+                readiness: createRuntimeReadiness('READY', 'Codex is ready.', {
+                  diagnostics: [
+                    {
+                      code: 'PROVIDER_PROCESS_NOT_SANDBOXED',
+                      severity: 'WARNING',
+                      stage: 'SECURITY',
+                      message: 'Provider commands run outside a Task Monki sandbox.'
+                    },
+                    {
+                      code: 'RUNTIME_RESTART_REQUIRED',
+                      severity: 'WARNING',
+                      stage: 'CONFIGURATION',
+                      message: 'The saved runtime change will apply after this turn.'
+                    },
+                    {
+                      code: 'ACP_CLIENT_TOOLS_DISABLED',
+                      severity: 'INFO',
+                      stage: 'SECURITY',
+                      message: 'Internal ACP client-tool notice.'
+                    }
+                  ]
+                }),
+                capabilities: {
+                  ...capabilities,
+                  executionPolicy: {
+                    ...capabilities.executionPolicy,
+                    defaultPresetId
                   }
-                ]
-              }),
-              capabilities: {
-                ...capabilities,
-                executionPolicy: {
-                  ...capabilities.executionPolicy,
-                  defaultPresetId
                 }
               },
+              models: models.filter((model) => model.runtimeId === 'codex'),
+              refreshedAt: '2026-07-10T00:00:00.000Z'
             },
-            models: models.filter((model) => model.runtimeId === 'codex'),
-            refreshedAt: '2026-07-10T00:00:00.000Z'
-          },
-          {
-            preflight: {
-              runtime: {
-                id: 'opencode',
-                displayName: 'OpenCode',
-                kind: 'HTTP_AGENT',
-                transport: 'HTTP_SSE',
-                lifecycleScope: 'SESSION'
+            {
+              preflight: {
+                runtime: {
+                  id: 'opencode',
+                  displayName: 'OpenCode',
+                  kind: 'HTTP_AGENT',
+                  transport: 'HTTP_SSE',
+                  lifecycleScope: 'SESSION'
+                },
+                readiness: createRuntimeReadiness('READY', 'OpenCode is ready.'),
+                capabilities: { ...codexCapabilities(), runtimeId: 'opencode' }
               },
-              readiness: createRuntimeReadiness('READY', 'OpenCode is ready.'),
-              capabilities: { ...codexCapabilities(), runtimeId: 'opencode' },
-            },
-            models: models.filter((model) => model.runtimeId === 'opencode'),
-            refreshedAt: '2026-07-10T00:00:00.000Z'
-          }
-        ]}
-        attachmentsEnabled={attachmentsEnabled}
-        onCreate={async () => undefined}
-        onRefinePrompt={async () => ({
-          titleSuggestion: 'Task',
-          prompt: 'Do the task.',
-          source: 'deterministic-fallback'
-        })}
-        onStageAttachmentBatch={async () => ({
-          id: 'draft-1',
-          attachments: [],
-          createdAt: '2026-07-10T00:00:00.000Z',
-          updatedAt: '2026-07-10T00:00:00.000Z'
-        })}
-        onDiscardAttachmentDraft={async () => undefined}
-        onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
-        onClose={() => undefined}
-      />
-    );
+              models: models.filter((model) => model.runtimeId === 'opencode'),
+              refreshedAt: '2026-07-10T00:00:00.000Z'
+            }
+          ]}
+          attachmentsEnabled={attachmentsEnabled}
+          onCreate={async () => undefined}
+          onRefinePrompt={async () => ({
+            titleSuggestion: 'Task',
+            prompt: 'Do the task.',
+            source: 'deterministic-fallback'
+          })}
+          onStageAttachmentBatch={async () => ({
+            id: 'draft-1',
+            attachments: [],
+            createdAt: '2026-07-10T00:00:00.000Z',
+            updatedAt: '2026-07-10T00:00:00.000Z'
+          })}
+          onDiscardAttachmentDraft={async () => undefined}
+          onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+          onClose={() => undefined}
+        />
+      );
     const html = renderPanel();
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('Execution policy');
     expect(html).toContain('Restricted');
     expect(html).toContain('<option value="restricted" selected="">Restricted</option>');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
+    expect(html).toContain('<strong>project</strong>');
+    expect(html).toContain('title="/tmp/project"');
+    expect(html).not.toContain('aria-label="Search repositories"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).not.toContain('type="radio"');
+    expect(html).not.toContain('role="radiogroup"');
+    expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('Ask for approval');
     expect(html).toContain('Approve for me');
     expect(html).toContain('Full access');
@@ -365,10 +405,39 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('Internal ACP client-tool notice.');
     expect(html).not.toContain('Reasoning effort');
 
-    const fullAccessHtml = renderPanel(true, 'full-access');
+    const fullAccessHtml = renderPanel({ defaultPresetId: 'full-access' });
     expect(fullAccessHtml).toContain('Required by this execution policy.');
 
-    const gatedHtml = renderPanel(false);
+    const fallbackHtml = renderPanel({
+      repositoryId: 'repository-disconnected',
+      repositories: [
+        {
+          id: 'repository-disconnected',
+          name: 'old-project',
+          path: '/tmp/old-project',
+          status: 'DISCONNECTED',
+          remotes: [],
+          createdAt: '2026-07-10T00:00:00.000Z',
+          updatedAt: '2026-07-10T00:00:00.000Z'
+        },
+        {
+          id: 'repository-available',
+          name: 'available-project',
+          path: '/tmp/available-project',
+          status: 'AVAILABLE',
+          remotes: [],
+          createdAt: '2026-07-10T00:00:00.000Z',
+          updatedAt: '2026-07-10T00:00:00.000Z'
+        }
+      ]
+    });
+    expect(fallbackHtml).toContain(
+      'aria-label="Task repository: available-project, /tmp/available-project"'
+    );
+    expect(fallbackHtml).toContain('aria-label="Create task in available-project"');
+    expect(fallbackHtml).not.toContain('Create task in old-project');
+
+    const gatedHtml = renderPanel({ attachmentsEnabled: false });
     expect(gatedHtml).toContain('Unavailable in this build');
     expect(gatedHtml).toContain('Attachments require file-read isolation between tasks.');
   });

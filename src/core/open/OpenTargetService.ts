@@ -14,7 +14,6 @@ import type {
   OpenTargetDetectedApp,
   OpenTargetInspection,
   OpenTargetRef,
-  TaskManagerAppSettings,
   TaskSnapshot,
   WorktreeRecord
 } from '../../shared/contracts';
@@ -44,8 +43,6 @@ interface DetectedOpenApp {
 
 interface OpenTargetContext {
   snapshot: TaskSnapshot;
-  defaultRepositoryPath: string;
-  appSettings: TaskManagerAppSettings;
 }
 
 interface ResolvedOpenTarget {
@@ -149,7 +146,7 @@ export class OpenTargetService {
   ): Promise<ResolvedOpenTarget> {
     switch (target.type) {
       case 'repository':
-        return await this.resolveRepositoryTarget(target.repositoryPath, target, context);
+        return await this.resolveRepositoryTarget(target.repositoryId, target, context);
       case 'worktree':
         return await this.resolveWorktreeTarget(target, context);
       case 'worktreeFile':
@@ -158,17 +155,20 @@ export class OpenTargetService {
   }
 
   private async resolveRepositoryTarget(
-    repositoryPath: string,
+    repositoryId: string,
     ref: OpenTargetRef,
     context: OpenTargetContext
   ): Promise<ResolvedOpenTarget> {
-    const normalized = this.normalizeLocalPath(repositoryPath);
-    if (!normalized) {
-      throw new Error('Repository path is required.');
+    const repository = context.snapshot.repositories.find(
+      (candidate) => candidate.id === repositoryId
+    );
+    if (!repository) {
+      throw new Error('Repository is not recorded by Task Monki.');
     }
-    if (!this.knownRepositoryPaths(context).some((candidate) => this.samePath(candidate, normalized))) {
-      throw new Error('Repository path is not recorded by Task Monki.');
+    if (repository.status !== 'AVAILABLE') {
+      throw new Error(`Repository is ${repository.status.toLowerCase()}.`);
     }
+    const normalized = this.normalizeLocalPath(repository.path);
     return await this.classifyPath(ref, normalized, normalized);
   }
 
@@ -474,16 +474,6 @@ export class OpenTargetService {
     const parent = this.pathApi.dirname(target.path);
     const stat = await this.host.stat(parent);
     return stat?.isDirectory ? parent : undefined;
-  }
-
-  private knownRepositoryPaths(context: OpenTargetContext): string[] {
-    return uniqueStrings([
-      context.defaultRepositoryPath,
-      context.appSettings.repositories.selectedPath ?? '',
-      ...context.appSettings.repositories.knownPaths,
-      ...context.snapshot.tasks.map((task) => task.repositoryPath),
-      ...context.snapshot.worktrees.map((worktree) => worktree.repositoryPath)
-    ].map((value) => this.normalizeLocalPath(value)));
   }
 
   private normalizeRelativePath(value: string): string {

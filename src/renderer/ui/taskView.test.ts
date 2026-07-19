@@ -30,7 +30,8 @@ describe('task card view model', () => {
           agentReview: { status: 'NOT_RUN' }
         },
         workflowPhase: 'REVIEW'
-      })
+      }),
+      { repositoryName: 'repo' }
     );
 
     expect(vm.stateLabel).toBe('Ready for review');
@@ -131,7 +132,7 @@ describe('task card view model', () => {
       },
       workflowPhase: 'IN_PROGRESS'
     });
-    const vm = buildTaskCardVM(task);
+    const vm = buildTaskCardVM(task, { repositoryName: 'repo' });
     const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
     const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
 
@@ -258,7 +259,8 @@ describe('task card view model', () => {
           git: 'DIRTY'
         },
         workflowPhase: 'ARCHIVED'
-      })
+      }),
+      { repositoryName: 'repo' }
     );
 
     expect(vm.meta).toBe('repo');
@@ -269,7 +271,7 @@ describe('task card view model', () => {
 
   it('drops the repo line when cards share a single repository', () => {
     const task = createTask();
-    expect(buildTaskCardVM(task, { showRepo: true }).meta).toBe('repo');
+    expect(buildTaskCardVM(task, { showRepo: true, repositoryName: 'repo' }).meta).toBe('repo');
     expect(buildTaskCardVM(task, { showRepo: false }).meta).toBeUndefined();
   });
 
@@ -304,9 +306,9 @@ describe('task card view model', () => {
   });
 
   it('detects when a task set spans more than one repository', () => {
-    const a = createTask({ id: 'a', repositoryPath: '/tmp/repo-a' });
-    const b = createTask({ id: 'b', repositoryPath: '/tmp/repo-a' });
-    const c = createTask({ id: 'c', repositoryPath: '/tmp/repo-b' });
+    const a = createTask({ id: 'a', repositoryId: '/tmp/repo-a' });
+    const b = createTask({ id: 'b', repositoryId: '/tmp/repo-a' });
+    const c = createTask({ id: 'c', repositoryId: '/tmp/repo-b' });
     expect(tasksSpanMultipleRepositories([a, b])).toBe(false);
     expect(tasksSpanMultipleRepositories([a, b, c])).toBe(true);
     expect(tasksSpanMultipleRepositories([])).toBe(false);
@@ -875,7 +877,7 @@ function createTask(overrides: Partial<Task> = {}): Task {
     runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
-    repositoryPath: '/tmp/repo',
+    repositoryId: '/tmp/repo',
     workflowPhase: 'READY',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

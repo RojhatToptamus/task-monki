@@ -8,6 +8,7 @@ import {
   FileTaskStore,
   type CreateInteractionRequestInput
 } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore agent persistence', () => {
   it('publishes an awaiting interaction, run, and session as one durable boundary', async () => {
@@ -277,7 +278,7 @@ describe('FileTaskStore agent persistence', () => {
     const task = await store.createTask({
       title: 'Agent persistence',
       prompt: 'Inspect the repository.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -509,7 +510,7 @@ describe('FileTaskStore agent persistence', () => {
         runtimeId,
         title: `${runtimeId} task`,
         prompt: 'Exercise scoped provider identifiers.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -554,7 +555,7 @@ describe('FileTaskStore agent persistence', () => {
       runtimeId: 'codex',
       title: 'Review with another runtime',
       prompt: 'Implement with Codex, then review with OpenCode.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -638,7 +639,7 @@ describe('FileTaskStore agent persistence', () => {
     await store.createTask({
       title: 'Current schema only',
       prompt: 'Reject legacy durable state.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     await store.close();
     const storePath = path.join(dir, 'store.json');
@@ -672,7 +673,7 @@ async function createAwaitingInteractionFixture(): Promise<{
   const task = await store.createTask({
     title: 'Atomic approval boundary',
     prompt: 'Request approval.',
-    repositoryPath: dir
+    repositoryId: (await addTestRepository(store, dir)).id
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 import { PreviewManager } from './PreviewManager';
 import { PreviewPlanResolver } from './PreviewPlanResolver';
@@ -108,7 +109,7 @@ routes:
 `
     );
     const store = new FileTaskStore(path.join(root, 'store'));
-    const task = await store.createTask({ title: 'Prepare cleanup', prompt: 'Test', repositoryPath: worktreePath });
+    const task = await store.createTask({ title: 'Prepare cleanup', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/prepare-cleanup', worktreePath, baseSha: 'head'
     });
@@ -200,7 +201,7 @@ routes:
 `
     );
     const store = new FileTaskStore(path.join(root, 'store'));
-    const task = await store.createTask({ title: 'Stop preparation', prompt: 'Test', repositoryPath: worktreePath });
+    const task = await store.createTask({ title: 'Stop preparation', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/stop-prepare', worktreePath, baseSha: 'head'
     });
@@ -277,7 +278,7 @@ routes:
     );
     const store = new FileTaskStore(path.join(root, 'store'));
     const task = await store.createTask({
-      title: 'Prepare retention', prompt: 'Test', repositoryPath: worktreePath
+      title: 'Prepare retention', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/prepare-retention', worktreePath, baseSha: 'head'
@@ -362,7 +363,7 @@ routes: { app: { service: web, port: http, primary: true } }
 `);
     await fs.writeFile(path.join(worktreePath, 'compose.yaml'), 'services: { web: { image: node:22, expose: [3000] } }\n');
     const store = new FileTaskStore(path.join(root, 'store'));
-    const task = await store.createTask({ title: 'Compose manager', prompt: 'Test', repositoryPath: worktreePath });
+    const task = await store.createTask({ title: 'Compose manager', prompt: 'Test', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/compose-manager', worktreePath, baseSha: 'head'
     });
@@ -595,7 +596,7 @@ scenarios:
 `;
     await fs.writeFile(recipePath, recipe('server-a.mjs'));
     const store = new FileTaskStore(path.join(root, 'store'));
-    const task = await store.createTask({ title: 'Reset', prompt: 'Reset data', repositoryPath: worktreePath });
+    const task = await store.createTask({ title: 'Reset', prompt: 'Reset data', repositoryId: (await addTestRepository(store, worktreePath)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/reset', worktreePath, baseSha: 'head'
     });

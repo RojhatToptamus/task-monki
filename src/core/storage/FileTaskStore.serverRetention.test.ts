@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentServerInstance, RunRecord, Task } from '../../shared/contracts';
 import { createDomainEvent } from './domainEvent';
 import { FileTaskStore } from './FileTaskStore';
@@ -137,7 +138,7 @@ async function createRunForServer(
   const task = await store.createTask({
     title: `Task for ${server.id}`,
     prompt: 'Preserve this server reference.',
-    repositoryPath: directory
+    repositoryId: (await addTestRepository(store, directory)).id
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,

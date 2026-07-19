@@ -1,16 +1,22 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode
 } from 'react';
 import {
+  BOARD_COLORS,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
   type CreateTaskRequest,
+  type CreateBoardRequest,
+  type Board,
+  type BoardColor,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
@@ -18,6 +24,8 @@ import {
   type ExternalToolStatusReport,
   type GitSnapshotRecord,
   type InteractionRequestRecord,
+  type Repository,
+  type RepositoryImpact,
   type PreviewRecipeGenerationSnapshot,
   type PreviewRecipeValidation,
   type PreviewResolvedAttachmentTarget,
@@ -48,6 +56,7 @@ import {
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
+import { selectBoardTasks } from '../model/boards';
 import {
   dragNewTaskCanvas,
   NEW_TASK_CANVAS_PAN_DURATION_MS,
@@ -56,24 +65,23 @@ import {
 } from '../model/newTaskPanel';
 import {
   buildRepositoryOptions,
-  isSameRepositoryPath,
-  mergeRepositoryPath,
-  normalizeRepositoryPath,
-  repositoryDisplayPath,
   resolveRepositorySetupState,
-  resolveSelectedRepositoryPath,
-  tasksForRepository
+  resolveSelectedRepositoryId,
+  type RepositoryOption
 } from '../model/repositories';
 import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
 import { NewTaskPanel } from './NewTaskPanel';
+import { RepositoryPicker } from './RepositoryPicker';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
+  repositories: [],
+  boards: [],
   tasks: [],
   iterations: [],
   worktrees: [],
@@ -163,18 +171,25 @@ function isHorizontalCanvasControl(target: EventTarget | null): boolean {
 }
 
 export function App() {
+  const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
-  const [defaultRepositoryPath, setDefaultRepositoryPath] = useState('');
   const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [view, setView] = useState<NavView>('board');
+  const [selectedBoardId, setSelectedBoardId] = useState<string | undefined>();
+  const [boardEditor, setBoardEditor] = useState<Board | 'new' | undefined>();
+  const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
+  const [repositoryDisconnect, setRepositoryDisconnect] = useState<{
+    repository: Repository;
+    impact: RepositoryImpact;
+  }>();
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
     DEFAULT_TASK_MANAGER_APP_SETTINGS
@@ -516,16 +531,14 @@ export function App() {
 
     async function load() {
       try {
-        const [repoPath, provider, settings, tools] = await Promise.all([
-          taskManagerApi.getDefaultRepositoryPath(),
+        const [catalog, settings, tools] = await Promise.all([
           taskManagerApi.getAgentRuntimeCatalog(),
           taskManagerApi.getAppSettings(),
           taskManagerApi.getExternalToolStatus(),
           refresh()
         ]);
         if (!canceled) {
-          setDefaultRepositoryPath(repoPath);
-          setRuntimeCatalog(provider);
+          setRuntimeCatalog(catalog);
           setAppSettings(settings);
           setExternalToolStatus(tools);
         }
@@ -586,50 +599,56 @@ export function App() {
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
-  const knownRepositoryPaths = appSettings.repositories.knownPaths;
-  const selectedRepositoryPath = appSettings.repositories.selectedPath ?? '';
+  const selectedRepositoryId = appSettings.selectedRepositoryId ?? '';
 
   const repositoryOptions = useMemo(
     () =>
       buildRepositoryOptions({
-        defaultRepositoryPath,
-        storedRepositoryPaths: knownRepositoryPaths,
+        repositories: snapshot.repositories,
         tasks: snapshot.tasks
       }),
-    [defaultRepositoryPath, knownRepositoryPaths, snapshot.tasks]
+    [snapshot.repositories, snapshot.tasks]
   );
-  const activeRepositoryPath = resolveSelectedRepositoryPath(
+  const activeRepositoryId = resolveSelectedRepositoryId(
     repositoryOptions,
-    selectedRepositoryPath
+    selectedRepositoryId
+  );
+  const activeRepository = snapshot.repositories.find(
+    (repository) => repository.id === activeRepositoryId
   );
   const repositorySetupState = resolveRepositorySetupState({
     loading: isLoading,
     options: repositoryOptions,
-    activeRepositoryPath,
+    activeRepositoryId,
     firstLaunchSetupCompleted: appSettings.firstLaunchSetupCompleted
   });
   const canCreateTask =
-    !isLoading && Boolean(activeRepositoryPath) && repositorySetupState === 'complete';
+    !isLoading &&
+    snapshot.repositories.some((repository) => repository.status === 'AVAILABLE') &&
+    repositorySetupState === 'complete';
+  const selectedBoard = snapshot.boards.find((board) => board.id === selectedBoardId);
   const visibleTasks = useMemo(
-    () => tasksForRepository(snapshot.tasks, activeRepositoryPath),
-    [activeRepositoryPath, snapshot.tasks]
+    () => selectBoardTasks(snapshot.tasks, view === 'board' ? selectedBoard : undefined),
+    [selectedBoard, snapshot.tasks, view]
   );
 
   useEffect(() => {
-    if (activeRepositoryPath && activeRepositoryPath !== selectedRepositoryPath) {
+    if (selectedBoardId && !snapshot.boards.some((board) => board.id === selectedBoardId)) {
+      setSelectedBoardId(undefined);
+    }
+  }, [selectedBoardId, snapshot.boards]);
+
+  useEffect(() => {
+    if (activeRepositoryId && activeRepositoryId !== selectedRepositoryId) {
       void updateAppSettings(
-        { repositories: { selectedPath: activeRepositoryPath } },
+        { selectedRepositoryId: activeRepositoryId },
         ''
       );
     }
-  }, [activeRepositoryPath, selectedRepositoryPath, updateAppSettings]);
+  }, [activeRepositoryId, selectedRepositoryId, updateAppSettings]);
 
   const selectedTaskCandidate = snapshot.tasks.find((task) => task.id === selectedTaskId);
-  const selectedTask =
-    selectedTaskCandidate &&
-    isSameRepositoryPath(selectedTaskCandidate.repositoryPath, activeRepositoryPath)
-      ? selectedTaskCandidate
-      : undefined;
+  const selectedTask = selectedTaskCandidate;
   const deleteCandidate = snapshot.tasks.find((task) => task.id === deleteCandidateId);
 
   useEffect(() => {
@@ -901,7 +920,7 @@ export function App() {
     }
   };
 
-  const refinePrompt = async (repositoryPath: string, input: string) => {
+  const refinePrompt = async (repositoryId: string, input: string) => {
     try {
       const refinementModel = selectModel(
         enabledRuntimeModels,
@@ -910,7 +929,7 @@ export function App() {
         appSettings.promptRefinementModelProvider
       );
       const refined = await taskManagerApi.refinePrompt({
-        repositoryPath,
+        repositoryId,
         input,
         runtimeId:
           refinementModel?.runtimeId ??
@@ -1393,18 +1412,12 @@ export function App() {
   };
 
   const selectRepository = useCallback(
-    async (repositoryPath: string) => {
-      const normalized = normalizeRepositoryPath(repositoryPath);
-      if (!normalized || normalized === activeRepositoryPath) {
+    async (repositoryId: string) => {
+      if (!repositoryId || repositoryId === activeRepositoryId) {
         return;
       }
       const nextSettings = await updateAppSettings(
-        {
-          repositories: {
-            knownPaths: mergeRepositoryPath(knownRepositoryPaths, normalized),
-            selectedPath: normalized
-          }
-        },
+        { selectedRepositoryId: repositoryId },
         ''
       );
       if (!nextSettings) {
@@ -1414,9 +1427,10 @@ export function App() {
       setLastTaskId(undefined);
       setIsDetailOpen(false);
       setError(undefined);
-      notify(`Switched to ${repositoryDisplayPath(normalized)}.`, 'success');
+      const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
+      notify(`New tasks will use ${repository?.name ?? 'this repository'}.`, 'success');
     },
-    [activeRepositoryPath, knownRepositoryPaths, notify, updateAppSettings]
+    [activeRepositoryId, notify, snapshot.repositories, updateAppSettings]
   );
 
   const addRepository = useCallback(async () => {
@@ -1424,24 +1438,12 @@ export function App() {
     setIsAddingRepository(true);
     try {
       const selectedPath = await taskManagerApi.chooseRepositoryFolder();
-      const normalized = normalizeRepositoryPath(selectedPath ?? '');
-      if (!normalized) {
+      if (!selectedPath) {
         return false;
       }
-
-      const preflight = await taskManagerApi.validateRepository(normalized);
-      if (preflight.status !== 'VALID') {
-        throw new Error(preflight.error ?? 'Selected folder is not a valid Git repository.');
-      }
-
-      const repositoryRoot = normalizeRepositoryPath(preflight.root ?? normalized);
+      const repository = await taskManagerApi.addRepository(selectedPath);
       const nextSettings = await updateAppSettings(
-        {
-          repositories: {
-            knownPaths: mergeRepositoryPath(knownRepositoryPaths, repositoryRoot),
-            selectedPath: repositoryRoot
-          }
-        },
+        { selectedRepositoryId: repository.id },
         ''
       );
       if (!nextSettings) {
@@ -1450,7 +1452,9 @@ export function App() {
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
-      notify(`Added ${repositoryDisplayPath(repositoryRoot)}.`, 'success');
+      setIsNewTaskOpen(false);
+      await refresh();
+      notify(`Added ${repository.name}.`, 'success');
       return true;
     } catch (caught) {
       reportActionError(caught, 'Could not add repository.');
@@ -1458,10 +1462,113 @@ export function App() {
     } finally {
       setIsAddingRepository(false);
     }
-  }, [knownRepositoryPaths, notify, reportActionError, updateAppSettings]);
+  }, [notify, refresh, reportActionError, updateAppSettings]);
+
+  const refreshRepository = useCallback(
+    async (repositoryId: string) => {
+      setError(undefined);
+      try {
+        const repository = await taskManagerApi.refreshRepository(repositoryId);
+        await refresh();
+        notify(`${repository.name} refreshed.`, 'success');
+      } catch (caught) {
+        reportActionError(caught, 'Could not refresh repository.');
+      }
+    },
+    [notify, refresh, reportActionError]
+  );
+
+  const reconnectRepository = useCallback(
+    async (repositoryId: string) => {
+      setError(undefined);
+      try {
+        const selectedPath = await taskManagerApi.chooseRepositoryFolder();
+        if (!selectedPath) return;
+        const repository = await taskManagerApi.reconnectRepository({
+          repositoryId,
+          path: selectedPath
+        });
+        await refresh();
+        notify(`${repository.name} reconnected.`, 'success');
+      } catch (caught) {
+        reportActionError(caught, 'Could not reconnect repository.');
+      }
+    },
+    [notify, refresh, reportActionError]
+  );
+
+  const requestRepositoryDisconnect = useCallback(
+    async (repositoryId: string) => {
+      setError(undefined);
+      try {
+        const [impact, repository] = await Promise.all([
+          taskManagerApi.getRepositoryImpact(repositoryId),
+          Promise.resolve(snapshot.repositories.find((candidate) => candidate.id === repositoryId))
+        ]);
+        if (!repository) throw new Error('Repository not found.');
+        setRepositoryDisconnect({ repository, impact });
+      } catch (caught) {
+        reportActionError(caught, 'Could not inspect repository impact.');
+      }
+    },
+    [reportActionError, snapshot.repositories]
+  );
+
+  const confirmRepositoryDisconnect = useCallback(async () => {
+    if (!repositoryDisconnect || repositoryDisconnect.impact.blockingReason) return;
+    try {
+      await taskManagerApi.disconnectRepository({
+        repositoryId: repositoryDisconnect.repository.id,
+        confirmed: true
+      });
+      setRepositoryDisconnect(undefined);
+      await refresh();
+      notify(`${repositoryDisconnect.repository.name} disconnected.`, 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Could not disconnect repository.');
+      throw caught;
+    }
+  }, [notify, refresh, repositoryDisconnect, reportActionError]);
+
+  const saveBoard = useCallback(
+    async (input: CreateBoardRequest) => {
+      try {
+        const board =
+          boardEditor && boardEditor !== 'new'
+            ? await taskManagerApi.updateBoard({ ...input, boardId: boardEditor.id })
+            : await taskManagerApi.createBoard(input);
+        await refresh();
+        setBoardEditor(undefined);
+        setSelectedBoardId(board.id);
+        setView('board');
+        setIsDetailOpen(false);
+        notify(`${board.name} saved.`, 'success');
+      } catch (caught) {
+        reportActionError(caught, 'Could not save board.');
+        throw caught;
+      }
+    },
+    [boardEditor, notify, refresh, reportActionError]
+  );
+
+  const deleteBoard = useCallback(
+    async (boardId: string) => {
+      try {
+        await taskManagerApi.deleteBoard(boardId);
+        setBoardEditor(undefined);
+        setSelectedBoardId(undefined);
+        await refresh();
+        notify('Saved view deleted.', 'success');
+      } catch (caught) {
+        reportActionError(caught, 'Could not delete board.');
+        throw caught;
+      }
+    },
+    [notify, refresh, reportActionError]
+  );
 
   const finishFirstLaunchSetup = useCallback(async () => {
-    if (!activeRepositoryPath) {
+    if (!activeRepositoryId) {
       const message = 'Add a repository before finishing setup.';
       reportActionError(new Error(message), message);
       throw new Error(message);
@@ -1499,7 +1606,7 @@ export function App() {
       reportActionError(caught, 'Could not finish setup.');
       throw caught;
     }
-  }, [activeRepositoryPath, appSettings.defaultRuntimeId, notify, reportActionError]);
+  }, [activeRepositoryId, appSettings.defaultRuntimeId, notify, reportActionError]);
 
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
@@ -1522,13 +1629,20 @@ export function App() {
 
   const showView = (next: NavView) => {
     setView(next);
+    setSelectedBoardId(undefined);
+    setIsDetailOpen(false);
+  };
+
+  const showBoard = (boardId: string) => {
+    setSelectedBoardId(boardId);
+    setView('board');
     setIsDetailOpen(false);
   };
 
   const canGoBack = isDetailOpen;
   const canGoForward = !isDetailOpen && Boolean(lastTaskId);
 
-  const navCounts = computeNavCounts(visibleTasks);
+  const navCounts = computeNavCounts(snapshot.tasks);
 
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
@@ -1537,8 +1651,11 @@ export function App() {
   return (
     <div
       className="tm-app app-shell"
+      data-input-modality={inputModality}
       data-theme={resolvedTheme}
       data-window-platform={windowChromePlatform}
+      onKeyDownCapture={() => setInputModality('keyboard')}
+      onPointerDownCapture={() => setInputModality('pointer')}
     >
       <header className="tm-titlebar" data-window-platform={windowChromePlatform}>
         {windowChromePlatform === 'macos' ? (
@@ -1611,63 +1728,113 @@ export function App() {
         <div className="tm-canvas">
           <div className="tm-canvas__workspace">
             <aside className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}>
-              <div className="tm-nav__brand">
-                <img
-                  className="tm-nav__brand-mark"
-                  src={
-                    resolvedTheme === 'dark'
-                      ? './assets/brand/monkey_icon_cream.svg'
-                      : './assets/brand/monkey_icon_charcoal.svg'
-                  }
-                  alt=""
-                  aria-hidden="true"
-                />
-                <span className="tm-nav__brand-name">Task Monki</span>
+          <div className="tm-nav__brand">
+            <img
+              className="tm-nav__brand-mark"
+              src={
+                resolvedTheme === 'dark'
+                  ? './assets/brand/monkey_icon_cream.svg'
+                  : './assets/brand/monkey_icon_charcoal.svg'
+              }
+              alt=""
+              aria-hidden="true"
+            />
+            <span className="tm-nav__brand-name">Task Monki</span>
+          </div>
+          <div className="tm-nav__divider" />
+          <div className="tm-nav__group">
+            <div className="tm-nav__section">
+              <NavItem
+                label="Inbox"
+                icon={<InboxIcon />}
+                count={navCounts.inbox}
+                urgent={navCounts.inbox > 0}
+                active={!showDetail && view === 'inbox'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('inbox')}
+              />
+              <NavItem
+                label="All tasks"
+                icon={<BoardIcon />}
+                active={!showDetail && view === 'board' && !selectedBoardId}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('board')}
+              />
+            </div>
+            <div className="tm-nav__section">
+              <div className="tm-nav__saved-head">
+                <button
+                  type="button"
+                  className="tm-nav__saved-toggle"
+                  aria-expanded={areSavedViewsExpanded}
+                  aria-controls="tm-saved-view-list"
+                  onClick={() => setAreSavedViewsExpanded((expanded) => !expanded)}
+                >
+                  <SavedViewsFolderIcon open={areSavedViewsExpanded} />
+                  <span className="tm-nav__saved-title">Saved views</span>
+                </button>
+                <button
+                  type="button"
+                  className="tm-nav__saved-add"
+                  aria-label="New saved view"
+                  title="New saved view"
+                  data-tip="New saved view"
+                  onClick={() => setBoardEditor('new')}
+                >
+                  <span aria-hidden="true">+</span>
+                </button>
               </div>
-              <div className="tm-nav__divider" />
-              <div className="tm-nav__group">
-                <NavItem
-                  label="Inbox"
-                  icon={<InboxIcon />}
-                  count={navCounts.inbox}
-                  urgent={navCounts.inbox > 0}
-                  active={!showDetail && view === 'inbox'}
-                  collapsed={isSidebarCollapsed}
-                  onClick={() => showView('inbox')}
-                />
-                <NavItem
-                  label="Board"
-                  icon={<BoardIcon />}
-                  active={!showDetail && view === 'board'}
-                  collapsed={isSidebarCollapsed}
-                  onClick={() => showView('board')}
-                />
-                <NavItem
-                  label="Active runs"
-                  icon={<ActiveIcon />}
-                  count={navCounts.active}
-                  active={!showDetail && view === 'active'}
-                  collapsed={isSidebarCollapsed}
-                  onClick={() => showView('active')}
-                />
-                <NavItem
-                  label="Review queue"
-                  icon={<ReviewIcon />}
-                  count={navCounts.review}
-                  active={!showDetail && view === 'review'}
-                  collapsed={isSidebarCollapsed}
-                  onClick={() => showView('review')}
-                />
-                <NavItem
-                  label="Done & Archive"
-                  icon={<DoneIcon />}
-                  count={navCounts.done}
-                  active={!showDetail && view === 'done'}
-                  collapsed={isSidebarCollapsed}
-                  onClick={() => showView('done')}
-                />
+              <div
+                id="tm-saved-view-list"
+                className="tm-nav__saved-list"
+                hidden={!areSavedViewsExpanded}
+              >
+                {snapshot.boards.map((board) => (
+                  <NavItem
+                    key={board.id}
+                    label={board.name}
+                    icon={
+                      <span
+                        className="tm-nav__saved-color tm-board-color"
+                        data-board-color={board.color.toLowerCase()}
+                        aria-hidden="true"
+                      />
+                    }
+                    count={selectBoardTasks(snapshot.tasks, board).length}
+                    active={!showDetail && view === 'board' && selectedBoardId === board.id}
+                    collapsed={isSidebarCollapsed}
+                    onClick={() => showBoard(board.id)}
+                  />
+                ))}
               </div>
-              <div className="tm-nav__divider" />
+            </div>
+            <div className="tm-nav__section">
+              <NavItem
+                label="Active runs"
+                icon={<ActiveIcon />}
+                count={navCounts.active}
+                active={!showDetail && view === 'active'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('active')}
+              />
+              <NavItem
+                label="Review queue"
+                icon={<ReviewIcon />}
+                count={navCounts.review}
+                active={!showDetail && view === 'review'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('review')}
+              />
+              <NavItem
+                label="Done & Archive"
+                icon={<DoneIcon />}
+                count={navCounts.done}
+                active={!showDetail && view === 'done'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('done')}
+              />
+            </div>
+            <div className="tm-nav__section">
               <NavItem
                 label="Settings"
                 icon={<SettingsIcon />}
@@ -1675,132 +1842,145 @@ export function App() {
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('settings')}
               />
-              <div className="tm-nav__spacer" />
+            </div>
+          </div>
+          <div className="tm-nav__spacer" />
+          <div className="tm-nav__divider" />
 
-              <RepositorySwitcher
-                activeRepositoryPath={activeRepositoryPath}
-                options={repositoryOptions}
-                collapsed={isSidebarCollapsed}
-                adding={isAddingRepository}
-                onSelect={selectRepository}
-                onAddRepository={addRepository}
-              />
-            </aside>
+          <RepositorySwitcher
+            activeRepositoryId={activeRepositoryId}
+            options={repositoryOptions}
+            collapsed={isSidebarCollapsed}
+            adding={isAddingRepository}
+            onSelect={selectRepository}
+            onAddRepository={addRepository}
+            onRefreshRepository={refreshRepository}
+            onReconnectRepository={reconnectRepository}
+            onDisconnectRepository={requestRepositoryDisconnect}
+          />
+        </aside>
 
-            {showDetail ? (
-              <TaskDetail
-                error={error}
-                task={selectedTask}
-                run={selectedRun}
-                worktree={selectedWorktree}
-                gitSnapshot={selectedGitSnapshot}
-                gitSnapshots={selectedGitSnapshots}
-                githubRepository={selectedGitHubRepository}
-                branchPublication={selectedBranchPublication}
-                pullRequest={selectedPullRequest}
-                ciRollup={selectedCiRollup}
-                reviewRollup={selectedReviewRollup}
-                mergeSnapshot={selectedMergeSnapshot}
-                events={selectedEvents}
-                runs={selectedRuns}
-                sessions={selectedSessions}
-                items={selectedItems}
-                goalSnapshots={selectedGoals}
-                planRevisions={selectedPlans}
-                usageSnapshots={selectedUsage}
-                settingsObservations={selectedSettings}
-                subagentObservations={selectedSubagentObservations}
-                runtimeState={selectedTaskRuntimeState}
-                server={snapshot.agentServers.find(
-                  (candidate) => candidate.id === selectedRun?.serverInstanceId
-                )}
-                artifacts={snapshot.artifacts}
-                attachments={selectedTaskAttachments}
-                interactions={selectedInteractions}
-                previewPlans={selectedPreviewPlans}
-                previewApprovals={selectedPreviewApprovals}
-                previewGenerations={selectedPreviewGenerations}
-                previewGenerationAttachments={selectedPreviewGenerationAttachments}
-                previewManagedResources={selectedPreviewManagedResources}
-                previewComposeProjects={selectedPreviewComposeProjects}
-                previewLocalBindings={selectedPreviewLocalBindings}
-                previewTaskRoutes={selectedPreviewTaskRoutes}
-                previewRuntimeResources={selectedPreviewRuntimeResources}
-                previewNodeAttempts={selectedPreviewNodeAttempts}
-                previewExecutionReadiness={selectedTask
-                  ? previewExecutionReadiness[selectedTask.id]
-                  : undefined}
-                previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
-                previewRecipeGeneration={selectedTask
-                  ? previewRecipeGenerations[selectedTask.id]
-                  : undefined}
-                showMascot={appSettings.showMascot}
-                onPrepareWorktree={prepareWorktree}
-                onStart={startRun}
-                onCancel={cancelRun}
-                onSteer={steerRun}
-                onContinue={continueRun}
-                onRetry={retryRun}
-                onReview={startReview}
-                onSyncAgentGoal={syncAgentGoal}
-                onUpdateAgentNativeSession={updateAgentNativeSession}
-                onRespondToInteraction={respondToInteraction}
-                onCreateDeliveryCommit={createDeliveryCommit}
-                onCreatePullRequest={createPullRequest}
-                onRefreshGitHub={refreshGitHub}
-                onResolvePreview={resolvePreview}
-                onSetPreviewLocalBinding={setPreviewLocalBinding}
-                onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
-                onGeneratePreviewRecipe={generatePreviewRecipe}
-                onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
-                onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
-                onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
-                onWritePreviewRecipeManually={writePreviewRecipeManually}
-                onApprovePreview={approvePreview}
-                onStartPreview={startPreview}
-                onOpenPreview={openPreview}
-                onStopPreview={stopPreview}
-                onResetPreviewData={resetPreviewData}
-                onRetryPreviewSetup={retryPreviewSetup}
-                onReadPreviewLog={readPreviewLog}
-                onTransition={transitionTask}
-                onArchive={archiveTask}
-                onRequestDelete={requestDeleteTask}
-              />
-            ) : (
-              <MainColumn
-                view={view}
-                tasks={visibleTasks}
-                interactionRequests={snapshot.interactionRequests}
-                theme={theme}
-                onSetTheme={updateTheme}
-                appSettings={appSettings}
-                onSetAppSettings={updateAppSettings}
-                externalToolStatus={externalToolStatus}
-                agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
-                onRefreshExternalTools={refreshExternalToolStatus}
-                onRefreshAgentRuntimes={refreshAgentRuntimes}
-                onDiscoverAgentRuntimeModels={discoverSettingsAgentRuntimeModels}
-                onTestExternalTool={testExternalTool}
-                error={error}
-                models={runtimeModels}
-                runtimes={runtimeCatalog?.runtimes ?? []}
-                activeRepositoryPath={activeRepositoryPath}
-                repositorySetupState={repositorySetupState}
-                addingRepository={isAddingRepository}
-                onAddRepository={addRepository}
-                onFinishSetup={finishFirstLaunchSetup}
-                onSelect={selectTask}
-                onRespondToInteraction={respondToInteraction}
-                onArchive={archiveTask}
-                onRequestDelete={requestDeleteTask}
-              />
+        {showDetail ? (
+          <TaskDetail
+            error={error}
+            task={selectedTask}
+            repository={snapshot.repositories.find(
+              (repository) => repository.id === selectedTask?.repositoryId
+            )}
+            run={selectedRun}
+            worktree={selectedWorktree}
+            gitSnapshot={selectedGitSnapshot}
+            gitSnapshots={selectedGitSnapshots}
+            githubRepository={selectedGitHubRepository}
+            branchPublication={selectedBranchPublication}
+            pullRequest={selectedPullRequest}
+            ciRollup={selectedCiRollup}
+            reviewRollup={selectedReviewRollup}
+            mergeSnapshot={selectedMergeSnapshot}
+            events={selectedEvents}
+            runs={selectedRuns}
+            sessions={selectedSessions}
+            items={selectedItems}
+            goalSnapshots={selectedGoals}
+            planRevisions={selectedPlans}
+            usageSnapshots={selectedUsage}
+            settingsObservations={selectedSettings}
+            subagentObservations={selectedSubagentObservations}
+            runtimeState={selectedTaskRuntimeState}
+            server={snapshot.agentServers.find(
+              (candidate) => candidate.id === selectedRun?.serverInstanceId
+            )}
+            artifacts={snapshot.artifacts}
+            attachments={selectedTaskAttachments}
+            interactions={selectedInteractions}
+            previewPlans={selectedPreviewPlans}
+            previewApprovals={selectedPreviewApprovals}
+            previewGenerations={selectedPreviewGenerations}
+            previewGenerationAttachments={selectedPreviewGenerationAttachments}
+            previewManagedResources={selectedPreviewManagedResources}
+            previewComposeProjects={selectedPreviewComposeProjects}
+            previewLocalBindings={selectedPreviewLocalBindings}
+            previewTaskRoutes={selectedPreviewTaskRoutes}
+            previewRuntimeResources={selectedPreviewRuntimeResources}
+            previewNodeAttempts={selectedPreviewNodeAttempts}
+            previewExecutionReadiness={selectedTask
+              ? previewExecutionReadiness[selectedTask.id]
+              : undefined}
+            previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
+            previewRecipeGeneration={selectedTask
+              ? previewRecipeGenerations[selectedTask.id]
+              : undefined}
+            showMascot={appSettings.showMascot}
+            onPrepareWorktree={prepareWorktree}
+            onStart={startRun}
+            onCancel={cancelRun}
+            onSteer={steerRun}
+            onContinue={continueRun}
+            onRetry={retryRun}
+            onReview={startReview}
+            onSyncAgentGoal={syncAgentGoal}
+            onUpdateAgentNativeSession={updateAgentNativeSession}
+            onRespondToInteraction={respondToInteraction}
+            onCreateDeliveryCommit={createDeliveryCommit}
+            onCreatePullRequest={createPullRequest}
+            onRefreshGitHub={refreshGitHub}
+            onResolvePreview={resolvePreview}
+            onSetPreviewLocalBinding={setPreviewLocalBinding}
+            onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
+            onGeneratePreviewRecipe={generatePreviewRecipe}
+            onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
+            onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
+            onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
+            onWritePreviewRecipeManually={writePreviewRecipeManually}
+            onApprovePreview={approvePreview}
+            onStartPreview={startPreview}
+            onOpenPreview={openPreview}
+            onStopPreview={stopPreview}
+            onResetPreviewData={resetPreviewData}
+            onRetryPreviewSetup={retryPreviewSetup}
+            onReadPreviewLog={readPreviewLog}
+            onTransition={transitionTask}
+            onArchive={archiveTask}
+            onRequestDelete={requestDeleteTask}
+          />
+        ) : (
+          <MainColumn
+            view={view}
+            board={selectedBoard}
+            tasks={visibleTasks}
+            repositories={snapshot.repositories}
+            interactionRequests={snapshot.interactionRequests}
+            theme={theme}
+            onSetTheme={updateTheme}
+            appSettings={appSettings}
+            onSetAppSettings={updateAppSettings}
+            externalToolStatus={externalToolStatus}
+            agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
+            onRefreshExternalTools={refreshExternalToolStatus}
+            onRefreshAgentRuntimes={refreshAgentRuntimes}
+            onDiscoverAgentRuntimeModels={discoverSettingsAgentRuntimeModels}
+            onTestExternalTool={testExternalTool}
+            error={error}
+            models={runtimeModels}
+            runtimes={runtimeCatalog?.runtimes ?? []}
+            activeRepository={activeRepository}
+            repositorySetupState={repositorySetupState}
+            addingRepository={isAddingRepository}
+            onAddRepository={addRepository}
+            onFinishSetup={finishFirstLaunchSetup}
+            onSelect={selectTask}
+            onRespondToInteraction={respondToInteraction}
+            onArchive={archiveTask}
+            onRequestDelete={requestDeleteTask}
+            onEditBoard={setBoardEditor}
+          />
             )}
           </div>
 
           {isNewTaskOpen ? (
             <NewTaskPanel
-              defaultRepositoryPath={activeRepositoryPath}
+              repositoryId={activeRepositoryId}
+              repositories={snapshot.repositories}
               models={enabledRuntimeModels}
               runtimes={enabledRuntimes}
               defaultAgentSettings={defaultTaskSettings}
@@ -1830,7 +2010,223 @@ export function App() {
         />
       ) : null}
 
+      {repositoryDisconnect ? (
+        <RepositoryDisconnectModal
+          repository={repositoryDisconnect.repository}
+          impact={repositoryDisconnect.impact}
+          onCancel={() => setRepositoryDisconnect(undefined)}
+          onConfirm={confirmRepositoryDisconnect}
+        />
+      ) : null}
+
+      {boardEditor ? (
+        <BoardEditorModal
+          key={boardEditor === 'new' ? 'new' : boardEditor.id}
+          board={boardEditor === 'new' ? undefined : boardEditor}
+          repositories={repositoryOptions}
+          onCancel={() => setBoardEditor(undefined)}
+          onSave={saveBoard}
+          onDelete={deleteBoard}
+        />
+      ) : null}
+
       <GlobalNotifier notifications={notifications} />
+    </div>
+  );
+}
+
+const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }> = [
+  { value: 'BACKLOG', label: 'Backlog' },
+  { value: 'READY', label: 'Ready' },
+  { value: 'IN_PROGRESS', label: 'In progress' },
+  { value: 'REVIEW', label: 'Review' },
+  { value: 'IN_REVIEW', label: 'In review' },
+  { value: 'DONE', label: 'Done' },
+  { value: 'BLOCKED', label: 'Blocked' },
+  { value: 'CANCELED', label: 'Canceled' },
+  { value: 'ARCHIVED', label: 'Archived' }
+];
+
+const BOARD_COLOR_LABELS: Record<BoardColor, string> = {
+  NEUTRAL: 'Neutral',
+  BLUE: 'Blue',
+  AMBER: 'Amber',
+  GREEN: 'Green',
+  ROSE: 'Rose',
+  VIOLET: 'Violet'
+};
+
+function BoardEditorModal({
+  board,
+  repositories,
+  onCancel,
+  onSave,
+  onDelete
+}: {
+  board?: Board;
+  repositories: RepositoryOption[];
+  onCancel(): void;
+  onSave(input: CreateBoardRequest): Promise<void>;
+  onDelete(boardId: string): Promise<void>;
+}) {
+  const [name, setName] = useState(board?.name ?? '');
+  const [color, setColor] = useState<BoardColor>(board?.color ?? 'NEUTRAL');
+  const [repositoryIds, setRepositoryIds] = useState<string[]>(board?.repositoryIds ?? []);
+  const [workflowPhases, setWorkflowPhases] = useState<WorkflowPhase[]>(
+    board?.workflowPhases ?? []
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const toggleWorkflowPhase = (workflowPhase: WorkflowPhase) => {
+    setWorkflowPhases((current) =>
+      current.includes(workflowPhase)
+        ? current.filter((candidate) => candidate !== workflowPhase)
+        : [...current, workflowPhase]
+    );
+  };
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!name.trim()) {
+      setError('Enter a name for this saved view.');
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      await onSave({ name, color, repositoryIds, workflowPhases });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save this view.');
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    if (!board) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await onDelete(board.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not delete this view.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="board-editor-title">
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <form className="tm-modal__panel tm-board-editor" onSubmit={submit}>
+        <h3 id="board-editor-title">{board ? 'Edit saved view' : 'New saved view'}</h3>
+
+        <label className="field">
+          <span>Name</span>
+          <input
+            autoFocus
+            value={name}
+            maxLength={80}
+            placeholder="For example, Review across repositories"
+            disabled={busy}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+
+        <fieldset className="tm-board-editor__color">
+          <legend>Color</legend>
+          <div className="tm-board-editor__swatches">
+            {BOARD_COLORS.map((option) => (
+              <label
+                className="tm-board-editor__swatch"
+                key={option}
+                title={BOARD_COLOR_LABELS[option]}
+              >
+                <input
+                  type="radio"
+                  name="saved-view-color"
+                  value={option}
+                  checked={color === option}
+                  disabled={busy}
+                  aria-label={`${BOARD_COLOR_LABELS[option]} saved-view color`}
+                  onChange={() => setColor(option)}
+                />
+                <span
+                  className="tm-board-color"
+                  data-board-color={option.toLowerCase()}
+                  aria-hidden="true"
+                />
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        <fieldset className="tm-board-editor__filter">
+          <legend>Repositories</legend>
+          <div className="tm-board-editor__filter-head">
+            <small>
+              {repositoryIds.length === 0 ? 'All repositories' : `${repositoryIds.length} selected`}
+            </small>
+            {repositoryIds.length > 0 ? (
+              <button type="button" disabled={busy} onClick={() => setRepositoryIds([])}>
+                Use all
+              </button>
+            ) : null}
+          </div>
+          <RepositoryPicker
+            options={repositories}
+            selectedIds={repositoryIds}
+            disabled={busy}
+            ariaLabel="Saved-view repositories"
+            onChange={setRepositoryIds}
+          />
+        </fieldset>
+
+        <fieldset className="tm-board-editor__filter">
+          <legend>Workflow phases</legend>
+          <div className="tm-board-editor__filter-head">
+            <small>
+              {workflowPhases.length === 0 ? 'All workflow phases' : `${workflowPhases.length} selected`}
+            </small>
+            {workflowPhases.length > 0 ? (
+              <button type="button" disabled={busy} onClick={() => setWorkflowPhases([])}>
+                Use all
+              </button>
+            ) : null}
+          </div>
+          <div className="tm-board-editor__options tm-board-editor__options--phases">
+            {BOARD_PHASE_OPTIONS.map((option) => (
+              <label key={option.value} className="tm-board-editor__option">
+                <input
+                  type="checkbox"
+                  checked={workflowPhases.includes(option.value)}
+                  disabled={busy}
+                  onChange={() => toggleWorkflowPhase(option.value)}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {error ? <div className="tm-error tm-board-editor__error">{error}</div> : null}
+        <div className="tm-modal__actions tm-board-editor__actions">
+          {board ? (
+            <button
+              type="button"
+              className="danger-button"
+              disabled={busy}
+              onClick={() => void remove()}
+            >
+              Delete view
+            </button>
+          ) : null}
+          <span className="tm-board-editor__actions-spacer" />
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={busy}>
+            {busy ? 'Saving…' : 'Save view'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -1847,6 +2243,74 @@ function GlobalNotifier({ notifications }: { notifications: AppNotification[] })
           <strong>{notification.message}</strong>
         </div>
       ))}
+    </div>
+  );
+}
+
+function RepositoryDisconnectModal({
+  repository,
+  impact,
+  onCancel,
+  onConfirm
+}: {
+  repository: Repository;
+  impact: RepositoryImpact;
+  onCancel(): void;
+  onConfirm(): Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (impact.blockingReason) return;
+    setBusy(true);
+    try {
+      await onConfirm();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="tm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="disconnect-repository-title"
+    >
+      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
+      <div
+        className="tm-modal__panel tm-delete-modal"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h3 id="disconnect-repository-title">Disconnect {repository.name}?</h3>
+        <p>
+          Tasks, worktrees, branches, commits, reviews, and delivery evidence stay intact. Task
+          actions that need this checkout remain unavailable until it is reconnected.
+        </p>
+        <div className="tm-modal__requirements">
+          <div className="tm-modal__requirement">
+            <strong>{impact.taskCount}</strong> tasks
+          </div>
+          <div className="tm-modal__requirement">
+            <strong>{impact.worktreeCount}</strong> worktrees
+          </div>
+          <div className="tm-modal__requirement">
+            <strong>{impact.openPullRequestCount}</strong> open pull requests
+          </div>
+        </div>
+        {impact.blockingReason ? <div className="tm-error">{impact.blockingReason}</div> : null}
+        <div className="tm-modal__actions">
+          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            disabled={busy || Boolean(impact.blockingReason)}
+            onClick={() => void submit()}
+          >
+            {busy ? 'Disconnecting…' : 'Disconnect repository'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1964,12 +2428,6 @@ function describeWorktreeRemoval(
       detail: 'No local worktree is recorded for this task.'
     };
   }
-  if (isSameRepositoryPath(worktree.repositoryPath, worktree.worktreePath)) {
-    return {
-      status: 'unavailable',
-      detail: 'Task Monki never removes the original repository checkout.'
-    };
-  }
   if (worktree.status === 'MISSING' || worktree.status === 'REMOVED') {
     return {
       status: 'none',
@@ -2010,7 +2468,7 @@ function describeWorktreeRemoval(
   };
 }
 
-function NavItem({
+export function NavItem({
   label,
   icon,
   count,
@@ -2027,6 +2485,9 @@ function NavItem({
   collapsed?: boolean;
   onClick(): void;
 }) {
+  const descriptionId = useId();
+  const taskDescription =
+    count != null && count > 0 ? `${count} task${count === 1 ? '' : 's'}` : undefined;
   return (
     <button
       type="button"
@@ -2034,11 +2495,22 @@ function NavItem({
       onClick={onClick}
       data-tip={collapsed ? label : undefined}
       aria-label={label}
+      aria-describedby={taskDescription ? descriptionId : undefined}
     >
       {icon}
       <span className="tm-nav__label">{label}</span>
       {count != null && count > 0 ? (
-        <span className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''}`}>{count}</span>
+        <span
+          className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''}`}
+          aria-hidden="true"
+        >
+          {count}
+        </span>
+      ) : null}
+      {taskDescription ? (
+        <span id={descriptionId} className="tm-visually-hidden">
+          {taskDescription}
+        </span>
       ) : null}
     </button>
   );
@@ -2107,6 +2579,21 @@ function BoardIcon() {
     <svg {...ICON_PROPS}>
       <rect x="3" y="3" width="7" height="18" rx="1" />
       <rect x="14" y="3" width="7" height="11" rx="1" />
+    </svg>
+  );
+}
+
+function SavedViewsFolderIcon({ open }: { open: boolean }) {
+  return (
+    <svg {...ICON_PROPS} aria-hidden="true">
+      {open ? (
+        <>
+          <path d="M3 10V6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5V10" />
+          <path d="M3.5 10h17a1.5 1.5 0 0 1 1.45 1.88l-1.5 5.75A3.2 3.2 0 0 1 17.35 20H5.5a2 2 0 0 1-1.94-1.51l-1.5-6A2 2 0 0 1 3.5 10z" />
+        </>
+      ) : (
+        <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z" />
+      )}
     </svg>
   );
 }

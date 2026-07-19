@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
 import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
@@ -62,7 +63,7 @@ describe('TaskManagerService provider-native session configuration', () => {
     const task = await store.createTask({
       title: 'Native configuration',
       prompt: 'Keep provider-native controls typed.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });

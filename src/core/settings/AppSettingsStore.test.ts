@@ -1,8 +1,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
-import { TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION } from '../../shared/agent';
+import { describe, expect, it } from 'vitest';
+import {
+  DEFAULT_TASK_MANAGER_APP_SETTINGS,
+  TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+} from '../../shared/agent';
 import {
   AppSettingsStore,
   MemoryAppSettingsStore,
@@ -23,7 +26,6 @@ describe('AppSettingsStore', () => {
       sidebarCollapsed: false,
       showMascot: true,
       firstLaunchSetupCompleted: false,
-      disabledRuntimeIds: [],
       externalExecutables: {
         gitExecutablePath: null,
         codexExecutablePath: null,
@@ -68,85 +70,9 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('merges runtime-owned executable paths without resetting other runtimes', async () => {
-    const store = new MemoryAppSettingsStore({
-      runtimeExecutablePaths: {
-        opencode: '/opt/opencode',
-        'cursor-agent-acp': '/opt/cursor-agent'
-      }
-    });
-
-    const settings = await store.update({
-      runtimeExecutablePaths: {
-        opencode: null,
-        'grok-acp': '/opt/grok'
-      }
-    });
-
-    expect(settings.runtimeExecutablePaths).toEqual({
-      opencode: null,
-      'cursor-agent-acp': '/opt/cursor-agent',
-      'grok-acp': '/opt/grok'
-    });
-  });
-
-  it('normalizes disabled runtime identities as a unique ordered set', async () => {
-    const store = new MemoryAppSettingsStore();
-
-    const settings = await store.update({
-      disabledRuntimeIds: [' grok-acp ', 'cursor-agent-acp', 'grok-acp', '']
-    });
-
-    expect(settings.disabledRuntimeIds).toEqual(['grok-acp', 'cursor-agent-acp']);
-  });
-
-  it('publishes settings in memory only after the durable write succeeds', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-write-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const store = new AppSettingsStore(settingsPath);
-    const before = await store.get();
-    const originalRename = fs.rename.bind(fs);
-    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination) === settingsPath) {
-        throw new Error('Injected settings publication failure.');
-      }
-      return originalRename(source, destination);
-    });
-
-    try {
-      await expect(store.update({ theme: 'dark' })).rejects.toThrow(
-        'settings publication failure'
-      );
-    } finally {
-      rename.mockRestore();
-    }
-
-    await expect(store.get()).resolves.toEqual(before);
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(
-      `${JSON.stringify(before, null, 2)}\n`
-    );
-  });
-
-  it('serializes concurrent updates without losing either patch', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-queue-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    const store = new AppSettingsStore(settingsPath);
-    await store.get();
-
-    await Promise.all([
-      store.update({ theme: 'dark' }),
-      store.update({ disabledRuntimeIds: ['opencode'] })
-    ]);
-
-    await expect(store.get()).resolves.toMatchObject({
-      theme: 'dark',
-      disabledRuntimeIds: ['opencode']
-    });
-  });
-
-  it('preserves explicit mascot visibility and defaults it to enabled', async () => {
-    expect(normalizeAppSettings({}).showMascot).toBe(true);
-    expect(normalizeAppSettings({ showMascot: false }).showMascot).toBe(false);
+  it('preserves explicit mascot visibility in the current schema', async () => {
+    expect(normalizeAppSettings(currentSettings()).showMascot).toBe(true);
+    expect(normalizeAppSettings(currentSettings({ showMascot: false })).showMascot).toBe(false);
 
     const store = new MemoryAppSettingsStore({ showMascot: true });
 
@@ -155,124 +81,73 @@ describe('AppSettingsStore', () => {
     });
   });
 
-  it('keeps first-launch setup incomplete when a fresh config adds a repository', async () => {
+  it('stores repository selection as an ID-only UI preference', async () => {
     const store = new MemoryAppSettingsStore();
 
     const settings = await store.update({
-      repositories: {
-        knownPaths: ['/repos/current'],
-        selectedPath: '/repos/current'
-      }
+      selectedRepositoryId: 'repository-1'
     });
 
     expect(settings.firstLaunchSetupCompleted).toBe(false);
-    expect(settings.repositories).toEqual({
-      knownPaths: ['/repos/current'],
-      selectedPath: '/repos/current'
+    expect(settings.selectedRepositoryId).toBe('repository-1');
+  });
+
+  it('rejects unsupported settings schemas instead of migrating them', () => {
+    expect(() => normalizeAppSettings({ schemaVersion: 3 })).toThrow(
+      'Unsupported Task Monki app settings schema 3'
+    );
+  });
+
+  it('rejects incomplete current-schema settings instead of filling defaults', () => {
+    expect(() =>
+      normalizeAppSettings({ schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION })
+    ).toThrow(`Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid`);
+  });
+
+  it('normalizes empty executable path updates as auto-detect', async () => {
+    const store = new MemoryAppSettingsStore({
+      externalExecutables: {
+        gitExecutablePath: '/usr/bin/git',
+        codexExecutablePath: '/opt/bin/codex',
+        ghExecutablePath: '/usr/bin/gh'
+      }
     });
-  });
 
-  it('preserves an explicit incomplete first-launch flag with repositories', () => {
-    expect(
-      normalizeAppSettings({
-        firstLaunchSetupCompleted: false,
-        repositories: {
-          knownPaths: ['/repos/current'],
-          selectedPath: '/repos/current'
-        }
-      }).firstLaunchSetupCompleted
-    ).toBe(false);
-  });
-
-  it('normalizes empty executable paths as auto-detect', () => {
-    expect(
-      normalizeAppSettings({
+    await expect(
+      store.update({
         externalExecutables: {
           gitExecutablePath: '',
           codexExecutablePath: '  ',
           ghExecutablePath: null
         }
-      }).externalExecutables
-    ).toEqual({
-      gitExecutablePath: null,
-      codexExecutablePath: null,
-      ghExecutablePath: null
-    });
-  });
-
-  it.each([4, 7])('upgrades the immediate schema %s predecessor', async (schemaVersion) => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-upgrade-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    await fs.writeFile(
-      settingsPath,
-      `${JSON.stringify({
-        schemaVersion,
-        theme: 'dark',
-        repositories: { knownPaths: ['/repo'], selectedPath: '/repo' }
-      }, null, 2)}\n`,
-      'utf8'
-    );
-
-    await expect(new AppSettingsStore(settingsPath).get()).resolves.toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-      theme: 'dark',
-      repositories: { knownPaths: ['/repo'], selectedPath: '/repo' }
-    });
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
-      `"schemaVersion": ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}`
-    );
-  });
-
-  it.each([5, TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION + 1])(
-    'rejects and preserves unsupported app settings schema %s',
-    async (schemaVersion) => {
-      const dir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'task-monki-settings-future-')
-      );
-      const settingsPath = path.join(dir, 'app-settings.json');
-      const raw = `${JSON.stringify({
-        schemaVersion,
-        defaultRuntimeId: 'future-runtime',
-        futureProviderSettings: { retained: true }
-      }, null, 2)}\n`;
-      await fs.writeFile(settingsPath, raw, 'utf8');
-
-      await expect(new AppSettingsStore(settingsPath).get()).rejects.toThrow(
-        'accepts only schema'
-      );
-      await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe(raw);
-      await expect(fs.readdir(dir)).resolves.toEqual(['app-settings.json']);
-    }
-  );
-
-  it('persists only a valid high preview gateway port', async () => {
-    expect(normalizeAppSettings({ previewGateway: { port: 9999 } }).previewGateway.port).toBeNull();
-    expect(normalizeAppSettings({ previewGateway: { port: 31337 } }).previewGateway.port).toBe(31337);
-    const store = new MemoryAppSettingsStore();
-    await expect(store.update({ previewGateway: { port: 41234 } })).resolves.toMatchObject({
-      previewGateway: { port: 41234 }
-    });
-  });
-
-  it('moves invalid JSON aside and recreates normalized defaults', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-invalid-'));
-    const settingsPath = path.join(dir, 'app-settings.json');
-    await fs.writeFile(settingsPath, '{not valid json', 'utf8');
-    const store = new AppSettingsStore(settingsPath);
-
-    await expect(store.get()).resolves.toMatchObject({
-      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
+      })
+    ).resolves.toMatchObject({
       externalExecutables: {
         gitExecutablePath: null,
         codexExecutablePath: null,
         ghExecutablePath: null
       }
     });
-    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toContain(
-      `"schemaVersion": ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}`
+  });
+
+  it('stores only valid preview gateway ports', async () => {
+    const store = new MemoryAppSettingsStore();
+    await expect(store.update({ previewGateway: { port: 41_234 } })).resolves.toMatchObject({
+      previewGateway: { port: 41_234 }
+    });
+    await expect(store.update({ previewGateway: { port: 9_999 } })).rejects.toThrow(
+      'Preview gateway port must be null or an integer from 10000 to 65535.'
     );
-    const files = await fs.readdir(dir);
-    expect(files.some((file) => file.startsWith('app-settings.json.invalid-'))).toBe(true);
+  });
+
+  it('fails closed on invalid JSON without replacing user data', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-invalid-'));
+    const settingsPath = path.join(dir, 'app-settings.json');
+    await fs.writeFile(settingsPath, '{not valid json', 'utf8');
+    const store = new AppSettingsStore(settingsPath);
+
+    await expect(store.get()).rejects.toThrow();
+    await expect(fs.readFile(settingsPath, 'utf8')).resolves.toBe('{not valid json');
   });
 
   it('does not reuse or remove an untrusted legacy settings temporary path', async () => {
@@ -306,3 +181,9 @@ describe('AppSettingsStore', () => {
     }
   );
 });
+
+function currentSettings(
+  overrides: Partial<typeof DEFAULT_TASK_MANAGER_APP_SETTINGS> = {}
+) {
+  return { ...structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS), ...overrides };
+}

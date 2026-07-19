@@ -59,6 +59,7 @@ interface CreateScenarioTaskInput {
 export interface TaskMonkiScenario {
   rootDir: string;
   repositoryPath: string;
+  repositoryId: string;
   worktreeRoot: string;
   previewRoot: string;
   store: FileTaskStore;
@@ -109,10 +110,12 @@ export async function createTaskMonkiScenario(
     previewOciEnv: options.previewOciEnv
   });
   await service.init();
+  const repository = await service.addRepository(repositoryPath);
 
   return {
     rootDir,
     repositoryPath,
+    repositoryId: repository.id,
     worktreeRoot,
     previewRoot,
     store,
@@ -123,7 +126,7 @@ export async function createTaskMonkiScenario(
       return service.createTask({
         title: input.title ?? 'Scenario task',
         prompt: input.prompt ?? 'Exercise the task workflow.',
-        repositoryPath,
+        repositoryId: repository.id,
         agentSettings: input.agentSettings ?? {
           model: 'scenario-model',
           reasoningEffort: 'low'

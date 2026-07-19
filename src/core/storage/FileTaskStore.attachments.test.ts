@@ -7,6 +7,7 @@ import {
   AttachmentFileStore
 } from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 function createStore(storeDir: string): FileTaskStore {
   return new FileTaskStore(storeDir);
@@ -25,7 +26,7 @@ describe('FileTaskStore attachments', () => {
     const request = {
       title: 'Use context',
       prompt: 'Read the attached context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-attachment-reload-0001',
       attachmentDraftId: draft.id
     };
@@ -54,7 +55,7 @@ describe('FileTaskStore attachments', () => {
     const request = {
       title: 'Original task',
       prompt: 'Use the original request.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       agentSettings: { model: 'codex-test', networkAccess: false },
       creationToken: 'task-create-conflict-token-0001'
     };
@@ -65,7 +66,7 @@ describe('FileTaskStore attachments', () => {
         ...request,
         title: `  ${request.title}  `,
         prompt: ` ${request.prompt} `,
-        repositoryPath: `${request.repositoryPath} `,
+        repositoryId: `${request.repositoryId} `,
         completionPolicy: 'LOCAL_ACCEPTANCE'
       })
     ).resolves.toMatchObject({ id: created.id });
@@ -78,14 +79,14 @@ describe('FileTaskStore attachments', () => {
     });
   });
 
-  it('rejects retired blob storage fields on reload', async () => {
+  it('rejects obsolete attachment storage fields in the current schema', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
     const { draftId } = await stageText(store, 'context.json', '{"scope":"task"}');
     await store.createTask({
       title: 'Use context',
       prompt: 'Read the attached context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     await store.close();
@@ -107,6 +108,7 @@ describe('FileTaskStore attachments', () => {
   it('leaves the draft retryable when task persistence fails', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
+    const repository = await addTestRepository(store, dir);
     const { draftId } = await stageText(store, 'notes.txt', 'keep me');
     const originalRename = fs.rename.bind(fs);
     const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
@@ -120,7 +122,7 @@ describe('FileTaskStore attachments', () => {
         store.createTask({
           title: 'Will fail',
           prompt: 'Do not lose the draft.',
-          repositoryPath: dir,
+          repositoryId: repository.id,
           attachmentDraftId: draftId
         })
       ).rejects.toThrow('injected persistence failure');
@@ -137,6 +139,7 @@ describe('FileTaskStore attachments', () => {
   it('reports ambiguous adoption when task persistence rollback cannot be proven', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
+    const repository = await addTestRepository(store, dir);
     const { draftId } = await stageText(store, 'notes.txt', 'keep me recoverable');
     const storePath = path.join(dir, 'store.json');
     const draftPath = path.join(dir, 'attachments', 'staging', draftId);
@@ -165,7 +168,7 @@ describe('FileTaskStore attachments', () => {
       failure = await store.createTask({
         title: 'Ambiguous attachment task',
         prompt: 'Do not report this create as retryable.',
-        repositoryPath: dir,
+        repositoryId: repository.id,
         attachmentDraftId: draftId
       }).catch((error: unknown) => error);
     } finally {
@@ -198,7 +201,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Recover cleanup',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     finalize.mockRestore();
@@ -225,14 +228,14 @@ describe('FileTaskStore attachments', () => {
     const source = await store.createTask({
       title: 'Source',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, source, worktreePath, 'source');
     const fork = await store.createForkedAlternativeTask({
       title: 'Alternative',
       prompt: source.prompt,
-      repositoryPath: source.repositoryPath,
+      repositoryId: source.repositoryId,
       sourceTaskId: source.id,
       sourceRunId: run.id
     });
@@ -258,14 +261,14 @@ describe('FileTaskStore attachments', () => {
     const source = await store.createTask({
       title: 'Source',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, source, worktreePath, 'delete');
     const fork = await store.createForkedAlternativeTask({
       title: 'Fork',
       prompt: source.prompt,
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       sourceTaskId: source.id,
       sourceRunId: run.id
     });
@@ -287,7 +290,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Delete run inputs',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'run-inputs');
@@ -305,7 +308,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Restart recovery',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'repair');
@@ -328,13 +331,13 @@ describe('FileTaskStore attachments', () => {
     const attachedTask = await store.createTask({
       title: 'Attached task',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const siblingTask = await store.createTask({
       title: 'Sibling task',
       prompt: 'Remain durable.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const [delivery] = await store.verifyTaskAttachments(attachedTask.id);
     await store.close();
@@ -371,7 +374,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Restart boundary breach',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'unsafe');

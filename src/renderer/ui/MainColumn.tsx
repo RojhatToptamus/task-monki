@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import type {
   AgentInteractionDecision,
+  Board,
   InteractionRequestRecord,
+  Repository,
   Task
 } from '../../shared/contracts';
 import {
@@ -15,6 +17,7 @@ import {
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
+import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { shouldShowExecutablePathControls } from '../model/executableSettings';
 import type { RepositorySetupState } from '../model/repositories';
@@ -35,7 +38,6 @@ import {
   BOARD_COLUMNS,
   buildTaskCardVM,
   columnTasks,
-  repositoryName,
   tasksForView,
   tasksSpanMultipleRepositories,
   type NavView,
@@ -44,7 +46,9 @@ import {
 
 interface MainColumnProps {
   view: NavView;
+  board?: Board;
   tasks: Task[];
+  repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
@@ -62,7 +66,7 @@ interface MainColumnProps {
   error?: string;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
-  activeRepositoryPath: string;
+  activeRepository?: Repository;
   repositorySetupState: RepositorySetupState;
   addingRepository: boolean;
   onAddRepository(): Promise<boolean>;
@@ -74,6 +78,7 @@ interface MainColumnProps {
   ): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
+  onEditBoard(board: Board): void;
 }
 
 const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): string }> = {
@@ -82,7 +87,7 @@ const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): str
     subtitle: () => 'Decisions and runs waiting on you'
   },
   board: {
-    title: 'Board',
+    title: 'All tasks',
     subtitle: (tasks) =>
       `${tasks.length} task${tasks.length === 1 ? '' : 's'} across the pipeline`
   },
@@ -125,7 +130,9 @@ const SETUP_VIEW_TITLES: Record<
 
 export function MainColumn({
   view,
+  board,
   tasks,
+  repositories,
   interactionRequests,
   theme,
   onSetTheme,
@@ -140,7 +147,7 @@ export function MainColumn({
   error,
   models,
   runtimes,
-  activeRepositoryPath,
+  activeRepository,
   repositorySetupState,
   addingRepository,
   onAddRepository,
@@ -148,7 +155,8 @@ export function MainColumn({
   onSelect,
   onRespondToInteraction,
   onArchive,
-  onRequestDelete
+  onRequestDelete,
+  onEditBoard
 }: MainColumnProps) {
   const head = VIEW_TITLES[view];
   const showRepositorySetup = repositorySetupState !== 'complete' && view !== 'settings';
@@ -169,11 +177,22 @@ export function MainColumn({
     <main className="tm-main">
       <div className="tm-main__head">
         <div style={{ minWidth: 0 }}>
-          <h1 className="tm-main__title">{showRepositorySetup ? setupHead.title : head.title}</h1>
+          <h1 className="tm-main__title">
+            {showRepositorySetup ? setupHead.title : board?.name ?? head.title}
+          </h1>
           <span className="tm-main__subtitle">
             {showRepositorySetup ? setupHead.subtitle : head.subtitle(tasks)}
           </span>
         </div>
+        {!showRepositorySetup && board && view === 'board' ? (
+          <button
+            type="button"
+            className="tm-main__head-action"
+            onClick={() => onEditBoard(board)}
+          >
+            Edit view
+          </button>
+        ) : null}
       </div>
 
       {error ? <div className="tm-error">{error}</div> : null}
@@ -186,7 +205,7 @@ export function MainColumn({
           externalToolStatus={externalToolStatus}
           models={enabledModels}
           runtimes={enabledRuntimes}
-          activeRepositoryPath={activeRepositoryPath}
+          activeRepositoryPath={activeRepository?.path ?? ''}
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
           onRefreshExternalTools={onRefreshExternalTools}
@@ -198,6 +217,8 @@ export function MainColumn({
       {!showRepositorySetup && view === 'board' ? (
         <BoardKanban
           tasks={tasks}
+          repositories={repositories}
+          showRepository={shouldShowTaskRepository(board)}
           onSelect={onSelect}
           onArchive={onArchive}
           onRequestDelete={onRequestDelete}
@@ -206,6 +227,7 @@ export function MainColumn({
       {!showRepositorySetup && (view === 'active' || view === 'review' || view === 'done') ? (
         <CardGrid
           tasks={tasksForView(tasks, view)}
+          repositories={repositories}
           view={view}
           onSelect={onSelect}
           onArchive={onArchive}
@@ -215,6 +237,7 @@ export function MainColumn({
       {!showRepositorySetup && view === 'inbox' ? (
         <Inbox
           tasks={tasks}
+          repositories={repositories}
           interactionRequests={interactionRequests}
           onSelect={onSelect}
           onRespondToInteraction={onRespondToInteraction}
@@ -648,16 +671,20 @@ function RefreshIcon() {
 
 function BoardKanban({
   tasks,
+  repositories,
+  showRepository,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   tasks: Task[];
+  repositories: Repository[];
+  showRepository: boolean;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
-  const showRepo = tasksSpanMultipleRepositories(tasks);
+  const repositoryNames = new Map(repositories.map((repository) => [repository.id, repository.name]));
   return (
     <div className="tm-board">
       {BOARD_COLUMNS.map((column) => {
@@ -673,7 +700,11 @@ function BoardKanban({
               {cards.map((task) => (
                 <TaskCard
                   key={task.id}
-                  vm={buildTaskCardVM(task, { showRepo, columnKey: column.key })}
+                  vm={buildTaskCardVM(task, {
+                    showRepo: showRepository,
+                    columnKey: column.key,
+                    repositoryName: repositoryNames.get(task.repositoryId)
+                  })}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onRequestDelete={onRequestDelete}
@@ -689,18 +720,21 @@ function BoardKanban({
 
 function CardGrid({
   tasks,
+  repositories,
   view,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   tasks: Task[];
+  repositories: Repository[];
   view: NavView;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
   const showRepo = tasksSpanMultipleRepositories(tasks);
+  const repositoryNames = new Map(repositories.map((repository) => [repository.id, repository.name]));
   const showReviewCount = view === 'review';
   return (
     <div className="tm-grid">
@@ -711,7 +745,11 @@ function CardGrid({
           {tasks.map((task) => (
             <TaskCard
               key={task.id}
-              vm={buildTaskCardVM(task, { showRepo, showReviewCount })}
+              vm={buildTaskCardVM(task, {
+                showRepo,
+                showReviewCount,
+                repositoryName: repositoryNames.get(task.repositoryId)
+              })}
               onSelect={onSelect}
               onArchive={onArchive}
               onRequestDelete={onRequestDelete}
@@ -756,7 +794,7 @@ export function TaskCard({
             taskId={vm.id}
             title={vm.title}
             archived={vm.archived}
-            openTarget={{ type: 'repository', repositoryPath: vm.repositoryPath }}
+            openTarget={{ type: 'repository', repositoryId: vm.repositoryId }}
             onArchive={onArchive}
             onRequestDelete={onRequestDelete}
             className="tm-card__actions"
@@ -806,11 +844,13 @@ function activeInteractionForTask(
 
 function Inbox({
   tasks,
+  repositories,
   interactionRequests,
   onSelect,
   onRespondToInteraction
 }: {
   tasks: Task[];
+  repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
   onSelect(id: string): void;
   onRespondToInteraction(
@@ -834,6 +874,7 @@ function Inbox({
             <InboxDecisionCard
               key={task.id}
               task={task}
+              repositoryName={repositories.find((repository) => repository.id === task.repositoryId)?.name}
               interaction={activeInteractionForTask(interactionRequests, task.id)}
               onSelect={onSelect}
               onRespondToInteraction={onRespondToInteraction}
@@ -847,11 +888,13 @@ function Inbox({
 
 function InboxDecisionCard({
   task,
+  repositoryName,
   interaction,
   onSelect,
   onRespondToInteraction
 }: {
   task: Task;
+  repositoryName?: string;
   interaction?: InteractionRequestRecord;
   onSelect(id: string): void;
   onRespondToInteraction(
@@ -889,7 +932,7 @@ function InboxDecisionCard({
       </div>
       <strong className="tm-decision__title">{task.title}</strong>
       <div className="tm-decision__task">
-        {repositoryName(task.repositoryPath)} · {humanizeEnum(task.workflowPhase)}
+        {repositoryName ?? 'Unknown repository'} · {humanizeEnum(task.workflowPhase)}
       </div>
       <p className="tm-decision__summary">{attention?.detail ?? task.projection.summary}</p>
       <div className="tm-decision__actions">

@@ -152,7 +152,7 @@ export type ProviderSmokeService = Pick<
   | 'init'
   | 'getAgentRuntimeCatalog'
   | 'discoverAgentRuntimeModels'
-  | 'getDefaultRepositoryPath'
+  | 'addRepository'
   | 'createTask'
   | 'startRun'
   | 'listTasks'
@@ -377,6 +377,7 @@ export async function runProviderSmoke(
   try {
     try {
       await service.init();
+      const repositoryRecord = await service.addRepository(repositoryPath);
       let catalog = await service.getAgentRuntimeCatalog();
       if (await activateSelectedModelCatalogs(service, catalog, options)) {
         catalog = await service.getAgentRuntimeCatalog();
@@ -423,6 +424,7 @@ export async function runProviderSmoke(
         const execution = await runTarget(
           service,
           target,
+          repositoryRecord.id,
           options.timeoutMs,
           pollIntervalMs,
           cancelTimeoutMs,
@@ -616,6 +618,7 @@ async function activateSelectedModelCatalogs(
 async function runTarget(
   service: ProviderSmokeService,
   target: ProviderSmokeTarget,
+  repositoryId: string,
   timeoutMs: number,
   pollIntervalMs: number,
   cancelTimeoutMs: number,
@@ -679,7 +682,7 @@ async function runTarget(
         title: `Provider smoke: ${target.runtimeId} / ${target.model.displayName}`,
         prompt:
           `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`,
-        repositoryPath: service.getDefaultRepositoryPath(),
+        repositoryId,
         runtimeId: target.runtimeId,
         agentSettings: {
           ...target.executionSettings,

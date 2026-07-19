@@ -4,9 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createInitialProjection,
-  TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
   TASK_STORE_SCHEMA_VERSION,
-  type TaskManagerAppSettings,
   type TaskSnapshot,
   type WorktreeRecord
 } from '../../shared/contracts';
@@ -15,32 +13,6 @@ import {
   OpenTargetService,
   type OpenTargetHost
 } from './OpenTargetService';
-
-const defaultSettings: TaskManagerAppSettings = {
-  schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-  defaultRuntimeId: 'codex',
-  theme: 'device',
-  sidebarCollapsed: false,
-  showMascot: true,
-  firstLaunchSetupCompleted: true,
-  disabledRuntimeIds: [],
-  codexExternalTools: {
-    webSearchMode: 'disabled',
-    mcpServers: 'disabled',
-    apps: 'disabled'
-  },
-  externalExecutables: {
-    gitExecutablePath: null,
-    codexExecutablePath: null,
-    ghExecutablePath: null
-  },
-  runtimeExecutablePaths: {},
-  repositories: {
-    knownPaths: ['/repo'],
-    selectedPath: '/repo'
-  },
-  previewGateway: { port: null }
-};
 
 describe('OpenTargetService', () => {
   it('provides an icon reader in the shared Node host', () => {
@@ -256,7 +228,7 @@ describe('OpenTargetService', () => {
           appId: 'default',
           target: {
             type: 'repository',
-            repositoryPath: '/repo'
+            repositoryId: 'repository-1'
           }
         },
         testContext()
@@ -441,7 +413,7 @@ describe('OpenTargetService', () => {
         {
           target: {
             type: 'repository',
-            repositoryPath: '/outside'
+            repositoryId: 'outside-repository'
           }
         },
         testContext()
@@ -602,15 +574,7 @@ function testContext(input: { repositoryPath?: string; worktreePath?: string } =
   const repositoryPath = input.repositoryPath ?? '/repo';
   const worktreePath = input.worktreePath ?? '/worktree';
   return {
-    snapshot: testSnapshot({ repositoryPath, worktreePath }),
-    defaultRepositoryPath: repositoryPath,
-    appSettings: {
-      ...defaultSettings,
-      repositories: {
-        knownPaths: [repositoryPath],
-        selectedPath: repositoryPath
-      }
-    }
+    snapshot: testSnapshot({ repositoryPath, worktreePath })
   };
 }
 
@@ -620,13 +584,25 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
   const worktree = testWorktree({ repositoryPath, worktreePath });
   return {
     schemaVersion: TASK_STORE_SCHEMA_VERSION,
+    repositories: [
+      {
+        id: 'repository-1',
+        name: 'repo',
+        path: repositoryPath,
+        status: 'AVAILABLE',
+        remotes: [],
+        createdAt: '2026-07-05T00:00:00.000Z',
+        updatedAt: '2026-07-05T00:00:00.000Z'
+      }
+    ],
+    boards: [],
     tasks: [
       {
         id: 'task-1',
         runtimeId: 'codex',
         title: 'Task',
         prompt: 'Do it',
-        repositoryPath,
+        repositoryId: 'repository-1',
         workflowPhase: 'REVIEW',
         resolution: 'NONE',
         completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -679,7 +655,7 @@ function testWorktree(input: { repositoryPath?: string; worktreePath?: string } 
     id: 'worktree-1',
     taskId: 'task-1',
     iterationId: 'iteration-1',
-    repositoryPath: input.repositoryPath ?? '/repo',
+    repositoryId: 'repository-1',
     worktreePath: input.worktreePath ?? '/worktree',
     branchName: 'codex/task',
     baseSha: 'abc123',

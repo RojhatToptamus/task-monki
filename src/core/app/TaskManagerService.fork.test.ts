@@ -24,11 +24,12 @@ describe('TaskManagerService fork alternatives', () => {
       worktreeRoot,
       agentRuntimeAdapters: [agent]
     });
+    const repository = await service.addRepository(repositoryPath);
 
     const sourceTask = await store.createTask({
       title: 'Build filter',
       prompt: 'Add a better filter.',
-      repositoryPath
+      repositoryId: repository.id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: sourceTask,
@@ -116,11 +117,12 @@ describe('TaskManagerService fork alternatives', () => {
       worktreeRoot,
       agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
+    const repository = await service.addRepository(repositoryPath);
 
     const sourceTask = await store.createTask({
       title: 'Build filter',
       prompt: 'Add a better filter.',
-      repositoryPath
+      repositoryId: repository.id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: sourceTask,

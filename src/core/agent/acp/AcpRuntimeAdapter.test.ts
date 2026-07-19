@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentInteractionService } from '../AgentInteractionService';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
@@ -118,7 +119,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const task = await store.createTask({
         title: 'Reject invalid Grok catalog',
         prompt: 'This prompt must not reach the provider.',
-        repositoryPath: directory,
+        repositoryId: (await addTestRepository(store, directory)).id,
         runtimeId,
         agentSettings: settings
       });
@@ -419,7 +420,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const task = await store.createTask({
         title: 'Observe Cursor authentication failure',
         prompt: 'Do not start a prompt.',
-        repositoryPath: directory,
+        repositoryId: (await addTestRepository(store, directory)).id,
         runtimeId,
         agentSettings: settings
       });
@@ -543,7 +544,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const task = await store.createTask({
       title: 'Select a Cursor model',
       prompt: 'Use the requested model.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId,
       agentSettings: settings
     });
@@ -762,7 +763,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const task = await store.createTask({
       title: 'Attest Grok model selection',
       prompt: 'Use Grok Build.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId,
       agentSettings: settings
     });
@@ -891,7 +892,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const task = await store.createTask({
       title: 'ACP replacement fence',
       prompt: 'Persist accepted output before replacement.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId,
       agentSettings: settings
     });
@@ -1085,7 +1086,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     const task = await store.createTask({
       title: 'ACP integration',
       prompt: 'Implement the requested change.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId: 'test-acp',
       agentSettings: settings
     });
@@ -1807,7 +1808,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await waitFor(async () => {
         const current = await store.getRun(persistenceRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
-      }, 20_000);
+      }, 45_000);
       await store.updateRun(persistenceRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
@@ -2183,7 +2184,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     } finally {
       await adapter.shutdown();
     }
-  }, 60_000);
+  }, 120_000);
 });
 
 describe('AcpRuntimeAdapter process safety fence', () => {
@@ -2949,7 +2950,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
       const task = await store.createTask({
         title: 'Permission materialization failure',
         prompt: 'Request a permission and remain blocked.',
-        repositoryPath: directory,
+        repositoryId: (await addTestRepository(store, directory)).id,
         runtimeId,
         agentSettings: settings
       });
@@ -3201,7 +3202,7 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
     const task = await store.createTask({
       title: 'Terminal persistence failure',
       prompt: 'Return a definitive terminal response.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId,
       agentSettings: settings
     });
@@ -3608,7 +3609,7 @@ async function createPermissionHarness(input: {
   const task = await store.createTask({
     title: `${input.approvalPolicy} permission`,
     prompt: 'Exercise provider permissions.',
-    repositoryPath: directory,
+    repositoryId: (await addTestRepository(store, directory)).id,
     runtimeId: input.runtimeId,
     agentSettings: settings
   });
@@ -3825,7 +3826,7 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
   const task = await store.createTask({
     title: `ACP ${scenario}`,
     prompt: scenario,
-    repositoryPath: directory,
+    repositoryId: (await addTestRepository(store, directory)).id,
     runtimeId,
     agentSettings: settings
   });

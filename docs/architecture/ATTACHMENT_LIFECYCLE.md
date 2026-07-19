@@ -114,6 +114,8 @@ an orphan and is removed at startup.
 The current schema stores only task-owned attachment records. Retired
 content-addressed fields such as `storageKey` are rejected on load; Task Monki
 does not retain a second blob authority or an older attachment migration path.
+An unsupported older store must be discarded before Task Monki starts with a
+fresh current-schema store.
 
 Fork alternatives receive independent task-owned copies. This intentionally
 avoids shared-reference accounting and garbage collection at the small bounded

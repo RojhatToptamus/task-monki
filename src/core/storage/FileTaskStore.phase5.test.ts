@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore Phase 5 provider observations', () => {
   it('structurally redacts provider credentials before journal persistence', async () => {
@@ -96,7 +97,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
     const task = await store.createTask({
       title: 'Provider observations',
       prompt: 'Keep Task Monki authoritative.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,

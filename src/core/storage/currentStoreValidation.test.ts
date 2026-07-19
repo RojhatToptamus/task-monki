@@ -317,7 +317,7 @@ function validTask(): Task {
     runtimeId: 'codex',
     title: 'Validate current schema',
     prompt: 'Reject malformed durable control state.',
-    repositoryPath: '/tmp/task-monki-validation',
+    repositoryId: randomUUID(),
     workflowPhase: 'READY',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

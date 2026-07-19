@@ -1,153 +1,125 @@
 import { describe, expect, it } from 'vitest';
-import type { Task } from '../../shared/contracts';
+import type { Repository, Task } from '../../shared/contracts';
 import {
   buildRepositoryOptions,
-  mergeRepositoryPath,
-  normalizeRepositoryPath,
+  filterRepositoryOptions,
   resolveRepositorySetupState,
-  resolveSelectedRepositoryPath,
-  tasksForRepository
+  resolveSelectedRepositoryId
 } from './repositories';
 
 describe('repository selection model', () => {
-  it('normalizes trailing separators without losing roots', () => {
-    expect(normalizeRepositoryPath('/Users/me/app/')).toBe('/Users/me/app');
-    expect(normalizeRepositoryPath('/')).toBe('/');
-    expect(normalizeRepositoryPath('C:\\')).toBe('C:\\');
-  });
-
-  it('builds unique repository options from defaults, saved paths, and tasks', () => {
+  it('builds options from durable repositories and counts tasks by ID', () => {
     const options = buildRepositoryOptions({
-      defaultRepositoryPath: '/repos/current/',
-      storedRepositoryPaths: ['/repos/empty', '/repos/current'],
+      repositories: [
+        repositoryFixture('repo-current', '/repos/current'),
+        repositoryFixture('repo-empty', '/repos/empty')
+      ],
       tasks: [
-        taskFixture('one', '/repos/current'),
-        taskFixture('two', '/repos/current/'),
-        taskFixture('three', '/repos/other')
+        taskFixture('one', 'repo-current'),
+        taskFixture('two', 'repo-current')
       ]
     });
 
-    expect(options.map((option) => option.path)).toEqual([
-      '/repos/current',
-      '/repos/empty',
-      '/repos/other'
-    ]);
-    expect(options[0]).toMatchObject({
-      displayPath: 'repos/current',
-      isDefault: true,
-      taskCount: 2
-    });
-    expect(options[1]).toMatchObject({
-      path: '/repos/empty',
-      taskCount: 0
-    });
-  });
-
-  it('filters tasks to the selected repository', () => {
-    const tasks = [
-      taskFixture('one', '/repos/current'),
-      taskFixture('two', '/repos/other'),
-      taskFixture('three', '/repos/current/')
-    ];
-
-    expect(tasksForRepository(tasks, '/repos/current').map((task) => task.id)).toEqual([
-      'one',
-      'three'
-    ]);
-    expect(tasksForRepository(tasks, '').map((task) => task.id)).toEqual([
-      'one',
-      'two',
-      'three'
+    expect(options).toEqual([
+      expect.objectContaining({
+        id: 'repo-current',
+        path: '/repos/current',
+        displayPath: '/repos/current',
+        taskCount: 2
+      }),
+      expect.objectContaining({ id: 'repo-empty', taskCount: 0 })
     ]);
   });
 
-  it('resolves and merges selected repository paths', () => {
+  it('keeps repositories with identical folder names distinguishable', () => {
     const options = buildRepositoryOptions({
-      defaultRepositoryPath: '/repos/current',
-      storedRepositoryPaths: ['/repos/empty'],
+      repositories: [
+        repositoryFixture('repo-one', '/Users/one/work/project'),
+        repositoryFixture('repo-two', '/Volumes/two/work/project')
+      ],
       tasks: []
     });
 
-    expect(resolveSelectedRepositoryPath(options, '/repos/empty/')).toBe('/repos/empty');
-    expect(resolveSelectedRepositoryPath(options, '/repos/missing')).toBe('/repos/current');
-    expect(mergeRepositoryPath(['/repos/current'], '/repos/current/')).toEqual([
-      '/repos/current'
-    ]);
-    expect(mergeRepositoryPath(['/repos/current'], '/repos/other')).toEqual([
-      '/repos/current',
-      '/repos/other'
+    expect(options.map((option) => option.displayPath)).toEqual([
+      '…/one/work/project',
+      '…/two/work/project'
     ]);
   });
 
-  it('keeps setup in loading while repositories are still loading', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: true,
-        options: [],
-        activeRepositoryPath: '',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('loading');
-  });
-
-  it('requires setup when no repository source is available', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: [],
-        activeRepositoryPath: '',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('needsRepository');
-  });
-
-  it('keeps setup open when a repository exists but first-launch setup is incomplete', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: [],
-        activeRepositoryPath: '/repos/current',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('needsReview');
-  });
-
-  it('treats an active repository as complete after first-launch setup is finished', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: [],
-        activeRepositoryPath: '/repos/current',
-        firstLaunchSetupCompleted: true
-      })
-    ).toBe('complete');
-  });
-
-  it('keeps saved repository options in setup until first-launch setup is finished', () => {
+  it('filters by repository name or full path without changing the options', () => {
     const options = buildRepositoryOptions({
-      defaultRepositoryPath: '',
-      storedRepositoryPaths: ['/repos/current'],
+      repositories: [
+        repositoryFixture('primary', '/Users/dev/primary'),
+        repositoryFixture('secondary', '/Volumes/work/repo-secondary')
+      ],
       tasks: []
     });
 
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options,
-        activeRepositoryPath: '',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('needsReview');
+    expect(filterRepositoryOptions(options, 'SECONDARY').map((option) => option.id)).toEqual([
+      'secondary'
+    ]);
+    expect(filterRepositoryOptions(options, '/users/dev').map((option) => option.id)).toEqual([
+      'primary'
+    ]);
+    expect(filterRepositoryOptions(options, '')).toEqual(options);
   });
+
+  it('keeps a selected ID and falls back to the first available repository', () => {
+    const options = buildRepositoryOptions({
+      repositories: [
+        repositoryFixture('missing', '/repos/missing', 'MISSING'),
+        repositoryFixture('available', '/repos/current')
+      ],
+      tasks: []
+    });
+
+    expect(resolveSelectedRepositoryId(options, 'missing')).toBe('missing');
+    expect(resolveSelectedRepositoryId(options, 'unknown')).toBe('available');
+  });
+
+  it.each([
+    [true, [], '', false, 'loading'],
+    [false, [], '', false, 'needsRepository'],
+    [false, [repositoryFixture('repo', '/repo')], 'repo', false, 'needsReview'],
+    [false, [repositoryFixture('repo', '/repo')], 'repo', true, 'complete']
+  ] as const)(
+    'resolves setup state without a second repository source',
+    (loading, repositories, activeRepositoryId, firstLaunchSetupCompleted, expected) => {
+      expect(
+        resolveRepositorySetupState({
+          loading,
+          options: buildRepositoryOptions({ repositories: [...repositories], tasks: [] }),
+          activeRepositoryId,
+          firstLaunchSetupCompleted
+        })
+      ).toBe(expected);
+    }
+  );
 });
 
-function taskFixture(id: string, repositoryPath: string): Task {
+function repositoryFixture(
+  id: string,
+  repositoryPath: string,
+  status: Repository['status'] = 'AVAILABLE'
+): Repository {
+  return {
+    id,
+    name: repositoryPath.split('/').at(-1) ?? id,
+    path: repositoryPath,
+    status,
+    remotes: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  };
+}
+
+function taskFixture(id: string, repositoryId: string): Task {
   return {
     id,
     runtimeId: 'codex',
     title: id,
     prompt: 'Do the work.',
-    repositoryPath,
+    repositoryId,
     workflowPhase: 'READY',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

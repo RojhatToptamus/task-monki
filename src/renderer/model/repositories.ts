@@ -1,127 +1,116 @@
-import type { Task } from '../../shared/contracts';
+import type { Repository, Task } from '../../shared/contracts';
 
 export interface RepositoryOption {
+  id: string;
   path: string;
   name: string;
   displayPath: string;
   taskCount: number;
-  isDefault: boolean;
+  status: Repository['status'];
 }
 
 export type RepositorySetupState = 'loading' | 'needsRepository' | 'needsReview' | 'complete';
 
-export function normalizeRepositoryPath(repositoryPath: string): string {
-  const trimmed = repositoryPath.trim();
-  if (!trimmed) {
-    return '';
-  }
-  if (trimmed === '/' || /^[A-Za-z]:[\\/]?$/.test(trimmed)) {
-    return trimmed;
-  }
-  return trimmed.replace(/[\\/]+$/, '');
-}
-
-export function isSameRepositoryPath(left: string, right: string): boolean {
-  return normalizeRepositoryPath(left) === normalizeRepositoryPath(right);
-}
-
 export function repositoryName(repositoryPath: string): string {
-  const normalized = normalizeRepositoryPath(repositoryPath);
+  const normalized = repositoryPath.replace(/[\\/]+$/, '');
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? normalized;
 }
 
 export function repositoryDisplayPath(repositoryPath: string): string {
-  const normalized = normalizeRepositoryPath(repositoryPath);
+  const normalized = repositoryPath.replace(/[\\/]+$/, '');
   const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.slice(-2).join('/') || normalized;
+  const suffix = parts.slice(-2).join('/');
+  return suffix && parts.length > 2 ? `…/${suffix}` : normalized.replace(/\\/g, '/');
+}
+
+export function filterRepositoryOptions(
+  options: readonly RepositoryOption[],
+  query: string
+): RepositoryOption[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return [...options];
+  return options.filter((option) =>
+    `${option.name}\n${option.path}`.toLocaleLowerCase().includes(normalizedQuery)
+  );
 }
 
 export function buildRepositoryOptions(input: {
-  defaultRepositoryPath: string;
-  storedRepositoryPaths: string[];
+  repositories: Repository[];
   tasks: Task[];
 }): RepositoryOption[] {
-  const defaultPath = normalizeRepositoryPath(input.defaultRepositoryPath);
   const taskCounts = new Map<string, number>();
   for (const task of input.tasks) {
-    const path = normalizeRepositoryPath(task.repositoryPath);
-    if (path) {
-      taskCounts.set(path, (taskCounts.get(path) ?? 0) + 1);
-    }
+    taskCounts.set(task.repositoryId, (taskCounts.get(task.repositoryId) ?? 0) + 1);
   }
-
-  const paths = new Map<string, string>();
-  addRepositoryPath(paths, defaultPath);
-  for (const path of input.storedRepositoryPaths) {
-    addRepositoryPath(paths, path);
-  }
-  const taskRepositoryPaths = [...taskCounts.keys()].sort((a, b) =>
-    repositoryName(a).localeCompare(repositoryName(b))
-  );
-  for (const path of taskRepositoryPaths) {
-    addRepositoryPath(paths, path);
-  }
-
-  return [...paths.keys()].map((path) => ({
-    path,
-    name: repositoryName(path),
-    displayPath: repositoryDisplayPath(path),
-    taskCount: taskCounts.get(path) ?? 0,
-    isDefault: defaultPath ? path === defaultPath : false
+  const displayPaths = buildDistinctRepositoryDisplayPaths(input.repositories);
+  return input.repositories.map((repository) => ({
+    id: repository.id,
+    path: repository.path,
+    name: repository.name,
+    displayPath: displayPaths.get(repository.id) ?? repositoryDisplayPath(repository.path),
+    taskCount: taskCounts.get(repository.id) ?? 0,
+    status: repository.status
   }));
 }
 
-export function tasksForRepository(tasks: Task[], repositoryPath: string): Task[] {
-  const selectedPath = normalizeRepositoryPath(repositoryPath);
-  if (!selectedPath) {
-    return tasks;
+function buildDistinctRepositoryDisplayPaths(
+  repositories: readonly Repository[]
+): Map<string, string> {
+  const pathParts = repositories.map((repository) => ({
+    id: repository.id,
+    normalizedPath: repository.path.replace(/[\\/]+$/, '').replace(/\\/g, '/'),
+    parts: repository.path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
+  }));
+  const displayPaths = new Map<string, string>();
+
+  for (const candidate of pathParts) {
+    let suffixLength = Math.min(2, candidate.parts.length);
+    while (
+      suffixLength < candidate.parts.length &&
+      pathParts.some(
+        (other) =>
+          other.id !== candidate.id &&
+          other.parts
+            .slice(-suffixLength)
+            .join('/')
+            .toLocaleLowerCase() ===
+            candidate.parts.slice(-suffixLength).join('/').toLocaleLowerCase()
+      )
+    ) {
+      suffixLength += 1;
+    }
+    const suffix = candidate.parts.slice(-suffixLength).join('/');
+    displayPaths.set(
+      candidate.id,
+      suffixLength < candidate.parts.length ? `…/${suffix}` : candidate.normalizedPath
+    );
   }
-  return tasks.filter((task) => normalizeRepositoryPath(task.repositoryPath) === selectedPath);
+
+  return displayPaths;
 }
 
-export function resolveSelectedRepositoryPath(
+export function resolveSelectedRepositoryId(
   options: RepositoryOption[],
-  requestedRepositoryPath: string
+  requestedRepositoryId: string
 ): string {
-  const requested = normalizeRepositoryPath(requestedRepositoryPath);
-  if (requested && options.some((option) => option.path === requested)) {
-    return requested;
+  if (requestedRepositoryId && options.some((option) => option.id === requestedRepositoryId)) {
+    return requestedRepositoryId;
   }
-  return options[0]?.path ?? '';
+  return options.find((option) => option.status === 'AVAILABLE')?.id ?? options[0]?.id ?? '';
 }
 
 export function resolveRepositorySetupState(input: {
   loading: boolean;
   options: RepositoryOption[];
-  activeRepositoryPath: string;
+  activeRepositoryId: string;
   firstLaunchSetupCompleted: boolean;
 }): RepositorySetupState {
   if (input.loading) {
     return 'loading';
   }
-  const hasRepository =
-    Boolean(normalizeRepositoryPath(input.activeRepositoryPath)) || input.options.length > 0;
-  if (!hasRepository) {
+  if (!input.activeRepositoryId && input.options.length === 0) {
     return 'needsRepository';
   }
   return input.firstLaunchSetupCompleted ? 'complete' : 'needsReview';
-}
-
-export function mergeRepositoryPath(paths: string[], repositoryPath: string): string[] {
-  const normalized = normalizeRepositoryPath(repositoryPath);
-  if (!normalized) {
-    return paths;
-  }
-  if (paths.some((path) => isSameRepositoryPath(path, normalized))) {
-    return paths.map((path) => normalizeRepositoryPath(path)).filter(Boolean);
-  }
-  return [...paths.map((path) => normalizeRepositoryPath(path)).filter(Boolean), normalized];
-}
-
-function addRepositoryPath(paths: Map<string, string>, repositoryPath: string): void {
-  const normalized = normalizeRepositoryPath(repositoryPath);
-  if (normalized && !paths.has(normalized)) {
-    paths.set(normalized, normalized);
-  }
 }

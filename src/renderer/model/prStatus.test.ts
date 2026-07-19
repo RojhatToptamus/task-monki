@@ -770,7 +770,7 @@ function taskFixture(overrides: Partial<Task> = {}): Task {
     runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
-    repositoryPath: '/tmp/repo',
+    repositoryId: '/tmp/repo',
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

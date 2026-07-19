@@ -28,6 +28,7 @@ import type {
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  Repository,
   PreviewApprovalRecord,
   PreviewComposeProjectRecord,
   PreviewGenerationRecord,
@@ -133,6 +134,7 @@ import type { PreviewTaskRouteOption } from '../model/previewBindings';
 interface TaskDetailProps {
   error?: string;
   task?: Task;
+  repository?: Repository;
   run?: RunRecord;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
@@ -225,6 +227,7 @@ interface HeadAction {
   label: string;
   kind: 'primary' | 'soft';
   disabled?: boolean;
+  title?: string;
   onClick(): void;
 }
 
@@ -611,6 +614,15 @@ export function TaskDetail(props: TaskDetailProps) {
 
   const nextActionState = (id: NextActionId): { disabled?: boolean; title?: string } => {
     const busy = reviewActionBusy || deliveryActionBusy;
+    if (
+      props.repository?.status !== 'AVAILABLE' &&
+      ['run-review', 'run-review-again', 'request-changes', 'commit'].includes(id)
+    ) {
+      return {
+        disabled: true,
+        title: 'Reconnect this repository before running repository actions.'
+      };
+    }
     switch (id) {
       case 'run-review':
       case 'run-review-again':
@@ -657,7 +669,14 @@ export function TaskDetail(props: TaskDetailProps) {
     headActions.push({
       label: primaryAction.label,
       kind: 'primary',
-      disabled: primaryAction.disabled || reviewActionsPaused,
+      disabled:
+        primaryAction.disabled ||
+        reviewActionsPaused ||
+        props.repository?.status !== 'AVAILABLE',
+      title:
+        props.repository?.status !== 'AVAILABLE'
+          ? 'Reconnect this repository before running repository actions.'
+          : undefined,
       onClick: primaryAction.onClick
     });
   }
@@ -783,16 +802,20 @@ export function TaskDetail(props: TaskDetailProps) {
                 openTarget={
                   worktree
                     ? { type: 'worktree', worktreeId: worktree.id, taskId: task.id }
-                    : { type: 'repository', repositoryPath: task.repositoryPath }
+                    : { type: 'repository', repositoryId: task.repositoryId }
                 }
                 onArchive={props.onArchive}
                 onRequestDelete={props.onRequestDelete}
                 className="tm-detail__taskmenu"
               />
             </div>
-            {worktree?.branchName ? (
-              <div className="tm-detail__meta">{worktree.branchName}</div>
-            ) : null}
+            <div className="tm-detail__meta">
+              {props.repository?.name ?? 'Unknown repository'}
+              {props.repository && props.repository.status !== 'AVAILABLE'
+                ? ` · ${props.repository.status.toLowerCase()}`
+                : ''}
+              {worktree?.branchName ? ` · ${worktree.branchName}` : ''}
+            </div>
           </div>
           {/* Primary action gets its own header slot on the right, out of the
               title row, so it never crowds the title or the mascot (audit §04
@@ -805,6 +828,7 @@ export function TaskDetail(props: TaskDetailProps) {
                   type="button"
                   className={`tm-headbtn ${action.kind === 'primary' ? 'tm-headbtn--primary' : ''}`}
                   disabled={action.disabled}
+                  title={action.title}
                   onClick={action.onClick}
                 >
                   {action.label}

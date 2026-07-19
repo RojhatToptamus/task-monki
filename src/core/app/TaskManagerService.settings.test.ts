@@ -13,6 +13,7 @@ import { AppEventBus } from '../runner/AppEventBus';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import {
   writeNodeExecutable,
   writeOutputExecutable
@@ -205,6 +206,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
   it('keeps deterministic seed hosts inert without starting Codex', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const repository = await addTestRepository(store, dir);
     const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
     const service = new TaskManagerService(store, dir, undefined, {
       codexPath: 'codex-not-used',
@@ -221,7 +223,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       });
       expect((await store.snapshot()).agentServers).toHaveLength(0);
       await expect(
-        service.refinePrompt({ repositoryPath: dir, input: 'Refine me.' })
+        service.refinePrompt({ repositoryId: repository.id, input: 'Refine me.' })
       ).rejects.toThrow(reason);
     } finally {
       await service.shutdown();
@@ -247,7 +249,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       const task = await store.createTask({
         title: 'Recovery settings guard',
         prompt: 'Keep recovery state stable.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -330,7 +332,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       const task = await store.createTask({
         title: 'Other provider stays active',
         prompt: 'Keep OpenCode active.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         runtimeId: 'opencode',
         agentSettings: { runtimeId: 'opencode' }
       });
@@ -586,7 +588,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       service.createTask({
         title: 'Disabled provider task',
         prompt: 'Do not create this task.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         runtimeId: 'opencode'
       })
     ).rejects.toThrow('OpenCode is disabled');
@@ -606,7 +608,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const task = await store.createTask({
       title: 'Active provider task',
       prompt: 'Keep this runtime enabled.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       runtimeId: 'cursor-agent-acp',
       agentSettings: { runtimeId: 'cursor-agent-acp' }
     });
@@ -694,7 +696,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const task = await service.createTask({
       title: 'Runtime lifecycle race',
       prompt: 'Exercise provider startup.',
-      repositoryPath,
+      repositoryId: (await addTestRepository(store, repositoryPath)).id,
       runtimeId: 'opencode',
       agentSettings: { runtimeId: 'opencode', model: 'scenario-model' }
     });
@@ -820,7 +822,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const task = await service.createTask({
       title: 'Runtime control remains responsive',
       prompt: 'Exercise provider controls.',
-      repositoryPath,
+      repositoryId: (await addTestRepository(store, repositoryPath)).id,
       runtimeId: 'codex',
       agentSettings: { runtimeId: 'codex', model: 'scenario-model' }
     });
@@ -960,7 +962,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     const task = await service.createTask({
       title: 'Release runtime before disabling',
       prompt: 'Delete this inactive provider task.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       runtimeId: 'opencode',
       agentSettings: { runtimeId: 'opencode' }
     });

@@ -19,10 +19,12 @@ import type {
   AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   ContinueRunRequest,
+  CreateBoardRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DisconnectRepositoryRequest,
   DeletePreviewLocalAttachmentBindingRequest,
   DiscardPreviewRecipeDraftRequest,
   GeneratePreviewRecipeRequest,
@@ -42,6 +44,7 @@ import type {
   ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
+  ReconnectRepositoryRequest,
   StartRunRequest,
   StartPreviewRequest,
   SetPreviewLocalAttachmentBindingRequest,
@@ -53,8 +56,9 @@ import type {
   TestExternalToolRequest,
   TransitionTaskRequest,
   UpdateAgentNativeSessionRequest,
-  StopPreviewRequest,
   UpdateAppSettingsRequest,
+  StopPreviewRequest,
+  UpdateBoardRequest,
   ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
 import {
@@ -314,7 +318,6 @@ function installIpcHandlers(): void {
     }
     syncWindowChrome(window);
   });
-  handleTrustedIpc('repository:defaultPath', () => service.getDefaultRepositoryPath());
   handleTrustedIpc('repository:chooseFolder', async () => {
     const options: OpenDialogOptions = {
       title: 'Add repository',
@@ -350,8 +353,29 @@ function installIpcHandlers(): void {
     return service.executeOpenTargetAction(input);
   });
 
-  handleTrustedIpc('repository:validate', async (_, repositoryPath: string) => {
-    return service.validateRepository(repositoryPath);
+  handleTrustedIpc('repository:add', async (_, repositoryPath: string) => {
+    return service.addRepository(repositoryPath);
+  });
+  handleTrustedIpc('repository:impact', async (_, repositoryId: string) => {
+    return service.getRepositoryImpact(repositoryId);
+  });
+  handleTrustedIpc('repository:disconnect', async (_, input: DisconnectRepositoryRequest) => {
+    return service.disconnectRepository(input);
+  });
+  handleTrustedIpc('repository:reconnect', async (_, input: ReconnectRepositoryRequest) => {
+    return service.reconnectRepository(input);
+  });
+  handleTrustedIpc('repository:refresh', async (_, repositoryId: string) => {
+    return service.refreshRepository(repositoryId);
+  });
+  handleTrustedIpc('board:create', async (_, input: CreateBoardRequest) => {
+    return service.createBoard(input);
+  });
+  handleTrustedIpc('board:update', async (_, input: UpdateBoardRequest) => {
+    return service.updateBoard(input);
+  });
+  handleTrustedIpc('board:delete', async (_, boardId: string) => {
+    return service.deleteBoard(boardId);
   });
 
   handleTrustedIpc('task:list', async () => {

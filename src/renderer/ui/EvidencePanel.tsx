@@ -28,6 +28,13 @@ import { StatusChip } from './StatusBadge';
 import { humanizeEnum } from './display';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
 import type { OpenTargetRef } from '../../shared/contracts';
+import {
+  focusMenuItem,
+  handleMenuBlur,
+  handleMenuKeyDown,
+  menuTriggerFocusTarget,
+  type MenuFocusTarget
+} from './menuKeyboard';
 
 interface EvidencePanelProps {
   run?: RunRecord;
@@ -92,6 +99,10 @@ export function EvidencePanel({
   const [filePanelCollapsed, setFilePanelCollapsed] = useState(false);
   const [diffBrowserHeight, setDiffBrowserHeight] = useState(DEFAULT_DIFF_BROWSER_HEIGHT);
   const resizeStateRef = useRef<{ startY: number; startHeight: number } | undefined>(undefined);
+  const filterMenuRootRef = useRef<HTMLDivElement>(null);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+  const filterMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const filterMenuInitialFocusRef = useRef<MenuFocusTarget>('selected');
 
   const diffArtifact = gitSnapshot?.diffArtifactId
     ? artifacts.find((artifact) => artifact.id === gitSnapshot.diffArtifactId)
@@ -135,6 +146,25 @@ export function EvidencePanel({
     diffArtifact?.byteCount,
     diffArtifact?.updatedAt,
   ]);
+
+  useEffect(() => {
+    if (!filterMenuOpen) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      focusMenuItem(filterMenuRef.current, filterMenuInitialFocusRef.current);
+    });
+    const onPointerDown = (event: PointerEvent) => {
+      if (!filterMenuRootRef.current?.contains(event.target as Node)) {
+        setFilterMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [filterMenuOpen]);
 
   const diffFilesByScope = useMemo(
     () => ({
@@ -280,15 +310,34 @@ export function EvidencePanel({
                       </button>
                     ) : null}
                   </div>
-                  <div className="tm-filefilter__menuwrap">
+                  <div className="tm-filefilter__menuwrap" ref={filterMenuRootRef}>
                     <button
+                      ref={filterMenuTriggerRef}
                       type="button"
                       className={`tm-filefilter__button ${
                         statusFilter !== 'all' ? 'tm-filefilter__button--active' : ''
                       }`}
                       aria-label="Filter changed files by status"
+                      aria-haspopup="menu"
                       aria-expanded={filterMenuOpen}
-                      onClick={() => setFilterMenuOpen((open) => !open)}
+                      aria-controls="diff-status-filter-menu"
+                      onKeyDown={(event) => {
+                        const target = menuTriggerFocusTarget(event.key);
+                        if (!target) {
+                          return;
+                        }
+                        event.preventDefault();
+                        filterMenuInitialFocusRef.current = target;
+                        if (filterMenuOpen) {
+                          focusMenuItem(filterMenuRef.current, target);
+                        } else {
+                          setFilterMenuOpen(true);
+                        }
+                      }}
+                      onClick={() => {
+                        filterMenuInitialFocusRef.current = 'selected';
+                        setFilterMenuOpen((open) => !open);
+                      }}
                     >
                       <svg
                         width="15"
@@ -305,13 +354,32 @@ export function EvidencePanel({
                       </svg>
                     </button>
                     {filterMenuOpen ? (
-                      <div className="tm-filefilter__menu" role="menu">
-                        <div className="tm-filefilter__menu-title">File status</div>
+                      <div
+                        ref={filterMenuRef}
+                        id="diff-status-filter-menu"
+                        className="tm-filefilter__menu"
+                        role="menu"
+                        tabIndex={-1}
+                        aria-label="File status"
+                        onKeyDown={(event) =>
+                          handleMenuKeyDown(event, {
+                            onClose: () => setFilterMenuOpen(false),
+                            returnFocus: filterMenuTriggerRef.current
+                          })
+                        }
+                        onBlur={(event) =>
+                          handleMenuBlur(event, () => setFilterMenuOpen(false))
+                        }
+                      >
+                        <div className="tm-filefilter__menu-title" role="presentation">
+                          File status
+                        </div>
                         {DIFF_STATUS_FILTERS.map((option) => (
                           <button
                             key={option.value}
                             type="button"
                             role="menuitemradio"
+                            tabIndex={-1}
                             aria-checked={statusFilter === option.value}
                             onClick={() => {
                               setStatusFilter(option.value);

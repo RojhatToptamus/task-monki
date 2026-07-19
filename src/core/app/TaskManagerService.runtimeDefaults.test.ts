@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentModel, AgentRuntimeCapabilities } from '../../shared/contracts';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
@@ -60,7 +61,7 @@ describe('TaskManagerService runtime execution defaults', () => {
         runtimeId,
         title: `${runtimeId} defaults`,
         prompt: 'Use the runtime-owned default policy.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
 
       expect(task.agentSettings).toMatchObject({
@@ -223,7 +224,7 @@ describe('TaskManagerService runtime execution defaults', () => {
         runtimeId: 'opencode',
         title: 'Unsafe browser runtime',
         prompt: 'Do not start the provider.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       })
     ).rejects.toThrow('browser development');
     expect(resolveExecution).not.toHaveBeenCalled();
@@ -277,7 +278,7 @@ describe('TaskManagerService runtime execution defaults', () => {
         runtimeId: 'codex',
         title: 'Conflicting runtime',
         prompt: 'Reject ambiguous ownership.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         agentSettings: { runtimeId: 'opencode' }
       })
     ).rejects.toThrow('runtime must match');

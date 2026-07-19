@@ -630,7 +630,8 @@ in `preview.yaml`.
 
 ## Durable records and schema
 
-`FileTaskStore` schema 16 contains these Preview collections:
+`FileTaskStore` schema 17 contains these Preview collections alongside
+repository identities and saved views:
 
 - `previewPlans` and `previewApprovals`;
 - `previewGenerations`, `previewNodeAttempts`, and native `previewResources`;
@@ -643,13 +644,9 @@ Logs and source manifests are bounded artifacts, not embedded snapshot text.
 Private ciphertext and revision reachability live in a separate main-only vault
 format, never in the task-store schema.
 
-The current store has selective additive migrations from Preview schemas 13,
-14, and 15 and from the released attachment schema 11. Schema 13 gains Phase 4
-binding/plan/generation fields and the Phase 5 Compose collection/adapter
-defaults; schema 14 gains the Compose collection and adapter defaults; schema
-15 gains the attachment collection. Schema 11 preserves its task-owned
-attachment records and gains the Preview collections. Rejected or unshipped
-prototype schema 12 is not interpreted.
+Only the complete current schema is accepted. Older Preview, attachment, and
+repository/path schemas are unsupported and are neither migrated nor
+reinterpreted; local data using an older schema must be discarded.
 
 ## Renderer model and user experience
 

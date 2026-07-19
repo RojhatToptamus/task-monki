@@ -164,6 +164,25 @@ describe('createBrowserTaskManagerApi settings', () => {
       requestId: 'request-1'
     });
   });
+
+  it('does not reinterpret obsolete flat error responses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: 'obsolete response' })
+        }) as Response
+      )
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(api.getAppSettings()).rejects.toMatchObject({
+      message: 'HTTP 400',
+      status: 400
+    });
+  });
 });
 
 describe('createBrowserTaskManagerApi provider-native session configuration', () => {

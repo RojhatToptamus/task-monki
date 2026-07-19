@@ -1,12 +1,15 @@
 import type {
+  Board,
   AcceptPreviewRecipeDraftRequest,
   AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
+  CreateBoardRequest,
   CreateTaskRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DisconnectRepositoryRequest,
   DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
@@ -19,6 +22,9 @@ import type {
   ReadProtocolMessageRequest,
   RefinePromptRequest,
   RefinePromptResponse,
+  ReconnectRepositoryRequest,
+  Repository,
+  RepositoryImpact,
   RepositoryPreflight,
   RunRecord,
   StartRunRequest,
@@ -40,6 +46,7 @@ import type {
   UpdateAppSettingsRequest,
   UpdateAgentNativeSessionRequest,
   UpdateAgentNativeSessionResult,
+  UpdateBoardRequest,
   ExternalToolStatusReport,
   TestExternalToolRequest,
   ExternalToolProbeResult,
@@ -100,6 +107,7 @@ import {
 } from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
+import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
@@ -176,7 +184,7 @@ export class TaskManagerService {
 
   constructor(
     private readonly store: FileTaskStore,
-    private readonly defaultRepositoryPath: string,
+    agentCwd: string,
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
@@ -207,7 +215,7 @@ export class TaskManagerService {
       agentProviderStartupDisabledReason?: string;
     } = {}
   ) {
-    const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
+    agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
     this.agentProviderStartupDisabledReason =
       options.agentProviderStartupDisabledReason;
@@ -399,10 +407,6 @@ export class TaskManagerService {
     this.assertInitializing();
   }
 
-  getDefaultRepositoryPath(): string {
-    return this.defaultRepositoryPath;
-  }
-
   async getAppSettings(): Promise<TaskManagerAppSettings> {
     this.appSettings = await this.loadBoundarySafeAppSettings();
     return structuredClone(this.appSettings);
@@ -559,9 +563,7 @@ export class TaskManagerService {
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
     this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.inspect(input, {
-      snapshot: await this.store.snapshot(),
-      defaultRepositoryPath: this.defaultRepositoryPath,
-      appSettings: this.appSettings
+      snapshot: await this.store.snapshot()
     });
   }
 
@@ -576,14 +578,84 @@ export class TaskManagerService {
   ): Promise<OpenTargetActionResult> {
     this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.execute(input, {
-      snapshot: await this.store.snapshot(),
-      defaultRepositoryPath: this.defaultRepositoryPath,
-      appSettings: this.appSettings
+      snapshot: await this.store.snapshot()
     });
   }
 
-  validateRepository(repositoryPath: string): Promise<RepositoryPreflight> {
-    return validateRepositoryPath(repositoryPath);
+  async addRepository(repositoryPath: string): Promise<Repository> {
+    const preflight = await validateRepositoryPath(repositoryPath);
+    if (preflight.status !== 'VALID') {
+      throw new Error(preflight.error ?? 'The selected folder is not a valid Git repository.');
+    }
+    const repository = await this.store.addRepository(preflight);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact> {
+    await this.requireRepository(repositoryId);
+    return selectRepositoryImpact(await this.store.snapshot(), repositoryId);
+  }
+
+  async disconnectRepository(input: DisconnectRepositoryRequest): Promise<Repository> {
+    if (!input.confirmed) {
+      throw new Error('Repository disconnect requires explicit confirmation.');
+    }
+    const impact = await this.getRepositoryImpact(input.repositoryId);
+    if (impact.blockingReason) {
+      throw new Error(impact.blockingReason);
+    }
+    const repository = await this.store.disconnectRepository(input.repositoryId);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async reconnectRepository(input: ReconnectRepositoryRequest): Promise<Repository> {
+    const existing = await this.requireRepository(input.repositoryId);
+    if (existing.status === 'AVAILABLE') {
+      throw new Error('Disconnect the repository before changing its path.');
+    }
+    const impact = selectRepositoryImpact(await this.store.snapshot(), existing.id);
+    if (impact.blockingReason) {
+      throw new Error(impact.blockingReason);
+    }
+    const preflight = await validateRepositoryPath(input.path);
+    if (preflight.status !== 'VALID') {
+      throw new Error(preflight.error ?? 'The selected folder is not a valid Git repository.');
+    }
+    const repository = await this.store.recordRepositoryPreflight(existing.id, preflight);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async refreshRepository(repositoryId: string): Promise<Repository> {
+    const existing = await this.requireRepository(repositoryId);
+    if (existing.status === 'DISCONNECTED') {
+      throw new Error('Reconnect the repository before refreshing it.');
+    }
+    const repository = await this.store.recordRepositoryPreflight(
+      existing.id,
+      await validateRepositoryPath(existing.path)
+    );
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async createBoard(input: CreateBoardRequest): Promise<Board> {
+    const board = await this.store.createBoard(input);
+    this.emitBoardUpdate('board.updated', board);
+    return board;
+  }
+
+  async updateBoard(input: UpdateBoardRequest): Promise<Board> {
+    const board = await this.store.updateBoard(input);
+    this.emitBoardUpdate('board.updated', board);
+    return board;
+  }
+
+  async deleteBoard(boardId: string): Promise<void> {
+    await this.store.deleteBoard(boardId);
+    this.emitBoardUpdate('board.deleted', { id: boardId });
   }
 
   async getAgentRuntimeCatalog() {
@@ -841,6 +913,7 @@ export class TaskManagerService {
     input: RefinePromptRequest
   ): Promise<RefinePromptResponse> {
     await this.assertAgentRuntimeAvailable();
+    const repository = await this.requireAvailableRepository(input.repositoryId);
     const configuredRuntimeId =
       this.appSettings.promptRefinementRuntimeId ??
       this.appSettings.defaultRuntimeId;
@@ -855,7 +928,7 @@ export class TaskManagerService {
       );
     }
     const refined = await adapter.refinePrompt({
-      repositoryPath: input.repositoryPath,
+      repositoryPath: repository.path,
       input: input.input,
       settings: {
         runtimeId,
@@ -892,9 +965,10 @@ export class TaskManagerService {
     input: PrepareWorktreeRequest
   ): Promise<WorktreeRecord> {
     const task = await this.requireTask(input.taskId);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
     if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
-      const verified = await this.worktrees.verify(existing);
+      const verified = await this.worktrees.verify(existing, repository.path);
       return this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
     }
 
@@ -921,7 +995,8 @@ export class TaskManagerService {
     });
 
     try {
-      const created = await this.worktrees.create(worktree);
+      const repository = await this.requireAvailableRepository(task.repositoryId);
+      const created = await this.worktrees.create(worktree, repository.path);
       const stored = await this.store.updateWorktree(created, 'WORKTREE_CREATED');
       await this.refreshEvidenceInternal({ taskId: task.id });
       this.events.emit({
@@ -1169,7 +1244,7 @@ export class TaskManagerService {
         worktree: input.sourceWorktree,
         instruction: input.instruction
       }),
-      repositoryPath: sourceTask.repositoryPath,
+      repositoryId: sourceTask.repositoryId,
       runtimeId,
       agentSettings: resolvedAlternativeSettings,
       sourceTaskId: sourceTask.id,
@@ -1837,8 +1912,9 @@ export class TaskManagerService {
     input: RefreshEvidenceRequest
   ): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
     const worktree = await this.requireWorktree(task);
-    const verified = await this.worktrees.verify(worktree);
+    const verified = await this.worktrees.verify(worktree, repository.path);
     const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
     if (storedWorktree.status !== 'PRESENT') {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
@@ -2110,7 +2186,10 @@ export class TaskManagerService {
             (worktree) => worktree.taskId === task.id
           );
           for (const worktree of worktrees) {
-            await this.worktrees.remove(worktree);
+            const repository = await this.requireAvailableRepository(
+              worktree.repositoryId
+            );
+            await this.worktrees.remove(worktree, repository.path);
             removedWorktree = true;
           }
         }
@@ -2138,7 +2217,9 @@ export class TaskManagerService {
   }
 
   private async validateAndRecordRepository(task: Task): Promise<RepositoryPreflight> {
-    const preflight = await validateRepositoryPath(task.repositoryPath);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    const preflight = await validateRepositoryPath(repository.path);
+    await this.store.recordRepositoryPreflight(repository.id, preflight);
     await this.store.appendEvent(
       createDomainEvent({
         type: 'REPOSITORY_PREFLIGHT_COMPLETED',
@@ -2341,6 +2422,22 @@ export class TaskManagerService {
     return task;
   }
 
+  private async requireAvailableRepository(repositoryId: string): Promise<Repository> {
+    const repository = await this.requireRepository(repositoryId);
+    if (repository.status !== 'AVAILABLE') {
+      throw new Error(`Repository ${repository.name} is ${repository.status.toLowerCase()}.`);
+    }
+    return repository;
+  }
+
+  private async requireRepository(repositoryId: string): Promise<Repository> {
+    const repository = await this.store.getRepository(repositoryId);
+    if (!repository) {
+      throw new Error(`Repository not found: ${repositoryId}`);
+    }
+    return repository;
+  }
+
   private async requireRunForTask(runId: string, taskId: string): Promise<RunRecord> {
     const run = await this.store.getRun(runId);
     if (!run || run.taskId !== taskId) {
@@ -2383,7 +2480,8 @@ export class TaskManagerService {
   private async requirePreviewContext(taskId: string) {
     const task = await this.requireTask(taskId);
     const worktree = await this.requireWorktree(task);
-    const verified = await this.worktrees.verify(worktree);
+    const repository = await this.requireAvailableRepository(worktree.repositoryId);
+    const verified = await this.worktrees.verify(worktree, repository.path);
     const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
     if (storedWorktree.status !== 'PRESENT') {
       throw new Error(`Worktree is not ready for preview: ${storedWorktree.status}.`);
@@ -2401,6 +2499,27 @@ export class TaskManagerService {
       taskId,
       iterationId: worktree.iterationId,
       worktreeId: worktree.id,
+      payload,
+      at: new Date().toISOString()
+    });
+  }
+
+  private emitRepositoryUpdate(repository: Repository): void {
+    this.events.emit({
+      type: 'repository.updated',
+      taskId: 'repositories',
+      payload: repository,
+      at: new Date().toISOString()
+    });
+  }
+
+  private emitBoardUpdate(
+    type: 'board.updated' | 'board.deleted',
+    payload: unknown
+  ): void {
+    this.events.emit({
+      type,
+      taskId: 'boards',
       payload,
       at: new Date().toISOString()
     });

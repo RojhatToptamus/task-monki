@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createDomainEvent } from './domainEvent';
 import { FileTaskStore } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore Phase 6 subagent observations', () => {
   it('persists provider-observed children with inherited runtime settings across restart', async () => {
@@ -12,7 +13,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     const task = await store.createTask({
       title: 'Restart observed subagent',
       prompt: 'Preserve durable runtime ownership.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       runtimeId: 'opencode',
       agentSettings: {
         runtimeId: 'opencode',
@@ -82,7 +83,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     const task = await store.createTask({
       title: 'Observed subagent',
       prompt: 'Delegate repository inspection.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -183,7 +184,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     const task = await store.createTask({
       title: 'Contradictory subagent',
       prompt: 'Observe exact identifiers.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,

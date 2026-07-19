@@ -211,16 +211,11 @@ export interface ExternalExecutablePathSettings {
 
 export type TaskManagerThemePreference = 'light' | 'dark' | 'device';
 
-export interface TaskManagerRepositorySettings {
-  knownPaths: string[];
-  selectedPath: string | null;
-}
-
 export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 8 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 9 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -243,7 +238,8 @@ export interface TaskManagerAppSettings {
   codexExternalTools: CodexExternalToolSettings;
   externalExecutables: ExternalExecutablePathSettings;
   runtimeExecutablePaths: Record<AgentRuntimeId, string | null>;
-  repositories: TaskManagerRepositorySettings;
+  /** UI preference only; repository records remain authoritative in the task store. */
+  selectedRepositoryId: string | null;
   previewGateway: PreviewGatewaySettings;
 }
 
@@ -272,10 +268,7 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
   runtimeExecutablePaths: {},
-  repositories: {
-    knownPaths: [],
-    selectedPath: null
-  },
+  selectedRepositoryId: null,
   previewGateway: { port: null }
 };
 

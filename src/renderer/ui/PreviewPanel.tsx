@@ -49,6 +49,12 @@ import {
   type PreviewTaskRouteOption
 } from '../model/previewBindings';
 import { Chip } from './StatusBadge';
+import {
+  focusMenuItem,
+  handleMenuBlur,
+  handleMenuKeyDown,
+  menuTriggerFocusTarget
+} from './menuKeyboard';
 
 export interface PreviewPanelProps {
   task: Task;
@@ -2291,21 +2297,14 @@ function PrivateInputControl(props: {
   };
   useEffect(() => {
     if (!menuOpen) return;
-    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const frame = window.requestAnimationFrame(() => focusMenuItem(menuRef.current));
     const onPointerDown = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setMenuOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
     };
   }, [menuOpen]);
   useEffect(() => {
@@ -2352,15 +2351,35 @@ function PrivateInputControl(props: {
             aria-label={`Private input options for ${props.label}`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
+            onKeyDown={(event) => {
+              const target = menuTriggerFocusTarget(event.key);
+              if (!target) return;
+              event.preventDefault();
+              if (menuOpen) focusMenuItem(menuRef.current, target);
+              else setMenuOpen(true);
+            }}
             onClick={() => setMenuOpen((current) => !current)}
           >
             <KebabIcon />
           </button>
           {menuOpen ? (
-            <div className="tm-taskmenu__menu" role="menu">
+            <div
+              className="tm-taskmenu__menu"
+              role="menu"
+              tabIndex={-1}
+              aria-label={`Private input options for ${props.label}`}
+              onKeyDown={(event) =>
+                handleMenuKeyDown(event, {
+                  onClose: () => setMenuOpen(false),
+                  returnFocus: triggerRef.current
+                })
+              }
+              onBlur={(event) => handleMenuBlur(event, () => setMenuOpen(false))}
+            >
               <button
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 className="tm-taskmenu__item tm-taskmenu__item--danger"
                 disabled={busy}
                 onClick={() => {
@@ -2556,21 +2575,14 @@ function PreviewActionMenu({
 
   useEffect(() => {
     if (!open) return;
-    rootRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const frame = window.requestAnimationFrame(() => focusMenuItem(rootRef.current));
     const onPointerDown = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
     };
   }, [open]);
 
@@ -2584,17 +2596,37 @@ function PreviewActionMenu({
         aria-label="Preview options"
         aria-haspopup="menu"
         aria-expanded={open}
+        onKeyDown={(event) => {
+          const target = menuTriggerFocusTarget(event.key);
+          if (!target) return;
+          event.preventDefault();
+          if (open) focusMenuItem(rootRef.current, target);
+          else setOpen(true);
+        }}
         onClick={() => setOpen((current) => !current)}
       >
         <KebabIcon />
       </button>
       {open ? (
-        <div className="tm-taskmenu__menu tm-preview-actionmenu" role="menu">
+        <div
+          className="tm-taskmenu__menu tm-preview-actionmenu"
+          role="menu"
+          tabIndex={-1}
+          aria-label="Preview options"
+          onKeyDown={(event) =>
+            handleMenuKeyDown(event, {
+              onClose: () => setOpen(false),
+              returnFocus: triggerRef.current
+            })
+          }
+          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+        >
           {actions.map((action) => (
             <button
               key={action.id}
               type="button"
               role="menuitem"
+              tabIndex={-1}
               className={`tm-taskmenu__item ${action.label.includes('Delete Data') ? 'tm-taskmenu__item--danger' : ''}`}
               disabled={isActionDisabled(action)}
               onClick={() => {
@@ -2605,12 +2637,15 @@ function PreviewActionMenu({
               {action.label}
             </button>
           ))}
-          {actions.length > 0 && resetResources.length > 0 ? <div className="tm-pathmenu__separator" /> : null}
+          {actions.length > 0 && resetResources.length > 0 ? (
+            <div className="tm-pathmenu__separator" role="separator" />
+          ) : null}
           {resetResources.map((resource) => (
             <button
               key={resource.id}
               type="button"
               role="menuitem"
+              tabIndex={-1}
               className="tm-taskmenu__item tm-taskmenu__item--danger"
               disabled={resetDisabled}
               onClick={() => {

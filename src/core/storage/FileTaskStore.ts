@@ -20,9 +20,12 @@ import type {
   AgentUsageSnapshotRecord,
   ArtifactKind,
   ArtifactRecord,
+  Board,
+  BoardColor,
   BranchPublicationRecord,
   CiRollupRecord,
   AgentReviewGateStatus,
+  CreateBoardRequest,
   CreateTaskRequest,
   DomainEvent,
   GitSnapshotRecord,
@@ -43,6 +46,8 @@ import type {
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReviewRollupRecord,
+  Repository,
+  RepositoryPreflight,
   RunRecord,
   StatusProjection,
   Task,
@@ -53,9 +58,12 @@ import type {
   StagedAttachmentRecord,
   TaskIteration,
   TaskSnapshot,
+  UpdateBoardRequest,
+  WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
+  BOARD_COLORS,
   TASK_STORE_SCHEMA_VERSION,
   ARTIFACT_KINDS,
   CODEX_RUNTIME_ID,
@@ -353,6 +361,47 @@ const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
   `^${UUID_FILE_SEGMENT}-(?:task|${UUID_FILE_SEGMENT})-(?:${ARTIFACT_KINDS.join('|')})-${UUID_FILE_SEGMENT}\\.log$`,
   'u'
 );
+const WORKFLOW_PHASES = new Set<WorkflowPhase>([
+  'BACKLOG',
+  'READY',
+  'IN_PROGRESS',
+  'REVIEW',
+  'IN_REVIEW',
+  'DONE',
+  'BLOCKED',
+  'CANCELED',
+  'ARCHIVED'
+]);
+const BOARD_COLOR_VALUES = new Set<string>(BOARD_COLORS);
+
+function validateBoardInput(
+  input: CreateBoardRequest,
+  repositories: readonly Repository[]
+): Pick<Board, 'name' | 'color' | 'repositoryIds' | 'workflowPhases'> {
+  if (
+    typeof input.name !== 'string' ||
+    typeof input.color !== 'string' ||
+    !BOARD_COLOR_VALUES.has(input.color) ||
+    !Array.isArray(input.repositoryIds) ||
+    !input.repositoryIds.every((value) => typeof value === 'string') ||
+    !Array.isArray(input.workflowPhases) ||
+    !input.workflowPhases.every((value) => typeof value === 'string')
+  ) {
+    throw new Error('Board filter is invalid.');
+  }
+  const name = input.name.trim();
+  if (!name) throw new Error('Board name is required.');
+  const knownRepositoryIds = new Set(repositories.map((repository) => repository.id));
+  const repositoryIds = uniqueIds(input.repositoryIds);
+  if (repositoryIds.some((repositoryId) => !knownRepositoryIds.has(repositoryId))) {
+    throw new Error('Board references an unknown repository.');
+  }
+  const workflowPhases = uniqueIds(input.workflowPhases) as WorkflowPhase[];
+  if (workflowPhases.some((phase) => !WORKFLOW_PHASES.has(phase))) {
+    throw new Error('Board contains an invalid workflow phase.');
+  }
+  return { name, color: input.color as BoardColor, repositoryIds, workflowPhases };
+}
 
 function normalizeCreateTaskCompletionPolicy(
   value: CreateTaskRequest['completionPolicy']
@@ -407,7 +456,7 @@ function taskCreationMetadata(
     canonicalRequest = stableJsonStringify({
       title: fingerprintInput.title.trim(),
       prompt: fingerprintInput.prompt.trim(),
-      repositoryPath: fingerprintInput.repositoryPath.trim(),
+      repositoryId: fingerprintInput.repositoryId.trim(),
       completionPolicy: normalizeCreateTaskCompletionPolicy(
         fingerprintInput.completionPolicy
       ),
@@ -644,14 +693,12 @@ export class FileTaskStore {
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const migrated = migratePersistedState(persisted);
-        const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
+        const normalized = normalizeLoadedState(requireCurrentState(persisted));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(this.state.attachments);
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
-          migrated.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
         ) {
@@ -806,6 +853,186 @@ export class FileTaskStore {
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return clone(this.state);
+  }
+
+  async getRepository(repositoryId: string): Promise<Repository | undefined> {
+    await this.init();
+    return clone(
+      this.state.repositories.find((repository) => repository.id === repositoryId)
+    );
+  }
+
+  addRepository(preflight: RepositoryPreflight): Promise<Repository> {
+    return this.serializeMutation(async () => {
+      if (preflight.status !== 'VALID' || !preflight.root || !preflight.headSha) {
+        throw new Error(
+          preflight.error ?? 'Repository validation must pass before it can be added.'
+        );
+      }
+      const repositoryPath = path.resolve(preflight.root);
+      const existing = this.state.repositories.find(
+        (repository) => path.resolve(repository.path) === repositoryPath
+      );
+      if (existing) {
+        if (existing.status === 'DISCONNECTED') {
+          throw new Error(
+            'Repository is disconnected. Reconnect the existing repository instead.'
+          );
+        }
+        return this.recordRepositoryPreflight(existing.id, preflight);
+      }
+      const now = new Date().toISOString();
+      const repository: Repository = {
+        id: randomUUID(),
+        name: path.basename(repositoryPath) || repositoryPath,
+        path: repositoryPath,
+        status: 'AVAILABLE',
+        headSha: preflight.headSha,
+        branch: preflight.branch,
+        remotes: preflight.remotes,
+        createdAt: now,
+        updatedAt: now,
+        checkedAt: preflight.checkedAt
+      };
+      this.state = {
+        ...this.state,
+        repositories: [repository, ...this.state.repositories]
+      };
+      await this.persistSnapshot();
+      return clone(repository);
+    });
+  }
+
+  recordRepositoryPreflight(
+    repositoryId: string,
+    preflight: RepositoryPreflight
+  ): Promise<Repository> {
+    return this.serializeMutation(async () => {
+      const existing = this.state.repositories.find(
+        (repository) => repository.id === repositoryId
+      );
+      if (!existing) {
+        throw new Error('Repository not found.');
+      }
+      if (
+        preflight.status === 'VALID' &&
+        preflight.root &&
+        this.state.repositories.some(
+          (repository) =>
+            repository.id !== repositoryId &&
+            path.resolve(repository.path) === path.resolve(preflight.root!)
+        )
+      ) {
+        throw new Error('Repository path is already connected to another repository.');
+      }
+      const repository: Repository = {
+        ...existing,
+        path:
+          preflight.status === 'VALID' && preflight.root
+            ? path.resolve(preflight.root)
+            : existing.path,
+        status:
+          preflight.status === 'VALID'
+            ? 'AVAILABLE'
+            : preflight.status === 'MISSING'
+              ? 'MISSING'
+              : 'INVALID',
+        headSha: preflight.status === 'VALID' ? preflight.headSha : existing.headSha,
+        branch: preflight.status === 'VALID' ? preflight.branch : existing.branch,
+        remotes: preflight.status === 'VALID' ? preflight.remotes : existing.remotes,
+        error: preflight.status === 'VALID' ? undefined : preflight.error,
+        updatedAt: new Date().toISOString(),
+        checkedAt: preflight.checkedAt
+      };
+      this.state = {
+        ...this.state,
+        repositories: this.state.repositories.map((candidate) =>
+          candidate.id === repositoryId ? repository : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(repository);
+    });
+  }
+
+  disconnectRepository(repositoryId: string): Promise<Repository> {
+    return this.serializeMutation(async () => {
+      const existing = this.state.repositories.find(
+        (repository) => repository.id === repositoryId
+      );
+      if (!existing) {
+        throw new Error('Repository not found.');
+      }
+      if (existing.status === 'DISCONNECTED') {
+        return clone(existing);
+      }
+      const repository: Repository = {
+        ...existing,
+        status: 'DISCONNECTED',
+        error: undefined,
+        updatedAt: new Date().toISOString()
+      };
+      this.state = {
+        ...this.state,
+        repositories: this.state.repositories.map((candidate) =>
+          candidate.id === repositoryId ? repository : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(repository);
+    });
+  }
+
+  createBoard(input: CreateBoardRequest): Promise<Board> {
+    return this.serializeMutation(async () => {
+      const values = validateBoardInput(input, this.state.repositories);
+      const now = new Date().toISOString();
+      const board: Board = {
+        id: randomUUID(),
+        ...values,
+        createdAt: now,
+        updatedAt: now
+      };
+      this.state = { ...this.state, boards: [board, ...this.state.boards] };
+      await this.persistSnapshot();
+      return clone(board);
+    });
+  }
+
+  updateBoard(input: UpdateBoardRequest): Promise<Board> {
+    return this.serializeMutation(async () => {
+      const existing = this.state.boards.find((board) => board.id === input.boardId);
+      if (!existing) {
+        throw new Error('Board not found.');
+      }
+      const values = validateBoardInput(input, this.state.repositories);
+      const board: Board = {
+        ...existing,
+        ...values,
+        updatedAt: new Date().toISOString()
+      };
+      this.state = {
+        ...this.state,
+        boards: this.state.boards.map((candidate) =>
+          candidate.id === board.id ? board : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(board);
+    });
+  }
+
+  deleteBoard(boardId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      if (!this.state.boards.some((board) => board.id === boardId)) {
+        throw new Error('Board not found.');
+      }
+      this.state = {
+        ...this.state,
+        boards: this.state.boards.filter((board) => board.id !== boardId)
+      };
+      await this.persistSnapshot();
+    });
   }
 
   createAttachmentDraft(): Promise<AttachmentDraftSnapshot> {
@@ -2022,7 +2249,7 @@ export class FileTaskStore {
       runtimeId,
       title: input.title.trim(),
       prompt: input.prompt.trim(),
-      repositoryPath: input.repositoryPath.trim(),
+      repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
       workflowPhase: 'READY',
@@ -2044,8 +2271,14 @@ export class FileTaskStore {
     if (!task.prompt) {
       throw new Error('Task prompt is required.');
     }
-    if (!task.repositoryPath) {
-      throw new Error('Repository path is required.');
+    const repository = this.state.repositories.find(
+      (candidate) => candidate.id === task.repositoryId
+    );
+    if (!repository) {
+      throw new Error('Repository not found.');
+    }
+    if (repository.status !== 'AVAILABLE') {
+      throw new Error('Repository is not available.');
     }
 
     if (fork && input.attachmentDraftId) {
@@ -2099,7 +2332,7 @@ export class FileTaskStore {
           source,
           payload: {
             title: task.title,
-            repositoryPath: task.repositoryPath,
+            repositoryId: task.repositoryId,
             forkedFromTaskId: task.forkedFromTaskId,
             forkedFromRunId: task.forkedFromRunId,
             attachmentIds: attachmentRecords.map((attachment) => attachment.id)
@@ -3536,7 +3769,7 @@ export class FileTaskStore {
       id: randomUUID(),
       taskId: input.task.id,
       iterationId: iteration.id,
-      repositoryPath: input.task.repositoryPath,
+      repositoryId: input.task.repositoryId,
       worktreePath: input.worktreePath,
       branchName: input.branchName,
       baseRef: input.baseRef,
@@ -5059,6 +5292,8 @@ function requireCurrentState(state: PersistedState): StoreState {
     );
   }
   const requiredCollections: Array<keyof StoreState> = [
+    'repositories',
+    'boards',
     'tasks',
     'iterations',
     'worktrees',
@@ -5102,6 +5337,8 @@ function requireCurrentState(state: PersistedState): StoreState {
   validateCurrentStoreRecords(current);
   validatePersistedRelationships(current);
   validatePersistedRuntimeIdentity(current);
+  validatePersistedRepositoryReferences(current);
+  validatePersistedBoards(current);
   validatePersistedTaskCreationMetadata(current);
   validatePersistedAttachments(current);
   return current;
@@ -5760,6 +5997,58 @@ function assertRuntimeOwnedAgentRecord(
   }
 }
 
+function validatePersistedBoards(state: StoreState): void {
+  const boardIds = new Set<string>();
+  for (const board of state.boards) {
+    try {
+      if (typeof board.id !== 'string' || !board.id || boardIds.has(board.id)) {
+        throw new Error('invalid board id');
+      }
+      if (typeof board.createdAt !== 'string' || typeof board.updatedAt !== 'string') {
+        throw new Error('invalid board timestamps');
+      }
+      validateBoardInput(board, state.repositories);
+      boardIds.add(board.id);
+    } catch {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: boards contains an invalid record.`
+      );
+    }
+  }
+}
+
+function validatePersistedRepositoryReferences(state: StoreState): void {
+  const repositoryIds = new Set<string>();
+  for (const repository of state.repositories) {
+    if (
+      typeof repository.id !== 'string' ||
+      !repository.id ||
+      repositoryIds.has(repository.id) ||
+      typeof repository.path !== 'string' ||
+      !repository.path ||
+      !['AVAILABLE', 'MISSING', 'INVALID', 'DISCONNECTED'].includes(repository.status)
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: repositories contains an invalid record.`
+      );
+    }
+    repositoryIds.add(repository.id);
+  }
+  if (
+    state.tasks.some(
+      (task) =>
+        !repositoryIds.has(task.repositoryId) ||
+        !Array.isArray(task.forkedAlternativeTaskIds) ||
+        !task.forkedAlternativeTaskIds.every((taskId) => typeof taskId === 'string')
+    ) ||
+    state.worktrees.some((worktree) => !repositoryIds.has(worktree.repositoryId))
+  ) {
+    throw new Error(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: a task or worktree references an unknown repository.`
+    );
+  }
+}
+
 function assertServerRuntime(
   state: StoreState,
   runtimeId: string,
@@ -5853,66 +6142,6 @@ function utf8SafePrefixLength(buffer: Buffer, endOfFile: boolean): number {
     (lead & 0xf0) === 0xe0 ? 3 :
     (lead & 0xf8) === 0xf0 ? 4 : 1;
   return buffer.length - start < expected ? start : buffer.length;
-}
-
-function migratePersistedState(state: PersistedState): {
-  state: PersistedState;
-  changed: boolean;
-} {
-  if (state.schemaVersion !== 16) {
-    return { state, changed: false };
-  }
-  return {
-    state: {
-      ...state,
-      tasks: migrateSchema16ReviewProjections(state.tasks),
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    },
-    changed: true
-  };
-}
-
-function migrateSchema16ReviewProjections(
-  tasks: PersistedState['tasks']
-): PersistedState['tasks'] {
-  if (!Array.isArray(tasks)) return tasks;
-  return tasks.map((task) => {
-    if (!task || typeof task !== 'object' || Array.isArray(task)) return task;
-    const taskRecord = task as unknown as Record<string, unknown>;
-    const projection = taskRecord.projection;
-    if (!projection || typeof projection !== 'object' || Array.isArray(projection)) {
-      return task;
-    }
-    const projectionRecord = projection as Record<string, unknown>;
-    if (!('codexReview' in projectionRecord)) return task;
-    const { codexReview, ...currentProjection } = projectionRecord;
-    const review = migrateSchema16ReviewResult(codexReview);
-    return {
-      ...taskRecord,
-      projection: {
-        ...currentProjection,
-        ...(review === undefined ? {} : { agentReview: review })
-      }
-    };
-  }) as Task[];
-}
-
-function migrateSchema16ReviewResult(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  const record = value as Record<string, unknown>;
-  const result = record.result;
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return value;
-  const resultRecord = result as Record<string, unknown>;
-  return {
-    ...record,
-    result: {
-      ...resultRecord,
-      schemaVersion:
-        resultRecord.schemaVersion === 'codex-review/v1'
-          ? 'agent-review/v1'
-          : resultRecord.schemaVersion
-    }
-  };
 }
 
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
@@ -6082,7 +6311,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
           updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? currentReview?.updatedAt
         }
       },
-      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? task.updatedAt
+      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? normalizedTask.updatedAt
     };
   });
 

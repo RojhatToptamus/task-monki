@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AppEventBus } from '../../runner/AppEventBus';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
@@ -35,7 +36,7 @@ describe('ACP cold recovery', () => {
     const task = await seedStore.createTask({
       title: 'Cold ACP recovery',
       prompt: 'Do not replay this prompt after restart.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(seedStore, directory)).id,
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });
@@ -163,7 +164,7 @@ describe('ACP cold recovery', () => {
     const task = await store.createTask({
       title: 'ACP reconciliation race',
       prompt: 'Finish before stale reconciliation.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });
@@ -246,7 +247,7 @@ describe('ACP cold recovery', () => {
     const task = await store.createTask({
       title: 'ACP runtime-loss race',
       prompt: 'Finish before stale process loss.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId: TEST_ACP_PROFILE.descriptor.id,
       agentSettings: settings
     });

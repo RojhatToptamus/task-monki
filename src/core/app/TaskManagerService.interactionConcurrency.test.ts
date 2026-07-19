@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import type { AgentExecutionSettings } from '../../shared/agent';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
@@ -40,7 +41,7 @@ describe('TaskManagerService interaction and cancellation coordination', () => {
     const task = await store.createTask({
       title: 'Cancel an approval',
       prompt: 'Do not execute after cancellation.',
-      repositoryPath: directory,
+      repositoryId: (await addTestRepository(store, directory)).id,
       runtimeId: 'codex',
       agentSettings: settings
     });

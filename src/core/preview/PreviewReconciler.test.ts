@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { PreviewGateway } from './PreviewGateway';
 import { PreviewReconciler } from './PreviewReconciler';
 import { previewRouteHostname } from './PreviewRouteHostname';
@@ -188,7 +189,7 @@ async function runningGeneration() {
   await git(repo, ['commit', '-m', 'Initial']);
   const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
   const store = new FileTaskStore(path.join(root, 'store'));
-  const task = await store.createTask({ title: 'Reconcile', prompt: 'Test', repositoryPath: repo });
+  const task = await store.createTask({ title: 'Reconcile', prompt: 'Test', repositoryId: (await addTestRepository(store, repo)).id });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task, branchName: 'codex/reconcile', worktreePath: repo, baseSha: head
   });

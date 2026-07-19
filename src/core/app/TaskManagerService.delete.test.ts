@@ -8,6 +8,7 @@ import { createTaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 const exec = promisify(execFile);
 
@@ -105,7 +106,7 @@ describe('TaskManagerService task deletion', () => {
     const task = await store.createTask({
       title: 'Active delete guard',
       prompt: 'Keep the run alive.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -144,10 +145,11 @@ describe('TaskManagerService task deletion', () => {
       worktreeRoot,
       agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
+    const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
       title: 'Dirty delete guard',
       prompt: 'Create a dirty worktree.',
-      repositoryPath
+      repositoryId: repository.id
     });
     const worktree = await service.prepareWorktree({ taskId: task.id });
     await fs.writeFile(path.join(worktree.worktreePath, 'dirty.txt'), 'dirty\n');
@@ -171,10 +173,11 @@ describe('TaskManagerService task deletion', () => {
       worktreeRoot,
       agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
+    const repository = await service.addRepository(repositoryPath);
     const task = await service.createTask({
       title: 'Clean delete removal',
       prompt: 'Remove the clean worktree.',
-      repositoryPath
+      repositoryId: repository.id
     });
     const worktree = await service.prepareWorktree({ taskId: task.id });
 

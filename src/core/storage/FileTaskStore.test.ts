@@ -13,6 +13,7 @@ import type {
 import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { ArtifactAppendAmbiguousError, FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore', () => {
   it('allows exactly one live owner for a store root', async () => {
@@ -27,7 +28,7 @@ describe('FileTaskStore', () => {
     const task = await first.createTask({
       title: 'Single durable owner',
       prompt: 'Prevent lost updates from a second writer.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(first, dir)).id
     });
     await first.close();
 
@@ -71,7 +72,7 @@ describe('FileTaskStore', () => {
         second.createTask({
           title: 'Reclaim winner',
           prompt: 'Keep the new live lease intact.',
-          repositoryPath: dir
+          repositoryId: (await addTestRepository(second, dir)).id
         })
       ).resolves.toMatchObject({ title: 'Reclaim winner' });
     } finally {
@@ -97,10 +98,11 @@ describe('FileTaskStore', () => {
   it('drains an admitted mutation before terminal close and rejects late work', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-close-'));
     const store = new FileTaskStore(dir);
+    const repository = await addTestRepository(store, dir);
     const creation = store.createTask({
       title: 'Admitted before close',
       prompt: 'Publish this mutation before releasing ownership.',
-      repositoryPath: dir
+      repositoryId: repository.id
     });
     const closing = store.close();
 
@@ -112,7 +114,7 @@ describe('FileTaskStore', () => {
       store.createTask({
         title: 'Too late',
         prompt: 'Do not admit work after shutdown begins.',
-        repositoryPath: dir
+        repositoryId: repository.id
       })
     ).rejects.toThrow('Task store is closed');
 
@@ -158,10 +160,14 @@ describe('FileTaskStore', () => {
       }
       await renameFile(source, destination);
     });
-    const creation = store.createTask({
-      title: 'Visible after opening',
-      prompt: 'Wait for the admitted mutation before reading.',
-      repositoryPath: dir
+    const creation = store.addRepository({
+      path: dir,
+      root: dir,
+      status: 'VALID',
+      headSha: 'test-head',
+      branch: 'main',
+      remotes: [],
+      checkedAt: new Date(0).toISOString()
     });
     let reading: ReturnType<FileTaskStore['snapshot']> | undefined;
 
@@ -178,9 +184,9 @@ describe('FileTaskStore', () => {
       expect(readFinished).toBe(false);
 
       releaseMutationRename();
-      await expect(creation).resolves.toMatchObject({ title: 'Visible after opening' });
+      await expect(creation).resolves.toMatchObject({ path: dir });
       await expect(reading).resolves.toMatchObject({
-        tasks: [expect.objectContaining({ title: 'Visible after opening' })]
+        repositories: [expect.objectContaining({ path: dir })]
       });
     } finally {
       releaseInitializationRename();
@@ -250,7 +256,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Publish one run',
         prompt: 'Do not duplicate a committed run.',
-        repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -319,7 +325,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Recover queued run',
       prompt: 'Start safely.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -355,7 +361,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Bound the store file',
       prompt: 'Reject an oversized snapshot before publication.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const originalByteLength = Buffer.byteLength.bind(Buffer);
     const byteLength = vi.spyOn(Buffer, 'byteLength').mockImplementation(
@@ -390,7 +396,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Read repo',
       prompt: 'Summarize and do not write.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -433,7 +439,7 @@ describe('FileTaskStore', () => {
       runtimeId: 'opencode',
       title: 'Retry terminal persistence',
       prompt: 'Persist one terminal artifact.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -508,7 +514,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Artifact swap',
         prompt: 'Keep output contained.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -558,7 +564,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Artifact crash cleanup',
         prompt: 'Leave artifacts until restart can resolve publication.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         attachmentDraftId: draft.id
       });
       const attachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
@@ -640,7 +646,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Durable deletion',
       prompt: 'Treat post-publication cleanup as recoverable maintenance.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -702,7 +708,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Artifact path integrity',
       prompt: 'Keep artifact paths managed.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -763,7 +769,7 @@ describe('FileTaskStore', () => {
     const otherTask = await fixture.store.createTask({
       title: 'Unrelated task',
       prompt: 'Must not own the first task run.',
-      repositoryPath: fixture.dir
+      repositoryId: (await addTestRepository(fixture.store, fixture.dir)).id
     });
     await fixture.store.close();
     const storePath = path.join(fixture.dir, 'store.json');
@@ -848,7 +854,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Require durable evidence',
       prompt: 'Do not reinterpret missing evidence as empty output.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(task.id, 'git-snapshot', 'verified evidence');
 
@@ -873,7 +879,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Fence crash tails',
       prompt: 'Keep only artifact bytes named by the durable snapshot.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(task.id, 'git-snapshot', 'committed');
     await fs.appendFile(artifact.path, '-uncommitted');
@@ -895,7 +901,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Read committed artifact evidence',
       prompt: 'Do not expose an artifact while its durable metadata is changing.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -976,7 +982,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Protect live artifacts',
         prompt: 'Fail closed if artifact permissions change.',
-        repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
       });
       const artifact = await store.writeTextArtifact(
         task.id,
@@ -1006,7 +1012,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Bound retained evidence',
       prompt: 'Keep artifact growth finite.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1026,7 +1032,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Rollback bounded evidence',
       prompt: 'Never rewrite bytes named by the durable snapshot.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const limit = 256 * 1024;
     const marker = Buffer.from(
@@ -1070,7 +1076,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Surface ambiguous artifact bytes',
       prompt: 'Do not retry an append whose bytes could not be rolled back.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1123,7 +1129,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Rollback failed artifact flush',
       prompt: 'Do not retain an uncommitted append.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1162,7 +1168,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Recover an artifact close failure',
       prompt: 'Keep a failed append safe to retry.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1207,7 +1213,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Recover a rolled-back close failure',
       prompt: 'Keep the original append failure retry-safe.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1257,7 +1263,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Surface ambiguous partial bytes',
       prompt: 'Do not retry a partial append whose rollback failed.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const artifact = await store.writeTextArtifact(
       task.id,
@@ -1318,7 +1324,7 @@ describe('FileTaskStore', () => {
     await store.createTask({
       title: 'Initial task',
       prompt: 'Seed the store.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
 
     const originalOpen = fs.open.bind(fs);
@@ -1343,7 +1349,7 @@ describe('FileTaskStore', () => {
         store.createTask({
           title: 'Fails while store write is unavailable',
           prompt: 'This persist should fail.',
-          repositoryPath: dir
+          repositoryId: (await addTestRepository(store, dir)).id
         })
       ).rejects.toThrow('Injected store write failure');
     } finally {
@@ -1363,7 +1369,7 @@ describe('FileTaskStore', () => {
     await store.createTask({
       title: 'Persists after recovery',
       prompt: 'This persist should succeed.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
 
     await store.close();
@@ -1383,7 +1389,7 @@ describe('FileTaskStore', () => {
     const manual = await store.createTask({
       title: 'Manual policy task',
       prompt: 'Keep manual completion.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       completionPolicy: 'MANUAL'
     });
 
@@ -1392,7 +1398,7 @@ describe('FileTaskStore', () => {
       store.createTask({
         title: 'Invalid policy task',
         prompt: 'Reject bad input.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         completionPolicy: 'NOT_A_POLICY' as never
       })
     ).rejects.toThrow('Invalid completion policy');
@@ -1404,7 +1410,7 @@ describe('FileTaskStore', () => {
     await store.createTask({
       title: 'Idempotent task',
       prompt: 'Persist the retry key.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-persisted-shape-0001'
     });
     await store.close();
@@ -1427,7 +1433,7 @@ describe('FileTaskStore', () => {
     await store.createTask({
       title: 'Validate durable primitives',
       prompt: 'Reject values that would crash downstream services.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     await store.close();
 
@@ -1451,13 +1457,13 @@ describe('FileTaskStore', () => {
     await store.createTask({
       title: 'First idempotent task',
       prompt: 'Persist the first retry key.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-persisted-first-0001'
     });
     await store.createTask({
       title: 'Second idempotent task',
       prompt: 'Persist the second retry key.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-persisted-second-0001'
     });
     await store.close();
@@ -1474,62 +1480,45 @@ describe('FileTaskStore', () => {
     );
   });
 
-  it('rejects the disposable schema 12 Phase 3 prototype instead of migrating its ownership model', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema12-'));
+  it('rejects unsupported store schemas without rewriting them', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-old-schema-'));
     const store = new FileTaskStore(dir);
-    await store.createTask({ title: 'Prototype', prompt: 'Reject it', repositoryPath: dir });
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    await fs.writeFile(storePath, `${JSON.stringify({ ...persisted, schemaVersion: 12 }, null, 2)}\n`);
-    await store.close();
-    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow('Unsupported Task Monki store schema 12');
-  });
-
-  it('upgrades the current main schema review projection without retaining Codex-specific fields', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema16-'));
-    const store = new FileTaskStore(dir);
-    const task = await store.createTask({
-      title: 'Current main review',
-      prompt: 'Preserve the review verdict.',
-      repositoryPath: dir
+    await store.createTask({
+      title: 'Unsupported schema task',
+      prompt: 'Fail closed.',
+      repositoryId: (await addTestRepository(store, dir)).id
     });
-    await store.close();
 
     const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-      schemaVersion: number;
-      tasks: Array<{ id: string; projection: Record<string, unknown> }>;
-    };
-    const persistedTask = persisted.tasks.find((candidate) => candidate.id === task.id)!;
-    delete persistedTask.projection.agentReview;
-    persistedTask.projection.codexReview = {
-      status: 'PASSED',
-      summary: 'No blocking issues found.',
-      result: {
-        schemaVersion: 'codex-review/v1',
-        verdict: 'PASSED',
-        summary: 'No blocking issues found.',
-        findings: []
-      }
-    };
-    persisted.schemaVersion = 16;
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    await fs.writeFile(
+      storePath,
+      `${JSON.stringify(
+        {
+          ...persisted,
+          schemaVersion: TASK_STORE_SCHEMA_VERSION - 1
+        },
+        null,
+        2
+      )}\n`,
+      'utf8'
+    );
+    await store.close();
 
-    const migrated = new FileTaskStore(dir);
-    const migratedTask = await migrated.getTask(task.id);
-    expect(migratedTask?.projection.agentReview).toMatchObject({
-      status: 'PASSED',
-      result: { schemaVersion: 'agent-review/v1', verdict: 'PASSED' }
-    });
-    expect(migratedTask?.projection).not.toHaveProperty('codexReview');
-    expect((await migrated.snapshot()).schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    await migrated.close();
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      `Unsupported Task Monki store schema ${TASK_STORE_SCHEMA_VERSION - 1}`
+    );
+    const unchanged = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    expect(unchanged.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION - 1);
   });
 
   it('allows stopped environment history but enforces one live environment per task', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-managed-environment-'));
     const store = new FileTaskStore(dir);
-    const task = await store.createTask({ title: 'Managed environment', prompt: 'Test', repositoryPath: dir });
+    const task = await store.createTask({ title: 'Managed environment', prompt: 'Test', repositoryId: (await addTestRepository(store, dir)).id });
     const engine = {
       contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
       serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
@@ -1554,7 +1543,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Preview task',
       prompt: 'Run the preview.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -1653,7 +1642,7 @@ describe('FileTaskStore', () => {
   it('reads bounded artifact ranges without splitting UTF-8 code points', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-artifact-range-'));
     const store = new FileTaskStore(dir);
-    const task = await store.createTask({ title: 'Logs', prompt: 'Tail safely', repositoryPath: dir });
+    const task = await store.createTask({ title: 'Logs', prompt: 'Tail safely', repositoryId: (await addTestRepository(store, dir)).id });
     const artifact = await store.createPreviewArtifact(task.id, 'preview-stdout');
     await store.appendBoundedArtifact(artifact.id, 'a😀b');
     const first = await store.readArtifactRange(artifact.id, 0, 4);
@@ -1670,7 +1659,7 @@ describe('FileTaskStore', () => {
   it('bounds terminal preview history and removes its child evidence and files', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-prune-'));
     const store = new FileTaskStore(dir);
-    const task = await store.createTask({ title: 'History', prompt: 'Bound it', repositoryPath: dir });
+    const task = await store.createTask({ title: 'History', prompt: 'Bound it', repositoryId: (await addTestRepository(store, dir)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/history', worktreePath: dir, baseSha: 'base'
     });
@@ -1753,7 +1742,7 @@ describe('FileTaskStore', () => {
   it('bounds completed argv probe attempts and resources while a generation remains active', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-probe-prune-'));
     const store = new FileTaskStore(dir);
-    const task = await store.createTask({ title: 'Probe history', prompt: 'Bound it live', repositoryPath: dir });
+    const task = await store.createTask({ title: 'Probe history', prompt: 'Bound it live', repositoryId: (await addTestRepository(store, dir)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/probe-history', worktreePath: dir, baseSha: 'base'
     });
@@ -1813,7 +1802,7 @@ describe('FileTaskStore', () => {
   it('rolls back both in-memory generation roles when atomic cutover persistence fails', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-cutover-'));
     const store = new FileTaskStore(dir);
-    const task = await store.createTask({ title: 'Cutover', prompt: 'Stay atomic', repositoryPath: dir });
+    const task = await store.createTask({ title: 'Cutover', prompt: 'Stay atomic', repositoryId: (await addTestRepository(store, dir)).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/cutover', worktreePath: dir, baseSha: 'base'
     });
@@ -1880,7 +1869,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Compare approaches',
       prompt: 'Implement the feature.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -1904,7 +1893,7 @@ describe('FileTaskStore', () => {
     const alternative = await store.createForkedAlternativeTask({
       title: 'Alternative: Compare approaches',
       prompt: 'Try another implementation.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       sourceTaskId: task.id,
       sourceRunId: run.id
     });
@@ -1934,12 +1923,12 @@ describe('FileTaskStore', () => {
     const linkedTask = await store.createTask({
       title: 'Linked PR task',
       prompt: 'Open a PR for this task.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const untouchedTask = await store.createTask({
       title: 'Untouched local task',
       prompt: 'Keep this task local.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: linkedTask,
@@ -1964,7 +1953,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Publish branch',
       prompt: 'Push the branch.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -2001,12 +1990,12 @@ describe('FileTaskStore', () => {
     const verifiedTask = await store.createTask({
       title: 'Verified merge task',
       prompt: 'Keep verification after merge.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const manualTask = await store.createTask({
       title: 'Manual completion task',
       prompt: 'Keep manual completion.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const verifiedRecords = await store.createIterationAndWorktree({
       task: verifiedTask,
@@ -2066,37 +2055,37 @@ describe('FileTaskStore', () => {
     const mergedTask = await store.createTask({
       title: 'Merged task',
       prompt: 'Complete when merged.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const verifiedTask = await store.createTask({
       title: 'Verified task',
       prompt: 'Require checks after merge.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const verifiedStaleTask = await store.createTask({
       title: 'Verified stale task',
       prompt: 'Reject old passing checks after merge.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const verifiedPassingTask = await store.createTask({
       title: 'Verified passing task',
       prompt: 'Complete when merged checks match.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const manualTask = await store.createTask({
       title: 'Manual task',
       prompt: 'Require explicit completion.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const archivedTask = await store.createTask({
       title: 'Archived task',
       prompt: 'Retain remote evidence without reactivating the task.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const mismatchedTask = await store.createTask({
       title: 'Mismatched merge task',
       prompt: 'Reject a merge snapshot for another head.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const mergedRecords = await store.createIterationAndWorktree({
       task: mergedTask,
@@ -2268,7 +2257,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Retry before review',
       prompt: 'Make the requested change.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -2321,7 +2310,7 @@ describe('FileTaskStore', () => {
     const sourceTask = await store.createTask({
       title: 'Compare deletion',
       prompt: 'Build the source task.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration: sourceIteration, worktree: sourceWorktree } =
       await store.createIterationAndWorktree({
@@ -2346,7 +2335,7 @@ describe('FileTaskStore', () => {
     const alternativeTask = await store.createForkedAlternativeTask({
       title: 'Alternative: Compare deletion',
       prompt: 'Try another implementation.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       sourceTaskId: sourceTask.id,
       sourceRunId: sourceRun.id
     });
@@ -2529,7 +2518,7 @@ describe('FileTaskStore', () => {
     const sourceTask = await store.createTask({
       title: 'Source delete',
       prompt: 'Build the original task.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task: sourceTask,
@@ -2552,7 +2541,7 @@ describe('FileTaskStore', () => {
     const alternativeTask = await store.createForkedAlternativeTask({
       title: 'Alternative: Source delete',
       prompt: 'Keep this alternative.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       sourceTaskId: sourceTask.id,
       sourceRunId: run.id
     });
@@ -2570,6 +2559,33 @@ describe('FileTaskStore', () => {
     expect(alternativeAfterDelete?.forkedFromRunId).toBeUndefined();
   });
 
+  it('rejects schema-current task records missing required alternative ids', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-repair-'));
+    const store = new FileTaskStore(dir);
+
+    const task = await store.createTask({
+      title: 'Repair task shape',
+      prompt: 'Keep current records loadable.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const storePath = path.join(dir, 'store.json');
+    const raw = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    raw.tasks = raw.tasks.map((candidate: any) => {
+      if (candidate.id !== task.id) {
+        return candidate;
+      }
+      const withoutAlternatives = { ...candidate };
+      delete withoutAlternatives.forkedAlternativeTaskIds;
+      return withoutAlternatives;
+    });
+    await fs.writeFile(storePath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+    await store.close();
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid`
+    );
+  });
+
   it('preserves structured terminal review status when reloading', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-status-'));
     const store = new FileTaskStore(dir);
@@ -2577,7 +2593,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Keep review verdict',
       prompt: 'Render passed review actions.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -2667,7 +2683,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title,
         prompt: 'Implement and review.',
-        repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -2776,7 +2792,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Retry failed implementation',
         prompt: 'Implement the task.',
-        repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -2851,7 +2867,7 @@ describe('FileTaskStore', () => {
       const task = await store.createTask({
         title: 'Keep historical review contextual',
         prompt: 'Run implementation, review it, then do newer work.',
-        repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -2978,7 +2994,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Review flow',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3032,7 +3048,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Repair review flow',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3122,7 +3138,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Repair idle review',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3232,7 +3248,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Repair completed but unfinalized review',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3337,7 +3353,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Repair completed review result',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3452,7 +3468,7 @@ describe('FileTaskStore', () => {
     const task = await store.createTask({
       title: 'Repair native review result',
       prompt: 'Implement and review.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -3567,7 +3583,7 @@ async function createRunFixture(suffix: string) {
   const task = await store.createTask({
     title: 'Durable run fixture',
     prompt: 'Keep record ownership consistent.',
-    repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,

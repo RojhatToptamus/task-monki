@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PreviewNativeProcessIdentity } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { NativeJobRunner, PreviewJobCompletionAmbiguousError } from './NativeJobRunner';
 import type { NativeLaunchInput } from './NativeLauncherHost';
 import { NativeServiceRuntime } from './NativeServiceRuntime';
@@ -124,7 +125,7 @@ async function runtimeFixture() {
   const sourcePath = path.join(root, 'preview', 'source');
   await fs.mkdir(sourcePath, { recursive: true });
   const store = new FileTaskStore(path.join(root, 'store'));
-  const task = await store.createTask({ title: 'Boundary', prompt: 'Test', repositoryPath: root });
+  const task = await store.createTask({ title: 'Boundary', prompt: 'Test', repositoryId: (await addTestRepository(store, root)).id });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task, branchName: 'codex/boundary', worktreePath: root, baseSha: 'head'
   });

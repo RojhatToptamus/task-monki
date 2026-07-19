@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import type {
   AgentExecutionSettings,
   AgentProtocolMessageReference,
@@ -3404,7 +3405,7 @@ describe('OpenCodeAdapter', () => {
       runtimeId: 'opencode',
       title: 'OpenCode target alternative',
       prompt: fixture.task.prompt,
-      repositoryPath: fixture.task.repositoryPath,
+      repositoryId: fixture.task.repositoryId,
       agentSettings: SETTINGS
     });
     const targetOwnership = await fixture.store.createIterationAndWorktree({
@@ -4174,7 +4175,7 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
     runtimeId: 'opencode',
     title: 'OpenCode adapter lifecycle',
     prompt: 'Implement the requested change.',
-    repositoryPath: worktreePath,
+    repositoryId: (await addTestRepository(store, worktreePath)).id,
     agentSettings: SETTINGS
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({

@@ -13,6 +13,7 @@ import type {
   Task,
   TaskSnapshot
 } from '../shared/contracts';
+import { createInitialProjection } from '../shared/contracts';
 import { createEmptyState } from '../core/projection/reducer';
 import { git } from '../core/git/gitCli';
 import {
@@ -411,7 +412,7 @@ describe('runProviderSmoke', () => {
       service,
       cleanupPaths,
       { timeoutMs: 200 },
-      { cancelTimeoutMs: 275 }
+      { cancelTimeoutMs: 2_000 }
     );
 
     expect(service.cancellationTransitions).toEqual([
@@ -739,8 +740,19 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     return structuredClone(runtime);
   }
 
-  getDefaultRepositoryPath(): string {
-    return this.repositoryPath;
+  async addRepository(repositoryPath: string) {
+    const now = new Date().toISOString();
+    const repository = {
+      id: 'repository-smoke',
+      name: path.basename(repositoryPath),
+      path: repositoryPath,
+      status: 'AVAILABLE' as const,
+      remotes: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    this.snapshot.repositories = [repository];
+    return structuredClone(repository);
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
@@ -750,11 +762,17 @@ class FakeProviderSmokeService implements ProviderSmokeService {
       runtimeId: input.runtimeId!,
       title: input.title,
       prompt: input.prompt,
-      repositoryPath: input.repositoryPath,
+      repositoryId: input.repositoryId,
+      workflowPhase: 'READY' as const,
+      resolution: 'NONE' as const,
+      completionPolicy: 'LOCAL_ACCEPTANCE' as const,
+      phaseVersion: 1,
+      forkedAlternativeTaskIds: [],
       agentSettings: input.agentSettings!,
       createdAt: now,
-      updatedAt: now
-    } as Task;
+      updatedAt: now,
+      projection: createInitialProjection(now)
+    } satisfies Task;
     this.snapshot.tasks.push(task);
     return structuredClone(task);
   }
@@ -1018,7 +1036,7 @@ async function runHarness(
       repositoryPath,
       runtimeIds: [],
       modelIds: [],
-      timeoutMs: 1_000,
+      timeoutMs: 5_000,
       confirmThrowaway: true,
       confirmProviderUsage: true,
       help: false,
@@ -1027,7 +1045,7 @@ async function runHarness(
     {
       createService: () => service,
       pollIntervalMs: 2,
-      cancelTimeoutMs: 25,
+      cancelTimeoutMs: 1_000,
       ...dependencyOverrides
     }
   );

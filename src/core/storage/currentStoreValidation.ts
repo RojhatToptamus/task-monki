@@ -148,8 +148,8 @@ const SHA256 = /^[a-f0-9]{64}$/u;
  */
 export function validateCurrentStoreRecords(state: StoreState): void {
   validateCollection(state.tasks, 'tasks', (task) => {
-    strings(task, 'tasks', ['runtimeId', 'title', 'prompt', 'repositoryPath']);
-    uuidField(task, 'id', 'tasks');
+    strings(task, 'tasks', ['runtimeId', 'title', 'prompt']);
+    uuidFields(task, 'tasks', ['id', 'repositoryId']);
     enumField(task, 'workflowPhase', WORKFLOW_PHASES, 'tasks');
     enumField(task, 'resolution', RESOLUTIONS, 'tasks');
     enumField(task, 'completionPolicy', COMPLETION_POLICIES, 'tasks');
@@ -185,10 +185,10 @@ export function validateCurrentStoreRecords(state: StoreState): void {
 
   validateCollection(state.worktrees, 'worktrees', (worktree) => {
     strings(worktree, 'worktrees', [
-      'repositoryPath', 'worktreePath', 'branchName', 'baseSha'
+      'worktreePath', 'branchName', 'baseSha'
     ]);
     optionalStrings(worktree, 'worktrees', ['baseRef', 'headSha', 'error']);
-    uuidFields(worktree, 'worktrees', ['id', 'taskId', 'iterationId']);
+    uuidFields(worktree, 'worktrees', ['id', 'taskId', 'iterationId', 'repositoryId']);
     enumField(worktree, 'status', WORKTREE_STATUSES, 'worktrees');
     timestamp(worktree, 'createdAt', 'worktrees');
     timestamp(worktree, 'updatedAt', 'worktrees');

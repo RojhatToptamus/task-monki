@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { RunRecord } from '../../../shared/contracts';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
@@ -243,7 +244,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       const task = await store.createTask({
         title: 'Full access contract',
         prompt: 'Use the native unrestricted profile.',
-        repositoryPath: worktreePath,
+        repositoryId: (await addTestRepository(store, worktreePath)).id,
         agentSettings: settings
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -371,7 +372,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     const task = await store.createTask({
       title: 'App Server turn',
       prompt: 'Finish the fake task.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       attachmentDraftId: draft.id,
       agentSettings: {
         model: 'fake-model',
@@ -3652,7 +3653,7 @@ async function createTaskContext(
   const task = await store.createTask({
     title: 'Approval turn',
     prompt: 'Finish the fake task.',
-    repositoryPath: repositoryDir,
+    repositoryId: (await addTestRepository(store, repositoryDir)).id,
     attachmentDraftId,
     agentSettings: {
       model: 'fake-model',
