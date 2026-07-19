@@ -39,8 +39,7 @@ import {
   tasksForView,
   tasksSpanMultipleRepositories,
   type NavView,
-  type TaskCardVM,
-  type Tone
+  type TaskCardVM
 } from './taskView';
 
 interface MainColumnProps {

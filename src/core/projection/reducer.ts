@@ -138,7 +138,7 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     next.tasks[taskIndex] = {
       ...task,
       workflowPhase: reduceWorkflowPhase(task, event, currentRun),
-      projection: reduceProjection(task.projection, event, currentRun, task),
+      projection: reduceProjection(task.projection, event, currentRun),
       updatedAt: event.receivedAt
     };
   }
@@ -355,8 +355,7 @@ function isReviewRunEvent(task: Task, event: DomainEvent, run?: RunRecord): bool
 export function reduceProjection(
   projection: StatusProjection | undefined,
   event: DomainEvent,
-  run?: RunRecord,
-  task?: Task
+  run?: RunRecord
 ): StatusProjection {
   const current = projection ?? createInitialProjection(event.receivedAt);
   const base =

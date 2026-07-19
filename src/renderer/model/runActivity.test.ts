@@ -194,9 +194,22 @@ describe('run activity projection', () => {
           payload: { namespace: 'multi-agent', tool: 'spawn' }
         }),
         itemFixture({
+          id: 'search',
+          type: 'OTHER',
+          payload: {
+            kind: 'search',
+            title: 'Find tests',
+            rawInput: { query: '*.test.ts', path: 'src' }
+          }
+        }),
+        itemFixture({
           id: 'web',
           type: 'WEB_SEARCH',
-          payload: { query: 'opencode timeline projection' }
+          payload: {
+            kind: 'fetch',
+            title: 'Fetch ACP docs',
+            rawInput: { url: 'https://agentclientprotocol.com/protocol/v1/tool-calls' }
+          }
         }),
         itemFixture({
           id: 'compact',
@@ -214,14 +227,36 @@ describe('run activity projection', () => {
     expect(projection.rows.map((row) => row.category)).toEqual([
       'mcp',
       'mcp',
+      'search',
       'web',
       'compaction',
       'subagent'
     ]);
     expect(projection.sections.map((section) => section.key)).toEqual([
+      'files',
       'tools',
       'subagents'
     ]);
+    expect(projection.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'search', label: 'Search', detail: '*.test.ts' }),
+        expect.objectContaining({
+          category: 'web',
+          label: 'Web',
+          detail: 'https://agentclientprotocol.com/protocol/v1/tool-calls'
+        })
+      ])
+    );
+  });
+
+  it('does not fabricate an actionable request from run status alone', () => {
+    const projection = buildRunActivityProjection({
+      run: runFixture({ status: 'AWAITING_APPROVAL' }),
+      items: [],
+      interactions: []
+    });
+
+    expect(projection.rows).toEqual([]);
   });
 
   it('maps permission and question interactions into request rows', () => {

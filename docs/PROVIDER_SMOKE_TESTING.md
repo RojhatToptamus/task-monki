@@ -3,12 +3,11 @@
 Date: 2026-07-14
 
 `npm run smoke:providers` verifies real provider/model connectivity, selection,
-streaming, and terminal lifecycle through `TaskManagerService`. It deliberately
-does not verify tool execution or repository mutation. It is intentionally
-separate from deterministic seeded UI
-testing: provider smoke runs use a caller-supplied disposable Git repository,
-real runtime discovery, real Task Monki task/worktree/session/run records, and
-real provider quota or credits.
+streaming, tool execution, repository mutation, Git evidence, and terminal
+lifecycle through `TaskManagerService`. It is intentionally separate from
+deterministic seeded UI testing: provider smoke runs use a caller-supplied
+disposable Git repository, real runtime discovery, real Task Monki
+task/worktree/session/run records, and real provider quota or credits.
 
 ## Prepare a throwaway repository
 
@@ -70,8 +69,11 @@ Run `npm run smoke:providers -- --help` for all options.
   provider-native effort names with no portable ordering, the provider's
   advertised default is preserved when one exists; otherwise the harness omits
   the override instead of guessing an arbitrary, potentially expensive choice.
-- Runs are sequential and use a minimal prompt that forbids tools and edits and
-  requests the `TASK_MONKI_PROVIDER_SMOKE_OK` sentinel.
+- Runs are sequential and use a minimal implementation prompt that creates only
+  `task-monki-provider-smoke.txt`, containing the
+  `TASK_MONKI_PROVIDER_SMOKE_OK` sentinel. When a runtime advertises a
+  non-interactive write-capable execution preset, the harness selects the
+  least-privileged such preset; otherwise its normal policy remains in force.
 - The execution timeout covers task creation, provider session/turn startup,
   execution, and normal post-run evidence. When it expires, or when an
   interaction appears, a separate bounded cancellation window starts. The
@@ -82,9 +84,10 @@ Run `npm run smoke:providers -- --help` for all options.
   including one already resolved or declined when the run terminalizes, fails
   that model run.
 - A model passes only when its Task Monki run completes, returns the sentinel,
-  the exact Git snapshot returned by the explicit post-run refresh is `CLEAN`,
-  that task worktree's HEAD still equals its recorded base with no committed
-  diff or commits ahead,
+  the exact Git snapshot returned by the explicit post-run refresh is `DIRTY`,
+  the sentinel file is a regular file with exact contents and is the only Git
+  change, that task worktree's HEAD still equals its recorded base with no
+  committed diff or commits ahead,
   and a provider observation or exact adapter resolution attests the requested
   provider, model, and advertised reasoning effort.
 - The original throwaway repository's porcelain status, checked-out ref, and
@@ -94,9 +97,9 @@ Run `npm run smoke:providers -- --help` for all options.
   stops because those states do not prove that the previous provider process
   or turn can no longer execute.
 
-Some ACP runtimes cannot attest a read-only OS sandbox. The harness therefore
-uses each runtime's supported execution policy in an isolated throwaway
-worktree; the no-edit requirement is also verified independently with Git.
+Some runtimes cannot attest an OS sandbox. The harness therefore uses each
+runtime's supported execution policy in an isolated throwaway worktree and
+verifies the sole allowed edit independently with Git.
 Never point this command at a repository that matters.
 
 ## Evidence and cleanup

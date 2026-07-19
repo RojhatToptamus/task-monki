@@ -2517,97 +2517,106 @@ describe('AcpRuntimeAdapter native settings', () => {
 });
 
 describe('AcpRuntimeAdapter permission materialization', () => {
-  it.each([
-    {
-      profileName: 'Cursor',
-      allowOpaqueExecutePermissions: true,
-      expectedActions: ['ACCEPT', 'DECLINE', 'CANCEL']
-    },
-    {
-      profileName: 'another ACP runtime',
-      allowOpaqueExecutePermissions: false,
-      expectedActions: ['DECLINE', 'CANCEL']
-    }
-  ])(
-    'keeps opaque execute approval profile-scoped for $profileName',
-    async ({ allowOpaqueExecutePermissions, expectedActions }) => {
-      const runtimeId = allowOpaqueExecutePermissions
-        ? 'test-cursor-opaque-permission'
-        : 'test-acp-opaque-permission';
-      const harness = await createPermissionHarness({
-        runtimeId,
-        approvalPolicy: 'on-request',
-        ...(allowOpaqueExecutePermissions
-          ? {
-              allowOpaqueExecutePermissions: true as const,
-              allowRememberedPermissions: true as const
-            }
-          : {})
-      });
-      const { adapter, client, events, run, server, store, task } = harness;
+  it('correlates a sparse permission request with the preceding tool call', async () => {
+    const runtimeId = 'test-acp-correlated-permission';
+    const harness = await createPermissionHarness({
+      runtimeId,
+      approvalPolicy: 'on-request',
+      allowRememberedPermissions: true
+    });
+    const { adapter, client, events, run, server, store, task } = harness;
 
-      try {
-        const requestId = `opaque-permission-${runtimeId}`;
-        const request = {
-          jsonrpc: '2.0' as const,
-          id: requestId,
-          method: 'session/request_permission',
-          params: {
-            sessionId: 'permission-materialization-session',
-            toolCall: {
-              toolCallId: `opaque-tool-${runtimeId}`,
-              title: 'Run command',
-              kind: 'execute'
-            },
-            options: [
-              { optionId: 'opaque-allow-once', name: 'Allow once', kind: 'allow_once' },
-              { optionId: 'opaque-allow-always', name: 'Allow always', kind: 'allow_always' },
-              { optionId: 'opaque-reject-once', name: 'Reject', kind: 'reject_once' }
-            ]
-          }
-        };
-        const raw = await store.appendProtocolMessage(
-          server.id,
-          'INBOUND',
-          JSON.stringify(request)
-        );
-        client.events.emit('request', request, raw);
-
-        const pending = await waitFor(async () =>
-          (await store.snapshot()).interactionRequests.find(
-            (interaction) => interaction.runId === run.id && interaction.status === 'PENDING'
-          )
-        );
-        expect(pending.allowedActions).toEqual(expectedActions);
-
-        if (allowOpaqueExecutePermissions) {
-          const interactionService = new AgentInteractionService(store, events, () => adapter);
-          await interactionService.respond({
-            taskId: task.id,
-            runId: run.id,
-            interactionRequestId: pending.id,
-            decision: {
-              interactionType: 'COMMAND_APPROVAL',
-              action: 'ACCEPT',
-              providerOptionId: 'opaque-allow-once'
-            }
-          });
-          const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-          const messages = journal
-            .trim()
-            .split('\n')
-            .map((line) => JSON.parse(JSON.parse(line).raw));
-          expect(messages).toContainEqual({
-            jsonrpc: '2.0',
-            id: requestId,
-            result: { outcome: { outcome: 'selected', optionId: 'opaque-allow-once' } }
-          });
+    try {
+      const toolCallId = 'correlated-tool';
+      const notification = {
+        sessionId: 'permission-materialization-session',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId,
+          title: '`npm test`',
+          kind: 'execute',
+          status: 'in_progress',
+          rawInput: { command: 'npm test', cwd: harness.directory }
         }
-      } finally {
-        await adapter.shutdown();
-      }
+      };
+      const notificationRaw = await store.appendProtocolMessage(
+        server.id,
+        'INBOUND',
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: notification
+        })
+      );
+      client.events.emit('notification', 'session/update', notification, notificationRaw);
+      await (adapter as unknown as { inboundQueue: Promise<void> }).inboundQueue;
+
+      const requestId = 'correlated-permission';
+      const request = {
+        jsonrpc: '2.0' as const,
+        id: requestId,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'permission-materialization-session',
+          toolCall: {
+            toolCallId,
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Not in allowlist: npm test' }
+              }
+            ]
+          },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'allow-always', name: 'Allow always', kind: 'allow_always' },
+            { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+          ]
+        }
+      };
+      const raw = await store.appendProtocolMessage(
+        server.id,
+        'INBOUND',
+        JSON.stringify(request)
+      );
+      client.events.emit('request', request, raw);
+
+      const pending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.runId === run.id && interaction.status === 'PENDING'
+        )
+      );
+      expect(pending.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+      expect(pending.request).toMatchObject({
+        reason: 'Not in allowlist: npm test',
+        command: 'npm test',
+        cwd: harness.directory
+      });
+      expect(pending.policyWarnings).not.toContain(
+        'ACP did not provide a verifiable command for this execution request.'
+      );
+
+      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      await interactionService.respond({
+        taskId: task.id,
+        runId: run.id,
+        interactionRequestId: pending.id,
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'allow-once'
+        }
+      });
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: { outcome: { outcome: 'selected', optionId: 'allow-once' } }
+      });
+    } finally {
+      await adapter.shutdown();
     }
-  );
+  });
 
   it.each([
     {
@@ -2631,7 +2640,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
       approvalPolicy: 'never',
       toolKind: 'execute',
       automatic: true,
-      verifiableCommand: false,
+      verifiableCommand: true,
       verifyCommandStillPrompts: false
     }
   ] as const)(
@@ -2647,8 +2656,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
       const harness = await createPermissionHarness({
         runtimeId,
         approvalPolicy,
-        allowRememberedPermissions: true,
-        allowOpaqueExecutePermissions: true
+        allowRememberedPermissions: true
       });
       const { adapter, client, directory, server, store } = harness;
 
@@ -2786,8 +2794,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     const harness = await createPermissionHarness({
       runtimeId: 'test-acp-full-access-remembered-only',
       approvalPolicy: 'never',
-      allowRememberedPermissions: true,
-      allowOpaqueExecutePermissions: true
+      allowRememberedPermissions: true
     });
     const { adapter, client, events, run, server, store, task } = harness;
 
@@ -2802,7 +2809,8 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           toolCall: {
             toolCallId: `${requestId}-tool`,
             title: 'Run command',
-            kind: 'execute'
+            kind: 'execute',
+            rawInput: { command: 'npm test', cwd: harness.directory }
           },
           options: [
             {
@@ -2850,7 +2858,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         ]
       });
       expect(pending.policyWarnings.join(' ')).toContain(
-        'owns its scope, storage, lifetime, and revocation'
+        'owns the scope and lifetime of remembered choices'
       );
 
       const interactionService = new AgentInteractionService(store, events, () => adapter);
@@ -3550,7 +3558,6 @@ async function readProtocolMessages(
 async function createPermissionHarness(input: {
   runtimeId: string;
   approvalPolicy: 'on-request' | 'auto-accept-edits' | 'never';
-  allowOpaqueExecutePermissions?: true;
   allowRememberedPermissions?: true;
 }) {
   const directory = await fs.mkdtemp(
@@ -3565,9 +3572,6 @@ async function createPermissionHarness(input: {
     ...TEST_ACP_PROFILE,
     descriptor: { ...TEST_ACP_PROFILE.descriptor, id: input.runtimeId },
     approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
-    ...(input.allowOpaqueExecutePermissions
-      ? { allowOpaqueExecutePermissions: true }
-      : {}),
     ...(input.allowRememberedPermissions
       ? { allowRememberedPermissions: true }
       : {}),

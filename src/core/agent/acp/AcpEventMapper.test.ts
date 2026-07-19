@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   interactionActionsForAcpOptions,
+  mapAcpToolKind,
   mapAcpStopReason,
   nativeSelectionOptionsValue,
   permissionOutcomeForDecision,
@@ -18,6 +19,11 @@ const options: AcpPermissionOption[] = [
 ];
 
 describe('ACP event mapping', () => {
+  it('keeps generic provider search distinct from external fetch activity', () => {
+    expect(mapAcpToolKind('search')).toBe('OTHER');
+    expect(mapAcpToolKind('fetch')).toBe('WEB_SEARCH');
+  });
+
   it.each([
     ['end_turn', 'completed'],
     ['cancelled', 'interrupted'],

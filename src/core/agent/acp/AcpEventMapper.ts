@@ -54,9 +54,10 @@ export function mapAcpToolKind(kind: AcpToolKind | null | undefined): AgentItemT
       return 'FILE_CHANGE';
     case 'execute':
       return 'COMMAND_EXECUTION';
-    case 'search':
     case 'fetch':
       return 'WEB_SEARCH';
+    case 'search':
+      return 'OTHER';
     case 'think':
       return 'REASONING_SUMMARY';
     default:

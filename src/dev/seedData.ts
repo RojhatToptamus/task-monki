@@ -11,7 +11,6 @@ import type {
   DomainEvent,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
-  GitStatus,
   InteractionRequestRecord,
   InteractionRequestType,
   MergeStatus,

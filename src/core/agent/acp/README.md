@@ -54,7 +54,7 @@ experimental and never enables it for another ACP profile.
 
 | Runtime ID | Native launch form | Non-mutating discovery proof | Default model provider | Child environment contract |
 | --- | --- | --- | --- | --- |
-| `grok-acp` | `grok --no-auto-update agent stdio` | the matching `agent stdio --help` command identifies Grok's stdio agent | `xai` | `task-monki/grok-acp-environment@v1` |
+| `grok-acp` | `grok --no-auto-update --permission-mode default agent stdio` | the matching process-scoped `agent stdio --help` command identifies Grok's stdio agent | `xai` | `task-monki/grok-acp-environment@v1` |
 | `cursor-agent-acp` | `cursor-agent acp`; an explicitly configured `agent acp` is also accepted | `help acp` identifies Cursor Agent ACP | `cursor` | `task-monki/cursor-agent-acp-environment@v1` |
 | `claude-agent-acp` | `claude-agent-acp` | bridge-specific `--cli --help` delegation identifies the Claude bridge | `anthropic` | `task-monki/claude-agent-acp-environment@v1` |
 
@@ -212,21 +212,20 @@ are attempted at most three times. An append whose outcome is ambiguous is
 never retried; either exhausted path discards retained bytes, quarantines that
 process generation, and requires explicit run recovery. A coalesced item
 publishes one activity event, whose `coalescedEvents` count makes the compaction
-visible. Permission choices retain the provider's opaque option IDs. Task Monki
+visible. Permission requests are correlated with the preceding ACP tool-call
+state because the protocol permits a request to contain only a `toolCallId`.
+Permission choices retain the provider's opaque option IDs. Task Monki
 intersects the offered choices with its own command/path/network policy and
 sends back the exact ID selected under the provider's own label; it never
 chooses the first option merely because two options share a semantic kind.
 Cursor and Grok preserve a provider's remembered option when the profile and
-current operation pass Task Monki's policy; the UI warns that the provider owns
-its scope, storage, lifetime, and revocation, which may extend beyond the ACP
-process. Remembered rejection remains available when offered. Reserved Git/GitHub delivery
-commands, outside-worktree file scope, and disabled-network requests fail
-closed. When Cursor omits command details for a terminal request, its profile
-may expose the provider's exact one-time and provider-remembered approval
-options. The user chooses among them under Ask for approval; no access mode ever
-automatically selects the remembered option. Task Monki does not infer its
-scope. Other ACP profiles fail closed
-on opaque execution scope. Task Monki never implements a provider grant by
+current operation pass Task Monki's policy; the UI identifies that the provider
+owns the remembered choice's scope and lifetime. Remembered rejection remains
+available when offered. Reserved Git/GitHub delivery commands,
+outside-worktree file scope, disabled-network requests, and execution requests
+that remain opaque after correlation fail closed. The user chooses among exact
+native choices under Ask for approval; no access mode ever automatically
+selects a remembered option. Task Monki never implements a provider grant by
 writing repository files or silently changing global configuration.
 Only `end_turn` completes a prompt successfully. `cancelled` interrupts it;
 `refusal`, `max_tokens`, and `max_turn_requests` fail it with a bounded provider
@@ -241,16 +240,25 @@ completions.
 
 ACP does not attest an OS filesystem or network sandbox for the provider
 process. Claude and unrecognized profiles therefore expose only **Ask for
-approval**. Cursor and Grok expose **Ask for approval**, **Auto-accept edits**, and **Full
-access**, all with `DANGER_FULL_ACCESS`, required network, and the user as
-reviewer. These policies control only responses to permission requests the
+approval**. Cursor and Grok expose **Ask for approval**, **Auto-accept edits**, and
+**Full access**, all with `DANGER_FULL_ACCESS`, required network, and the user
+as reviewer. These policies control only responses to permission requests the
 provider sends: Ask for approval asks the user, Auto-accept edits chooses an
 exact `allow_once` only for verified in-worktree mutations, and Full access
 automatically chooses only an exact `allow_once`. Remembered options always
-require an explicit user choice and remain provider-owned. These modes do not change Cursor into its
-read-only native `ask` mode and do not claim process confinement. Restricted
-workspace, read-only, network-disabled, and automated-reviewer settings are
-rejected instead of being silently downgraded.
+require an explicit user choice and remain provider-owned. These modes do not
+change Cursor into its read-only native `ask` mode and do not claim process
+confinement.
+
+Task Monki launches the managed Grok ACP process with
+`--permission-mode default`, which makes approval behavior process-scoped
+without rewriting Grok's global or repository configuration. Grok's native
+allow/deny rules still apply before ACP requests reach Task Monki. The current
+Grok ACP may offer only `allow_once` and `reject_once`; Task Monki displays those
+exact choices and does not manufacture `allow_always` or a rule scope.
+
+Restricted workspace, read-only, network-disabled, and automated-reviewer
+settings are rejected instead of being silently downgraded.
 
 For the same reason, Task Monki attachment delivery is currently unsupported
 for ACP. Agents may negotiate native ACP image/resource blocks, and that state

@@ -36,8 +36,7 @@ export function buildReviewActivityViewModel(input: {
     .filter((activity): activity is { label: string; at: string } => Boolean(activity));
   const telemetryActivities = buildRunActivityProjection({
     run: input.reviewRun,
-    items: input.items.filter((item) => item.type !== 'AGENT_MESSAGE'),
-    includeWaiting: false
+    items: input.items.filter((item) => item.type !== 'AGENT_MESSAGE')
   }).rows
     .map(reviewActivityFromRow)
     .filter((activity): activity is { label: string; at: string } => Boolean(activity));

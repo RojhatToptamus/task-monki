@@ -23,8 +23,7 @@ import {
 import {
   AttachmentStoreError,
   attachmentIntegrityError,
-  attachmentStorageError,
-  type AttachmentStoreErrorCode
+  attachmentStorageError
 } from './AttachmentErrors';
 
 export { AttachmentStoreError, type AttachmentStoreErrorCode } from './AttachmentErrors';
@@ -107,7 +106,7 @@ export class AttachmentFileStore {
   private closePromise?: Promise<void>;
 
   constructor(
-    private readonly baseDir: string,
+    baseDir: string,
     options: AttachmentFileStoreOptions = {}
   ) {
     this.attachmentsDir = path.join(baseDir, 'attachments');

@@ -24,15 +24,18 @@ describe('ACP runtime profiles', () => {
 
   it('uses provider-native ACP launch forms', () => {
     expect(TEST_ACP_PROFILE.argv).toEqual(['--acp']);
-    expect(GROK_ACP_PROFILE.argv).toEqual(['--no-auto-update', 'agent', 'stdio']);
+    expect(GROK_ACP_PROFILE.argv).toEqual([
+      '--no-auto-update',
+      '--permission-mode',
+      'default',
+      'agent',
+      'stdio'
+    ]);
     expect(GROK_ACP_PROFILE.defaultModel).toBe('grok-build');
     expect(CURSOR_ACP_PROFILE.argv).toEqual(['acp']);
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
     expect(CURSOR_ACP_PROFILE.defaultModel).toBe('default');
-    expect(CURSOR_ACP_PROFILE.allowOpaqueExecutePermissions).toBe(true);
-    expect(GROK_ACP_PROFILE.allowOpaqueExecutePermissions).toBeUndefined();
-    expect(CLAUDE_AGENT_ACP_PROFILE.allowOpaqueExecutePermissions).toBeUndefined();
     expect(CLAUDE_AGENT_ACP_PROFILE.argv).toEqual([]);
   });
 
@@ -40,6 +43,8 @@ describe('ACP runtime profiles', () => {
     expect(TEST_ACP_PROFILE.launchContractProbe.argv).toEqual(['--help']);
     expect(GROK_ACP_PROFILE.launchContractProbe.argv).toEqual([
       '--no-auto-update',
+      '--permission-mode',
+      'default',
       'agent',
       'stdio',
       '--help'
@@ -200,9 +205,14 @@ describe('ACP runtime profiles', () => {
     ]);
     expect(policy.detail).toContain('does not provide an enforceable process sandbox');
 
-    expect(acpCapabilities(GROK_ACP_PROFILE).executionPolicy.presets).toEqual(
-      policy.presets
-    );
+    expect(acpCapabilities(GROK_ACP_PROFILE).executionPolicy).toMatchObject({
+      defaultPresetId: 'ask-for-approval',
+      presets: [
+        expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' }),
+        expect.objectContaining({ id: 'auto-accept-edits', approvalPolicy: 'auto-accept-edits' }),
+        expect.objectContaining({ id: 'full-access', approvalPolicy: 'never' })
+      ]
+    });
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
       expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);

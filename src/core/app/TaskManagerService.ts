@@ -382,7 +382,7 @@ export class TaskManagerService {
           (['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) &&
             !getImplementationRetryReason(task) &&
             recovered.interactionRequests.some((interaction) =>
-              isDeclinedExecutionInteraction(interaction, run.id)
+              isRejectedExecutionInteraction(interaction, run.id)
             )));
       return run &&
         isImplementationRunMode(run.mode) &&
@@ -2205,10 +2205,10 @@ export class TaskManagerService {
     ) {
       return;
     }
-    const declinedExecution = state.interactionRequests.some((interaction) =>
-      isDeclinedExecutionInteraction(interaction, run.id)
+    const rejectedExecution = state.interactionRequests.find((interaction) =>
+      isRejectedExecutionInteraction(interaction, run.id)
     );
-    if (!declinedExecution) {
+    if (!rejectedExecution) {
       return;
     }
     const before = state.gitSnapshots.find(
@@ -2223,8 +2223,8 @@ export class TaskManagerService {
     ) {
       return;
     }
-    const reason =
-      'A provider execution request was declined and this run produced no Git change. Retry or continue before review.';
+    const outcome = rejectedExecution.status === 'CANCELED' ? 'canceled' : 'declined';
+    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry or continue before review.`;
     await this.store.appendEvent(
       createDomainEvent({
         type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
@@ -2872,7 +2872,7 @@ function isDeclinedInteractionAction(action: string | undefined): boolean {
   return action === 'DECLINE' || action === 'DECLINE_FOR_SESSION';
 }
 
-function isDeclinedExecutionInteraction(
+function isRejectedExecutionInteraction(
   interaction: Pick<
     InteractionRequestRecord,
     'runId' | 'type' | 'status' | 'decision'
@@ -2884,8 +2884,9 @@ function isDeclinedExecutionInteraction(
     ['COMMAND_APPROVAL', 'FILE_CHANGE_APPROVAL', 'PERMISSION_APPROVAL'].includes(
       interaction.type
     ) &&
-    interaction.status === 'DECLINED' &&
-    isDeclinedInteractionAction(interaction.decision?.action)
+    ((interaction.status === 'DECLINED' &&
+      isDeclinedInteractionAction(interaction.decision?.action)) ||
+      (interaction.status === 'CANCELED' && interaction.decision?.action === 'CANCEL'))
   );
 }
 

@@ -161,8 +161,12 @@ describe('Task Monki development seed data', () => {
       expect.arrayContaining([
         expect.objectContaining({ category: 'read', label: 'Read' }),
         expect.objectContaining({ category: 'edit', label: 'Edited' }),
-        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' }),
-        expect.objectContaining({ category: 'permission', label: 'Waiting', detail: 'for approval' })
+        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' })
+      ])
+    );
+    expect(approvalProgress?.activityTail).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'permission', label: 'Waiting' })
       ])
     );
 

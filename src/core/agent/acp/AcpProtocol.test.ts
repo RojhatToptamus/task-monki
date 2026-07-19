@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeAcpMessage,
   flattenSelectOptions,
+  mergeAcpToolCallUpdate,
   parseConfigOptions,
   parseInitializeResponse,
   parseInitializeModelExtension,
@@ -14,6 +15,46 @@ import {
 } from './AcpProtocol';
 
 describe('ACP stable-v1 protocol codec', () => {
+  it('merges sparse permission tool calls with the prior tool state', () => {
+    const merged = mergeAcpToolCallUpdate(
+      {
+        toolCallId: 'tool-1',
+        title: '`npm test`',
+        kind: 'execute',
+        status: 'in_progress',
+        rawInput: { command: 'npm test' },
+        unrelated: 'discarded'
+      },
+      {
+        toolCallId: 'tool-1',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'Not in allowlist' } }
+        ]
+      }
+    );
+
+    expect(merged).toEqual({
+      toolCallId: 'tool-1',
+      title: '`npm test`',
+      kind: 'execute',
+      status: 'in_progress',
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Not in allowlist' } }
+      ],
+      rawInput: { command: 'npm test' }
+    });
+    expect(merged).not.toHaveProperty('unrelated');
+  });
+
+  it('respects explicit null fields in sparse tool-call updates', () => {
+    expect(
+      mergeAcpToolCallUpdate(
+        { toolCallId: 'tool-1', title: 'Old title', locations: [{ path: 'old' }] },
+        { toolCallId: 'tool-1', title: null, locations: null }
+      )
+    ).toEqual({ toolCallId: 'tool-1', title: null, locations: null });
+  });
+
   it('requires JSON-RPC 2.0 envelopes', () => {
     expect(() => decodeAcpMessage('{"id":1,"result":{}}')).toThrow(
       'JSON-RPC 2.0'

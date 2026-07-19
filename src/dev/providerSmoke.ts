@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  AgentExecutionSettings,
   AgentModel,
   AgentObservationSource,
   AgentRunStatus,
@@ -19,8 +20,10 @@ import { TaskManagerService } from '../core/app/TaskManagerService';
 import { git } from '../core/git/gitCli';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 
-const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v1' as const;
+const REPORT_SCHEMA_VERSION = 'task-monki/provider-smoke@v2' as const;
 const SMOKE_SENTINEL = 'TASK_MONKI_PROVIDER_SMOKE_OK';
+const SMOKE_FILE_NAME = 'task-monki-provider-smoke.txt';
+const SMOKE_FILE_CONTENT = `${SMOKE_SENTINEL}\n`;
 const DEFAULT_TIMEOUT_MS = 3 * 60_000;
 const CANCEL_TIMEOUT_MS = 20_000;
 const POLL_INTERVAL_MS = 250;
@@ -62,6 +65,7 @@ export interface ProviderSmokeTarget {
   runtimeStatus: AgentRuntimeReadinessStatus;
   model: AgentModel;
   reasoningEffort?: string;
+  executionSettings?: AgentExecutionSettings;
 }
 
 export interface ProviderSmokeResult {
@@ -78,6 +82,8 @@ export interface ProviderSmokeResult {
   runStatus?: AgentRunStatus;
   gitStatus?: GitStatus;
   gitSnapshotId?: string;
+  worktreePath?: string;
+  worktreeChangeVerified: boolean;
   repositoryClean: boolean;
   repositoryIdentityUnchanged: boolean;
   receivedSentinel: boolean;
@@ -292,7 +298,8 @@ export function discoverProviderSmokeTargets(
           runtimeId: runtime.preflight.runtime.id,
           runtimeStatus: runtime.preflight.readiness.status,
           model,
-          reasoningEffort: selectLowestReasoningEffort(model)
+          reasoningEffort: selectLowestReasoningEffort(model),
+          executionSettings: nonInteractiveSmokeSettings(runtime)
         }))
     )
     .sort(
@@ -300,6 +307,33 @@ export function discoverProviderSmokeTargets(
         left.runtimeId.localeCompare(right.runtimeId) ||
         left.model.id.localeCompare(right.model.id)
     );
+}
+
+function nonInteractiveSmokeSettings(
+  runtime: AgentRuntimeState
+): AgentExecutionSettings | undefined {
+  const preset = runtime.preflight.capabilities.executionPolicy?.presets
+    .filter(
+      (candidate) =>
+        candidate.approvalPolicy === 'never' && candidate.sandbox !== 'READ_ONLY'
+    )
+    .sort(
+      (left, right) =>
+        smokeSandboxRank(left.sandbox) - smokeSandboxRank(right.sandbox)
+    )[0];
+  if (!preset) return undefined;
+  return {
+    sandbox: preset.sandbox,
+    approvalPolicy: preset.approvalPolicy,
+    approvalsReviewer: preset.approvalsReviewer,
+    networkAccess: preset.networkAccess === 'REQUIRED'
+  };
+}
+
+function smokeSandboxRank(
+  sandbox: NonNullable<AgentExecutionSettings['sandbox']>
+): number {
+  return sandbox === 'WORKSPACE_WRITE' ? 0 : sandbox === 'DANGER_FULL_ACCESS' ? 1 : 2;
 }
 
 export async function runProviderSmoke(
@@ -594,6 +628,7 @@ async function runTarget(
   let runId: string | undefined;
   let snapshot: TaskSnapshot | undefined;
   let gitSnapshot: GitSnapshotRecord | undefined;
+  let worktreeVerification: SmokeWorktreeVerification | undefined;
   let timedOut = false;
   let unexpectedInteraction = false;
   let failure: string | undefined;
@@ -643,10 +678,11 @@ async function runTarget(
       const task = await service.createTask({
         title: `Provider smoke: ${target.runtimeId} / ${target.model.displayName}`,
         prompt:
-          `This is a provider connectivity smoke test. Do not inspect the repository, call tools, execute commands, or modify files. Reply with exactly: ${SMOKE_SENTINEL}`,
+          `Create ${SMOKE_FILE_NAME} in the repository root with exactly one line containing ${SMOKE_SENTINEL}. Make no other changes. Inspect the resulting Git diff, then reply with exactly: ${SMOKE_SENTINEL}`,
         repositoryPath: service.getDefaultRepositoryPath(),
         runtimeId: target.runtimeId,
         agentSettings: {
+          ...target.executionSettings,
           runtimeId: target.runtimeId,
           model: target.model.model,
           modelProvider: target.model.modelProvider,
@@ -682,6 +718,7 @@ async function runTarget(
       snapshot ??= await service.listTasks();
       try {
         gitSnapshot = await service.refreshEvidence({ taskId });
+        worktreeVerification = await inspectSmokeWorktree(gitSnapshot);
         snapshot = await service.listTasks();
       } catch (error) {
         failure = joinErrors(
@@ -749,6 +786,7 @@ async function runTarget(
       run,
       snapshot,
       gitSnapshot,
+      worktreeVerification,
       interrupted: isStopping() || boundary === 'INTERRUPTED',
       errors: [
         failure,
@@ -801,11 +839,12 @@ function evaluateResult(input: {
   run?: RunRecord;
   snapshot?: TaskSnapshot;
   gitSnapshot?: GitSnapshotRecord;
+  worktreeVerification?: SmokeWorktreeVerification;
   interrupted: boolean;
   errors: Array<string | undefined>;
 }): ProviderSmokeResult {
   const { target, run, snapshot } = input;
-  const receivedSentinel = run?.finalMessage?.trim() === SMOKE_SENTINEL;
+  const receivedSentinel = run?.finalMessage?.includes(SMOKE_SENTINEL) === true;
   const interactionRequested = Boolean(
     run && snapshot?.interactionRequests.some((request) => request.runId === run.id)
   );
@@ -817,6 +856,11 @@ function evaluateResult(input: {
       input.gitSnapshot.commitsAheadOfBase === 0 &&
       input.gitSnapshot.committedDiffFileCount === 0
   );
+  const expectedWorktreeChange = Boolean(
+    input.gitSnapshot?.status === 'DIRTY' &&
+      input.gitSnapshot.workingDiffFileCount === 1 &&
+      input.worktreeVerification?.verified
+  );
   const baseErrors = [
     ...input.errors,
     !run ? 'Task Monki did not create a provider run.' : undefined,
@@ -827,14 +871,20 @@ function evaluateResult(input: {
       ? `The provider did not return ${SMOKE_SENTINEL}.`
       : undefined,
     interactionRequested
-      ? 'The provider created an interaction request during the no-tool smoke prompt.'
+      ? 'The provider created an interaction request during the implementation smoke prompt.'
       : undefined,
     !input.gitSnapshot ? 'Task Monki did not capture exact post-run Git evidence.' : undefined,
-    input.gitSnapshot && input.gitSnapshot.status !== 'CLEAN'
-      ? `The no-edit worktree ended with Git status ${input.gitSnapshot.status}.`
+    input.gitSnapshot && input.gitSnapshot.status !== 'DIRTY'
+      ? `The implementation worktree ended with Git status ${input.gitSnapshot.status}; one verified file change was required.`
       : undefined,
     input.gitSnapshot && !worktreeMatchesBase
-      ? `The no-edit worktree no longer matches its base commit (base=${input.gitSnapshot.baseSha ?? 'missing'}, head=${input.gitSnapshot.headSha ?? 'missing'}, commitsAhead=${input.gitSnapshot.commitsAheadOfBase}, committedFiles=${input.gitSnapshot.committedDiffFileCount}).`
+      ? `The implementation worktree no longer matches its base commit (base=${input.gitSnapshot.baseSha ?? 'missing'}, head=${input.gitSnapshot.headSha ?? 'missing'}, commitsAhead=${input.gitSnapshot.commitsAheadOfBase}, committedFiles=${input.gitSnapshot.committedDiffFileCount}).`
+      : undefined,
+    input.gitSnapshot && input.gitSnapshot.workingDiffFileCount !== 1
+      ? `The implementation worktree reported ${input.gitSnapshot.workingDiffFileCount} changed files; exactly one was required.`
+      : undefined,
+    input.worktreeVerification && !input.worktreeVerification.verified
+      ? input.worktreeVerification.error
       : undefined,
     selection.attestation === 'OBSERVED_MISMATCH'
       ? `The observed selection ${formatObservedSelection(selection)} did not match ${formatTargetSelection(target)}.`
@@ -843,7 +893,7 @@ function evaluateResult(input: {
   const basePassed =
     run?.status === 'COMPLETED' &&
     receivedSentinel &&
-    input.gitSnapshot?.status === 'CLEAN' &&
+    expectedWorktreeChange &&
     worktreeMatchesBase &&
     !interactionRequested &&
     baseErrors.length === 0;
@@ -875,6 +925,8 @@ function evaluateResult(input: {
     runStatus: run?.status,
     gitStatus: input.gitSnapshot?.status,
     gitSnapshotId: input.gitSnapshot?.id,
+    worktreePath: input.gitSnapshot?.worktreePath,
+    worktreeChangeVerified: expectedWorktreeChange,
     repositoryClean: true,
     repositoryIdentityUnchanged: true,
     receivedSentinel,
@@ -887,6 +939,48 @@ function evaluateResult(input: {
     startedAt: input.startedAt,
     completedAt: new Date().toISOString()
   };
+}
+
+interface SmokeWorktreeVerification {
+  verified: boolean;
+  error?: string;
+}
+
+async function inspectSmokeWorktree(
+  gitSnapshot: GitSnapshotRecord
+): Promise<SmokeWorktreeVerification> {
+  try {
+    const worktreePath = await fs.realpath(gitSnapshot.worktreePath);
+    const expectedPath = path.join(worktreePath, SMOKE_FILE_NAME);
+    const entry = await fs.lstat(expectedPath);
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error(`${SMOKE_FILE_NAME} is not a regular file.`);
+    }
+    const filePath = await fs.realpath(expectedPath);
+    if (filePath !== expectedPath) {
+      throw new Error(`${SMOKE_FILE_NAME} escaped the task worktree.`);
+    }
+    const content = await fs.readFile(filePath, 'utf8');
+    if (content !== SMOKE_FILE_CONTENT) {
+      throw new Error(`${SMOKE_FILE_NAME} did not contain the exact smoke sentinel line.`);
+    }
+    const rows = (await git(worktreePath, [
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all'
+    ])).trimEnd().split('\n').filter(Boolean);
+    if (rows.length !== 1 || rows[0]!.slice(3) !== SMOKE_FILE_NAME) {
+      throw new Error(
+        `The task worktree changed paths other than ${SMOKE_FILE_NAME}.`
+      );
+    }
+    return { verified: true };
+  } catch (cause) {
+    return {
+      verified: false,
+      error: `Expected implementation change was not verified: ${errorMessage(cause)}`
+    };
+  }
 }
 
 function selectionAttestation(
@@ -1394,13 +1488,16 @@ function reasoningRank(value: string): number | undefined {
     none: 0,
     off: 0,
     disabled: 0,
+    false: 0,
     minimal: 1,
     min: 1,
     low: 2,
     medium: 3,
     med: 3,
+    true: 4,
     high: 4,
     xhigh: 5,
+    extrahigh: 5,
     max: 5,
     maximum: 5
   }[value.trim().toLowerCase().replace(/[\s_-]+/gu, '')];

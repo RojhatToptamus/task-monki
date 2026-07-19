@@ -80,6 +80,17 @@ describe('selectLowestReasoningEffort', () => {
     ).toBe('minimal');
   });
 
+  it('orders native thinking toggles and extra-high effort without preserving a costly default', () => {
+    expect(
+      selectLowestReasoningEffort(model('cursor:claude-test', ['false', 'true'], 'true'))
+    ).toBe('false');
+    expect(
+      selectLowestReasoningEffort(
+        model('cursor:gpt-test', ['extra-high', 'medium', 'low'], 'medium')
+      )
+    ).toBe('low');
+  });
+
   it('preserves the provider default when effort names have provider-native semantics', () => {
     expect(
       selectLowestReasoningEffort(
@@ -124,7 +135,13 @@ describe('discoverProviderSmokeTargets', () => {
         runtimeId: 'codex',
         runtimeStatus: 'READY',
         model: codexModel,
-        reasoningEffort: 'low'
+        reasoningEffort: 'low',
+        executionSettings: {
+          sandbox: 'WORKSPACE_WRITE',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: false
+        }
       })
     ]);
   });
@@ -165,7 +182,6 @@ describe('runProviderSmoke', () => {
     });
 
     const report = await runHarness(repositoryPath, service, cleanupPaths);
-
     expect(service.startedModels).toEqual([
       { model: 'first', reasoningEffort: 'low' },
       { model: 'second', reasoningEffort: undefined }
@@ -304,7 +320,7 @@ describe('runProviderSmoke', () => {
     expect(report.results[0]?.error).toContain('interaction request');
   });
 
-  it('rejects a final message that only mentions the smoke sentinel', async () => {
+  it('accepts provider prose around the sentinel when the exact worktree change is verified', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('codex:openai/verbose-response');
     const service = new FakeProviderSmokeService(repositoryPath, {
@@ -316,10 +332,10 @@ describe('runProviderSmoke', () => {
     const report = await runHarness(repositoryPath, service, cleanupPaths);
 
     expect(report.results[0]).toMatchObject({
-      verdict: 'FAILED',
-      receivedSentinel: false
+      verdict: 'PASSED',
+      receivedSentinel: true,
+      worktreeChangeVerified: true
     });
-    expect(report.results[0]?.error).toContain('did not return');
   });
 
   it('uses the exact explicit post-run Git snapshot', async () => {
@@ -334,9 +350,10 @@ describe('runProviderSmoke', () => {
     const report = await runHarness(repositoryPath, service, cleanupPaths);
 
     expect(report.results[0]).toMatchObject({
-      verdict: 'FAILED',
+      verdict: 'PASSED',
       gitStatus: 'DIRTY',
-      gitSnapshotId: 'git-1'
+      gitSnapshotId: 'git-1',
+      worktreeChangeVerified: true
     });
   });
 
@@ -393,8 +410,8 @@ describe('runProviderSmoke', () => {
       repositoryPath,
       service,
       cleanupPaths,
-      { timeoutMs: 20 },
-      { cancelTimeoutMs: 75 }
+      { timeoutMs: 200 },
+      { cancelTimeoutMs: 275 }
     );
 
     expect(service.cancellationTransitions).toEqual([
@@ -619,11 +636,33 @@ function runtime(
         detail: canStart ? `${runtimeId} is available.` : `${runtimeId} is unavailable.`
       },
       capabilities: explicitModelDiscovery
-        ? { modelCatalog: { activation: 'EXPLICIT' } }
-        : { modelCatalog: {} }
+        ? {
+            modelCatalog: { activation: 'EXPLICIT' },
+            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
+          }
+        : {
+            modelCatalog: {},
+            executionPolicy: runtimeId === 'codex' ? smokeExecutionPolicy() : undefined
+          }
     },
     models,
     refreshedAt: '2026-07-14T00:00:00.000Z'
+  };
+}
+
+function smokeExecutionPolicy() {
+  return {
+    defaultPresetId: 'restricted',
+    presets: [
+      {
+        id: 'restricted',
+        label: 'Restricted',
+        sandbox: 'WORKSPACE_WRITE' as const,
+        approvalPolicy: 'never' as const,
+        approvalsReviewer: 'user' as const,
+        networkAccess: 'DISABLED' as const
+      }
+    ]
   };
 }
 
@@ -648,6 +687,7 @@ interface FakeProviderBehavior {
   interactionStatus?: 'RESOLVED';
   gitStatus?: 'CLEAN' | 'DIRTY';
   committedTaskChange?: boolean;
+  wrongWorktreeChange?: boolean;
   retainDifferentStoredGitSnapshot?: boolean;
   hangStart?: boolean;
   timedOutRunCount?: number;
@@ -662,6 +702,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   private catalogIndex = 0;
   private taskSequence = 0;
   private runSequence = 0;
+  private readonly worktreePaths = new Map<string, string>();
   cancelCount = 0;
   readonly discoveredRuntimeIds: string[] = [];
   readonly cancellationTransitions: Array<{
@@ -813,12 +854,18 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
-    const status = this.behavior.gitStatus ?? 'CLEAN';
+    const status = this.behavior.gitStatus ??
+      (this.behavior.committedTaskChange ? 'CLEAN' : 'DIRTY');
+    const worktreePath = await this.ensureWorktree(
+      input.taskId,
+      status,
+      this.behavior.committedTaskChange === true
+    );
     const snapshot = gitSnapshot(
       input.taskId,
       'git-1',
       status,
-      this.repositoryPath,
+      worktreePath,
       this.behavior.committedTaskChange
         ? {
             headSha: 'provider-commit',
@@ -829,7 +876,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     );
     if (this.behavior.retainDifferentStoredGitSnapshot) {
       this.snapshot.gitSnapshots.push(
-        gitSnapshot(input.taskId, 'stored-clean', 'CLEAN', this.repositoryPath)
+        gitSnapshot(input.taskId, 'stored-clean', 'CLEAN', worktreePath)
       );
     } else {
       this.snapshot.gitSnapshots.push(snapshot);
@@ -860,7 +907,45 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     }
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(): Promise<void> {
+    await Promise.all(
+      [...this.worktreePaths.values()].map((worktreePath) =>
+        fs.rm(worktreePath, { recursive: true, force: true })
+      )
+    );
+    this.worktreePaths.clear();
+  }
+
+  private async ensureWorktree(
+    taskId: string,
+    status: 'CLEAN' | 'DIRTY',
+    committed: boolean
+  ): Promise<string> {
+    const existing = this.worktreePaths.get(taskId);
+    if (existing) return existing;
+    const worktreePath = await fs.mkdtemp(path.join(os.tmpdir(), 'provider-smoke-worktree-'));
+    this.worktreePaths.set(taskId, worktreePath);
+    await git(worktreePath, ['init', '-b', 'main']);
+    await git(worktreePath, ['config', 'user.name', 'Task Monki Smoke Test']);
+    await git(worktreePath, ['config', 'user.email', 'smoke@example.invalid']);
+    await fs.writeFile(path.join(worktreePath, 'README.md'), '# Smoke worktree\n');
+    await git(worktreePath, ['add', 'README.md']);
+    await git(worktreePath, ['commit', '-m', 'Initial fixture']);
+    if (status === 'DIRTY' || committed) {
+      const fileName = this.behavior.wrongWorktreeChange
+        ? 'unexpected-provider-change.txt'
+        : 'task-monki-provider-smoke.txt';
+      await fs.writeFile(
+        path.join(worktreePath, fileName),
+        'TASK_MONKI_PROVIDER_SMOKE_OK\n'
+      );
+    }
+    if (committed) {
+      await git(worktreePath, ['add', 'task-monki-provider-smoke.txt']);
+      await git(worktreePath, ['commit', '-m', 'Provider committed smoke change']);
+    }
+    return worktreePath;
+  }
 }
 
 function protocolReference(run: RunRecord, sequence: number, recordedAt: string) {

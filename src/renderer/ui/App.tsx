@@ -841,9 +841,6 @@ export function App() {
   const refineDisabledReason = promptRefinementRuntime
     ? undefined
     : 'No ready agent runtime supports isolated prompt refinement.';
-  const reviewDisabledReason = reviewRuntime
-    ? undefined
-    : 'No ready agent runtime supports an isolated review workflow.';
   const selectedTaskRuntimeState = selectedTask
     ? runtimeCatalog?.runtimes.find(
         (runtime) => runtime.preflight.runtime.id === selectedTask.runtimeId

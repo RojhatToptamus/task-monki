@@ -24,14 +24,14 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
-  allowOpaqueExecutePermissions?: boolean;
   rememberedPermissionOwner?: string;
 }): MaterializedAcpPermission {
   const paths = pathsFromToolCall(input.toolCall);
+  const reason = reasonFromToolCall(input.toolCall);
   const request: AgentCommandApprovalRequest = {
     startedAtMs: Date.now(),
     approvalId: input.toolCall.toolCallId,
-    ...(input.toolCall.title ? { reason: input.toolCall.title } : {}),
+    ...(reason ? { reason } : {}),
     command: commandFromToolCall(input.toolCall),
     cwd: cwdFromToolCall(input.toolCall),
     ...(paths.length > 0 ? { paths } : {}),
@@ -76,22 +76,20 @@ export function materializeAcpPermission(input: {
     hardBlocked = policy.warnings.length > 0;
     if (!request.command) {
       warnings.push('ACP did not provide a verifiable command for this execution request.');
-      if (input.allowOpaqueExecutePermissions) {
-        // Cursor's native ACP contract reports some terminal operations
-        // without command text. The profile may expose the provider's exact
-        // choices, but Task Monki never infers a command or permission scope.
-        localAllowed = localAllowed.filter(
-          (action) =>
-            action === 'ACCEPT' ||
-            action === 'DECLINE' ||
-            action === 'CANCEL'
-        );
-      } else {
-        hardBlocked = true;
-      }
+      hardBlocked = true;
     }
-  } else if (input.toolCall.kind === 'fetch' || input.toolCall.kind === 'search') {
+  } else if (input.toolCall.kind === 'fetch') {
     request.networkApprovalContext = networkContext(input.toolCall);
+    const policy = buildInteractionPolicy({
+      type: 'COMMAND_APPROVAL',
+      request,
+      session: input.session,
+      run: input.run
+    });
+    localAllowed = policy.allowedActions;
+    warnings.push(...policy.warnings);
+    hardBlocked = policy.warnings.length > 0;
+  } else if (input.toolCall.kind === 'search') {
     const policy = buildInteractionPolicy({
       type: 'COMMAND_APPROVAL',
       request,
@@ -143,10 +141,9 @@ export function materializeAcpPermission(input: {
         ...warnings,
         ...(hasRememberedOption
           ? [
-              `Selecting a remembered option allows ${rememberedPermissionOwner} to persist the choice. ${rememberedPermissionOwner} owns its scope, storage, lifetime, and revocation, which may extend beyond this ACP session or process.`
+              `${rememberedPermissionOwner} owns the scope and lifetime of remembered choices.`
             ]
-          : []),
-        'The ACP agent executes this tool in its own process. Provider details are untrusted telemetry.'
+          : [])
       ])
     ]
   };
@@ -187,6 +184,18 @@ function commandFromToolCall(toolCall: AcpToolCallUpdate): string | undefined {
     }
   }
   return undefined;
+}
+
+function reasonFromToolCall(toolCall: AcpToolCallUpdate): string | undefined {
+  for (const entry of toolCall.content ?? []) {
+    if (!isRecord(entry)) continue;
+    const content = entry.type === 'content' ? entry.content : entry;
+    if (!isRecord(content)) continue;
+    if (content.type === 'text' && typeof content.text === 'string' && content.text.trim()) {
+      return content.text.trim();
+    }
+  }
+  return toolCall.title?.trim() || undefined;
 }
 
 function cwdFromToolCall(toolCall: AcpToolCallUpdate): string | undefined {

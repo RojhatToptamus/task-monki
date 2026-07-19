@@ -137,6 +137,30 @@ export interface AcpToolCallUpdate {
   _meta?: Record<string, unknown> | null;
 }
 
+/**
+ * Applies ACP's sparse tool-call update semantics without retaining unrelated
+ * provider payload fields. Permission requests may contain only a toolCallId,
+ * so callers must correlate them with the preceding session update before
+ * making an approval decision.
+ */
+export function mergeAcpToolCallUpdate(
+  previous: unknown,
+  update: AcpToolCallUpdate
+): AcpToolCallUpdate {
+  const prior = isRecord(previous) ? previous : {};
+  return {
+    toolCallId: update.toolCallId,
+    ...mergedOptionalField(prior, update, 'title', isNullableString),
+    ...mergedOptionalField(prior, update, 'kind', isNullableToolKind),
+    ...mergedOptionalField(prior, update, 'status', isNullableToolCallStatus),
+    ...mergedOptionalField(prior, update, 'content', isNullableArray),
+    ...mergedOptionalField(prior, update, 'locations', isNullableArray),
+    ...mergedOpaqueField(prior, update, 'rawInput'),
+    ...mergedOpaqueField(prior, update, 'rawOutput'),
+    ...mergedOptionalField(prior, update, '_meta', isNullableRecord)
+  };
+}
+
 export interface AcpRequestPermissionParams {
   sessionId: string;
   toolCall: AcpToolCallUpdate;
@@ -889,6 +913,48 @@ function isToolKind(value: unknown): value is AcpToolKind {
 
 function isToolCallStatus(value: unknown): value is AcpToolCallStatus {
   return ['pending', 'in_progress', 'completed', 'failed'].includes(String(value));
+}
+
+function mergedOptionalField<K extends keyof AcpToolCallUpdate>(
+  previous: Record<string, unknown>,
+  update: AcpToolCallUpdate,
+  key: K,
+  validate: (value: unknown) => boolean
+): Partial<Pick<AcpToolCallUpdate, K>> {
+  const source = Object.prototype.hasOwnProperty.call(update, key) ? update : previous;
+  const value = source[key];
+  return validate(value) ? ({ [key]: value } as Partial<Pick<AcpToolCallUpdate, K>>) : {};
+}
+
+function mergedOpaqueField<K extends 'rawInput' | 'rawOutput'>(
+  previous: Record<string, unknown>,
+  update: AcpToolCallUpdate,
+  key: K
+): Partial<Pick<AcpToolCallUpdate, K>> {
+  const source = Object.prototype.hasOwnProperty.call(update, key) ? update : previous;
+  return Object.prototype.hasOwnProperty.call(source, key)
+    ? ({ [key]: source[key] } as Partial<Pick<AcpToolCallUpdate, K>>)
+    : {};
+}
+
+function isNullableString(value: unknown): boolean {
+  return value === null || typeof value === 'string';
+}
+
+function isNullableToolKind(value: unknown): boolean {
+  return value === null || isToolKind(value);
+}
+
+function isNullableToolCallStatus(value: unknown): boolean {
+  return value === null || isToolCallStatus(value);
+}
+
+function isNullableArray(value: unknown): boolean {
+  return value === null || Array.isArray(value);
+}
+
+function isNullableRecord(value: unknown): boolean {
+  return value === null || isRecord(value);
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

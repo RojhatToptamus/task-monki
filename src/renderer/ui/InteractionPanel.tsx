@@ -120,12 +120,14 @@ function InteractionBody({
 
   return (
     <>
-      {interaction.policyWarnings.map((warning) => (
-        <p className="interaction-card__warning" key={warning}>
-          <span aria-hidden="true" />
-          {warning}
-        </p>
-      ))}
+      {interaction.type === 'COMMAND_APPROVAL'
+        ? null
+        : interaction.policyWarnings.map((warning) => (
+            <p className="interaction-card__warning" key={warning}>
+              <span aria-hidden="true" />
+              {warning}
+            </p>
+          ))}
       {interaction.type === 'COMMAND_APPROVAL' ? (
         <CommandRequest
           interaction={interaction}
@@ -236,12 +238,20 @@ function CommandRequest({
 
   return (
     <>
-      {providerNativeRequest ? <ProviderCommandContext request={request} /> : null}
+      {providerNativeRequest ? (
+        <ProviderCommandContext request={request} displayCommand={displayCommand} />
+      ) : null}
       {displayCommand ? (
         <pre className="interaction-command">
           <code>{displayCommand}</code>
         </pre>
       ) : null}
+      {interaction.policyWarnings.map((warning) => (
+        <p className="interaction-card__warning" key={warning}>
+          <span aria-hidden="true" />
+          {warning}
+        </p>
+      ))}
       <div className="interaction-command__footer">
         {!providerNativeRequest && canRememberCommand && canAllowForSession ? (
           <label className="interaction-remember">
@@ -258,8 +268,8 @@ function CommandRequest({
         )}
         <div className="interaction-actions interaction-actions--command">
           {providerNativeRequest ? (
-            providerOptions.length > 0 ? (
-              providerOptions.map((option) => (
+            <>
+              {providerOptions.map((option) => (
                 <ActionButton
                   key={option.id}
                   label={option.label}
@@ -269,24 +279,23 @@ function CommandRequest({
                       : 'secondary'
                   }
                   disabled={disabled}
+                  onClick={() => onRespond(option.decision)}
+                />
+              ))}
+              {hasAction(interaction, 'CANCEL') ? (
+                <ActionButton
+                  label="Cancel request"
+                  variant="secondary"
+                  disabled={disabled}
                   onClick={() =>
-                    onRespond(option.decision)
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'CANCEL'
+                    })
                   }
                 />
-              ))
-            ) : hasAction(interaction, 'CANCEL') ? (
-              <ActionButton
-                label="Cancel"
-                variant="secondary"
-                disabled={disabled}
-                onClick={() =>
-                  onRespond({
-                    interactionType: 'COMMAND_APPROVAL',
-                    action: 'CANCEL'
-                  })
-                }
-              />
-            ) : null
+              ) : null}
+            </>
           ) : (
             <>
               <RejectButtons
@@ -330,13 +339,16 @@ function CommandRequest({
 }
 
 function ProviderCommandContext({
-  request
+  request,
+  displayCommand
 }: {
   request: AgentCommandApprovalRequest;
+  displayCommand?: string;
 }) {
   const network = formatProviderNetworkContext(request.networkApprovalContext);
+  const reason = providerReason(request.reason, displayCommand);
   const hasDetails =
-    Boolean(request.reason) ||
+    Boolean(reason) ||
     Boolean(request.paths?.length) ||
     Boolean(request.cwd) ||
     Boolean(network);
@@ -347,10 +359,10 @@ function ProviderCommandContext({
 
   return (
     <dl className="interaction-details">
-      {request.reason ? (
+      {reason ? (
         <>
-          <dt>Provider context</dt>
-          <dd><strong>Untrusted:</strong> {request.reason}</dd>
+          <dt>Reason</dt>
+          <dd>{reason}</dd>
         </>
       ) : null}
       {request.paths?.length ? (
@@ -373,6 +385,17 @@ function ProviderCommandContext({
       ) : null}
     </dl>
   );
+}
+
+function providerReason(
+  reason: string | undefined,
+  displayCommand: string | undefined
+): string | undefined {
+  if (!reason) return undefined;
+  const normalize = (value: string) => value.trim().replace(/^`|`$/gu, '');
+  return displayCommand && normalize(reason) === normalize(displayCommand)
+    ? undefined
+    : reason;
 }
 
 function FileChangeRequest({

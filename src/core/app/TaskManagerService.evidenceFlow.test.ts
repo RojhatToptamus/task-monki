@@ -45,53 +45,61 @@ describe('TaskManagerService evidence flow', () => {
     expect(completedRun?.afterGitSnapshotId).toBeTruthy();
   });
 
-  it('keeps a provider-completed implementation in progress when a declined execution produced no Git change', async () => {
-    const scenario = await createTaskMonkiScenario({
-      name: 'task-monki-declined-no-change'
-    });
-    const task = await scenario.createTask({
-      title: 'Declined command',
-      prompt: 'Create a file with a command.'
-    });
-    const run = await scenario.service.startRun({ taskId: task.id });
-    await recordDeclinedCommand(scenario, run);
+  it.each([
+    ['declined', recordDeclinedCommand],
+    ['canceled', recordCanceledCommand]
+  ] as const)(
+    'keeps a provider-completed implementation in progress when a %s execution produced no Git change',
+    async (outcome, recordDecision) => {
+      const scenario = await createTaskMonkiScenario({
+        name: `task-monki-${outcome}-no-change`
+      });
+      const task = await scenario.createTask({
+        title: 'Rejected command',
+        prompt: 'Create a file with a command.'
+      });
+      const run = await scenario.service.startRun({ taskId: task.id });
+      await recordDecision(scenario, run);
+      const retryReason = new RegExp(`${outcome}.*no Git change`, 'i');
 
-    const reconciled = scenario.waitForSnapshot((snapshot) => {
+      const reconciled = scenario.waitForSnapshot((snapshot) => {
+        const currentTask = snapshot.tasks.find((candidate) => candidate.id === task.id);
+        const currentRun = snapshot.runs.find((candidate) => candidate.id === run.id);
+        return Boolean(
+          currentRun?.afterGitSnapshotId &&
+            currentTask?.workflowPhase === 'IN_PROGRESS' &&
+            currentTask.projection.requestedAction === 'FAILED'
+        );
+      });
+      await scenario.completeRun(run.id, 'The requested command was not approved.');
+      const reviewAttempt = expect(
+        scenario.service.startReview({ taskId: task.id, runId: run.id })
+      ).rejects.toThrow(retryReason);
+      const snapshot = await reconciled;
       const currentTask = snapshot.tasks.find((candidate) => candidate.id === task.id);
       const currentRun = snapshot.runs.find((candidate) => candidate.id === run.id);
-      return Boolean(
-        currentRun?.afterGitSnapshotId &&
-          currentTask?.workflowPhase === 'IN_PROGRESS' &&
-          currentTask.projection.requestedAction === 'FAILED'
-      );
-    });
-    await scenario.completeRun(run.id, 'The requested command was denied.');
-    const reviewAttempt = expect(
-      scenario.service.startReview({ taskId: task.id, runId: run.id })
-    ).rejects.toThrow(/declined.*no Git change/i);
-    const snapshot = await reconciled;
-    const currentTask = snapshot.tasks.find((candidate) => candidate.id === task.id);
-    const currentRun = snapshot.runs.find((candidate) => candidate.id === run.id);
 
-    expect(currentRun?.status).toBe('COMPLETED');
-    expect(currentTask?.projection.agentRun).toBe('COMPLETED');
-    expect(currentTask?.projection.summary).toMatch(/declined.*no Git change/i);
-    expect(
-      snapshot.events.some(
-        (event) => event.type === 'IMPLEMENTATION_OUTCOME_BLOCKED' && event.runId === run.id
-      )
-    ).toBe(true);
-    await reviewAttempt;
-    await expect(
-      scenario.service.createDeliveryCommit({ taskId: task.id })
-    ).rejects.toThrow(/declined.*no Git change/i);
-    await expect(
-      scenario.service.transitionTask({ taskId: task.id, toPhase: 'REVIEW' })
-    ).rejects.toThrow(/declined.*no Git change/i);
-    await expect(
-      scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' })
-    ).rejects.toThrow(/declined.*no Git change/i);
-  });
+      expect(currentRun?.status).toBe('COMPLETED');
+      expect(currentTask?.projection.agentRun).toBe('COMPLETED');
+      expect(currentTask?.projection.summary).toMatch(retryReason);
+      expect(
+        snapshot.events.some(
+          (event) =>
+            event.type === 'IMPLEMENTATION_OUTCOME_BLOCKED' && event.runId === run.id
+        )
+      ).toBe(true);
+      await reviewAttempt;
+      await expect(
+        scenario.service.createDeliveryCommit({ taskId: task.id })
+      ).rejects.toThrow(retryReason);
+      await expect(
+        scenario.service.transitionTask({ taskId: task.id, toPhase: 'REVIEW' })
+      ).rejects.toThrow(retryReason);
+      await expect(
+        scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' })
+      ).rejects.toThrow(retryReason);
+    }
+  );
 
   it('does not treat a declined MCP elicitation as rejected implementation execution', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -102,7 +110,7 @@ describe('TaskManagerService evidence flow', () => {
       prompt: 'Finish without the optional provider form.'
     });
     const run = await scenario.service.startRun({ taskId: task.id });
-    await recordDeclinedInteraction(scenario, run, {
+    await recordResolvedInteraction(scenario, run, {
       type: 'MCP_ELICITATION',
       request: {
         mode: 'form',
@@ -110,7 +118,8 @@ describe('TaskManagerService evidence flow', () => {
         message: 'Share optional context?',
         requestedSchema: {}
       },
-      decision: { interactionType: 'MCP_ELICITATION', action: 'DECLINE' }
+      decision: { interactionType: 'MCP_ELICITATION', action: 'DECLINE' },
+      status: 'DECLINED'
     });
 
     const postRunEvidence = scenario.waitForSnapshot((snapshot) =>
@@ -298,13 +307,29 @@ async function recordDeclinedCommand(
   scenario: TaskMonkiScenario,
   run: RunRecord
 ): Promise<void> {
-  return recordDeclinedInteraction(scenario, run, {
+  return recordResolvedInteraction(scenario, run, {
     type: 'COMMAND_APPROVAL',
     request: {
       command: 'touch implemented.txt',
       startedAtMs: Date.now()
     },
-    decision: { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE' }
+    decision: { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE' },
+    status: 'DECLINED'
+  });
+}
+
+async function recordCanceledCommand(
+  scenario: TaskMonkiScenario,
+  run: RunRecord
+): Promise<void> {
+  return recordResolvedInteraction(scenario, run, {
+    type: 'COMMAND_APPROVAL',
+    request: {
+      command: 'touch implemented.txt',
+      startedAtMs: Date.now()
+    },
+    decision: { interactionType: 'COMMAND_APPROVAL', action: 'CANCEL' },
+    status: 'CANCELED'
   });
 }
 
@@ -397,13 +422,14 @@ process.exit(1);
   );
 }
 
-async function recordDeclinedInteraction(
+async function recordResolvedInteraction(
   scenario: TaskMonkiScenario,
   run: RunRecord,
   input: {
     type: InteractionRequestType;
     request: AgentInteractionRequestPayload;
     decision: AgentInteractionDecision;
+    status: 'DECLINED' | 'CANCELED';
   }
 ): Promise<void> {
   const server = await scenario.store.createAgentServer({
@@ -419,13 +445,13 @@ async function recordDeclinedInteraction(
     'INBOUND',
     JSON.stringify({
       method: 'session/request_permission',
-      id: `declined-${input.type.toLowerCase()}`
+      id: `resolved-${input.type.toLowerCase()}`
     })
   );
   const interaction = await scenario.store.createInteractionRequest({
     runtimeId: run.runtimeId,
     serverInstanceId: server.id,
-    providerRequestId: `declined-${input.type.toLowerCase()}`,
+    providerRequestId: `resolved-${input.type.toLowerCase()}`,
     taskId: run.taskId,
     iterationId: run.iterationId,
     runId: run.id,
@@ -433,7 +459,7 @@ async function recordDeclinedInteraction(
     providerTurnId: run.providerTurnId,
     type: input.type,
     request: input.request,
-    allowedActions: ['DECLINE'],
+    allowedActions: [input.status === 'CANCELED' ? 'CANCEL' : 'DECLINE'],
     policyWarnings: [],
     requestRawMessage: rawMessage
   });
@@ -443,8 +469,8 @@ async function recordDeclinedInteraction(
     respondedAt: new Date().toISOString()
   });
   await scenario.store.transitionInteractionRequest(interaction.id, 'RESPONDING', {
-    status: 'DECLINED',
-    resolution: { outcome: 'declined' },
+    status: input.status,
+    resolution: { outcome: input.status === 'CANCELED' ? 'canceled' : 'declined' },
     resolvedAt: new Date().toISOString()
   });
 }

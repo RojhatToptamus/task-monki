@@ -60,6 +60,7 @@ import {
 import {
   ACP_MAX_MESSAGE_BYTES,
   flattenSelectOptions,
+  mergeAcpToolCallUpdate,
   parseConfigOptions,
   parseNewSessionResponse,
   parseParameterizedModelCatalog,
@@ -2679,13 +2680,17 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       await client.respond(request.id, { outcome: { outcome: 'cancelled' } });
       return;
     }
+    const providerItem = await this.store.getAgentItemByProviderId(
+      run.id,
+      permission.toolCall.toolCallId
+    );
+    if (!this.isCurrentClientEvent(client, generation, raw)) return;
+    const toolCall = mergeAcpToolCallUpdate(providerItem?.payload, permission.toolCall);
     const materialized = materializeAcpPermission({
-      toolCall: permission.toolCall,
+      toolCall,
       options: permission.options,
       session,
       run,
-      allowOpaqueExecutePermissions:
-        this.profile.allowOpaqueExecutePermissions === true,
       rememberedPermissionOwner:
         this.profile.allowRememberedPermissions === true
           ? this.descriptor.displayName
@@ -2694,7 +2699,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
     const automaticOption = selectAutomaticAcpPermissionOption({
       approvalPolicy: run.requestedSettings.approvalPolicy,
-      toolCall: permission.toolCall,
+      toolCall,
       options: permission.options,
       materialized
     });
@@ -2719,7 +2724,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         runId: run.id,
         sessionId: session.id,
         providerTurnId: run.providerTurnId,
-        providerItemId: permission.toolCall.toolCallId,
+        providerItemId: toolCall.toolCallId,
         type: 'COMMAND_APPROVAL',
         request: this.redactProviderValue(materialized.request),
         allowedActions: materialized.allowedActions,
@@ -3228,16 +3233,16 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   ): Promise<void> {
     if (typeof update.toolCallId !== 'string') return;
     const existing = await this.store.getAgentItemByProviderId(run.id, update.toolCallId);
-    const prior = isRecord(existing?.payload) ? existing.payload : {};
+    const toolCall = mergeAcpToolCallUpdate(existing?.payload, update);
     await this.store.upsertAgentItem({
       taskId: run.taskId,
       iterationId: run.iterationId,
       runId: run.id,
       sessionId: run.sessionId,
       providerItemId: update.toolCallId,
-      type: mapAcpToolKind(update.kind ?? (prior.kind as never)),
-      status: mapAcpToolStatus(update.status),
-      payload: this.redactProviderValue({ ...prior, ...jsonSafeRecord(update) }),
+      type: mapAcpToolKind(toolCall.kind),
+      status: mapAcpToolStatus(toolCall.status),
+      payload: this.redactProviderValue(toolCall),
       rawMessage: raw
     });
   }

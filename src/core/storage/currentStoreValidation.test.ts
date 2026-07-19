@@ -168,6 +168,19 @@ describe('validateCurrentStoreRecords', () => {
     );
   });
 
+  it('accepts an inbound provider acknowledgement as interaction response evidence', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.responseRawMessage = {
+      ...interaction.requestRawMessage,
+      sequence: 2,
+      direction: 'INBOUND'
+    };
+    state.interactionRequests = [interaction];
+
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+  });
+
   it('rejects ambiguous or mismatched durable provider permission options', () => {
     const state = createEmptyState();
     const interaction = validInteraction();

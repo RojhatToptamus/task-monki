@@ -64,14 +64,6 @@ export interface AcpRuntimeProfile {
   };
   /** The provider may offer an exact option whose remembered scope it owns. */
   allowRememberedPermissions?: true;
-  /**
-   * Allows this profile's documented permission contract to expose positive
-   * provider choices when an execute request omits command text. Remembered
-   * choices additionally require allowRememberedPermissions and always remain
-   * explicit. All other profiles fail closed because Task Monki cannot verify
-   * scope.
-   */
-  allowOpaqueExecutePermissions?: true;
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
@@ -135,10 +127,17 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   descriptor: descriptor('grok-acp', 'Grok Build'),
   executableEnvironmentKey: 'TASK_MONKI_GROK_ACP_BIN',
   executableCandidates: ['grok'],
-  argv: ['--no-auto-update', 'agent', 'stdio'],
+  argv: ['--no-auto-update', '--permission-mode', 'default', 'agent', 'stdio'],
   versionArgv: ['--version'],
   launchContractProbe: {
-    argv: ['--no-auto-update', 'agent', 'stdio', '--help'],
+    argv: [
+      '--no-auto-update',
+      '--permission-mode',
+      'default',
+      'agent',
+      'stdio',
+      '--help'
+    ],
     description: 'Grok Build ACP stdio launch contract',
     requiredOutput: [
       {
@@ -153,6 +152,9 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'xai',
   defaultModel: 'grok-build',
+  // The CLI's process-scoped default mode reports native permission requests.
+  // Task Monki decides only how to answer those exact requests; Grok still owns
+  // its documented global allow/deny rules and the unconfined agent process.
   approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
   allowRememberedPermissions: true,
   environmentPolicy: {
@@ -217,7 +219,6 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
       'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
   },
   allowRememberedPermissions: true,
-  allowOpaqueExecutePermissions: true,
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -370,7 +371,7 @@ export function acpCapabilities(
   return {
     runtimeId: profile.descriptor.id,
     executionPolicy: {
-      defaultPresetId: 'ask-for-approval',
+      defaultPresetId: executionPresets[0]!.id,
       presets: executionPresets,
       detail:
         'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'

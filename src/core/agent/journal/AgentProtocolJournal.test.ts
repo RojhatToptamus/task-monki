@@ -32,6 +32,17 @@ describe('AgentProtocolJournal', () => {
     await journal.close();
   });
 
+  it('rejects malformed reference digests before reading a journal segment', async () => {
+    const directory = await temporaryDirectory();
+    const journal = new AgentProtocolJournal(directory, tinyLimits());
+    const reference = await journal.append('server-reference', 'OUTBOUND', 'safe');
+
+    expect(() => journal.read({ ...reference, sha256: 'invalid' })).toThrow(
+      'reference is invalid'
+    );
+    await journal.close();
+  });
+
   it('prunes only complete old segments and fails closed for a pruned reference', async () => {
     const directory = await temporaryDirectory();
     const limits = tinyLimits({ maxTotalBytes: 1_100 });
@@ -176,18 +187,18 @@ describe('AgentProtocolJournal', () => {
     await restarted.close();
   });
 
-  it('reads legacy segment-zero references and continues their sequence', async () => {
+  it('reads unnumbered segment-zero references and continues their sequence', async () => {
     const directory = await temporaryDirectory();
-    const serverInstanceId = 'server-legacy';
+    const serverInstanceId = 'server-segment-zero';
     const recordedAt = '2026-07-12T12:00:00.000Z';
-    const raw = '{"legacy":true}';
+    const raw = '{"segment":0}';
     const line = `${JSON.stringify({
       serverInstanceId,
       sequence: 42,
       direction: 'INBOUND',
       recordedAt,
       raw,
-      metadata: { legacy: true }
+      metadata: { segment: 0 }
     })}\n`;
     const filePath = path.join(directory, `${serverInstanceId}.ndjson`);
     await fs.writeFile(filePath, line, { encoding: 'utf8', mode: 0o600 });
@@ -205,7 +216,7 @@ describe('AgentProtocolJournal', () => {
 
     await expect(journal.read(reference)).resolves.toEqual({
       raw,
-      metadata: { legacy: true }
+      metadata: { segment: 0 }
     });
     const next = await journal.append(serverInstanceId, 'OUTBOUND', 'new format');
     expect(next).toMatchObject({ sequence: 43 });

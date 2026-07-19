@@ -79,7 +79,7 @@ WebSocket transport is not used.
   - Codex App Server process state, runtime version, schema hash, and status.
 - `AgentProtocolJournal`
   - Bounded append-only NDJSON segments for structurally redacted protocol
-    debugging. Segment zero keeps the legacy server journal path; rotated
+    debugging. Segment zero keeps the unnumbered server journal path; rotated
     references carry an explicit segment. Complete old segments are pruned at
     the per-server retention bound. Across every runtime, only the eight newest
     unreferenced terminal server records are retained; referenced and

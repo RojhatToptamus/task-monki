@@ -25,7 +25,7 @@ export const DEFAULT_AGENT_PROTOCOL_JOURNAL_LIMITS = Object.freeze({
 export interface AgentProtocolJournalOptions {
   /** Maximum serialized NDJSON bytes for one protocol message. */
   maxEntryBytes?: number;
-  /** Maximum bytes in one segment. A legacy segment can exceed this until rotation. */
+  /** Maximum bytes in one segment. An existing segment zero may exceed this until rotation. */
   maxSegmentBytes?: number;
   /** Maximum retained segment bytes for one server instance. */
   maxTotalBytes?: number;
@@ -83,7 +83,7 @@ export interface AgentProtocolJournalRecord {
  * Per-server segmented, structurally redacted protocol storage.
  *
  * Appends for one server are serialized and references use a global sequence.
- * Segment zero keeps the historical `<server>.ndjson` name; newer references
+ * Segment zero keeps the unnumbered `<server>.ndjson` name; newer references
  * carry a segment number only after rotation. Inbound writes are synced in
  * bounded batches, while outbound writes are synced before append resolves.
  */
@@ -874,7 +874,7 @@ function validateReference(
     reference.byteLength > maxEntryBytes ||
     (reference.direction !== 'INBOUND' && reference.direction !== 'OUTBOUND') ||
     !Number.isFinite(Date.parse(reference.recordedAt)) ||
-    typeof reference.sha256 !== 'string'
+    !/^[a-f0-9]{64}$/u.test(reference.sha256)
   ) {
     throw new Error('Protocol journal reference is invalid.');
   }

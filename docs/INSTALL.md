@@ -98,16 +98,24 @@ uses that agent's native model operation rather than translating it into a
 generic model name. Controls are available only while the session is idle and
 are disabled for active or recovery-required work.
 
-Cursor and Grok offer **Ask for approval**, **Auto-accept edits**, and **Full
-access** through their native ACP permission requests; Claude Agent ACP remains
+Cursor offers **Ask for approval**, **Auto-accept edits**, and **Full access**
+through its native ACP permission requests; Claude Agent ACP remains
 Ask-for-approval only. Full access automatically selects only an exact
 `allow_once` option. A provider-remembered choice such as Cursor's
 `allow_always` always requires explicit confirmation, retains the provider's
 exact label and ID, and may outlive the ACP process because the provider owns
-its scope, storage, lifetime, and revocation. The provider process still runs
+its scope and lifetime. The provider process still runs
 outside a Task Monki filesystem or network sandbox, so these modes govern Task
 Monki's responses to reported requests rather than confining unreported
 provider activity.
+
+Grok also offers **Ask for approval**, **Auto-accept edits**, and **Full access**.
+Task Monki starts its managed ACP process with Grok's process-scoped
+`--permission-mode default`, then answers only the exact permission options Grok
+sends. Grok's global `--allow`/`--deny` rules remain provider-owned; Task Monki
+does not rewrite global or repository configuration. The current Grok ACP may
+offer only one-time allow and reject choices for an individual request, in which
+case Task Monki does not invent a remembered or scoped choice.
 
 Codex is different: it enforces and attests its managed sandbox. **Restricted**
 permits only worktree writes with network and exceptions disabled; **Ask for

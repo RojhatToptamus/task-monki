@@ -61,7 +61,7 @@ describe('InteractionPanel', () => {
     const interaction = commandInteraction();
     interaction.runtimeId = 'cursor-agent-acp';
     interaction.policyWarnings = [
-      'Selecting a remembered option allows Cursor Agent to persist the choice. Cursor Agent owns its scope, storage, lifetime, and revocation, which may extend beyond this ACP session or process.'
+      'Cursor Agent owns the scope and lifetime of remembered choices.'
     ];
     interaction.request = {
       startedAtMs: Date.now(),
@@ -106,8 +106,9 @@ describe('InteractionPanel', () => {
 
     expect(html).toContain('Tool approval');
     expect(html).not.toContain('Command approval');
-    expect(html).toContain('Provider context');
-    expect(html).toContain('<strong>Untrusted:</strong>');
+    expect(html).toContain('<dt>Reason</dt>');
+    expect(html).not.toContain('Provider context');
+    expect(html).not.toContain('<strong>Untrusted:</strong>');
     expect(html).toContain('Run the project test suite before finishing.');
     expect(html).toContain('<code>npm test</code>');
     expect(html).toContain('src/core/agent.ts');
@@ -116,12 +117,16 @@ describe('InteractionPanel', () => {
     expect(html).toContain('Yes, proceed');
     expect(html).toContain('No, tell Grok why');
     expect(html).toContain('Allow edits this session');
+    expect(html).toContain('Cancel request');
     expect(html).toMatch(/class="primary-button"[^>]*>Yes, proceed<\/button>/);
     expect(html).toMatch(
       /class="outline-button"[^>]*>Allow edits this session<\/button>/
     );
     expect(html).toContain(
-      'Cursor Agent owns its scope, storage, lifetime, and revocation'
+      'Cursor Agent owns the scope and lifetime of remembered choices'
+    );
+    expect(html.indexOf('Run the project test suite before finishing.')).toBeLessThan(
+      html.indexOf('Cursor Agent owns the scope and lifetime of remembered choices')
     );
     expect(html).not.toContain('Allow for session');
   });
@@ -142,7 +147,7 @@ describe('InteractionPanel', () => {
       />
     );
 
-    expect(html).toContain('Cancel');
+    expect(html).toContain('Cancel request');
     expect(html).not.toContain('Allow once');
     expect(html).not.toContain('>Deny<');
     expect(html).not.toContain('Working directory');

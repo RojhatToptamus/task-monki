@@ -28,13 +28,11 @@ export function openCodePermissionRules(
   settings: AgentExecutionSettings
 ): OpenCodePermissionRule[] {
   assertOpenCodeExecutionSettings(settings);
-  const fallbackAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
-  const mutationAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
-  const externalDirectoryAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
+  const defaultAction = settings.approvalPolicy === 'never' ? 'allow' : 'ask';
   const taskAction = settings.approvalPolicy === 'never' ? 'allow' : 'deny';
   const networkAction = settings.networkAccess === true ? 'allow' : 'deny';
   return [
-    { permission: '*', pattern: '*', action: fallbackAction },
+    { permission: '*', pattern: '*', action: defaultAction },
     { permission: 'read', pattern: '*', action: 'allow' },
     { permission: 'glob', pattern: '*', action: 'allow' },
     { permission: 'grep', pattern: '*', action: 'allow' },
@@ -42,9 +40,9 @@ export function openCodePermissionRules(
     { permission: 'lsp', pattern: '*', action: 'allow' },
     { permission: 'question', pattern: '*', action: 'allow' },
     { permission: 'task', pattern: '*', action: taskAction },
-    { permission: 'external_directory', pattern: '*', action: externalDirectoryAction },
-    { permission: 'edit', pattern: '*', action: mutationAction },
-    { permission: 'bash', pattern: '*', action: mutationAction },
+    { permission: 'external_directory', pattern: '*', action: defaultAction },
+    { permission: 'edit', pattern: '*', action: defaultAction },
+    { permission: 'bash', pattern: '*', action: defaultAction },
     { permission: 'webfetch', pattern: '*', action: networkAction },
     { permission: 'websearch', pattern: '*', action: networkAction }
   ];

@@ -529,7 +529,7 @@ export type AgentItemType =
 
 export interface AgentProtocolMessageReference {
   serverInstanceId: string;
-  /** Omitted for the legacy segment-zero `<server>.ndjson` file. */
+  /** Omitted for the unnumbered segment-zero `<server>.ndjson` file. */
   segment?: number;
   sequence: number;
   direction: 'INBOUND' | 'OUTBOUND';

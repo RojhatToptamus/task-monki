@@ -42,41 +42,38 @@ describe('ACP permission safety intersection', () => {
     expect(policy.warnings.join(' ')).toContain('commit, publication, merge');
   });
 
-  it('keeps opaque execution and remembered choices behind explicit profile gates', async () => {
+  it('preserves the provider reason and exact remembered choices for a verified command', async () => {
     const { session, run } = await ownership();
-    const oneTime = materializeAcpPermission({
-      toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
-      options,
-      session,
-      run,
-      allowOpaqueExecutePermissions: true
-    });
     const remembered = materializeAcpPermission({
-      toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
+      toolCall: {
+        toolCallId: 'tool-2',
+        kind: 'execute',
+        title: '`npm test`',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: 'Not in allowlist: npm test' }
+          }
+        ],
+        rawInput: { command: 'npm test', cwd: session.worktreePath }
+      },
       options,
       session,
       run,
-      allowOpaqueExecutePermissions: true,
       rememberedPermissionOwner: 'Cursor Agent'
     });
-    expect(oneTime.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
-    expect(oneTime.request.providerOptions?.map((option) => option.id)).not.toContain(
-      'yes-always'
-    );
-    expect(oneTime.request.providerOptions?.map((option) => option.id)).not.toContain(
-      'no-always'
-    );
     expect(remembered.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+    expect(remembered.request.reason).toBe('Not in allowlist: npm test');
+    expect(remembered.request.command).toBe('npm test');
     expect(remembered.request.providerOptions).toContainEqual({
       id: 'yes-always',
       label: 'Always',
       action: 'ACCEPT',
       providerRemembersChoice: true
     });
-    expect(remembered.warnings.join(' ')).toContain('verifiable command');
-    expect(remembered.warnings.join(' ')).toContain(
-      'Cursor Agent owns its scope, storage, lifetime, and revocation'
-    );
+    expect(remembered.warnings).toEqual([
+      'Cursor Agent owns the scope and lifetime of remembered choices.'
+    ]);
   });
 
   it('fails closed for opaque execution outside an explicitly attested profile', async () => {
@@ -157,7 +154,7 @@ describe('ACP permission safety intersection', () => {
       providerRemembersChoice: true
     });
     expect(policy.warnings.join(' ')).toContain(
-      'Cursor Agent owns its scope, storage, lifetime, and revocation'
+      'Cursor Agent owns the scope and lifetime of remembered choices'
     );
   });
 
@@ -288,13 +285,16 @@ describe('ACP automatic permission selection', () => {
 
   it('uses a one-time full-access approval and never falls back to a remembered option', async () => {
     const { session, run } = await ownership();
-    const toolCall = { toolCallId: 'tool-full', kind: 'execute' as const };
+    const toolCall = {
+      toolCallId: 'tool-full',
+      kind: 'execute' as const,
+      rawInput: { command: 'npm test', cwd: session.worktreePath }
+    };
     const materialized = materializeAcpPermission({
       toolCall,
       options,
       session,
       run,
-      allowOpaqueExecutePermissions: true,
       rememberedPermissionOwner: 'Cursor Agent'
     });
 
