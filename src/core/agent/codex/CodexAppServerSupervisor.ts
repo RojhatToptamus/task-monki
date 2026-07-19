@@ -134,6 +134,10 @@ export class CodexAppServerSupervisor {
   private server?: AgentServerInstance;
   private startPromise?: Promise<CodexRpcClient>;
   private readonly closeHandlings = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+  private readonly processTreeTerminations = new WeakMap<
+    ChildProcessWithoutNullStreams,
+    Promise<void>
+  >();
   private readonly closingChildren = new WeakSet<ChildProcessWithoutNullStreams>();
   private readonly diagnosticTails = new WeakMap<ChildProcessWithoutNullStreams, string>();
   private readonly diagnosticLineBuffers = new WeakMap<ChildProcessWithoutNullStreams, string>();
@@ -237,7 +241,7 @@ export class CodexAppServerSupervisor {
     }
     if (childAtShutdown) {
       try {
-        await terminateAndConfirm(
+        await this.ensureProcessTreeExit(
           childAtShutdown,
           this.options.shutdownGraceTimeoutMs ?? 3_000,
           this.options.shutdownKillTimeoutMs ?? 2_000
@@ -250,7 +254,7 @@ export class CodexAppServerSupervisor {
     const lateChild = this.child;
     if (lateChild && lateChild !== childAtShutdown) {
       try {
-        await terminateAndConfirm(
+        await this.ensureProcessTreeExit(
           lateChild,
           this.options.shutdownGraceTimeoutMs ?? 3_000,
           this.options.shutdownKillTimeoutMs ?? 2_000
@@ -293,7 +297,7 @@ export class CodexAppServerSupervisor {
     if (child) this.terminationReasons.set(child, safeReason);
     this.client?.close(safeReason);
     if (child && isPortableProcessTreeRunning(child)) {
-      await terminateAndConfirm(
+      await this.ensureProcessTreeExit(
         child,
         this.options.shutdownGraceTimeoutMs ?? 1_000,
         this.options.shutdownKillTimeoutMs ?? 2_000
@@ -331,7 +335,7 @@ export class CodexAppServerSupervisor {
     this.client?.close(safeReason);
     if (child && isPortableProcessTreeRunning(child)) {
       try {
-        await terminateAndConfirm(
+        await this.ensureProcessTreeExit(
           child,
           this.options.shutdownGraceTimeoutMs ?? 1_000,
           this.options.shutdownKillTimeoutMs ?? 2_000
@@ -519,7 +523,7 @@ export class CodexAppServerSupervisor {
       if (this.client === client) this.client = undefined;
       if (child && isPortableProcessTreeRunning(child)) {
         try {
-          await terminateAndConfirm(
+          await this.ensureProcessTreeExit(
             child,
             this.options.shutdownGraceTimeoutMs ?? 1_000,
             this.options.shutdownKillTimeoutMs ?? 2_000
@@ -591,7 +595,7 @@ export class CodexAppServerSupervisor {
     client.close(`Protocol error: ${safeMessage}`);
     const termination =
       isPortableProcessTreeRunning(child)
-        ? terminateAndConfirm(
+        ? this.ensureProcessTreeExit(
             child,
             this.options.shutdownGraceTimeoutMs ?? 1_000,
             this.options.shutdownKillTimeoutMs ?? 2_000
@@ -623,6 +627,18 @@ export class CodexAppServerSupervisor {
       this.lifecycleFailure = failure;
       throw failure;
     }
+  }
+
+  private ensureProcessTreeExit(
+    child: ChildProcessWithoutNullStreams,
+    gracefulTimeoutMs: number,
+    killTimeoutMs: number
+  ): Promise<void> {
+    const existing = this.processTreeTerminations.get(child);
+    if (existing) return existing;
+    const termination = terminateAndConfirm(child, gracefulTimeoutMs, killTimeoutMs);
+    this.processTreeTerminations.set(child, termination);
+    return termination;
   }
 
   private async waitForHandledClose(
@@ -657,7 +673,7 @@ export class CodexAppServerSupervisor {
     let processTreeFailure: unknown;
     if (isPortableProcessTreeRunning(child)) {
       try {
-        await terminateAndConfirm(
+        await this.ensureProcessTreeExit(
           child,
           this.options.shutdownGraceTimeoutMs ?? 1_000,
           this.options.shutdownKillTimeoutMs ?? 2_000

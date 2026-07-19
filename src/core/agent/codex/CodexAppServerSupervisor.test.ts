@@ -472,6 +472,30 @@ describe('Codex App Server launch configuration', () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
 
+  it('coalesces safety-fence and close-handler process-tree termination', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-fence-'));
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const child = fakeCodexChild({ closeBeforeExitConfirmation: true });
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: directory,
+      appVersion: 'test',
+      runtimeResolver: async () => resolvedCodexRuntime(),
+      argvResolver: async () => ['app-server', '--stdio'],
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit('spawn'));
+        return child;
+      }
+    });
+
+    await supervisor.start();
+    await supervisor.terminateAndFence('unsafe provider settings');
+
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    expect(supervisor.currentServer).toMatchObject({ status: 'EXITED' });
+    await store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
   it('refuses a replacement generation when prior exit cleanup cannot confirm termination', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-prior-tree-'));
     const store = new FileTaskStore(path.join(directory, 'store'));
@@ -522,7 +546,7 @@ function resolvedCodexRuntime() {
 }
 
 function fakeCodexChild(
-  options: { closeOnKill?: boolean } = {}
+  options: { closeOnKill?: boolean; closeBeforeExitConfirmation?: boolean } = {}
 ): ChildProcessWithoutNullStreams & {
   stderr: PassThrough;
   kill: ReturnType<typeof vi.fn>;
@@ -537,8 +561,17 @@ function fakeCodexChild(
     if (child.exitCode !== null || child.signalCode !== null) return false;
     killed = true;
     if (options.closeOnKill !== false) {
-      signalCode = signal;
-      queueMicrotask(() => child.emit('close', null, signal));
+      if (options.closeBeforeExitConfirmation) {
+        queueMicrotask(() => {
+          child.emit('close', null, signal);
+          setImmediate(() => {
+            signalCode = signal;
+          });
+        });
+      } else {
+        signalCode = signal;
+        queueMicrotask(() => child.emit('close', null, signal));
+      }
     }
     return true;
   });

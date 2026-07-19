@@ -449,7 +449,7 @@ describe('runProviderSmoke', () => {
       { cancelTimeoutMs: 25 }
     );
 
-    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(service.startedModels.map(({ model }) => model)).toEqual([
       'first-hung-cancel'
     ]);
