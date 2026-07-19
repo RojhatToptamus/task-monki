@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { AgentModel } from '../../shared/contracts';
+import type { AgentModel, Repository } from '../../shared/contracts';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import {
   capAttachmentValidationFailures,
@@ -174,30 +174,59 @@ describe('NewTaskPanel', () => {
       }
     ];
 
-    const renderPanel = (attachmentsEnabled = true) => renderToStaticMarkup(
-      <NewTaskPanel
-        defaultRepositoryPath="/tmp/project"
-        models={models}
-        attachmentsEnabled={attachmentsEnabled}
-        onCreate={async () => undefined}
-        onRefinePrompt={async () => ({
-          titleSuggestion: 'Task',
-          prompt: 'Do the task.',
-          source: 'deterministic-fallback'
-        })}
-        onStageAttachmentBatch={async () => ({
-          id: 'draft-1',
-          attachments: [],
+    const renderPanel = ({
+      attachmentsEnabled = true,
+      repositoryId = 'repository-1',
+      repositories = [
+        {
+          id: 'repository-1',
+          name: 'project',
+          path: '/tmp/project',
+          status: 'AVAILABLE',
+          remotes: [],
           createdAt: '2026-07-10T00:00:00.000Z',
           updatedAt: '2026-07-10T00:00:00.000Z'
-        })}
-        onDiscardAttachmentDraft={async () => undefined}
-        onClose={() => undefined}
-      />
-    );
+        }
+      ]
+    }: {
+      attachmentsEnabled?: boolean;
+      repositoryId?: string;
+      repositories?: Repository[];
+    } = {}) =>
+      renderToStaticMarkup(
+        <NewTaskPanel
+          repositoryId={repositoryId}
+          repositories={repositories}
+          models={models}
+          attachmentsEnabled={attachmentsEnabled}
+          onCreate={async () => undefined}
+          onRefinePrompt={async () => ({
+            titleSuggestion: 'Task',
+            prompt: 'Do the task.',
+            source: 'deterministic-fallback'
+          })}
+          onStageAttachmentBatch={async () => ({
+            id: 'draft-1',
+            attachments: [],
+            createdAt: '2026-07-10T00:00:00.000Z',
+            updatedAt: '2026-07-10T00:00:00.000Z'
+          })}
+          onDiscardAttachmentDraft={async () => undefined}
+          onClose={() => undefined}
+        />
+      );
     const html = renderPanel();
 
     expect(html).toContain('Permission mode');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
+    expect(html).toContain('<strong>project</strong>');
+    expect(html).toContain('title="/tmp/project"');
+    expect(html).not.toContain('aria-label="Search repositories"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).not.toContain('type="radio"');
+    expect(html).not.toContain('role="radiogroup"');
+    expect(html).toContain('aria-label="Create task in project"');
     expect(html).toContain('Sandboxed');
     expect(html).toContain('<option value="SANDBOXED" selected="">Sandboxed</option>');
     expect(html).toContain('Ask for approval');
@@ -219,7 +248,36 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
 
-    const gatedHtml = renderPanel(false);
+    const fallbackHtml = renderPanel({
+      repositoryId: 'repository-disconnected',
+      repositories: [
+        {
+          id: 'repository-disconnected',
+          name: 'old-project',
+          path: '/tmp/old-project',
+          status: 'DISCONNECTED',
+          remotes: [],
+          createdAt: '2026-07-10T00:00:00.000Z',
+          updatedAt: '2026-07-10T00:00:00.000Z'
+        },
+        {
+          id: 'repository-available',
+          name: 'available-project',
+          path: '/tmp/available-project',
+          status: 'AVAILABLE',
+          remotes: [],
+          createdAt: '2026-07-10T00:00:00.000Z',
+          updatedAt: '2026-07-10T00:00:00.000Z'
+        }
+      ]
+    });
+    expect(fallbackHtml).toContain(
+      'aria-label="Task repository: available-project, /tmp/available-project"'
+    );
+    expect(fallbackHtml).toContain('aria-label="Create task in available-project"');
+    expect(fallbackHtml).not.toContain('Create task in old-project');
+
+    const gatedHtml = renderPanel({ attachmentsEnabled: false });
     expect(gatedHtml).toContain('Unavailable in this build');
     expect(gatedHtml).toContain('Attachments require file-read isolation between tasks.');
   });

@@ -40,7 +40,7 @@ export interface TaskCardVM {
   meta?: string;
   /** Lineage cue for a forked task, e.g. "fork of #task-rev"; undefined otherwise. */
   lineage?: string;
-  repositoryPath: string;
+  repositoryId: string;
   stateLabel: string;
   stateTone: Tone;
   showState: boolean;
@@ -62,6 +62,7 @@ export interface TaskCardOptions {
    * the Review queue where that count is the signal engineers scan for.
    */
   showReviewCount?: boolean;
+  repositoryName?: string;
 }
 
 export interface FinishEvidenceWarning {
@@ -551,10 +552,6 @@ function deliveryLineTone(task: Task): Tone {
   return 'neutral';
 }
 
-export function taskMeta(task: Task): string {
-  return repositoryName(task.repositoryPath);
-}
-
 export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
   const state = describeTaskState(task);
@@ -573,11 +570,11 @@ export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): Task
     id: task.id,
     num: `#${formatShortId(task.id)}`,
     title: task.title,
-    meta: showRepo ? taskMeta(task) : undefined,
+    meta: showRepo ? options.repositoryName : undefined,
     lineage: task.forkedFromTaskId
       ? `fork of #${formatShortId(task.forkedFromTaskId)}`
       : undefined,
-    repositoryPath: task.repositoryPath,
+    repositoryId: task.repositoryId,
     stateLabel: state.label,
     stateTone: state.tone,
     showState: !stateRestatesColumn(state.label, columnKey),
@@ -606,7 +603,7 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
 export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
   const seen = new Set<string>();
   for (const task of tasks) {
-    seen.add(task.repositoryPath);
+    seen.add(task.repositoryId);
     if (seen.size > 1) {
       return true;
     }
@@ -731,10 +728,6 @@ function checksRequirement(
   };
 }
 
-export function repositoryName(repositoryPath: string): string {
-  const parts = repositoryPath.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? repositoryPath;
-}
 
 export type NavView = 'inbox' | 'board' | 'active' | 'review' | 'done' | 'settings';
 

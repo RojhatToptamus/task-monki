@@ -12,7 +12,8 @@ import type {
   AgentModel,
   AgentPreflight,
   CreateTaskRequest,
-  RefinePromptResponse
+  RefinePromptResponse,
+  Repository
 } from '../../shared/contracts';
 import {
   ATTACHMENT_FILE_INPUT_ACCEPT,
@@ -41,17 +42,23 @@ import {
   MAX_NEW_TASK_PANEL_WIDTH,
   resizeNewTaskPanelFromPointer
 } from '../model/newTaskPanel';
+import {
+  buildRepositoryOptions,
+  resolveSelectedRepositoryId
+} from '../model/repositories';
+import { RepositorySelect } from './RepositoryPicker';
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
-  defaultRepositoryPath: string;
+  repositoryId: string;
+  repositories: Repository[];
   models: AgentModel[];
   preflight?: AgentPreflight;
   defaultAgentSettings?: AgentExecutionSettings;
   disabled?: boolean;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
-  onRefinePrompt(repositoryPath: string, input: string): Promise<RefinePromptResponse>;
+  onRefinePrompt(repositoryId: string, input: string): Promise<RefinePromptResponse>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
@@ -61,7 +68,8 @@ interface NewTaskPanelProps {
 }
 
 export function NewTaskPanel({
-  defaultRepositoryPath,
+  repositoryId,
+  repositories,
   models,
   preflight,
   defaultAgentSettings,
@@ -78,6 +86,12 @@ export function NewTaskPanel({
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [requestedRepositoryId, setRequestedRepositoryId] = useState(
+    () =>
+      repositories.find(
+        (repository) => repository.id === repositoryId && repository.status === 'AVAILABLE'
+      )?.id ?? repositories.find((repository) => repository.status === 'AVAILABLE')?.id ?? ''
+  );
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const [permissionMode, setPermissionMode] =
@@ -133,7 +147,20 @@ export function NewTaskPanel({
   }, [defaultAgentSettings?.model, defaultAgentSettings?.reasoningEffort, model, models]);
 
   const selectedModel = models.find((candidate) => candidate.model === model);
-  const repositoryPath = defaultRepositoryPath.trim();
+  const availableRepositories = repositories.filter(
+    (repository) => repository.status === 'AVAILABLE'
+  );
+  const repositoryOptions = buildRepositoryOptions({
+    repositories: availableRepositories,
+    tasks: []
+  });
+  const selectedRepositoryId = resolveSelectedRepositoryId(
+    repositoryOptions,
+    requestedRepositoryId
+  );
+  const selectedRepository = availableRepositories.find(
+    (repository) => repository.id === selectedRepositoryId
+  );
   const sandboxedSelected = permissionMode === 'SANDBOXED';
   const fullAccessSelected = permissionMode === 'FULL_ACCESS';
   const reasoningEfforts = [
@@ -230,6 +257,9 @@ export function NewTaskPanel({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
       if (event.key === 'Escape') {
         closePanel();
         return;
@@ -272,7 +302,7 @@ export function NewTaskPanel({
       return;
     }
     setError(undefined);
-    if (!repositoryPath) {
+    if (!selectedRepositoryId) {
       setError('Select a repository before creating a task.');
       return;
     }
@@ -289,7 +319,7 @@ export function NewTaskPanel({
         await onCreate({
           title,
           prompt,
-          repositoryPath,
+          repositoryId: selectedRepositoryId,
           creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
           attachmentDraftId,
           agentSettings: {
@@ -328,7 +358,7 @@ export function NewTaskPanel({
 
   const refine = async () => {
     setError(undefined);
-    if (!repositoryPath) {
+    if (!selectedRepositoryId) {
       setError('Select a repository before refining the description.');
       return;
     }
@@ -336,7 +366,7 @@ export function NewTaskPanel({
     setRestorable(undefined);
     setIsRefining(true);
     try {
-      const refined = await onRefinePrompt(repositoryPath, prompt);
+      const refined = await onRefinePrompt(selectedRepositoryId, prompt);
       // Present as a proposal instead of overwriting the user's input.
       setProposal({ prompt: refined.prompt, titleSuggestion: refined.titleSuggestion });
     } catch (caught) {
@@ -372,7 +402,7 @@ export function NewTaskPanel({
     isRefining ||
     !title.trim() ||
     !prompt.trim() ||
-    !repositoryPath ||
+    !selectedRepositoryId ||
     attachmentsBusy ||
     attachmentsHaveErrors ||
     selectedModelRejectsImages;
@@ -482,6 +512,16 @@ export function NewTaskPanel({
 
         <div className="slideover__body">
           <section className="newtask-section" aria-label="Task essentials">
+            <fieldset className="field tm-newtask-repository">
+              <legend>Repository</legend>
+              <RepositorySelect
+                options={repositoryOptions}
+                selectedId={selectedRepositoryId}
+                disabled={composerLocked || repositoryOptions.length === 0}
+                ariaLabel="Task repository"
+                onChange={setRequestedRepositoryId}
+              />
+            </fieldset>
             <label className="field">
               <span>Title</span>
               <input
@@ -516,7 +556,7 @@ export function NewTaskPanel({
                       composerLocked ||
                       isRefining ||
                       !prompt.trim() ||
-                      !repositoryPath ||
+                      !selectedRepositoryId ||
                       Boolean(proposal)
                     }
                     aria-busy={isRefining}
@@ -791,6 +831,11 @@ export function NewTaskPanel({
               type="submit"
               disabled={createDisabled}
               aria-busy={isSubmitting}
+              aria-label={
+                selectedRepository
+                  ? `Create task in ${selectedRepository.name}`
+                  : 'Create task'
+              }
             >
               {isSubmitting
                 ? 'Creating…'

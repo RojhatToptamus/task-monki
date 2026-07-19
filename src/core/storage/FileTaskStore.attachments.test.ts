@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { AttachmentFileStore } from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
-import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 function createStore(storeDir: string): FileTaskStore {
   return new FileTaskStore(storeDir);
@@ -23,7 +23,7 @@ describe('FileTaskStore attachments', () => {
     const request = {
       title: 'Use context',
       prompt: 'Read the attached context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-attachment-reload-0001',
       attachmentDraftId: draft.id
     };
@@ -52,7 +52,7 @@ describe('FileTaskStore attachments', () => {
     const request = {
       title: 'Original task',
       prompt: 'Use the original request.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       agentSettings: { model: 'codex-test', networkAccess: false },
       creationToken: 'task-create-conflict-token-0001'
     };
@@ -63,7 +63,7 @@ describe('FileTaskStore attachments', () => {
         ...request,
         title: `  ${request.title}  `,
         prompt: ` ${request.prompt} `,
-        repositoryPath: `${request.repositoryPath} `,
+        repositoryId: `${request.repositoryId} `,
         completionPolicy: 'LOCAL_ACCEPTANCE'
       })
     ).resolves.toMatchObject({ id: created.id });
@@ -76,14 +76,14 @@ describe('FileTaskStore attachments', () => {
     });
   });
 
-  it('rejects forged legacy blob keys on reload', async () => {
+  it('rejects obsolete attachment storage fields in the current schema', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
     const { draftId } = await stageText(store, 'context.json', '{"scope":"task"}');
     await store.createTask({
       title: 'Use context',
       prompt: 'Read the attached context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     await store.close();
@@ -97,14 +97,15 @@ describe('FileTaskStore attachments', () => {
       mode: 0o600
     });
 
-    await expect(createStore(dir).snapshot()).rejects.toMatchObject({
-      code: 'ATTACHMENT_INTEGRITY_MISMATCH'
-    });
+    await expect(createStore(dir).snapshot()).rejects.toThrow(
+      'attachments contains an invalid record'
+    );
   });
 
   it('leaves the draft retryable when task persistence fails', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
+    const repository = await addTestRepository(store, dir);
     const { draftId } = await stageText(store, 'notes.txt', 'keep me');
     const originalRename = fs.rename.bind(fs);
     const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
@@ -118,7 +119,7 @@ describe('FileTaskStore attachments', () => {
         store.createTask({
           title: 'Will fail',
           prompt: 'Do not lose the draft.',
-          repositoryPath: dir,
+          repositoryId: repository.id,
           attachmentDraftId: draftId
         })
       ).rejects.toThrow('injected persistence failure');
@@ -142,7 +143,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Recover cleanup',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     finalize.mockRestore();
@@ -169,14 +170,14 @@ describe('FileTaskStore attachments', () => {
     const source = await store.createTask({
       title: 'Source',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, source, worktreePath, 'source');
     const fork = await store.createForkedAlternativeTask({
       title: 'Alternative',
       prompt: source.prompt,
-      repositoryPath: source.repositoryPath,
+      repositoryId: source.repositoryId,
       sourceTaskId: source.id,
       sourceRunId: run.id
     });
@@ -202,14 +203,14 @@ describe('FileTaskStore attachments', () => {
     const source = await store.createTask({
       title: 'Source',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, source, worktreePath, 'delete');
     const fork = await store.createForkedAlternativeTask({
       title: 'Fork',
       prompt: source.prompt,
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       sourceTaskId: source.id,
       sourceRunId: run.id
     });
@@ -231,7 +232,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Delete run inputs',
       prompt: 'Use context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'run-inputs');
@@ -249,7 +250,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Restart recovery',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'repair');
@@ -272,7 +273,7 @@ describe('FileTaskStore attachments', () => {
     const task = await store.createTask({
       title: 'Restart boundary breach',
       prompt: 'Use the attachment.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       attachmentDraftId: draftId
     });
     const run = await createRun(store, task, worktreePath, 'unsafe');
@@ -284,187 +285,7 @@ describe('FileTaskStore attachments', () => {
     });
   });
 
-  it('migrates schema 9 by adding an empty attachment collection', async () => {
-    const dir = await temporaryDirectory();
-    const store = createStore(dir);
-    await store.createTask({ title: 'Legacy', prompt: 'Keep me.', repositoryPath: dir });
-    await store.close();
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    delete persisted.attachments;
-    persisted.schemaVersion = 9;
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-
-    const migrated = await createStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(migrated.attachments).toEqual([]);
-  });
-
-  it('migrates the released schema 11 attachment store by adding preview collections', async () => {
-    const dir = await temporaryDirectory();
-    const store = createStore(dir);
-    const draft = await store.createAttachmentDraft();
-    await store.stageTaskAttachment({
-      draftId: draft.id,
-      displayName: 'context.txt',
-      bytes: bytes('preserve me')
-    });
-    const task = await store.createTask({
-      title: 'Released attachment store',
-      prompt: 'Preserve the attachment.',
-      repositoryPath: dir,
-      creationToken: 'task-create-schema-eleven-0001',
-      attachmentDraftId: draft.id
-    });
-    await store.close();
-
-    const storePath = path.join(dir, 'store.json');
-    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
-    persisted.schemaVersion = 11;
-    for (const key of [
-      'previewPlans',
-      'previewApprovals',
-      'previewComposeProjects',
-      'previewGenerations',
-      'previewManagedEnvironments',
-      'previewManagedResources',
-      'previewGenerationAttachments',
-      'previewLocalBindings',
-      'previewNodeAttempts',
-      'previewResources'
-    ]) {
-      delete persisted[key];
-    }
-    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-
-    const migratedStore = createStore(dir);
-    const migrated = await migratedStore.snapshot();
-    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(migrated.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
-    expect(migrated.attachments).toHaveLength(1);
-    expect(migrated.previewPlans).toEqual([]);
-    await expect(migratedStore.readTaskAttachment(migrated.attachments[0]!.id))
-      .resolves.toMatchObject({ displayName: 'context.txt' });
-  });
-
-  it('migrates schema 10 blobs into path-free task-owned storage', async () => {
-    const fixture = await createSchema10AttachmentFixture();
-
-    const migrated = createStore(fixture.dir);
-    const snapshot = await migrated.snapshot();
-    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(snapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await migrated.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
-    await expect(fs.access(fixture.blobRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('recovers and repeats schema 10 migration after snapshot publication is interrupted', async () => {
-    const fixture = await createSchema10AttachmentFixture();
-    const originalRename = fs.rename.bind(fs);
-    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
-      if (String(destination) === fixture.storePath) {
-        throw new Error('injected migration publication failure');
-      }
-      return originalRename(source, destination);
-    });
-
-    try {
-      await expect(createStore(fixture.dir).snapshot()).rejects.toThrow(
-        'injected migration publication failure'
-      );
-    } finally {
-      rename.mockRestore();
-    }
-
-    const interrupted = JSON.parse(await fs.readFile(fixture.storePath, 'utf8')) as {
-      schemaVersion: number;
-      attachments: Array<{ storageKey?: string }>;
-    };
-    expect(interrupted.schemaVersion).toBe(10);
-    expect(interrupted.attachments[0]).toHaveProperty('storageKey');
-    await expect(fs.access(fixture.taskOwnedPath)).resolves.toBeUndefined();
-    await expect(fs.access(fixture.blobPath)).resolves.toBeUndefined();
-
-    // Simulate the old interrupted ordering, where cleanup removed the source
-    // blob before the schema-11 snapshot was published.
-    await fs.rm(fixture.blobRoot, { recursive: true });
-
-    const restarted = createStore(fixture.dir);
-    const restartedSnapshot = await restarted.snapshot();
-    expect(restartedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(restartedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await restarted.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
-    await expect(fs.access(fixture.blobRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-    await restarted.close();
-
-    const repeated = createStore(fixture.dir);
-    const repeatedSnapshot = await repeated.snapshot();
-    expect(repeatedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
-    expect(repeatedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
-    expect(
-      new TextDecoder().decode(
-        (await repeated.readTaskAttachment(fixture.attachmentId)).bytes
-      )
-    ).toBe('legacy bytes');
-  });
 });
-
-async function createSchema10AttachmentFixture(): Promise<{
-  dir: string;
-  storePath: string;
-  blobRoot: string;
-  blobPath: string;
-  taskOwnedPath: string;
-  attachmentId: string;
-}> {
-  const dir = await temporaryDirectory();
-  const store = createStore(dir);
-  const { draftId } = await stageText(store, 'legacy.txt', 'legacy bytes');
-  const task = await store.createTask({
-    title: 'Legacy attachments',
-    prompt: 'Use the attachment.',
-    repositoryPath: dir,
-    attachmentDraftId: draftId
-  });
-  const [verified] = await store.verifyTaskAttachments(task.id);
-  await store.close();
-
-  const blobRoot = path.join(dir, 'attachment-blobs');
-  await fs.mkdir(blobRoot, { mode: 0o700 });
-  const blobPath = path.join(blobRoot, verified!.record.sha256);
-  await fs.copyFile(verified!.absolutePath, blobPath);
-  if (process.platform !== 'win32') await fs.chmod(blobPath, 0o400);
-  await fs.rm(path.join(dir, 'attachments'), { recursive: true });
-
-  const storePath = path.join(dir, 'store.json');
-  const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
-    schemaVersion: number;
-    attachments: Array<{ storageKey?: string }>;
-  };
-  persisted.schemaVersion = 10;
-  persisted.attachments[0]!.storageKey =
-    `attachment-blobs/${verified!.record.sha256}`;
-  await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, {
-    mode: 0o600
-  });
-
-  return {
-    dir,
-    storePath,
-    blobRoot,
-    blobPath,
-    taskOwnedPath: verified!.absolutePath,
-    attachmentId: verified!.record.id
-  };
-}
 
 async function stageText(
   store: FileTaskStore,

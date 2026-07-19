@@ -8,6 +8,7 @@ import type {
   PreviewOciEngineIdentity
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import {
   PreviewComposeActivationError,
   PreviewComposeResetRequiredError,
@@ -272,7 +273,7 @@ async function runtimeFixture(failUp: boolean, data = false, failContainerRemova
   await fs.mkdir(generationRoot);
   await fs.writeFile(path.join(sourcePath, 'compose.yaml'), 'services: {}\n');
   const store = new FileTaskStore(path.join(root, 'store'));
-  const task = await store.createTask({ title: 'Compose', prompt: 'Test', repositoryPath: sourcePath });
+  const task = await store.createTask({ title: 'Compose', prompt: 'Test', repositoryId: (await addTestRepository(store, sourcePath)).id });
   const taskId = task.id;
   let currentInspection = inspection(data);
   const objects = new Map<string, Record<string, unknown>>();

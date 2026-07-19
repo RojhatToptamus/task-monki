@@ -19,7 +19,7 @@ const task: Task = {
   id: 'task-1',
   title: 'Task',
   prompt: 'Prompt',
-  repositoryPath: '/repo',
+  repositoryId: 'repository-1',
   workflowPhase: 'REVIEW',
   resolution: 'NONE',
   completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -37,7 +37,7 @@ describe('preview view model', () => {
   it('keeps resolve and approval distinct from execution', () => {
     const unchecked = buildPreviewViewModel({
       task,
-      worktree: { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryPath: '/repo', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: task.createdAt, updatedAt: task.updatedAt },
+      worktree: { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryId: 'repository-1', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: task.createdAt, updatedAt: task.updatedAt },
       plans: [], approvals: [], generations: [], attempts: []
     });
     expect(unchecked.actions[0]?.id).toBe('RESOLVE');
@@ -550,7 +550,7 @@ describe('preview view model', () => {
 });
 
 function uncheckedWorktree() {
-  return { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryPath: '/repo', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT' as const, createdAt: task.createdAt, updatedAt: task.updatedAt };
+  return { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryId: 'repository-1', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT' as const, createdAt: task.createdAt, updatedAt: task.updatedAt };
 }
 
 function testPlan(): PreviewPlanRecord {

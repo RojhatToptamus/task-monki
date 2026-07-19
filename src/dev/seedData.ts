@@ -30,10 +30,11 @@ import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
+import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
 import { previewRouteHostname } from '../core/preview/PreviewRouteHostname';
 import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
 
-export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v1';
+export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v2';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
 
 export type DevSeedScenarioGroup =
@@ -69,6 +70,7 @@ export interface DevSeedManifest {
   rootDir: string;
   storeDir: string;
   repositoryPath: string;
+  secondaryRepositoryPath: string;
   worktreeRoot: string;
   previewRoot: string;
   appSettingsPath: string;
@@ -98,6 +100,7 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   rootDir?: string;
   storeDir?: string;
   repositoryPath?: string;
+  secondaryRepositoryPath?: string;
   worktreeRoot?: string;
   previewRoot?: string;
   appSettingsPath?: string;
@@ -409,6 +412,7 @@ interface SeedPaths {
   rootDir: string;
   storeDir: string;
   repositoryPath: string;
+  secondaryRepositoryPath: string;
   worktreeRoot: string;
   previewRoot: string;
   appSettingsPath: string;
@@ -419,6 +423,8 @@ interface SeedPaths {
 interface SeedContext extends SeedPaths {
   scenarioSet: DevSeedScenarioSet;
   store: FileTaskStore;
+  repositoryId: string;
+  secondaryRepositoryId: string;
   worktrees: WorktreeService;
   serverInstanceId: string;
   baseSha: string;
@@ -469,10 +475,17 @@ export async function seedTaskMonkiDevelopmentData(
     { encoding: 'utf8', mode: 0o600 }
   );
 
-  await initSeedRepository(paths.rootDir, paths.repositoryPath);
+  await initSeedRepository(paths.rootDir, paths.secondaryRepositoryPath, 'remote-secondary.git');
+  await initSeedRepository(paths.rootDir, paths.repositoryPath, 'remote.git');
 
   const store = new FileTaskStore(paths.storeDir);
   await store.init();
+  const secondaryRepository = await store.addRepository(
+    await validateRepositoryPath(paths.secondaryRepositoryPath)
+  );
+  const repository = await store.addRepository(
+    await validateRepositoryPath(paths.repositoryPath)
+  );
   const appSettingsStore = new AppSettingsStore(paths.appSettingsPath);
   await appSettingsStore.update({
     firstLaunchSetupCompleted: true,
@@ -480,10 +493,7 @@ export async function seedTaskMonkiDevelopmentData(
     defaultReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
     reviewModel: DEFAULT_AGENT_SETTINGS.model ?? null,
     reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
-    repositories: {
-      knownPaths: [paths.repositoryPath],
-      selectedPath: paths.repositoryPath
-    }
+    selectedRepositoryId: repository.id
   });
 
   const server = await store.createAgentServer({
@@ -505,6 +515,8 @@ export async function seedTaskMonkiDevelopmentData(
     ...paths,
     scenarioSet,
     store,
+    repositoryId: repository.id,
+    secondaryRepositoryId: secondaryRepository.id,
     worktrees: new WorktreeService(paths.worktreeRoot),
     serverInstanceId: server.id,
     baseSha: (await git(paths.repositoryPath, ['rev-parse', 'HEAD'])).trim(),
@@ -522,6 +534,18 @@ export async function seedTaskMonkiDevelopmentData(
       relatedTaskIds: result.relatedTaskIds
     });
   }
+  await store.createBoard({
+    name: 'Secondary repository',
+    color: 'VIOLET',
+    repositoryIds: [secondaryRepository.id],
+    workflowPhases: []
+  });
+  await store.createBoard({
+    name: 'Review across repositories',
+    color: 'BLUE',
+    repositoryIds: [],
+    workflowPhases: ['REVIEW', 'IN_REVIEW']
+  });
   await store.updateAgentServer(server.id, {
     status: 'EXITED',
     exitedAt: new Date().toISOString(),
@@ -600,6 +624,9 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
     rootDir,
     storeDir: path.resolve(options.storeDir ?? path.join(rootDir, 'store')),
     repositoryPath: path.resolve(options.repositoryPath ?? path.join(rootDir, 'repo')),
+    secondaryRepositoryPath: path.resolve(
+      options.secondaryRepositoryPath ?? path.join(rootDir, 'repo-secondary')
+    ),
     worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
     previewRoot: path.resolve(options.previewRoot ?? path.join(rootDir, 'preview-runtime')),
     appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
@@ -778,7 +805,8 @@ async function createSeedTask(
       '',
       'This task exists so agents can verify UI and workflow states without inventing local state.'
     ].join('\n'),
-    repositoryPath: ctx.repositoryPath,
+    repositoryId:
+      definition.slug === 'board-backlog' ? ctx.secondaryRepositoryId : ctx.repositoryId,
     completionPolicy,
     agentSettings: DEFAULT_AGENT_SETTINGS
   });
@@ -812,7 +840,7 @@ async function createWorktreeState(
     return { task: await requireTask(ctx, task.id), iteration, worktree: failed };
   }
 
-  const created = await ctx.worktrees.create(worktree);
+  const created = await ctx.worktrees.create(worktree, ctx.repositoryPath);
   let storedWorktree = await ctx.store.updateWorktree(created, 'WORKTREE_CREATED');
 
   if (gitState === 'missing') {
@@ -1656,7 +1684,7 @@ async function createForkScenario(
   const alternative = await ctx.store.createForkedAlternativeTask({
     title: `[seed:${definition.slug}:alternative] Alternative approach`,
     prompt: 'Seeded fork alternative for UI coverage.',
-    repositoryPath: ctx.repositoryPath,
+    repositoryId: ctx.repositoryId,
     agentSettings: DEFAULT_AGENT_SETTINGS,
     sourceTaskId: source.task.id,
     sourceRunId: source.run.id
@@ -2125,8 +2153,12 @@ function totalCheckCount(options: RecordPrOptions): number {
   return explicitCount || options.checkDetails?.length || 0;
 }
 
-async function initSeedRepository(rootDir: string, repositoryPath: string): Promise<void> {
-  const remotePath = path.join(rootDir, 'remote.git');
+async function initSeedRepository(
+  rootDir: string,
+  repositoryPath: string,
+  remoteName: string
+): Promise<void> {
+  const remotePath = path.join(rootDir, remoteName);
   await fs.mkdir(repositoryPath, { recursive: true });
   await fs.mkdir(remotePath, { recursive: true });
   await git(remotePath, ['init', '--bare']);
@@ -2170,7 +2202,10 @@ async function refreshStoredWorktree(
   ctx: SeedContext,
   worktree: WorktreeRecord
 ): Promise<WorktreeRecord> {
-  return ctx.store.updateWorktree(await ctx.worktrees.verify(worktree), 'WORKTREE_VERIFIED');
+  return ctx.store.updateWorktree(
+    await ctx.worktrees.verify(worktree, ctx.repositoryPath),
+    'WORKTREE_VERIFIED'
+  );
 }
 
 async function rawMessage(

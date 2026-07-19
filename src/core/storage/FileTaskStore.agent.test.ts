@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore agent persistence', () => {
   it('persists provider-neutral server, session, turn, item, and interaction records', async () => {
@@ -11,7 +12,7 @@ describe('FileTaskStore agent persistence', () => {
     const task = await store.createTask({
       title: 'Agent persistence',
       prompt: 'Inspect the repository.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,

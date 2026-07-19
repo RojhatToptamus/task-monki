@@ -21,6 +21,7 @@ import {
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
 import { buildRunProgressViewModel } from '../renderer/model/runProgress';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
+import { selectBoardTasks } from '../renderer/model/boards';
 import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
   DEV_SEED_SCENARIOS,
@@ -60,8 +61,17 @@ describe('Task Monki development seed data', () => {
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(settings.repositories.selectedPath).toBe(manifest.repositoryPath);
-    expect(settings.repositories.knownPaths).toContain(manifest.repositoryPath);
+    expect(snapshot.repositories).toHaveLength(2);
+    const primaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.repositoryPath)
+    );
+    const secondaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.secondaryRepositoryPath)
+    );
+    expect(settings.selectedRepositoryId).toBe(primaryRepository?.id);
+    expect(primaryRepository?.path).toBe(await fs.realpath(manifest.repositoryPath));
+    expect(secondaryRepository?.path).toBe(await fs.realpath(manifest.secondaryRepositoryPath));
+    expect(secondaryRepository).toMatchObject({ status: 'AVAILABLE' });
     expect(await pathExists(manifest.manifestPath)).toBe(true);
     expect(await pathExists(manifest.envFilePath)).toBe(true);
     expect(manifest.env).toMatchObject({
@@ -90,6 +100,22 @@ describe('Task Monki development seed data', () => {
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
+
+    expect(taskForScenario(manifest, snapshot, 'board-backlog').repositoryId).toBe(
+      secondaryRepository?.id
+    );
+    expect(snapshot.boards.map((board) => board.name)).toEqual([
+      'Review across repositories',
+      'Secondary repository'
+    ]);
+    expect(snapshot.boards.map((board) => board.color)).toEqual(['BLUE', 'VIOLET']);
+    const secondaryBoard = snapshot.boards.find(
+      (board) => board.name === 'Secondary repository'
+    );
+    expect(secondaryBoard?.repositoryIds).toEqual([secondaryRepository?.id]);
+    expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
+      taskForScenario(manifest, snapshot, 'board-backlog').id
+    ]);
   });
 
   it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
@@ -400,7 +426,7 @@ describe('Task Monki development seed data', () => {
       ).rejects.toThrow(disabledReason);
       await expect(
         service.refinePrompt({
-          repositoryPath: manifest.repositoryPath,
+          repositoryId: before.repositories[0]!.id,
           input: 'Do not start Codex from fixture mode.'
         })
       ).rejects.toThrow(disabledReason);

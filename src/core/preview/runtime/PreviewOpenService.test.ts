@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { previewRouteHostname } from '../PreviewRouteHostname';
 import { PreviewOpenService } from './PreviewOpenService';
 
@@ -91,7 +92,7 @@ async function seedGeneration(
   store: FileTaskStore,
   routeOverride?: { hostname: string; url: string; gatewayPort: number }
 ) {
-  const task = await store.createTask({ title: 'Open', prompt: 'Test', repositoryPath: process.cwd() });
+  const task = await store.createTask({ title: 'Open', prompt: 'Test', repositoryId: (await addTestRepository(store, process.cwd())).id });
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task, branchName: 'codex/open', worktreePath: process.cwd(), baseSha: 'base'
   });

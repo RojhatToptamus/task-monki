@@ -34,24 +34,24 @@ describe('development HTTP server', () => {
   it('requires proxy authentication and emits no permissive CORS headers', async () => {
     const running = await startServer();
 
-    const unauthenticated = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`);
+    const unauthenticated = await fetch(`${running.baseUrl}/api/settings`);
     expect(unauthenticated.status).toBe(401);
     await expect(unauthenticated.json()).resolves.toMatchObject({
       error: { code: 'UNAUTHORIZED', retryable: false }
     });
 
-    const authenticated = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const authenticated = await fetch(`${running.baseUrl}/api/settings`, {
       headers: running.headers
     });
     expect(authenticated.status).toBe(200);
     expect(authenticated.headers.get('access-control-allow-origin')).toBeNull();
     expect(authenticated.headers.get('cache-control')).toBe('no-store');
-    await expect(authenticated.json()).resolves.toBe('/trusted/repository');
+    await expect(authenticated.json()).resolves.toEqual({});
   });
 
   it('returns a retryable 503 during the listen-to-token startup window', async () => {
     const running = await startServer({}, undefined, undefined, '');
-    const response = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const response = await fetch(`${running.baseUrl}/api/settings`, {
       headers: running.headers
     });
     expect(response.status).toBe(503);
@@ -63,7 +63,7 @@ describe('development HTTP server', () => {
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 
-    const hostileOrigin = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const hostileOrigin = await fetch(`${running.baseUrl}/api/settings`, {
       headers: { ...running.headers, origin: 'https://evil.test' }
     });
     expect(hostileOrigin.status).toBe(403);
@@ -71,7 +71,7 @@ describe('development HTTP server', () => {
       error: { code: 'INVALID_ORIGIN' }
     });
 
-    const crossSite = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
+    const crossSite = await fetch(`${running.baseUrl}/api/settings`, {
       headers: { ...running.headers, 'sec-fetch-site': 'cross-site' }
     });
     expect(crossSite.status).toBe(403);
@@ -252,7 +252,7 @@ describe('development HTTP server', () => {
       body: JSON.stringify({
         title: 'Changed task',
         prompt: 'Changed request.',
-        repositoryPath: '/trusted/repository',
+        repositoryId: 'repository-1',
         creationToken: 'task-create-http-conflict-0001'
       })
     });
@@ -319,7 +319,7 @@ describe('development HTTP server', () => {
     const logger = { error: vi.fn() };
     const running = await startServer(
       {
-        getDefaultRepositoryPath: vi.fn(() => {
+        addRepository: vi.fn(() => {
           throw new Error('Failed at /Users/private/secret.txt');
         })
       },
@@ -327,8 +327,10 @@ describe('development HTTP server', () => {
       logger
     );
 
-    const response = await fetch(`${running.baseUrl}/api/defaultRepositoryPath`, {
-      headers: running.headers
+    const response = await fetch(`${running.baseUrl}/api/repositories`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/private/secret' })
     });
     expect(response.status).toBe(500);
     const body = (await response.json()) as {
@@ -443,7 +445,7 @@ async function startServer(
   const events = new AppEventBus();
   const service = {
     events,
-    getDefaultRepositoryPath: vi.fn(() => '/trusted/repository'),
+    addRepository: vi.fn(async () => ({ id: 'repository-1' })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async (input: unknown) => input),
     ...overrides

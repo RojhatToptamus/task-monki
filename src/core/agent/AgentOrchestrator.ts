@@ -566,14 +566,10 @@ export class AgentOrchestrator {
         `Reasoning effort ${effort} is not supported by ${model.displayName}.`
       );
     }
-    const modelProvider =
-      settings.modelProvider && settings.modelProvider !== 'codex'
-        ? settings.modelProvider
-        : 'openai';
     const resolvedSettings: AgentExecutionSettings = {
       ...settings,
       model: model.model,
-      modelProvider,
+      modelProvider: settings.modelProvider ?? 'openai',
       reasoningEffort: effort,
       serviceTier: settings.serviceTier ?? model.defaultServiceTier
     };

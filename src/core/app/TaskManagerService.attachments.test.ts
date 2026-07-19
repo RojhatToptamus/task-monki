@@ -7,6 +7,7 @@ import { ATTACHMENT_MAX_IMAGE_BYTES } from '../../shared/attachments';
 import { ScriptedAgentProviderAdapter } from '../../testSupport/taskMonkiScenario';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('TaskManagerService attachments', () => {
   it('stages one bounded batch atomically through the public boundary', async () => {
@@ -43,7 +44,7 @@ describe('TaskManagerService attachments', () => {
       service.createTask({
         title: 'Inspect screenshot',
         prompt: 'Use the attached screenshot.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         agentSettings: { model: 'scenario-model' },
         attachmentDraftId: draft.id
       })
@@ -73,7 +74,7 @@ describe('TaskManagerService attachments', () => {
     const task = await service.createTask({
       title: 'Inspect screenshot',
       prompt: 'Use the attached screenshot.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       agentSettings: { model: 'vision-model' },
       attachmentDraftId: draft.id
     });
@@ -99,7 +100,7 @@ describe('TaskManagerService attachments', () => {
     const request = {
       title: 'Retry task creation',
       prompt: 'Use the attached context.',
-      repositoryPath: dir,
+      repositoryId: (await addTestRepository(store, dir)).id,
       creationToken: 'task-create-service-retry-0001',
       attachmentDraftId: draft.id
     };
@@ -129,7 +130,7 @@ describe('TaskManagerService attachments', () => {
       service.createTask({
         title: 'Invalid retry token',
         prompt: 'Do not create this task.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         creationToken: 'short'
       })
     ).rejects.toMatchObject({
@@ -153,7 +154,7 @@ describe('TaskManagerService attachments', () => {
       service.createTask({
         title: 'Network attachment boundary',
         prompt: 'Use the attachment.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         agentSettings: { sandbox: 'WORKSPACE_WRITE', networkAccess: true },
         attachmentDraftId: draft.id
       })
@@ -163,7 +164,7 @@ describe('TaskManagerService attachments', () => {
       service.createTask({
         title: 'Unsafe attachment boundary',
         prompt: 'Use the attachment.',
-        repositoryPath: dir,
+        repositoryId: (await addTestRepository(store, dir)).id,
         agentSettings: { sandbox: 'DANGER_FULL_ACCESS' },
         attachmentDraftId: draft.id
       })

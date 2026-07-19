@@ -1,10 +1,21 @@
 import type { RepositoryPreflight } from '../../shared/contracts';
+import fs from 'node:fs/promises';
 import { git } from '../git/gitCli';
 
 export async function validateRepositoryPath(repositoryPath: string): Promise<RepositoryPreflight> {
   const checkedAt = new Date().toISOString();
 
   try {
+    const stat = await fs.stat(repositoryPath);
+    if (!stat.isDirectory()) {
+      return {
+        path: repositoryPath,
+        status: 'INVALID',
+        remotes: [],
+        error: 'Repository path is not a directory.',
+        checkedAt
+      };
+    }
     const [root, headSha, branch, remoteOutput] = await Promise.all([
       git(repositoryPath, ['rev-parse', '--show-toplevel']),
       git(repositoryPath, ['rev-parse', 'HEAD']),
@@ -22,9 +33,10 @@ export async function validateRepositoryPath(repositoryPath: string): Promise<Re
       checkedAt
     };
   } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
     return {
       path: repositoryPath,
-      status: 'INVALID',
+      status: missing ? 'MISSING' : 'INVALID',
       remotes: [],
       error: error instanceof Error ? error.message : 'Unknown repository validation error.',
       checkedAt

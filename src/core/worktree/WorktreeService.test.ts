@@ -64,7 +64,7 @@ describe('WorktreeService', () => {
       id: 'worktree-1',
       taskId: 'task-1',
       iterationId: 'iteration-1',
-      repositoryPath: repo,
+      repositoryId: 'repository-1',
       worktreePath: path.join(worktreeRoot, 'task-1'),
       branchName: 'codex/task-test',
       baseSha,
@@ -73,7 +73,7 @@ describe('WorktreeService', () => {
       updatedAt: new Date().toISOString()
     };
 
-    const created = await service.create(record);
+    const created = await service.create(record, repo);
     expect(created.status).toBe('PRESENT');
     expect(created.headSha).toBe(baseSha);
     await expect(fs.access(path.join(record.worktreePath, 'README.md'))).resolves.toBeUndefined();

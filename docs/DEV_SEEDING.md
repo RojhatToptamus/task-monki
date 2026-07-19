@@ -12,9 +12,9 @@ not store IDs. `FileTaskStore` owns UUIDs and timestamps, so agents must read
 created for that run.
 
 The seed generator writes current-schema Task Monki records through store APIs:
-tasks, iterations, worktrees, runs, interaction requests, Git snapshots, GitHub
-rollups, artifacts, and domain events. It does not patch task projections by
-hand.
+two real Git repositories, tasks, saved views, iterations, worktrees, runs,
+interaction requests, Git snapshots, GitHub rollups, artifacts, and domain
+events. It does not patch task projections by hand.
 
 ## Usage
 
@@ -78,6 +78,8 @@ states:
 - completion policy: `MERGED_AND_VERIFIED` with failing, stale, and passing
   checks, plus `MANUAL` with a merged PR
 - terminal workflow: fork alternative, canceled, archived
+- repository and saved-view behavior: global review filtering plus a
+  repository-specific view containing a task from the secondary checkout
 - preview: missing recipe, approval required, preparing, ready, failed, stale,
   stopped, recovery required, and cleanup incomplete
 

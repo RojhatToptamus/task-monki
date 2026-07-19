@@ -12,6 +12,7 @@ import type {
 } from '../../../shared/contracts';
 import { execFilePortable } from '../../process/portableChildProcess';
 import { FileTaskStore } from '../../storage/FileTaskStore';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { OciEngineAdapter } from '../runtime/OciEngineAdapter';
 import { PreviewComposeCliAdapter } from './PreviewComposeCliAdapter';
 import { previewComposeProjectName } from './PreviewComposeIdentity';
@@ -36,7 +37,7 @@ describeReal('PreviewComposeRuntime real Docker lifecycle', () => {
     const store = new FileTaskStore(path.join(root, 'store'));
     const repository = path.join(root, 'repository');
     await fs.mkdir(repository);
-    const task = await store.createTask({ title: 'Real Compose matrix', prompt: 'Verify', repositoryPath: repository });
+    const task = await store.createTask({ title: 'Real Compose matrix', prompt: 'Verify', repositoryId: (await addTestRepository(store, repository)).id });
     const projectName = previewComposeProjectName(task.id);
     const runId = randomUUID().replace(/-/g, '').slice(0, 16);
     const externalVolume = `taskmonki_external_volume_${runId}`;

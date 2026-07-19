@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createDomainEvent } from './domainEvent';
 import { FileTaskStore } from './FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore Phase 6 subagent observations', () => {
   it('materializes explicit child hierarchy without replacing the task run', async () => {
@@ -12,7 +13,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     const task = await store.createTask({
       title: 'Observed subagent',
       prompt: 'Delegate repository inspection.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,
@@ -113,7 +114,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
     const task = await store.createTask({
       title: 'Contradictory subagent',
       prompt: 'Observe exact identifiers.',
-      repositoryPath: dir
+      repositoryId: (await addTestRepository(store, dir)).id
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task,

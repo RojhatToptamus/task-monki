@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-12
+Date: 2026-07-18
 
 This document describes the current runtime architecture and responsibility
 boundaries.
@@ -60,6 +60,12 @@ Reasons:
     an opaque creation token and normalized-request fingerprint so a lost create
     response resolves to the same durable task rather than consuming its draft
     twice.
+- `Repository`
+  - Stable domain identity plus the mutable local checkout path, availability,
+    and observed Git metadata. Tasks and worktrees reference the repository ID.
+- `Board`
+  - A named saved filter containing repository IDs, workflow phases, and a
+    presentation color. It does not contain task membership or workflow truth.
 - `RunRecord`
   - One implementation, follow-up, retry, review, or provider-origin child run.
     Fork alternatives are represented as a new `Task` with its own
@@ -264,7 +270,7 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - theme, sidebar, and mascot preferences;
 - first-launch setup completion;
 - default implementation, review, and prompt-refinement models;
-- selected and known repositories;
+- selected repository ID for the new-task default;
 - Codex external tool modes for web search, MCP servers, and apps;
 - external executable path preferences for Git, Codex CLI, and GitHub CLI.
 - the persisted high loopback port used by the local preview gateway.
@@ -274,6 +280,13 @@ executables live; resolved paths and detected versions are not persisted. Git
 and Codex CLI are required, while GitHub CLI is optional. Environment variables
 `TASK_MANAGER_GIT_PATH`, `TASK_MONKI_CODEX_BIN`, and `TASK_MANAGER_GH_PATH`
 act as debug overrides ahead of saved settings.
+
+Repository records and boards belong to `FileTaskStore`, not app settings.
+Only the current store and settings schema versions are accepted. Older or
+invalid versions fail closed with an instruction to discard the local data;
+Task Monki does not migrate, reinterpret, or fall back to older shapes. Startup
+reconciliation is limited to current-schema runtime evidence such as an
+interrupted provider turn and does not repair missing schema fields.
 
 Codex Auto-detect status may display the resolved `codex` path, but that
 auto-discovered path is not passed as an explicit App Server runtime. In Auto

@@ -339,12 +339,12 @@ async function readGhInvocations(logPath: string): Promise<string[][]> {
     .map((line) => JSON.parse(line) as string[]);
 }
 
-function taskFixture(repositoryPath: string): Task {
+function taskFixture(repositoryId: string): Task {
   return {
     id: 'task-1',
     title: 'Test task',
     prompt: 'Do work.',
-    repositoryPath,
+    repositoryId,
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -382,7 +382,7 @@ function worktreeFixture(worktreePath: string): WorktreeRecord {
     id: 'worktree-1',
     taskId: 'task-1',
     iterationId: 'iteration-1',
-    repositoryPath: worktreePath,
+    repositoryId: 'repository-1',
     worktreePath,
     branchName: 'codex/task-test',
     baseSha: 'base',

@@ -111,6 +111,10 @@ selection, Codex tool modes, and external executable paths, in
 `app-settings.json` under the platform application data directory. Task and
 evidence records are stored separately.
 
+Task Monki accepts only its current store and app-settings schemas. This release
+does not migrate older local data. If startup reports an unsupported schema,
+delete the named local store or settings file and start with fresh data.
+
 ## First Launch
 
 Task Monki opens without a selected repository in packaged builds. Add a local

@@ -19,8 +19,11 @@ import type {
   AgentUsageSnapshotRecord,
   ArtifactKind,
   ArtifactRecord,
+  Board,
+  BoardColor,
   BranchPublicationRecord,
   CiRollupRecord,
+  CreateBoardRequest,
   CodexReviewGateStatus,
   CreateTaskRequest,
   DomainEvent,
@@ -42,6 +45,8 @@ import type {
   PreviewPlanRecord,
   PreviewResourceRecord,
   ReviewRollupRecord,
+  Repository,
+  RepositoryPreflight,
   RunRecord,
   StatusProjection,
   Task,
@@ -52,9 +57,12 @@ import type {
   StagedAttachmentRecord,
   TaskIteration,
   TaskSnapshot,
+  UpdateBoardRequest,
+  WorkflowPhase,
   WorktreeRecord
 } from '../../shared/contracts';
 import {
+  BOARD_COLORS,
   TASK_STORE_SCHEMA_VERSION,
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
@@ -230,6 +238,47 @@ const MANAGED_ARTIFACT_FILE_PATTERN = new RegExp(
   `^${UUID_FILE_SEGMENT}-(?:task|${UUID_FILE_SEGMENT})-(?:${ARTIFACT_KINDS.join('|')})-${UUID_FILE_SEGMENT}\\.log$`,
   'u'
 );
+const WORKFLOW_PHASES = new Set<WorkflowPhase>([
+  'BACKLOG',
+  'READY',
+  'IN_PROGRESS',
+  'REVIEW',
+  'IN_REVIEW',
+  'DONE',
+  'BLOCKED',
+  'CANCELED',
+  'ARCHIVED'
+]);
+const BOARD_COLOR_VALUES = new Set<string>(BOARD_COLORS);
+
+function validateBoardInput(
+  input: CreateBoardRequest,
+  repositories: readonly Repository[]
+): Pick<Board, 'name' | 'color' | 'repositoryIds' | 'workflowPhases'> {
+  if (
+    typeof input.name !== 'string' ||
+    typeof input.color !== 'string' ||
+    !BOARD_COLOR_VALUES.has(input.color) ||
+    !Array.isArray(input.repositoryIds) ||
+    !input.repositoryIds.every((value) => typeof value === 'string') ||
+    !Array.isArray(input.workflowPhases) ||
+    !input.workflowPhases.every((value) => typeof value === 'string')
+  ) {
+    throw new Error('Board filter is invalid.');
+  }
+  const name = input.name.trim();
+  if (!name) throw new Error('Board name is required.');
+  const knownRepositoryIds = new Set(repositories.map((repository) => repository.id));
+  const repositoryIds = uniqueIds(input.repositoryIds);
+  if (repositoryIds.some((repositoryId) => !knownRepositoryIds.has(repositoryId))) {
+    throw new Error('Board references an unknown repository.');
+  }
+  const workflowPhases = uniqueIds(input.workflowPhases) as WorkflowPhase[];
+  if (workflowPhases.some((phase) => !WORKFLOW_PHASES.has(phase))) {
+    throw new Error('Board contains an invalid workflow phase.');
+  }
+  return { name, color: input.color as BoardColor, repositoryIds, workflowPhases };
+}
 
 function normalizeCreateTaskCompletionPolicy(
   value: CreateTaskRequest['completionPolicy']
@@ -267,7 +316,7 @@ function taskCreationMetadata(
     canonicalRequest = stableJsonStringify({
       title: input.title.trim(),
       prompt: input.prompt.trim(),
-      repositoryPath: input.repositoryPath.trim(),
+      repositoryId: input.repositoryId.trim(),
       completionPolicy: normalizeCreateTaskCompletionPolicy(input.completionPolicy),
       agentSettings: input.agentSettings ?? {},
       attachmentDraftId: input.attachmentDraftId ?? null
@@ -350,7 +399,6 @@ function isCanonicalStoreTimestamp(value: unknown): value is string {
 
 type PersistedState = Omit<Partial<StoreState>, 'schemaVersion'> & {
   schemaVersion?: unknown;
-  testRuns?: unknown;
 };
 
 export type TaskCreationRequestErrorCode =
@@ -417,45 +465,24 @@ export class FileTaskStore {
     await this.attachmentFiles.init();
     await initializeArtifactDirectory(this.baseDir, this.artifactsDir);
 
-    let raw: string | undefined;
     try {
-      raw = await readPrivateStoreFile(this.storePath);
+      const raw = await readPrivateStoreFile(this.storePath);
+      const persisted = JSON.parse(raw) as PersistedState;
+      const reconciled = reconcileLoadedState(requireCurrentState(persisted));
+      this.state = reconciled.state;
+      await this.attachmentFiles.reconcile(this.state.attachments);
+      await this.reconcileArtifacts();
+      if (reconciled.changed) {
+        await this.persist();
+      }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-
-    if (raw === undefined) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
       this.state = createEmptyState();
       await this.attachmentFiles.reconcile(this.state.attachments);
       await this.reconcileArtifacts();
       await this.persist();
-    } else {
-      const persisted = JSON.parse(raw) as PersistedState;
-      const migrated = migratePersistedState(persisted);
-      const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
-      this.state = normalized.state;
-      const attachments = await this.attachmentFiles.migrateLegacyRecords(
-        this.state.attachments
-      );
-      const attachmentsMigrated = attachments.some(
-        (attachment, index) =>
-          attachment.storageKey !== this.state.attachments[index]?.storageKey
-      );
-      if (attachmentsMigrated) {
-        this.state = { ...this.state, attachments };
-      }
-      await this.attachmentFiles.reconcile(this.state.attachments);
-      await this.reconcileArtifacts();
-      if (migrated.changed || normalized.changed || attachmentsMigrated) {
-        await this.persist();
-      }
-      if (
-        persisted.schemaVersion === 10 ||
-        persisted.schemaVersion === 11 ||
-        persisted.schemaVersion === TASK_STORE_SCHEMA_VERSION
-      ) {
-        await this.attachmentFiles.cleanupLegacyStorage();
-      }
     }
     this.loaded = true;
   }
@@ -523,6 +550,174 @@ export class FileTaskStore {
   async snapshot(): Promise<TaskSnapshot> {
     await this.init();
     return clone(this.state);
+  }
+
+  async getRepository(repositoryId: string): Promise<Repository | undefined> {
+    await this.init();
+    return clone(this.state.repositories.find((repository) => repository.id === repositoryId));
+  }
+
+  async addRepository(preflight: RepositoryPreflight): Promise<Repository> {
+    await this.init();
+    if (preflight.status !== 'VALID' || !preflight.root || !preflight.headSha) {
+      throw new Error(preflight.error ?? 'Repository validation must pass before it can be added.');
+    }
+    const repositoryPath = path.resolve(preflight.root);
+    const existing = this.state.repositories.find(
+      (repository) => path.resolve(repository.path) === repositoryPath
+    );
+    if (existing) {
+      if (existing.status === 'DISCONNECTED') {
+        throw new Error('Repository is disconnected. Reconnect the existing repository instead.');
+      }
+      return this.recordRepositoryPreflight(existing.id, preflight);
+    }
+    const now = new Date().toISOString();
+    const repository: Repository = {
+      id: randomUUID(),
+      name: path.basename(repositoryPath) || repositoryPath,
+      path: repositoryPath,
+      status: 'AVAILABLE',
+      headSha: preflight.headSha,
+      branch: preflight.branch,
+      remotes: preflight.remotes,
+      createdAt: now,
+      updatedAt: now,
+      checkedAt: preflight.checkedAt
+    };
+    this.state = {
+      ...this.state,
+      repositories: [repository, ...this.state.repositories]
+    };
+    await this.persistQueued();
+    return clone(repository);
+  }
+
+  async recordRepositoryPreflight(
+    repositoryId: string,
+    preflight: RepositoryPreflight
+  ): Promise<Repository> {
+    await this.init();
+    const existing = this.state.repositories.find(
+      (repository) => repository.id === repositoryId
+    );
+    if (!existing) {
+      throw new Error('Repository not found.');
+    }
+    if (
+      preflight.status === 'VALID' &&
+      preflight.root &&
+      this.state.repositories.some(
+        (repository) =>
+          repository.id !== repositoryId &&
+          path.resolve(repository.path) === path.resolve(preflight.root!)
+      )
+    ) {
+      throw new Error('Repository path is already connected to another repository.');
+    }
+    const repository: Repository = {
+      ...existing,
+      path:
+        preflight.status === 'VALID' && preflight.root
+          ? path.resolve(preflight.root)
+          : existing.path,
+      status:
+        preflight.status === 'VALID'
+          ? 'AVAILABLE'
+          : preflight.status === 'MISSING'
+            ? 'MISSING'
+            : 'INVALID',
+      headSha: preflight.status === 'VALID' ? preflight.headSha : existing.headSha,
+      branch: preflight.status === 'VALID' ? preflight.branch : existing.branch,
+      remotes: preflight.status === 'VALID' ? preflight.remotes : existing.remotes,
+      error: preflight.status === 'VALID' ? undefined : preflight.error,
+      updatedAt: new Date().toISOString(),
+      checkedAt: preflight.checkedAt
+    };
+    this.state = {
+      ...this.state,
+      repositories: this.state.repositories.map((candidate) =>
+        candidate.id === repositoryId ? repository : candidate
+      )
+    };
+    await this.persistQueued();
+    return clone(repository);
+  }
+
+  async disconnectRepository(repositoryId: string): Promise<Repository> {
+    await this.init();
+    const existing = this.state.repositories.find(
+      (repository) => repository.id === repositoryId
+    );
+    if (!existing) {
+      throw new Error('Repository not found.');
+    }
+    if (existing.status === 'DISCONNECTED') {
+      return clone(existing);
+    }
+    const repository: Repository = {
+      ...existing,
+      status: 'DISCONNECTED',
+      error: undefined,
+      updatedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      repositories: this.state.repositories.map((candidate) =>
+        candidate.id === repositoryId ? repository : candidate
+      )
+    };
+    await this.persistQueued();
+    return clone(repository);
+  }
+
+  async createBoard(input: CreateBoardRequest): Promise<Board> {
+    await this.init();
+    const values = validateBoardInput(input, this.state.repositories);
+    const now = new Date().toISOString();
+    const board: Board = {
+      id: randomUUID(),
+      ...values,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.state = { ...this.state, boards: [board, ...this.state.boards] };
+    await this.persistQueued();
+    return clone(board);
+  }
+
+  async updateBoard(input: UpdateBoardRequest): Promise<Board> {
+    await this.init();
+    const existing = this.state.boards.find((board) => board.id === input.boardId);
+    if (!existing) {
+      throw new Error('Board not found.');
+    }
+    const values = validateBoardInput(input, this.state.repositories);
+    const board: Board = {
+      ...existing,
+      ...values,
+      updatedAt: new Date().toISOString()
+    };
+    this.state = {
+      ...this.state,
+      boards: this.state.boards.map((candidate) =>
+        candidate.id === board.id ? board : candidate
+      )
+    };
+    await this.persistQueued();
+    return clone(board);
+  }
+
+  async deleteBoard(boardId: string): Promise<void> {
+    await this.init();
+    if (!this.state.boards.some((board) => board.id === boardId)) {
+      throw new Error('Board not found.');
+    }
+    this.state = {
+      ...this.state,
+      boards: this.state.boards.filter((board) => board.id !== boardId)
+    };
+    await this.persistQueued();
   }
 
   async createAttachmentDraft(): Promise<AttachmentDraftSnapshot> {
@@ -1673,7 +1868,7 @@ export class FileTaskStore {
       id: randomUUID(),
       title: input.title.trim(),
       prompt: input.prompt.trim(),
-      repositoryPath: input.repositoryPath.trim(),
+      repositoryId: input.repositoryId.trim(),
       creationToken: creationMetadata?.token,
       creationRequestFingerprint: creationMetadata?.fingerprint,
       workflowPhase: 'READY',
@@ -1695,8 +1890,14 @@ export class FileTaskStore {
     if (!task.prompt) {
       throw new Error('Task prompt is required.');
     }
-    if (!task.repositoryPath) {
-      throw new Error('Repository path is required.');
+    const repository = this.state.repositories.find(
+      (candidate) => candidate.id === task.repositoryId
+    );
+    if (!repository) {
+      throw new Error('Repository not found.');
+    }
+    if (repository.status !== 'AVAILABLE') {
+      throw new Error('Repository is not available.');
     }
 
     if (fork && input.attachmentDraftId) {
@@ -1731,7 +1932,7 @@ export class FileTaskStore {
               ? {
                   ...existing,
                   forkedAlternativeTaskIds: uniqueIds([
-                    ...(existing.forkedAlternativeTaskIds ?? []),
+                    ...existing.forkedAlternativeTaskIds,
                     task.id
                   ]),
                   updatedAt: now
@@ -1750,7 +1951,7 @@ export class FileTaskStore {
           source,
           payload: {
             title: task.title,
-            repositoryPath: task.repositoryPath,
+            repositoryId: task.repositoryId,
             forkedFromTaskId: task.forkedFromTaskId,
             forkedFromRunId: task.forkedFromRunId,
             attachmentIds: attachmentRecords.map((attachment) => attachment.id)
@@ -2891,7 +3092,7 @@ export class FileTaskStore {
       id: randomUUID(),
       taskId: input.task.id,
       iterationId: iteration.id,
-      repositoryPath: input.task.repositoryPath,
+      repositoryId: input.task.repositoryId,
       worktreePath: input.worktreePath,
       branchName: input.branchName,
       baseRef: input.baseRef,
@@ -3866,6 +4067,8 @@ function requireCurrentState(state: PersistedState): StoreState {
     );
   }
   const requiredCollections: Array<keyof StoreState> = [
+    'repositories',
+    'boards',
     'tasks',
     'iterations',
     'worktrees',
@@ -3906,9 +4109,63 @@ function requireCurrentState(state: PersistedState): StoreState {
     }
   }
   const current = state as StoreState;
+  validatePersistedRepositoryReferences(current);
+  validatePersistedBoards(current);
   validatePersistedTaskCreationMetadata(current);
   validatePersistedAttachments(current);
   return current;
+}
+
+function validatePersistedBoards(state: StoreState): void {
+  const boardIds = new Set<string>();
+  for (const board of state.boards) {
+    try {
+      if (typeof board.id !== 'string' || !board.id || boardIds.has(board.id)) {
+        throw new Error('invalid board id');
+      }
+      if (typeof board.createdAt !== 'string' || typeof board.updatedAt !== 'string') {
+        throw new Error('invalid board timestamps');
+      }
+      validateBoardInput(board, state.repositories);
+      boardIds.add(board.id);
+    } catch {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: boards contains an invalid record.`
+      );
+    }
+  }
+}
+
+function validatePersistedRepositoryReferences(state: StoreState): void {
+  const repositoryIds = new Set<string>();
+  for (const repository of state.repositories) {
+    if (
+      typeof repository.id !== 'string' ||
+      !repository.id ||
+      repositoryIds.has(repository.id) ||
+      typeof repository.path !== 'string' ||
+      !repository.path ||
+      !['AVAILABLE', 'MISSING', 'INVALID', 'DISCONNECTED'].includes(repository.status)
+    ) {
+      throw new Error(
+        `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: repositories contains an invalid record.`
+      );
+    }
+    repositoryIds.add(repository.id);
+  }
+  if (
+    state.tasks.some(
+      (task) =>
+        !repositoryIds.has(task.repositoryId) ||
+        !Array.isArray(task.forkedAlternativeTaskIds) ||
+        !task.forkedAlternativeTaskIds.every((taskId) => typeof taskId === 'string')
+    ) ||
+    state.worktrees.some((worktree) => !repositoryIds.has(worktree.repositoryId))
+  ) {
+    throw new Error(
+      `Task Monki store schema ${TASK_STORE_SCHEMA_VERSION} is invalid: a task or worktree references an unknown repository.`
+    );
+  }
 }
 
 function validatePersistedTaskCreationMetadata(state: StoreState): void {
@@ -3979,145 +4236,7 @@ function utf8SafePrefixLength(buffer: Buffer, endOfFile: boolean): number {
   return buffer.length - start < expected ? start : buffer.length;
 }
 
-function migratePersistedState(state: PersistedState): {
-  state: PersistedState;
-  changed: boolean;
-} {
-  let next = state;
-  let changed = false;
-
-  if (next.schemaVersion === 8) {
-    // Schema 8 differs from schema 9 only by this retired collection.
-    const { testRuns: _legacyTestRuns, ...schemaNineState } = next;
-    next = { ...schemaNineState, schemaVersion: 9 };
-    changed = true;
-  }
-
-  if (next.schemaVersion === 9) {
-    next = {
-      ...next,
-      previewPlans: [],
-      previewApprovals: [],
-      previewComposeProjects: [],
-      previewGenerations: [],
-      previewManagedEnvironments: [],
-      previewManagedResources: [],
-      previewGenerationAttachments: [],
-      previewLocalBindings: [],
-      previewNodeAttempts: [],
-      previewResources: [],
-      attachments: [],
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    };
-    changed = true;
-  }
-
-  if (next.schemaVersion === 10 || next.schemaVersion === 11) {
-    next = {
-      ...next,
-      previewPlans: [],
-      previewApprovals: [],
-      previewComposeProjects: [],
-      previewGenerations: [],
-      previewManagedEnvironments: [],
-      previewManagedResources: [],
-      previewGenerationAttachments: [],
-      previewLocalBindings: [],
-      previewNodeAttempts: [],
-      previewResources: [],
-      attachments: Array.isArray(next.attachments) ? next.attachments : [],
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    };
-    changed = true;
-  }
-
-  if (next.schemaVersion === 13) {
-    next = {
-      ...next,
-      previewLocalBindings: [],
-      previewComposeProjects: [],
-      previewPlans: Array.isArray(next.previewPlans)
-        ? next.previewPlans.map((plan) =>
-            migratePhaseFourPreviewPlan(migratePhaseThreePreviewPlan(plan))
-          ) as PreviewPlanRecord[]
-        : next.previewPlans,
-      previewGenerations: Array.isArray(next.previewGenerations)
-        ? next.previewGenerations.map((generation) => ({
-            ...generation,
-            adapter: 'NATIVE',
-            attachmentReadiness: []
-          }))
-        : next.previewGenerations,
-      attachments: [],
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    };
-    changed = true;
-  }
-
-  if (next.schemaVersion === 14) {
-    next = {
-      ...next,
-      previewComposeProjects: [],
-      previewPlans: Array.isArray(next.previewPlans)
-        ? next.previewPlans.map((plan) =>
-            migratePhaseFourPreviewPlan(plan)
-          ) as PreviewPlanRecord[]
-        : next.previewPlans,
-      previewGenerations: Array.isArray(next.previewGenerations)
-        ? next.previewGenerations.map((generation) => ({
-            ...generation,
-            adapter: 'NATIVE'
-          }))
-        : next.previewGenerations,
-      attachments: [],
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    };
-    changed = true;
-  }
-
-  if (next.schemaVersion === 15) {
-    next = {
-      ...next,
-      attachments: [],
-      schemaVersion: TASK_STORE_SCHEMA_VERSION
-    };
-    changed = true;
-  }
-
-  return { state: next, changed };
-}
-
-function migratePhaseFourPreviewPlan(plan: unknown): unknown {
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
-  const record = plan as Record<string, unknown>;
-  const executionPlan = record.executionPlan;
-  if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) {
-    return plan;
-  }
-  return {
-    ...record,
-    executionPlan: { ...(executionPlan as Record<string, unknown>), adapter: 'NATIVE' }
-  };
-}
-
-function migratePhaseThreePreviewPlan(plan: unknown): unknown {
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
-  const record = plan as Record<string, unknown>;
-  const executionPlan = record.executionPlan;
-  if (!executionPlan || typeof executionPlan !== 'object' || Array.isArray(executionPlan)) {
-    return plan;
-  }
-  return {
-    ...record,
-    executionPlan: {
-      ...(executionPlan as Record<string, unknown>),
-      inputs: [],
-      attachments: []
-    }
-  };
-}
-
-function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
+function reconcileLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
   let changed = false;
   const previewResources = state.previewResources.filter(
     (resource) => (resource as { adapterKind: string }).adapterKind === 'NATIVE_PROCESS'
@@ -4160,22 +4279,12 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     };
   });
   const tasks = state.tasks.map((task) => {
-    const taskWithDefaults =
-      Array.isArray(task.forkedAlternativeTaskIds)
-        ? task
-        : {
-            ...task,
-            forkedAlternativeTaskIds: []
-          };
-    if (taskWithDefaults !== task) {
-      changed = true;
-    }
     const taskCurrentRun = task.currentRunId
       ? runs.find((run) => run.id === task.currentRunId)
       : undefined;
-    const currentRun = findReviewRunForRepair(taskWithDefaults, runs);
+    const currentRun = findReviewRunForRepair(task, runs);
     if (!currentRun) {
-      return taskWithDefaults;
+      return task;
     }
 
     const isActiveReview = activeRunStatuses.includes(currentRun.status);
@@ -4185,12 +4294,12 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       activeRunStatuses.includes(taskCurrentRun.status);
     const shouldRepairPhase =
       !hasActiveNonReviewRun &&
-      taskWithDefaults.workflowPhase !== 'REVIEW' &&
-      taskWithDefaults.workflowPhase !== 'IN_REVIEW' &&
-      taskWithDefaults.workflowPhase !== 'DONE' &&
-      taskWithDefaults.workflowPhase !== 'CANCELED' &&
-      taskWithDefaults.workflowPhase !== 'ARCHIVED';
-    const currentReview = taskWithDefaults.projection.codexReview;
+      task.workflowPhase !== 'REVIEW' &&
+      task.workflowPhase !== 'IN_REVIEW' &&
+      task.workflowPhase !== 'DONE' &&
+      task.workflowPhase !== 'CANCELED' &&
+      task.workflowPhase !== 'ARCHIVED';
+    const currentReview = task.projection.codexReview;
     const sameProjectedReview = currentReview?.runId === currentRun.id;
     const reviewResult =
       parseCodexReviewResult(currentRun.finalMessage) ??
@@ -4223,7 +4332,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       (!currentReview.result && Boolean(reviewResult));
 
     if (!shouldRepairPhase && !shouldRepairReview && !shouldRepairCurrentRun) {
-      return taskWithDefaults;
+      return task;
     }
 
     changed = true;
@@ -4234,15 +4343,15 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       | StatusProjection['agentRun']
       | undefined;
     return {
-      ...taskWithDefaults,
-      workflowPhase: shouldRepairPhase ? 'REVIEW' : taskWithDefaults.workflowPhase,
-      currentRunId: repairedSourceRun?.id ?? taskWithDefaults.currentRunId,
-      currentAgentSessionId: repairedSourceRun?.sessionId ?? taskWithDefaults.currentAgentSessionId,
-      currentIterationId: repairedSourceRun?.iterationId ?? taskWithDefaults.currentIterationId,
-      currentWorktreeId: repairedSourceRun?.worktreeId ?? taskWithDefaults.currentWorktreeId,
+      ...task,
+      workflowPhase: shouldRepairPhase ? 'REVIEW' : task.workflowPhase,
+      currentRunId: repairedSourceRun?.id ?? task.currentRunId,
+      currentAgentSessionId: repairedSourceRun?.sessionId ?? task.currentAgentSessionId,
+      currentIterationId: repairedSourceRun?.iterationId ?? task.currentIterationId,
+      currentWorktreeId: repairedSourceRun?.worktreeId ?? task.currentWorktreeId,
       projection: {
-        ...taskWithDefaults.projection,
-        agentRun: repairedAgentRun ?? taskWithDefaults.projection.agentRun,
+        ...task.projection,
+        agentRun: repairedAgentRun ?? task.projection.agentRun,
         codexReview: {
           ...currentReview,
           status: reviewStatus,
@@ -4270,7 +4379,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
           updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? currentReview?.updatedAt
         }
       },
-      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? taskWithDefaults.updatedAt
+      updatedAt: currentRun.lastEventAt ?? currentRun.startedAt ?? task.updatedAt
     };
   });
 
@@ -4280,11 +4389,11 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
 }
 
 function removeTaskLink(task: Task, deletedTaskId: string, now: string): Task {
-  const forkedAlternativeTaskIds = (task.forkedAlternativeTaskIds ?? []).filter(
+  const forkedAlternativeTaskIds = task.forkedAlternativeTaskIds.filter(
     (alternativeTaskId) => alternativeTaskId !== deletedTaskId
   );
   const removedAlternative =
-    forkedAlternativeTaskIds.length !== (task.forkedAlternativeTaskIds ?? []).length;
+    forkedAlternativeTaskIds.length !== task.forkedAlternativeTaskIds.length;
   const removedSource = task.forkedFromTaskId === deletedTaskId;
 
   if (!removedAlternative && !removedSource) {

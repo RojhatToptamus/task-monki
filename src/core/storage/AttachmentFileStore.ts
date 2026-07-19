@@ -289,9 +289,8 @@ export class AttachmentFileStore {
       const records: TaskAttachmentRecord[] = [];
       try {
         for (const source of verified) {
-          const { storageKey: _legacyStorageKey, ...sourceRecord } = source.record;
           const record: TaskAttachmentRecord = {
-            ...sourceRecord,
+            ...source.record,
             id: this.uniqueId(records),
             taskId: targetTaskId,
             ordinal: records.length,
@@ -328,41 +327,6 @@ export class AttachmentFileStore {
       const record = draft.attachments.find((item) => item.id === attachmentId);
       if (!record) throw notFound();
       return content(record, await this.readVerified(this.draftFile(draft.id, record), record));
-    });
-  }
-
-  migrateLegacyRecords(records: readonly TaskAttachmentRecord[]): Promise<TaskAttachmentRecord[]> {
-    return this.enqueue(async () => {
-      if (!records.some((record) => record.storageKey)) return structuredClone([...records]);
-      const migrated: TaskAttachmentRecord[] = [];
-      for (const record of records) {
-        if (!record.storageKey) {
-          migrated.push(structuredClone(record));
-          continue;
-        }
-        const legacyPath = path.resolve(this.baseDir, record.storageKey);
-        const legacyRoot = path.join(this.baseDir, 'attachment-blobs');
-        if (!isInside(legacyPath, legacyRoot)) throw attachmentIntegrityError();
-        await ensurePrivateDirectory(this.taskDirectory(record.taskId));
-        const { storageKey: _legacyStorageKey, ...next } = record;
-        const target = this.taskFile(record.taskId, next);
-        if (await exists(target)) {
-          await this.readVerified(target, next);
-        } else {
-          const bytes = await this.readVerified(legacyPath, record);
-          await writeAtomic(target, bytes, 0o400, true);
-          await this.readVerified(target, next);
-        }
-        migrated.push(next);
-      }
-      return migrated;
-    });
-  }
-
-  cleanupLegacyStorage(): Promise<void> {
-    return this.enqueue(async () => {
-      await this.removeLegacyDirectory(path.join(this.baseDir, 'attachment-blobs'));
-      await this.removeLegacyDirectory(path.join(this.baseDir, 'attachment-drafts'));
     });
   }
 
@@ -508,16 +472,6 @@ export class AttachmentFileStore {
     await fs.rmdir(directory);
     await syncDirectoryIfSupported(path.dirname(directory));
   }
-  private async removeLegacyDirectory(directory: string): Promise<void> {
-    if (!(await exists(directory))) return;
-    const stat = await fs.lstat(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw attachmentIntegrityError();
-    for (const entry of await safeDirectoryEntries(directory)) {
-      if (!entry.isFile() || entry.isSymbolicLink()) throw attachmentIntegrityError();
-      await fs.unlink(path.join(directory, entry.name));
-    }
-    await fs.rmdir(directory);
-  }
 }
 
 export function validateTaskAttachmentRecords(records: readonly TaskAttachmentRecord[], taskId: string): void {
@@ -548,7 +502,7 @@ function validateGlobalTaskRecords(records: readonly TaskAttachmentRecord[]): vo
 }
 
 function validateRecord(record: StagedAttachmentRecord | TaskAttachmentRecord): void {
-  if (!SAFE_ID.test(record.id) || !Number.isSafeInteger(record.ordinal) || record.ordinal < 0 ||
+  if ('storageKey' in record || !SAFE_ID.test(record.id) || !Number.isSafeInteger(record.ordinal) || record.ordinal < 0 ||
       !record.displayName || /[\u0000-\u001f\u007f]/u.test(record.displayName) ||
       (record.kind !== 'image' && record.kind !== 'text') || !record.mediaType ||
       !Number.isSafeInteger(record.byteCount) || record.byteCount <= 0 || !SHA256.test(record.sha256) ||

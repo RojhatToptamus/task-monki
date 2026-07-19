@@ -1,6 +1,7 @@
 import type {
   AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
+  Board,
   ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
@@ -29,6 +30,8 @@ import type {
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  Repository,
+  RepositoryImpact,
   ReadPreviewLogRequest,
   ReadPreviewLogResult,
   ResetPreviewDataRequest,
@@ -153,11 +156,37 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   };
 
   return {
-    getDefaultRepositoryPath: () => get<string>(baseUrl, '/api/defaultRepositoryPath'),
     chooseRepositoryFolder: async () => {
       const selectedPath = await post<string | null>(baseUrl, '/api/repository/chooseFolder', {});
       return selectedPath ?? undefined;
     },
+    addRepository: (path) =>
+      post<Repository>(baseUrl, '/api/repositories', { path }),
+    getRepositoryImpact: (repositoryId) =>
+      get<RepositoryImpact>(baseUrl, `/api/repositories/${encodeURIComponent(repositoryId)}/impact`),
+    disconnectRepository: (input) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(input.repositoryId)}/disconnect`,
+        input
+      ),
+    reconnectRepository: (input) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(input.repositoryId)}/reconnect`,
+        input
+      ),
+    refreshRepository: (repositoryId) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(repositoryId)}/refresh`,
+        {}
+      ),
+    createBoard: (input) => post<Board>(baseUrl, '/api/boards', input),
+    updateBoard: (input) =>
+      post<Board>(baseUrl, `/api/boards/${encodeURIComponent(input.boardId)}`, input),
+    deleteBoard: (boardId) =>
+      post<void>(baseUrl, `/api/boards/${encodeURIComponent(boardId)}/delete`, {}),
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),
@@ -169,8 +198,6 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
     getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
-    validateRepository: (path) =>
-      post<RepositoryPreflight>(baseUrl, '/api/repository/validate', { path }),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
     stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
       post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {
@@ -338,9 +365,9 @@ async function post<T>(baseUrl: string, path: string, body: unknown): Promise<T>
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  let body: T | { error?: string } | StructuredApiError | undefined;
+  let body: T | StructuredApiError | undefined;
   try {
-    body = (await response.json()) as T | { error?: string } | StructuredApiError;
+    body = (await response.json()) as T | StructuredApiError;
   } catch {
     if (!response.ok) {
       throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
@@ -358,17 +385,7 @@ async function readResponse<T>(response: Response): Promise<T> {
         structured.requestId
       );
     }
-    const legacyMessage =
-      typeof body === 'object' &&
-      body !== null &&
-      'error' in body &&
-      typeof body.error === 'string'
-        ? body.error
-        : undefined;
-    throw new TaskManagerApiError(
-      legacyMessage ?? `HTTP ${response.status}`,
-      response.status
-    );
+    throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
   }
   return body as T;
 }

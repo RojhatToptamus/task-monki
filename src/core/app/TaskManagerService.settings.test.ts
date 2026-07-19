@@ -7,6 +7,7 @@ import { getGitExecutablePath, configureGitExecutablePath } from '../git/gitCli'
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import {
   writeNodeExecutable,
   writeOutputExecutable
@@ -249,6 +250,7 @@ describe('TaskManagerService settings', () => {
   it('keeps deterministic seed hosts inert without starting Codex', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const repository = await addTestRepository(store, dir);
     const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
     const service = new TaskManagerService(store, dir, undefined, {
       codexPath: 'codex-not-used',
@@ -264,7 +266,7 @@ describe('TaskManagerService settings', () => {
       });
       expect((await store.snapshot()).agentServers).toHaveLength(0);
       await expect(
-        service.refinePrompt({ repositoryPath: dir, input: 'Refine me.' })
+        service.refinePrompt({ repositoryId: repository.id, input: 'Refine me.' })
       ).rejects.toThrow(reason);
     } finally {
       await service.shutdown();
@@ -288,7 +290,7 @@ describe('TaskManagerService settings', () => {
       const task = await store.createTask({
         title: 'Recovery settings guard',
         prompt: 'Keep recovery state stable.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,

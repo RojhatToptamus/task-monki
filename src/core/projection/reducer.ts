@@ -21,6 +21,8 @@ export interface StoreState extends TaskSnapshot {}
 export function createEmptyState(): StoreState {
   return {
     schemaVersion: TASK_STORE_SCHEMA_VERSION,
+    repositories: [],
+    boards: [],
     tasks: [],
     iterations: [],
     worktrees: [],
@@ -60,6 +62,8 @@ export function createEmptyState(): StoreState {
 export function applyEventToState(state: StoreState, event: DomainEvent): StoreState {
   const next: StoreState = {
     schemaVersion: state.schemaVersion,
+    repositories: [...state.repositories],
+    boards: [...state.boards],
     tasks: [...state.tasks],
     iterations: [...state.iterations],
     worktrees: [...state.worktrees],

@@ -133,8 +133,6 @@ export interface AttachmentDescriptor {
   mediaType: string;
   byteCount: number;
   sha256: string;
-  /** Schema 10 migration input only. New records derive storage from task and attachment ids. */
-  storageKey?: string;
   createdAt: string;
 }
 

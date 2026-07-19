@@ -3,12 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from '../storage/FileTaskStore';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
 
 describe('PreviewApprovalPolicy', () => {
   it('requires an exact digest and invalidates approval when capability authority changes', async () => {
     const store = new FileTaskStore(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-')));
-    const task = await store.createTask({ title: 'Approval', prompt: 'Test', repositoryPath: process.cwd() });
+    const task = await store.createTask({ title: 'Approval', prompt: 'Test', repositoryId: (await addTestRepository(store, process.cwd())).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/approval', worktreePath: process.cwd(), baseSha: 'base'
     });
@@ -24,7 +25,7 @@ describe('PreviewApprovalPolicy', () => {
 
   it('reuses task-scoped authority for a new plan with the same execution digest', async () => {
     const store = new FileTaskStore(await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-reuse-')));
-    const task = await store.createTask({ title: 'Approval reuse', prompt: 'Test', repositoryPath: process.cwd() });
+    const task = await store.createTask({ title: 'Approval reuse', prompt: 'Test', repositoryId: (await addTestRepository(store, process.cwd())).id });
     const { iteration, worktree } = await store.createIterationAndWorktree({
       task, branchName: 'codex/approval-reuse', worktreePath: process.cwd(), baseSha: 'base'
     });

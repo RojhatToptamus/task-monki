@@ -43,7 +43,7 @@ function taskFixture(overrides: Partial<Task> = {}): Task {
     id: 'task-1',
     title: 'Task',
     prompt: 'Do the work.',
-    repositoryPath: '/tmp/repo',
+    repositoryId: '/tmp/repo',
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

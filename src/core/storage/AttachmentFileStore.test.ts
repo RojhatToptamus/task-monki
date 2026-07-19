@@ -116,39 +116,6 @@ describe('AttachmentFileStore', () => {
     expect(await fs.readdir(path.join(root, 'attachments', 'tasks'))).toEqual([]);
   });
 
-  it('reuses a verified task-owned copy when repeating schema-10 migration', async () => {
-    const root = await temporaryDirectory();
-    const blobRoot = path.join(root, 'attachment-blobs');
-    await fs.mkdir(blobRoot, { recursive: true, mode: 0o700 });
-    const bytes = Buffer.from('legacy');
-    const sha256 = 'c49fea7425fa7f8699897a97c159c6690267d9003bb78c53fafa8fc15c325d84';
-    await fs.writeFile(path.join(blobRoot, sha256), bytes, { mode: 0o400 });
-    const store = new AttachmentFileStore(root);
-    const legacyRecord = {
-      id: 'legacy-file',
-      taskId: 'legacy-task',
-      ordinal: 0,
-      displayName: 'legacy.txt',
-      kind: 'text',
-      mediaType: 'text/plain',
-      byteCount: bytes.byteLength,
-      sha256,
-      storageKey: `attachment-blobs/${sha256}`,
-      createdAt: '2026-07-10T00:00:00.000Z'
-    } as const;
-    const [record] = await store.migrateLegacyRecords([legacyRecord]);
-
-    expect(record).not.toHaveProperty('storageKey');
-    await expect(store.verifyTask('legacy-task', [record!])).resolves.toHaveLength(1);
-    await expect(fs.access(blobRoot)).resolves.toBeUndefined();
-
-    await fs.rm(blobRoot, { recursive: true });
-    await expect(store.migrateLegacyRecords([legacyRecord])).resolves.toEqual([record]);
-    await expect(store.verifyTask('legacy-task', [record!])).resolves.toHaveLength(1);
-
-    await store.cleanupLegacyStorage();
-    await expect(fs.access(blobRoot)).rejects.toMatchObject({ code: 'ENOENT' });
-  });
 });
 
 async function temporaryDirectory(): Promise<string> {

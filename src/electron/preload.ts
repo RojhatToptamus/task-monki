@@ -72,8 +72,17 @@ function getWindowChromePlatform(): WindowChromePlatform {
 const attachmentIpcClientGate = new AttachmentIpcOperationGate();
 
 const api: TaskManagerApi = {
-  getDefaultRepositoryPath: () => ipcRenderer.invoke('repository:defaultPath'),
   chooseRepositoryFolder: () => ipcRenderer.invoke('repository:chooseFolder'),
+  addRepository: (path) => ipcRenderer.invoke('repository:add', path),
+  getRepositoryImpact: (repositoryId) =>
+    ipcRenderer.invoke('repository:impact', repositoryId),
+  disconnectRepository: (input) => ipcRenderer.invoke('repository:disconnect', input),
+  reconnectRepository: (input) => ipcRenderer.invoke('repository:reconnect', input),
+  refreshRepository: (repositoryId) =>
+    ipcRenderer.invoke('repository:refresh', repositoryId),
+  createBoard: (input) => ipcRenderer.invoke('board:create', input),
+  updateBoard: (input) => ipcRenderer.invoke('board:update', input),
+  deleteBoard: (boardId) => ipcRenderer.invoke('board:delete', boardId),
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   updateAppSettings: (input: UpdateAppSettingsRequest) =>
     ipcRenderer.invoke('settings:update', input),
@@ -85,7 +94,6 @@ const api: TaskManagerApi = {
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     ipcRenderer.invoke('openTarget:execute', input),
   getAgentProviderState: () => ipcRenderer.invoke('agent:providerState'),
-  validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),
   listTasks: () => ipcRenderer.invoke('task:list'),
   stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
     const byteCount = assertAttachmentIpcBatch(input);
