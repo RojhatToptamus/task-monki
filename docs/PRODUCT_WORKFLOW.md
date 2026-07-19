@@ -100,6 +100,28 @@ Screens should prioritize:
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
 
+## Local preview
+
+Preview is independent of task workflow phase and provider-run state. The
+Overview card presents the current Preview decision and stable primary route;
+the full workspace presents capability approval, selected data scenario,
+application/setup evidence, bounded logs, routes, owned data, external
+attachments, private-input readiness, cleanup authority, and recovery actions.
+
+Native replacement preserves the current route while a candidate starts and
+makes cancellation candidate-only. Compose replacement is a serialized stable
+project update with an explicit route-downtime window after activation begins.
+**Stop Preview & Delete Data** and managed-resource Reset are intentionally
+destructive only for exact Task-Monki-owned runtime/data. Attached dependencies,
+producer tasks, external Compose objects, images, build cache, repository
+files, and user-owned secret files are never included in that authority.
+
+The [Preview Guide](PREVIEW_GUIDE.md) is the public behavior and recipe
+reference. [Preview Architecture](architecture/PREVIEW_ARCHITECTURE.md) is the
+canonical lifecycle, security, storage, ownership, shutdown, and recovery
+source. Keep product copy and action rules consistent with those documents
+rather than adding a second Preview lifecycle here.
+
 ## Activity Timeline
 
 The Overview may show `Activity Timeline` below PR Status. It is a curated task

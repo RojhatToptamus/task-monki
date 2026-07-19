@@ -28,6 +28,19 @@ import type {
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
+  PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewManagedResourceRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  PreviewResolvedAttachmentTarget,
+  ResolvePreviewResult,
+  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   Task,
@@ -113,6 +126,9 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { CompletedChangeSummaryPanel } from './CompletedChangeSummaryCard';
 import { RunProgressCard } from './RunProgressCard';
 import { describeGitSnapshot } from './gitSnapshotCopy';
+import { PreviewOverviewCard, PreviewWorkspace } from './PreviewPanel';
+import type { PreviewExecutionReadiness } from '../../shared/preview';
+import type { PreviewTaskRouteOption } from '../model/previewBindings';
 
 interface TaskDetailProps {
   error?: string;
@@ -141,6 +157,19 @@ interface TaskDetailProps {
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
   interactions: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewTaskRoutes: PreviewTaskRouteOption[];
+  previewRuntimeResources: PreviewResourceRecord[];
+  previewExecutionReadiness?: PreviewExecutionReadiness;
+  previewResolution?: ResolvePreviewResult;
+  previewRecipeGeneration?: PreviewRecipeGenerationSnapshot;
   showMascot: boolean;
   reviewDisabledReason?: string;
   onPrepareWorktree(taskId: string): Promise<void>;
@@ -159,6 +188,34 @@ interface TaskDetailProps {
   onCreateDeliveryCommit(taskId: string): Promise<void>;
   onCreatePullRequest(taskId: string, title?: string): Promise<void>;
   onRefreshGitHub(taskId: string): Promise<void>;
+  onResolvePreview(taskId: string, scenarioId?: string): Promise<void>;
+  onSetPreviewLocalBinding(
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ): Promise<void>;
+  onGetPreviewRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onGeneratePreviewRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onValidatePreviewRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<PreviewRecipeValidation>;
+  onAcceptPreviewRecipeDraft(
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
+  onDiscardPreviewRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
+  onWritePreviewRecipeManually(taskId: string, worktreeId: string): Promise<void>;
+  onApprovePreview(taskId: string, planId: string, executionDigest: string): Promise<void>;
+  onStartPreview(taskId: string, scenarioId?: string): Promise<void>;
+  onOpenPreview(taskId: string, generationId: string, routeId: string): Promise<void>;
+  onStopPreview(taskId: string, generationId: string): Promise<void>;
+  onResetPreviewData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
+  onRetryPreviewSetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
+  onReadPreviewLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<import('../../shared/contracts').ReadPreviewLogResult>;
   onTransition(taskId: string, toPhase: WorkflowPhase): Promise<void>;
   onArchive(taskId: string): void;
   onRequestDelete(taskId: string): void;
@@ -171,7 +228,7 @@ interface HeadAction {
   onClick(): void;
 }
 
-type DetailTab = 'overview' | 'evidence' | 'debug';
+type DetailTab = 'overview' | 'preview' | 'evidence' | 'debug';
 
 const REVIEW_START_PENDING_TIMEOUT_MS = 5000;
 const REVIEW_MASCOT_MIN_ACTIVE_MS = 1600;
@@ -675,6 +732,38 @@ export function TaskDetail(props: TaskDetailProps) {
   const detailHeadClassName = props.showMascot
     ? 'tm-detail__head tm-detail__head--with-mascot'
     : 'tm-detail__head';
+  const previewPanelProps = {
+    task,
+    worktree,
+    plans: props.previewPlans,
+    approvals: props.previewApprovals,
+    generations: props.previewGenerations,
+    generationAttachments: props.previewGenerationAttachments,
+    managedResources: props.previewManagedResources,
+    attempts: props.previewNodeAttempts,
+    composeProjects: props.previewComposeProjects,
+    localBindings: props.previewLocalBindings,
+    taskRouteOptions: props.previewTaskRoutes,
+    runtimeResources: props.previewRuntimeResources,
+    executionReadiness: props.previewExecutionReadiness,
+    resolution: props.previewResolution,
+    recipeGeneration: props.previewRecipeGeneration,
+    onResolve: props.onResolvePreview,
+    onSetLocalBinding: props.onSetPreviewLocalBinding,
+    onGetRecipeGeneration: props.onGetPreviewRecipeGeneration,
+    onGenerateRecipe: props.onGeneratePreviewRecipe,
+    onValidateRecipeDraft: props.onValidatePreviewRecipeDraft,
+    onAcceptRecipeDraft: props.onAcceptPreviewRecipeDraft,
+    onDiscardRecipeDraft: props.onDiscardPreviewRecipeDraft,
+    onWriteRecipeManually: props.onWritePreviewRecipeManually,
+    onApprove: props.onApprovePreview,
+    onStart: props.onStartPreview,
+    onOpen: props.onOpenPreview,
+    onStop: props.onStopPreview,
+    onResetData: props.onResetPreviewData,
+    onRetrySetup: props.onRetryPreviewSetup,
+    onReadLog: props.onReadPreviewLog
+  };
 
   return (
     <main className="tm-detail">
@@ -733,6 +822,7 @@ export function TaskDetail(props: TaskDetailProps) {
         ) : null}
         <div className="tm-tabs">
           <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
+          <TabButton label="Preview" active={tab === 'preview'} onClick={() => setTab('preview')} />
           <TabButton
             label="Evidence"
             active={tab === 'evidence'}
@@ -892,9 +982,19 @@ export function TaskDetail(props: TaskDetailProps) {
                 onInvestigate={() => void investigateFailingChecks()}
               />
 
+              <PreviewOverviewCard
+                key={task.id}
+                {...previewPanelProps}
+                onShowDetails={() => setTab('preview')}
+              />
+
               <TaskActivityPanel view={overviewActivity} variant="overview" />
             </div>
           </div>
+        ) : null}
+
+        {tab === 'preview' ? (
+          <PreviewWorkspace key={task.id} {...previewPanelProps} />
         ) : null}
 
         {tab === 'evidence' ? (

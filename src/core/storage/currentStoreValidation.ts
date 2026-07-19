@@ -109,11 +109,14 @@ const DOMAIN_EVENT_TYPES = [
   'AGENT_MUTATION_AMBIGUOUS', 'AGENT_REVIEW_POLICY_VIOLATION',
   'AGENT_RUNTIME_LOST', 'AGENT_RUNTIME_RECONCILED', 'PROCESS_EXITED',
   'PROCESS_SIGNALED', 'CANCEL_REQUESTED', 'ARTIFACT_CREATED',
-  'PROJECTION_UPDATED', 'REPOSITORY_PREFLIGHT_COMPLETED'
+  'PROJECTION_UPDATED', 'REPOSITORY_PREFLIGHT_COMPLETED',
+  'PREVIEW_PLAN_RESOLVED', 'PREVIEW_PLAN_APPROVED',
+  'PREVIEW_GENERATION_CREATED', 'PREVIEW_GENERATION_UPDATED',
+  'PREVIEW_NODE_UPDATED', 'PREVIEW_RESOURCE_UPDATED', 'PREVIEW_RECONCILED'
 ] as const;
 const DOMAIN_EVENT_SOURCES = [
   'ui', 'provider', 'process', 'storage', 'repository', 'projection', 'git',
-  'github', 'prompt'
+  'github', 'prompt', 'preview'
 ] as const;
 const REQUESTED_ACTION_STATUSES = [
   'NONE', 'REQUESTED', 'STARTING', 'RUNNING', 'SUCCEEDED', 'FAILED',
@@ -156,7 +159,8 @@ const ARTIFACT_STATUSES = ['NONE', 'FINAL_MESSAGE_PRESENT', 'MISSING'] as const;
 const HEALTH_STATUSES = ['HEALTHY', 'INFO', 'WARNING', 'ERROR', 'BLOCKED'] as const;
 const ARTIFACT_KINDS = [
   'agent-prompt', 'agent-output', 'agent-diagnostics', 'agent-final', 'diff',
-  'git-snapshot', 'pr-body'
+  'git-snapshot', 'pr-body', 'preview-source-manifest', 'preview-stdout',
+  'preview-stderr'
 ] as const;
 const SANDBOXES = ['READ_ONLY', 'WORKSPACE_WRITE', 'DANGER_FULL_ACCESS'] as const;
 const APPROVALS_REVIEWERS = ['user', 'auto_review', 'guardian_subagent'] as const;
@@ -789,6 +793,7 @@ function validateEvents(state: StoreState): void {
       'iterationId', 'runId', 'agentSessionId', 'serverInstanceId',
       'agentItemId', 'interactionRequestId', 'worktreeId'
     ]);
+    optionalStrings(event, 'events', ['previewPlanId', 'previewGenerationId']);
     enumField(event, 'type', DOMAIN_EVENT_TYPES, 'events');
     enumField(event, 'source', DOMAIN_EVENT_SOURCES, 'events');
     timestamp(event, 'occurredAt', 'events');

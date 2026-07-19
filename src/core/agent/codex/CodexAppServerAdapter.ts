@@ -337,6 +337,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     return supervisor;
   }
 
+  get currentRuntimeExecutable(): string | undefined {
+    return this.supervisor.currentServer?.executable;
+  }
+
   async initialize(): Promise<void> {
     if (this.initialized) {
       if (this.shuttingDown) {

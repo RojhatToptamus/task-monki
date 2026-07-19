@@ -38,10 +38,16 @@ import { createDomainEvent } from '../core/storage/domainEvent';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { assertModelSupportsAttachments } from '../core/agent/AgentAttachmentDelivery';
+import type { PreviewRecipeGenerationService } from '../core/preview/generation/PreviewRecipeGenerationService';
 
-interface ScenarioOptions {
+export interface ScenarioOptions {
   name?: string;
   ghPath?: string;
+  previewEnabled?: boolean;
+  previewOciExecutablePath?: string;
+  previewOciContextName?: string;
+  previewOciEnv?: NodeJS.ProcessEnv;
+  previewRecipeGenerator?: PreviewRecipeGenerationService;
 }
 
 interface CreateScenarioTaskInput {
@@ -54,6 +60,7 @@ export interface TaskMonkiScenario {
   rootDir: string;
   repositoryPath: string;
   worktreeRoot: string;
+  previewRoot: string;
   store: FileTaskStore;
   events: AppEventBus;
   agent: ScriptedAgentRuntimeAdapter;
@@ -79,6 +86,7 @@ export async function createTaskMonkiScenario(
   );
   const repositoryPath = path.join(rootDir, 'repo');
   const worktreeRoot = path.join(rootDir, 'worktrees');
+  const previewRoot = path.join(rootDir, 'preview-runtime');
   await fs.mkdir(repositoryPath, { recursive: true });
   await initRepository(repositoryPath);
 
@@ -88,7 +96,17 @@ export async function createTaskMonkiScenario(
   const service = new TaskManagerService(store, repositoryPath, events, {
     worktreeRoot,
     ghPath: options.ghPath,
-    agentRuntimeAdapters: [agent]
+    agentRuntimeAdapters: [agent],
+    previewRecipeGenerator: options.previewRecipeGenerator,
+    previewEnabled: options.previewEnabled,
+    previewRoot,
+    previewLauncherPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/native-preview-launcher.mjs'
+    ),
+    previewOciExecutablePath: options.previewOciExecutablePath,
+    previewOciContextName: options.previewOciContextName,
+    previewOciEnv: options.previewOciEnv
   });
   await service.init();
 
@@ -96,6 +114,7 @@ export async function createTaskMonkiScenario(
     rootDir,
     repositoryPath,
     worktreeRoot,
+    previewRoot,
     store,
     events,
     agent,

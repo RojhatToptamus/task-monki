@@ -31,6 +31,17 @@ import type {
   InteractionRequestStatus,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
+  PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
+  PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
+  PreviewNodeAttemptRecord,
+  PreviewNativeResourceRecord,
+  PreviewPlanRecord,
+  PreviewResourceRecord,
   ReviewRollupRecord,
   RunRecord,
   StatusProjection,
@@ -324,7 +335,10 @@ const ARTIFACT_KINDS: readonly ArtifactKind[] = [
   'agent-final',
   'diff',
   'git-snapshot',
-  'pr-body'
+  'pr-body',
+  'preview-source-manifest',
+  'preview-stdout',
+  'preview-stderr'
 ];
 const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-prompt': 8 * 1024 * 1024,
@@ -333,7 +347,10 @@ const ARTIFACT_BYTE_LIMITS: Readonly<Record<ArtifactKind, number>> = {
   'agent-final': 8 * 1024 * 1024,
   diff: 32 * 1024 * 1024,
   'git-snapshot': 8 * 1024 * 1024,
-  'pr-body': 256 * 1024
+  'pr-body': 256 * 1024,
+  'preview-source-manifest': 8 * 1024 * 1024,
+  'preview-stdout': 256 * 1024,
+  'preview-stderr': 256 * 1024
 };
 const UUID_FILE_SEGMENT =
   '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -570,6 +587,10 @@ export class FileTaskStore {
     this.attachmentFiles = new AttachmentFileStore(baseDir);
   }
 
+  getStoreIdentity(): string {
+    return createHash('sha256').update(path.resolve(this.baseDir)).digest('hex');
+  }
+
   async init(): Promise<void> {
     const admitted = this.mutationContext.getStore() || this.ownedIoContext.getStore();
     if ((this.lifecycle === 'CLOSING' || this.lifecycle === 'CLOSED') && !admitted) {
@@ -607,9 +628,14 @@ export class FileTaskStore {
   private async initialize(): Promise<void> {
     await fs.mkdir(this.baseDir, { recursive: true, mode: 0o700 });
     const baseEntry = await fs.lstat(this.baseDir);
-    if (!baseEntry.isDirectory() || baseEntry.isSymbolicLink()) {
+    if (
+      !baseEntry.isDirectory() ||
+      baseEntry.isSymbolicLink() ||
+      !isOwnedByCurrentUser(baseEntry)
+    ) {
       throw new Error('Task store root failed its directory integrity check.');
     }
+    await enforcePosixMode(this.baseDir, 0o700);
     this.lease = await acquireStoreOwnershipLease(this.baseDir, this.leasePath);
     try {
       await cleanupStoreTemporaryFiles(this.baseDir, this.storePath);
@@ -630,12 +656,14 @@ export class FileTaskStore {
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const normalized = normalizeLoadedState(requireCurrentState(persisted));
+        const migrated = migratePersistedState(persisted);
+        const normalized = normalizeLoadedState(requireCurrentState(migrated.state));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(this.state.attachments);
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
+          migrated.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
         ) {
@@ -733,7 +761,6 @@ export class FileTaskStore {
     );
     return running;
   }
-
   private async reconcileArtifacts(): Promise<void> {
     await assertArtifactDirectory(this.baseDir, this.artifactsDir);
     const taskIds = new Set(this.state.tasks.map((task) => task.id));
@@ -930,6 +957,608 @@ export class FileTaskStore {
   async getTask(taskId: string): Promise<Task | undefined> {
     await this.init();
     return clone(this.state.tasks.find((task) => task.id === taskId));
+  }
+
+  async getPreviewPlan(planId: string): Promise<PreviewPlanRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewPlans.find((plan) => plan.id === planId));
+  }
+
+  async getLatestPreviewPlan(taskId: string): Promise<PreviewPlanRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewPlans
+        .filter((plan) => plan.taskId === taskId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    );
+  }
+
+  async getMatchingPreviewApproval(
+    taskId: string,
+    executionDigest: string
+  ): Promise<PreviewApprovalRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewApprovals
+        .filter(
+          (approval) =>
+            approval.taskId === taskId &&
+            approval.executionDigest === executionDigest &&
+            !approval.invalidatedAt
+        )
+        .sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))[0]
+    );
+  }
+
+  async getPreviewGeneration(generationId: string): Promise<PreviewGenerationRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewGenerations.find((generation) => generation.id === generationId)
+    );
+  }
+
+  async getPreviewGenerations(taskId?: string): Promise<PreviewGenerationRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewGenerations.filter(
+        (generation) => !taskId || generation.taskId === taskId
+      )
+    );
+  }
+
+  async getPreviewManagedEnvironment(taskId: string): Promise<PreviewManagedEnvironmentRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewManagedEnvironments.find((environment) => environment.taskId === taskId));
+  }
+
+  async getPreviewComposeProject(taskId: string): Promise<PreviewComposeProjectRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewComposeProjects.find((project) => project.taskId === taskId));
+  }
+
+  async getPreviewComposeProjects(): Promise<PreviewComposeProjectRecord[]> {
+    await this.init();
+    return clone(this.state.previewComposeProjects);
+  }
+
+  async getPreviewManagedEnvironments(): Promise<PreviewManagedEnvironmentRecord[]> {
+    await this.init();
+    return clone(this.state.previewManagedEnvironments);
+  }
+
+  async getPreviewManagedResource(resourceId: string): Promise<PreviewManagedResourceRecord | undefined> {
+    await this.init();
+    return clone(this.state.previewManagedResources.find((resource) => resource.id === resourceId));
+  }
+
+  async getPreviewManagedResources(taskId?: string): Promise<PreviewManagedResourceRecord[]> {
+    await this.init();
+    return clone(this.state.previewManagedResources.filter((resource) => !taskId || resource.taskId === taskId));
+  }
+
+  async getPreviewGenerationAttachments(generationId?: string): Promise<PreviewGenerationAttachmentRecord[]> {
+    await this.init();
+    return clone(this.state.previewGenerationAttachments.filter((attachment) => !generationId || attachment.generationId === generationId));
+  }
+
+  async getPreviewNodeAttempts(generationId: string): Promise<PreviewNodeAttemptRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewNodeAttempts.filter((attempt) => attempt.generationId === generationId)
+    );
+  }
+
+  async isPreviewLogArtifactOwned(taskId: string, artifactId: string): Promise<boolean> {
+    await this.init();
+    return this.state.previewNodeAttempts.some(
+      (attempt) =>
+        attempt.taskId === taskId &&
+        (attempt.stdoutArtifactId === artifactId || attempt.stderrArtifactId === artifactId)
+    );
+  }
+
+  async getPreviewResources(generationId?: string): Promise<PreviewResourceRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewResources.filter(
+        (resource) => !generationId || resource.generationId === generationId
+      )
+    );
+  }
+
+  async getPreviewLocalBindings(taskId?: string): Promise<PreviewLocalAttachmentBindingRecord[]> {
+    await this.init();
+    return clone(
+      this.state.previewLocalBindings.filter((binding) => !taskId || binding.taskId === taskId)
+    );
+  }
+
+  async getPreviewLocalBinding(
+    taskId: string,
+    attachmentId: string
+  ): Promise<PreviewLocalAttachmentBindingRecord | undefined> {
+    await this.init();
+    return clone(
+      this.state.previewLocalBindings.find(
+        (binding) => binding.taskId === taskId && binding.attachmentId === attachmentId
+      )
+    );
+  }
+
+  async savePreviewLocalBinding(
+    binding: PreviewLocalAttachmentBindingRecord
+  ): Promise<PreviewLocalAttachmentBindingRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!this.state.tasks.some((task) => task.id === binding.taskId)) {
+        throw new Error('Preview local binding references a missing task.');
+      }
+      const conflicting = this.state.previewLocalBindings.find(
+        (candidate) =>
+          candidate.taskId === binding.taskId &&
+          candidate.attachmentId === binding.attachmentId &&
+          candidate.id !== binding.id
+      );
+      if (conflicting) throw new Error('Preview attachment already has a local binding.');
+      this.state = {
+        ...this.state,
+        previewLocalBindings: [
+          binding,
+          ...this.state.previewLocalBindings.filter((candidate) => candidate.id !== binding.id)
+        ]
+      };
+      await this.persistSnapshot();
+      return clone(binding);
+    });
+  }
+
+  async deletePreviewLocalBinding(taskId: string, attachmentId: string): Promise<void> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.state = {
+        ...this.state,
+        previewLocalBindings: this.state.previewLocalBindings.filter(
+          (binding) => binding.taskId !== taskId || binding.attachmentId !== attachmentId
+        )
+      };
+      await this.persistSnapshot();
+    });
+  }
+
+  async savePreviewPlan(plan: PreviewPlanRecord): Promise<PreviewPlanRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewPlanReferences(plan);
+      const now = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        previewPlans: [
+          plan,
+          ...this.state.previewPlans.filter((candidate) => candidate.id !== plan.id)
+        ],
+        previewApprovals: this.state.previewApprovals.map((approval) =>
+          approval.taskId === plan.taskId &&
+          approval.executionDigest !== plan.executionDigest &&
+          !approval.invalidatedAt
+            ? {
+                ...approval,
+                invalidatedAt: now,
+                invalidatedReason: 'Preview execution plan changed.'
+              }
+            : approval
+        )
+      };
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'PREVIEW_PLAN_RESOLVED',
+          taskId: plan.taskId,
+          iterationId: plan.iterationId,
+          worktreeId: plan.worktreeId,
+          previewPlanId: plan.id,
+          source: 'preview',
+          payload: { executionDigest: plan.executionDigest }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(plan);
+    });
+  }
+
+  async savePreviewApproval(approval: PreviewApprovalRecord): Promise<PreviewApprovalRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewApprovalReferences(approval);
+      this.state = {
+        ...this.state,
+        previewApprovals: [
+          approval,
+          ...this.state.previewApprovals.filter((candidate) => candidate.id !== approval.id)
+        ]
+      };
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'PREVIEW_PLAN_APPROVED',
+          taskId: approval.taskId,
+          previewPlanId: approval.planId,
+          source: 'preview',
+          payload: { executionDigest: approval.executionDigest, scope: approval.scope }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(approval);
+    });
+  }
+
+  async savePreviewGeneration(
+    generation: PreviewGenerationRecord
+  ): Promise<PreviewGenerationRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewGenerationReferences(generation);
+      const exists = this.state.previewGenerations.some(
+        (candidate) => candidate.id === generation.id
+      );
+      this.state = {
+        ...this.state,
+        previewGenerations: [
+          generation,
+          ...this.state.previewGenerations.filter((candidate) => candidate.id !== generation.id)
+        ]
+      };
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: exists ? 'PREVIEW_GENERATION_UPDATED' : 'PREVIEW_GENERATION_CREATED',
+          taskId: generation.taskId,
+          iterationId: generation.iterationId,
+          worktreeId: generation.worktreeId,
+          previewPlanId: generation.planId,
+          previewGenerationId: generation.id,
+          source: 'preview',
+          payload: { state: generation.state, freshness: generation.freshness }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(generation);
+    });
+  }
+
+  async savePreviewManagedEnvironment(
+    environment: PreviewManagedEnvironmentRecord
+  ): Promise<PreviewManagedEnvironmentRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!this.state.tasks.some((task) => task.id === environment.taskId)) {
+        throw new Error('Preview managed environment references a missing task.');
+      }
+      const hasOtherLiveEnvironment = this.state.previewManagedEnvironments.some(
+        (candidate) =>
+          candidate.taskId === environment.taskId &&
+          candidate.id !== environment.id &&
+          candidate.state !== 'STOPPED'
+      );
+      if (environment.state !== 'STOPPED' && hasOtherLiveEnvironment) {
+        throw new Error('A task preview may have only one managed environment.');
+      }
+      this.state = {
+        ...this.state,
+        previewManagedEnvironments: [
+          environment,
+          ...this.state.previewManagedEnvironments.filter((candidate) => candidate.id !== environment.id)
+        ]
+      };
+      await this.persistSnapshot();
+      return clone(environment);
+    });
+  }
+
+  async savePreviewComposeProject(
+    project: PreviewComposeProjectRecord
+  ): Promise<PreviewComposeProjectRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!this.state.tasks.some((task) => task.id === project.taskId)) {
+        throw new Error('Preview Compose project references a missing task.');
+      }
+      const conflicting = this.state.previewComposeProjects.find(
+        (candidate) => candidate.taskId === project.taskId && candidate.id !== project.id
+      );
+      if (conflicting && conflicting.state !== 'STOPPED') {
+        throw new Error('A task preview may have only one Compose project record.');
+      }
+      this.state = {
+        ...this.state,
+        previewComposeProjects: [
+          project,
+          ...this.state.previewComposeProjects.filter((candidate) => candidate.taskId !== project.taskId)
+        ]
+      };
+      await this.persistSnapshot();
+      return clone(project);
+    });
+  }
+
+  async savePreviewManagedResource(
+    resource: PreviewManagedResourceRecord
+  ): Promise<PreviewManagedResourceRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const environment = this.state.previewManagedEnvironments.find(
+        (candidate) => candidate.id === resource.environmentId && candidate.taskId === resource.taskId
+      );
+      if (!environment) throw new Error('Preview managed resource references a missing environment.');
+      const duplicate = this.state.previewManagedResources.find(
+        (candidate) =>
+          candidate.environmentId === resource.environmentId &&
+          candidate.logicalResourceId === resource.logicalResourceId &&
+          candidate.id !== resource.id &&
+          candidate.state !== 'STOPPED'
+      );
+      if (resource.state !== 'STOPPED' && duplicate) {
+        throw new Error(`Managed resource ${resource.logicalResourceId} already exists.`);
+      }
+      this.state = {
+        ...this.state,
+        previewManagedResources: [
+          resource,
+          ...this.state.previewManagedResources.filter((candidate) => candidate.id !== resource.id)
+        ]
+      };
+      await this.persistSnapshot();
+      return clone(resource);
+    });
+  }
+
+  async savePreviewGenerationAttachments(
+    attachments: PreviewGenerationAttachmentRecord[]
+  ): Promise<PreviewGenerationAttachmentRecord[]> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      for (const attachment of attachments) {
+        const generation = this.state.previewGenerations.find(
+          (candidate) => candidate.id === attachment.generationId && candidate.taskId === attachment.taskId
+        );
+        const resource = this.state.previewManagedResources.find(
+          (candidate) =>
+            candidate.id === attachment.managedResourceId &&
+            candidate.taskId === attachment.taskId &&
+            candidate.logicalResourceId === attachment.logicalResourceId &&
+            candidate.binding?.id === attachment.bindingId
+        );
+        if (!generation || !resource) {
+          throw new Error('Preview generation attachment references missing authority.');
+        }
+      }
+      const ids = new Set(attachments.map((attachment) => attachment.id));
+      const generationIds = new Set(attachments.map((attachment) => attachment.generationId));
+      this.state = {
+        ...this.state,
+        previewGenerationAttachments: [
+          ...attachments,
+          ...this.state.previewGenerationAttachments.filter(
+            (candidate) => !ids.has(candidate.id) && !generationIds.has(candidate.generationId)
+          )
+        ]
+      };
+      await this.persistSnapshot();
+      return clone(attachments);
+    });
+  }
+
+  async cutoverPreviewGenerations(input: {
+    candidate: PreviewGenerationRecord;
+    replaced?: PreviewGenerationRecord;
+  }): Promise<{ candidate: PreviewGenerationRecord; replaced?: PreviewGenerationRecord }> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewGenerationReferences(input.candidate);
+      if (input.replaced) this.assertPreviewGenerationReferences(input.replaced);
+      const storedCandidate = this.state.previewGenerations.find(
+        (generation) => generation.id === input.candidate.id
+      );
+      const storedActive = this.state.previewGenerations.filter(
+        (generation) =>
+          generation.taskId === input.candidate.taskId &&
+          generation.routingState === 'ACTIVE' &&
+          generation.state === 'READY'
+      );
+      if (
+        storedCandidate?.routingState !== 'CANDIDATE' ||
+        input.candidate.routingState !== 'ACTIVE' ||
+        input.candidate.replacesGenerationId !== input.replaced?.id ||
+        storedActive.some((generation) => generation.id !== input.replaced?.id) ||
+        (input.replaced &&
+          (storedActive.length !== 1 ||
+            input.replaced.taskId !== input.candidate.taskId ||
+            input.replaced.routingState !== 'RETIRED'))
+      ) {
+        throw new Error('Preview cutover requires one active candidate and an optional retired generation for the same task.');
+      }
+      const updates = new Map(
+        [input.candidate, input.replaced].filter(Boolean).map((generation) => [generation!.id, generation!])
+      );
+      this.state = {
+        ...this.state,
+        previewGenerations: [
+          input.candidate,
+          ...(input.replaced ? [input.replaced] : []),
+          ...this.state.previewGenerations.filter((generation) => !updates.has(generation.id))
+        ]
+      };
+      for (const generation of updates.values()) {
+        await this.appendEventInternal(
+          createDomainEvent({
+            type: 'PREVIEW_GENERATION_UPDATED',
+            taskId: generation.taskId,
+            iterationId: generation.iterationId,
+            worktreeId: generation.worktreeId,
+            previewPlanId: generation.planId,
+            previewGenerationId: generation.id,
+            source: 'preview',
+            payload: {
+              state: generation.state,
+              freshness: generation.freshness,
+              routingState: generation.routingState
+            }
+          }),
+          false
+        );
+      }
+      await this.persistSnapshot();
+      return clone(input);
+    });
+  }
+
+  async prunePreviewHistory(taskId: string, maxTerminalGenerations = 20): Promise<number> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!Number.isInteger(maxTerminalGenerations) || maxTerminalGenerations < 1 || maxTerminalGenerations > 100) {
+        throw new Error('Preview history retention must be between 1 and 100 generations.');
+      }
+      const terminal = this.state.previewGenerations
+        .filter((generation) => generation.taskId === taskId && ['STOPPED', 'FAILED'].includes(generation.state))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      const removedIds = new Set(terminal.slice(maxTerminalGenerations).map((generation) => generation.id));
+      if (removedIds.size === 0) return 0;
+      const removedAttempts = this.state.previewNodeAttempts.filter((attempt) => removedIds.has(attempt.generationId));
+      const removedGenerations = this.state.previewGenerations.filter((generation) => removedIds.has(generation.id));
+      const artifactIds = new Set([
+        ...removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId]),
+        ...removedGenerations.flatMap((generation) => generation.sourceManifestArtifactId ? [generation.sourceManifestArtifactId] : [])
+      ]);
+      const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
+      this.state = {
+        ...this.state,
+        previewGenerations: this.state.previewGenerations.filter((generation) => !removedIds.has(generation.id)),
+        previewNodeAttempts: this.state.previewNodeAttempts.filter((attempt) => !removedIds.has(attempt.generationId)),
+        previewResources: this.state.previewResources.filter((resource) => !removedIds.has(resource.generationId)),
+        previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
+          (attachment) => !removedIds.has(attachment.generationId)
+        ),
+        events: this.state.events.filter((event) => !event.previewGenerationId || !removedIds.has(event.previewGenerationId)),
+        artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
+      };
+      await this.persistSnapshot();
+      await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
+      return removedIds.size;
+    });
+  }
+
+  async prunePreviewProbeHistory(
+    generationId: string,
+    nodeId: string,
+    maxAttempts = 20
+  ): Promise<number> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 100) {
+        throw new Error('Preview probe retention must be between 1 and 100 attempts.');
+      }
+      const terminalAttempts = this.state.previewNodeAttempts
+        .filter(
+          (attempt) =>
+            attempt.generationId === generationId &&
+            attempt.nodeId === nodeId &&
+            attempt.kind === 'PROBE' &&
+            ['SUCCEEDED', 'FAILED', 'STOPPED'].includes(attempt.state)
+        )
+        .sort((a, b) => b.attempt - a.attempt);
+      const removedAttempts = terminalAttempts.slice(maxAttempts);
+      if (removedAttempts.length === 0) return 0;
+      const removedAttemptIds = new Set(removedAttempts.map((attempt) => attempt.id));
+      const artifactIds = new Set(
+        removedAttempts.flatMap((attempt) => [attempt.stdoutArtifactId, attempt.stderrArtifactId])
+      );
+      const terminalResources = this.state.previewResources
+        .filter(
+          (resource) =>
+            resource.generationId === generationId &&
+            resource.logicalNodeId === nodeId &&
+            ['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
+        )
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      const removedResourceIds = new Set(
+        terminalResources.slice(maxAttempts).map((resource) => resource.id)
+      );
+      const artifacts = this.state.artifacts.filter((artifact) => artifactIds.has(artifact.id));
+      this.state = {
+        ...this.state,
+        previewNodeAttempts: this.state.previewNodeAttempts.filter(
+          (attempt) => !removedAttemptIds.has(attempt.id)
+        ),
+        previewResources: this.state.previewResources.filter(
+          (resource) => !removedResourceIds.has(resource.id)
+        ),
+        events: this.state.events.filter(
+          (event) => {
+            if (event.previewGenerationId !== generationId || !event.payload) return true;
+            const payload = event.payload as { nodeId?: unknown; resourceId?: unknown };
+            return payload.nodeId !== nodeId &&
+              (typeof payload.resourceId !== 'string' || !removedResourceIds.has(payload.resourceId));
+          }
+        ),
+        artifacts: this.state.artifacts.filter((artifact) => !artifactIds.has(artifact.id))
+      };
+      await this.persistSnapshot();
+      await Promise.all(artifacts.map((artifact) => unlinkIfExists(artifact.path)));
+      return removedAttempts.length;
+    });
+  }
+
+  async savePreviewNodeAttempt(
+    attempt: PreviewNodeAttemptRecord
+  ): Promise<PreviewNodeAttemptRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewChildReferences(attempt.taskId, attempt.generationId, 'attempt');
+      this.state = {
+        ...this.state,
+        previewNodeAttempts: [
+          attempt,
+          ...this.state.previewNodeAttempts.filter((candidate) => candidate.id !== attempt.id)
+        ]
+      };
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'PREVIEW_NODE_UPDATED',
+          taskId: attempt.taskId,
+          previewGenerationId: attempt.generationId,
+          source: 'preview',
+          payload: { nodeId: attempt.nodeId, state: attempt.state }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(attempt);
+    });
+  }
+
+  async savePreviewResource(resource: PreviewNativeResourceRecord): Promise<PreviewNativeResourceRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      this.assertPreviewChildReferences(resource.taskId, resource.generationId, 'resource');
+      this.state = {
+        ...this.state,
+        previewResources: [
+          resource,
+          ...this.state.previewResources.filter((candidate) => candidate.id !== resource.id)
+        ]
+      };
+      await this.appendEventInternal(
+        createDomainEvent({
+          type: 'PREVIEW_RESOURCE_UPDATED',
+          taskId: resource.taskId,
+          previewGenerationId: resource.generationId,
+          source: 'preview',
+          payload: { resourceId: resource.id, state: resource.state }
+        }),
+        false
+      );
+      await this.persistSnapshot();
+      return clone(resource);
+    });
   }
 
   async getRun(runId: string): Promise<RunRecord | undefined> {
@@ -1191,6 +1820,40 @@ export class FileTaskStore {
     if (!task) {
       throw new Error(`Task not found: ${taskId}`);
     }
+    const activePreviewResource = this.state.previewResources.find(
+      (resource) =>
+        resource.taskId === taskId &&
+        !['STOPPED', 'EXITED', 'FAILED'].includes(resource.state)
+    );
+    if (activePreviewResource) {
+      throw new Error(
+        `Task has an active or unverified preview resource: ${activePreviewResource.id}. Stop or reconcile it before deletion.`
+      );
+    }
+    const activeManagedEnvironment = this.state.previewManagedEnvironments.find(
+      (environment) => environment.taskId === taskId && environment.state !== 'STOPPED'
+    );
+    const activeManagedResource = this.state.previewManagedResources.find(
+      (resource) => resource.taskId === taskId && resource.state !== 'STOPPED'
+    );
+    if (activeManagedEnvironment || activeManagedResource) {
+      throw new Error('Task has an active or unverified managed preview environment. Stop or reconcile it before deletion.');
+    }
+    const activeComposeProject = this.state.previewComposeProjects.find(
+      (project) => project.taskId === taskId && project.state !== 'STOPPED'
+    );
+    if (activeComposeProject) {
+      throw new Error('Task has an active or unverified Compose preview project. Stop or reconcile it before deletion.');
+    }
+    const nonterminalPreviewGeneration = this.state.previewGenerations.find(
+      (generation) =>
+        generation.taskId === taskId && !['STOPPED', 'FAILED'].includes(generation.state)
+    );
+    if (nonterminalPreviewGeneration) {
+      throw new Error(
+        `Task has an active or unverified preview generation: ${nonterminalPreviewGeneration.id}. Stop or reconcile it before deletion.`
+      );
+    }
 
     const runIds = new Set(
       this.state.runs.filter((run) => run.taskId === taskId).map((run) => run.id)
@@ -1273,6 +1936,34 @@ export class FileTaskStore {
           request.taskId !== taskId &&
           !runIds.has(request.runId) &&
           !sessionIds.has(request.sessionId)
+      ),
+      previewPlans: this.state.previewPlans.filter((record) => record.taskId !== taskId),
+      previewApprovals: this.state.previewApprovals.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewComposeProjects: this.state.previewComposeProjects.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewGenerations: this.state.previewGenerations.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewManagedEnvironments: this.state.previewManagedEnvironments.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewManagedResources: this.state.previewManagedResources.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewGenerationAttachments: this.state.previewGenerationAttachments.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewLocalBindings: this.state.previewLocalBindings.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewNodeAttempts: this.state.previewNodeAttempts.filter(
+        (record) => record.taskId !== taskId
+      ),
+      previewResources: this.state.previewResources.filter(
+        (record) => record.taskId !== taskId
       ),
       events: this.state.events.filter(
         (event) =>
@@ -1468,6 +2159,85 @@ export class FileTaskStore {
       );
     }
     return clone(task);
+  }
+
+  private assertPreviewPlanReferences(plan: PreviewPlanRecord): void {
+    const task = this.state.tasks.find((candidate) => candidate.id === plan.taskId);
+    const iteration = this.state.iterations.find(
+      (candidate) => candidate.id === plan.iterationId && candidate.taskId === plan.taskId
+    );
+    const worktree = this.state.worktrees.find(
+      (candidate) =>
+        candidate.id === plan.worktreeId &&
+        candidate.taskId === plan.taskId &&
+        candidate.iterationId === plan.iterationId
+    );
+    if (!task || !iteration || !worktree) {
+      throw new Error('Preview plan references a missing or mismatched task context.');
+    }
+  }
+
+  private assertPreviewApprovalReferences(approval: PreviewApprovalRecord): void {
+    const plan = this.state.previewPlans.find(
+      (candidate) =>
+        candidate.id === approval.planId &&
+        candidate.taskId === approval.taskId &&
+        candidate.executionDigest === approval.executionDigest
+    );
+    if (!plan || !this.state.tasks.some((task) => task.id === approval.taskId)) {
+      throw new Error('Preview approval references a missing or mismatched plan.');
+    }
+  }
+
+  private assertPreviewGenerationReferences(generation: PreviewGenerationRecord): void {
+    const existing = this.state.previewGenerations.find(
+      (candidate) => candidate.id === generation.id
+    );
+    const plan = this.state.previewPlans.find(
+      (candidate) =>
+        candidate.id === generation.planId &&
+        candidate.taskId === generation.taskId &&
+        candidate.iterationId === generation.iterationId &&
+        candidate.worktreeId === generation.worktreeId &&
+        candidate.executionDigest === generation.executionDigest
+    );
+    const approval = this.state.previewApprovals.find(
+      (candidate) =>
+        candidate.id === generation.approvalId &&
+        candidate.taskId === generation.taskId &&
+        candidate.executionDigest === generation.executionDigest &&
+        candidate.scope === 'TASK' &&
+        (!candidate.invalidatedAt || Boolean(existing))
+    );
+    const authorityChanged =
+      existing &&
+      (existing.taskId !== generation.taskId ||
+        existing.iterationId !== generation.iterationId ||
+        existing.worktreeId !== generation.worktreeId ||
+        existing.planId !== generation.planId ||
+        existing.approvalId !== generation.approvalId ||
+        existing.executionDigest !== generation.executionDigest);
+    if (
+      !plan ||
+      !approval ||
+      authorityChanged ||
+      !this.state.tasks.some((task) => task.id === generation.taskId)
+    ) {
+      throw new Error('Preview generation references missing or mismatched task authority.');
+    }
+  }
+
+  private assertPreviewChildReferences(
+    taskId: string,
+    generationId: string,
+    kind: 'attempt' | 'resource'
+  ): void {
+    const generation = this.state.previewGenerations.find(
+      (candidate) => candidate.id === generationId && candidate.taskId === taskId
+    );
+    if (!generation || !this.state.tasks.some((task) => task.id === taskId)) {
+      throw new Error(`Preview ${kind} references a missing or mismatched generation.`);
+    }
   }
 
   private resolveTaskCreationRetryFromState(
@@ -3351,6 +4121,113 @@ export class FileTaskStore {
     }
   }
 
+  async createPreviewArtifact(
+    taskId: string,
+    kind: 'preview-stdout' | 'preview-stderr'
+  ): Promise<ArtifactRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const artifact = await this.createArtifactRecord(taskId, kind);
+      await writeNewArtifactFiles(this.artifactsDir, [{ artifact, content: '' }]);
+      this.state = {
+        ...this.state,
+        artifacts: [artifact, ...this.state.artifacts]
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        await this.cleanupUnpublishedArtifacts([artifact]);
+        throw error;
+      }
+      return clone(artifact);
+    });
+  }
+
+  async appendBoundedArtifact(
+    artifactId: string,
+    chunk: string | Buffer,
+    maxBytes = 256 * 1024
+  ): Promise<{ byteCount: number; truncated: boolean }> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+      if (!artifact) {
+        throw new Error(`Artifact not found: ${artifactId}`);
+      }
+      const limit = Math.min(maxBytes, ARTIFACT_BYTE_LIMITS[artifact.kind]);
+      if (!Number.isSafeInteger(limit) || limit < 0) {
+        throw new Error('Artifact byte limit must be a non-negative safe integer.');
+      }
+      if (artifact.byteCount >= limit) {
+        return { byteCount: artifact.byteCount, truncated: true };
+      }
+
+      const marker = Buffer.from('\n[Task Monki preview log truncated]\n', 'utf8');
+      const input = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+      const remaining = limit - artifact.byteCount;
+      const truncated = input.byteLength > remaining;
+      const output = truncated
+        ? Buffer.concat([
+            input.subarray(0, Math.max(0, remaining - marker.byteLength)),
+            marker.subarray(0, Math.min(marker.byteLength, remaining))
+          ])
+        : input;
+      if (output.byteLength > 0) {
+        await appendManagedArtifactFile(artifact.path, output);
+      }
+
+      const byteCount = artifact.byteCount + output.byteLength;
+      const updatedAt = new Date().toISOString();
+      this.state = {
+        ...this.state,
+        artifacts: this.state.artifacts.map((candidate) =>
+          candidate.id === artifactId ? { ...candidate, byteCount, updatedAt } : candidate
+        )
+      };
+      try {
+        await this.persistSnapshot();
+      } catch (error) {
+        try {
+          await reconcileArtifactFile(artifact.path, artifact.byteCount);
+        } catch (rollbackError) {
+          throw new ArtifactAppendAmbiguousError(artifactId, error, rollbackError);
+        }
+        throw error;
+      }
+      return { byteCount, truncated };
+    });
+  }
+
+  async syncArtifactByteCount(artifactId: string): Promise<ArtifactRecord> {
+    return this.serializeMutation(async () => {
+      await this.init();
+      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+      if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
+      const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      });
+      const stat = handle ? await handle.stat().finally(() => handle.close()) : undefined;
+      const byteCount = stat?.size ?? 0;
+      if (byteCount > ARTIFACT_BYTE_LIMITS[artifact.kind]) {
+        throw new Error('Stored task artifact exceeds its byte limit.');
+      }
+      const updated: ArtifactRecord = {
+        ...artifact,
+        byteCount,
+        updatedAt: new Date().toISOString()
+      };
+      this.state = {
+        ...this.state,
+        artifacts: this.state.artifacts.map((candidate) =>
+          candidate.id === artifactId ? updated : candidate
+        )
+      };
+      await this.persistSnapshot();
+      return clone(updated);
+    });
+  }
+
   async writeFinalArtifact(taskId: string, runId: string, content: string): Promise<ArtifactRecord> {
     return this.serializeMutation(() =>
       this.writeFinalArtifactInternal(taskId, runId, content)
@@ -3506,6 +4383,54 @@ export class FileTaskStore {
     if (unpublished.length === 0) return;
     await Promise.allSettled(unpublished.map((artifact) => fs.unlink(artifact.path)));
     await syncDirectoryIfSupported(this.artifactsDir).catch(() => undefined);
+  }
+
+  readArtifactRange(
+    artifactId: string,
+    offset: number,
+    maxBytes: number
+  ): Promise<{ chunk: string; nextOffset: number; endOfFile: boolean }> {
+    return this.serializeMutation(async () => {
+      if (!Number.isInteger(offset) || offset < 0) {
+        throw new Error('Artifact offset must be a nonnegative integer.');
+      }
+      if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 64 * 1024) {
+        throw new Error('Artifact range must contain 4-65536 bytes.');
+      }
+      const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+      if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
+      const handle = await openManagedArtifactFile(artifact.path, fsConstants.O_RDONLY).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (!handle) return { chunk: '', nextOffset: offset, endOfFile: true };
+      try {
+        const stat = await handle.stat();
+        if (offset >= stat.size) return { chunk: '', nextOffset: stat.size, endOfFile: true };
+        const buffer = Buffer.alloc(Math.min(maxBytes, stat.size - offset));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+        const safeBytes = utf8SafePrefixLength(
+          buffer.subarray(0, bytesRead),
+          offset + bytesRead >= stat.size
+        );
+        return {
+          chunk: buffer.subarray(0, safeBytes).toString('utf8'),
+          nextOffset: offset + safeBytes,
+          endOfFile: offset + safeBytes >= stat.size
+        };
+      } finally {
+        await handle.close();
+      }
+    });
+  }
+
+  async getArtifactPath(artifactId: string): Promise<string> {
+    await this.init();
+    const artifact = this.state.artifacts.find((candidate) => candidate.id === artifactId);
+    if (!artifact) {
+      throw new Error(`Artifact not found: ${artifactId}`);
+    }
+    return artifact.path;
   }
 
   private async createArtifactRecord(
@@ -3678,7 +4603,7 @@ async function assertStoreOwnershipLease(
     owner.lease.token !== expected.token ||
     owner.lease.pid !== expected.pid ||
     owner.lease.acquiredAt !== expected.acquiredAt ||
-    !sameFileIdentity(inspected.stat, owner.stat)
+    !sameStoreLeaseIdentity(inspected.stat, owner.stat)
   ) {
     throw new Error('Task store ownership lease was lost before publication.');
   }
@@ -3829,8 +4754,8 @@ async function reclaimStoreOwnershipLease(
     if (
       !sameStoreLease(canonical.lease, expected.lease) ||
       !sameStoreLease(claimed.lease, expected.lease) ||
-      !sameFileIdentity(canonical.stat, expected.stat) ||
-      !sameFileIdentity(claimed.stat, expected.stat)
+      !sameStoreLeaseIdentity(canonical.stat, expected.stat) ||
+      !sameStoreLeaseIdentity(claimed.stat, expected.stat)
     ) {
       throw new Error('Task store ownership changed during stale-lease reclamation.');
     }
@@ -3841,7 +4766,7 @@ async function reclaimStoreOwnershipLease(
     return true;
   } catch (error) {
     const canonical = await fs.lstat(leasePath).catch(() => undefined);
-    if (canonical && sameFileIdentity(canonical, expected.stat)) {
+    if (canonical && sameStoreLeaseIdentity(canonical, expected.stat)) {
       try {
         await fs.rename(reclaimPath, anchor);
         await syncDirectoryIfSupported(baseDir);
@@ -3872,7 +4797,7 @@ async function findStoreLeaseAnchor(
     if (!inspected) continue;
     if (
       sameStoreLease(inspected.lease, expected.lease) &&
-      sameFileIdentity(inspected.stat, expected.stat)
+      sameStoreLeaseIdentity(inspected.stat, expected.stat)
     ) {
       candidates.push(entryPath);
     }
@@ -3947,7 +4872,7 @@ function sameStoreLease(left: StoreOwnershipLease, right: StoreOwnershipLease): 
   );
 }
 
-function sameFileIdentity(left: StoreLeaseStat, right: StoreLeaseStat): boolean {
+function sameStoreLeaseIdentity(left: StoreLeaseStat, right: StoreLeaseStat): boolean {
   return (
     left.dev === right.dev &&
     (left.ino === 0 || right.ino === 0 || left.ino === right.ino)
@@ -3955,15 +4880,10 @@ function sameFileIdentity(left: StoreLeaseStat, right: StoreLeaseStat): boolean 
 }
 
 async function readPrivateStoreFile(storePath: string): Promise<string> {
-  let handle: Awaited<ReturnType<typeof fs.open>>;
-  try {
-    handle = await fs.open(
-      storePath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
-    );
-  } catch (error) {
-    throw error;
-  }
+  const handle = await fs.open(
+    storePath,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+  );
   try {
     const stat = await handle.stat();
     if (
@@ -4035,11 +4955,7 @@ async function initializeArtifactDirectory(
   }
   try {
     const stat = await handle.stat();
-    if (
-      !stat.isDirectory() ||
-      stat.dev !== before.dev ||
-      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino)
-    ) {
+    if (!stat.isDirectory() || !sameFileIdentity(stat, before)) {
       throw new Error('Task artifact directory changed during initialization.');
     }
     assertArtifactOwnedByCurrentUser(stat);
@@ -4050,7 +4966,10 @@ async function initializeArtifactDirectory(
   await assertArtifactDirectory(baseDir, artifactsDir);
 }
 
-async function assertArtifactDirectory(baseDir: string, artifactsDir: string): Promise<void> {
+async function assertArtifactDirectory(
+  baseDir: string,
+  artifactsDir: string
+): Promise<void> {
   const stat = await inspectArtifactDirectory(baseDir, artifactsDir);
   assertArtifactPrivateMode(stat, 0o700);
 }
@@ -4104,7 +5023,7 @@ function validateArtifactRecord(
   const fileName = `${artifact.taskId}-${ownerId}-${artifact.kind}-${artifact.id}.log`;
   if (
     !MANAGED_ARTIFACT_FILE_PATTERN.test(fileName) ||
-    artifact.path !== path.join(artifactsDir, fileName)
+    !sameAbsolutePath(artifact.path, path.join(artifactsDir, fileName))
   ) {
     throw new Error('Task artifact path failed its managed-path integrity check.');
   }
@@ -4131,11 +5050,7 @@ async function reconcileArtifactFile(
   }
   try {
     const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.dev !== before.dev ||
-      (stat.ino !== 0 && before.ino !== 0 && stat.ino !== before.ino)
-    ) {
+    if (!sameFileIdentity(stat, before)) {
       throw new Error('Stored task artifact changed during validation.');
     }
     assertArtifactOwnedByCurrentUser(stat);
@@ -4427,8 +5342,57 @@ async function readPrivateArtifactFile(
   }
 }
 
+async function appendManagedArtifactFile(
+  filePath: string,
+  content: string | Buffer
+): Promise<void> {
+  const handle = await openManagedArtifactFile(
+    filePath,
+    fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT,
+    0o600
+  );
+  try {
+    await handle.writeFile(content);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function openManagedArtifactFile(
+  filePath: string,
+  flags: number,
+  mode?: number
+): Promise<Awaited<ReturnType<typeof fs.open>>> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      filePath,
+      flags | (fsConstants.O_NOFOLLOW ?? 0),
+      mode
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    throw new Error('Stored task artifact could not be opened safely.', { cause: error });
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error('Stored task artifact is not a regular file.');
+    }
+    assertArtifactOwnedByCurrentUser(stat);
+    if (!posixModeMatches(stat, 0o600)) {
+      await enforcePosixMode(handle, 0o600);
+    }
+    assertArtifactPrivateMode(await handle.stat(), 0o600);
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 function assertArtifactOwnedByCurrentUser(
-  stat: Awaited<ReturnType<typeof fs.lstat>>
+  stat: { uid: number | bigint }
 ): void {
   if (!isOwnedByCurrentUser(stat)) {
     throw new Error('Task artifact entry is not owned by the current user.');
@@ -4436,7 +5400,7 @@ function assertArtifactOwnedByCurrentUser(
 }
 
 function assertArtifactPrivateMode(
-  stat: Awaited<ReturnType<typeof fs.lstat>>,
+  stat: { mode: number | bigint },
   expected: number
 ): void {
   if (!posixModeMatches(stat, expected)) {
@@ -4444,12 +5408,16 @@ function assertArtifactPrivateMode(
   }
 }
 
+function sameFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint }
+): boolean {
+  if (left.dev !== right.dev) return false;
+  return left.ino === 0 || right.ino === 0 || left.ino === right.ino;
+}
+
 function sameAbsolutePath(left: string, right: string): boolean {
-  return (
-    path.isAbsolute(left) &&
-    path.isAbsolute(right) &&
-    path.relative(left, right) === ''
-  );
+  return path.isAbsolute(left) && path.isAbsolute(right) && path.relative(left, right) === '';
 }
 
 function requireCurrentState(state: PersistedState): StoreState {
@@ -4480,6 +5448,16 @@ function requireCurrentState(state: PersistedState): StoreState {
     'agentSettingsObservations',
     'agentSubagentObservations',
     'interactionRequests',
+    'previewPlans',
+    'previewApprovals',
+    'previewComposeProjects',
+    'previewGenerations',
+    'previewManagedEnvironments',
+    'previewManagedResources',
+    'previewGenerationAttachments',
+    'previewLocalBindings',
+    'previewNodeAttempts',
+    'previewResources',
     'events',
     'artifacts',
     'attachments'
@@ -5233,8 +6211,87 @@ function validatePersistedAttachments(state: StoreState): void {
   }
 }
 
+function utf8SafePrefixLength(buffer: Buffer, endOfFile: boolean): number {
+  if (endOfFile || buffer.length === 0) return buffer.length;
+  let start = buffer.length - 1;
+  while (start > 0 && (buffer[start] & 0xc0) === 0x80) start -= 1;
+  const lead = buffer[start];
+  const expected =
+    (lead & 0x80) === 0 ? 1 :
+    (lead & 0xe0) === 0xc0 ? 2 :
+    (lead & 0xf0) === 0xe0 ? 3 :
+    (lead & 0xf8) === 0xf0 ? 4 : 1;
+  return buffer.length - start < expected ? start : buffer.length;
+}
+
+function migratePersistedState(state: PersistedState): {
+  state: PersistedState;
+  changed: boolean;
+} {
+  if (state.schemaVersion !== 16) {
+    return { state, changed: false };
+  }
+  return {
+    state: {
+      ...state,
+      tasks: migrateLegacyReviewProjections(state.tasks),
+      schemaVersion: TASK_STORE_SCHEMA_VERSION
+    },
+    changed: true
+  };
+}
+
+function migrateLegacyReviewProjections(
+  tasks: PersistedState['tasks']
+): PersistedState['tasks'] {
+  if (!Array.isArray(tasks)) return tasks;
+  return tasks.map((task) => {
+    if (!task || typeof task !== 'object' || Array.isArray(task)) return task;
+    const taskRecord = task as unknown as Record<string, unknown>;
+    const projection = taskRecord.projection;
+    if (!projection || typeof projection !== 'object' || Array.isArray(projection)) {
+      return task;
+    }
+    const projectionRecord = projection as Record<string, unknown>;
+    if (!('codexReview' in projectionRecord)) return task;
+    const { codexReview, ...currentProjection } = projectionRecord;
+    const review = migrateLegacyReviewResult(codexReview);
+    return {
+      ...taskRecord,
+      projection: {
+        ...currentProjection,
+        ...(review === undefined ? {} : { agentReview: review })
+      }
+    };
+  }) as Task[];
+}
+
+function migrateLegacyReviewResult(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const result = record.result;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return value;
+  const resultRecord = result as Record<string, unknown>;
+  return {
+    ...record,
+    result: {
+      ...resultRecord,
+      schemaVersion:
+        resultRecord.schemaVersion === 'codex-review/v1'
+          ? 'agent-review/v1'
+          : resultRecord.schemaVersion
+    }
+  };
+}
+
 function normalizeLoadedState(state: StoreState): { state: StoreState; changed: boolean } {
   let changed = false;
+  const previewResources = state.previewResources.filter(
+    (resource) => (resource as { adapterKind: string }).adapterKind === 'NATIVE_PROCESS'
+  );
+  if (previewResources.length !== state.previewResources.length) {
+    changed = true;
+  }
   const activeRunStatuses: RunRecord['status'][] = [
     'QUEUED',
     'STARTING',
@@ -5398,7 +6455,9 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     };
   });
 
-  return changed ? { state: { ...state, runs, tasks }, changed } : { state, changed };
+  return changed
+    ? { state: { ...state, runs, tasks, previewResources }, changed }
+    : { state, changed };
 }
 
 function removeTaskLink(task: Task, deletedTaskId: string, now: string): Task {

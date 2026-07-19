@@ -18,6 +18,14 @@ Install these before using Task Monki:
   - an ACP profile: Grok Build, Cursor Agent, or `claude-agent-acp`;
 - Optional: GitHub CLI, installed and authenticated, for branch publishing and
   draft pull-request features
+- Optional: Docker Desktop for managed-data and existing-Compose previews.
+  Compose previews require a Compose CLI that exposes
+  `docker compose config --no-env-resolution`; Task Monki feature-probes this
+  and refuses the preview before mutation when it is unavailable.
+
+See the [Preview Guide](PREVIEW_GUIDE.md) for recipe setup, private-input
+platform requirements, supported native and Compose behavior, and current
+limitations.
 
 Task Monki does not bundle Git, agent runtimes, or GitHub CLI. Packaged desktop
 apps probe each registered runtime independently. One unavailable runtime does

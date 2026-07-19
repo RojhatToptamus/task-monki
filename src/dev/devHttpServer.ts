@@ -566,6 +566,152 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/preview/resolve') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.resolvePreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/get') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getPreviewRecipeGeneration((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/generate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.generatePreviewRecipe((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/validate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.validatePreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/accept') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.acceptPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/discard') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.discardPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.approvePreviewPlan((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/start') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.startPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.stopPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/open') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.openPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/log/read') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.readPreviewLog((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/reset-data') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.resetPreviewData((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/retry-setup') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.retryPreviewSetup((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/binding/set') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.setPreviewLocalAttachmentBinding((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/binding/delete') {
+        await options.service.deletePreviewLocalAttachmentBinding((await readJson()) as never);
+        sendJson(response, requestId, 200, null);
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
         sendJson(
           response,
@@ -651,6 +797,7 @@ export function createDevEventStreamFrame(event: AppUpdateEvent): string {
     iterationId: event.iterationId,
     runId: event.runId,
     worktreeId: event.worktreeId,
+    previewGenerationId: event.previewGenerationId,
     payload: null,
     at: event.at
   };

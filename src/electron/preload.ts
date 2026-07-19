@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   CancelRunRequest,
   ContinueRunRequest,
@@ -7,17 +8,29 @@ import type {
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DiscardPreviewRecipeDraftRequest,
   ExecuteOpenTargetActionRequest,
   GitHubPreflightRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   InspectOpenTargetRequest,
   PrepareWorktreeRequest,
+  ApprovePreviewPlanRequest,
+  OpenPreviewRequest,
   PublishBranchRequest,
   ReadArtifactRequest,
+  ReadPreviewLogRequest,
+  ResetPreviewDataRequest,
+  SetPreviewLocalAttachmentBindingRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
   StartRunRequest,
+  StartPreviewRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -27,7 +40,9 @@ import type {
   TaskManagerApi,
   TransitionTaskRequest,
   UpdateAgentNativeSessionRequest,
-  UpdateAppSettingsRequest
+  StopPreviewRequest,
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
 import {
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -40,6 +55,7 @@ import {
   assertAttachmentIpcBatch,
 } from './attachmentIpcSecurity';
 import type { TaskManagerShellApi, WindowChromePlatform } from '../shared/shell';
+import type { PreviewPrivateInputApi } from '../shared/preview';
 
 function getWindowChromePlatform(): WindowChromePlatform {
   if (process.platform === 'darwin') {
@@ -115,6 +131,29 @@ const api: TaskManagerApi = {
   createPullRequest: (input: CreatePullRequestRequest) =>
     ipcRenderer.invoke('github:createPullRequest', input),
   refreshGitHub: (input: RefreshGitHubRequest) => ipcRenderer.invoke('github:refresh', input),
+  resolvePreview: (input: ResolvePreviewRequest) => ipcRenderer.invoke('preview:resolve', input),
+  getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:get', input),
+  generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:generate', input),
+  validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:validate', input),
+  acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:accept', input),
+  discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
+    ipcRenderer.invoke('preview:recipe-generation:discard', input),
+  approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
+    ipcRenderer.invoke('preview:approve', input),
+  startPreview: (input: StartPreviewRequest) => ipcRenderer.invoke('preview:start', input),
+  stopPreview: (input: StopPreviewRequest) => ipcRenderer.invoke('preview:stop', input),
+  openPreview: (input: OpenPreviewRequest) => ipcRenderer.invoke('preview:open', input),
+  readPreviewLog: (input: ReadPreviewLogRequest) => ipcRenderer.invoke('preview:log:read', input),
+  resetPreviewData: (input: ResetPreviewDataRequest) => ipcRenderer.invoke('preview:resetData', input),
+  retryPreviewSetup: (input: RetryPreviewSetupRequest) => ipcRenderer.invoke('preview:retrySetup', input),
+  setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
+    ipcRenderer.invoke('preview:binding:set', input),
+  deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
+    ipcRenderer.invoke('preview:binding:delete', input),
   transitionTask: (input: TransitionTaskRequest) => ipcRenderer.invoke('task:transition', input),
   deleteTask: (input: DeleteTaskRequest) => ipcRenderer.invoke('task:delete', input),
   readArtifact: (input: ReadArtifactRequest) => ipcRenderer.invoke('artifact:read', input),
@@ -128,6 +167,13 @@ const api: TaskManagerApi = {
 };
 
 contextBridge.exposeInMainWorld('taskManager', api);
+const privateInputs: PreviewPrivateInputApi = {
+  set: (input) => ipcRenderer.invoke('preview:private:set', input),
+  import: (input) => ipcRenderer.invoke('preview:private:import', input),
+  delete: (input) => ipcRenderer.invoke('preview:private:delete', input),
+  retryCleanup: () => ipcRenderer.invoke('preview:private:retryCleanup')
+};
+contextBridge.exposeInMainWorld('previewPrivateInputs', privateInputs);
 const shellApi: TaskManagerShellApi = {
   windowChromePlatform: getWindowChromePlatform(),
   syncWindowChrome: () => ipcRenderer.send('windowChrome:sync')

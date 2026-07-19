@@ -6,6 +6,23 @@ import { applyEventToState, createEmptyState, reduceProjection, reduceRun } from
 const now = '2026-06-20T10:00:00.000Z';
 
 describe('projection reducer', () => {
+  it('keeps preview lifecycle events out of task workflow and agent projections', () => {
+    const state = createEmptyState();
+    const task = createTask();
+    state.tasks = [task];
+
+    const next = applyEventToState(
+      state,
+      createEvent('PREVIEW_GENERATION_UPDATED', {
+        state: 'READY',
+        freshness: 'CURRENT'
+      })
+    );
+
+    expect(next.tasks[0]).toEqual(task);
+    expect(next.events).toHaveLength(1);
+  });
+
   it('separates agent completion from process exit', () => {
     const projection = createInitialProjection(now);
     const run = createRun();

@@ -1,5 +1,7 @@
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
+  ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
   BranchPublicationRecord,
@@ -8,24 +10,41 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DiscardPreviewRecipeDraftRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
   RepositoryPreflight,
   RunRecord,
   StartRunRequest,
+  StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
   TransitionTaskRequest,
+  StopPreviewRequest,
   WorktreeRecord,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
@@ -39,7 +58,8 @@ import type {
   SteerRunRequest,
   TestExternalToolRequest,
   UpdateAgentNativeSessionRequest,
-  UpdateAppSettingsRequest
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../../shared/contracts';
 import type {
   AttachmentContent,
@@ -201,6 +221,36 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord>(baseUrl, '/api/github/pr/create', input),
     refreshGitHub: (input: RefreshGitHubRequest) =>
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
+    resolvePreview: (input: ResolvePreviewRequest) =>
+      post<ResolvePreviewResult>(baseUrl, '/api/preview/resolve', input),
+    getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/get', input),
+    generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/generate', input),
+    validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/validate', input),
+    acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/accept', input),
+    discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/discard', input),
+    approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
+      post<PreviewApprovalRecord>(baseUrl, '/api/preview/approve', input),
+    startPreview: (input: StartPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/start', input),
+    stopPreview: (input: StopPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/stop', input),
+    openPreview: (input: OpenPreviewRequest) =>
+      post<OpenPreviewResult>(baseUrl, '/api/preview/open', input),
+    readPreviewLog: (input: ReadPreviewLogRequest) =>
+      post<ReadPreviewLogResult>(baseUrl, '/api/preview/log/read', input),
+    resetPreviewData: (input: ResetPreviewDataRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
+    retryPreviewSetup: (input: RetryPreviewSetupRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/retry-setup', input),
+    setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
+      post(baseUrl, '/api/preview/binding/set', input),
+    deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
+      post<void>(baseUrl, '/api/preview/binding/delete', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>

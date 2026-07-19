@@ -202,6 +202,32 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     await service.shutdown();
   });
 
+  it('keeps deterministic seed hosts inert without starting Codex', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: 'codex-not-used',
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentProviderStartupDisabledReason: reason
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness).toMatchObject({
+        status: 'DISABLED',
+        canStart: false,
+        detail: reason
+      });
+      expect((await store.snapshot()).agentServers).toHaveLength(0);
+      await expect(
+        service.refinePrompt({ repositoryPath: dir, input: 'Refine me.' })
+      ).rejects.toThrow(reason);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   it('applies deferred Codex settings after the last Codex run terminalizes', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-recovery-'));
@@ -831,7 +857,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     await service.shutdown();
   });
 
-  it('finishes initialization before provider shutdown and store closure', async () => {
+  it('settles interrupted initialization before provider shutdown and store closure', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-init-shutdown-race-'));
     const store = new FileTaskStore(path.join(dir, 'store'));
     const closeStore = vi.spyOn(store, 'close');
@@ -861,7 +887,7 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     expect(closeStore).not.toHaveBeenCalled();
 
     releaseInitialization();
-    await expect(initializing).resolves.toBeUndefined();
+    await expect(initializing).rejects.toThrow('shutting down');
     await expect(shutdown).resolves.toBeUndefined();
     expect(runtime.shutdown).toHaveBeenCalledOnce();
     expect(closeStore).toHaveBeenCalledOnce();

@@ -1,5 +1,5 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import type {
   CodexExternalToolSettings,
   ExternalExecutablePathSettings,
@@ -13,6 +13,12 @@ import {
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
+import {
+  readPrivateFile,
+  writePrivateFileAtomically
+} from '../filesystem/secureFilesystem';
+
+const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -53,9 +59,9 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = await fs.readFile(this.filePath, 'utf8');
+      raw = await readPrivateFile(this.filePath, MAX_APP_SETTINGS_FILE_BYTES);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
@@ -67,8 +73,10 @@ export class AppSettingsStore implements AppSettingsStorage {
     }
 
     let parsed: unknown;
+    let decoded: string;
     try {
-      parsed = JSON.parse(raw) as unknown;
+      decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+      parsed = JSON.parse(decoded) as unknown;
     } catch {
       await this.moveInvalidSettingsFileAside();
       this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
@@ -77,10 +85,11 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
-    assertPersistedSettingsSchema(parsed);
-    this.settings = normalizeAppSettings(parsed);
+    const migrated = migratePersistedSettings(parsed);
+    assertPersistedSettingsSchema(migrated);
+    this.settings = normalizeAppSettings(migrated);
 
-    if (raw !== serializeAppSettings(this.settings)) {
+    if (decoded !== serializeAppSettings(this.settings)) {
       await this.persist();
     }
 
@@ -88,18 +97,15 @@ export class AppSettingsStore implements AppSettingsStorage {
   }
 
   private async persist(settings = this.settings): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, serializeAppSettings(settings), {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.rename(tmpPath, this.filePath);
+    await writePrivateFileAtomically(
+      this.filePath,
+      serializeAppSettings(settings)
+    );
   }
 
   private async moveInvalidSettingsFileAside(): Promise<void> {
     const timestamp = new Date().toISOString().replace(/[^0-9A-Za-z_-]/g, '-');
-    const backupPath = `${this.filePath}.invalid-${timestamp}`;
+    const backupPath = `${this.filePath}.invalid-${timestamp}-${randomUUID()}`;
     try {
       await fs.rename(this.filePath, backupPath);
     } catch (error) {
@@ -167,7 +173,8 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
     runtimeExecutablePaths: normalizeRuntimeExecutablePaths(record.runtimeExecutablePaths),
-    repositories
+    repositories,
+    previewGateway: normalizePreviewGateway(record.previewGateway)
   };
 }
 
@@ -186,6 +193,16 @@ function assertPersistedSettingsSchema(value: unknown): void {
       `Unsupported app settings schema ${String(isRecord(value) ? value.schemaVersion : undefined)}. This build accepts only schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION}.`
     );
   }
+}
+
+function migratePersistedSettings(value: unknown): unknown {
+  if (!isRecord(value) || (value.schemaVersion !== 4 && value.schemaVersion !== 7)) {
+    return value;
+  }
+  return {
+    ...value,
+    schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+  };
 }
 
 export function mergeAppSettings(
@@ -267,6 +284,12 @@ export function mergeAppSettings(
       ...input.repositories
     });
   }
+  if (input.previewGateway) {
+    patch.previewGateway = normalizePreviewGateway({
+      ...current.previewGateway,
+      ...input.previewGateway
+    });
+  }
   return normalizeAppSettings({
     ...current,
     ...patch
@@ -330,6 +353,15 @@ function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
   };
 }
 
+function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
+  const record = isRecord(value) ? value : {};
+  const port = record.port;
+  return {
+    port: Number.isInteger(port) && Number(port) >= 10_000 && Number(port) <= 65_535
+      ? Number(port)
+      : null
+  };
+}
 function normalizeExecutablePath(value: unknown): string | null {
   return normalizeOptionalString(value) ?? null;
 }

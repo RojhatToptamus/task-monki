@@ -8,6 +8,7 @@ import {
   codexCapabilities
 } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -23,12 +24,17 @@ import {
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
 import { buildRunProgressViewModel } from '../renderer/model/runProgress';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
+import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
   DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
   seedTaskMonkiDevelopmentData,
   type DevSeedManifest
 } from './seedData';
+import {
+  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
+  deterministicDevSeedProviderDisabledReason
+} from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -39,7 +45,7 @@ describe('Task Monki development seed data', () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
     snapshot = await readStoreSnapshot(manifest.storeDir);
-  }, 90_000);
+  }, 180_000);
 
   afterAll(async () => {
     if (rootDir) {
@@ -66,8 +72,15 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      TASK_MANAGER_DETERMINISTIC_SEED: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
     });
+    expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
+      DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+    );
+    expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
       DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
@@ -80,6 +93,39 @@ describe('Task Monki development seed data', () => {
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
+  });
+
+  it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
+    const view = (slug: string) => {
+      const task = taskForScenario(manifest, snapshot, slug);
+      return buildPreviewViewModel({
+        task,
+        worktree: snapshot.worktrees.find((record) => record.id === task.currentWorktreeId),
+        plans: snapshot.previewPlans.filter((record) => record.taskId === task.id),
+        approvals: snapshot.previewApprovals.filter((record) => record.taskId === task.id),
+        generations: snapshot.previewGenerations.filter((record) => record.taskId === task.id),
+        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id)
+      });
+    };
+    expect(view('preview-missing-recipe').status).toBe('Not checked');
+    expect(view('preview-approval-required').status).toBe('Approval required');
+    expect(view('preview-active-approval-required').actions.map((action) => action.id)).toEqual([
+      'OPEN', 'APPROVE', 'STOP'
+    ]);
+    expect(view('preview-preparing').status).toBe('Starting');
+    expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-compose-ready')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-compose-recovery').summary).toContain('verified data volumes are preserved');
+    expect(view('preview-replacing').status).toBe('Replacing');
+    expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-replacement-failed').summary).toContain('latest replacement did not reach readiness');
+    expect(view('preview-replacement-failed').summary).not.toContain('Candidate web service exited');
+    expect(view('preview-failed').status).toBe('Failed');
+    expect(view('preview-stale').status).toContain('stale');
+    expect(view('preview-stopped').status).toBe('Stopped');
+    expect(view('preview-recovery-required').status).toBe('Recovery required');
+    expect(view('preview-cleanup-incomplete').status).toBe('Cleanup incomplete');
+    expect(JSON.stringify(snapshot)).not.toContain('intentional seeded preview failure');
   });
 
   it('drives review, interaction, PR, and completion states from records and events', () => {

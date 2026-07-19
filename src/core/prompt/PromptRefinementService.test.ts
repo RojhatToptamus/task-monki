@@ -102,6 +102,7 @@ describe('PromptRefinementService', () => {
         'exec',
         '--json',
         '--ephemeral',
+        '--skip-git-repo-check',
         '--sandbox',
         'read-only',
         '--cd',

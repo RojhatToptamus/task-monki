@@ -1,6 +1,6 @@
 # Codex App Server Architecture
 
-Date: 2026-07-11
+Date: 2026-07-12
 
 This document describes the Codex runtime adapter. The provider-neutral runtime
 registry and cross-runtime invariants live in
@@ -220,6 +220,47 @@ partial candidate.
 Read `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md` before changing review
 mode or follow-up behavior.
 
+## Local preview control plane
+
+Preview is a separate Task Monki-owned domain, not a Codex turn, agent run mode,
+workflow transition, or provider-evidence stream. Its manager, graph, native
+launcher, managed OCI and Compose runtimes, encrypted vault, loopback gateway,
+store records, stop-only reconciliation, and renderer projection have their own
+authority and shutdown boundaries.
+
+The canonical current description is
+[Preview Architecture](architecture/PREVIEW_ARCHITECTURE.md). Repository
+authors and users should read the [Preview Guide](PREVIEW_GUIDE.md). Those
+documents define native and Compose behavior, capability approval, source
+generations, private inputs, attached dependencies, exact ownership, destructive
+cleanup, shutdown, and recovery without duplicating the App Server lifecycle
+here.
+
+Graceful app quit fences new service actions and starts the Preview and Codex
+runtime owners' single-flight shutdown paths together. App Server shutdown
+cancels pending startup/restart work, drains RPC handling, removes process
+listeners, and terminates its portable child process tree. Preview shutdown
+independently cancels and joins generation work, watches, sockets, and cleanup.
+Preview events never update `Task.workflowPhase` or the agent projection.
+
+## Renderer and development-host trust
+
+The Electron renderer runs with context isolation and sandboxing, without Node
+integration. A local CSP permits only packaged renderer assets and the exact
+development WebSocket origin when applicable. Typed IPC rejects messages that
+do not originate from the expected main frame, and the main process blocks
+renderer navigation, popup creation, permission requests, and unexpected
+external targets.
+
+The browser development host is a distinct loopback boundary. Its API requires
+a short-lived private token transferred to Vite through a one-use local lease,
+plus the exact Host, renderer Origin, and Fetch Metadata. It bounds JSON bodies
+and event streams and closes both during process shutdown. Browser-hosted agent
+runs are non-escalatable: network access and external Codex tools are forced
+off, and unsafe persisted settings are refused. Deterministic seed hosts keep
+the provider inert so synthetic provider records cannot start a live Codex
+process.
+
 ## Settings
 
 Task and review execution settings stored on task/run records include:
@@ -248,7 +289,8 @@ The development HTTP server uses `TASK_MANAGER_APP_SETTINGS_PATH` or an
 - selected and known repositories;
 - Codex external tool modes for web search, MCP servers, and apps;
 - external executable path preferences for Git, Codex CLI, and GitHub CLI;
-  other registered runtimes use PATH or their documented environment override.
+  other registered runtimes use PATH or their documented environment override;
+- the persisted high loopback port used by the local preview gateway.
 
 Empty executable paths mean Auto-detect. The main process resolves and probes
 executables live; resolved paths and detected versions are not persisted. Git

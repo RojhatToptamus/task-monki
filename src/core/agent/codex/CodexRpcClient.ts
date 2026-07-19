@@ -258,6 +258,10 @@ export class CodexRpcClient {
     this.pending.clear();
   }
 
+  drain(): Promise<void> {
+    return this.inboundQueue;
+  }
+
   private async write(
     message: unknown,
     onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>,

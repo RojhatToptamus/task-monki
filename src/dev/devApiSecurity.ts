@@ -356,7 +356,6 @@ export async function readBoundedBinary(
   }
   return readBoundedBody(request, maxBytes);
 }
-
 async function readBoundedBody(
   request: http.IncomingMessage,
   maxBytes: number

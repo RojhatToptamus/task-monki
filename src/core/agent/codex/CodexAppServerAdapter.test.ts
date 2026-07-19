@@ -313,6 +313,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     ).toBe(true);
     expect(runtime.models[0]?.model).toBe('fake-model');
     expect(runtime.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
+    expect(adapter.currentRuntimeExecutable).toBe(executable);
     const initializedServer = (await store.snapshot()).agentServers[0];
     expect(initializedServer.runtimeResolution).toMatchObject({
       selectedExecutable: executable,

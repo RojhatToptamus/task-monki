@@ -259,3 +259,56 @@ describe('createBrowserTaskManagerApi runtime model discovery', () => {
     ]);
   });
 });
+
+describe('createBrowserTaskManagerApi preview contract', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('supports the renderer development server same-origin API proxy', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createBrowserTaskManagerApi('').resolvePreview({ taskId: 'task-1' });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/preview/resolve', expect.any(Object));
+  });
+
+  it('uses typed preview operation endpoints rather than accepting an arbitrary URL', async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return { ok: true, json: async () => ({}) } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    await api.resolvePreview({ taskId: 'task-1' });
+    await api.approvePreviewPlan({ taskId: 'task-1', planId: 'plan-1', executionDigest: 'digest' });
+    await api.startPreview({ taskId: 'task-1' });
+    await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
+    await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
+    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65_536 });
+    await api.resetPreviewData({
+      taskId: 'task-1', generationId: 'generation-1', resourceId: 'database', scenarioId: 'full'
+    });
+    await api.retryPreviewSetup({
+      taskId: 'task-1', generationId: 'generation-1', scenarioId: 'full'
+    });
+
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://127.0.0.1:3099/api/preview/resolve',
+      'http://127.0.0.1:3099/api/preview/approve',
+      'http://127.0.0.1:3099/api/preview/start',
+      'http://127.0.0.1:3099/api/preview/open',
+      'http://127.0.0.1:3099/api/preview/stop',
+      'http://127.0.0.1:3099/api/preview/log/read',
+      'http://127.0.0.1:3099/api/preview/reset-data',
+      'http://127.0.0.1:3099/api/preview/retry-setup'
+    ]);
+    expect(calls[3]?.body).toEqual({
+      taskId: 'task-1',
+      generationId: 'generation-1',
+      routeId: 'app'
+    });
+  });
+});

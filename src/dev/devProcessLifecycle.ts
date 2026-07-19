@@ -20,10 +20,26 @@ export class DevProcessLifecycle {
 
   stop(cleanup: () => Promise<void>): Promise<void> {
     this.stopping = true;
-    this.shutdownPromise ??= (async () => {
-      await this.startupPromise?.catch(() => undefined);
-      await cleanup();
-    })();
+    this.shutdownPromise ??= this.stopInternal(cleanup);
     return this.shutdownPromise;
+  }
+
+  private async stopInternal(cleanup: () => Promise<void>): Promise<void> {
+    let cleanupError: unknown;
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupError = error;
+    }
+
+    await this.startupPromise?.catch(() => undefined);
+
+    try {
+      await cleanup();
+    } catch (error) {
+      cleanupError ??= error;
+    }
+
+    if (cleanupError) throw cleanupError;
   }
 }

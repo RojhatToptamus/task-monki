@@ -182,6 +182,21 @@ describe('development HTTP server', () => {
     expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
   });
 
+  it('keeps current preview endpoints behind the hardened boundary', async () => {
+    const startPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
+    const running = await startServer({ startPreview });
+
+    const response = await fetch(`${running.baseUrl}/api/preview/start`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ taskId: 'task-1' })
+    });
+
+    expect(response.status).toBe(200);
+    expect(startPreview).toHaveBeenCalledWith({ taskId: 'task-1' });
+    await expect(response.json()).resolves.toMatchObject({ id: 'generation-1' });
+  });
+
   it('accepts one bounded attachment batch and preserves no source path', async () => {
     const stageTaskAttachmentBatch = vi.fn(async (input: { attachments: Array<{ bytes: ArrayBuffer }> }) => ({
       id: 'draft-1',
@@ -454,6 +469,19 @@ describe('development HTTP server', () => {
     expect(frame).toContain('"type":"run.output"');
     expect(frame).toContain('"payload":null');
     expect(frame).not.toContain('xxx');
+  });
+
+  it('preserves the preview generation identity in compact invalidation frames', () => {
+    const frame = createDevEventStreamFrame({
+      type: 'preview.updated',
+      taskId: 'task-1',
+      previewGenerationId: 'generation-1',
+      payload: null,
+      at: '2026-07-10T00:00:00.000Z'
+    });
+
+    expect(Buffer.byteLength(frame)).toBeLessThan(512);
+    expect(frame).toContain('"previewGenerationId":"generation-1"');
   });
 });
 
