@@ -3,6 +3,12 @@ import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { PreviewExecutionBlocker } from '../../../shared/preview';
+import {
+  isOwnedByCurrentUser,
+  posixModeMatches,
+  syncDirectoryIfSupported,
+  writePrivateFileAtomically
+} from '../../filesystem/secureFilesystem';
 
 export interface PreviewSecretProtector {
   isAvailable(): boolean;
@@ -17,6 +23,8 @@ interface VaultIndex { formatVersion: 1; current: Record<string, string>; revisi
 const MAX_VAULT_INDEX_BYTES = 4 * 1024 * 1024;
 const MAX_VAULT_BLOB_BYTES = 64 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INDEX_NAME = 'index.json';
+const BACKUP_INDEX_NAME = 'index.backup.json';
 
 export interface PreviewPrivateLease {
   values: Readonly<Record<string, string>>;
@@ -43,7 +51,7 @@ export class PreviewPrivateVault {
         const id = randomUUID();
         const blobName = `${id}.blob`;
         await this.ensureRoot();
-        await writeAtomic(path.join(this.root, blobName), encrypted);
+        await writePrivateFileAtomically(path.join(this.root, blobName), encrypted);
         index.revisions.push({ id, taskId, inputId, blobName, createdAt: new Date().toISOString() });
         index.current[key(taskId, inputId)] = id;
         await this.writeIndex(index);
@@ -182,24 +190,94 @@ export class PreviewPrivateVault {
 
   private releaseLease(id: string): void { const next = (this.leases.get(id) ?? 1) - 1; if (next > 0) this.leases.set(id, next); else this.leases.delete(id); }
   private lock<T>(action: () => Promise<T>): Promise<T> { const next = this.operation.then(action, action); this.operation = next.then(() => undefined, () => undefined); return next; }
-  private async ensureRoot(): Promise<void> { await fs.mkdir(this.root, { recursive: true, mode: 0o700 }); const stat = await fs.lstat(this.root); if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error('Unsafe vault root.'); }
+  private async ensureRoot(): Promise<void> {
+    await fs.mkdir(this.root, { recursive: true, mode: 0o700 });
+    const handle = await fs.open(
+      this.root,
+      constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0)
+    );
+    try {
+      const stat = await handle.stat();
+      if (
+        !stat.isDirectory() ||
+        !isOwnedByCurrentUser(stat) ||
+        !posixModeMatches(stat, 0o700)
+      ) {
+        throw new Error('Unsafe vault root.');
+      }
+      const [actual, parent] = await Promise.all([
+        fs.realpath(this.root),
+        fs.realpath(path.dirname(this.root))
+      ]);
+      if (actual !== path.join(parent, path.basename(this.root))) {
+        throw new Error('Unsafe vault root.');
+      }
+    } finally {
+      await handle.close();
+    }
+  }
   private async readIndex(): Promise<VaultIndex | undefined> {
     if (this.recoveryRequired) return undefined;
-    await this.ensureRoot();
     try {
-      const bytes = await readProtectedFile(path.join(this.root, 'index.json'), MAX_VAULT_INDEX_BYTES);
-      try {
-        return validateVaultIndex(JSON.parse(bytes.toString('utf8')));
-      } finally {
-        bytes.fill(0);
+      await this.ensureRoot();
+      const primary = await readIndexFile(path.join(this.root, INDEX_NAME));
+      if (primary.status === 'READY') {
+        const backup = await readIndexFile(path.join(this.root, BACKUP_INDEX_NAME));
+        if (backup.status === 'MISSING') {
+          await this.writeIndexFile(BACKUP_INDEX_NAME, primary.index);
+        } else if (backup.status !== 'READY') {
+          throw new Error('Private vault backup index is unsafe or corrupt.');
+        }
+        return primary.index;
       }
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { formatVersion: 1, current: {}, revisions: [], references: [] };
+      if (primary.status === 'UNSAFE') {
+        throw new Error('Private vault index is unsafe.');
+      }
+
+      const backup = await readIndexFile(path.join(this.root, BACKUP_INDEX_NAME));
+      if (backup.status === 'READY') {
+        await this.writeIndexFile(INDEX_NAME, backup.index);
+        return backup.index;
+      }
+      if (backup.status === 'UNSAFE') {
+        throw new Error('Private vault backup index is unsafe.');
+      }
+
+      if (primary.status === 'MISSING' && backup.status === 'MISSING') {
+        const entries = await fs.readdir(this.root);
+        if (entries.length === 0) {
+          return { formatVersion: 1, current: {}, revisions: [], references: [] };
+        }
+      }
+      throw new Error('Private vault index recovery is required.');
+    } catch {
       this.recoveryRequired = true;
       return undefined;
     }
   }
-  private writeIndex(index: VaultIndex): Promise<void> { return writeAtomic(path.join(this.root, 'index.json'), Buffer.from(JSON.stringify(index), 'utf8')); }
+  private async writeIndex(index: VaultIndex): Promise<void> {
+    await this.ensureRoot();
+    const current = await readIndexFile(path.join(this.root, INDEX_NAME));
+    if (current.status === 'READY') {
+      await this.writeIndexFile(BACKUP_INDEX_NAME, current.index);
+    } else if (current.status !== 'MISSING') {
+      throw new Error('Private vault index is unsafe or corrupt.');
+    }
+    await this.writeIndexFile(INDEX_NAME, index);
+    if (current.status === 'MISSING') {
+      await this.writeIndexFile(BACKUP_INDEX_NAME, index);
+    }
+  }
+
+  private async writeIndexFile(name: string, index: VaultIndex): Promise<void> {
+    const bytes = Buffer.from(JSON.stringify(index), 'utf8');
+    try {
+      await writePrivateFileAtomically(path.join(this.root, name), bytes);
+      await syncDirectoryIfSupported(this.root);
+    } finally {
+      bytes.fill(0);
+    }
+  }
   private async collect(index: VaultIndex): Promise<boolean> {
     const live = new Set([...Object.values(index.current), ...index.references.map((reference) => reference.revisionId)]);
     const removed = index.revisions.filter((revision) => !live.has(revision.id) && !this.leases.has(revision.id));
@@ -225,12 +303,26 @@ export class PreviewPrivateVault {
 }
 
 function key(taskId: string, inputId: string): string { return `${taskId}\u0000${inputId}`; }
-async function writeAtomic(target: string, data: Buffer): Promise<void> {
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporary, data, { mode: 0o600, flag: 'wx' });
-  const handle = await fs.open(temporary, 'r');
-  try { await handle.sync(); } finally { await handle.close(); }
-  await fs.rename(temporary, target);
+
+type IndexReadResult =
+  | { status: 'READY'; index: VaultIndex }
+  | { status: 'MISSING' | 'CORRUPT' | 'UNSAFE' };
+
+async function readIndexFile(filePath: string): Promise<IndexReadResult> {
+  try {
+    const bytes = await readProtectedFile(filePath, MAX_VAULT_INDEX_BYTES);
+    try {
+      return { status: 'READY', index: validateVaultIndex(JSON.parse(bytes.toString('utf8'))) };
+    } catch {
+      return { status: 'CORRUPT' };
+    } finally {
+      bytes.fill(0);
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { status: 'MISSING' };
+    return { status: 'UNSAFE' };
+  }
 }
 
 async function readProtectedFile(filePath: string, maximumBytes: number): Promise<Buffer> {
@@ -242,8 +334,8 @@ async function readProtectedFile(filePath: string, maximumBytes: number): Promis
     if (
       !stat.isFile() ||
       stat.size > maximumBytes ||
-      (stat.mode & 0o077) !== 0 ||
-      (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+      !posixModeMatches(stat, 0o600) ||
+      !isOwnedByCurrentUser(stat)
     ) {
       throw new Error('Unsafe private vault file.');
     }

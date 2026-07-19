@@ -79,6 +79,62 @@ describe('OciEngineAdapter', () => {
     } satisfies Partial<OciEngineError>);
   });
 
+  it('keeps one-shot credential input outside OCI argv and configured environment', async () => {
+    const calls: Array<{ argv: string[]; input: Buffer; env: NodeJS.ProcessEnv }> = [];
+    const adapter = new OciEngineAdapter({
+      env: { PATH: process.env.PATH, UNRELATED: 'public' },
+      attachStdin: async (_executable, argv, input, options) => {
+        calls.push({ argv: [...argv], input: Buffer.from(input), env: { ...options.env } });
+        return {
+          failure: new Promise<never>(() => undefined),
+          async close() {}
+        };
+      }
+    });
+    const secret = Buffer.from('credential-canary', 'utf8');
+
+    const attachment = await adapter.attachStdin(['container', 'attach', 'owned-id'], secret);
+    await attachment.close();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].input.toString('utf8')).toBe('credential-canary');
+    expect(JSON.stringify(calls[0].argv)).not.toContain('credential-canary');
+    expect(JSON.stringify(calls[0].env)).not.toContain('credential-canary');
+    secret.fill(0);
+  });
+
+  it('joins the bounded stdin attachment after its payload is flushed', async () => {
+    const adapter = new OciEngineAdapter({ executable: process.execPath });
+    const input = Buffer.from('transient-canary', 'utf8');
+
+    const attachment = await adapter.attachStdin([
+      '-e',
+      'process.stdin.resume();'
+    ], input, { timeoutMs: 5_000 });
+    const firstClose = attachment.close();
+    const concurrentClose = attachment.close();
+    expect(concurrentClose).toBe(firstClose);
+    await firstClose;
+
+    input.fill(0);
+  });
+
+  it('terminates and joins the stdin attachment when startup is canceled', async () => {
+    const controller = new AbortController();
+    const adapter = new OciEngineAdapter({ executable: process.execPath });
+    const input = Buffer.from('cancel-canary', 'utf8');
+    const attachment = await adapter.attachStdin([
+      '-e',
+      'process.stdin.resume(); setInterval(() => {}, 1000);'
+    ], input, { timeoutMs: 5_000, signal: controller.signal });
+
+    controller.abort(new Error('preview canceled'));
+
+    await expect(attachment.failure).rejects.toThrow('preview canceled');
+    await attachment.close();
+    input.fill(0);
+  });
+
   it.runIf(process.platform === 'darwin' && process.env.TASK_MONKI_OCI_INTEGRATION === '1')(
     'passes the capability contract against the configured macOS Docker context',
     async () => {

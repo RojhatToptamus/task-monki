@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -30,6 +30,62 @@ describe('PreviewPrivateVault', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
     const vault = new PreviewPrivateVault(root, protector);
     expect(await vault.readiness('task', ['token'])).toEqual([{ kind: 'PRIVATE_INPUT_MISSING', inputId: 'token' }]);
+  });
+  it('recovers the last-known-good index when the primary index is missing', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
+    const vault = new PreviewPrivateVault(root, protector);
+    await vault.set('task', 'token', 'recoverable-canary');
+    await unlink(path.join(root, 'index.json'));
+
+    const recovered = new PreviewPrivateVault(root, protector);
+    const lease = await recovered.acquire('task', ['token']);
+    if (Array.isArray(lease)) throw new Error('unexpected blocker');
+    expect(lease.values.token).toBe('recoverable-canary');
+    expect(await readFile(path.join(root, 'index.json'), 'utf8')).toContain(lease.revisions.token);
+    await lease.release();
+  });
+  it('recovers the last-known-good index when the primary index is corrupt', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
+    const vault = new PreviewPrivateVault(root, protector);
+    await vault.set('task', 'token', 'first-canary');
+    const previousLease = await vault.acquire('task', ['token']);
+    if (Array.isArray(previousLease)) throw new Error('unexpected blocker');
+    await vault.set('task', 'token', 'second-canary');
+    await writeFile(path.join(root, 'index.json'), '{broken', { mode: 0o600 });
+
+    const recovered = new PreviewPrivateVault(root, protector);
+    const lease = await recovered.acquire('task', ['token']);
+    if (Array.isArray(lease)) throw new Error('unexpected blocker');
+    expect(lease.values.token).toBe('first-canary');
+    await lease.release();
+  });
+  it('does not reinterpret an established vault with lost indexes as empty', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
+    const vault = new PreviewPrivateVault(root, protector);
+    await vault.set('task', 'token', 'preserved-canary');
+    const blob = (await readdir(root)).find((name) => name.endsWith('.blob'))!;
+    await Promise.all([
+      unlink(path.join(root, 'index.json')),
+      unlink(path.join(root, 'index.backup.json'))
+    ]);
+
+    const reopened = new PreviewPrivateVault(root, protector);
+    expect(await reopened.sweep({
+      taskIds: new Set(['task']),
+      retainedGenerationIds: new Set()
+    })).toBe('RECOVERY_REQUIRED');
+    expect(await readFile(path.join(root, blob))).toBeDefined();
+  });
+  it('fails closed when the vault root permissions become unsafe', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
+    await chmod(root, 0o755);
+    const vault = new PreviewPrivateVault(root, protector);
+
+    expect(await vault.readiness('task', ['token'])).toEqual([
+      { kind: 'PRIVATE_INPUT_CORRUPT', inputId: 'token' }
+    ]);
+    expect((await fsMode(root)) & 0o777).toBe(0o755);
   });
   it('retains an exact revision until its durable generation reference is released', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'tm-vault-')); roots.push(root);
@@ -87,3 +143,7 @@ describe('PreviewPrivateVault', () => {
     ]);
   });
 });
+
+async function fsMode(target: string): Promise<number> {
+  return (await stat(target)).mode;
+}

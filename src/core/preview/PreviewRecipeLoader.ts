@@ -699,7 +699,8 @@ function normalizeImage(
   type: PreviewOciResourcePlan['type'],
   context: string
 ): string {
-  const image = value ?? (type === 'postgres' ? 'postgres:17-alpine' : type === 'redis' ? 'redis:7-alpine' : undefined);
+  const supported = type === 'postgres' ? 'postgres:17-alpine' : 'redis:7-alpine';
+  const image = value ?? supported;
   if (
     typeof image !== 'string' ||
     !image ||
@@ -708,6 +709,9 @@ function normalizeImage(
     image.startsWith('-')
   ) {
     throw new Error(`${context}.image must be a bounded OCI image reference.`);
+  }
+  if (image !== supported) {
+    throw new Error(`${context}.image must be the supported ${supported} image.`);
   }
   return image;
 }

@@ -1,6 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { PreviewOciResourcePlan } from '../../../shared/contracts';
 
 export interface RuntimeManagedResourceBinding {
@@ -15,53 +13,31 @@ export interface HostedResourceCredential {
   username?: string;
   password: string;
   containerEnvironment: Record<string, string>;
-  secretMounts: Array<{ sourcePath: string; targetPath: string }>;
   binding?: RuntimeManagedResourceBinding;
 }
 
 export class PreviewCredentialHost {
   private readonly credentials = new Map<string, HostedResourceCredential>();
 
-  constructor(private readonly root: string) {}
-
   async create(resourceId: string, resource: PreviewOciResourcePlan): Promise<HostedResourceCredential> {
     if (this.credentials.has(resourceId)) {
       throw new Error(`Runtime credentials already exist for managed resource ${resourceId}.`);
     }
-    const directory = path.join(this.root, resourceId);
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    await fs.chmod(directory, 0o700);
     const password = randomBytes(32).toString('base64url');
-    const secretMounts: HostedResourceCredential['secretMounts'] = [];
     const containerEnvironment: Record<string, string> = {};
     let username: string | undefined;
     if (resource.type === 'postgres') {
       username = `tm_${randomBytes(8).toString('hex')}`;
-      const userPath = await this.writeSecret(directory, 'postgres-user', username);
-      const passwordPath = await this.writeSecret(directory, 'postgres-password', password);
-      secretMounts.push(
-        { sourcePath: userPath, targetPath: '/run/taskmonki/postgres-user' },
-        { sourcePath: passwordPath, targetPath: '/run/taskmonki/postgres-password' }
-      );
-      containerEnvironment.POSTGRES_USER_FILE = '/run/taskmonki/postgres-user';
-      containerEnvironment.POSTGRES_PASSWORD_FILE = '/run/taskmonki/postgres-password';
+      containerEnvironment.POSTGRES_USER = username;
+      containerEnvironment.POSTGRES_PASSWORD_FILE = '/dev/stdin';
       containerEnvironment.POSTGRES_DB = resource.database;
-    } else {
-      const configPath = await this.writeSecret(
-        directory,
-        'redis.conf',
-        `appendonly yes\nrequirepass ${password}\n`,
-        0o644
-      );
-      secretMounts.push({ sourcePath: configPath, targetPath: '/run/taskmonki/redis.conf' });
     }
     const hosted: HostedResourceCredential = {
       resourceId,
       type: resource.type,
       username,
       password,
-      containerEnvironment,
-      secretMounts
+      containerEnvironment
     };
     this.credentials.set(resourceId, hosted);
     return hosted;
@@ -106,23 +82,9 @@ export class PreviewCredentialHost {
 
   async delete(resourceId: string): Promise<void> {
     this.credentials.delete(resourceId);
-    await fs.rm(path.join(this.root, resourceId), { recursive: true, force: true });
   }
 
   async clear(): Promise<void> {
     this.credentials.clear();
-    await fs.rm(this.root, { recursive: true, force: true });
-  }
-
-  private async writeSecret(
-    directory: string,
-    name: string,
-    value: string,
-    mode = 0o600
-  ): Promise<string> {
-    const filePath = path.join(directory, name);
-    await fs.writeFile(filePath, value, { encoding: 'utf8', mode });
-    await fs.chmod(filePath, mode);
-    return filePath;
   }
 }

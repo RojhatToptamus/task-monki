@@ -259,14 +259,18 @@ receive:
 ### Managed PostgreSQL and Redis
 
 Native recipes may declare typed `postgres` and `redis` resources. Defaults
-are `postgres:17-alpine` and `redis:7-alpine`; explicit images and supported
-CPU/memory/PID limits become approval authority. `diskMb` is displayed as
-advisory because portable Docker local-volume quotas are not guaranteed.
+are the only currently supported images: `postgres:17-alpine` and
+`redis:7-alpine`. Other images are rejected because Task Monki has not verified
+their credential-entrypoint contract. Supported CPU/memory/PID limits become
+approval authority. `diskMb` is displayed as advisory because portable Docker
+local-volume quotas are not guaranteed.
 
 Use typed `postgres-url` and `redis-url` environment values. Task Monki creates
 generated credentials, publishes only to loopback, delivers each URL to its
 declared recipient, and keeps the resource stable across application
-generations.
+generations. Passwords are streamed once through container stdin during
+creation; they are not written to host files or placed in Docker argv,
+configured environment, bind mounts, logs, or inspection data.
 
 ### Scenarios
 

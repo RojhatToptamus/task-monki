@@ -1,6 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { Client as PgClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 import type {
@@ -16,8 +13,11 @@ import { PreviewCredentialHost } from './PreviewCredentialHost';
 import {
   OciResourceRuntime,
   probeManagedPostgres,
+  probeManagedRedis,
   type ManagedPostgresClient,
-  type ManagedPostgresProbeInput
+  type ManagedPostgresProbeInput,
+  type ManagedRedisClient,
+  type ManagedRedisProbeInput
 } from './OciResourceRuntime';
 
 describe('OciResourceRuntime', () => {
@@ -37,40 +37,43 @@ describe('OciResourceRuntime', () => {
     expect(JSON.stringify(fixture.store)).not.toContain(password);
     expect(fixture.cli.calls.some((call) => call.argv.some((argument) => argument.includes(password)))).toBe(false);
     expect(fixture.cli.calls.some((call) => Object.values(call.env).includes(password))).toBe(false);
-    const authenticatedExec = fixture.cli.calls.find(
-      (call) => call.argv.includes('container') && call.argv.includes('exec')
-    );
-    expect(authenticatedExec?.argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis.conf'));
-    expect(authenticatedExec?.argv).not.toContain('REDIS_PASSWORD');
+    expect(fixture.cli.attachCalls).toHaveLength(1);
+    expect(fixture.cli.attachCalls[0].input.toString('utf8')).toBe(password);
     expect(second.bindings.cache.redisUrl).toBe(first.bindings.cache.redisUrl);
   });
 
-  it('launches Redis from a protected config without credentials in argv or configured environment', async () => {
+  it('delivers Redis credentials only through the one-shot container stdin channel', async () => {
     const fixture = createFixture();
-    try {
-      const managed = await fixture.runtime.ensureManagedPreview(
-        runtimeInput(fixture.identity, [redisResource()])
-      );
-      const credential = fixture.credentials.require(managed.resources[0].id);
-      const mount = credential.secretMounts[0];
-      const createCall = fixture.cli.calls.find(
-        (call) => call.argv.includes('container') && call.argv.includes('create')
-      )!;
+    const managed = await fixture.runtime.ensureManagedPreview(
+      runtimeInput(fixture.identity, [redisResource()])
+    );
+    const credential = fixture.credentials.require(managed.resources[0].id);
+    const createCall = fixture.cli.calls.find(
+      (call) => call.argv.includes('container') && call.argv.includes('create')
+    )!;
 
-      expect(mount.targetPath).toBe('/run/taskmonki/redis.conf');
-      expect(await fs.readFile(mount.sourcePath, 'utf8')).toBe(
-        `appendonly yes\nrequirepass ${credential.password}\n`
-      );
-      expect((await fs.stat(path.dirname(mount.sourcePath))).mode & 0o777).toBe(0o700);
-      expect((await fs.stat(mount.sourcePath)).mode & 0o777).toBe(0o644);
-      expect(createCall.argv).toContain('redis-server');
-      expect(createCall.argv).toContain('/run/taskmonki/redis.conf');
-      expect(createCall.argv).not.toContain('sh');
-      expect(JSON.stringify(createCall)).not.toContain(credential.password);
-      expect(Object.values(createCall.env)).not.toContain(credential.password);
-    } finally {
-      await fixture.credentials.clear();
-    }
+    expect(createCall.argv).toContain('--interactive');
+    expect(createCall.argv).toContainEqual(expect.stringContaining('redis-server -'));
+    expect(createCall.argv.some((argument) => argument.includes('redis.conf'))).toBe(false);
+    expect(createCall.argv.filter((argument) => argument === '--mount')).toHaveLength(1);
+    expect(JSON.stringify(createCall)).not.toContain(credential.password);
+    expect(Object.values(createCall.env)).not.toContain(credential.password);
+    expect(fixture.cli.attachCalls).toEqual([
+      expect.objectContaining({ input: expect.any(Buffer) })
+    ]);
+    expect(fixture.cli.attachCalls[0].input.toString('utf8')).toBe(credential.password);
+    expect(fixture.cli.attachCalls[0].closed).toBe(true);
+  });
+
+  it('joins credential delivery when startup readiness fails after container creation', async () => {
+    const fixture = createFixture({ tcpReady: false });
+
+    await expect(fixture.runtime.ensureManagedPreview(
+      runtimeInput(fixture.identity, [redisResource()])
+    )).rejects.toMatchObject({ code: 'UNHEALTHY_CONTAINER' });
+
+    expect(fixture.cli.attachCalls).toHaveLength(1);
+    expect(fixture.cli.attachCalls[0].closed).toBe(true);
   });
 
   it('authenticates PostgreSQL over its published TCP binding without a Docker helper credential', async () => {
@@ -79,24 +82,16 @@ describe('OciResourceRuntime', () => {
       runtimeInput(fixture.identity, [postgresResource(), redisResource()])
     );
     const credentials = managed.resources.map((resource) => fixture.credentials.require(resource.id));
-    const execCalls = fixture.cli.calls.filter(
+    expect(fixture.cli.calls.some(
       (call) => call.argv.includes('container') && call.argv.includes('exec')
-    );
-
-    expect(execCalls).toHaveLength(1);
-    for (const call of execCalls) {
-      expect(call.argv).not.toContain('--env');
-      expect(call.env.PGPASSWORD).toBeUndefined();
-      expect(call.env.REDIS_PASSWORD).toBeUndefined();
-      expect(call.env.REDISCLI_AUTH).toBeUndefined();
-      for (const credential of credentials) {
-        expect(JSON.stringify(call)).not.toContain(credential.password);
-      }
-    }
-    expect(execCalls[0].argv).toContainEqual(expect.stringContaining('/run/taskmonki/redis.conf'));
-    expect(execCalls.some((call) =>
-      call.argv.some((argument) => argument.includes('/run/taskmonki/postgres-password'))
     )).toBe(false);
+    expect(fixture.cli.attachCalls).toHaveLength(2);
+    for (const credential of credentials) {
+      expect(fixture.cli.attachCalls.some(
+        (call) => call.input.toString('utf8') === credential.password
+      )).toBe(true);
+      expect(JSON.stringify(fixture.cli.calls)).not.toContain(credential.password);
+    }
     expect(fixture.postgres.calls).toHaveLength(1);
     expect(fixture.postgres.calls[0]).toMatchObject({
       host: '127.0.0.1',
@@ -152,6 +147,33 @@ describe('OciResourceRuntime', () => {
 
     await expect(operation).rejects.toThrow('preview canceled');
     expect(ended).toBe(1);
+  });
+
+  it('cancels and destroys an in-flight Redis client before returning', async () => {
+    const controller = new AbortController();
+    let rejectConnect!: (error: Error) => void;
+    let destroyed = 0;
+    const client: ManagedRedisClient = {
+      isOpen: false,
+      on() {},
+      connect() {
+        return new Promise((_resolve, reject) => { rejectConnect = reject; });
+      },
+      async ping() { return 'PONG'; },
+      destroy() {
+        destroyed += 1;
+        rejectConnect(new Error('connection destroyed'));
+      }
+    };
+    const operation = probeManagedRedis({
+      host: '127.0.0.1', port: 6379, password: 'secret', signal: controller.signal
+    }, () => client);
+    await Promise.resolve();
+
+    controller.abort(new Error('preview canceled'));
+
+    await expect(operation).rejects.toThrow('preview canceled');
+    expect(destroyed).toBe(1);
   });
 
   it('refuses reuse when persisted safe binding identity no longer matches runtime authority', async () => {
@@ -375,7 +397,7 @@ describe('OciResourceRuntime', () => {
     const managed = await fixture.runtime.ensureManagedPreview(runtimeInput(fixture.identity, [redisResource()]));
     await fixture.runtime.markSetupReady(managed.setupResourceIds);
     const resource = managed.resources[0];
-    fixture.cli.resourceExecHealthy = false;
+    fixture.redis.healthy = false;
 
     let resolveFailure!: (resource: PreviewManagedResourceRecord) => void;
     const failure = new Promise<PreviewManagedResourceRecord>((resolve) => { resolveFailure = resolve; });
@@ -468,8 +490,7 @@ describe('OciResourceRuntime', () => {
         contextName: process.env.TASK_MONKI_OCI_CONTEXT || 'desktop-linux'
       });
       const capability = await adapter.requireReady();
-      const credentialRoot = `/tmp/task-monki-oci-${randomUUID()}`;
-      const credentials = new PreviewCredentialHost(credentialRoot);
+      const credentials = new PreviewCredentialHost();
       const runtime = new OciResourceRuntime(
         store as never,
         adapter,
@@ -585,7 +606,7 @@ describe('OciResourceRuntime', () => {
           store as never,
           adapter,
           new PreviewReadinessService(),
-          new PreviewCredentialHost(credentialRoot)
+          new PreviewCredentialHost()
         );
         await expect(restarted.cleanupTaskResources('task-one')).resolves.toBe('STOPPED');
         await expect(runtime.cleanupTaskResources('task-two')).resolves.toBe('STOPPED');
@@ -634,38 +655,41 @@ async function assertRealAuthentication(
 
   const cache = runtime.resources.find((resource) => resource.logicalResourceId === 'cache')!;
   const cacheCredential = credentials.require(cache.id);
-  const unauthenticated = await adapter.run([
-    '--context', cache.container.engine.contextName,
-    'container', 'exec', cache.container.objectId!,
-    'redis-cli', 'ping'
-  ]);
-  expect(unauthenticated.stdout).not.toContain('PONG');
-  await expect(adapter.run([
-    '--context', cache.container.engine.contextName,
-    'container', 'exec', cache.container.objectId!,
-    'sh', '-eu', '-c',
-    'REDISCLI_AUTH="$(sed -n "s/^requirepass //p" /run/taskmonki/redis.conf)"; export REDISCLI_AUTH; exec redis-cli --no-auth-warning ping'
-  ])).resolves.toMatchObject({
-    stdout: expect.stringContaining('PONG')
-  });
-  const surfaces = await Promise.all([
-    adapter.run([
-      '--context', cache.container.engine.contextName,
-      'container', 'inspect', cache.container.objectId!
-    ]),
-    adapter.run([
-      '--context', cache.container.engine.contextName,
-      'container', 'logs', cache.container.objectId!
-    ]),
-    adapter.run([
-      '--context', cache.container.engine.contextName,
-      'container', 'top', cache.container.objectId!, '-eo', 'pid,user,args'
-    ])
-  ]);
-  for (const surface of surfaces) {
-    const serialized = JSON.stringify(surface);
-    expect(serialized).not.toContain(cacheCredential.password);
-    expect(serialized).not.toContain(encodeURIComponent(cacheCredential.password));
+  await expect(probeManagedRedis({
+    host: '127.0.0.1',
+    port: runtime.bindings.cache.ports.redis,
+    password: cacheCredential.password
+  })).resolves.toBeUndefined();
+  await expect(probeManagedRedis({
+    host: '127.0.0.1',
+    port: runtime.bindings.cache.ports.redis,
+    password: 'deliberately-wrong-password'
+  })).rejects.toThrow();
+  for (const resource of [database, cache]) {
+    const credential = credentials.require(resource.id);
+    const surfaces = await Promise.all([
+      adapter.run([
+        '--context', resource.container.engine.contextName,
+        'container', 'inspect', resource.container.objectId!
+      ]),
+      adapter.run([
+        '--context', resource.container.engine.contextName,
+        'container', 'logs', resource.container.objectId!
+      ]),
+      adapter.run([
+        '--context', resource.container.engine.contextName,
+        'container', 'top', resource.container.objectId!, '-eo', 'pid,user,args'
+      ]),
+      adapter.run([
+        '--context', resource.container.engine.contextName,
+        'container', 'diff', resource.container.objectId!
+      ])
+    ]);
+    for (const surface of surfaces) {
+      const serialized = JSON.stringify(surface);
+      expect(serialized).not.toContain(credential.password);
+      expect(serialized).not.toContain(encodeURIComponent(credential.password));
+    }
   }
 }
 
@@ -735,12 +759,14 @@ function createFixture(options: {
   inheritedLabels?: boolean;
   failRemoveOnce?: 'container' | 'network' | 'volume';
   hostAuthenticationEnv?: boolean;
+  tcpReady?: boolean;
 } = {}) {
   const store = new MemoryManagedStore();
   const cli = new FakeOciCli(options.inheritedLabels === true, options.failRemoveOnce);
   const postgres = new FakePostgresProbe();
   const adapter = new OciEngineAdapter({
     execute: cli.execute,
+    attachStdin: cli.attachStdin,
     env: options.hostAuthenticationEnv
       ? {
           ...process.env,
@@ -754,19 +780,27 @@ function createFixture(options: {
     contextName: 'desktop-linux', endpointDigest: cli.endpointDigest, engineId: cli.engineId,
     serverVersion: '28.0.4', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
   };
-  const credentials = new PreviewCredentialHost(`/tmp/task-monki-credentials-${randomUUID()}`);
+  const credentials = new PreviewCredentialHost();
+  const redis = new FakeRedisProbe();
   const runtime = new OciResourceRuntime(
     store as never,
     adapter,
-    { async waitForTcp() { return { status: 'PASSED' as const }; } } as never,
+    {
+      async waitForTcp() {
+        return options.tcpReady === false
+          ? { status: 'FAILED' as const, reason: 'injected readiness failure' }
+          : { status: 'PASSED' as const };
+      }
+    } as never,
     credentials,
     {
       healthIntervalMs: 20,
       afterMutation(operation) { if (operation === options.failAfter) throw new Error('injected crash'); },
-      postgresProbe: postgres.probe
+      postgresProbe: postgres.probe,
+      redisProbe: redis.probe
     }
   );
-  return { store, cli, postgres, runtime, identity, credentials };
+  return { store, cli, postgres, redis, runtime, identity, credentials };
 }
 
 class FakePostgresProbe {
@@ -776,6 +810,16 @@ class FakePostgresProbe {
   probe = async (input: ManagedPostgresProbeInput): Promise<void> => {
     this.calls.push({ ...input });
     if (!this.healthy) throw new Error('authenticated PostgreSQL query failed');
+  };
+}
+
+class FakeRedisProbe {
+  readonly calls: ManagedRedisProbeInput[] = [];
+  healthy = true;
+
+  probe = async (input: ManagedRedisProbeInput): Promise<void> => {
+    this.calls.push({ ...input });
+    if (!this.healthy) throw new Error('authenticated Redis ping failed');
   };
 }
 
@@ -815,13 +859,13 @@ interface FakeObject {
 
 class FakeOciCli {
   readonly calls: Array<{ argv: string[]; env: NodeJS.ProcessEnv }> = [];
+  readonly attachCalls: Array<{ argv: string[]; input: Buffer; closed: boolean }> = [];
   readonly objects = new Map<string, FakeObject>([[
     'unrelated',
     { id: 'unrelated', kind: 'container', name: 'unrelated', labels: {}, ports: {}, removed: false, running: true }
   ]]);
   readonly endpointDigest = 'f120d06200affbb4da036243e8ea30b016001f09b53b4c29cdb696824006c005';
   engineId = 'engine-id';
-  resourceExecHealthy = true;
   private sequence = 0;
   private imageAvailable = false;
 
@@ -829,6 +873,15 @@ class FakeOciCli {
     private readonly inheritedLabels: boolean,
     private failRemoveOnce?: 'container' | 'network' | 'volume'
   ) {}
+
+  attachStdin = async (_executable: string, argv: string[], input: Buffer) => {
+    const call = { argv: [...argv], input: Buffer.from(input), closed: false };
+    this.attachCalls.push(call);
+    return {
+      failure: new Promise<never>(() => undefined),
+      async close() { call.closed = true; }
+    };
+  };
 
   execute: OciCommandExecutor = async (_executable, argv, execution) => {
     this.calls.push({ argv: [...argv], env: { ...execution.env } });
@@ -858,10 +911,6 @@ class FakeOciCli {
     if (command[0] === 'container' && command[1] === 'start') {
       const object = this.objects.get(command[2]);
       if (object) object.running = true;
-      return output('ok\n');
-    }
-    if (command[0] === 'container' && command[1] === 'exec') {
-      if (!this.resourceExecHealthy) throw new Error('authenticated command failed');
       return output('ok\n');
     }
     if (['container', 'network', 'volume'].includes(command[0]) && command[1] === 'inspect') {

@@ -54,7 +54,7 @@ export function createPreviewManager(
     env: options.ociEnv
   });
   const gateway = new PreviewGateway();
-  const credentialHost = new PreviewCredentialHost(path.join(options.previewRoot, 'runtime-credentials'));
+  const credentialHost = new PreviewCredentialHost();
   const ociRuntime = new OciResourceRuntime(
     store,
     ociEngine,

@@ -295,20 +295,25 @@ mutation requires the recorded engine identity, exact object ID/name, exact
 reserved labels, and ownership marker digest. Images are not owned. The
 runtime never prunes images or build cache.
 
-Resource credentials are currently volatile main-process credentials:
+Resource credentials are volatile main-process credentials:
 
-- PostgreSQL uses protected runtime user/password files mounted read-only and
-  authenticated readiness over the published loopback TCP endpoint;
-- Redis uses a protected runtime configuration file, so the password is not in
-  Docker argv;
+- only the verified `postgres:17-alpine` and `redis:7-alpine` entrypoint
+  contracts are accepted;
+- PostgreSQL and Redis receive the password once through a bounded Docker stdin
+  attachment while their entrypoint reads a single line;
+- the attachment is raced with authenticated readiness, then terminated and
+  joined on success, failure, cancellation, or shutdown;
+- authenticated PostgreSQL `SELECT 1` and Redis `PING` checks use the published
+  loopback endpoints and the in-memory credential;
 - values and generated connection URLs are delivered only to declared native
   recipients and are redacted from managed output;
 - values are not stored in `FileTaskStore`, plans, approvals, renderer state,
-  events, or general IPC.
+  events, general IPC, host files, Docker argv/configured environment, bind
+  mounts, logs, or inspection data.
 
-The failed stdin-credential experiment was not promoted. There is no insecure
-fallback. A Task Monki main-process restart therefore cannot adopt surviving
-managed resources because their credentials are no longer available; restart
+There is no file, environment-value, argv, shell-interpolation, or tmpfs
+fallback. A Task Monki main-process restart cannot adopt surviving managed
+resources because their credentials are no longer available; restart
 reconciliation cleans verified owners instead.
 
 Migration and seed setup is tied to resource creation, not application source
@@ -398,12 +403,16 @@ outer quotes. It does not evaluate shell syntax, interpolation, escapes,
 continuations, or multiline values. Only the selected value is sealed. The
 renderer receives no path, content, candidate key list, or plaintext.
 
-The vault stores a private atomic index plus one immutable ciphertext blob per
-revision. Current pointers, durable generation references, and memory-only
-leases prevent collection while any live or cleanup-incomplete generation
-still needs a revision. Rotation publishes a new current revision while old
-generations keep their exact revision. Deletion removes the current pointer but
-does not invalidate a live generation's retained revision.
+The vault stores a private atomic index, its last-known-good backup, and one
+immutable ciphertext blob per revision. Both index publications flush file and
+directory metadata. On an interrupted primary publication, a validated backup
+is restored. Missing indexes mean first use only when the private vault root is
+empty; existing blobs or metadata instead require recovery and are preserved.
+Current pointers, durable generation references, and memory-only leases prevent
+collection while any live or cleanup-incomplete generation still needs a
+revision. Rotation publishes a new current revision while old generations keep
+their exact revision. Deletion removes the current pointer but does not
+invalidate a live generation's retained revision.
 
 A revision is collectible only when it is neither current, durably referenced,
 nor leased. Generation references release only after every recipient process
@@ -715,7 +724,8 @@ evidence rather than inference from CLI compatibility.
   in the recipe; task-local binding operations exist on the trusted service
   API for integrated clients.
 - Managed PostgreSQL/Redis credentials are volatile. Durable adoption and a
-  verified stdin credential transport are not implemented.
+  managed-container restart after main-process loss are not implemented;
+  stop-only reconciliation cleans verified owners instead.
 - Native process ownership and OCI support are validated primarily on the
   current macOS support matrix; broader Windows/Linux and alternative-engine
   claims require their own evidence.

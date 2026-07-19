@@ -247,6 +247,17 @@ routes:
     expect(() => selectPreviewScenario(parsed, 'missing')).toThrow('does not exist');
   });
 
+  it('rejects unverified managed-resource images whose credential entrypoint contract is unknown', () => {
+    expect(() => parsePreviewRecipe(PHASE_THREE_RECIPE.replace(
+      'type: redis',
+      'type: redis\n    image: redis:8-alpine'
+    ))).toThrow('must be the supported redis:7-alpine image');
+    expect(() => parsePreviewRecipe(PHASE_THREE_RECIPE.replace(
+      'type: postgres\n    database:',
+      'type: postgres\n    image: postgres:18-alpine\n    database:'
+    ))).toThrow('must be the supported postgres:17-alpine image');
+  });
+
   it('rejects generic OCI until PostgreSQL and Redis prove the shared lifecycle', () => {
     const source = PHASE_THREE_RECIPE.replace(
       'resources:\n  cache:',

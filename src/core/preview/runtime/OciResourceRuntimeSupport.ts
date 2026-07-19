@@ -98,9 +98,16 @@ export function resourceVolumeMount(resource: PreviewOciResourcePlan): string {
 }
 
 export function resourceCommand(resource: PreviewOciResourcePlan): string[] {
-  return resource.type === 'redis'
-    ? ['redis-server', '/run/taskmonki/redis.conf']
-    : [];
+  if (resource.type === 'redis') {
+    return [
+      'sh', '-eu', '-c',
+      '{ printf "appendonly yes\\nrequirepass "; head -n 1; } | redis-server -'
+    ];
+  }
+  return [
+    'sh', '-eu', '-c',
+    'head -n 1 | POSTGRES_PASSWORD_FILE=/dev/stdin docker-entrypoint.sh postgres'
+  ];
 }
 
 export function objectName(kind: OciObjectKind, ownerId: string, logicalId: string): string {

@@ -3,7 +3,11 @@ import type {
   PreviewOciEngineCapability,
   PreviewOciEngineIdentity
 } from '../../../shared/contracts';
-import { execFilePortable } from '../../process/portableChildProcess';
+import {
+  execFilePortable,
+  spawnPortable,
+  terminatePortableProcessTree
+} from '../../process/portableChildProcess';
 
 const MAX_OCI_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const OCI_COMMAND_TIMEOUT_MS = 15_000;
@@ -35,12 +39,31 @@ export type OciCommandExecutor = (
   }
 ) => Promise<OciCommandResult>;
 
+export type OciStdinAttachExecutor = (
+  executable: string,
+  argv: string[],
+  input: Buffer,
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }
+) => Promise<OciStdinAttachment>;
+
+export interface OciStdinAttachment {
+  /** Rejects if delivery fails before the caller closes the bounded attachment. */
+  failure: Promise<never>;
+  close(): Promise<void>;
+}
+
 export interface OciEngineAdapterOptions {
   executable?: string;
   contextName?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   execute?: OciCommandExecutor;
+  attachStdin?: OciStdinAttachExecutor;
 }
 
 export interface OciRunOptions {
@@ -53,6 +76,7 @@ export class OciEngineAdapter {
   private readonly cwd: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly execute: OciCommandExecutor;
+  private readonly executeStdinAttach: OciStdinAttachExecutor;
   private selectedContextName: string | undefined;
 
   constructor(options: OciEngineAdapterOptions = {}) {
@@ -60,6 +84,7 @@ export class OciEngineAdapter {
     this.cwd = options.cwd ?? process.cwd();
     this.env = options.env ?? process.env;
     this.execute = options.execute ?? executeOciCommand;
+    this.executeStdinAttach = options.attachStdin ?? executeOciStdinAttach;
     this.selectedContextName = options.contextName
       ? validateContextName(options.contextName)
       : undefined;
@@ -167,6 +192,19 @@ export class OciEngineAdapter {
     });
   }
 
+  attachStdin(
+    argv: string[],
+    input: Buffer,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<OciStdinAttachment> {
+    return this.executeStdinAttach(this.executable, argv, input, {
+      cwd: this.cwd,
+      env: this.env,
+      timeoutMs: options.timeoutMs ?? OCI_COMMAND_TIMEOUT_MS,
+      signal: options.signal
+    });
+  }
+
   private async resolveContextName(): Promise<string> {
     if (this.selectedContextName) return this.selectedContextName;
     const result = await this.run(['context', 'show']);
@@ -193,6 +231,109 @@ async function executeOciCommand(
   });
 }
 
+async function executeOciStdinAttach(
+  executable: string,
+  argv: string[],
+  input: Buffer,
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }
+): Promise<OciStdinAttachment> {
+  if (options.signal?.aborted) throw abortError(options.signal);
+  const child = spawnPortable(executable, argv, {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ['pipe', 'ignore', 'ignore'],
+    windowsHide: true
+  });
+  let expectedClose = false;
+  let exited = false;
+  let rejectFailure!: (error: Error) => void;
+  const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject; });
+  // The caller races this promise with authenticated readiness immediately.
+  void failure.catch(() => undefined);
+  let resolveExit!: () => void;
+  const exitedPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
+  let timer: NodeJS.Timeout | undefined;
+  const cleanupControl = () => {
+    if (timer) clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onAbort);
+  };
+  const fail = (error: Error) => {
+    if (!expectedClose) rejectFailure(error);
+  };
+  child.once('error', () => {
+    exited = true;
+    cleanupControl();
+    fail(new Error('OCI credential delivery failed.'));
+    resolveExit();
+  });
+  child.once('exit', (code) => {
+    exited = true;
+    cleanupControl();
+    if (code !== 0) fail(new Error('OCI credential delivery failed.'));
+    resolveExit();
+  });
+  const stopFor = (error: Error) => {
+    fail(error);
+    void terminatePortableProcessTree(child).catch(() => undefined);
+  };
+  const onAbort = () => stopFor(abortError(options.signal));
+  timer = setTimeout(
+    () => stopFor(new Error('OCI credential delivery timed out.')),
+    options.timeoutMs
+  );
+  timer.unref?.();
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  if (options.signal?.aborted) onAbort();
+
+  if (!child.stdin) {
+    stopFor(new Error('OCI credential delivery is unavailable.'));
+    await exitedPromise;
+    throw new Error('OCI credential delivery is unavailable.');
+  }
+  const payload = Buffer.alloc(input.byteLength + 1);
+  input.copy(payload);
+  payload[payload.byteLength - 1] = 0x0a;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.stdin!.end(payload, resolve);
+      child.stdin!.once('error', () => reject(new Error('OCI credential delivery failed.')));
+    });
+  } catch (error) {
+    stopFor(error instanceof Error ? error : new Error('OCI credential delivery failed.'));
+    await exitedPromise;
+    throw error;
+  } finally {
+    payload.fill(0);
+  }
+
+  let closePromise: Promise<void> | undefined;
+  const close = () => closePromise ??= (async () => {
+    expectedClose = true;
+    cleanupControl();
+    if (!exited) await terminatePortableProcessTree(child).catch(() => undefined);
+    if (!exited) {
+      let forceTimer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        exitedPromise,
+        new Promise<void>((resolve) => {
+          forceTimer = setTimeout(() => {
+            void terminatePortableProcessTree(child, 'SIGKILL').finally(resolve);
+          }, 5_000);
+          forceTimer.unref?.();
+        })
+      ]);
+      if (forceTimer) clearTimeout(forceTimer);
+    }
+    await exitedPromise;
+  })();
+  return { failure, close };
+}
+
 function unavailableCapability(
   error: unknown,
   status: 'ENGINE_MISSING' | 'ENGINE_UNAVAILABLE',
@@ -206,6 +347,12 @@ function unavailableCapability(
     supportsPidsLimit: false,
     reason: boundedError(error)
   };
+}
+
+function abortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error('OCI credential delivery was canceled.');
 }
 
 function sameEngine(

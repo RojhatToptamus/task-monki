@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Client as PgClient, type ClientConfig } from 'pg';
+import { createClient } from 'redis';
 import type {
   PreviewManagedEnvironmentRecord,
   PreviewManagedResourceRecord,
@@ -11,7 +12,11 @@ import type {
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { PreviewReadinessService } from '../PreviewReadinessService';
-import { OciEngineAdapter, OciEngineError } from './OciEngineAdapter';
+import {
+  OciEngineAdapter,
+  OciEngineError,
+  type OciStdinAttachment
+} from './OciEngineAdapter';
 import {
   asRecord,
   bindingDigest,
@@ -76,6 +81,7 @@ export interface OciResourceRuntimeHooks {
   afterMutation?(operation: 'network-create' | 'volume-create' | 'container-create'): Promise<void> | void;
   healthIntervalMs?: number;
   postgresProbe?(input: ManagedPostgresProbeInput): Promise<void>;
+  redisProbe?(input: ManagedRedisProbeInput): Promise<void>;
 }
 
 export interface ManagedPostgresProbeInput {
@@ -97,6 +103,27 @@ export interface ManagedPostgresClient {
 export type ManagedPostgresClientFactory = (
   config: ClientConfig
 ) => ManagedPostgresClient;
+
+export interface ManagedRedisProbeInput {
+  host: string;
+  port: number;
+  password: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface ManagedRedisClient {
+  readonly isOpen: boolean;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+  connect(): Promise<unknown>;
+  ping(): Promise<string>;
+  destroy(): void;
+}
+
+export type ManagedRedisClientFactory = (input: {
+  url: string;
+  connectTimeout: number;
+}) => ManagedRedisClient;
 
 export async function probeManagedPostgres(
   input: ManagedPostgresProbeInput,
@@ -134,6 +161,49 @@ export async function probeManagedPostgres(
   } finally {
     input.signal?.removeEventListener('abort', onAbort);
     await close();
+    await operation.catch(() => undefined);
+  }
+}
+
+export async function probeManagedRedis(
+  input: ManagedRedisProbeInput,
+  createManagedClient: ManagedRedisClientFactory = ({ url, connectTimeout }) => createClient({
+    url,
+    socket: { connectTimeout, reconnectStrategy: false }
+  })
+): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? POSTGRES_PROBE_TIMEOUT_MS;
+  const url = new URL('redis://127.0.0.1');
+  url.hostname = input.host;
+  url.port = String(input.port);
+  url.password = input.password;
+  const client = createManagedClient({ url: url.toString(), connectTimeout: timeoutMs });
+  client.on('error', () => undefined);
+  let destroyed = false;
+  const destroy = () => {
+    if (destroyed) return;
+    destroyed = true;
+    try { client.destroy(); } catch { /* best-effort close */ }
+  };
+  let rejectAbort!: (reason: Error) => void;
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const onAbort = () => {
+    destroy();
+    rejectAbort(abortError(input.signal));
+  };
+  input.signal?.addEventListener('abort', onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
+  const operation = (async () => {
+    await client.connect();
+    throwIfAborted(input.signal);
+    if (await client.ping() !== 'PONG') throw new Error('Managed Redis authentication failed.');
+    throwIfAborted(input.signal);
+  })();
+  try {
+    await Promise.race([operation, aborted]);
+  } finally {
+    input.signal?.removeEventListener('abort', onAbort);
+    destroy();
     await operation.catch(() => undefined);
   }
 }
@@ -600,42 +670,53 @@ export class OciResourceRuntime {
       });
 
       const imageId = await this.requireImage(environment.engine, plan);
-      const createdContainer = await this.createContainer(
-        environment, record, plan, credential, imageId, containerLabels
+      const created = await this.createContainer(
+        environment, record, plan, credential, imageId, containerLabels, signal
       );
-      record = await this.store.savePreviewManagedResource({
-        ...record,
-        container: createdContainer,
-        updatedAt: new Date().toISOString()
-      });
-      const publishedPorts = await this.waitForPublishedPorts(createdContainer, Object.keys(resourcePorts(plan)).length, signal);
-      const ports = this.mapPublishedPorts(plan, publishedPorts);
-      const binding = this.credentials.bind(id, plan, ports);
-      const bindingId = randomUUID();
-      record = await this.store.savePreviewManagedResource({
-        ...record,
-        state: 'SETTING_UP',
-        container: { ...createdContainer, publishedPorts },
-        binding: {
-          id: bindingId,
-          digest: bindingDigest({
+      try {
+        record = await this.store.savePreviewManagedResource({
+          ...record,
+          container: created.container,
+          updatedAt: new Date().toISOString()
+        });
+        const publishedPorts = await this.waitForPublishedPorts(
+          created.container,
+          Object.keys(resourcePorts(plan)).length,
+          signal
+        );
+        const ports = this.mapPublishedPorts(plan, publishedPorts);
+        const binding = this.credentials.bind(id, plan, ports);
+        const bindingId = randomUUID();
+        record = await this.store.savePreviewManagedResource({
+          ...record,
+          state: 'SETTING_UP',
+          container: { ...created.container, publishedPorts },
+          binding: {
             id: bindingId,
-            type: plan.type,
+            digest: bindingDigest({
+              id: bindingId,
+              type: plan.type,
+              host: '127.0.0.1',
+              ports,
+              username: credential.username,
+              database: plan.type === 'postgres' ? plan.database : undefined
+            }),
             host: '127.0.0.1',
             ports,
             username: credential.username,
             database: plan.type === 'postgres' ? plan.database : undefined
-          }),
-          host: '127.0.0.1',
-          ports,
-          username: credential.username,
-          database: plan.type === 'postgres' ? plan.database : undefined
-        },
-        setupAttemptedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      });
-      await this.waitUntilAuthenticated(plan, record, binding, signal);
-      return record;
+          },
+          setupAttemptedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        await Promise.race([
+          this.waitUntilAuthenticated(plan, record, binding, signal),
+          created.credentialDelivery.failure
+        ]);
+        return record;
+      } finally {
+        await created.credentialDelivery.close();
+      }
     } catch (error) {
       const message = this.credentials.redact(boundedError(error));
       await this.store.savePreviewManagedResource({
@@ -655,8 +736,12 @@ export class OciResourceRuntime {
     plan: PreviewOciResourcePlan,
     credential: HostedResourceCredential,
     imageId: string,
-    labels: Record<string, string>
-  ): Promise<PreviewOciObjectIdentity> {
+    labels: Record<string, string>,
+    signal?: AbortSignal
+  ): Promise<{
+    container: PreviewOciObjectIdentity;
+    credentialDelivery: OciStdinAttachment;
+  }> {
     const ports = resourcePorts(plan);
     const env = this.engine.environment(credential.containerEnvironment);
     const result = await this.engine.run([
@@ -665,10 +750,8 @@ export class OciResourceRuntime {
       ...labelArgs(labels),
       '--network', environment.network.objectId!,
       ...limitArgs(plan),
+      '--interactive',
       ...Object.keys(credential.containerEnvironment).sort().flatMap((key) => ['--env', key]),
-      ...credential.secretMounts.flatMap((mount) => [
-        '--mount', `type=bind,src=${mount.sourcePath},dst=${mount.targetPath},readonly`
-      ]),
       ...Object.values(ports).flatMap((port) => [
         '--publish', `127.0.0.1::${port.containerPort}/${port.protocol}`
       ]),
@@ -684,7 +767,18 @@ export class OciResourceRuntime {
     await this.engine.run([
       '--context', environment.engine.contextName, 'container', 'start', objectId
     ], this.engine.environment(), { timeoutMs: MUTATION_TIMEOUT_MS });
-    return container;
+    const input = Buffer.from(credential.password, 'utf8');
+    try {
+      const credentialDelivery = await this.engine.attachStdin([
+        '--context', environment.engine.contextName,
+        'container', 'attach',
+        '--sig-proxy=false',
+        objectId
+      ], input, { timeoutMs: MUTATION_TIMEOUT_MS, signal });
+      return { container, credentialDelivery };
+    } finally {
+      input.fill(0);
+    }
   }
 
   private async waitUntilAuthenticated(
@@ -705,15 +799,8 @@ export class OciResourceRuntime {
     if (plan.type === 'postgres') {
       await this.retryPostgres(record, binding, plan.database, 60, signal);
     } else {
-      await this.retryExec(record, this.redisAuthenticationProbe(), 60, signal);
+      await this.retryRedis(record, binding, 60, signal);
     }
-  }
-
-  private redisAuthenticationProbe(): string[] {
-    return [
-      'sh', '-eu', '-c',
-      'REDISCLI_AUTH="$(sed -n "s/^requirepass //p" /run/taskmonki/redis.conf)"; export REDISCLI_AUTH; test "$(redis-cli --no-auth-warning ping)" = PONG'
-    ];
   }
 
   private async retryPostgres(
@@ -762,9 +849,9 @@ export class OciResourceRuntime {
     });
   }
 
-  private async retryExec(
+  private async retryRedis(
     resource: PreviewManagedResourceRecord,
-    command: string[],
+    binding: RuntimeManagedResourceBinding,
     timeoutSeconds: number,
     signal?: AbortSignal
   ): Promise<void> {
@@ -772,14 +859,17 @@ export class OciResourceRuntime {
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       try {
-        await this.engine.run([
-          '--context', resource.container.engine.contextName,
-          'container', 'exec',
-          resource.container.objectId!,
-          ...command
-        ], authenticationProbeEnvironment(this.engine.environment()));
+        const credential = this.credentials.require(resource.id);
+        await (this.hooks.redisProbe ?? probeManagedRedis)({
+          host: '127.0.0.1',
+          port: binding.ports.redis,
+          password: credential.password,
+          signal,
+          timeoutMs: Math.min(POSTGRES_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now()))
+        });
         return;
       } catch {
+        throwIfAborted(signal);
         await delay(250, signal);
       }
     }
@@ -872,12 +962,12 @@ export class OciResourceRuntime {
       if (resource.type === 'postgres') {
         await this.probePostgres(resource, runtimeBinding, safeBinding.database!);
       } else {
-        await this.engine.run([
-          '--context', resource.container.engine.contextName,
-          'container', 'exec',
-          resource.container.objectId!,
-          ...this.redisAuthenticationProbe()
-        ], authenticationProbeEnvironment(this.engine.environment()));
+        await (this.hooks.redisProbe ?? probeManagedRedis)({
+          host: '127.0.0.1',
+          port: runtimeBinding.ports.redis,
+          password: credential.password,
+          timeoutMs: POSTGRES_PROBE_TIMEOUT_MS
+        });
       }
     } catch {
       throw new Error(`Managed resource ${resource.logicalResourceId} failed authenticated health verification.`);
@@ -1104,16 +1194,8 @@ export class OciResourceRuntime {
   }
 }
 
-function authenticationProbeEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const sanitized = { ...environment };
-  delete sanitized.PGPASSWORD;
-  delete sanitized.REDIS_PASSWORD;
-  delete sanitized.REDISCLI_AUTH;
-  return sanitized;
-}
-
 function abortError(signal?: AbortSignal): Error {
   return signal?.reason instanceof Error
     ? signal.reason
-    : new Error('Managed PostgreSQL authentication was canceled.');
+    : new Error('Managed resource authentication was canceled.');
 }
