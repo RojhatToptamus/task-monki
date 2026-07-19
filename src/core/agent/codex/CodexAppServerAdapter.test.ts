@@ -653,7 +653,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     const buffered = adapter as unknown as {
       appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
-      flushBufferedOutput(runId: string): Promise<void>;
+      flushBufferedOutput(runId: string, releaseCredentialCarry?: boolean): Promise<void>;
     };
     const appendArtifact = store.appendArtifact.bind(store);
     let releasePersistence!: () => void;
@@ -689,7 +689,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     releasePersistence();
     await expect(failedFlush).rejects.toThrow('injected output persistence failure');
     await concurrentFailure;
-    await buffered.flushBufferedOutput(run.id);
+    await buffered.flushBufferedOutput(run.id, true);
 
     const output = await store.readArtifact(run.outputArtifactId);
     expect(output).toContain('[REDACTED] after');

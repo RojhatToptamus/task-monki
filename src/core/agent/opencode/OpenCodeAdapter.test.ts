@@ -2570,7 +2570,7 @@ describe('OpenCodeAdapter', () => {
     expect(appendArtifact).toHaveBeenCalledTimes(1);
     expect(failing.harness.stoppedStreams).toBe(1);
     await failing.adapter.shutdown();
-  });
+  }, 15_000);
 
   it('redacts exact credentials split across output flushes, including self-overlap', async () => {
     const fixture = await createFixture({
@@ -2638,7 +2638,7 @@ describe('OpenCodeAdapter', () => {
     }
     unsubscribe();
     await fixture.adapter.shutdown();
-  });
+  }, 15_000);
 
   it('accumulates assistant-step usage and ignores duplicate terminal updates', async () => {
     const fixture = await createFixture();

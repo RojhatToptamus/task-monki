@@ -1337,6 +1337,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async respondToInteraction(input: AgentInteractionResponse): Promise<void> {
+    await this.enqueueInbound(() => this.respondToInteractionInOrder(input));
+  }
+
+  private async respondToInteractionInOrder(
+    input: AgentInteractionResponse
+  ): Promise<void> {
     const interaction = input.interaction;
     if (interaction.status !== 'RESPONDING') {
       throw new Error(`ACP interaction ${interaction.id} must be RESPONDING.`);
@@ -1394,6 +1400,10 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
         }
       );
     } catch (cause) {
+      // The provider has consumed the response. Fence its generation before
+      // any recovery I/O can yield, so a concurrent terminal response cannot
+      // make this locally ambiguous mutation appear successful.
+      this.invalidateBoundClient(client);
       const reason =
         `The provider accepted interaction ${interaction.id}, but local completion persistence failed.`;
       const ambiguity = new AgentMutationAmbiguousError(
@@ -1412,7 +1422,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }
       await this.quarantineRuntimeAfterAmbiguousMutation(
         'session/request_permission',
-        reason
+        reason,
+        false
       ).catch((failure) => {
         recoveryFailures.push(failure);
       });
@@ -4499,8 +4510,9 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
     }
   }
 
-  private enqueueInbound(operation: () => Promise<void>): void {
-    this.inboundQueue = this.inboundQueue.then(operation, operation).catch((cause) => {
+  private enqueueInbound(operation: () => Promise<void>): Promise<void> {
+    const result = this.inboundQueue.then(operation, operation);
+    this.inboundQueue = result.catch((cause) => {
       this.preflightState = appendRuntimeDiagnostic(
         this.preflightState,
         warningDiagnostic(
@@ -4513,6 +4525,7 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       );
       this.emitRuntimeUpdate();
     });
+    return result;
   }
 
   private emitRuntimeUpdate(): void {

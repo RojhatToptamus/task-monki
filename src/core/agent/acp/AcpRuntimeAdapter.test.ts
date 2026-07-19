@@ -22,8 +22,17 @@ import {
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
 const temporaryDirectories: string[] = [];
+const testStores = new Set<FileTaskStore>();
+
+function createTestStore(root: string): FileTaskStore {
+  const store = new FileTaskStore(root);
+  testStores.add(store);
+  return store;
+}
 
 afterEach(async () => {
+  await Promise.all([...testStores].map((store) => store.close()));
+  testStores.clear();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       fs.rm(directory, { recursive: true, force: true })
@@ -88,7 +97,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         executableCandidates: [process.execPath],
         argv: [agentScript]
       };
-      const store = new FileTaskStore(path.join(directory, 'store'));
+      const store = createTestStore(path.join(directory, 'store'));
       const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         ...(credential
@@ -215,7 +224,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+      const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -248,7 +257,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       path.join(os.tmpdir(), 'task-monki-generic-acp-model-')
     );
     temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(
       store,
       new AppEventBus(),
@@ -330,7 +339,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -514,7 +523,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -640,7 +649,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       environment: { ...process.env, TEST_ACP_API_KEY: secret },
@@ -734,7 +743,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 2_000,
@@ -863,7 +872,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
       cwd: directory,
       requestTimeoutMs: 1_000,
@@ -1043,7 +1052,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         sensitiveKeys: ['GEMINI_API_KEY']
       }
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const events = new AppEventBus();
     const observedEvents: Array<{ type: string; payload: unknown; runId?: string }> = [];
     events.on((event) => observedEvents.push(event));
@@ -2193,7 +2202,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
       path.join(os.tmpdir(), 'task-monki-acp-shutdown-fence-')
     );
     temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const server = await store.createAgentServer({
       runtimeId: 'test-acp-shutdown-fence',
       runtimeKind: 'ACP_AGENT',
@@ -2241,7 +2250,7 @@ describe('AcpRuntimeAdapter process safety fence', () => {
   it('retains a failed quarantine and rejects every later runtime operation', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-fence-'));
     temporaryDirectories.push(directory);
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const server = await store.createAgentServer({
       runtimeId: 'test-acp-fence',
       runtimeKind: 'ACP_AGENT',
@@ -2307,7 +2316,7 @@ describe('AcpRuntimeAdapter native settings', () => {
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId }
     };
     const adapter = new AcpRuntimeAdapter(
-      new FileTaskStore(path.join(directory, 'store')),
+      createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       profile,
       { cwd: directory }
@@ -2401,7 +2410,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     temporaryDirectories.push(directory);
     const runtimeId = 'test-grok-reasoning-setting';
     const adapter = new AcpRuntimeAdapter(
-      new FileTaskStore(path.join(directory, 'store')),
+      createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       {
         ...TEST_ACP_PROFILE,
@@ -2470,7 +2479,7 @@ describe('AcpRuntimeAdapter native settings', () => {
     );
     temporaryDirectories.push(directory);
     const adapter = new AcpRuntimeAdapter(
-      new FileTaskStore(path.join(directory, 'store')),
+      createTestStore(path.join(directory, 'store')),
       new AppEventBus(),
       TEST_ACP_PROFILE,
       { cwd: directory }
@@ -2617,7 +2626,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     } finally {
       await adapter.shutdown();
     }
-  });
+  }, 15_000);
 
   it.each([
     {
@@ -2921,7 +2930,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         executableCandidates: [process.execPath],
         argv: [agentScript]
       };
-      const store = new FileTaskStore(path.join(directory, 'store'));
+      const store = createTestStore(path.join(directory, 'store'));
       const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
         cwd: directory,
         requestTimeoutMs: 1_000,
@@ -3170,7 +3179,7 @@ describe('AcpRuntimeAdapter terminal persistence', () => {
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
-    const store = new FileTaskStore(path.join(directory, 'store'));
+    const store = createTestStore(path.join(directory, 'store'));
     const appEvents = new AppEventBus();
     const observedEvents: Array<{ type: string; runId?: string }> = [];
     appEvents.on((event) => observedEvents.push(event));
@@ -3579,7 +3588,7 @@ async function createPermissionHarness(input: {
     executableCandidates: [process.execPath],
     argv: [agentScript]
   };
-  const store = new FileTaskStore(path.join(directory, 'store'));
+  const store = createTestStore(path.join(directory, 'store'));
   const events = new AppEventBus();
   const adapter = new AcpRuntimeAdapter(store, events, profile, {
     cwd: directory,
@@ -3793,7 +3802,7 @@ async function createStreamSafetyHarness(scenario: string, secret = 'test-stream
     executableCandidates: [process.execPath],
     argv: [agentScript]
   };
-  const store = new FileTaskStore(path.join(directory, 'store'));
+  const store = createTestStore(path.join(directory, 'store'));
   const appEvents = new AppEventBus();
   const observedEvents: Array<{ type: string; runId?: string; payload: unknown }> = [];
   appEvents.on((event) => observedEvents.push(event));

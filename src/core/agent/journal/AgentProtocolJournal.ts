@@ -702,7 +702,6 @@ async function openPrivateFile(
         (fsConstants.O_NOFOLLOW ?? 0)
       : mode === 'repair'
         ? fsConstants.O_RDWR |
-          fsConstants.O_APPEND |
           (fsConstants.O_NOFOLLOW ?? 0)
       : mode === 'create'
         ? fsConstants.O_WRONLY |

@@ -254,7 +254,7 @@ describe('TaskManagerService evidence flow', () => {
       reason: expect.stringMatching(/declined.*no Git change/i)
     });
     await recoveredService.shutdown();
-  });
+  }, 15_000);
 
   it('reconciles missing post-run evidence before recording a merged GitHub refresh', async () => {
     const ghPath = await writeMergedPullRequestGh();

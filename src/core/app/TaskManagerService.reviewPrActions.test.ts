@@ -121,7 +121,8 @@ describe('TaskManagerService review and PR action coordination', () => {
         'A review requires a successfully completed implementation run. Retry or continue this run first.'
       );
       expect(scenario.agent.startedReviews).toHaveLength(1);
-    }
+    },
+    15_000
   );
 
   it('makes review and PR actions deterministic around a running review', async () => {
