@@ -3,7 +3,9 @@ import {
   useEffect,
   useRef,
   useState,
-  type FormEvent
+  type CSSProperties,
+  type FormEvent,
+  type RefObject
 } from 'react';
 import type {
   AgentExecutionSettings,
@@ -32,6 +34,13 @@ import {
   taskCreationNeedsUnchangedRetry,
   type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
+import {
+  clampNewTaskPanelWidth,
+  DEFAULT_NEW_TASK_PANEL_WIDTH,
+  getNewTaskPanelWidthBounds,
+  MAX_NEW_TASK_PANEL_WIDTH,
+  resizeNewTaskPanelFromPointer
+} from '../model/newTaskPanel';
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
@@ -46,6 +55,8 @@ interface NewTaskPanelProps {
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  onResize?(): void;
   onClose(): void;
 }
 
@@ -61,6 +72,8 @@ export function NewTaskPanel({
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
+  returnFocusRef,
+  onResize,
   onClose
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
@@ -74,13 +87,30 @@ export function NewTaskPanel({
   const [isRefining, setIsRefining] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(() =>
+    clampNewTaskPanelWidth(
+      DEFAULT_NEW_TASK_PANEL_WIDTH,
+      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
+    )
+  );
+  const [panelWidthBounds, setPanelWidthBounds] = useState(() =>
+    getNewTaskPanelWidthBounds(
+      typeof window === 'undefined' ? MAX_NEW_TASK_PANEL_WIDTH : window.innerWidth
+    )
+  );
   const panelRef = useRef<HTMLFormElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
   const previouslyFocusedElementRef = useRef<HTMLElement | null>(
     typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null
   );
   const submittingRef = useRef(false);
+  const resizeStateRef = useRef<{ startX: number; startWidth: number } | undefined>(
+    undefined
+  );
   const taskCreationTokenRef = useRef<string | undefined>(undefined);
   // Refinement remains a reversible proposal instead of overwriting user input.
   const [proposal, setProposal] = useState<{ prompt: string; titleSuggestion: string }>();
@@ -153,23 +183,50 @@ export function NewTaskPanel({
     (fullAccessSelected || (!sandboxedSelected && networkAccess));
   const selectedModelRejectsImages = Boolean(attachmentModelError);
 
+  useEffect(() => {
+    titleInputRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    const resizePanelForViewport = () => {
+      const nextBounds = getNewTaskPanelWidthBounds(window.innerWidth);
+      setPanelWidthBounds(nextBounds);
+      setPanelWidth((current) =>
+        Math.min(nextBounds.max, Math.max(nextBounds.min, current))
+      );
+      onResize?.();
+    };
+    window.addEventListener('resize', resizePanelForViewport);
+    return () => window.removeEventListener('resize', resizePanelForViewport);
+  }, [onResize]);
+
   useEffect(
     () => () => {
-      const previouslyFocusedElement = previouslyFocusedElementRef.current;
+      const previouslyFocusedElement =
+        returnFocusRef?.current ?? previouslyFocusedElementRef.current;
       queueMicrotask(() => {
         if (panelClosedRef.current && previouslyFocusedElement?.isConnected) {
           previouslyFocusedElement.focus();
         }
       });
     },
-    [panelClosedRef]
+    [panelClosedRef, returnFocusRef]
   );
 
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
     closeAttachments();
+    setIsClosing(true);
     onClose();
   }, [closeAttachments, onClose, panelClosedRef]);
+
+  const resizePanel = useCallback(
+    (nextWidth: number) => {
+      setPanelWidth(Math.min(panelWidthBounds.max, Math.max(panelWidthBounds.min, nextWidth)));
+      onResize?.();
+    },
+    [onResize, panelWidthBounds.max, panelWidthBounds.min]
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -222,6 +279,7 @@ export function NewTaskPanel({
     submittingRef.current = true;
     setIsSubmitting(true);
     let creationNeedsUnchangedRetry = false;
+    let created = false;
     try {
       const attachmentDraftId = await attachments.prepareForCreate();
       const permissionSettings = settingsForPermissionMode(permissionMode, {
@@ -241,6 +299,7 @@ export function NewTaskPanel({
             ...permissionSettings
           }
         });
+        created = true;
       } catch (caught) {
         creationNeedsUnchangedRetry = taskCreationNeedsUnchangedRetry(caught);
         await attachments.markCreateFailed(creationNeedsUnchangedRetry);
@@ -260,6 +319,9 @@ export function NewTaskPanel({
       submittingRef.current = false;
       if (!panelClosedRef.current) {
         setIsSubmitting(false);
+      }
+      if (created) {
+        closePanel();
       }
     }
   };
@@ -314,11 +376,16 @@ export function NewTaskPanel({
     attachmentsBusy ||
     attachmentsHaveErrors ||
     selectedModelRejectsImages;
+  const slideoverStyle = {
+    '--slideover-width': `${panelWidth}px`
+  } as CSSProperties;
 
   return (
     <div
-      className="slideover"
-      onClick={closePanel}
+      className={`slideover ${isClosing ? 'slideover--closing' : ''} ${
+        isResizing ? 'slideover--resizing' : ''
+      }`}
+      style={slideoverStyle}
       onDragEnter={enterAttachmentDrag}
       onDragOver={continueAttachmentDrag}
       onDragLeave={leaveAttachmentDrag}
@@ -327,12 +394,77 @@ export function NewTaskPanel({
       <form
         ref={panelRef}
         className="slideover__panel"
-        onClick={(event) => event.stopPropagation()}
         onSubmit={submit}
         role="dialog"
         aria-modal="true"
         aria-label="New task"
       >
+        <div
+          className="slideover__resize"
+          role="separator"
+          aria-label="Resize new task panel"
+          aria-orientation="vertical"
+          aria-valuemin={panelWidthBounds.min}
+          aria-valuemax={panelWidthBounds.max}
+          aria-valuenow={panelWidth}
+          tabIndex={0}
+          title="Resize new task panel"
+          onPointerDown={(event) => {
+            resizeStateRef.current = {
+              startX: event.clientX,
+              startWidth: panelWidth
+            };
+            setIsResizing(true);
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const resizeState = resizeStateRef.current;
+            if (!resizeState) {
+              return;
+            }
+            event.preventDefault();
+            setPanelWidth(
+              resizeNewTaskPanelFromPointer(
+                resizeState.startWidth,
+                resizeState.startX,
+                event.clientX,
+                window.innerWidth
+              )
+            );
+            onResize?.();
+          }}
+          onPointerUp={(event) => {
+            resizeStateRef.current = undefined;
+            setIsResizing(false);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onPointerCancel={(event) => {
+            resizeStateRef.current = undefined;
+            setIsResizing(false);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault();
+              resizePanel(panelWidth + 32);
+            } else if (event.key === 'ArrowRight') {
+              event.preventDefault();
+              resizePanel(panelWidth - 32);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              resizePanel(panelWidthBounds.min);
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              resizePanel(panelWidthBounds.max);
+            }
+          }}
+        >
+          <span aria-hidden="true" />
+        </div>
         <header className="slideover__header">
           <div className="slideover__heading">
             <strong>New task</strong>
@@ -353,11 +485,11 @@ export function NewTaskPanel({
             <label className="field">
               <span>Title</span>
               <input
+                ref={titleInputRef}
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
                 placeholder="Short imperative summary"
                 disabled={composerLocked}
-                autoFocus
               />
             </label>
 

@@ -2904,26 +2904,58 @@ textarea:focus-visible {
 /* ----------------------------------------------------------------------- */
 
 .slideover {
-  position: fixed;
-  inset: 0;
+  position: relative;
   z-index: 40;
-  display: flex;
-  justify-content: flex-end;
-  background: var(--scrim);
-  backdrop-filter: blur(3px);
+  width: min(var(--slideover-width, 520px), 100vw);
+  height: 100%;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.slideover--resizing {
+  user-select: none;
 }
 
 .slideover__panel {
+  position: relative;
   display: flex;
   flex-direction: column;
-  width: clamp(500px, var(--slideover-width, 660px), 760px);
-  max-width: 96vw;
+  width: 100%;
   height: 100%;
-  border-top-left-radius: 14px;
-  border-bottom-left-radius: 14px;
+  border-left: 1px solid var(--border);
   background: var(--surface);
-  box-shadow: -18px 0 60px rgba(16, 19, 24, 0.28);
   overflow: hidden;
+}
+
+.slideover--closing .slideover__panel {
+  pointer-events: none;
+}
+
+.slideover__resize {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.slideover__resize span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.slideover__resize:hover span,
+.slideover__resize:focus-visible span,
+.slideover--resizing .slideover__resize span {
+  background: var(--border-strong);
+}
+
+.slideover__resize:focus-visible {
+  outline: none;
 }
 
 .slideover__header {
@@ -3649,10 +3681,6 @@ textarea:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .slideover__panel {
-    max-width: 100vw;
-  }
-
   .slideover__footer {
     align-items: stretch;
     flex-direction: column;
@@ -3846,7 +3874,39 @@ textarea:focus-visible {
 .tm-body {
   flex: 1;
   min-height: 0;
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tm-body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.tm-body--dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.tm-canvas {
   display: flex;
+  width: max-content;
+  min-width: 100%;
+  height: 100%;
+}
+
+.tm-canvas__workspace {
+  display: flex;
+  width: 100vw;
+  min-width: 100vw;
+  height: 100%;
+  flex: 0 0 100vw;
+  min-height: 0;
 }
 
 /* ---- Slim nav ---- */
@@ -5880,6 +5940,7 @@ textarea:focus-visible {
 
 .tm-detail {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;

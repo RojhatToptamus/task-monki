@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode
+} from 'react';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
@@ -39,6 +47,12 @@ import {
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import { areRequiredExternalToolsReady } from '../model/executableSettings';
+import {
+  dragNewTaskCanvas,
+  NEW_TASK_CANVAS_PAN_DURATION_MS,
+  newTaskCanvasPanPosition,
+  shouldInterruptNewTaskCanvasPanForWheel
+} from '../model/newTaskPanel';
 import {
   buildRepositoryOptions,
   isSameRepositoryPath,
@@ -137,6 +151,17 @@ function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
 }
 
+function isHorizontalCanvasControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(
+      target.closest(
+        'button, input, textarea, select, a, summary, [role="button"], [role="separator"]'
+      )
+    )
+  );
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
@@ -148,6 +173,7 @@ export function App() {
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
+  const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
   const [prefersDark, setPrefersDark] = useState<boolean>(() => prefersDarkScheme());
   const [appSettings, setAppSettings] = useState<TaskManagerAppSettings>(
@@ -156,6 +182,14 @@ export function App() {
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [isCanvasDragging, setIsCanvasDragging] = useState(false);
+  const newTaskButtonRef = useRef<HTMLButtonElement>(null);
+  const canvasViewportRef = useRef<HTMLDivElement>(null);
+  const canvasPanFrameRef = useRef<number | undefined>(undefined);
+  const canvasResizeFrameRef = useRef<number | undefined>(undefined);
+  const canvasDragRef = useRef<
+    { pointerId: number; startX: number; startScrollLeft: number } | undefined
+  >(undefined);
   const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
     Record<string, PreviewExecutionReadiness>
   >({});
@@ -167,8 +201,163 @@ export function App() {
   >({});
   const windowChromePlatform = resolveWindowChromePlatform();
 
-  const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
-  const closeNewTask = useCallback(() => setIsNewTaskOpen(false), []);
+  const cancelCanvasPan = useCallback(() => {
+    if (canvasPanFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(canvasPanFrameRef.current);
+      canvasPanFrameRef.current = undefined;
+    }
+  }, []);
+
+  const panCanvasTo = useCallback(
+    (requestedTarget: number, onComplete?: () => void) => {
+      const viewport = canvasViewportRef.current;
+      if (!viewport) {
+        onComplete?.();
+        return;
+      }
+      cancelCanvasPan();
+      const target = Math.min(
+        Math.max(0, viewport.scrollWidth - viewport.clientWidth),
+        Math.max(0, requestedTarget)
+      );
+      const start = viewport.scrollLeft;
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      if (reduceMotion || Math.abs(target - start) < 0.5) {
+        viewport.scrollLeft = target;
+        onComplete?.();
+        return;
+      }
+      const startedAt = window.performance.now();
+      const step = (now: number) => {
+        const elapsed = now - startedAt;
+        viewport.scrollLeft = newTaskCanvasPanPosition(start, target, elapsed);
+        if (elapsed < NEW_TASK_CANVAS_PAN_DURATION_MS) {
+          canvasPanFrameRef.current = window.requestAnimationFrame(step);
+          return;
+        }
+        viewport.scrollLeft = target;
+        canvasPanFrameRef.current = undefined;
+        onComplete?.();
+      };
+      canvasPanFrameRef.current = window.requestAnimationFrame(step);
+    },
+    [cancelCanvasPan]
+  );
+
+  const revealNewTaskPanel = useCallback(() => {
+    const viewport = canvasViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    panCanvasTo(viewport.scrollWidth - viewport.clientWidth);
+  }, [panCanvasTo]);
+
+  const openNewTask = useCallback(() => {
+    if (isNewTaskClosing) {
+      return;
+    }
+    if (isNewTaskOpen) {
+      revealNewTaskPanel();
+      return;
+    }
+    setIsNewTaskOpen(true);
+  }, [isNewTaskClosing, isNewTaskOpen, revealNewTaskPanel]);
+
+  const closeNewTask = useCallback(() => {
+    if (isNewTaskClosing) {
+      return;
+    }
+    setIsNewTaskClosing(true);
+    panCanvasTo(0, () => {
+      setIsNewTaskOpen(false);
+      setIsNewTaskClosing(false);
+    });
+  }, [isNewTaskClosing, panCanvasTo]);
+
+  const keepNewTaskPanelInView = useCallback(() => {
+    if (isNewTaskClosing) {
+      return;
+    }
+    cancelCanvasPan();
+    if (canvasResizeFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(canvasResizeFrameRef.current);
+    }
+    canvasResizeFrameRef.current = window.requestAnimationFrame(() => {
+      const viewport = canvasViewportRef.current;
+      if (viewport) {
+        viewport.scrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      }
+      canvasResizeFrameRef.current = undefined;
+    });
+  }, [cancelCanvasPan, isNewTaskClosing]);
+
+  useEffect(() => {
+    if (!isNewTaskOpen) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(revealNewTaskPanel);
+    return () => window.cancelAnimationFrame(frame);
+  }, [isNewTaskOpen, revealNewTaskPanel]);
+
+  useEffect(
+    () => () => {
+      cancelCanvasPan();
+      if (canvasResizeFrameRef.current !== undefined) {
+        window.cancelAnimationFrame(canvasResizeFrameRef.current);
+      }
+    },
+    [cancelCanvasPan]
+  );
+
+  const startCanvasDrag = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (
+        isNewTaskClosing ||
+        event.pointerType !== 'mouse' ||
+        event.button !== 0 ||
+        isHorizontalCanvasControl(event.target)
+      ) {
+        return;
+      }
+      cancelCanvasPan();
+      canvasDragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startScrollLeft: event.currentTarget.scrollLeft
+      };
+      setIsCanvasDragging(true);
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [cancelCanvasPan, isNewTaskClosing]
+  );
+
+  const moveCanvasDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = canvasDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    if (Math.abs(event.clientX - drag.startX) > 3) {
+      event.preventDefault();
+    }
+    event.currentTarget.scrollLeft = dragNewTaskCanvas(
+      drag.startScrollLeft,
+      drag.startX,
+      event.clientX,
+      event.currentTarget.scrollWidth - event.currentTarget.clientWidth
+    );
+  }, []);
+
+  const stopCanvasDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = canvasDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    canvasDragRef.current = undefined;
+    setIsCanvasDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
   const notify = useCallback((message: string, tone: NotificationTone = 'info') => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setNotifications((current) => [...current.slice(-2), { id, tone, message }]);
@@ -581,7 +770,6 @@ export function App() {
       const created = await taskManagerApi.createTask(input);
       setSelectedTaskId(created.id);
       setIsDetailOpen(true);
-      setIsNewTaskOpen(false);
       notify('Task created.', 'success');
       await refresh();
     } catch (caught) {
@@ -1074,7 +1262,6 @@ export function App() {
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
-      setIsNewTaskOpen(false);
       setError(undefined);
       notify(`Switched to ${repositoryDisplayPath(normalized)}.`, 'success');
     },
@@ -1112,7 +1299,6 @@ export function App() {
       setSelectedTaskId(undefined);
       setLastTaskId(undefined);
       setIsDetailOpen(false);
-      setIsNewTaskOpen(false);
       notify(`Added ${repositoryDisplayPath(repositoryRoot)}.`, 'success');
       return true;
     } catch (caught) {
@@ -1228,6 +1414,7 @@ export function App() {
         </div>
         <div className="tm-titlebar__spacer" />
         <button
+          ref={newTaskButtonRef}
           type="button"
           className="tm-newtask"
           onClick={openNewTask}
@@ -1238,205 +1425,230 @@ export function App() {
         </button>
       </header>
 
-      <div className="tm-body">
-        <aside className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}>
-          <div className="tm-nav__brand">
-            <img
-              className="tm-nav__brand-mark"
-              src={
-                resolvedTheme === 'dark'
-                  ? './assets/brand/monkey_icon_cream.svg'
-                  : './assets/brand/monkey_icon_charcoal.svg'
-              }
-              alt=""
-              aria-hidden="true"
-            />
-            <span className="tm-nav__brand-name">Task Monki</span>
-          </div>
-          <div className="tm-nav__divider" />
-          <div className="tm-nav__group">
-            <NavItem
-              label="Inbox"
-              icon={<InboxIcon />}
-              count={navCounts.inbox}
-              urgent={navCounts.inbox > 0}
-              active={!showDetail && view === 'inbox'}
-              collapsed={isSidebarCollapsed}
-              onClick={() => showView('inbox')}
-            />
-            <NavItem
-              label="Board"
-              icon={<BoardIcon />}
-              active={!showDetail && view === 'board'}
-              collapsed={isSidebarCollapsed}
-              onClick={() => showView('board')}
-            />
-            <NavItem
-              label="Active runs"
-              icon={<ActiveIcon />}
-              count={navCounts.active}
-              active={!showDetail && view === 'active'}
-              collapsed={isSidebarCollapsed}
-              onClick={() => showView('active')}
-            />
-            <NavItem
-              label="Review queue"
-              icon={<ReviewIcon />}
-              count={navCounts.review}
-              active={!showDetail && view === 'review'}
-              collapsed={isSidebarCollapsed}
-              onClick={() => showView('review')}
-            />
-            <NavItem
-              label="Done & Archive"
-              icon={<DoneIcon />}
-              count={navCounts.done}
-              active={!showDetail && view === 'done'}
-              collapsed={isSidebarCollapsed}
-              onClick={() => showView('done')}
-            />
-          </div>
-          <div className="tm-nav__divider" />
-          <NavItem
-            label="Settings"
-            icon={<SettingsIcon />}
-            active={!showDetail && view === 'settings'}
-            collapsed={isSidebarCollapsed}
-            onClick={() => showView('settings')}
-          />
-          <div className="tm-nav__spacer" />
+      <div
+        ref={canvasViewportRef}
+        className={`tm-body ${isCanvasDragging ? 'tm-body--dragging' : ''}`}
+        onWheel={(event) => {
+          if (
+            !isNewTaskClosing &&
+            shouldInterruptNewTaskCanvasPanForWheel(
+              event.deltaX,
+              event.deltaY,
+              event.shiftKey
+            )
+          ) {
+            cancelCanvasPan();
+          }
+        }}
+        onPointerDown={startCanvasDrag}
+        onPointerMove={moveCanvasDrag}
+        onPointerUp={stopCanvasDrag}
+        onPointerCancel={stopCanvasDrag}
+      >
+        <div className="tm-canvas">
+          <div className="tm-canvas__workspace">
+            <aside className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}>
+              <div className="tm-nav__brand">
+                <img
+                  className="tm-nav__brand-mark"
+                  src={
+                    resolvedTheme === 'dark'
+                      ? './assets/brand/monkey_icon_cream.svg'
+                      : './assets/brand/monkey_icon_charcoal.svg'
+                  }
+                  alt=""
+                  aria-hidden="true"
+                />
+                <span className="tm-nav__brand-name">Task Monki</span>
+              </div>
+              <div className="tm-nav__divider" />
+              <div className="tm-nav__group">
+                <NavItem
+                  label="Inbox"
+                  icon={<InboxIcon />}
+                  count={navCounts.inbox}
+                  urgent={navCounts.inbox > 0}
+                  active={!showDetail && view === 'inbox'}
+                  collapsed={isSidebarCollapsed}
+                  onClick={() => showView('inbox')}
+                />
+                <NavItem
+                  label="Board"
+                  icon={<BoardIcon />}
+                  active={!showDetail && view === 'board'}
+                  collapsed={isSidebarCollapsed}
+                  onClick={() => showView('board')}
+                />
+                <NavItem
+                  label="Active runs"
+                  icon={<ActiveIcon />}
+                  count={navCounts.active}
+                  active={!showDetail && view === 'active'}
+                  collapsed={isSidebarCollapsed}
+                  onClick={() => showView('active')}
+                />
+                <NavItem
+                  label="Review queue"
+                  icon={<ReviewIcon />}
+                  count={navCounts.review}
+                  active={!showDetail && view === 'review'}
+                  collapsed={isSidebarCollapsed}
+                  onClick={() => showView('review')}
+                />
+                <NavItem
+                  label="Done & Archive"
+                  icon={<DoneIcon />}
+                  count={navCounts.done}
+                  active={!showDetail && view === 'done'}
+                  collapsed={isSidebarCollapsed}
+                  onClick={() => showView('done')}
+                />
+              </div>
+              <div className="tm-nav__divider" />
+              <NavItem
+                label="Settings"
+                icon={<SettingsIcon />}
+                active={!showDetail && view === 'settings'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('settings')}
+              />
+              <div className="tm-nav__spacer" />
 
-          <RepositorySwitcher
-            activeRepositoryPath={activeRepositoryPath}
-            options={repositoryOptions}
-            collapsed={isSidebarCollapsed}
-            adding={isAddingRepository}
-            onSelect={selectRepository}
-            onAddRepository={addRepository}
-          />
-        </aside>
+              <RepositorySwitcher
+                activeRepositoryPath={activeRepositoryPath}
+                options={repositoryOptions}
+                collapsed={isSidebarCollapsed}
+                adding={isAddingRepository}
+                onSelect={selectRepository}
+                onAddRepository={addRepository}
+              />
+            </aside>
 
-        {showDetail ? (
-          <TaskDetail
-            error={error}
-            task={selectedTask}
-            run={selectedRun}
-            worktree={selectedWorktree}
-            gitSnapshot={selectedGitSnapshot}
-            gitSnapshots={selectedGitSnapshots}
-            githubRepository={selectedGitHubRepository}
-            branchPublication={selectedBranchPublication}
-            pullRequest={selectedPullRequest}
-            ciRollup={selectedCiRollup}
-            reviewRollup={selectedReviewRollup}
-            mergeSnapshot={selectedMergeSnapshot}
-            events={selectedEvents}
-            runs={selectedRuns}
-            sessions={selectedSessions}
-            items={selectedItems}
-            goalSnapshots={selectedGoals}
-            planRevisions={selectedPlans}
-            usageSnapshots={selectedUsage}
-            settingsObservations={selectedSettings}
-            subagentObservations={selectedSubagentObservations}
-            providerState={providerState}
-            server={snapshot.agentServers.find(
-              (candidate) => candidate.id === selectedRun?.serverInstanceId
+            {showDetail ? (
+              <TaskDetail
+                error={error}
+                task={selectedTask}
+                run={selectedRun}
+                worktree={selectedWorktree}
+                gitSnapshot={selectedGitSnapshot}
+                gitSnapshots={selectedGitSnapshots}
+                githubRepository={selectedGitHubRepository}
+                branchPublication={selectedBranchPublication}
+                pullRequest={selectedPullRequest}
+                ciRollup={selectedCiRollup}
+                reviewRollup={selectedReviewRollup}
+                mergeSnapshot={selectedMergeSnapshot}
+                events={selectedEvents}
+                runs={selectedRuns}
+                sessions={selectedSessions}
+                items={selectedItems}
+                goalSnapshots={selectedGoals}
+                planRevisions={selectedPlans}
+                usageSnapshots={selectedUsage}
+                settingsObservations={selectedSettings}
+                subagentObservations={selectedSubagentObservations}
+                providerState={providerState}
+                server={snapshot.agentServers.find(
+                  (candidate) => candidate.id === selectedRun?.serverInstanceId
+                )}
+                artifacts={snapshot.artifacts}
+                attachments={selectedTaskAttachments}
+                interactions={selectedInteractions}
+                previewPlans={selectedPreviewPlans}
+                previewApprovals={selectedPreviewApprovals}
+                previewGenerations={selectedPreviewGenerations}
+                previewGenerationAttachments={selectedPreviewGenerationAttachments}
+                previewManagedResources={selectedPreviewManagedResources}
+                previewComposeProjects={selectedPreviewComposeProjects}
+                previewLocalBindings={selectedPreviewLocalBindings}
+                previewTaskRoutes={selectedPreviewTaskRoutes}
+                previewRuntimeResources={selectedPreviewRuntimeResources}
+                previewNodeAttempts={selectedPreviewNodeAttempts}
+                previewExecutionReadiness={selectedTask
+                  ? previewExecutionReadiness[selectedTask.id]
+                  : undefined}
+                previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
+                previewRecipeGeneration={selectedTask
+                  ? previewRecipeGenerations[selectedTask.id]
+                  : undefined}
+                showMascot={appSettings.showMascot}
+                onPrepareWorktree={prepareWorktree}
+                onStart={startRun}
+                onCancel={cancelRun}
+                onSteer={steerRun}
+                onContinue={continueRun}
+                onRetry={retryRun}
+                onReview={startReview}
+                onSyncAgentGoal={syncAgentGoal}
+                onRespondToInteraction={respondToInteraction}
+                onCreateDeliveryCommit={createDeliveryCommit}
+                onCreatePullRequest={createPullRequest}
+                onRefreshGitHub={refreshGitHub}
+                onResolvePreview={resolvePreview}
+                onSetPreviewLocalBinding={setPreviewLocalBinding}
+                onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
+                onGeneratePreviewRecipe={generatePreviewRecipe}
+                onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
+                onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
+                onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
+                onWritePreviewRecipeManually={writePreviewRecipeManually}
+                onApprovePreview={approvePreview}
+                onStartPreview={startPreview}
+                onOpenPreview={openPreview}
+                onStopPreview={stopPreview}
+                onResetPreviewData={resetPreviewData}
+                onRetryPreviewSetup={retryPreviewSetup}
+                onReadPreviewLog={readPreviewLog}
+                onTransition={transitionTask}
+                onArchive={archiveTask}
+                onRequestDelete={requestDeleteTask}
+              />
+            ) : (
+              <MainColumn
+                view={view}
+                tasks={visibleTasks}
+                interactionRequests={snapshot.interactionRequests}
+                theme={theme}
+                onSetTheme={updateTheme}
+                appSettings={appSettings}
+                onSetAppSettings={updateAppSettings}
+                externalToolStatus={externalToolStatus}
+                onRefreshExternalTools={refreshExternalToolStatus}
+                onTestExternalTool={testExternalTool}
+                error={error}
+                models={providerModels}
+                activeRepositoryPath={activeRepositoryPath}
+                repositorySetupState={repositorySetupState}
+                addingRepository={isAddingRepository}
+                onAddRepository={addRepository}
+                onFinishSetup={finishFirstLaunchSetup}
+                onSelect={selectTask}
+                onRespondToInteraction={respondToInteraction}
+                onArchive={archiveTask}
+                onRequestDelete={requestDeleteTask}
+              />
             )}
-            artifacts={snapshot.artifacts}
-            attachments={selectedTaskAttachments}
-            interactions={selectedInteractions}
-            previewPlans={selectedPreviewPlans}
-            previewApprovals={selectedPreviewApprovals}
-            previewGenerations={selectedPreviewGenerations}
-            previewGenerationAttachments={selectedPreviewGenerationAttachments}
-            previewManagedResources={selectedPreviewManagedResources}
-            previewComposeProjects={selectedPreviewComposeProjects}
-            previewLocalBindings={selectedPreviewLocalBindings}
-            previewTaskRoutes={selectedPreviewTaskRoutes}
-            previewRuntimeResources={selectedPreviewRuntimeResources}
-            previewNodeAttempts={selectedPreviewNodeAttempts}
-            previewExecutionReadiness={selectedTask
-              ? previewExecutionReadiness[selectedTask.id]
-              : undefined}
-            previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
-            previewRecipeGeneration={selectedTask
-              ? previewRecipeGenerations[selectedTask.id]
-              : undefined}
-            showMascot={appSettings.showMascot}
-            onPrepareWorktree={prepareWorktree}
-            onStart={startRun}
-            onCancel={cancelRun}
-            onSteer={steerRun}
-            onContinue={continueRun}
-            onRetry={retryRun}
-            onReview={startReview}
-            onSyncAgentGoal={syncAgentGoal}
-            onRespondToInteraction={respondToInteraction}
-            onCreateDeliveryCommit={createDeliveryCommit}
-            onCreatePullRequest={createPullRequest}
-            onRefreshGitHub={refreshGitHub}
-            onResolvePreview={resolvePreview}
-            onSetPreviewLocalBinding={setPreviewLocalBinding}
-            onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
-            onGeneratePreviewRecipe={generatePreviewRecipe}
-            onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
-            onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
-            onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
-            onWritePreviewRecipeManually={writePreviewRecipeManually}
-            onApprovePreview={approvePreview}
-            onStartPreview={startPreview}
-            onOpenPreview={openPreview}
-            onStopPreview={stopPreview}
-            onResetPreviewData={resetPreviewData}
-            onRetryPreviewSetup={retryPreviewSetup}
-            onReadPreviewLog={readPreviewLog}
-            onTransition={transitionTask}
-            onArchive={archiveTask}
-            onRequestDelete={requestDeleteTask}
-          />
-        ) : (
-          <MainColumn
-            view={view}
-            tasks={visibleTasks}
-            interactionRequests={snapshot.interactionRequests}
-            theme={theme}
-            onSetTheme={updateTheme}
-            appSettings={appSettings}
-            onSetAppSettings={updateAppSettings}
-            externalToolStatus={externalToolStatus}
-            onRefreshExternalTools={refreshExternalToolStatus}
-            onTestExternalTool={testExternalTool}
-            error={error}
-            models={providerModels}
-            activeRepositoryPath={activeRepositoryPath}
-            repositorySetupState={repositorySetupState}
-            addingRepository={isAddingRepository}
-            onAddRepository={addRepository}
-            onFinishSetup={finishFirstLaunchSetup}
-            onSelect={selectTask}
-            onRespondToInteraction={respondToInteraction}
-            onArchive={archiveTask}
-            onRequestDelete={requestDeleteTask}
-          />
-        )}
-      </div>
+          </div>
 
-      {isNewTaskOpen ? (
-        <NewTaskPanel
-          defaultRepositoryPath={activeRepositoryPath}
-          models={providerModels}
-          preflight={providerState?.preflight}
-          defaultAgentSettings={defaultTaskSettings}
-          disabled={!canCreateTask}
-          onCreate={createTask}
-          onRefinePrompt={refinePrompt}
-          onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
-          onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
-          onReadClipboardImage={taskManagerApi.readClipboardImage}
-          onClose={closeNewTask}
-        />
-      ) : null}
+          {isNewTaskOpen ? (
+            <NewTaskPanel
+              defaultRepositoryPath={activeRepositoryPath}
+              models={providerModels}
+              preflight={providerState?.preflight}
+              defaultAgentSettings={defaultTaskSettings}
+              disabled={!canCreateTask}
+              onCreate={createTask}
+              onRefinePrompt={refinePrompt}
+              onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
+              onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
+              onReadClipboardImage={taskManagerApi.readClipboardImage}
+              returnFocusRef={newTaskButtonRef}
+              onResize={keepNewTaskPanelInView}
+              onClose={closeNewTask}
+            />
+          ) : null}
+        </div>
+      </div>
 
       {deleteCandidate ? (
         <DeleteTaskModal

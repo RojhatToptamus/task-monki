@@ -10,9 +10,41 @@ import {
   shouldPreventDefaultAttachmentPaste,
   taskCreationNeedsUnchangedRetry
 } from '../model/taskAttachmentComposer';
+import {
+  clampNewTaskPanelWidth,
+  dragNewTaskCanvas,
+  getNewTaskPanelWidthBounds,
+  newTaskCanvasPanPosition,
+  resizeNewTaskPanelFromPointer,
+  shouldInterruptNewTaskCanvasPanForWheel
+} from '../model/newTaskPanel';
 import { AttachmentChip, NewTaskPanel } from './NewTaskPanel';
 
 describe('NewTaskPanel', () => {
+  it('keeps the dock resize width within desktop and narrow viewport bounds', () => {
+    expect(getNewTaskPanelWidthBounds(1440)).toEqual({ min: 500, max: 760 });
+    expect(clampNewTaskPanelWidth(420, 1440)).toBe(500);
+    expect(clampNewTaskPanelWidth(820, 1440)).toBe(760);
+    expect(getNewTaskPanelWidthBounds(460)).toEqual({ min: 460, max: 460 });
+    expect(clampNewTaskPanelWidth(660, 460)).toBe(460);
+    expect(resizeNewTaskPanelFromPointer(520, 600, 500, 1440)).toBe(620);
+    expect(resizeNewTaskPanelFromPointer(520, 600, 200, 1440)).toBe(760);
+    expect(resizeNewTaskPanelFromPointer(520, 600, 700, 1440)).toBe(500);
+    expect(newTaskCanvasPanPosition(0, 520, 0)).toBe(0);
+    expect(newTaskCanvasPanPosition(0, 520, 180)).toBe(260);
+    expect(newTaskCanvasPanPosition(0, 520, 360)).toBe(520);
+    expect(dragNewTaskCanvas(0, 600, 450, 520)).toBe(150);
+    expect(dragNewTaskCanvas(520, 450, 600, 520)).toBe(370);
+  });
+
+  it('only interrupts an automatic canvas pan for intentional horizontal wheel input', () => {
+    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 160, false)).toBe(false);
+    expect(shouldInterruptNewTaskCanvasPanForWheel(2, 160, false)).toBe(false);
+    expect(shouldInterruptNewTaskCanvasPanForWheel(80, 12, false)).toBe(true);
+    expect(shouldInterruptNewTaskCanvasPanForWheel(0, 80, true)).toBe(true);
+    expect(shouldInterruptNewTaskCanvasPanForWheel(0.2, 0.1, false)).toBe(false);
+  });
+
   it('reuses one task creation token across response-loss retries', () => {
     const holder: { current: string | undefined } = { current: undefined };
     let generated = 0;
@@ -181,6 +213,9 @@ describe('NewTaskPanel', () => {
     expect(html).toContain(`accept="${ATTACHMENT_FILE_INPUT_ACCEPT}"`);
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details class="newtask-settings">');
+    expect(html).toContain('role="separator"');
+    expect(html).toContain('aria-label="Resize new task panel"');
+    expect(html).not.toContain('slideover__scrim');
     expect(html).not.toContain('>Sandbox<');
     expect(html).not.toContain('Approval policy');
 
