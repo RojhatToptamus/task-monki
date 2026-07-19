@@ -3,7 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentSessionRecord, RunRecord } from '../../../shared/contracts';
-import { materializeAcpPermission } from './AcpPermissionPolicy';
+import {
+  materializeAcpPermission,
+  selectAutomaticAcpPermissionOption
+} from './AcpPermissionPolicy';
 import type { AcpPermissionOption } from './AcpProtocol';
 
 const temporaryDirectories: string[] = [];
@@ -39,22 +42,38 @@ describe('ACP permission safety intersection', () => {
     expect(policy.warnings.join(' ')).toContain('commit, publication, merge');
   });
 
-  it('offers only one-time approval when an execution request omits its command', async () => {
+  it('keeps remembered opaque execution behind both explicit profile gates', async () => {
     const { session, run } = await ownership();
-    const policy = materializeAcpPermission({
+    const oneTime = materializeAcpPermission({
       toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
       options,
       session,
       run,
       allowOpaqueExecuteOnce: true
     });
-    expect(policy.allowedActions).toEqual([
+    const remembered = materializeAcpPermission({
+      toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
+      options,
+      session,
+      run,
+      allowOpaqueExecuteOnce: true,
+      allowRememberedApprovals: true
+    });
+    expect(oneTime.allowedActions).toEqual([
       'ACCEPT',
       'DECLINE',
       'DECLINE_FOR_SESSION',
       'CANCEL'
     ]);
-    expect(policy.warnings.join(' ')).toContain('verifiable command');
+    expect(remembered.allowedActions).toEqual([
+      'ACCEPT',
+      'ACCEPT_FOR_SESSION',
+      'DECLINE',
+      'DECLINE_FOR_SESSION',
+      'CANCEL'
+    ]);
+    expect(remembered.warnings.join(' ')).toContain('verifiable command');
+    expect(remembered.warnings.join(' ')).toContain('provider controls what its remembered');
   });
 
   it('fails closed for opaque execution outside an explicitly attested profile', async () => {
@@ -98,8 +117,64 @@ describe('ACP permission safety intersection', () => {
     });
     expect(policy.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
     expect(policy.request.providerOptions).toEqual([
-      { id: 'yes-once', label: 'Allow', kind: 'allow_once' },
-      { id: 'no-once', label: 'Reject', kind: 'reject_once' }
+      { id: 'yes-once', label: 'Allow', action: 'ACCEPT' },
+      { id: 'no-once', label: 'Reject', action: 'DECLINE' }
+    ]);
+  });
+
+  it('exposes an exact provider-remembered command option when the profile enables it', async () => {
+    const { session, run } = await ownership();
+    const policy = materializeAcpPermission({
+      toolCall: {
+        toolCallId: 'tool-remembered',
+        kind: 'execute',
+        rawInput: { command: 'npm test', cwd: session.worktreePath }
+      },
+      options,
+      session,
+      run,
+      allowRememberedApprovals: true
+    });
+
+    expect(policy.allowedActions).toEqual([
+      'ACCEPT',
+      'ACCEPT_FOR_SESSION',
+      'DECLINE',
+      'DECLINE_FOR_SESSION',
+      'CANCEL'
+    ]);
+    expect(policy.warnings.join(' ')).toContain('provider controls what its remembered');
+  });
+
+  it('exposes an exact remembered option only for a verified file mutation when enabled', async () => {
+    const { session, run } = await ownership();
+    const filePath = path.join(session.worktreePath, 'src', 'safe.ts');
+    const enabled = materializeAcpPermission({
+      toolCall: { toolCallId: 'tool-file', kind: 'edit', locations: [{ path: filePath }] },
+      options,
+      session,
+      run,
+      allowRememberedApprovals: true
+    });
+    const disabled = materializeAcpPermission({
+      toolCall: { toolCallId: 'tool-file', kind: 'edit', locations: [{ path: filePath }] },
+      options,
+      session,
+      run
+    });
+
+    expect(enabled.allowedActions).toEqual([
+      'ACCEPT',
+      'ACCEPT_FOR_SESSION',
+      'DECLINE',
+      'DECLINE_FOR_SESSION',
+      'CANCEL'
+    ]);
+    expect(disabled.allowedActions).toEqual([
+      'ACCEPT',
+      'DECLINE',
+      'DECLINE_FOR_SESSION',
+      'CANCEL'
     ]);
   });
 
@@ -117,6 +192,188 @@ describe('ACP permission safety intersection', () => {
     });
     expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
     expect(policy.warnings.join(' ')).toContain('does not allow command network access');
+  });
+});
+
+describe('ACP automatic permission selection', () => {
+  it('does not select an option for supervised access', async () => {
+    const { session, run } = await ownership();
+    const toolCall = {
+      toolCallId: 'tool-supervised',
+      kind: 'edit' as const,
+      locations: [{ path: path.join(session.worktreePath, 'src', 'safe.ts') }]
+    };
+    const materialized = materializeAcpPermission({ toolCall, options, session, run });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'on-request',
+        toolCall,
+        options,
+        materialized
+      })
+    ).toBeUndefined();
+  });
+
+  it('auto-accepts only a locally verified file mutation with the exact one-time option', async () => {
+    const { session, run } = await ownership();
+    const safeToolCall = {
+      toolCallId: 'tool-safe',
+      kind: 'move' as const,
+      locations: [{ path: path.join(session.worktreePath, 'src', 'safe.ts') }]
+    };
+    const unsafeToolCall = {
+      toolCallId: 'tool-unsafe',
+      kind: 'move' as const,
+      locations: [{ path: path.join(session.worktreePath, '..', 'outside.ts') }]
+    };
+
+    const safe = materializeAcpPermission({
+      toolCall: safeToolCall,
+      options,
+      session,
+      run
+    });
+    const unsafe = materializeAcpPermission({
+      toolCall: unsafeToolCall,
+      options,
+      session,
+      run
+    });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'auto-accept-edits',
+        toolCall: safeToolCall,
+        options,
+        materialized: safe
+      })
+    ).toBe(options[0]);
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'auto-accept-edits',
+        toolCall: unsafeToolCall,
+        options,
+        materialized: unsafe
+      })
+    ).toBeUndefined();
+  });
+
+  it('does not auto-accept commands in auto-accept-edits mode', async () => {
+    const { session, run } = await ownership();
+    const toolCall = {
+      toolCallId: 'tool-command',
+      kind: 'execute' as const,
+      rawInput: { command: 'npm test', cwd: session.worktreePath }
+    };
+    const materialized = materializeAcpPermission({ toolCall, options, session, run });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'auto-accept-edits',
+        toolCall,
+        options,
+        materialized
+      })
+    ).toBeUndefined();
+  });
+
+  it('prefers one-time full-access approval and falls back to an offered remembered option', async () => {
+    const { session, run } = await ownership();
+    const toolCall = { toolCallId: 'tool-full', kind: 'execute' as const };
+    const materialized = materializeAcpPermission({
+      toolCall,
+      options,
+      session,
+      run,
+      allowOpaqueExecuteOnce: true,
+      allowRememberedApprovals: true
+    });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'never',
+        toolCall,
+        options,
+        materialized
+      })
+    ).toBe(options[0]);
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'never',
+        toolCall,
+        options: [options[1]!, options[2]!],
+        materialized
+      })
+    ).toBe(options[1]);
+
+    const outsideMutation = {
+      toolCallId: 'tool-full-outside',
+      kind: 'edit' as const,
+      locations: [{ path: path.join(session.worktreePath, '..', 'outside.ts') }]
+    };
+    const blocked = materializeAcpPermission({
+      toolCall: outsideMutation,
+      options,
+      session,
+      run,
+      allowRememberedApprovals: true
+    });
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'never',
+        toolCall: outsideMutation,
+        options,
+        materialized: blocked
+      })
+    ).toBeUndefined();
+  });
+
+  it('leaves ambiguous positive provider choices for explicit user selection', async () => {
+    const { session, run } = await ownership();
+    const toolCall = { toolCallId: 'tool-ambiguous', kind: 'edit' as const };
+    const duplicateOneTime = [
+      options[0]!,
+      { optionId: 'yes-once-other', name: 'Allow this edit', kind: 'allow_once' as const },
+      options[2]!
+    ];
+    const oneTimePolicy = materializeAcpPermission({
+      toolCall,
+      options: duplicateOneTime,
+      session,
+      run
+    });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'auto-accept-edits',
+        toolCall,
+        options: duplicateOneTime,
+        materialized: oneTimePolicy
+      })
+    ).toBeUndefined();
+
+    const duplicateRemembered = [
+      options[1]!,
+      { optionId: 'yes-always-other', name: 'Remember this edit', kind: 'allow_always' as const },
+      options[2]!
+    ];
+    const rememberedPolicy = materializeAcpPermission({
+      toolCall,
+      options: duplicateRemembered,
+      session,
+      run,
+      allowRememberedApprovals: true
+    });
+
+    expect(
+      selectAutomaticAcpPermissionOption({
+        approvalPolicy: 'never',
+        toolCall,
+        options: duplicateRemembered,
+        materialized: rememberedPolicy
+      })
+    ).toBeUndefined();
   });
 });
 

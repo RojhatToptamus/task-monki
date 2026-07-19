@@ -138,6 +138,8 @@ export interface AgentRuntimeAdapter {
   preflight(): Promise<AgentPreflight>;
   capabilities(): Promise<AgentRuntimeCapabilities>;
   listModels(): Promise<AgentModel[]>;
+  /** Refresh a provider-owned model catalog after an explicit user request. */
+  discoverModels?(): Promise<void>;
   readNativeState?(): Promise<AgentJsonValue | undefined>;
   listSessionControls?(): Promise<AgentSessionControlSet[]>;
   applySessionControl?(input: {

@@ -62,6 +62,9 @@ const INTERACTION_ACTIONS = [
   'APPLY_NETWORK_POLICY_AMENDMENT', 'GRANT_TURN', 'GRANT_SESSION',
   'ANSWER', 'DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL'
 ] as const;
+const PROVIDER_PERMISSION_ACTIONS = [
+  'ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'DECLINE_FOR_SESSION'
+] as const;
 const GOAL_SYNC_STATES = [
   'IN_SYNC', 'DIVERGED', 'CLEARED', 'SYNC_FAILED', 'UNKNOWN'
 ] as const;
@@ -485,7 +488,7 @@ function validateInteractions(state: StoreState): void {
     stringArray(request, 'policyWarnings', 'interactionRequests', true);
     interactionRequestPayload(request.type as string, request.request);
     if (request.decision !== undefined) {
-      interactionDecision(request.type as string, request.decision);
+      interactionDecision(request.type as string, request.decision, request.request);
     }
     protocolReference(request.requestRawMessage, 'interactionRequests.requestRawMessage');
     if (request.requestRawMessage.direction !== 'INBOUND') invalid('interactionRequests');
@@ -557,13 +560,16 @@ function interactionRequestPayload(type: string, value: unknown): void {
         }
       }
       if (request.providerOptions !== undefined) {
-        if (!Array.isArray(request.providerOptions)) invalid('interactionRequests');
+        if (!Array.isArray(request.providerOptions) || request.providerOptions.length === 0) {
+          invalid('interactionRequests');
+        }
+        const optionIds = new Set<string>();
         for (const option of request.providerOptions) {
-          strings(
-            persistedRecord(option, 'interactionRequests'),
-            'interactionRequests',
-            ['id', 'label', 'kind']
-          );
+          const record = persistedRecord(option, 'interactionRequests');
+          strings(record, 'interactionRequests', ['id', 'label']);
+          enumField(record, 'action', PROVIDER_PERMISSION_ACTIONS, 'interactionRequests');
+          if (optionIds.has(record.id as string)) invalid('interactionRequests');
+          optionIds.add(record.id as string);
         }
       }
       return;
@@ -645,7 +651,7 @@ function interactionRequestPayload(type: string, value: unknown): void {
   }
 }
 
-function interactionDecision(type: string, value: unknown): void {
+function interactionDecision(type: string, value: unknown, requestValue: unknown): void {
   const decision = persistedRecord(value, 'interactionRequests');
   enumField(decision, 'interactionType', [type], 'interactionRequests');
   switch (type) {
@@ -668,6 +674,29 @@ function interactionDecision(type: string, value: unknown): void {
         stringArray(decision, 'amendment', 'interactionRequests');
       } else if (decision.action === 'APPLY_NETWORK_POLICY_AMENDMENT') {
         networkPolicyAmendment(decision.amendment);
+      } else if (
+        ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'DECLINE_FOR_SESSION'].includes(
+          decision.action as string
+        )
+      ) {
+        const request = persistedRecord(requestValue, 'interactionRequests');
+        const providerOptions = request.providerOptions;
+        if (providerOptions === undefined) {
+          if (decision.providerOptionId !== undefined) invalid('interactionRequests');
+        } else {
+          stringField(decision, 'providerOptionId', 'interactionRequests');
+          const selected = (providerOptions as unknown[])
+            .map((option) => persistedRecord(option, 'interactionRequests'))
+            .find((option) => option.id === decision.providerOptionId);
+          if (
+            !selected ||
+            selected.action !== decision.action
+          ) {
+            invalid('interactionRequests');
+          }
+        }
+      } else if (decision.providerOptionId !== undefined) {
+        invalid('interactionRequests');
       }
       return;
     case 'FILE_CHANGE_APPROVAL':

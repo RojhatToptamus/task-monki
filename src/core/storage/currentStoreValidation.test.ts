@@ -112,6 +112,63 @@ describe('validateCurrentStoreRecords', () => {
       'interactionRequests contains a malformed record'
     );
   });
+
+  it('validates the durable provider option selected for a command response', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.request = {
+      startedAtMs: Date.now(),
+      command: 'npm test',
+      providerOptions: [
+        { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' }
+      ]
+    };
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT',
+      providerOptionId: 'allow-once'
+    };
+    state.interactionRequests = [interaction];
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+
+    interaction.decision.providerOptionId = 7 as never;
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+  });
+
+  it('rejects ambiguous or mismatched durable provider permission options', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.request = {
+      startedAtMs: Date.now(),
+      command: 'npm test',
+      providerOptions: [
+        { id: 'same', label: 'Allow once', action: 'ACCEPT' },
+        { id: 'same', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+      ]
+    };
+    state.interactionRequests = [interaction];
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+
+    interaction.request = {
+      startedAtMs: Date.now(),
+      command: 'npm test',
+      providerOptions: [
+        { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+      ]
+    };
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT',
+      providerOptionId: 'allow-always'
+    };
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+  });
 });
 
 function validTask(): Task {

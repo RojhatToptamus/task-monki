@@ -54,6 +54,44 @@ describe('inboxInteractionDecisions', () => {
     });
   });
 
+  it('returns the exact native option IDs for an ACP permission request', () => {
+    const d = inboxInteractionDecisions(
+      interaction(
+        'COMMAND_APPROVAL',
+        ['ACCEPT', 'DECLINE', 'CANCEL'],
+        {
+          startedAtMs: 1,
+          providerOptions: [
+            { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' },
+            {
+              id: 'allow-always',
+              label: 'Allow always',
+              action: 'ACCEPT_FOR_SESSION'
+            },
+            { id: 'reject-once', label: 'Reject', action: 'DECLINE' }
+          ]
+        }
+      )
+    );
+
+    expect(d.approve).toEqual({
+      label: 'Allow once',
+      decision: {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT',
+        providerOptionId: 'allow-once'
+      }
+    });
+    expect(d.deny).toEqual({
+      label: 'Reject',
+      decision: {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'DECLINE',
+        providerOptionId: 'reject-once'
+      }
+    });
+  });
+
   it('grants the current turn for a permission approval, carrying its permissions', () => {
     const d = inboxInteractionDecisions(
       interaction('PERMISSION_APPROVAL', ['GRANT_TURN', 'DECLINE'], {

@@ -58,6 +58,7 @@ interface MainColumnProps {
   agentRuntimesLoading: boolean;
   onRefreshExternalTools(): Promise<void>;
   onRefreshAgentRuntimes(): Promise<void>;
+  onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
@@ -135,6 +136,7 @@ export function MainColumn({
   agentRuntimesLoading,
   onRefreshExternalTools,
   onRefreshAgentRuntimes,
+  onDiscoverAgentRuntimeModels,
   onTestExternalTool,
   error,
   models,
@@ -189,6 +191,7 @@ export function MainColumn({
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
           onRefreshExternalTools={onRefreshExternalTools}
+          onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
           onTestExternalTool={onTestExternalTool}
           onSetAppSettings={onSetAppSettings}
         />
@@ -228,6 +231,7 @@ export function MainColumn({
           agentRuntimesLoading={agentRuntimesLoading}
           onRefreshExternalTools={onRefreshExternalTools}
           onRefreshAgentRuntimes={onRefreshAgentRuntimes}
+          onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
           onTestExternalTool={onTestExternalTool}
           models={models}
           runtimes={runtimes}
@@ -248,6 +252,7 @@ function FirstLaunchSetup({
   onAddRepository,
   onFinishSetup,
   onRefreshExternalTools,
+  onDiscoverAgentRuntimeModels,
   onTestExternalTool,
   onSetAppSettings
 }: {
@@ -261,6 +266,7 @@ function FirstLaunchSetup({
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
   onRefreshExternalTools(): Promise<void>;
+  onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   onSetAppSettings(
     settings: UpdateAppSettingsRequest,
@@ -383,6 +389,7 @@ function FirstLaunchSetup({
                 effortValue={selectedModels.selectedDefaultEffort}
                 models={models}
                 runtimes={runtimes}
+                onDiscoverModels={onDiscoverAgentRuntimeModels}
                 onRuntimeChange={(runtimeId) => {
                   const nextModel = selectModel(models, undefined, runtimeId);
                   onSetAppSettings({

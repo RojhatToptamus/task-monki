@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentModel } from '../../shared/contracts';
 import { ATTACHMENT_FILE_INPUT_ACCEPT } from '../../shared/attachments';
 import {
@@ -133,6 +133,62 @@ describe('NewTaskPanel', () => {
     expect(failedAttachment).toContain('aria-label="Remove query.sql"');
   });
 
+  it('offers retry for an explicitly activated catalog that already failed', () => {
+    const discoverModels = vi.fn(async () => undefined);
+    const capabilities = codexCapabilities();
+    const html = renderToStaticMarkup(
+      <NewTaskPanel
+        defaultRepositoryPath="/tmp/project"
+        models={[]}
+        runtimes={[
+          {
+            preflight: {
+              runtime: {
+                id: 'cursor-agent-acp',
+                displayName: 'Cursor Agent',
+                kind: 'ACP_AGENT',
+                transport: 'STDIO',
+                lifecycleScope: 'APPLICATION'
+              },
+              readiness: createRuntimeReadiness('FAILED', 'Model discovery failed.', {
+                checks: { modelCatalog: 'FAILED' }
+              }),
+              capabilities: {
+                ...capabilities,
+                runtimeId: 'cursor-agent-acp',
+                modelCatalog: {
+                  ...capabilities.modelCatalog,
+                  activation: 'EXPLICIT'
+                }
+              }
+            },
+            models: [],
+            refreshedAt: '2026-07-18T00:00:00.000Z'
+          }
+        ]}
+        onCreate={async () => undefined}
+        onRefinePrompt={async () => ({
+          titleSuggestion: 'Task',
+          prompt: 'Do the task.',
+          source: 'deterministic-fallback'
+        })}
+        onStageAttachmentBatch={async () => ({
+          id: 'draft-1',
+          attachments: [],
+          createdAt: '2026-07-18T00:00:00.000Z',
+          updatedAt: '2026-07-18T00:00:00.000Z'
+        })}
+        onDiscardAttachmentDraft={async () => undefined}
+        onDiscoverAgentRuntimeModels={discoverModels}
+        onClose={() => undefined}
+      />
+    );
+
+    expect(discoverModels).not.toHaveBeenCalled();
+    expect(html).toContain('Retry model discovery');
+    expect(html).not.toContain('>Load models<');
+  });
+
   it('shows task-level controls and the attachment composer without raw Codex fields', () => {
     const models: AgentModel[] = [
       {
@@ -162,7 +218,12 @@ describe('NewTaskPanel', () => {
       }
     ];
 
-    const renderPanel = (attachmentsEnabled = true) => renderToStaticMarkup(
+    const capabilities = codexCapabilities();
+    const discoverAgentRuntimeModels = vi.fn(async () => undefined);
+    const renderPanel = (
+      attachmentsEnabled = true,
+      defaultPresetId = capabilities.executionPolicy.defaultPresetId
+    ) => renderToStaticMarkup(
       <NewTaskPanel
         defaultRepositoryPath="/tmp/project"
         models={models}
@@ -192,7 +253,13 @@ describe('NewTaskPanel', () => {
                   }
                 ]
               }),
-              capabilities: codexCapabilities(),
+              capabilities: {
+                ...capabilities,
+                executionPolicy: {
+                  ...capabilities.executionPolicy,
+                  defaultPresetId
+                }
+              },
             },
             models: models.filter((model) => model.runtimeId === 'codex'),
             refreshedAt: '2026-07-10T00:00:00.000Z'
@@ -227,12 +294,14 @@ describe('NewTaskPanel', () => {
           updatedAt: '2026-07-10T00:00:00.000Z'
         })}
         onDiscardAttachmentDraft={async () => undefined}
+        onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
         onClose={() => undefined}
       />
     );
     const html = renderPanel();
 
-    expect(html).toContain('Permission mode');
+    expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
+    expect(html).toContain('Execution policy');
     expect(html).toContain('Sandboxed');
     expect(html).toContain('<option value="sandboxed" selected="">Sandboxed</option>');
     expect(html).toContain('Ask for approval');
@@ -251,7 +320,7 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('>Agent<');
     expect(html).toContain('aria-label="Agent runtime"');
     expect(html).toContain('aria-label="Model"');
-    expect(html).toContain('aria-label="Permission mode"');
+    expect(html).toContain('aria-label="Execution policy"');
     expect(html).toContain('OpenCode');
     expect(html).not.toContain('OpenCode-only model');
     expect(html).not.toContain('>Sandbox<');
@@ -260,6 +329,9 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('The saved runtime change will apply after this turn.');
     expect(html).not.toContain('Internal ACP client-tool notice.');
     expect(html).not.toContain('Reasoning effort');
+
+    const fullAccessHtml = renderPanel(true, 'full-access');
+    expect(fullAccessHtml).toContain('Required by this execution policy.');
 
     const gatedHtml = renderPanel(false);
     expect(gatedHtml).toContain('Unavailable in this build');

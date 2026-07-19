@@ -152,6 +152,36 @@ describe('development HTTP server', () => {
     });
   });
 
+  it('routes explicit runtime model discovery without coupling it to catalog reads', async () => {
+    const catalog = {
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+    const getAgentRuntimeCatalog = vi.fn(async () => catalog);
+    const discoverAgentRuntimeModels = vi.fn(async () => catalog);
+    const running = await startServer({
+      getAgentRuntimeCatalog,
+      discoverAgentRuntimeModels
+    });
+
+    const passive = await fetch(`${running.baseUrl}/api/agent/runtimes`, {
+      headers: running.headers
+    });
+    expect(passive.status).toBe(200);
+    expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
+
+    const explicit = await fetch(`${running.baseUrl}/api/agent/runtimes/discover`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
+    });
+    expect(explicit.status).toBe(200);
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledOnce();
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
+  });
+
   it('accepts one bounded attachment batch and preserves no source path', async () => {
     const stageTaskAttachmentBatch = vi.fn(async (input: { attachments: Array<{ bytes: ArrayBuffer }> }) => ({
       id: 'draft-1',

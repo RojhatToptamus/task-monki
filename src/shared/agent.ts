@@ -17,6 +17,11 @@ export interface AgentCapability {
   detail?: string;
 }
 
+export interface AgentModelCatalogCapability extends AgentCapability {
+  /** Catalog activation is allowed only in direct response to a user selection. */
+  activation?: 'EXPLICIT';
+}
+
 export interface AgentExecutionPolicyPreset {
   /** Runtime-owned stable ID; it is not assumed to exist on another runtime. */
   id: string;
@@ -39,7 +44,7 @@ export interface AgentRuntimeCapabilities {
   /** Truthful Task Monki execution presets supplied by this runtime adapter. */
   executionPolicy: AgentExecutionPolicyCapability;
   promptRefinement: AgentCapability;
-  modelCatalog: AgentCapability;
+  modelCatalog: AgentModelCatalogCapability;
   reasoningEffort: AgentCapability;
   persistentSessions: AgentCapability;
   sessionResume: AgentCapability;
@@ -572,6 +577,22 @@ export type AgentInteractionAction =
   | 'DECLINE_FOR_SESSION'
   | 'CANCEL';
 
+export type AgentProviderPermissionAction = Extract<
+  AgentInteractionAction,
+  'ACCEPT' | 'ACCEPT_FOR_SESSION' | 'DECLINE' | 'DECLINE_FOR_SESSION'
+>;
+
+export function isAgentProviderPermissionAction(
+  action: AgentInteractionAction
+): action is AgentProviderPermissionAction {
+  return (
+    action === 'ACCEPT' ||
+    action === 'ACCEPT_FOR_SESSION' ||
+    action === 'DECLINE' ||
+    action === 'DECLINE_FOR_SESSION'
+  );
+}
+
 export interface AgentNetworkApprovalContext {
   host: string;
   protocol: string;
@@ -592,11 +613,11 @@ export interface AgentCommandApprovalRequest {
   networkApprovalContext?: AgentNetworkApprovalContext;
   proposedExecPolicyAmendment?: string[];
   proposedNetworkPolicyAmendments?: AgentNetworkPolicyAmendment[];
-  /** Runtime-native choices retained verbatim for exact response correlation. */
+  /** Exact provider choice identity plus Task Monki's normalized local action. */
   providerOptions?: Array<{
     id: string;
     label: string;
-    kind: string;
+    action: AgentProviderPermissionAction;
   }>;
 }
 
@@ -688,8 +709,16 @@ export type AgentInteractionRequestPayload =
   | AgentDynamicToolRequest;
 
 export type AgentCommandApprovalDecision =
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'ACCEPT' }
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'ACCEPT_FOR_SESSION' }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'ACCEPT';
+      providerOptionId?: string;
+    }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'ACCEPT_FOR_SESSION';
+      providerOptionId?: string;
+    }
   | {
       interactionType: 'COMMAND_APPROVAL';
       action: 'ACCEPT_EXEC_POLICY_AMENDMENT';
@@ -700,8 +729,16 @@ export type AgentCommandApprovalDecision =
       action: 'APPLY_NETWORK_POLICY_AMENDMENT';
       amendment: AgentNetworkPolicyAmendment;
     }
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'DECLINE' }
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'DECLINE_FOR_SESSION' }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'DECLINE';
+      providerOptionId?: string;
+    }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'DECLINE_FOR_SESSION';
+      providerOptionId?: string;
+    }
   | { interactionType: 'COMMAND_APPROVAL'; action: 'CANCEL' };
 
 export type AgentFileChangeApprovalDecision =

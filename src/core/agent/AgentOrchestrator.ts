@@ -3,6 +3,7 @@ import type {
   AgentExecutionSettings,
   AgentRuntimeCatalog,
   AgentRuntimeId,
+  AgentRuntimeState,
   AgentReviewTarget,
   AgentRunMode,
   AgentSessionRecord,
@@ -241,6 +242,25 @@ export class AgentOrchestrator {
     }
     const { unsafeRuntimeIds } = await this.classifyBrowserRuntimeIsolation();
     return this.runtimes.getCatalog({
+      disabledRuntimeIds,
+      excludedRuntimeIds: unsafeRuntimeIds,
+      exclusionReason:
+        'This runtime is unavailable in browser development because it does not attest the required process, filesystem, and network isolation.'
+    });
+  }
+
+  async discoverAgentRuntimeModels(
+    runtimeId: AgentRuntimeId,
+    disabledRuntimeIds: ReadonlySet<AgentRuntimeId> = new Set()
+  ): Promise<AgentRuntimeState> {
+    this.assertProviderStartupAvailable();
+    if (this.options.allowNetworkAccess !== false) {
+      return this.runtimes.discoverAgentRuntimeModels(runtimeId, {
+        disabledRuntimeIds
+      });
+    }
+    const { unsafeRuntimeIds } = await this.classifyBrowserRuntimeIsolation();
+    return this.runtimes.discoverAgentRuntimeModels(runtimeId, {
       disabledRuntimeIds,
       excludedRuntimeIds: unsafeRuntimeIds,
       exclusionReason:

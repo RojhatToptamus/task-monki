@@ -14,6 +14,7 @@ import { AcpRuntimeAdapter } from './AcpRuntimeAdapter';
 import type { AcpSessionConfigOption, AcpSessionUpdate } from './AcpProtocol';
 import type { AcpRpcClient } from './AcpRpcClient';
 import {
+  CURSOR_PARAMETERIZED_MODEL_CATALOG,
   GROK_SESSION_MODEL_EXTENSION,
   type AcpRuntimeProfile
 } from './AcpRuntimeProfiles';
@@ -298,73 +299,133 @@ describe('AcpRuntimeAdapter end-to-end', () => {
     }
   });
 
-  it('promotes and restores Cursor model selectors only from task-owned sessions', async () => {
+  it('discovers the Cursor catalog only on demand and caches it for the ACP process', async () => {
     const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'task-monki-cursor-model-selector-')
+      path.join(os.tmpdir(), 'task-monki-cursor-model-catalog-')
     );
     temporaryDirectories.push(directory);
     const agentScript = path.join(directory, 'cursor-agent.cjs');
-    const catalogMarker = path.join(directory, 'catalog-state.txt');
-    const sessionSequence = path.join(directory, 'session-sequence.txt');
+    const messageLog = path.join(directory, 'messages.ndjson');
+    const generationFile = path.join(directory, 'generation.txt');
+    const discoveryFailureFile = path.join(directory, 'discovery-failed-once');
+    const authenticationFailureFile = path.join(directory, 'authentication-failure');
     await fs.writeFile(
       agentScript,
-      cursorModelSelectorAgentSource(catalogMarker, sessionSequence),
+      cursorParameterizedModelAgentSource(
+        messageLog,
+        generationFile,
+        discoveryFailureFile,
+        authenticationFailureFile
+      ),
       { mode: 0o600 }
     );
-    const runtimeId = 'test-cursor-model-selector';
-    const exactModel = 'grok-4.5[effort=high,fast=true]';
+    const runtimeId = 'test-cursor-model-catalog';
     const profile: AcpRuntimeProfile = {
       ...TEST_ACP_PROFILE,
       descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
       defaultModelProvider: 'cursor',
       defaultModel: 'default',
-      promoteSessionModelSelector: true,
+      parameterizedModelCatalog: CURSOR_PARAMETERIZED_MODEL_CATALOG,
       executableCandidates: [process.execPath],
       argv: [agentScript]
     };
     const store = new FileTaskStore(path.join(directory, 'store'));
-    const createAdapter = () =>
-      new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
-        cwd: directory,
-        requestTimeoutMs: 2_000,
-        runtimeResolver: async () => ({
-          executable: process.execPath,
-          version: process.version,
-          diagnostics: {
-            selectedExecutable: process.execPath,
-            selectedSource: 'test',
-            selectedVersion: process.version,
-            selectedLaunchArgv: [agentScript],
-            requiredCapabilities: ['ACP protocolVersion=1'],
-            probes: []
-          }
-        })
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 2_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default', displayName: 'Auto' })
+      ]);
+      expect((await store.snapshot()).agentServers).toEqual([]);
+      await expect(fs.readFile(messageLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+      await expect(
+        Promise.all([adapter.discoverModels(), adapter.discoverModels()])
+      ).rejects.toThrow('has no models');
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: {
+          status: 'FAILED',
+          checks: { modelCatalog: 'FAILED' },
+          nextAction: { kind: 'RETRY', label: 'Retry model discovery' }
+        }
       });
-    const defaultSettings = {
-      runtimeId,
-      model: 'default',
-      modelProvider: 'cursor',
-      sandbox: 'DANGER_FULL_ACCESS' as const,
-      networkAccess: true,
-      approvalPolicy: 'on-request',
-      approvalsReviewer: 'user' as const
-    };
-    const createOwnedSession = async (
-      slug: string,
-      settings: typeof defaultSettings
-    ) => {
-      const worktreePath = path.join(directory, slug);
+      expect(
+        (await readCursorAgentMessages(messageLog)).filter(
+          (message) => message.method === 'cursor/list_available_models'
+        )
+      ).toHaveLength(1);
+
+      await adapter.discoverModels();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default', displayName: 'Auto', isDefault: true }),
+        expect.objectContaining({
+          model: 'grok-4.5',
+          displayName: 'Cursor Grok 4.5',
+          isDefault: false,
+          supportedReasoningEfforts: ['low', 'medium', 'high'],
+          defaultReasoningEffort: 'medium',
+          native: expect.objectContaining({
+            source: 'provider-parameterized-model-catalog',
+            reasoningConfigId: 'effort'
+          })
+        })
+      ]);
+      let messages = await readCursorAgentMessages(messageLog);
+      expect(messages.map((message) => message.method)).toEqual([
+        'initialize',
+        'cursor/list_available_models',
+        'cursor/list_available_models'
+      ]);
+      expect(messages[0]?.params).toMatchObject({
+        clientCapabilities: {
+          _meta: { parameterizedModelPicker: true }
+        }
+      });
+
+      await adapter.discoverModels();
+      expect(
+        (await readCursorAgentMessages(messageLog)).filter(
+          (message) => message.method === 'cursor/list_available_models'
+        )
+      ).toHaveLength(2);
+
+      const settings = {
+        runtimeId,
+        model: 'default',
+        modelProvider: 'cursor',
+        sandbox: 'DANGER_FULL_ACCESS' as const,
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user' as const
+      };
+      const worktreePath = path.join(directory, 'authentication-worktree');
       await fs.mkdir(worktreePath);
       const task = await store.createTask({
-        title: slug,
-        prompt: 'Implement the requested change.',
+        title: 'Observe Cursor authentication failure',
+        prompt: 'Do not start a prompt.',
         repositoryPath: directory,
         runtimeId,
         agentSettings: settings
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
-        branchName: `codex/${slug}`,
+        branchName: 'codex/cursor-authentication-failure',
         worktreePath,
         baseSha: 'base'
       });
@@ -375,138 +436,164 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         runtimeId,
         requestedSettings: settings
       });
-      return { task, iteration, worktree, session };
-    };
-
-    const first = createAdapter();
-    try {
-      await first.initialize();
-      await expect(first.listModels()).resolves.toEqual([
-        expect.objectContaining({ model: 'default', displayName: 'Auto' })
-      ]);
-      expect((await store.snapshot()).agentServers).toEqual([]);
-
-      const owned = await createOwnedSession('cursor-default', defaultSettings);
-      await first.createSession({
-        runtimeId,
-        localSessionId: owned.session.id,
-        taskId: owned.task.id,
-        iterationId: owned.iteration.id,
-        worktreeId: owned.worktree.id,
-        worktreePath: owned.worktree.worktreePath,
-        settings: defaultSettings
-      });
-      await expect(first.listModels()).resolves.toEqual([
-        expect.objectContaining({ model: 'default[]', displayName: 'Auto', isDefault: true }),
-        expect.objectContaining({
-          model: exactModel,
-          displayName: 'grok-4.5',
-          isDefault: false,
-          native: {
-            source: 'task-owned-session-model-selector',
-            configId: 'model'
-          }
-        }),
-        expect.objectContaining({
-          model: 'composer-2.5[fast=true]',
-          displayName: 'composer-2.5'
-        })
-      ]);
-      await first.shutdown();
-      await first.initialize();
-      const reenabled = await createOwnedSession('cursor-reenabled', defaultSettings);
+      await fs.writeFile(authenticationFailureFile, 'fail');
       await expect(
-        first.createSession({
+        adapter.createSession({
           runtimeId,
-          localSessionId: reenabled.session.id,
-          taskId: reenabled.task.id,
-          iterationId: reenabled.iteration.id,
-          worktreeId: reenabled.worktree.id,
-          worktreePath: reenabled.worktree.worktreePath,
-          settings: defaultSettings
+          localSessionId: session.id,
+          taskId: task.id,
+          iterationId: iteration.id,
+          worktreeId: worktree.id,
+          worktreePath,
+          settings
+        })
+      ).rejects.toThrow('Authentication required');
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default' })
+      ]);
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: { status: 'AUTHENTICATION_REQUIRED' }
+      });
+      await fs.rm(authenticationFailureFile);
+      await adapter.discoverModels();
+      expect(
+        (await readCursorAgentMessages(messageLog)).filter(
+          (message) => message.method === 'cursor/list_available_models'
+        )
+      ).toHaveLength(3);
+
+      await adapter.configureRuntime({ restart: true });
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default' })
+      ]);
+      await adapter.discoverModels();
+      messages = await readCursorAgentMessages(messageLog);
+      expect(
+        messages.filter((message) => message.method === 'cursor/list_available_models')
+      ).toHaveLength(4);
+      expect(new Set(messages.map((message) => message.generation))).toEqual(new Set([1, 2]));
+
+      await adapter.shutdown();
+      await expect(adapter.listModels()).resolves.toEqual([
+        expect.objectContaining({ model: 'default' })
+      ]);
+      await adapter.discoverModels();
+      messages = await readCursorAgentMessages(messageLog);
+      expect(
+        messages.filter((message) => message.method === 'cursor/list_available_models')
+      ).toHaveLength(5);
+      expect(new Set(messages.map((message) => message.generation))).toEqual(
+        new Set([1, 2, 3])
+      );
+    } finally {
+      await adapter.shutdown();
+    }
+  });
+
+  it('applies a selected Cursor model before its catalog-derived reasoning value', async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-cursor-model-selection-')
+    );
+    temporaryDirectories.push(directory);
+    const agentScript = path.join(directory, 'cursor-agent.cjs');
+    const messageLog = path.join(directory, 'messages.ndjson');
+    const generationFile = path.join(directory, 'generation.txt');
+    await fs.writeFile(
+      agentScript,
+      cursorParameterizedModelAgentSource(messageLog, generationFile),
+      { mode: 0o600 }
+    );
+    const runtimeId = 'test-cursor-model-selection';
+    const profile: AcpRuntimeProfile = {
+      ...TEST_ACP_PROFILE,
+      descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
+      defaultModelProvider: 'cursor',
+      defaultModel: 'default',
+      parameterizedModelCatalog: CURSOR_PARAMETERIZED_MODEL_CATALOG,
+      executableCandidates: [process.execPath],
+      argv: [agentScript]
+    };
+    const store = new FileTaskStore(path.join(directory, 'store'));
+    const adapter = new AcpRuntimeAdapter(store, new AppEventBus(), profile, {
+      cwd: directory,
+      requestTimeoutMs: 2_000,
+      runtimeResolver: async () => ({
+        executable: process.execPath,
+        version: process.version,
+        diagnostics: {
+          selectedExecutable: process.execPath,
+          selectedSource: 'test',
+          selectedVersion: process.version,
+          selectedLaunchArgv: [agentScript],
+          requiredCapabilities: ['ACP protocolVersion=1'],
+          probes: []
+        }
+      })
+    });
+    const settings = {
+      runtimeId,
+      model: 'grok-4.5',
+      modelProvider: 'cursor',
+      reasoningEffort: 'low',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user' as const
+    };
+    const task = await store.createTask({
+      title: 'Select a Cursor model',
+      prompt: 'Use the requested model.',
+      repositoryPath: directory,
+      runtimeId,
+      agentSettings: settings
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/cursor-model-selection',
+      worktreePath: directory,
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId,
+      requestedSettings: settings
+    });
+
+    try {
+      await adapter.discoverModels();
+      await expect(
+        adapter.resolveExecution({ settings, attachments: [] })
+      ).resolves.toMatchObject({
+        settings: { model: 'grok-4.5', reasoningEffort: 'low' },
+        model: { model: 'grok-4.5' }
+      });
+      await expect(
+        adapter.createSession({
+          runtimeId,
+          localSessionId: session.id,
+          taskId: task.id,
+          iterationId: iteration.id,
+          worktreeId: worktree.id,
+          worktreePath: worktree.worktreePath,
+          settings
         })
       ).resolves.toMatchObject({
-        id: reenabled.session.id,
-        providerSessionId: expect.any(String)
-      });
-    } finally {
-      await first.shutdown();
-    }
-
-    const serverCountBeforeRestore = (await store.snapshot()).agentServers.length;
-    const restored = createAdapter();
-    try {
-      await restored.initialize();
-      await expect(restored.listModels()).resolves.toEqual([
-        expect.objectContaining({ model: 'default[]', displayName: 'Auto' }),
-        expect.objectContaining({ model: exactModel }),
-        expect.objectContaining({ model: 'composer-2.5[fast=true]' })
-      ]);
-      expect((await store.snapshot()).agentServers).toHaveLength(serverCountBeforeRestore);
-
-      const selectedSettings = { ...defaultSettings, model: exactModel };
-      await expect(
-        restored.resolveExecution({ settings: selectedSettings, attachments: [] })
-      ).resolves.toMatchObject({
-        settings: { model: exactModel, modelProvider: 'cursor' },
-        model: { model: exactModel }
-      });
-      const selected = await createOwnedSession('cursor-selected', selectedSettings);
-      await restored.createSession({
-        runtimeId,
-        localSessionId: selected.session.id,
-        taskId: selected.task.id,
-        iterationId: selected.iteration.id,
-        worktreeId: selected.worktree.id,
-        worktreePath: selected.worktree.worktreePath,
-        settings: selectedSettings
-      });
-      await expect(restored.listModels()).resolves.toEqual([
-        expect.objectContaining({ model: 'default[]', isDefault: true }),
-        expect.objectContaining({ model: exactModel, isDefault: false }),
-        expect.objectContaining({ model: 'composer-2.5[fast=true]', isDefault: false })
-      ]);
-      expect(await protocolMethodCount(store, 'session/set_config_option')).toBe(1);
-      const activeServer = (await store.snapshot()).agentServers.find(
-        (server) => server.status === 'READY'
-      );
-      expect(activeServer).toBeDefined();
-      const journal = await fs.readFile(activeServer!.protocolJournalPath, 'utf8');
-      expect(
-        journal
-          .trim()
-          .split('\n')
-          .map((line) => JSON.parse(JSON.parse(line).raw))
-      ).toContainEqual({
-        jsonrpc: '2.0',
-        id: expect.any(Number),
-        method: 'session/set_config_option',
-        params: {
-          sessionId: expect.any(String),
-          configId: 'model',
-          value: exactModel
+        observedSettings: {
+          model: 'grok-4.5',
+          reasoningEffort: 'low'
         }
       });
-
-      await fs.writeFile(catalogMarker, 'stale');
-      const stale = await createOwnedSession('cursor-stale', selectedSettings);
-      await expect(
-        restored.createSession({
-          runtimeId,
-          localSessionId: stale.session.id,
-          taskId: stale.task.id,
-          iterationId: stale.iteration.id,
-          worktreeId: stale.worktree.id,
-          worktreePath: stale.worktree.worktreePath,
-          settings: selectedSettings
-        })
-      ).rejects.toThrow(`does not offer value ${exactModel}`);
-      expect(await protocolMethodCount(store, 'session/set_config_option')).toBe(1);
-      await expect(restored.listModels()).resolves.toEqual([
-        expect.objectContaining({ model: 'default[]', displayName: 'Auto' })
+      const configRequests = (await readCursorAgentMessages(messageLog)).filter(
+        (message) => message.method === 'session/set_config_option'
+      );
+      expect(configRequests.map((message) => message.params)).toEqual([
+        expect.objectContaining({ configId: 'model', value: 'grok-4.5' }),
+        expect.objectContaining({ configId: 'effort', value: 'low' })
       ]);
     } finally {
-      await restored.shutdown();
+      await adapter.shutdown();
     }
   });
 
@@ -942,6 +1029,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       defaultModelProvider: 'xai',
       defaultModel: 'grok-build',
       sessionModelExtension: GROK_SESSION_MODEL_EXTENSION,
+      terminalFailureMessage: {
+        exactText: 'Upgrade your plan to continue',
+        diagnostic:
+          'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
+      },
       executableCandidates: [process.execPath],
       argv: [agentScript],
       environmentPolicy: {
@@ -1461,8 +1553,8 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       );
       expect(pending.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
       expect('providerOptions' in pending.request && pending.request.providerOptions).toEqual([
-        { id: 'native-allow-42', label: 'Allow once', kind: 'allow_once' },
-        { id: 'native-reject-7', label: 'Reject', kind: 'reject_once' }
+        { id: 'native-allow-42', label: 'Allow once', action: 'ACCEPT' },
+        { id: 'native-reject-7', label: 'Reject', action: 'DECLINE' }
       ]);
       await expect(
         adapter.releaseSession({
@@ -1483,7 +1575,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         taskId: task.id,
         runId: run.id,
         interactionRequestId: pending.id,
-        decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'native-allow-42'
+        }
       });
 
       const completed = await waitFor(async () => {
@@ -1702,7 +1798,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
             taskId: task.id,
             runId: persistenceRun.id,
             interactionRequestId: persistenceInteraction.id,
-            decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+            decision: {
+              interactionType: 'COMMAND_APPROVAL',
+              action: 'ACCEPT',
+              providerOptionId: 'native-allow-42'
+            }
           })
         ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
       } finally {
@@ -1805,6 +1905,36 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       );
       expect(await fs.readFile(tokenLimitArtifact!.path, 'utf8')).toContain(
         'Failure: The ACP agent reached its token limit before completing the turn.'
+      );
+
+      const planLimitedRun = await store.createRun({
+        task,
+        session: (await store.getAgentSession(session.id))!,
+        mode: 'FOLLOW_UP',
+        prompt: 'plan limit terminal',
+        requestedSettings: settings
+      });
+      await adapter.startTurn({
+        localRunId: planLimitedRun.id,
+        session: { localSessionId: session.id, providerSessionId: session.providerSessionId },
+        mode: 'FOLLOW_UP',
+        prompt: 'plan limit terminal',
+        authoritativeGoal: task.prompt,
+        settings
+      });
+      const planLimited = await waitFor(async () => {
+        const current = await store.getRun(planLimitedRun.id);
+        return current?.status === 'FAILED' ? current : undefined;
+      });
+      expect(planLimited.finalMessage).toBe('Upgrade your plan to continue');
+      expect(planLimited.terminalReason).toBe(
+        'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
+      );
+      const planLimitArtifact = (await store.snapshot()).artifacts.find(
+        (artifact) => artifact.id === planLimited.finalArtifactId
+      );
+      expect(await fs.readFile(planLimitArtifact!.path, 'utf8')).toContain(
+        'Failure: Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
       );
 
       const malformedRun = await store.createRun({
@@ -1986,7 +2116,11 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         taskId: task.id,
         runId: replacementRun.id,
         interactionRequestId: replacementInteraction.id,
-        decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'native-allow-42'
+        }
       });
       const replacementCompleted = await waitFor(async () => {
         const current = await store.getRun(replacementRun.id);
@@ -2040,7 +2174,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       const submittedPrompts = protocolMessages.filter(
         (message) => message.method === 'session/prompt'
       );
-      expect(submittedPrompts).toHaveLength(11);
+      expect(submittedPrompts).toHaveLength(12);
       expect(
         protocolMessages.filter((message) => message.method === 'session/close')
       ).toHaveLength(2);
@@ -2393,7 +2527,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     {
       profileName: 'Cursor',
       allowOpaqueExecuteOnce: true,
-      expectedActions: ['ACCEPT', 'DECLINE', 'CANCEL']
+      expectedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL']
     },
     {
       profileName: 'another ACP runtime',
@@ -2402,98 +2536,23 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     }
   ])(
     'keeps opaque execute approval profile-scoped for $profileName',
-    async ({ profileName, allowOpaqueExecuteOnce, expectedActions }) => {
-      const directory = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'task-monki-acp-opaque-permission-')
-      );
-      temporaryDirectories.push(directory);
-      const agentScript = path.join(directory, 'permission-agent.cjs');
-      await fs.writeFile(agentScript, permissionMaterializationAgentSource(), {
-        mode: 0o600
-      });
+    async ({ allowOpaqueExecuteOnce, expectedActions }) => {
       const runtimeId = allowOpaqueExecuteOnce
         ? 'test-cursor-opaque-permission'
         : 'test-acp-opaque-permission';
-      const profile: AcpRuntimeProfile = {
-        ...TEST_ACP_PROFILE,
-        descriptor: { ...TEST_ACP_PROFILE.descriptor, id: runtimeId },
-        ...(allowOpaqueExecuteOnce ? { allowOpaqueExecuteOnce: true as const } : {}),
-        executableCandidates: [process.execPath],
-        argv: [agentScript]
-      };
-      const store = new FileTaskStore(path.join(directory, 'store'));
-      const events = new AppEventBus();
-      const adapter = new AcpRuntimeAdapter(store, events, profile, {
-        cwd: directory,
-        requestTimeoutMs: 1_000,
-        runtimeResolver: async () => ({
-          executable: process.execPath,
-          version: process.version,
-          diagnostics: {
-            selectedExecutable: process.execPath,
-            selectedSource: 'test',
-            selectedVersion: process.version,
-            selectedLaunchArgv: [agentScript],
-            requiredCapabilities: ['ACP protocolVersion=1'],
-            probes: []
-          }
-        })
-      });
-      const settings = {
+      const harness = await createPermissionHarness({
         runtimeId,
-        model: 'default',
-        modelProvider: 'test-provider',
-        sandbox: 'DANGER_FULL_ACCESS' as const,
-        networkAccess: true,
         approvalPolicy: 'on-request',
-        approvalsReviewer: 'user' as const
-      };
-      const task = await store.createTask({
-        title: `${profileName} opaque permission`,
-        prompt: 'Request an opaque execute permission.',
-        repositoryPath: directory,
-        runtimeId,
-        agentSettings: settings
+        ...(allowOpaqueExecuteOnce
+          ? {
+              allowOpaqueExecuteOnce: true as const,
+              allowRememberedPermissions: true as const
+            }
+          : {})
       });
-      const { iteration, worktree } = await store.createIterationAndWorktree({
-        task,
-        branchName: `codex/${runtimeId}`,
-        worktreePath: directory,
-        baseSha: 'base'
-      });
-      const session = await store.createAgentSession({
-        task,
-        iteration,
-        worktree,
-        runtimeId,
-        requestedSettings: settings
-      });
-      const run = await store.createRun({
-        task,
-        session,
-        mode: 'IMPLEMENTATION',
-        prompt: task.prompt,
-        requestedSettings: settings
-      });
+      const { adapter, client, events, run, server, store, task } = harness;
 
       try {
-        await adapter.initialize();
-        await adapter.startTurn({
-          localRunId: run.id,
-          session: { localSessionId: session.id },
-          mode: 'IMPLEMENTATION',
-          prompt: task.prompt,
-          authoritativeGoal: task.prompt,
-          settings,
-          attachments: []
-        });
-        const runtimeInternals = adapter as unknown as {
-          boundClient?: AcpRpcClient;
-        };
-        const client = runtimeInternals.boundClient!;
-        const server = (await store.snapshot()).agentServers.find(
-          (candidate) => candidate.status === 'RUNNING'
-        )!;
         const requestId = `opaque-permission-${runtimeId}`;
         const request = {
           jsonrpc: '2.0' as const,
@@ -2508,6 +2567,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             },
             options: [
               { optionId: 'opaque-allow-once', name: 'Allow once', kind: 'allow_once' },
+              { optionId: 'opaque-allow-always', name: 'Allow always', kind: 'allow_always' },
               { optionId: 'opaque-reject-once', name: 'Reject', kind: 'reject_once' }
             ]
           }
@@ -2532,7 +2592,11 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             taskId: task.id,
             runId: run.id,
             interactionRequestId: pending.id,
-            decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
+            decision: {
+              interactionType: 'COMMAND_APPROVAL',
+              action: 'ACCEPT',
+              providerOptionId: 'opaque-allow-once'
+            }
           });
           const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
           const messages = journal
@@ -2544,6 +2608,170 @@ describe('AcpRuntimeAdapter permission materialization', () => {
             id: requestId,
             result: { outcome: { outcome: 'selected', optionId: 'opaque-allow-once' } }
           });
+        }
+      } finally {
+        await adapter.shutdown();
+      }
+    }
+  );
+
+  it.each([
+    {
+      name: 'supervised access',
+      approvalPolicy: 'on-request',
+      toolKind: 'execute',
+      automatic: false,
+      verifiableCommand: true,
+      verifyCommandStillPrompts: false
+    },
+    {
+      name: 'auto-accept edits',
+      approvalPolicy: 'auto-accept-edits',
+      toolKind: 'edit',
+      automatic: true,
+      verifiableCommand: false,
+      verifyCommandStillPrompts: true
+    },
+    {
+      name: 'full access',
+      approvalPolicy: 'never',
+      toolKind: 'execute',
+      automatic: true,
+      verifiableCommand: false,
+      verifyCommandStillPrompts: false
+    }
+  ] as const)(
+    'respects exact provider options for $name',
+    async ({
+      approvalPolicy,
+      toolKind,
+      automatic,
+      verifiableCommand,
+      verifyCommandStillPrompts
+    }) => {
+      const runtimeId = `test-acp-${approvalPolicy}-permission`;
+      const harness = await createPermissionHarness({
+        runtimeId,
+        approvalPolicy,
+        allowRememberedPermissions: true,
+        allowOpaqueExecuteOnce: true
+      });
+      const { adapter, client, directory, run, server, store } = harness;
+
+      try {
+        const requestId = `${approvalPolicy}-automatic`;
+        const request = {
+          jsonrpc: '2.0' as const,
+          id: requestId,
+          method: 'session/request_permission',
+          params: {
+            sessionId: 'permission-materialization-session',
+            toolCall: {
+              toolCallId: `${requestId}-tool`,
+              title: toolKind === 'edit' ? 'Edit a file' : 'Run a command',
+              kind: toolKind,
+              ...(toolKind === 'edit'
+                ? { locations: [{ path: path.join(directory, 'src', 'safe.ts') }] }
+                : {}),
+              ...(verifiableCommand
+                ? { rawInput: { command: 'npm test', cwd: directory } }
+                : {})
+            },
+            options: [
+              { optionId: `${requestId}-once`, name: 'Allow once', kind: 'allow_once' },
+              { optionId: `${requestId}-always`, name: 'Allow for session', kind: 'allow_always' },
+              { optionId: `${requestId}-reject`, name: 'Reject', kind: 'reject_once' }
+            ]
+          }
+        };
+        const raw = await store.appendProtocolMessage(
+          server.id,
+          'INBOUND',
+          JSON.stringify(request)
+        );
+        client.events.emit('request', request, raw);
+
+        if (automatic) {
+          const response = await waitFor(async () =>
+            (await readProtocolMessages(server.protocolJournalPath)).find(
+              (message) => message.id === requestId && 'result' in message
+            )
+          );
+          expect(response).toEqual({
+            jsonrpc: '2.0',
+            id: requestId,
+            result: {
+              outcome: { outcome: 'selected', optionId: `${requestId}-once` }
+            }
+          });
+          expect(
+            (await store.snapshot()).interactionRequests.some(
+              (interaction) => interaction.providerRequestId === requestId
+            )
+          ).toBe(false);
+        } else {
+          const pending = await waitFor(async () =>
+            (await store.snapshot()).interactionRequests.find(
+              (interaction) =>
+                interaction.providerRequestId === requestId &&
+                interaction.status === 'PENDING'
+            )
+          );
+          expect(pending.allowedActions).toEqual([
+            'ACCEPT',
+            'ACCEPT_FOR_SESSION',
+            'DECLINE',
+            'CANCEL'
+          ]);
+          expect(pending.request).toMatchObject({
+            providerOptions: [
+              { id: `${requestId}-once`, label: 'Allow once', action: 'ACCEPT' },
+              {
+                id: `${requestId}-always`,
+                label: 'Allow for session',
+                action: 'ACCEPT_FOR_SESSION'
+              },
+              { id: `${requestId}-reject`, label: 'Reject', action: 'DECLINE' }
+            ]
+          });
+        }
+
+        if (verifyCommandStillPrompts) {
+          const commandId = `${approvalPolicy}-command`;
+          const command = {
+            jsonrpc: '2.0' as const,
+            id: commandId,
+            method: 'session/request_permission',
+            params: {
+              sessionId: 'permission-materialization-session',
+              toolCall: {
+                toolCallId: `${commandId}-tool`,
+                title: 'Run tests',
+                kind: 'execute',
+                rawInput: { command: 'npm test', cwd: directory }
+              },
+              options: request.params.options
+            }
+          };
+          const commandRaw = await store.appendProtocolMessage(
+            server.id,
+            'INBOUND',
+            JSON.stringify(command)
+          );
+          client.events.emit('request', command, commandRaw);
+          const pending = await waitFor(async () =>
+            (await store.snapshot()).interactionRequests.find(
+              (interaction) =>
+                interaction.providerRequestId === commandId &&
+                interaction.status === 'PENDING'
+            )
+          );
+          expect(pending.allowedActions).toEqual([
+            'ACCEPT',
+            'ACCEPT_FOR_SESSION',
+            'DECLINE',
+            'CANCEL'
+          ]);
         }
       } finally {
         await adapter.shutdown();
@@ -3208,65 +3436,235 @@ async function protocolMethodCount(
   return messages.filter((message) => message.method === method).length;
 }
 
+async function readProtocolMessages(
+  protocolJournalPath: string
+): Promise<Array<Record<string, unknown>>> {
+  return (await fs.readFile(protocolJournalPath, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(JSON.parse(line).raw) as Record<string, unknown>);
+}
+
+async function createPermissionHarness(input: {
+  runtimeId: string;
+  approvalPolicy: 'on-request' | 'auto-accept-edits' | 'never';
+  allowOpaqueExecuteOnce?: true;
+  allowRememberedPermissions?: true;
+}) {
+  const directory = await fs.mkdtemp(
+    path.join(os.tmpdir(), `task-monki-acp-${input.runtimeId}-`)
+  );
+  temporaryDirectories.push(directory);
+  const agentScript = path.join(directory, 'permission-agent.cjs');
+  await fs.writeFile(agentScript, permissionMaterializationAgentSource(), {
+    mode: 0o600
+  });
+  const profile: AcpRuntimeProfile = {
+    ...TEST_ACP_PROFILE,
+    descriptor: { ...TEST_ACP_PROFILE.descriptor, id: input.runtimeId },
+    approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
+    ...(input.allowOpaqueExecuteOnce ? { allowOpaqueExecuteOnce: true } : {}),
+    ...(input.allowRememberedPermissions
+      ? { allowRememberedPermissions: true }
+      : {}),
+    executableCandidates: [process.execPath],
+    argv: [agentScript]
+  };
+  const store = new FileTaskStore(path.join(directory, 'store'));
+  const events = new AppEventBus();
+  const adapter = new AcpRuntimeAdapter(store, events, profile, {
+    cwd: directory,
+    requestTimeoutMs: 1_000,
+    runtimeResolver: async () => ({
+      executable: process.execPath,
+      version: process.version,
+      diagnostics: {
+        selectedExecutable: process.execPath,
+        selectedSource: 'test',
+        selectedVersion: process.version,
+        selectedLaunchArgv: [agentScript],
+        requiredCapabilities: ['ACP protocolVersion=1'],
+        probes: []
+      }
+    })
+  });
+  const settings = {
+    runtimeId: input.runtimeId,
+    model: 'default',
+    modelProvider: 'test-provider',
+    sandbox: 'DANGER_FULL_ACCESS' as const,
+    networkAccess: true,
+    approvalPolicy: input.approvalPolicy,
+    approvalsReviewer: 'user' as const
+  };
+  const task = await store.createTask({
+    title: `${input.approvalPolicy} permission`,
+    prompt: 'Exercise provider permissions.',
+    repositoryPath: directory,
+    runtimeId: input.runtimeId,
+    agentSettings: settings
+  });
+  const { iteration, worktree } = await store.createIterationAndWorktree({
+    task,
+    branchName: `codex/${input.runtimeId}`,
+    worktreePath: directory,
+    baseSha: 'base'
+  });
+  const session = await store.createAgentSession({
+    task,
+    iteration,
+    worktree,
+    runtimeId: input.runtimeId,
+    requestedSettings: settings
+  });
+  const run = await store.createRun({
+    task,
+    session,
+    mode: 'IMPLEMENTATION',
+    prompt: task.prompt,
+    requestedSettings: settings
+  });
+  try {
+    await adapter.startTurn({
+      localRunId: run.id,
+      session: { localSessionId: session.id },
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      authoritativeGoal: task.prompt,
+      settings,
+      attachments: []
+    });
+  } catch (cause) {
+    await adapter.shutdown();
+    throw cause;
+  }
+  const client = (adapter as unknown as { boundClient?: AcpRpcClient }).boundClient!;
+  const server = (await store.snapshot()).agentServers.find(
+    (candidate) => candidate.status === 'RUNNING'
+  )!;
+  return { adapter, client, directory, events, run, server, store, task };
+}
+
 function itemPayloadText(item: { payload: unknown } | undefined): string {
   if (!item || typeof item.payload !== 'object' || item.payload === null) return '';
   const text = (item.payload as { text?: unknown }).text;
   return typeof text === 'string' ? text : '';
 }
 
-function cursorModelSelectorAgentSource(
-  catalogMarker: string,
-  sessionSequence: string
+interface CursorAgentMessage {
+  generation: number;
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+async function readCursorAgentMessages(messageLog: string): Promise<CursorAgentMessage[]> {
+  return (await fs.readFile(messageLog, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as CursorAgentMessage);
+}
+
+function cursorParameterizedModelAgentSource(
+  messageLog: string,
+  generationFile: string,
+  discoveryFailureFile?: string,
+  authenticationFailureFile?: string
 ): string {
   return `
 const fs = require('node:fs');
 const readline = require('node:readline');
+let generation = 1;
+try { generation = Number(fs.readFileSync(${JSON.stringify(generationFile)}, 'utf8')) + 1; }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
+fs.writeFileSync(${JSON.stringify(generationFile)}, String(generation));
 const input = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
-const fullOptions = [
-  { value: 'default[]', name: 'Auto' },
-  { value: 'grok-4.5[effort=high,fast=true]', name: 'grok-4.5' },
-  { value: 'composer-2.5[fast=true]', name: 'composer-2.5' }
+const record = (message) => fs.appendFileSync(
+  ${JSON.stringify(messageLog)},
+  JSON.stringify({ generation, method: message.method, params: message.params }) + '\\n'
+);
+const modelOptions = [
+  { value: 'default', name: 'Auto' },
+  { value: 'grok-4.5', name: 'Cursor Grok 4.5' }
 ];
-const selector = (currentValue, options = fullOptions) => ({
+const modelSelector = (currentValue) => ({
   id: 'model',
   name: 'Model',
   category: 'model',
   type: 'select',
   currentValue,
-  options
+  options: modelOptions
 });
-const nextSessionId = () => {
-  let sequence = 0;
-  try { sequence = Number(fs.readFileSync(${JSON.stringify(sessionSequence)}, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  sequence += 1;
-  fs.writeFileSync(${JSON.stringify(sessionSequence)}, String(sequence));
-  return 'cursor-session-' + sequence;
-};
+const effortSelector = (currentValue = 'medium') => ({
+  id: 'effort',
+  name: 'Reasoning effort',
+  category: 'thought_level',
+  type: 'select',
+  currentValue,
+  options: [
+    { value: 'low', name: 'Low' },
+    { value: 'medium', name: 'Medium' },
+    { value: 'high', name: 'High' }
+  ]
+});
+let selectedModel = 'default';
 input.on('line', (line) => {
   const message = JSON.parse(line);
+  record(message);
   if (message.method === 'initialize') {
     send({ jsonrpc: '2.0', id: message.id, result: {
       protocolVersion: 1,
       agentCapabilities: { promptCapabilities: {} },
-      agentInfo: { name: 'cursor-selector-agent', version: '1.0.0' }
+      agentInfo: { name: 'cursor-parameterized-model-agent', version: '1.0.0' }
+    }});
+    return;
+  }
+  if (message.method === 'cursor/list_available_models') {
+    ${discoveryFailureFile ? `
+    if (!fs.existsSync(${JSON.stringify(discoveryFailureFile)})) {
+      fs.writeFileSync(${JSON.stringify(discoveryFailureFile)}, 'failed');
+      send({ jsonrpc: '2.0', id: message.id, result: { models: [] } });
+      return;
+    }` : ''}
+    send({ jsonrpc: '2.0', id: message.id, result: {
+      models: [
+        { value: 'default', name: 'Auto', configOptions: [] },
+        {
+          value: 'grok-4.5',
+          name: 'Cursor Grok 4.5',
+          configOptions: [effortSelector()]
+        }
+      ]
     }});
     return;
   }
   if (message.method === 'session/new') {
-    let stale = false;
-    try { stale = fs.readFileSync(${JSON.stringify(catalogMarker)}, 'utf8') === 'stale'; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    ${authenticationFailureFile ? `
+    if (fs.existsSync(${JSON.stringify(authenticationFailureFile)})) {
+      send({ jsonrpc: '2.0', id: message.id, error: {
+        code: -32001,
+        message: 'Authentication required'
+      }});
+      return;
+    }` : ''}
     send({ jsonrpc: '2.0', id: message.id, result: {
-      sessionId: nextSessionId(),
-      configOptions: [selector('default[]', stale ? [fullOptions[0]] : fullOptions)]
+      sessionId: 'cursor-session-' + generation,
+      configOptions: [modelSelector(selectedModel)]
     }});
     return;
   }
   if (message.method === 'session/set_config_option') {
+    if (message.params.configId === 'model') selectedModel = message.params.value;
+    const configOptions = selectedModel === 'grok-4.5'
+      ? [
+          modelSelector(selectedModel),
+          effortSelector(message.params.configId === 'effort' ? message.params.value : 'medium')
+        ]
+      : [modelSelector(selectedModel)];
     send({ jsonrpc: '2.0', id: message.id, result: {
-      configOptions: [selector(message.params.value)]
+      configOptions
     }});
     return;
   }
@@ -3788,6 +4186,18 @@ input.on('line', (line) => {
     }
     if (JSON.stringify(message.params.prompt).includes('token limit terminal')) {
       send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'max_tokens' } });
+      return;
+    }
+    if (JSON.stringify(message.params.prompt).includes('plan limit terminal')) {
+      send({ jsonrpc: '2.0', method: 'session/update', params: {
+        sessionId: 'provider-session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'message-plan-limit',
+          content: { type: 'text', text: 'Upgrade your plan to continue' }
+        }
+      }});
+      send({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } });
       return;
     }
     if (JSON.stringify(message.params.prompt).includes('high volume stream')) {

@@ -39,6 +39,7 @@ export interface SettingsViewProps {
   agentRuntimesLoading: boolean;
   onRefreshExternalTools(): Promise<void>;
   onRefreshAgentRuntimes(): Promise<void>;
+  onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
@@ -256,7 +257,13 @@ function AgentRuntimeSetting({
   );
 }
 
-function ModelSettings({ appSettings, onSetAppSettings, models, runtimes }: SettingsViewProps) {
+function ModelSettings({
+  appSettings,
+  onSetAppSettings,
+  onDiscoverAgentRuntimeModels,
+  models,
+  runtimes
+}: SettingsViewProps) {
   const disabledRuntimeIds = useMemo(
     () => new Set(appSettings.disabledRuntimeIds),
     [appSettings.disabledRuntimeIds]
@@ -294,6 +301,7 @@ function ModelSettings({ appSettings, onSetAppSettings, models, runtimes }: Sett
           effortValue={selected.selectedDefaultEffort}
           models={enabledModels}
           runtimes={enabledRuntimes}
+          onDiscoverModels={onDiscoverAgentRuntimeModels}
           onRuntimeChange={(runtimeId) => {
             const nextModel = selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
@@ -322,6 +330,7 @@ function ModelSettings({ appSettings, onSetAppSettings, models, runtimes }: Sett
           value={selected.selectedPromptRefinementModel?.id ?? ''}
           models={enabledModels}
           runtimes={promptRefinementRuntimes}
+          onDiscoverModels={onDiscoverAgentRuntimeModels}
           onRuntimeChange={(runtimeId) => {
             const nextModel = selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
@@ -345,6 +354,7 @@ function ModelSettings({ appSettings, onSetAppSettings, models, runtimes }: Sett
           effortValue={selected.selectedReviewEffort}
           models={enabledModels}
           runtimes={reviewRuntimes}
+          onDiscoverModels={onDiscoverAgentRuntimeModels}
           onRuntimeChange={(runtimeId) => {
             const nextModel = selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
@@ -473,6 +483,7 @@ export function ModelSettingRow({
   effortValue = '',
   models,
   runtimes,
+  onDiscoverModels,
   onRuntimeChange,
   onModelChange,
   onEffortChange
@@ -484,12 +495,19 @@ export function ModelSettingRow({
   effortValue?: string;
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
+  onDiscoverModels?(runtimeId: string): void | Promise<void>;
   onRuntimeChange(value: string): void;
   onModelChange(value: string): void;
   onEffortChange?(value: string): void;
 }) {
-  const runtimeAvailable = runtimes.some(
+  const selectedRuntime = runtimes.find(
     (runtime) => runtime.preflight.runtime.id === runtimeId
+  );
+  const runtimeAvailable = Boolean(selectedRuntime);
+  const canLoadModels = Boolean(
+    onDiscoverModels &&
+      selectedRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+      selectedRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
   );
   const runtimeModels = runtimeAvailable
     ? models.filter((model) => model.runtimeId === runtimeId)
@@ -519,7 +537,19 @@ export function ModelSettingRow({
           <select
             className="tm-settings__select"
             value={runtimes.length > 0 ? runtimeId : ''}
-            onChange={(event) => onRuntimeChange(event.target.value)}
+            onChange={(event) => {
+              const nextRuntimeId = event.target.value;
+              onRuntimeChange(nextRuntimeId);
+              const nextRuntime = runtimes.find(
+                (runtime) => runtime.preflight.runtime.id === nextRuntimeId
+              );
+              if (
+                nextRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+                nextRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
+              ) {
+                void onDiscoverModels?.(nextRuntimeId);
+              }
+            }}
             disabled={runtimes.length === 0}
           >
             {runtimes.length === 0 ? <option value="">Not available</option> : null}
@@ -531,9 +561,10 @@ export function ModelSettingRow({
             ))}
           </select>
         </label>
-        <label>
+        <div className="tm-model-default__field">
           <span>Model</span>
           <select
+            aria-label={`${label} model`}
             className="tm-settings__select"
             value={selected ? value : ''}
             onChange={(event) => onModelChange(event.target.value)}
@@ -552,7 +583,18 @@ export function ModelSettingRow({
                 </option>
               ))}
           </select>
-        </label>
+          {canLoadModels ? (
+            <button
+              type="button"
+              className="tm-settings__button"
+              onClick={() => void onDiscoverModels?.(runtimeId)}
+            >
+              {selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED'
+                ? 'Retry model discovery'
+                : 'Load models'}
+            </button>
+          ) : null}
+        </div>
         {onEffortChange && efforts.length > 0 ? (
           <label className="tm-model-default__effort">
             <span>Effort</span>

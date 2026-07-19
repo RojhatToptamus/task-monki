@@ -127,14 +127,25 @@ for runtime selection and publishes its provider-selected default; the session
 response revalidates the exact ID before any prompt. Those IDs also remain in
 the session's typed control set and are changed through its provider-owned
 `session/set_model`. Other profiles ignore those non-standard fields. Cursor
-instead profile-gates promotion of the exact stable model-category selector
-observed from a real task-owned session. The latest safe provider observation is
-retained across application restart, but every selection is revalidated against
-the next session before `session/set_config_option`. Task Monki never creates an
-orphan Cursor session for discovery; Auto is the only choice before the first
-real Cursor session. A session's current model is not promoted into an
-application default; explicit Task Monki settings remain authoritative and the
-first provider-ordered choice is the fallback. Other stable ACP session-only
+instead uses the captured
+`cursor-agent-acp/parameterized-model-picker@v1` extension. Its initialize
+request alone advertises `_meta.parameterizedModelPicker`; after an explicit
+Cursor selection, the adapter calls `cursor/list_available_models` before any
+`session/new`. The response supplies exact model values plus per-model config
+options, including `category=thought_level` reasoning choices. Auto is the exact
+value `default`. Model selection is applied first because Cursor can replace
+the config catalog for the selected model; reasoning is validated and applied
+against that acknowledged replacement. The catalog is cached only for the
+current application-scoped Cursor process and is cleared on shutdown, process
+loss, executable reconfiguration, or an observed authentication/account
+failure. External CLI authentication changes are not observable while the
+cached process remains healthy; changing or restarting the configured runtime
+establishes a new cache boundary, and a provider-reported authentication failure
+clears it. Task Monki does not poll, discover at startup, discover merely because
+New Task or Settings opened, create an orphan session, or persist the catalog as
+a task-owned settings observation. Selected-runtime surfaces offer an explicit
+Load models action and turn a failed request into Retry; the adapter retains a
+typed catalog failure until retry succeeds. Other stable ACP session-only
 catalogs remain scoped to the provider session that advertised them and do not
 leak into New Task selection.
 
@@ -203,24 +214,41 @@ process generation, and requires explicit run recovery. A coalesced item
 publishes one activity event, whose `coalescedEvents` count makes the compaction
 visible. Permission choices retain the provider's opaque option IDs. Task Monki
 intersects the offered choices with its own command/path/network policy and
-sends back the exact ID; reserved Git/GitHub delivery commands,
-outside-worktree file scope, and disabled-network requests fail closed. When
-Cursor omits command details for a terminal request, its profile may expose
-only the provider's exact one-time approval option. Other ACP profiles fail
-closed on opaque execution scope. Task Monki never turns opaque scope into a
-persistent session grant.
+sends back the exact ID selected under the provider's own label; it never
+chooses the first option merely because two options share a semantic kind.
+Cursor and Grok preserve a provider's remembered option when the current
+operation passes Task Monki's local policy; the UI warns that the provider owns
+the remembered scope and may stop reporting matching operations. Remembered
+rejection remains available when offered. Reserved Git/GitHub delivery
+commands, outside-worktree file scope, and disabled-network requests fail
+closed. When Cursor omits command details for a terminal request, its profile
+may expose the provider's exact one-time and provider-remembered approval
+options. The user must choose either option explicitly under Supervised access;
+Task Monki does not infer the remembered scope. Other ACP profiles fail closed
+on opaque execution scope. Task Monki never implements a provider grant by
+writing repository files or silently changing global configuration.
 Only `end_turn` completes a prompt successfully. `cancelled` interrupts it;
 `refusal`, `max_tokens`, and `max_turn_requests` fail it with a bounded provider
-diagnostic.
+diagnostic. Cursor currently reports its exact `Upgrade your plan to continue`
+account or usage gate as ordinary message text followed by `end_turn`. The
+Cursor profile recognizes only that complete message as a failed turn; Task
+Monki preserves the provider text and leaves implementation in a retryable
+state. Other empty, read-only, and no-change `end_turn` responses remain valid
+completions.
 
 ## Security and execution policy
 
 ACP does not attest an OS filesystem or network sandbox for the provider
-process. The current profiles therefore expose one truthful preset:
-`provider-controlled-full-access` (`DANGER_FULL_ACCESS`, network required,
-on-request approvals, user reviewer). Restricted workspace, read-only,
-network-disabled, automated-reviewer, and `never`-approval settings are rejected
-instead of being silently downgraded.
+process. Claude and unrecognized profiles therefore expose only **Supervised**.
+Cursor and Grok expose **Supervised**, **Auto-accept edits**, and **Full
+access**, all with `DANGER_FULL_ACCESS`, required network, and the user as
+reviewer. These policies control only responses to permission requests the
+provider sends: Supervised asks the user, Auto-accept edits chooses an exact
+`allow_once` only for verified in-worktree mutations, and Full access chooses an
+exact positive option automatically. They do not change Cursor into its
+read-only native `ask` mode and do not claim process confinement. Restricted
+workspace, read-only, network-disabled, and automated-reviewer settings are
+rejected instead of being silently downgraded.
 
 For the same reason, Task Monki attachment delivery is currently unsupported
 for ACP. Agents may negotiate native ACP image/resource blocks, and that state

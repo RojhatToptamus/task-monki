@@ -187,6 +187,35 @@ export function App() {
       reportActionError(caught, 'Failed to refresh agent runtimes.');
     }
   }, [reportActionError]);
+  const discoverAgentRuntimeModels = useCallback(async (runtimeId: string) => {
+    const runtime = await taskManagerApi.discoverAgentRuntimeModels(runtimeId);
+    setRuntimeCatalog((current) => {
+      if (!current) return current;
+      const runtimeIndex = current.runtimes.findIndex(
+        (candidate) => candidate.preflight.runtime.id === runtimeId
+      );
+      if (runtimeIndex < 0) return current;
+      const runtimes = [...current.runtimes];
+      runtimes[runtimeIndex] = runtime;
+      return {
+        ...current,
+        runtimes,
+        models: runtimes.flatMap((candidate) => candidate.models),
+        refreshedAt: runtime.refreshedAt
+      };
+    });
+  }, []);
+  const discoverSettingsAgentRuntimeModels = useCallback(
+    async (runtimeId: string) => {
+      setError(undefined);
+      try {
+        await discoverAgentRuntimeModels(runtimeId);
+      } catch (caught) {
+        reportActionError(caught, 'Failed to discover agent models.');
+      }
+    },
+    [discoverAgentRuntimeModels, reportActionError]
+  );
   const testExternalTool = useCallback(
     async (input: Parameters<typeof taskManagerApi.testExternalTool>[0]) => {
       const result = await taskManagerApi.testExternalTool(input);
@@ -1192,6 +1221,7 @@ export function App() {
             agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
             onRefreshExternalTools={refreshExternalToolStatus}
             onRefreshAgentRuntimes={refreshAgentRuntimes}
+            onDiscoverAgentRuntimeModels={discoverSettingsAgentRuntimeModels}
             onTestExternalTool={testExternalTool}
             error={error}
             models={runtimeModels}
@@ -1222,6 +1252,7 @@ export function App() {
           onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
           onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
           onReadClipboardImage={taskManagerApi.readClipboardImage}
+          onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
           onClose={closeNewTask}
         />
       ) : null}

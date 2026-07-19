@@ -1,5 +1,6 @@
 import {
   REDACTED_CREDENTIAL,
+  normalizeCredentialFieldName,
   redactCredentialText,
   shouldRedactCredentialRecordEntry
 } from '../AgentCredentialRedaction';
@@ -95,7 +96,10 @@ function redactJsonValue(
   >;
 
   for (const [key, entry] of Object.entries(record)) {
-    if (shouldRedactCredentialRecordEntry(record, key, entry)) {
+    if (
+      normalizeCredentialFieldName(key) === 'email' ||
+      shouldRedactCredentialRecordEntry(record, key, entry)
+    ) {
       redacted[key] = REDACTED_CREDENTIAL;
       changed = true;
       continue;

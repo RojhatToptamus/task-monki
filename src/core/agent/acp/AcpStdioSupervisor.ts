@@ -67,6 +67,13 @@ export interface RunningAcpAgent {
   profileModelState?: AcpSessionModelState;
 }
 
+export function clientCapabilitiesForAcpProfile(profile: AcpRuntimeProfile) {
+  const extensionMeta = profile.parameterizedModelCatalog?.clientCapabilityMeta;
+  return extensionMeta
+    ? { ...ACP_CLIENT_CAPABILITIES, _meta: extensionMeta }
+    : ACP_CLIENT_CAPABILITIES;
+}
+
 export class AcpStdioSupervisor {
   readonly events = new EventEmitter<AcpSupervisorEvents>();
 
@@ -352,7 +359,7 @@ export class AcpStdioSupervisor {
 
       const initialized = await client.request<unknown>('initialize', {
         protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: ACP_CLIENT_CAPABILITIES,
+        clientCapabilities: clientCapabilitiesForAcpProfile(profile),
         clientInfo: {
           name: 'task-monki',
           title: 'Task Monki',

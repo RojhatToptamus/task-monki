@@ -67,6 +67,54 @@ describe('Agent interaction policy', () => {
     ).toThrow('does not match');
   });
 
+  it('requires the exact provider option selected for a native permission request', () => {
+    const interaction = interactionFixture({
+      request: {
+        startedAtMs: 1,
+        command: 'npm test',
+        cwd: '/tmp/worktree',
+        providerOptions: [
+          { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' },
+          { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+        ]
+      },
+      allowedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL']
+    });
+
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('exact option ID');
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'allow-always'
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('does not match');
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'allow-once'
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).not.toThrow();
+  });
+
   it('does not delegate Task Monki-controlled Git delivery actions to Codex', () => {
     const policy = buildInteractionPolicy({
       type: 'COMMAND_APPROVAL',

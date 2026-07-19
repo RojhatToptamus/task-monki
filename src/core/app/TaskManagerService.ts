@@ -60,6 +60,7 @@ import {
   normalizePullRequestTitle,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import type { AgentRuntimeId } from '../../shared/agent';
 import os from 'node:os';
 import path from 'node:path';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
@@ -420,6 +421,15 @@ export class TaskManagerService {
 
   private getAgentRuntimeCatalogUnlocked() {
     return this.agents.getRuntimeCatalog(new Set(this.appSettings.disabledRuntimeIds));
+  }
+
+  async discoverAgentRuntimeModels(runtimeId: AgentRuntimeId) {
+    return this.withRuntimeOperation(() =>
+      this.agents.discoverAgentRuntimeModels(
+        runtimeId,
+        new Set(this.appSettings.disabledRuntimeIds)
+      )
+    );
   }
 
   async updateAgentNativeSession(

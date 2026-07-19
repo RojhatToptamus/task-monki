@@ -1,11 +1,12 @@
-import type {
-  AgentCommandApprovalDecision,
-  AgentExecutionSettings,
-  AgentInteractionAction,
-  AgentItemStatus,
-  AgentItemType,
-  AgentJsonValue,
-  AgentPlanStep
+import {
+  type AgentCommandApprovalDecision,
+  type AgentExecutionSettings,
+  type AgentInteractionAction,
+  type AgentItemStatus,
+  type AgentItemType,
+  type AgentJsonValue,
+  type AgentProviderPermissionAction,
+  type AgentPlanStep
 } from '../../../shared/agent';
 import {
   type AcpContentBlock,
@@ -104,10 +105,10 @@ export function interactionActionsForAcpOptions(
   options: readonly AcpPermissionOption[]
 ): AgentInteractionAction[] {
   const actions: AgentInteractionAction[] = [];
-  if (options.some((option) => option.kind === 'allow_once')) actions.push('ACCEPT');
-  if (options.some((option) => option.kind === 'allow_always')) actions.push('ACCEPT_FOR_SESSION');
-  if (options.some((option) => option.kind === 'reject_once')) actions.push('DECLINE');
-  if (options.some((option) => option.kind === 'reject_always')) actions.push('DECLINE_FOR_SESSION');
+  for (const option of options) {
+    const action = agentActionForAcpPermissionKind(option.kind);
+    if (!actions.includes(action)) actions.push(action);
+  }
   actions.push('CANCEL');
   return actions;
 }
@@ -117,22 +118,51 @@ export function permissionOutcomeForDecision(
   decision: AgentCommandApprovalDecision
 ): { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
   if (decision.action === 'CANCEL') return { outcome: 'cancelled' };
-  const kind =
-    decision.action === 'ACCEPT'
-      ? 'allow_once'
-      : decision.action === 'ACCEPT_FOR_SESSION'
-        ? 'allow_always'
-        : decision.action === 'DECLINE'
-          ? 'reject_once'
-          : decision.action === 'DECLINE_FOR_SESSION'
-            ? 'reject_always'
-            : undefined;
-  if (!kind) throw new Error(`ACP cannot represent ${decision.action} as a permission option.`);
-  const selected = options.find((option) => option.kind === kind);
+  const providerOptionId =
+    'providerOptionId' in decision ? decision.providerOptionId : undefined;
+  if (!providerOptionId) {
+    throw new Error('An ACP permission response requires the exact provider option ID.');
+  }
+  const selected = options.find((option) => option.optionId === providerOptionId);
   if (!selected) {
-    throw new Error(`The ACP agent did not offer a ${kind} permission option.`);
+    throw new Error(`The ACP agent did not offer permission option ${providerOptionId}.`);
+  }
+  if (agentActionForAcpPermissionKind(selected.kind) !== decision.action) {
+    throw new Error(
+      `ACP permission option ${selected.optionId} does not represent ${decision.action}.`
+    );
   }
   return { outcome: 'selected', optionId: selected.optionId };
+}
+
+export function agentActionForAcpPermissionKind(
+  kind: AcpPermissionOption['kind']
+): AgentProviderPermissionAction {
+  switch (kind) {
+    case 'allow_once':
+      return 'ACCEPT';
+    case 'allow_always':
+      return 'ACCEPT_FOR_SESSION';
+    case 'reject_once':
+      return 'DECLINE';
+    case 'reject_always':
+      return 'DECLINE_FOR_SESSION';
+  }
+}
+
+export function acpPermissionKindForAgentAction(
+  action: AgentProviderPermissionAction
+): AcpPermissionOption['kind'] {
+  switch (action) {
+    case 'ACCEPT':
+      return 'allow_once';
+    case 'ACCEPT_FOR_SESSION':
+      return 'allow_always';
+    case 'DECLINE':
+      return 'reject_once';
+    case 'DECLINE_FOR_SESSION':
+      return 'reject_always';
+  }
 }
 
 export function observedSettingsFromAcpState(

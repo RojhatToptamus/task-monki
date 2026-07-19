@@ -1,6 +1,9 @@
 import type {
+  AgentCommandApprovalDecision,
+  AgentCommandApprovalRequest,
   AgentInteractionDecision,
   AgentPermissionApprovalRequest,
+  AgentProviderPermissionAction,
   InteractionRequestRecord
 } from '../../shared/contracts';
 
@@ -30,14 +33,24 @@ export function inboxInteractionDecisions(
   }
 
   switch (interaction.type) {
-    case 'COMMAND_APPROVAL':
-      if (has(interaction, 'ACCEPT')) {
+    case 'COMMAND_APPROVAL': {
+      const providerOptions = commandProviderOptions(interaction);
+      const approvals = providerOptions.filter(
+        (option) => option.action === 'ACCEPT' || option.action === 'ACCEPT_FOR_SESSION'
+      );
+      if (approvals.length === 1) {
+        result.approve = {
+          label: approvals[0]!.label,
+          decision: approvals[0]!.decision
+        };
+      } else if (providerOptions.length === 0 && has(interaction, 'ACCEPT')) {
         result.approve = {
           label: 'Approve',
           decision: { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' }
         };
       }
       break;
+    }
     case 'FILE_CHANGE_APPROVAL':
       if (has(interaction, 'ACCEPT')) {
         result.approve = {
@@ -63,7 +76,29 @@ export function inboxInteractionDecisions(
   }
 
   switch (interaction.type) {
-    case 'COMMAND_APPROVAL':
+    case 'COMMAND_APPROVAL': {
+      const providerOptions = commandProviderOptions(interaction);
+      const rejections = providerOptions.filter(
+        (option) => option.action === 'DECLINE' || option.action === 'DECLINE_FOR_SESSION'
+      );
+      if (rejections.length === 1) {
+        result.deny = {
+          label: rejections[0]!.label,
+          decision: rejections[0]!.decision
+        };
+      } else if (providerOptions.length === 0 && has(interaction, 'DECLINE')) {
+        result.deny = {
+          label: 'Deny',
+          decision: { interactionType: 'COMMAND_APPROVAL', action: 'DECLINE' }
+        };
+      } else if (providerOptions.length === 0 && has(interaction, 'CANCEL')) {
+        result.deny = {
+          label: 'Cancel',
+          decision: { interactionType: 'COMMAND_APPROVAL', action: 'CANCEL' }
+        };
+      }
+      break;
+    }
     case 'FILE_CHANGE_APPROVAL':
     case 'MCP_ELICITATION':
       if (has(interaction, 'DECLINE')) {
@@ -92,4 +127,27 @@ export function inboxInteractionDecisions(
   }
 
   return result;
+}
+
+function commandProviderOptions(interaction: InteractionRequestRecord): Array<{
+  label: string;
+  action: AgentProviderPermissionAction;
+  decision: AgentCommandApprovalDecision;
+}> {
+  const request = interaction.request as AgentCommandApprovalRequest;
+  return (request.providerOptions ?? []).flatMap((option) => {
+    const action = option.action;
+    if (!has(interaction, action)) return [];
+    return [
+      {
+        label: option.label,
+        action,
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action,
+          providerOptionId: option.id
+        } as AgentCommandApprovalDecision
+      }
+    ];
+  });
 }

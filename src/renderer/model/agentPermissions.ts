@@ -8,6 +8,7 @@ import {
 export type AgentPermissionMode =
   | 'SANDBOXED'
   | 'ASK_FOR_APPROVAL'
+  | 'AUTO_ACCEPT_EDITS'
   | 'APPROVE_FOR_ME'
   | 'FULL_ACCESS'
   | 'CUSTOM';
@@ -56,6 +57,13 @@ export function inferAgentPermissionMode(
     return 'ASK_FOR_APPROVAL';
   }
   if (
+    sandbox === 'DANGER_FULL_ACCESS' &&
+    approvalPolicy === 'auto-accept-edits' &&
+    approvalsReviewer === 'user'
+  ) {
+    return 'AUTO_ACCEPT_EDITS';
+  }
+  if (
     (sandbox === 'WORKSPACE_WRITE' || sandbox === 'READ_ONLY') &&
     settings.networkAccess !== true &&
     approvalPolicy === 'never' &&
@@ -88,6 +96,8 @@ export function formatAgentPermissionMode(
       return 'Sandboxed';
     case 'ASK_FOR_APPROVAL':
       return 'Ask for approval';
+    case 'AUTO_ACCEPT_EDITS':
+      return 'Auto-accept edits';
     case 'APPROVE_FOR_ME':
       return 'Approve for me';
     case 'FULL_ACCESS':

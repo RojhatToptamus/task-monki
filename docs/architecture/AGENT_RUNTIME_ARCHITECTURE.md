@@ -270,12 +270,19 @@ method, so its application catalog normally contains only the profile default;
 exact models advertised only by a live ACP session remain in that session's
 revisioned controls. Two profiles opt into stronger contracts. Grok's versioned
 provider extension advertises the account/runtime catalog in ACP initialize
-metadata. Cursor's stable model-category selector is promoted only after a real
-Task Monki-owned session advertises it, then restored from the latest safe
-provider settings observation. Task Monki never creates a Cursor probe session,
-so the first Cursor task honestly uses Auto. Both profiles revalidate the exact
-selected value against the new worktree session before mutation or prompt
-submission.
+metadata. Cursor uses the profile-gated
+`cursor-agent-acp/parameterized-model-picker@v1` contract: Task Monki advertises
+`_meta.parameterizedModelPicker`, then calls `cursor/list_available_models`
+only after the user explicitly selects Cursor in task setup or model settings
+and no catalog is cached for the current ACP process. The read-only request
+runs before `session/new`; it never creates a probe session. Results are reused
+until that process, executable configuration, or observed authentication state
+changes. They are not polled, loaded at startup, inferred from opening New Task
+or Settings, or persisted as task/session observations. Cursor's exact Auto
+value is `default`. The selected-runtime surfaces provide an explicit Load or
+Retry action; a failed request records a typed catalog failure until that action
+succeeds. Both profiles revalidate the selected model and reasoning value
+against the new worktree session before mutation or prompt submission.
 
 ## Runtime behavior
 
@@ -404,7 +411,8 @@ Task Monki negotiates stable ACP protocol version 1 and advertised
 capabilities. It preserves session config options, structured stream updates,
 tool calls/diffs, plans, usage, session resume, cancellation, and opaque
 extension messages. Permission responses use the exact opaque `optionId`
-reported by the agent; semantic actions never fabricate an ID from a label. If
+reported by the agent; the renderer uses the provider's label and semantic
+actions never fabricate or ambiguously infer an ID from its kind. If
 an inbound permission's durable publication fails, Task Monki submits
 `cancelled` when the same client generation is still writable, marks the prompt
 no-replay recovery-required, unloads the session, and quarantines the
@@ -418,11 +426,26 @@ agent remains responsible for its tools; Task Monki does not become a generic
 command-execution host through ACP. Unsupported client requests fail
 explicitly.
 
-Cursor Agent is the only current ACP profile allowed to surface a provider
-`allow_once` choice for an execute request that omits command text. That
-exception preserves Cursor's exact opaque option ID and never creates a session
-grant. Grok, Claude, and unrecognized ACP profiles fail closed when execution
-scope cannot be verified.
+Cursor Agent is the only current ACP profile allowed to surface positive
+provider choices for an execute request that omits command text. The profile
+may expose the exact one-time choice and, when advertised, the exact provider-
+remembered choice; it never creates a Task Monki session grant. Grok, Claude,
+and unrecognized ACP profiles fail closed when execution scope cannot be
+verified. Cursor and Grok may also expose exact provider-remembered options
+when their local command/path/network check permits the request. The provider
+owns that remembered scope and may stop reporting matching operations; Task
+Monki does not imitate it with repository files or global configuration.
+Provider-remembered rejection remains available when offered.
+
+Cursor and Grok expose three runtime-owned policies without changing the native
+ACP agent mode: **Supervised** publishes permitted provider options to the user;
+**Auto-accept edits** selects an exact one-time positive option only for a
+verified edit, delete, or move inside the task worktree; **Full access** selects
+the provider's exact one-time positive option, falling back to its remembered
+positive option only when no one-time option exists. Commands and unverifiable
+operations remain interactive under Auto-accept edits. Every automatic response
+is durably journaled before delivery, and ambiguous delivery quarantines the
+owning ACP process.
 
 ACP modes and configuration selectors are not flattened into common settings.
 The stable v1.19 schema does not define initialize model metadata, a session
@@ -454,8 +477,8 @@ profile-owned application catalog starts its ACP process to read the initialize
 catalog without creating a provider session.
 Live `initialize` negotiation and successful session creation/resume advance
 the staged readiness state. Current profiles expose a provider-controlled
-full-access preset because ACP v1 does not attest an OS filesystem/network
-sandbox.
+full-access boundary under the user-facing **Ask for approval** preset because
+ACP v1 does not attest an OS filesystem/network sandbox.
 
 Persisted ACP recovery is reconciled during adapter initialization without
 starting a child process. Stale server ownership is marked lost and ambiguous
@@ -524,11 +547,12 @@ evidence, not protocol messages.
 Every runtime writes traffic to the same provider-neutral journal contract.
 Before persistence, the journal recursively replaces credential-bearing JSON
 fields, named environment/header values, authorization tokens, cookies, and URL
-userinfo in both the message and metadata. Benign structure, event names, and
-token-usage counters remain available for diagnostics, but the journal is not a
-lossless copy of provider traffic. This redaction is defense in depth in
-addition to private file permissions; callers must still avoid placing secrets
-in provider payloads when possible.
+userinfo in both the message and metadata. Provider account email is also
+removed because it is not required for protocol diagnosis. Benign structure,
+event names, account type, plan type, and token-usage counters remain available
+for diagnostics, but the journal is not a lossless copy of provider traffic.
+This redaction is defense in depth in addition to private file permissions;
+callers must still avoid placing secrets in provider payloads when possible.
 
 Transport decoding and routing use the exact in-memory provider message;
 redaction is applied only to separate journal, diagnostic, artifact, and
@@ -623,10 +647,14 @@ Rules:
 - a granting response requires both the run and exact owning session to retain
   the interaction's matching awaiting state; decline and cancel remain
   available when stale state must be recovered;
-- `DECLINE_FOR_SESSION` exists only when the runtime reports a persistent deny
+- `DECLINE_FOR_SESSION` exists only when the runtime reports a remembered deny
   option;
-- ACP keeps exact native option IDs in `providerOptions` and returns the chosen
-  ID verbatim;
+- ACP keeps exact native option IDs and labels plus a normalized local action
+  in `providerOptions`, requires the chosen ID on the durable decision, and
+  returns it verbatim;
+- a provider-remembered option is exposed only after the current request passes
+  Task Monki's local command/path/network checks; its exact provider label and
+  scope remain provider-owned, and Task Monki creates no persistent grant;
 - runtime loss makes unanswered interactions stale or aborted; it does not
   auto-approve or synthesize a response.
 

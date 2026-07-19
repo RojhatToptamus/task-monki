@@ -209,6 +209,17 @@ export interface AcpSessionModelState {
   _meta?: Record<string, unknown> | null;
 }
 
+/** Captured response model for Cursor's parameterized model-picker extension. */
+export interface AcpParameterizedModel {
+  value: string;
+  name: string;
+  configOptions?: AcpSessionConfigOption[];
+}
+
+export interface AcpParameterizedModelCatalog {
+  models: AcpParameterizedModel[];
+}
+
 export interface AcpSessionConfigSelectOption {
   value: string;
   name: string;
@@ -388,6 +399,42 @@ export function parseSessionModelUpdateExtension(value: unknown): AcpSessionMode
   return parsed;
 }
 
+/** Parses Cursor's profile-gated `cursor/list_available_models` response. */
+export function parseParameterizedModelCatalog(
+  value: unknown
+): AcpParameterizedModelCatalog {
+  const response = requireRecord(value, 'ACP parameterized model catalog');
+  if (!Array.isArray(response.models) || response.models.length === 0) {
+    throw new Error('ACP parameterized model catalog has no models.');
+  }
+  const modelIds = new Set<string>();
+  const models = response.models.map((candidate) => {
+    const model = requireRecord(candidate, 'ACP parameterized model');
+    if (
+      typeof model.value !== 'string' ||
+      !model.value.trim() ||
+      typeof model.name !== 'string' ||
+      !model.name.trim()
+    ) {
+      throw new Error('ACP parameterized model is invalid.');
+    }
+    if (modelIds.has(model.value)) {
+      throw new Error('ACP parameterized model catalog has duplicate model IDs.');
+    }
+    modelIds.add(model.value);
+
+    if (!Object.prototype.hasOwnProperty.call(model, 'configOptions')) {
+      return { value: model.value, name: model.name };
+    }
+    const configOptions = parseConfigOptions(model.configOptions);
+    if (configOptions === null) {
+      throw new Error('ACP parameterized model configOptions must be an array.');
+    }
+    return { value: model.value, name: model.name, configOptions };
+  });
+  return { models };
+}
+
 export function parsePromptResponse(value: unknown): AcpPromptResponse {
   const record = requireRecord(value, 'ACP prompt response');
   if (!isStopReason(record.stopReason)) {
@@ -424,6 +471,7 @@ export function parsePermissionRequest(value: unknown): AcpRequestPermissionPara
   if (!Array.isArray(record.options) || record.options.length === 0) {
     throw new Error('ACP permission request has no options.');
   }
+  const optionIds = new Set<string>();
   const options = record.options.map((candidate) => {
     const option = requireRecord(candidate, 'ACP permission option');
     if (
@@ -434,6 +482,10 @@ export function parsePermissionRequest(value: unknown): AcpRequestPermissionPara
     ) {
       throw new Error('ACP permission option is invalid.');
     }
+    if (optionIds.has(option.optionId)) {
+      throw new Error('ACP permission request has duplicate option IDs.');
+    }
+    optionIds.add(option.optionId);
     return {
       optionId: option.optionId,
       name: option.name,
@@ -454,11 +506,21 @@ export function parseConfigOptions(value: unknown): AcpSessionConfigOption[] | n
   if (!Array.isArray(value)) {
     throw new Error('ACP configOptions must be an array or null.');
   }
+  const optionIds = new Set<string>();
   return value.map((candidate) => {
     const option = requireRecord(candidate, 'ACP session config option');
-    if (typeof option.id !== 'string' || typeof option.name !== 'string') {
+    if (
+      typeof option.id !== 'string' ||
+      !option.id.trim() ||
+      typeof option.name !== 'string' ||
+      !option.name.trim()
+    ) {
       throw new Error('ACP session config option has no id or name.');
     }
+    if (optionIds.has(option.id)) {
+      throw new Error('ACP configOptions has duplicate option IDs.');
+    }
+    optionIds.add(option.id);
     const common = {
       id: option.id,
       name: option.name,

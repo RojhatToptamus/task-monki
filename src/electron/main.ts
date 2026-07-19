@@ -306,6 +306,9 @@ function installIpcHandlers(): void {
     return result.canceled ? undefined : result.filePaths[0];
   });
   handleTrustedIpc('agent:runtimeCatalog', () => service.getAgentRuntimeCatalog());
+  handleTrustedIpc('agent:discoverRuntimeModels', async (_, runtimeId: string) =>
+    service.discoverAgentRuntimeModels(runtimeId)
+  );
   handleTrustedIpc(
     'agent:updateNativeSession',
     async (_, input: UpdateAgentNativeSessionRequest) => {

@@ -130,6 +130,27 @@ export class AgentRuntimeRegistry {
     };
   }
 
+  async discoverAgentRuntimeModels(
+    runtimeId: AgentRuntimeId,
+    options: {
+      disabledRuntimeIds?: ReadonlySet<AgentRuntimeId>;
+      excludedRuntimeIds?: ReadonlySet<AgentRuntimeId>;
+      exclusionReason?: string;
+    } = {}
+  ): Promise<AgentRuntimeState> {
+    const adapter = this.require(runtimeId);
+    if (options.disabledRuntimeIds?.has(adapter.descriptor.id)) {
+      throw new Error(`${adapter.descriptor.displayName} is disabled.`);
+    }
+    if (options.excludedRuntimeIds?.has(adapter.descriptor.id)) {
+      throw new Error(
+        options.exclusionReason ?? `${adapter.descriptor.displayName} is unavailable.`
+      );
+    }
+    await adapter.discoverModels?.();
+    return this.getRuntimeState(adapter, new Date().toISOString());
+  }
+
   async reconcileAll(): Promise<void> {
     await Promise.all(
       this.list().map(async (adapter) => {

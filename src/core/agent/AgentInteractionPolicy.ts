@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { realpathSync } from 'node:fs';
+import { isAgentProviderPermissionAction } from '../../shared/contracts';
 import type {
   AgentCommandApprovalDecision,
   AgentCommandApprovalRequest,
@@ -260,6 +261,29 @@ function validateCommandDecision(
   request: AgentCommandApprovalRequest,
   decision: AgentCommandApprovalDecision
 ): void {
+  const providerOptionId =
+    'providerOptionId' in decision ? decision.providerOptionId : undefined;
+  if (
+    request.providerOptions?.length &&
+    isAgentProviderPermissionAction(decision.action)
+  ) {
+    if (!providerOptionId) {
+      throw new Error('A provider permission decision requires its exact option ID.');
+    }
+    const option = request.providerOptions?.find(
+      (candidate) => candidate.id === providerOptionId
+    );
+    if (!option) {
+      throw new Error('The selected provider permission option is not part of this request.');
+    }
+    if (option.action !== decision.action) {
+      throw new Error(
+        'The selected provider permission option does not match the requested decision.'
+      );
+    }
+  } else if (providerOptionId) {
+    throw new Error('This command approval request has no provider permission options.');
+  }
   if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {
     if (!deepEqual(decision.amendment, request.proposedExecPolicyAmendment)) {
       throw new Error('The execution-policy amendment does not match the provider proposal.');

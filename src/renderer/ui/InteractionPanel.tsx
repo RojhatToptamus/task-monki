@@ -6,6 +6,7 @@ import type {
   AgentJsonValue,
   AgentMcpElicitationRequest,
   AgentPermissionApprovalRequest,
+  AgentProviderPermissionAction,
   AgentSessionRecord,
   AgentUserInputRequest,
   InteractionRequestRecord
@@ -199,6 +200,8 @@ function CommandRequest({
 }: InteractionSectionProps) {
   const request = interaction.request as AgentCommandApprovalRequest;
   const displayCommand = unwrapShellCommand(request.command);
+  const providerOptions = providerCommandOptions(interaction, request);
+  const hasProviderOptions = Boolean(request.providerOptions?.length);
   const canRememberCommand =
     hasAction(interaction, 'ACCEPT_EXEC_POLICY_AMENDMENT') &&
     Boolean(request.proposedExecPolicyAmendment?.length);
@@ -239,7 +242,7 @@ function CommandRequest({
         </pre>
       ) : null}
       <div className="interaction-command__footer">
-        {canRememberCommand && canAllowForSession ? (
+        {!hasProviderOptions && canRememberCommand && canAllowForSession ? (
           <label className="interaction-remember">
             <input
               type="checkbox"
@@ -253,34 +256,72 @@ function CommandRequest({
           <span />
         )}
         <div className="interaction-actions interaction-actions--command">
-          <RejectButtons
-            interaction={interaction}
-            interactionType="COMMAND_APPROVAL"
-            disabled={disabled}
-            declineLabel="Deny"
-            showCancel={false}
-            onRespond={onRespond}
-          />
-          {hasAction(interaction, 'ACCEPT') ? (
-            <ActionButton
-              label="Allow once"
-              variant="secondary"
-              disabled={disabled}
-              onClick={() =>
-                onRespond({
-                  interactionType: 'COMMAND_APPROVAL',
-                  action: 'ACCEPT'
-                })
-              }
-            />
-          ) : null}
-          {canAllowForSession || canRememberCommand ? (
-            <ActionButton
-              label={useAlwaysAllow || !canAllowForSession ? 'Always allow' : 'Allow for session'}
-              disabled={disabled}
-              onClick={submitPersistentChoice}
-            />
-          ) : null}
+          {hasProviderOptions ? (
+            providerOptions.length > 0 ? (
+              providerOptions.map((option) => (
+                <ActionButton
+                  key={option.id}
+                  label={option.label}
+                  variant={option.action === 'ACCEPT' ? 'primary' : 'secondary'}
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: option.action,
+                      providerOptionId: option.id
+                    })
+                  }
+                />
+              ))
+            ) : hasAction(interaction, 'CANCEL') ? (
+              <ActionButton
+                label="Cancel"
+                variant="secondary"
+                disabled={disabled}
+                onClick={() =>
+                  onRespond({
+                    interactionType: 'COMMAND_APPROVAL',
+                    action: 'CANCEL'
+                  })
+                }
+              />
+            ) : null
+          ) : (
+            <>
+              <RejectButtons
+                interaction={interaction}
+                interactionType="COMMAND_APPROVAL"
+                disabled={disabled}
+                declineLabel="Deny"
+                showCancel={false}
+                onRespond={onRespond}
+              />
+              {hasAction(interaction, 'ACCEPT') ? (
+                <ActionButton
+                  label="Allow once"
+                  variant="secondary"
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'ACCEPT'
+                    })
+                  }
+                />
+              ) : null}
+              {canAllowForSession || canRememberCommand ? (
+                <ActionButton
+                  label={
+                    useAlwaysAllow || !canAllowForSession
+                      ? 'Always allow'
+                      : 'Allow for session'
+                  }
+                  disabled={disabled}
+                  onClick={submitPersistentChoice}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     </>
@@ -760,6 +801,21 @@ function ActionButton({
       {label}
     </button>
   );
+}
+
+function providerCommandOptions(
+  interaction: InteractionRequestRecord,
+  request: AgentCommandApprovalRequest
+): Array<{
+  id: string;
+  label: string;
+  action: AgentProviderPermissionAction;
+}> {
+  return (request.providerOptions ?? []).flatMap((option) => {
+    return hasAction(interaction, option.action)
+      ? [{ id: option.id, label: option.label, action: option.action }]
+      : [];
+  });
 }
 
 function InteractionTechnicalDetails({

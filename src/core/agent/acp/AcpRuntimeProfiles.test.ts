@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   ACP_RUNTIME_PROFILES,
+  CURSOR_PARAMETERIZED_MODEL_CATALOG,
   CURSOR_ACP_PROFILE,
   GROK_ACP_PROFILE,
   GROK_SESSION_MODEL_EXTENSION,
   CLAUDE_AGENT_ACP_PROFILE,
-  acpCapabilities
+  acpCapabilities,
+  defaultAcpModel
 } from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 
@@ -27,6 +29,7 @@ describe('ACP runtime profiles', () => {
     expect(CURSOR_ACP_PROFILE.argv).toEqual(['acp']);
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
+    expect(CURSOR_ACP_PROFILE.defaultModel).toBe('default');
     expect(CURSOR_ACP_PROFILE.allowOpaqueExecuteOnce).toBe(true);
     expect(GROK_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
     expect(CLAUDE_AGENT_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
@@ -109,10 +112,18 @@ describe('ACP runtime profiles', () => {
       acpCapabilities(GROK_ACP_PROFILE).extensions.grokSessionModels
     ).toMatchObject({ maturity: 'experimental' });
     expect(
-      ACP_RUNTIME_PROFILES.filter((profile) => profile.promoteSessionModelSelector).map(
+      ACP_RUNTIME_PROFILES.filter((profile) => profile.parameterizedModelCatalog).map(
         (profile) => profile.descriptor.id
       )
     ).toEqual(['cursor-agent-acp']);
+    expect(CURSOR_ACP_PROFILE.parameterizedModelCatalog).toBe(
+      CURSOR_PARAMETERIZED_MODEL_CATALOG
+    );
+    expect(CURSOR_PARAMETERIZED_MODEL_CATALOG).toEqual({
+      contractId: 'cursor-agent-acp/parameterized-model-picker@v1',
+      listModelsMethod: 'cursor/list_available_models',
+      clientCapabilityMeta: { parameterizedModelPicker: true }
+    });
   });
 
   it('enables optional lifecycle features only after negotiation', () => {
@@ -162,5 +173,71 @@ describe('ACP runtime profiles', () => {
     for (const profile of ACP_RUNTIME_PROFILES) {
       expect(acpCapabilities(profile).backgroundTerminals.maturity).toBe('unsupported');
     }
+  });
+
+  it('exposes only the access policies each provider profile can enforce', () => {
+    const policy = acpCapabilities(CURSOR_ACP_PROFILE).executionPolicy;
+    expect(policy.defaultPresetId).toBe('supervised');
+    expect(policy.presets).toEqual([
+      expect.objectContaining({
+        id: 'supervised',
+        label: 'Supervised',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'on-request'
+      }),
+      expect.objectContaining({
+        id: 'auto-accept-edits',
+        label: 'Auto-accept edits',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'auto-accept-edits'
+      }),
+      expect.objectContaining({
+        id: 'full-access',
+        label: 'Full access',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'never'
+      })
+    ]);
+    expect(policy.detail).toContain('does not provide an enforceable process sandbox');
+
+    expect(acpCapabilities(GROK_ACP_PROFILE).executionPolicy.presets).toEqual(
+      policy.presets
+    );
+    expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
+      expect.objectContaining({ id: 'supervised', approvalPolicy: 'on-request' })
+    ]);
+    expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
+      expect.objectContaining({ id: 'supervised', approvalPolicy: 'on-request' })
+    ]);
+  });
+
+  it('gates provider-owned remembered permission choices to Cursor and Grok', () => {
+    expect(CURSOR_ACP_PROFILE.allowRememberedPermissions).toBe(true);
+    expect(GROK_ACP_PROFILE.allowRememberedPermissions).toBe(true);
+    expect(CLAUDE_AGENT_ACP_PROFILE.allowRememberedPermissions).toBeUndefined();
+    expect(TEST_ACP_PROFILE.allowRememberedPermissions).toBeUndefined();
+  });
+
+  it('owns the known Cursor plan gate as a failed terminal response', () => {
+    expect(CURSOR_ACP_PROFILE.terminalFailureMessage).toEqual({
+      exactText: 'Upgrade your plan to continue',
+      diagnostic:
+        'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
+    });
+    expect(GROK_ACP_PROFILE.terminalFailureMessage).toBeUndefined();
+    expect(CLAUDE_AGENT_ACP_PROFILE.terminalFailureMessage).toBeUndefined();
+  });
+
+  it('describes the Cursor default without relying on a prior task session', () => {
+    expect(defaultAcpModel(CURSOR_ACP_PROFILE)).toMatchObject({
+      model: 'default',
+      displayName: 'Auto',
+      native: {
+        source: 'cursor-agent-acp/parameterized-model-picker@v1'
+      }
+    });
+    expect(defaultAcpModel(CURSOR_ACP_PROFILE).description).not.toContain(
+      'task-owned session'
+    );
   });
 });

@@ -1017,6 +1017,9 @@ export interface TaskManagerApi {
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult>;
   getAgentRuntimeCatalog(): Promise<import('./agent').AgentRuntimeCatalog>;
+  discoverAgentRuntimeModels(
+    runtimeId: import('./agent').AgentRuntimeId
+  ): Promise<import('./agent').AgentRuntimeState>;
   updateAgentNativeSession(
     input: UpdateAgentNativeSessionRequest
   ): Promise<UpdateAgentNativeSessionResult>;

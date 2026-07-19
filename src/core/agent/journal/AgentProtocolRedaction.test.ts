@@ -62,6 +62,39 @@ describe('AgentProtocolRedaction', () => {
     expect(JSON.stringify(parsed)).not.toContain('nested-secret');
   });
 
+  it('redacts provider account email from durable protocol traffic', () => {
+    const parsed = JSON.parse(
+      redactProtocolText(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            account: {
+              type: 'chatgpt',
+              email: 'provider-account@example.test',
+              planType: 'pro'
+            },
+            requiresOpenaiAuth: false
+          }
+        })
+      )
+    ) as {
+      result: {
+        account: { type: string; email: string; planType: string };
+        requiresOpenaiAuth: boolean;
+      };
+    };
+
+    expect(parsed.result).toEqual({
+      account: {
+        type: 'chatgpt',
+        email: '[REDACTED]',
+        planType: 'pro'
+      },
+      requiresOpenaiAuth: false
+    });
+  });
+
   it('redacts named env and header values plus credentials embedded in text', () => {
     const record = redactProtocolJournalRecord(
       JSON.stringify({

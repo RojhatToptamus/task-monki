@@ -5,6 +5,7 @@ import {
   parseConfigOptions,
   parseInitializeModelExtension,
   parseNewSessionResponse,
+  parseParameterizedModelCatalog,
   parsePermissionRequest,
   parseSessionModelExtension,
   parseSessionModelUpdateExtension,
@@ -73,6 +74,93 @@ describe('ACP stable-v1 protocol codec', () => {
       _meta: { providerOwned: true }
     });
     expect(setup).not.toHaveProperty('models');
+  });
+
+  it('parses Cursor parameterized models with their native config options', () => {
+    expect(
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'claude-4.6[thinking=true]',
+            name: 'Claude 4.6',
+            configOptions: [
+              {
+                id: 'thinking',
+                name: 'Thinking',
+                type: 'boolean',
+                currentValue: true
+              }
+            ]
+          },
+          { value: 'auto', name: 'Auto' }
+        ]
+      })
+    ).toEqual({
+      models: [
+        {
+          value: 'claude-4.6[thinking=true]',
+          name: 'Claude 4.6',
+          configOptions: [
+            expect.objectContaining({
+              id: 'thinking',
+              type: 'boolean',
+              currentValue: true
+            })
+          ]
+        },
+        { value: 'auto', name: 'Auto' }
+      ]
+    });
+  });
+
+  it('rejects empty, malformed, and duplicate Cursor model IDs', () => {
+    expect(() => parseParameterizedModelCatalog({ models: [] })).toThrow('no models');
+    expect(() =>
+      parseParameterizedModelCatalog({ models: [{ value: '  ', name: 'Auto' }] })
+    ).toThrow('model is invalid');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          { value: 'auto', name: 'Auto' },
+          { value: 'auto', name: 'Automatic' }
+        ]
+      })
+    ).toThrow('duplicate model IDs');
+  });
+
+  it('rejects malformed or duplicate Cursor model config options', () => {
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [{ value: 'auto', name: 'Auto', configOptions: null }]
+      })
+    ).toThrow('configOptions must be an array');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'auto',
+            name: 'Auto',
+            configOptions: [
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: 'yes' }
+            ]
+          }
+        ]
+      })
+    ).toThrow('unsupported shape');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'auto',
+            name: 'Auto',
+            configOptions: [
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: true },
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: false }
+            ]
+          }
+        ]
+      })
+    ).toThrow('duplicate option IDs');
   });
 
   it('parses the captured Grok model catalog only through the explicit extension codec', () => {
@@ -241,6 +329,19 @@ describe('ACP stable-v1 protocol codec', () => {
       'opaque-d'
     ]);
     expect(permission._meta).toEqual({ provider: 'native' });
+  });
+
+  it('rejects duplicate permission option IDs before they become ambiguous', () => {
+    expect(() =>
+      parsePermissionRequest({
+        sessionId: 'session-1',
+        toolCall: { toolCallId: 'tool-1', title: 'Edit file', kind: 'edit' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'allow', name: 'Allow edits this session', kind: 'allow_always' }
+        ]
+      })
+    ).toThrow('duplicate option IDs');
   });
 
   it('validates typed session updates while retaining unknown extension fields', () => {

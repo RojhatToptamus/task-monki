@@ -150,6 +150,8 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
     getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
+    discoverAgentRuntimeModels: (runtimeId) =>
+      post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),
     updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
       post(baseUrl, '/api/agent/session/native', input),
     validateRepository: (path) =>

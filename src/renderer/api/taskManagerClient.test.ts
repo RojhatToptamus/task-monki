@@ -222,3 +222,40 @@ describe('createBrowserTaskManagerApi provider-native session configuration', ()
     ]);
   });
 });
+
+describe('createBrowserTaskManagerApi runtime model discovery', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses a dedicated explicit-discovery endpoint', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const catalog = {
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => catalog } as Response;
+      })
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(api.discoverAgentRuntimeModels('cursor-agent-acp')).resolves.toEqual(
+      catalog
+    );
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/runtimes/discover',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
+        })
+      }
+    ]);
+  });
+});

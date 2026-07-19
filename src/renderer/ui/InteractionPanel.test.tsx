@@ -56,6 +56,61 @@ describe('InteractionPanel', () => {
     expect(html).not.toContain('Allow once');
     expect(html).not.toContain('Stop current turn');
   });
+
+  it('renders provider-native permission choices instead of inventing their scope', () => {
+    const interaction = commandInteraction();
+    interaction.runtimeId = 'grok-acp';
+    interaction.request = {
+      startedAtMs: Date.now(),
+      command: 'npm test',
+      cwd: '/tmp/task/react-repo',
+      providerOptions: [
+        {
+          id: 'allow-edits-session',
+          label: 'Allow edits this session',
+          action: 'ACCEPT_FOR_SESSION'
+        },
+        { id: 'allow-once', label: 'Yes, proceed', action: 'ACCEPT' },
+        { id: 'reject-once', label: 'No, tell Grok why', action: 'DECLINE' }
+      ]
+    };
+    interaction.allowedActions = ['ACCEPT', 'DECLINE', 'CANCEL'];
+
+    const html = renderToStaticMarkup(
+      <InteractionPanel
+        interactions={[interaction]}
+        sessions={[sessionFixture()]}
+        onRespond={async () => undefined}
+      />
+    );
+
+    expect(html).toContain('Yes, proceed');
+    expect(html).toContain('No, tell Grok why');
+    expect(html).not.toContain('Allow edits this session');
+    expect(html).not.toContain('Allow for session');
+  });
+
+  it('keeps a cancel action when every provider grant is withheld', () => {
+    const interaction = commandInteraction();
+    interaction.request = {
+      startedAtMs: Date.now(),
+      providerOptions: [
+        { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+      ]
+    };
+    interaction.allowedActions = ['CANCEL'];
+
+    const html = renderToStaticMarkup(
+      <InteractionPanel
+        interactions={[interaction]}
+        sessions={[sessionFixture()]}
+        onRespond={async () => undefined}
+      />
+    );
+
+    expect(html).toContain('Cancel');
+    expect(html).not.toContain('Allow always');
+  });
 });
 
 function commandInteraction(): InteractionRequestRecord {

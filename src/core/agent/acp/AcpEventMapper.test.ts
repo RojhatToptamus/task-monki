@@ -44,9 +44,31 @@ describe('ACP event mapping', () => {
     expect(
       permissionOutcomeForDecision(options, {
         interactionType: 'COMMAND_APPROVAL',
-        action
+        action,
+        providerOptionId: optionId
       })
     ).toEqual({ outcome: 'selected', optionId });
+  });
+
+  it('selects the exact provider option when multiple choices share one kind', () => {
+    const duplicateKindOptions: AcpPermissionOption[] = [
+      { optionId: 'allow-edits-session', name: 'Allow edits this session', kind: 'allow_always' },
+      { optionId: 'allow-project', name: 'Always allow in this project', kind: 'allow_always' }
+    ];
+
+    expect(
+      permissionOutcomeForDecision(duplicateKindOptions, {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT_FOR_SESSION',
+        providerOptionId: 'allow-edits-session'
+      })
+    ).toEqual({ outcome: 'selected', optionId: 'allow-edits-session' });
+    expect(() =>
+      permissionOutcomeForDecision(duplicateKindOptions, {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT_FOR_SESSION'
+      })
+    ).toThrow('exact provider option ID');
   });
 
   it('maps cancel to the protocol cancellation outcome without inventing an option', () => {

@@ -8,9 +8,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import {
   AcpStdioSupervisor,
+  clientCapabilitiesForAcpProfile,
   type AcpStdioSupervisorOptions
 } from './AcpStdioSupervisor';
-import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
+import {
+  CLAUDE_AGENT_ACP_PROFILE,
+  CURSOR_ACP_PROFILE,
+  GROK_ACP_PROFILE,
+  type AcpRuntimeProfile
+} from './AcpRuntimeProfiles';
 import { TEST_ACP_PROFILE } from '../../../testSupport/acpRuntimeProfile';
 import { spawnPortable } from '../../process/portableChildProcess';
 
@@ -25,6 +31,24 @@ afterEach(async () => {
 });
 
 describe('AcpStdioSupervisor', () => {
+  it('advertises the parameterized model picker only to Cursor', () => {
+    expect(clientCapabilitiesForAcpProfile(CURSOR_ACP_PROFILE)).toEqual({
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+      session: { configOptions: { boolean: {} } },
+      _meta: { parameterizedModelPicker: true }
+    });
+    expect(clientCapabilitiesForAcpProfile(GROK_ACP_PROFILE)).not.toHaveProperty(
+      '_meta'
+    );
+    expect(
+      clientCapabilitiesForAcpProfile(CLAUDE_AGENT_ACP_PROFILE)
+    ).not.toHaveProperty('_meta');
+    expect(clientCapabilitiesForAcpProfile(TEST_ACP_PROFILE)).not.toHaveProperty(
+      '_meta'
+    );
+  });
+
   it('negotiates stable v1 with boolean config support and no client fs or terminal tools', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-acp-supervisor-'));
     temporaryDirectories.push(directory);

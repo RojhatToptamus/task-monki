@@ -70,6 +70,8 @@ const api: TaskManagerApi = {
   executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
     ipcRenderer.invoke('openTarget:execute', input),
   getAgentRuntimeCatalog: () => ipcRenderer.invoke('agent:runtimeCatalog'),
+  discoverAgentRuntimeModels: (runtimeId) =>
+    ipcRenderer.invoke('agent:discoverRuntimeModels', runtimeId),
   updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
     ipcRenderer.invoke('agent:updateNativeSession', input),
   validateRepository: (path) => ipcRenderer.invoke('repository:validate', path),

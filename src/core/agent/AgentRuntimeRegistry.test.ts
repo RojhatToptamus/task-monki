@@ -167,6 +167,46 @@ describe('AgentRuntimeRegistry', () => {
     expect(adapter.listModels).not.toHaveBeenCalled();
   });
 
+  it('runs provider discovery only for an explicit catalog request', async () => {
+    const discoverModels = vi.fn().mockResolvedValue(undefined);
+    const adapter = runtime('cursor-agent-acp', { discoverModels });
+    const unrelated = runtime('unrelated-runtime');
+    const registry = new AgentRuntimeRegistry(
+      [adapter, unrelated],
+      'cursor-agent-acp'
+    );
+
+    await registry.getCatalog();
+    expect(discoverModels).not.toHaveBeenCalled();
+    vi.mocked(adapter.listModels).mockClear();
+    vi.mocked(unrelated.listModels).mockClear();
+
+    const runtimeState = await registry.discoverAgentRuntimeModels('cursor-agent-acp');
+
+    expect(discoverModels).toHaveBeenCalledOnce();
+    expect(adapter.listModels).toHaveBeenCalledOnce();
+    expect(unrelated.listModels).not.toHaveBeenCalled();
+    expect(runtimeState.models).toEqual([
+      expect.objectContaining({ runtimeId: 'cursor-agent-acp' })
+    ]);
+  });
+
+  it('rejects explicit discovery for disabled and unknown runtimes', async () => {
+    const discoverModels = vi.fn().mockResolvedValue(undefined);
+    const adapter = runtime('cursor-agent-acp', { discoverModels });
+    const registry = new AgentRuntimeRegistry([adapter], 'cursor-agent-acp');
+
+    await expect(
+      registry.discoverAgentRuntimeModels('cursor-agent-acp', {
+        disabledRuntimeIds: new Set(['cursor-agent-acp'])
+      })
+    ).rejects.toThrow('cursor-agent-acp is disabled');
+    await expect(registry.discoverAgentRuntimeModels('unknown')).rejects.toThrow(
+      'Agent runtime is not registered: unknown'
+    );
+    expect(discoverModels).not.toHaveBeenCalled();
+  });
+
   it('returns readiness advanced by live model discovery', async () => {
     const descriptor: AgentRuntimeDescriptor = {
       id: 'grok-acp',

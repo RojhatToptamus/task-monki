@@ -258,6 +258,29 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/agent/runtimes/discover') {
+        const payload = await readJson();
+        const runtimeId =
+          payload && typeof payload === 'object'
+            ? (payload as { runtimeId?: unknown }).runtimeId
+            : undefined;
+        if (typeof runtimeId !== 'string') {
+          throw new DevApiHttpError(
+            400,
+            'INVALID_RUNTIME_ID',
+            'A runtime id is required.',
+            false
+          );
+        }
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.discoverAgentRuntimeModels(runtimeId)
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/agent/session/native') {
         sendJson(
           response,

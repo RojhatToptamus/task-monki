@@ -129,6 +129,24 @@ describe('agent permission settings', () => {
         approvalsReviewer: 'user'
       })
     ).toBe('Ask for approval');
+    expect(
+      inferAgentPermissionMode({
+        runtimeId: 'cursor',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'auto-accept-edits',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('AUTO_ACCEPT_EDITS');
+    expect(
+      formatAgentPermissionMode({
+        runtimeId: 'cursor',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'auto-accept-edits',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('Auto-accept edits');
   });
 });
 

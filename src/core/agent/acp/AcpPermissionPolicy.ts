@@ -5,7 +5,10 @@ import type {
   RunRecord
 } from '../../../shared/contracts';
 import { buildInteractionPolicy } from '../AgentInteractionPolicy';
-import { interactionActionsForAcpOptions } from './AcpEventMapper';
+import {
+  agentActionForAcpPermissionKind,
+  interactionActionsForAcpOptions
+} from './AcpEventMapper';
 import type { AcpPermissionOption, AcpToolCallUpdate } from './AcpProtocol';
 
 export interface MaterializedAcpPermission {
@@ -21,6 +24,7 @@ export function materializeAcpPermission(input: {
   session: AgentSessionRecord;
   run: RunRecord;
   allowOpaqueExecuteOnce?: boolean;
+  allowRememberedApprovals?: boolean;
 }): MaterializedAcpPermission {
   const request: AgentCommandApprovalRequest = {
     startedAtMs: Date.now(),
@@ -32,7 +36,7 @@ export function materializeAcpPermission(input: {
     providerOptions: input.options.map((option) => ({
       id: option.optionId,
       label: option.name,
-      kind: option.kind
+      action: agentActionForAcpPermissionKind(option.kind)
     }))
   };
   const warnings: string[] = [];
@@ -77,11 +81,13 @@ export function materializeAcpPermission(input: {
       warnings.push('ACP did not provide a verifiable command for this execution request.');
       if (input.allowOpaqueExecuteOnce) {
         // Cursor's native ACP contract reports some terminal operations
-        // without command text. Retain only its exact, one-time decision;
-        // never turn opaque scope into a durable or policy-amending grant.
+        // without command text. The profile may also expose the provider's
+        // exact remembered option, whose scope remains provider-owned and is
+        // selected only by an explicit user decision.
         localAllowed = localAllowed.filter(
           (action) =>
             action === 'ACCEPT' ||
+            (input.allowRememberedApprovals && action === 'ACCEPT_FOR_SESSION') ||
             action === 'DECLINE' ||
             action === 'DECLINE_FOR_SESSION' ||
             action === 'CANCEL'
@@ -112,21 +118,71 @@ export function materializeAcpPermission(input: {
   if (hardBlocked) {
     localAllowed = localAllowed.filter((action) => !isApproval(action));
   }
+  const allowRememberedMutation =
+    input.allowRememberedApprovals &&
+    ['edit', 'delete', 'move'].includes(input.toolCall.kind ?? '') &&
+    localAllowed.includes('ACCEPT');
+  if (allowRememberedMutation) {
+    if (!localAllowed.includes('ACCEPT_FOR_SESSION')) {
+      localAllowed.push('ACCEPT_FOR_SESSION');
+    }
+  } else if (!input.allowRememberedApprovals) {
+    localAllowed = localAllowed.filter((action) => action !== 'ACCEPT_FOR_SESSION');
+  }
   const providerAllowed = interactionActionsForAcpOptions(input.options);
+  const allowedActions = providerAllowed.filter((action) =>
+    action === 'DECLINE' || action === 'DECLINE_FOR_SESSION' || action === 'CANCEL'
+      ? true
+      : localAllowed.includes(action)
+  );
   return {
     request,
-    allowedActions: providerAllowed.filter((action) =>
-      action === 'DECLINE' || action === 'DECLINE_FOR_SESSION' || action === 'CANCEL'
-        ? true
-        : localAllowed.includes(action)
-    ),
+    allowedActions,
     warnings: [
       ...new Set([
         ...warnings,
+        ...(allowedActions.includes('ACCEPT_FOR_SESSION')
+          ? [
+              'The provider controls what its remembered permission covers and may stop reporting matching operations in this or later provider sessions.'
+            ]
+          : []),
         'The ACP agent executes this tool in its own process. Provider details are untrusted telemetry.'
       ])
     ]
   };
+}
+
+/** Selects an exact provider option only when the chosen access policy permits it. */
+export function selectAutomaticAcpPermissionOption(input: {
+  approvalPolicy: string | undefined;
+  toolCall: Pick<AcpToolCallUpdate, 'kind'>;
+  options: readonly AcpPermissionOption[];
+  materialized: MaterializedAcpPermission;
+}): AcpPermissionOption | undefined {
+  if (input.approvalPolicy === 'never') {
+    const oneTime = input.options.filter((option) => option.kind === 'allow_once');
+    if (oneTime.length > 0) {
+      return oneTime.length === 1 && input.materialized.allowedActions.includes('ACCEPT')
+        ? oneTime[0]
+        : undefined;
+    }
+    const remembered = input.options.filter((option) => option.kind === 'allow_always');
+    return remembered.length === 1 &&
+      input.materialized.allowedActions.includes('ACCEPT_FOR_SESSION')
+      ? remembered[0]
+      : undefined;
+  }
+
+  if (
+    input.approvalPolicy !== 'auto-accept-edits' ||
+    !['edit', 'delete', 'move'].includes(input.toolCall.kind ?? '') ||
+    !input.materialized.allowedActions.includes('ACCEPT')
+  ) {
+    return undefined;
+  }
+
+  const oneTime = input.options.filter((option) => option.kind === 'allow_once');
+  return oneTime.length === 1 ? oneTime[0] : undefined;
 }
 
 function commandFromToolCall(toolCall: AcpToolCallUpdate): string | undefined {

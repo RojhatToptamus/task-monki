@@ -46,22 +46,43 @@ export interface AcpRuntimeProfile {
    */
   sessionModelExtension?: AcpSessionModelExtensionContract;
   /**
-   * Allows this profile to promote the exact stable `category=model` selector
-   * observed from a real, Task Monki-owned session into its application model
-   * catalog. ACP has no global model-list method, so the selector must never be
-   * discovered by creating a probe session.
+   * Provider-owned model catalog available before session creation. Stable ACP
+   * does not define this method, so both the request and initialize capability
+   * stay gated by an exact, versioned profile contract.
    */
-  promoteSessionModelSelector?: true;
+  parameterizedModelCatalog?: AcpParameterizedModelCatalogContract;
+  /** Access policies Task Monki can enforce for this provider's ACP requests. */
+  approvalPolicies?: readonly AcpApprovalPolicy[];
   /**
-   * Allows this profile's documented permission contract to expose an exact
-   * provider `allow_once` choice when an execute request omits command text.
-   * All other profiles fail closed because Task Monki cannot verify scope.
+   * Exact provider text that represents a failed turn despite an ACP
+   * `end_turn` response. This is profile-owned because ACP has no structured
+   * account or usage-limit terminal reason.
+   */
+  terminalFailureMessage?: {
+    exactText: string;
+    diagnostic: string;
+  };
+  /** The provider may offer an exact option whose remembered scope it owns. */
+  allowRememberedPermissions?: true;
+  /**
+   * Allows this profile's documented permission contract to expose positive
+   * provider choices when an execute request omits command text. A remembered
+   * choice additionally requires allowRememberedPermissions. All other
+   * profiles fail closed because Task Monki cannot verify scope.
    */
   allowOpaqueExecuteOnce?: true;
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
   >;
+}
+
+export type AcpApprovalPolicy = 'on-request' | 'auto-accept-edits' | 'never';
+
+export interface AcpParameterizedModelCatalogContract {
+  contractId: string;
+  listModelsMethod: 'cursor/list_available_models';
+  clientCapabilityMeta: Readonly<{ parameterizedModelPicker: true }>;
 }
 
 export interface AcpSessionModelExtensionContract {
@@ -87,6 +108,13 @@ export const GROK_SESSION_MODEL_EXTENSION = {
   setModelReasoningEffortMetaField: 'reasoningEffort',
   modelUpdateNotification: '_x.ai/models/update'
 } as const satisfies AcpSessionModelExtensionContract;
+
+/** Captured Cursor ACP parameterized-model-picker vendor contract. */
+export const CURSOR_PARAMETERIZED_MODEL_CATALOG = {
+  contractId: 'cursor-agent-acp/parameterized-model-picker@v1',
+  listModelsMethod: 'cursor/list_available_models',
+  clientCapabilityMeta: { parameterizedModelPicker: true }
+} as const satisfies AcpParameterizedModelCatalogContract;
 
 const descriptor = (id: AgentRuntimeId, displayName: string): AgentRuntimeDescriptor => ({
   id,
@@ -124,6 +152,8 @@ export const GROK_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'xai',
   defaultModel: 'grok-build',
+  approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
+  allowRememberedPermissions: true,
   environmentPolicy: {
     contractId: 'task-monki/grok-acp-environment@v1',
     allowedKeys: [
@@ -178,7 +208,14 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'cursor',
   defaultModel: 'default',
-  promoteSessionModelSelector: true,
+  parameterizedModelCatalog: CURSOR_PARAMETERIZED_MODEL_CATALOG,
+  approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
+  terminalFailureMessage: {
+    exactText: 'Upgrade your plan to continue',
+    diagnostic:
+      'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
+  },
+  allowRememberedPermissions: true,
   allowOpaqueExecuteOnce: true,
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
@@ -191,8 +228,8 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
   },
   extensions: {
     cursorModelSelection: {
-      maturity: 'inferred',
-      detail: 'Cursor model choices are preserved exactly from the latest task-owned ACP model selector and revalidated per session.'
+      maturity: 'experimental',
+      detail: 'Cursor model choices use the exact cursor-agent-acp/parameterized-model-picker@v1 vendor contract and are revalidated per session.'
     },
     cursorAgentRules: {
       maturity: 'stable',
@@ -222,6 +259,7 @@ export const CLAUDE_AGENT_ACP_PROFILE: AcpRuntimeProfile = {
   },
   defaultModelProvider: 'anthropic',
   defaultModel: 'default',
+  approvalPolicies: ['on-request'],
   environmentPolicy: {
     contractId: 'task-monki/claude-agent-acp-environment@v1',
     allowedKeys: [
@@ -290,22 +328,51 @@ export function acpCapabilities(
   const negotiationDetail = negotiated
     ? 'Enabled only when advertised by the connected ACP agent.'
     : 'Pending ACP initialize capability negotiation.';
+  const approvalPolicies = profile.approvalPolicies ?? ['on-request'];
+  const executionPresets = approvalPolicies.map((approvalPolicy) => {
+    switch (approvalPolicy) {
+      case 'on-request':
+        return {
+          id: 'supervised',
+          label: 'Supervised',
+          detail:
+            'Task Monki asks before provider-reported operations. The ACP agent process is not sandboxed, so unreported activity cannot be confined.',
+          sandbox: 'DANGER_FULL_ACCESS' as const,
+          approvalPolicy,
+          approvalsReviewer: 'user' as const,
+          networkAccess: 'REQUIRED' as const
+        };
+      case 'auto-accept-edits':
+        return {
+          id: 'auto-accept-edits',
+          label: 'Auto-accept edits',
+          detail:
+            'Verified file changes inside the task worktree are accepted once. Commands and other provider-reported operations still require approval; the provider process is not sandboxed.',
+          sandbox: 'DANGER_FULL_ACCESS' as const,
+          approvalPolicy,
+          approvalsReviewer: 'user' as const,
+          networkAccess: 'REQUIRED' as const
+        };
+      case 'never':
+        return {
+          id: 'full-access',
+          label: 'Full access',
+          detail:
+            'Positive provider permission requests are accepted automatically. The ACP agent process has unconfined filesystem and network access.',
+          sandbox: 'DANGER_FULL_ACCESS' as const,
+          approvalPolicy,
+          approvalsReviewer: 'user' as const,
+          networkAccess: 'REQUIRED' as const
+        };
+    }
+  });
   return {
     runtimeId: profile.descriptor.id,
     executionPolicy: {
-      defaultPresetId: 'provider-controlled-full-access',
-      presets: [
-        {
-          id: 'provider-controlled-full-access',
-          label: 'Provider-controlled full access',
-          detail: 'The ACP agent process controls filesystem and network access. Task Monki handles reported approvals but cannot attest a sandbox.',
-          sandbox: 'DANGER_FULL_ACCESS',
-          approvalPolicy: 'on-request',
-          approvalsReviewer: 'user',
-          networkAccess: 'REQUIRED'
-        }
-      ],
-      detail: 'ACP stable v1 does not negotiate an execution sandbox; restricted presets remain unavailable until a provider profile can attest equivalent isolation.'
+      defaultPresetId: 'supervised',
+      presets: executionPresets,
+      detail:
+        'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
     },
     promptRefinement: {
       maturity: 'unsupported',
@@ -313,16 +380,19 @@ export function acpCapabilities(
     },
     modelCatalog: {
       maturity: 'inferred',
+      ...(profile.parameterizedModelCatalog ? { activation: 'EXPLICIT' as const } : {}),
       detail: profile.sessionModelExtension
         ? `${profile.descriptor.displayName} session models use the explicit ${profile.sessionModelExtension.contractId} provider extension; stable ACP model-category config selectors remain a separate path.`
-        : profile.promoteSessionModelSelector
-          ? 'The exact model-category selector from the latest task-owned session is retained for later selection and revalidated by every new session.'
+        : profile.parameterizedModelCatalog
+          ? `Models are loaded on demand through the explicit ${profile.parameterizedModelCatalog.contractId} provider extension and revalidated by every new session.`
         : 'ACP has no global model-list method; model-category config selectors are preserved after session setup.'
     },
     reasoningEffort: {
       maturity: 'inferred',
       detail: profile.sessionModelExtension?.setModelReasoningEffortMetaField
         ? `Preserved through the explicit ${profile.sessionModelExtension.contractId} model mutation metadata when advertised; stable thought-level selectors remain a separate path.`
+        : profile.parameterizedModelCatalog
+          ? `Advertised per model through ${profile.parameterizedModelCatalog.contractId} and applied through native session config selectors.`
         : 'Preserved through native thought-level selectors when an agent exposes them.'
     },
     persistentSessions: negotiated?.resume || negotiated?.loadSession
@@ -430,18 +500,20 @@ export function defaultAcpModel(
     runtimeId: profile.descriptor.id,
     modelProvider: profile.defaultModelProvider,
     model: profile.defaultModel,
-    displayName: profile.promoteSessionModelSelector
+    displayName: profile.parameterizedModelCatalog
       ? 'Auto'
       : `${profile.descriptor.displayName} default`,
-    description: profile.promoteSessionModelSelector
-      ? 'The agent selects the model until a task-owned session advertises its exact choices.'
+    description: profile.parameterizedModelCatalog
+      ? 'The provider selects a model automatically. Select Cursor to load its current model catalog.'
       : 'The agent selects its configured default model. Native choices appear after session setup.',
     hidden: false,
     supportedReasoningEfforts: [],
     serviceTiers: [],
     inputModalities,
     isDefault: true,
-    native: { source: 'profile-default' }
+    native: {
+      source: profile.parameterizedModelCatalog?.contractId ?? 'profile-default'
+    }
   };
 }
 

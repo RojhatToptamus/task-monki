@@ -3505,6 +3505,12 @@ textarea:focus-visible {
   padding: 4px 0 16px;
 }
 
+.newtask-model-discovery {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -8px;
+}
+
 .network-toggle {
   display: flex;
   align-items: center;
@@ -5802,14 +5808,16 @@ textarea:focus-visible {
   gap: 10px;
 }
 
-.tm-model-default__fields > label {
+.tm-model-default__fields > label,
+.tm-model-default__field {
   display: grid;
   align-content: start;
   gap: 6px;
   min-width: 0;
 }
 
-.tm-model-default__fields > label > span {
+.tm-model-default__fields > label > span,
+.tm-model-default__field > span {
   color: var(--muted);
   font-size: 10.5px;
   font-weight: 650;
@@ -5819,7 +5827,8 @@ textarea:focus-visible {
   width: 100%;
 }
 
-.tm-model-default__fields > label:last-child:nth-child(2) {
+.tm-model-default__fields > label:last-child:nth-child(2),
+.tm-model-default__field:last-child:nth-child(2) {
   grid-column: span 2;
 }
 
@@ -5971,7 +5980,8 @@ textarea:focus-visible {
     grid-column: span 2;
   }
 
-  .tm-model-default__fields > label:last-child:nth-child(2) {
+  .tm-model-default__fields > label:last-child:nth-child(2),
+  .tm-model-default__field:last-child:nth-child(2) {
     grid-column: auto;
   }
 
@@ -5997,7 +6007,8 @@ textarea:focus-visible {
   }
 
   .tm-model-default__effort,
-  .tm-model-default__fields > label:last-child:nth-child(2) {
+  .tm-model-default__fields > label:last-child:nth-child(2),
+  .tm-model-default__field:last-child:nth-child(2) {
     grid-column: auto;
   }
 

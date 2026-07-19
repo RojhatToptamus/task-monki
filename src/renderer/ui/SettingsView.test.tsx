@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   type AgentModel,
@@ -59,6 +59,7 @@ const runtimes: AgentRuntimeState[] = [
 
 describe('SettingsView', () => {
   it('shows every agent with its independent enabled state', () => {
+    const discoverAgentRuntimeModels = vi.fn(async () => undefined);
     const html = renderToStaticMarkup(
       <SettingsView
         theme="device"
@@ -73,6 +74,7 @@ describe('SettingsView', () => {
           throw new Error('not called during render');
         }}
         onRefreshAgentRuntimes={async () => undefined}
+        onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
         onTestExternalTool={async () => {
           throw new Error('not called during render');
         }}
@@ -93,6 +95,7 @@ describe('SettingsView', () => {
     expect(html).toContain('aria-label="OpenCode enabled"');
     expect(html).toMatch(/aria-checked="false" aria-label="OpenCode enabled"/u);
     expect(html).not.toContain('Repository');
+    expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
   });
 
   it('offers effort only when the selected model reports effort choices', () => {
@@ -136,6 +139,59 @@ describe('SettingsView', () => {
     expect(withEffort).toContain('<option value="xhigh">X-high</option>');
   });
 
+  it('offers explicit model loading without starting discovery during render', () => {
+    const discoverModels = vi.fn(async () => undefined);
+    const html = renderToStaticMarkup(
+      <ModelSettingRow
+        label="Implementation"
+        runtimeId="cursor-agent-acp"
+        value="cursor-agent-acp:cursor/default"
+        models={[
+          {
+            ...codexModel,
+            id: 'cursor-agent-acp:cursor/default',
+            runtimeId: 'cursor-agent-acp',
+            modelProvider: 'cursor',
+            model: 'default',
+            displayName: 'Auto',
+            supportedReasoningEfforts: [],
+            defaultReasoningEffort: undefined
+          }
+        ]}
+        runtimes={[
+          {
+            preflight: {
+              runtime: {
+                id: 'cursor-agent-acp',
+                displayName: 'Cursor Agent',
+                kind: 'ACP_AGENT',
+                transport: 'STDIO',
+                lifecycleScope: 'APPLICATION'
+              },
+              readiness: createRuntimeReadiness('DISCOVERED', 'Cursor is available.'),
+              capabilities: {
+                ...codexCapabilities(),
+                runtimeId: 'cursor-agent-acp',
+                modelCatalog: {
+                  maturity: 'experimental',
+                  activation: 'EXPLICIT'
+                }
+              }
+            },
+            models: [],
+            refreshedAt: '2026-07-18T00:00:00.000Z'
+          }
+        ]}
+        onDiscoverModels={discoverModels}
+        onRuntimeChange={() => undefined}
+        onModelChange={() => undefined}
+      />
+    );
+
+    expect(html).toContain('>Load models<');
+    expect(discoverModels).not.toHaveBeenCalled();
+  });
+
   it('does not offer a model for an unavailable purpose runtime', () => {
     const html = renderToStaticMarkup(
       <ModelSettingRow
@@ -167,6 +223,7 @@ describe('SettingsView', () => {
           agentRuntimesLoading={agentRuntimesLoading}
           onRefreshExternalTools={async () => undefined}
           onRefreshAgentRuntimes={async () => undefined}
+          onDiscoverAgentRuntimeModels={async () => undefined}
           onTestExternalTool={async () => {
             throw new Error('not called during render');
           }}

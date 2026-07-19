@@ -50,6 +50,7 @@ interface NewTaskPanelProps {
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   onClose(): void;
 }
 
@@ -66,6 +67,7 @@ export function NewTaskPanel({
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
+  onDiscoverAgentRuntimeModels,
   onClose
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
@@ -83,6 +85,8 @@ export function NewTaskPanel({
   const permissionRuntimeRef = useRef('');
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
+  const [isDiscoveringModels, setIsDiscoveringModels] = useState(false);
+  const [modelDiscoveryFailed, setModelDiscoveryFailed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const panelRef = useRef<HTMLFormElement>(null);
@@ -137,6 +141,11 @@ export function NewTaskPanel({
     (runtime) => runtime.preflight.runtime.id === runtimeId
   );
   const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
+  const modelCatalogRequiresExplicitActivation =
+    selectedRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+    selectedRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE';
+  const modelCatalogFailed =
+    selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED';
   const executionPolicy = selectedRuntime?.preflight.capabilities.executionPolicy;
   const permissionPresets = executionPolicy?.presets ?? [];
   const permissionPreset =
@@ -366,6 +375,44 @@ export function NewTaskPanel({
     }
   };
 
+  const discoverRuntimeModels = async (nextRuntimeId: string) => {
+    setError(undefined);
+    setModelDiscoveryFailed(false);
+    if (!onDiscoverAgentRuntimeModels) return;
+    setIsDiscoveringModels(true);
+    try {
+      await onDiscoverAgentRuntimeModels(nextRuntimeId);
+    } catch (caught) {
+      if (!panelClosedRef.current) {
+        setModelDiscoveryFailed(true);
+        setError(
+          caught instanceof Error ? caught.message : 'Could not discover provider models.'
+        );
+      }
+    } finally {
+      if (!panelClosedRef.current) {
+        setIsDiscoveringModels(false);
+      }
+    }
+  };
+
+  const selectRuntime = async (nextRuntimeId: string) => {
+    const nextRuntime = runtimes.find(
+      (runtime) => runtime.preflight.runtime.id === nextRuntimeId
+    );
+    const nextModel = selectModel(models, undefined, nextRuntimeId);
+    setRuntimeId(nextRuntimeId);
+    setModelId(nextModel?.id ?? '');
+    setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+    setModelDiscoveryFailed(false);
+    if (
+      nextRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
+      nextRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
+    ) {
+      await discoverRuntimeModels(nextRuntimeId);
+    }
+  };
+
   const acceptProposal = () => {
     if (!proposal) {
       return;
@@ -390,6 +437,8 @@ export function NewTaskPanel({
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
+    isDiscoveringModels ||
+    modelDiscoveryFailed ||
     !title.trim() ||
     !prompt.trim() ||
     !repositoryPath ||
@@ -631,13 +680,9 @@ export function NewTaskPanel({
                     aria-label="Agent runtime"
                     value={runtimeId}
                     onChange={(event) => {
-                      const nextRuntimeId = event.target.value;
-                      const nextModel = selectModel(models, undefined, nextRuntimeId);
-                      setRuntimeId(nextRuntimeId);
-                      setModelId(nextModel?.id ?? '');
-                      setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                      void selectRuntime(event.target.value);
                     }}
-                    disabled={composerLocked || runtimes.length === 0}
+                    disabled={composerLocked || isDiscoveringModels || runtimes.length === 0}
                   >
                     {runtimes.map((runtime) => (
                       <option
@@ -651,9 +696,12 @@ export function NewTaskPanel({
                   </select>
                 </label>
                 <label className="field">
-                  <span className="field__label">Model</span>
+                  <span className="field__label">
+                    {isDiscoveringModels ? 'Discovering models…' : 'Model'}
+                  </span>
                   <select
                     aria-label="Model"
+                    aria-busy={isDiscoveringModels}
                     value={modelId}
                     onChange={(event) => {
                       const nextModel = runtimeModels.find(
@@ -662,7 +710,9 @@ export function NewTaskPanel({
                       setModelId(event.target.value);
                       setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
                     }}
-                    disabled={composerLocked || runtimeModels.length === 0}
+                    disabled={
+                      composerLocked || isDiscoveringModels || runtimeModels.length === 0
+                    }
                   >
                     {runtimeModels
                       .filter((candidate) => !candidate.hidden || candidate.id === modelId)
@@ -674,6 +724,20 @@ export function NewTaskPanel({
                   </select>
                 </label>
               </div>
+              {modelCatalogRequiresExplicitActivation && onDiscoverAgentRuntimeModels ? (
+                <div className="newtask-model-discovery">
+                  <button
+                    type="button"
+                    className="outline-button"
+                    disabled={composerLocked || isDiscoveringModels}
+                    onClick={() => void discoverRuntimeModels(runtimeId)}
+                  >
+                    {modelDiscoveryFailed || modelCatalogFailed
+                      ? 'Retry model discovery'
+                      : 'Load models'}
+                  </button>
+                </div>
+              ) : null}
               {reasoningEfforts.length > 0 ? (
                 <div className="field-grid">
                   <div className="field">
@@ -703,14 +767,14 @@ export function NewTaskPanel({
               <div className="field-grid">
                 <label className="field">
                   <span className="field__label">
-                    Permission mode
+                    Execution policy
                     <HelpTooltip>
                       {permissionPreset?.detail ??
                         'The selected runtime does not expose an execution policy.'}
                     </HelpTooltip>
                   </span>
                   <select
-                    aria-label="Permission mode"
+                    aria-label="Execution policy"
                     value={permissionPreset?.id ?? ''}
                     onChange={(event) => setPermissionPresetId(event.target.value)}
                     disabled={composerLocked || permissionPresets.length === 0}
@@ -742,10 +806,10 @@ export function NewTaskPanel({
                       : networkDisabledByPreset
                         ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
                         : networkRequiredByPreset
-                          ? `Required by ${permissionPreset?.label ?? 'this mode'}.`
-                      : effectiveNetworkAccess
-                        ? 'Enabled - commands may use the network during this task.'
-                        : 'Disabled - network use stays outside the task boundary.'}
+                          ? 'Required by this execution policy.'
+                          : effectiveNetworkAccess
+                            ? 'Enabled - commands may use the network during this task.'
+                            : 'Disabled - network use stays outside the task boundary.'}
                   </span>
                 </div>
                 <button
