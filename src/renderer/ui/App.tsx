@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -170,6 +171,7 @@ function isHorizontalCanvasControl(target: EventTarget | null): boolean {
 }
 
 export function App() {
+  const [inputModality, setInputModality] = useState<'keyboard' | 'pointer'>('pointer');
   const [snapshot, setSnapshot] = useState<TaskSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
   const [isAddingRepository, setIsAddingRepository] = useState(false);
@@ -1486,8 +1488,11 @@ export function App() {
   return (
     <div
       className="tm-app app-shell"
+      data-input-modality={inputModality}
       data-theme={resolvedTheme}
       data-window-platform={windowChromePlatform}
+      onKeyDownCapture={() => setInputModality('keyboard')}
+      onPointerDownCapture={() => setInputModality('pointer')}
     >
       <header className="tm-titlebar" data-window-platform={windowChromePlatform}>
         {windowChromePlatform === 'macos' ? (
@@ -2293,7 +2298,7 @@ function describeWorktreeRemoval(
   };
 }
 
-function NavItem({
+export function NavItem({
   label,
   icon,
   count,
@@ -2310,6 +2315,9 @@ function NavItem({
   collapsed?: boolean;
   onClick(): void;
 }) {
+  const descriptionId = useId();
+  const taskDescription =
+    count != null && count > 0 ? `${count} task${count === 1 ? '' : 's'}` : undefined;
   return (
     <button
       type="button"
@@ -2317,11 +2325,22 @@ function NavItem({
       onClick={onClick}
       data-tip={collapsed ? label : undefined}
       aria-label={label}
+      aria-describedby={taskDescription ? descriptionId : undefined}
     >
       {icon}
       <span className="tm-nav__label">{label}</span>
       {count != null && count > 0 ? (
-        <span className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''}`}>{count}</span>
+        <span
+          className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''}`}
+          aria-hidden="true"
+        >
+          {count}
+        </span>
+      ) : null}
+      {taskDescription ? (
+        <span id={descriptionId} className="tm-visually-hidden">
+          {taskDescription}
+        </span>
       ) : null}
     </button>
   );

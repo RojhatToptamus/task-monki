@@ -27,6 +27,7 @@
   --action: #c47e14;
   --success: #1a8f5e;
   --error: #cf4640;
+  --control-border: #8a8d93;
 
   /* Derived semantic tokens */
   --border-hover: color-mix(in srgb, var(--accent) 32%, var(--border));
@@ -69,6 +70,7 @@
   --action: #e6a23c;
   --success: #37bd80;
   --error: #e0655c;
+  --control-border: #686c74;
 
   /* Derived semantic tokens (dark) */
   --border-hover: color-mix(in srgb, var(--accent) 22%, var(--border));
@@ -97,7 +99,7 @@
   --state-blocked: var(--error); /* blocked / verdict against (needs changes, failed) */
   --state-verified: var(--success); /* verified / complete (done, review passed) */
   --state-idle: var(--neutral); /* idle / not yet (ready, not run, no PR, backlog) */
-  --focus-ring: color-mix(in srgb, var(--info) 62%, transparent);
+  --focus-ring: var(--info);
 
   /* Categorical saved-view colors. These identify views; they are not status tones. */
   --view-color-neutral: #858990;
@@ -246,11 +248,60 @@ button:disabled {
   opacity: 0.45;
 }
 
+.tm-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 button:focus-visible,
+a:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role='menu']:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
+}
+
+button:focus:not(:focus-visible),
+summary:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.app-shell[data-input-modality='pointer'] button:focus-visible,
+.app-shell[data-input-modality='pointer'] a:focus-visible,
+.app-shell[data-input-modality='pointer'] summary:focus-visible,
+.app-shell[data-input-modality='pointer'] [role='menu']:focus-visible {
+  outline: none;
+}
+
+.app-shell[data-input-modality='keyboard'] button:focus,
+.app-shell[data-input-modality='keyboard'] a:focus,
+.app-shell[data-input-modality='keyboard'] summary:focus,
+.app-shell[data-input-modality='keyboard'] [role='menu']:focus {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  [role='menu']:focus-visible {
+    outline-color: Highlight;
+  }
 }
 
 /* ----------------------------------------------------------------------- */
@@ -3063,7 +3114,7 @@ textarea:focus-visible {
   width: 100%;
   min-height: 48px;
   padding: 7px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 9px;
   background: var(--surface);
   color: var(--text);
@@ -3363,7 +3414,7 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border);
   border-radius: 11px;
   background: var(--surface);
   transition: border-color 120ms ease, box-shadow 120ms ease;
@@ -3432,7 +3483,7 @@ textarea:focus-visible {
 .task-attachment-add:focus-visible,
 .task-attachment__remove:focus-visible,
 .newtask-settings > summary:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -3630,7 +3681,7 @@ textarea:focus-visible {
 .field textarea,
 .field select {
   width: 100%;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--control-border);
   border-radius: 9px;
   background: var(--surface);
   color: var(--text);
@@ -4769,8 +4820,11 @@ textarea:focus-visible {
 
 /* clean tooltip on collapsed items (escapes the bar; nav is overflow:visible) */
 .tm-nav--collapsed .tm-nav__item[data-tip]:hover::after,
+.tm-nav--collapsed .tm-nav__item[data-tip]:focus-visible::after,
 .tm-nav--collapsed .tm-nav__saved-add[data-tip]:hover::after,
-.tm-nav--collapsed .tm-nav__repo[data-tip]:hover::after {
+.tm-nav--collapsed .tm-nav__saved-add[data-tip]:focus-visible::after,
+.tm-nav--collapsed .tm-nav__repo[data-tip]:hover::after,
+.tm-nav--collapsed .tm-nav__repo[data-tip]:focus-visible::after {
   content: attr(data-tip);
   position: absolute;
   left: calc(100% + 12px);
@@ -4790,8 +4844,11 @@ textarea:focus-visible {
 }
 
 .app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__item[data-tip]:hover::after,
+.app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__item[data-tip]:focus-visible::after,
 .app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__saved-add[data-tip]:hover::after,
-.app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__repo[data-tip]:hover::after {
+.app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__saved-add[data-tip]:focus-visible::after,
+.app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__repo[data-tip]:hover::after,
+.app-shell[data-theme='dark'] .tm-nav--collapsed .tm-nav__repo[data-tip]:focus-visible::after {
   background: #2f3036;
   border-color: var(--border-strong);
 }
@@ -5439,36 +5496,13 @@ textarea:focus-visible {
   gap: 1px;
 }
 
-.tm-pathmenu__submenu > summary {
-  display: flex;
-  align-items: center;
-  min-height: 31px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
-  cursor: pointer;
-  list-style: none;
-}
-
-.tm-pathmenu__submenu > summary::-webkit-details-marker {
-  display: none;
-}
-
-.tm-pathmenu__submenu > summary::after {
-  content: '›';
-  margin-left: auto;
-  color: var(--faint);
-}
-
-.tm-pathmenu__submenu[open] > summary::after {
-  transform: rotate(90deg);
-}
-
-.tm-pathmenu__submenu > summary:hover,
-.tm-pathmenu__submenu[open] > summary {
-  background: var(--surface2);
+.tm-pathmenu__submenu-label {
+  padding: 5px 10px 3px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .tm-pathmenu__submenu-body {
@@ -6016,7 +6050,7 @@ textarea:focus-visible {
   min-width: 0;
   max-width: 100%;
   height: 32px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   /* Drop the native OS chevron for a custom one so selects match the app's
      other controls instead of reading as a third dialect (audit §03 Settings). */
@@ -6037,16 +6071,14 @@ textarea:focus-visible {
 }
 
 .tm-settings__select:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--focus-ring);
 }
 
 .tm-settings__input {
   min-width: 180px;
   height: 32px;
   flex: 1 1 240px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--surface2);
   color: var(--text);
@@ -6453,6 +6485,11 @@ textarea:focus-visible {
   flex: 0 0 auto;
 }
 
+.tm-detail__taskmenu .tm-taskmenu__menu {
+  right: auto;
+  left: 0;
+}
+
 .tm-detail__mascot {
   position: absolute;
   top: 14px;
@@ -6480,56 +6517,6 @@ textarea:focus-visible {
 
 .tm-detail__mascot-video--active {
   opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tm-detail__mascot-video {
-    transition: none;
-  }
-
-  /* Hold the agent-progress card still: no fade-up, ring spin, or shimmer. The
-     live command falls back to a solid bright label rather than a moving gradient. */
-  .tm-run-activity--live .tm-run-activity__row {
-    animation: none;
-  }
-
-  .tm-plan__ring--spin {
-    animation: none;
-  }
-
-  .tm-plan__label--shimmer {
-    animation: none;
-    background-image: none;
-    -webkit-background-clip: border-box;
-    background-clip: border-box;
-    color: var(--text);
-  }
-
-  .tm-shimmer-text {
-    animation: none;
-    background-image: none;
-    -webkit-background-clip: border-box;
-    background-clip: border-box;
-    color: var(--tm-shimmer-bright);
-  }
-
-  .tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
-    animation: none;
-    background-image: none;
-    -webkit-background-clip: border-box;
-    background-clip: border-box;
-  }
-
-  .tm-run-activity--live
-    .tm-run-activity__row--active
-    .tm-run-activity__copy
-    .tm-run-activity__label,
-  .tm-run-activity--live
-    .tm-run-activity__row--active
-    .tm-run-activity__copy
-    .tm-run-activity__detail--command {
-    color: var(--text);
-  }
 }
 
 .tm-detail__meta {
@@ -8043,12 +8030,6 @@ textarea:focus-visible {
 
 .tm-preview-recipe-review__discard:not(:disabled):hover {
   color: var(--error-ink);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tm-preview-recipe-progress__dot {
-    animation: none;
-  }
 }
 
 .tm-preview-actionmenu {
@@ -10852,7 +10833,7 @@ textarea:focus-visible {
 }
 
 .tm-diffbrowser__pane-toggle:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -10946,7 +10927,7 @@ textarea:focus-visible {
   min-width: 0;
   height: 32px;
   padding: 0 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--surface2);
   color: var(--faint);
@@ -10962,10 +10943,15 @@ textarea:focus-visible {
   outline: none;
 }
 
+.tm-filefilter__search input::-webkit-search-cancel-button {
+  display: none;
+  -webkit-appearance: none;
+}
+
 .tm-filefilter__search:focus-within {
-  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
-  border-color: var(--border-strong);
+  border-color: var(--focus-ring);
 }
 
 .tm-filefilter__search-icon {
@@ -10978,14 +10964,19 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   border: 0;
-  border-radius: 4px;
-  background: var(--border);
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
   font-size: 12px;
   line-height: 1;
+}
+
+.tm-filefilter__clear:hover {
+  background: var(--border);
+  color: var(--text);
 }
 
 .tm-repository-picker__search input {
@@ -11904,5 +11895,54 @@ textarea:focus-visible {
   .tm-diffline--addition,
   .tm-diffline--deletion {
     grid-template-columns: 38px max-content;
+  }
+}
+
+/* Keep this final so later component animation declarations cannot override
+   the operating-system Reduce Motion preference through source order. */
+@media (prefers-reduced-motion: reduce) {
+  .tm-detail__mascot-video {
+    transition: none;
+  }
+
+  .status-pill--running .status-pill__dot,
+  .tm-pulse,
+  .tm-exec__spinner,
+  .tm-preview-statusline--info > span:first-child,
+  .tm-preview-row__dot--action,
+  .tm-preview-recipe-progress__dot,
+  .tm-prstatus__dot--pulse,
+  .tm-prcheck__dot--pending,
+  .tm-reviewcard--info .tm-reviewcard__dot,
+  .tm-run-activity--live .tm-run-activity__row,
+  .tm-plan__ring--spin,
+  .tm-plan__label--shimmer,
+  .tm-shimmer-text,
+  .tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
+    animation: none;
+  }
+
+  .tm-plan__label--shimmer,
+  .tm-shimmer-text,
+  .tm-run-activity--live .tm-run-activity__row--active .tm-run-activity__copy {
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+  }
+
+  .tm-plan__label--shimmer,
+  .tm-run-activity--live
+    .tm-run-activity__row--active
+    .tm-run-activity__copy
+    .tm-run-activity__label,
+  .tm-run-activity--live
+    .tm-run-activity__row--active
+    .tm-run-activity__copy
+    .tm-run-activity__detail--command {
+    color: var(--text);
+  }
+
+  .tm-shimmer-text {
+    color: var(--tm-shimmer-bright);
   }
 }
