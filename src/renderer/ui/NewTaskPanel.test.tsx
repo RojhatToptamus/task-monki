@@ -366,7 +366,7 @@ describe('NewTaskPanel', () => {
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('Execution policy');
     expect(html).toContain('Restricted');
-    expect(html).toContain('<option value="restricted" selected="">Restricted</option>');
+    expect(html).toMatch(/class="is-selected" aria-pressed="true">Restricted</u);
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-label="Task repository: project, /tmp/project"');
     expect(html).toContain('<strong>project</strong>');
@@ -390,11 +390,10 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('aria-labelledby="task-network-access-label"');
     expect(html).toContain('<details class="newtask-settings">');
     expect(html).toContain('>Agent<');
-    expect(html).toContain('aria-label="Agent runtime"');
-    expect(html).toContain('aria-label="Model"');
+    expect(html).toContain('aria-label="Run configuration agent and model"');
     expect(html).toContain('aria-label="Execution policy"');
     expect(html).toContain('OpenCode');
-    expect(html).not.toContain('OpenCode-only model');
+    expect(html).toContain('OpenCode-only model');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="Resize new task panel"');
     expect(html).not.toContain('slideover__scrim');

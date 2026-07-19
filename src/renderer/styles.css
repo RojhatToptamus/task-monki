@@ -3742,39 +3742,6 @@ summary:focus:not(:focus-visible) {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
-.segmented-effort {
-  display: inline-flex;
-  gap: 3px;
-  height: 42px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--surface2);
-}
-
-.segmented-effort__button {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.segmented-effort__button--active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 1px 2px rgba(16, 19, 24, 0.14);
-}
-
-.segmented-effort__button:disabled {
-  cursor: default;
-  opacity: 0.62;
-}
-
 .newtask-settings {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -3826,12 +3793,6 @@ summary:focus:not(:focus-visible) {
   display: grid;
   gap: 14px;
   padding: 4px 0 16px;
-}
-
-.newtask-model-discovery {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: -8px;
 }
 
 .network-toggle {
@@ -6329,34 +6290,370 @@ summary:focus:not(:focus-visible) {
   line-height: 1.4;
 }
 
-.tm-model-default__fields {
+.tm-agent-console {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(120px, 0.9fr) minmax(160px, 1.35fr) minmax(88px, 0.65fr);
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
 }
 
-.tm-model-default__fields > label,
-.tm-model-default__field {
+.tm-agent-console:has(.tm-agent-console__menu:not([hidden])) {
+  z-index: 40;
+}
+
+.tm-agent-console__row {
   display: grid;
-  align-content: start;
-  gap: 6px;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
   min-width: 0;
 }
 
-.tm-model-default__fields > label > span,
-.tm-model-default__field > span {
+.tm-agent-console__row--agent {
+  position: relative;
+  align-items: center;
+}
+
+.tm-agent-console__label {
+  padding-top: 7px;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
 }
 
-.tm-model-default__fields .tm-settings__select {
+.tm-agent-console__row--agent .tm-agent-console__label {
+  padding-top: 0;
+}
+
+.tm-agent-console__trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
   width: 100%;
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--surface2);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
 }
 
-.tm-model-default__fields > label:last-child:nth-child(2),
-.tm-model-default__field:last-child:nth-child(2) {
-  grid-column: span 2;
+.tm-agent-console__trigger:not(:disabled):hover,
+.tm-agent-console__trigger[aria-expanded='true'] {
+  border-color: var(--border-strong);
+}
+
+.tm-agent-console__trigger--error {
+  border-color: color-mix(in srgb, var(--state-blocked) 62%, var(--border));
+}
+
+.tm-agent-console__trigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.tm-agent-console__trigger:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.68;
+}
+
+.tm-agent-console__summary {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-agent-console__chevron {
+  color: var(--faint);
+  transition: transform 120ms ease;
+}
+
+.tm-agent-console__chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.tm-agent-console__spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--text-soft);
+  border-radius: 50%;
+  animation: tm-agent-console-spin 700ms linear infinite;
+}
+
+@keyframes tm-agent-console-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tm-agent-console__menu {
+  position: absolute;
+  inset: 38px 0 auto 84px;
+  z-index: 50;
+  max-height: min(320px, calc(100vh - 220px));
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  overflow-y: auto;
+}
+
+.tm-agent-console__menu--top {
+  inset: auto 0 38px 84px;
+}
+
+.tm-agent-console__menu[hidden] {
+  display: none;
+}
+
+.tm-agent-console__group + .tm-agent-console__group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hair);
+}
+
+.tm-agent-console__group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px 4px;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tm-agent-console__group-title span:last-child:not(:first-child) {
+  overflow: hidden;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.tm-agent-console__option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+
+.tm-agent-console__option:hover,
+.tm-agent-console__option:focus-visible,
+.tm-agent-console__option[aria-checked='true'] {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.tm-agent-console__option:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.tm-agent-console__option > span:first-child {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-agent-console__option-meta {
+  color: var(--faint);
+  font: 10px/1 var(--font-mono);
+}
+
+.tm-agent-console__check {
+  display: inline-flex;
+  color: var(--text-soft);
+}
+
+.tm-agent-console__catalog-state,
+.tm-agent-console__catalog-action,
+.tm-agent-console__empty {
+  margin: 2px 4px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.tm-agent-console__catalog-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 8px;
+}
+
+.tm-agent-console__catalog-action {
+  display: grid;
+  width: calc(100% - 8px);
+  gap: 2px;
+  min-height: 34px;
+  padding: 6px 8px;
+  background: var(--surface2);
+  text-align: left;
+}
+
+.tm-agent-console__catalog-action:hover,
+.tm-agent-console__catalog-action:focus-visible {
+  color: var(--text);
+}
+
+.tm-agent-console__catalog-action--error {
+  color: var(--error-ink);
+}
+
+.tm-agent-console__catalog-action small {
+  overflow: hidden;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-agent-console__empty {
+  padding: 9px 8px;
+}
+
+.tm-agent-console__reasoning {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.tm-agent-console__reasoning::before {
+  position: absolute;
+  inset: 7px 8% auto;
+  height: 1px;
+  background: var(--border-strong);
+  content: '';
+}
+
+.tm-agent-console__reasoning button {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  justify-items: center;
+  gap: 6px;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tm-agent-console__reasoning button > span {
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--border-strong);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.tm-agent-console__reasoning button.is-selected {
+  color: var(--text);
+}
+
+.tm-agent-console__reasoning button.is-selected > span {
+  background: var(--text-soft);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-soft) 24%, transparent);
+}
+
+.tm-agent-console__reasoning button:focus-visible {
+  border-radius: 5px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.tm-agent-console__reasoning button:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.tm-agent-console__reasoning small {
+  overflow: hidden;
+  max-width: 100%;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tm-agent-console__access {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.tm-agent-console__access-options {
+  display: flex;
+  gap: 1px;
+  min-width: 0;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.tm-agent-console__access-options button {
+  flex: 1;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tm-agent-console__access-options button.is-selected {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.tm-agent-console__access-options button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.tm-agent-console__access-options button:disabled {
+  cursor: default;
+  opacity: 0.46;
+}
+
+.tm-agent-console__access > small {
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.35;
 }
 
 .tm-executable-setting {
@@ -6499,19 +6796,6 @@ summary:focus:not(:focus-visible) {
     padding-top: 0;
   }
 
-  .tm-model-default__fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .tm-model-default__effort {
-    grid-column: span 2;
-  }
-
-  .tm-model-default__fields > label:last-child:nth-child(2),
-  .tm-model-default__field:last-child:nth-child(2) {
-    grid-column: auto;
-  }
-
   .tm-executable-editor__controls {
     align-items: stretch;
     flex-wrap: wrap;
@@ -6529,14 +6813,22 @@ summary:focus:not(:focus-visible) {
     align-items: flex-start;
   }
 
-  .tm-model-default__fields {
+  .tm-agent-console__row {
     grid-template-columns: 1fr;
+    gap: 6px;
   }
 
-  .tm-model-default__effort,
-  .tm-model-default__fields > label:last-child:nth-child(2),
-  .tm-model-default__field:last-child:nth-child(2) {
-    grid-column: auto;
+  .tm-agent-console__label,
+  .tm-agent-console__row--agent .tm-agent-console__label {
+    padding-top: 0;
+  }
+
+  .tm-agent-console__menu {
+    inset: 58px 0 auto;
+  }
+
+  .tm-agent-console__menu--top {
+    inset: auto 0 46px;
   }
 
   .tm-executable-editor__controls .tm-settings__input {

@@ -467,17 +467,6 @@ export function App() {
       };
     });
   }, []);
-  const discoverSettingsAgentRuntimeModels = useCallback(
-    async (runtimeId: string) => {
-      setError(undefined);
-      try {
-        await discoverAgentRuntimeModels(runtimeId);
-      } catch (caught) {
-        reportActionError(caught, 'Failed to discover agent models.');
-      }
-    },
-    [discoverAgentRuntimeModels, reportActionError]
-  );
   const testExternalTool = useCallback(
     async (input: Parameters<typeof taskManagerApi.testExternalTool>[0]) => {
       const result = await taskManagerApi.testExternalTool(input);
@@ -1958,7 +1947,7 @@ export function App() {
             agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
             onRefreshExternalTools={refreshExternalToolStatus}
             onRefreshAgentRuntimes={refreshAgentRuntimes}
-            onDiscoverAgentRuntimeModels={discoverSettingsAgentRuntimeModels}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             onTestExternalTool={testExternalTool}
             error={error}
             models={runtimeModels}

@@ -143,9 +143,9 @@ cached process remains healthy; changing or restarting the configured runtime
 establishes a new cache boundary, and a provider-reported authentication failure
 clears it. Task Monki does not poll, discover at startup, discover merely because
 New Task or Settings opened, create an orphan session, or persist the catalog as
-a task-owned settings observation. Selected-runtime surfaces offer an explicit
-Load models action and turn a failed request into Retry; the adapter retains a
-typed catalog failure until retry succeeds. Other stable ACP session-only
+a task-owned settings observation. Selected-runtime palettes show model loading
+and retry inside the menu; the adapter retains a typed catalog failure until
+retry succeeds. Other stable ACP session-only
 catalogs remain scoped to the provider session that advertised them and do not
 leak into New Task selection.
 

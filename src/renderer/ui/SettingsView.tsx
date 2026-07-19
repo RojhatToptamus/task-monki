@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
   type AgentModel,
   type AgentRuntimeState,
   type ExternalToolId,
@@ -16,6 +15,7 @@ import {
   selectExecutableDisplayStatus
 } from '../model/executableSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
+import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
 
 type SettingsSection = 'agents' | 'models' | 'tools' | 'appearance';
@@ -294,16 +294,19 @@ function ModelSettings({
       detail="Defaults for implementation, prompt refinement, and review."
     >
       <div className="tm-model-defaults">
-        <ModelSettingRow
+        <AgentModelSetting
           label="Implementation"
           runtimeId={selected.defaultRuntimeId}
-          value={selected.selectedDefaultModel?.id ?? ''}
-          effortValue={selected.selectedDefaultEffort}
+          modelId={selected.selectedDefaultModel?.id ?? ''}
+          reasoningEffort={selected.selectedDefaultEffort}
           models={enabledModels}
           runtimes={enabledRuntimes}
           onDiscoverModels={onDiscoverAgentRuntimeModels}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(enabledModels, undefined, runtimeId);
+          onSelectionChange={(runtimeId, modelId) => {
+            const nextModel =
+              enabledModels.find(
+                (candidate) => candidate.runtimeId === runtimeId && candidate.id === modelId
+              ) ?? selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
               defaultRuntimeId: runtimeId,
               defaultModel: nextModel?.model ?? null,
@@ -311,52 +314,42 @@ function ModelSettings({
               defaultReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
             });
           }}
-          onModelChange={(modelId) => {
-            const nextModel = enabledModels.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              defaultModel: nextModel?.model ?? null,
-              defaultModelProvider: nextModel?.modelProvider ?? null,
-              defaultReasoningEffort:
-                resolveReasoningEffort(nextModel, appSettings.defaultReasoningEffort) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
+          onReasoningEffortChange={(reasoningEffort) =>
             onSetAppSettings({ defaultReasoningEffort: reasoningEffort || null })
           }
         />
-        <ModelSettingRow
+        <AgentModelSetting
           label="Prompt refinement"
           runtimeId={selected.promptRefinementRuntimeId}
-          value={selected.selectedPromptRefinementModel?.id ?? ''}
+          modelId={selected.selectedPromptRefinementModel?.id ?? ''}
           models={enabledModels}
           runtimes={promptRefinementRuntimes}
           onDiscoverModels={onDiscoverAgentRuntimeModels}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(enabledModels, undefined, runtimeId);
+          onSelectionChange={(runtimeId, modelId) => {
+            const nextModel =
+              enabledModels.find(
+                (candidate) => candidate.runtimeId === runtimeId && candidate.id === modelId
+              ) ?? selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
               promptRefinementRuntimeId: runtimeId,
               promptRefinementModel: nextModel?.model ?? null,
               promptRefinementModelProvider: nextModel?.modelProvider ?? null
             });
           }}
-          onModelChange={(modelId) => {
-            const nextModel = enabledModels.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              promptRefinementModel: nextModel?.model ?? null,
-              promptRefinementModelProvider: nextModel?.modelProvider ?? null
-            });
-          }}
         />
-        <ModelSettingRow
+        <AgentModelSetting
           label="Review"
           runtimeId={selected.reviewRuntimeId}
-          value={selected.selectedReviewModel?.id ?? ''}
-          effortValue={selected.selectedReviewEffort}
+          modelId={selected.selectedReviewModel?.id ?? ''}
+          reasoningEffort={selected.selectedReviewEffort}
           models={enabledModels}
           runtimes={reviewRuntimes}
           onDiscoverModels={onDiscoverAgentRuntimeModels}
-          onRuntimeChange={(runtimeId) => {
-            const nextModel = selectModel(enabledModels, undefined, runtimeId);
+          onSelectionChange={(runtimeId, modelId) => {
+            const nextModel =
+              enabledModels.find(
+                (candidate) => candidate.runtimeId === runtimeId && candidate.id === modelId
+              ) ?? selectModel(enabledModels, undefined, runtimeId);
             onSetAppSettings({
               reviewRuntimeId: runtimeId,
               reviewModel: nextModel?.model ?? null,
@@ -364,16 +357,7 @@ function ModelSettings({
               reviewReasoningEffort: resolveReasoningEffort(nextModel, undefined) ?? null
             });
           }}
-          onModelChange={(modelId) => {
-            const nextModel = enabledModels.find((candidate) => candidate.id === modelId);
-            onSetAppSettings({
-              reviewModel: nextModel?.model ?? null,
-              reviewModelProvider: nextModel?.modelProvider ?? null,
-              reviewReasoningEffort:
-                resolveReasoningEffort(nextModel, appSettings.reviewReasoningEffort) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
+          onReasoningEffortChange={(reasoningEffort) =>
             onSetAppSettings({ reviewReasoningEffort: reasoningEffort || null })
           }
         />
@@ -450,7 +434,7 @@ export function selectSettingsModels(
   );
   const selectedPromptRefinementModel = selectModel(
     models,
-    appSettings.promptRefinementModel ?? DEFAULT_PROMPT_REFINEMENT_MODEL,
+    appSettings.promptRefinementModel,
     promptRefinementRuntimeId,
     appSettings.promptRefinementModelProvider
   );
@@ -473,150 +457,6 @@ export function selectSettingsModels(
     selectedReviewEffort:
       resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? ''
   };
-}
-
-export function ModelSettingRow({
-  label,
-  hint,
-  runtimeId,
-  value,
-  effortValue = '',
-  models,
-  runtimes,
-  onDiscoverModels,
-  onRuntimeChange,
-  onModelChange,
-  onEffortChange
-}: {
-  label: string;
-  hint?: string;
-  runtimeId: string;
-  value: string;
-  effortValue?: string;
-  models: AgentModel[];
-  runtimes: AgentRuntimeState[];
-  onDiscoverModels?(runtimeId: string): void | Promise<void>;
-  onRuntimeChange(value: string): void;
-  onModelChange(value: string): void;
-  onEffortChange?(value: string): void;
-}) {
-  const selectedRuntime = runtimes.find(
-    (runtime) => runtime.preflight.runtime.id === runtimeId
-  );
-  const runtimeAvailable = Boolean(selectedRuntime);
-  const canLoadModels = Boolean(
-    onDiscoverModels &&
-      selectedRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
-      selectedRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
-  );
-  const runtimeModels = runtimeAvailable
-    ? models.filter((model) => model.runtimeId === runtimeId)
-    : [];
-  const selected = runtimeModels.find((model) => model.id === value);
-  const efforts = selected
-    ? [
-        ...new Set(
-          [
-            ...selected.supportedReasoningEfforts,
-            selected.defaultReasoningEffort,
-            effortValue
-          ].filter((effort): effort is string => Boolean(effort))
-        )
-      ]
-    : [];
-
-  return (
-    <div className="tm-model-default">
-      <div className="tm-model-default__title">
-        <strong>{label}</strong>
-        {hint ? <span>{hint}</span> : null}
-      </div>
-      <div className="tm-model-default__fields">
-        <label>
-          <span>Agent</span>
-          <select
-            className="tm-settings__select"
-            value={runtimes.length > 0 ? runtimeId : ''}
-            onChange={(event) => {
-              const nextRuntimeId = event.target.value;
-              onRuntimeChange(nextRuntimeId);
-              const nextRuntime = runtimes.find(
-                (runtime) => runtime.preflight.runtime.id === nextRuntimeId
-              );
-              if (
-                nextRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
-                nextRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
-              ) {
-                void onDiscoverModels?.(nextRuntimeId);
-              }
-            }}
-            disabled={runtimes.length === 0}
-          >
-            {runtimes.length === 0 ? <option value="">Not available</option> : null}
-            {runtimes.map((runtime) => (
-              <option key={runtime.preflight.runtime.id} value={runtime.preflight.runtime.id}>
-                {runtime.preflight.runtime.displayName}
-                {runtimeReadinessView(runtime).optionSuffix}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="tm-model-default__field">
-          <span>Model</span>
-          <select
-            aria-label={`${label} model`}
-            className="tm-settings__select"
-            value={selected ? value : ''}
-            onChange={(event) => onModelChange(event.target.value)}
-            disabled={runtimeModels.length === 0}
-          >
-            {runtimeModels.length === 0 ? (
-              <option value="">
-                {runtimeAvailable ? 'Resolved when available' : 'Not available'}
-              </option>
-            ) : null}
-            {runtimeModels
-              .filter((model) => !model.hidden || model.id === value)
-              .map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.displayName}
-                </option>
-              ))}
-          </select>
-          {canLoadModels ? (
-            <button
-              type="button"
-              className="tm-settings__button"
-              onClick={() => void onDiscoverModels?.(runtimeId)}
-            >
-              {selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED'
-                ? 'Retry model discovery'
-                : 'Load models'}
-            </button>
-          ) : null}
-        </div>
-        {onEffortChange && efforts.length > 0 ? (
-          <label className="tm-model-default__effort">
-            <span>Effort</span>
-            <select
-              className="tm-settings__select"
-              value={effortValue}
-              onChange={(event) => onEffortChange(event.target.value)}
-            >
-              {selected?.defaultReasoningEffort === undefined ? (
-                <option value="">Provider default</option>
-              ) : null}
-              {efforts.map((effort) => (
-                <option key={effort} value={effort}>
-                  {formatEffortLabel(effort)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-      </div>
-    </div>
-  );
 }
 
 function ToolSettings({
@@ -1037,17 +877,6 @@ export function ExecutablePathEditor({
       ) : null}
     </div>
   );
-}
-
-function formatEffortLabel(value: string): string {
-  if (value.toLowerCase() === 'xhigh') {
-    return 'X-high';
-  }
-  return value
-    .split(/[-_\s]+/u)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
 }
 
 type ExecutableTestFeedback =

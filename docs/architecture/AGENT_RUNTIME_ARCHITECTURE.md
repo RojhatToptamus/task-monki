@@ -269,6 +269,13 @@ selected runtime; it never falls through to another runtime or provider. A task
 captured while its runtime is unavailable may omit a model until start, when
 the owning adapter selects or rejects its current default explicitly.
 
+Implementation, prompt-refinement, and review defaults use the same selector,
+but each receives its own capability-filtered runtime set. Prompt refinement
+requires a ready runtime that advertises that operation. Review requires either
+native review support or stable detached review support. These choices are not
+hard-coded to Codex; an enabled provider appears as soon as its integration can
+truthfully advertise and implement the required operation.
+
 Catalog scope is part of model identity. Application catalogs contain only
 models proven safe for application-wide selection. Worktree-, account-, or
 provider-session-specific catalogs stay with that scope and are revalidated
@@ -287,10 +294,11 @@ runs before `session/new`; it never creates a probe session. Results are reused
 until that process, executable configuration, or observed authentication state
 changes. They are not polled, loaded at startup, inferred from opening New Task
 or Settings, or persisted as task/session observations. Cursor's exact Auto
-value is `default`. The selected-runtime surfaces provide an explicit Load or
-Retry action; a failed request records a typed catalog failure until that action
-succeeds. Both profiles revalidate the selected model and reasoning value
-against the new worktree session before mutation or prompt submission.
+value is `default`. Selected-runtime palettes keep loading, failure, and retry
+inside the model menu; a failed request records a typed catalog failure until
+the user retries successfully. Both profiles revalidate the selected model and
+reasoning value against the new worktree session before mutation or prompt
+submission.
 
 ## Runtime behavior
 

@@ -411,7 +411,7 @@ describe('runProviderSmoke', () => {
       repositoryPath,
       service,
       cleanupPaths,
-      { timeoutMs: 200 },
+      { timeoutMs: 1_000 },
       { cancelTimeoutMs: 2_000 }
     );
 

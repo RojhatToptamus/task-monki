@@ -34,6 +34,7 @@ import {
   type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
 import {
+  formatReasoningEffort,
   resolveReasoningEffort,
   selectModel
 } from '../model/agentExecutionSettings';
@@ -50,6 +51,10 @@ import {
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
+import {
+  AgentModelSelector,
+  type ModelDiscoveryStatus
+} from './AgentModelSelector';
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
@@ -112,8 +117,8 @@ export function NewTaskPanel({
   const permissionRuntimeRef = useRef('');
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
-  const [isDiscoveringModels, setIsDiscoveringModels] = useState(false);
-  const [modelDiscoveryFailed, setModelDiscoveryFailed] = useState(false);
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>('idle');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -185,9 +190,6 @@ export function NewTaskPanel({
     (runtime) => runtime.preflight.runtime.id === runtimeId
   );
   const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
-  const modelCatalogRequiresExplicitActivation =
-    selectedRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
-    selectedRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE';
   const modelCatalogFailed =
     selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED';
   const executionPolicy = selectedRuntime?.preflight.capabilities.executionPolicy;
@@ -238,15 +240,6 @@ export function NewTaskPanel({
   const selectedRepository = availableRepositories.find(
     (repository) => repository.id === selectedRepositoryId
   );
-  const reasoningEfforts = [
-    ...new Set(
-      [
-        ...(selectedModel?.supportedReasoningEfforts ?? []),
-        selectedModel?.defaultReasoningEffort
-      ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-    )
-  ];
-
   const composerLocked = Boolean(disabled) || isSubmitting || creationOutcomeUnknown;
   const attachments = useTaskAttachments({
     enabled: effectiveAttachmentsEnabled,
@@ -467,44 +460,6 @@ export function NewTaskPanel({
     }
   };
 
-  const discoverRuntimeModels = async (nextRuntimeId: string) => {
-    setError(undefined);
-    setModelDiscoveryFailed(false);
-    if (!onDiscoverAgentRuntimeModels) return;
-    setIsDiscoveringModels(true);
-    try {
-      await onDiscoverAgentRuntimeModels(nextRuntimeId);
-    } catch (caught) {
-      if (!panelClosedRef.current) {
-        setModelDiscoveryFailed(true);
-        setError(
-          caught instanceof Error ? caught.message : 'Could not discover provider models.'
-        );
-      }
-    } finally {
-      if (!panelClosedRef.current) {
-        setIsDiscoveringModels(false);
-      }
-    }
-  };
-
-  const selectRuntime = async (nextRuntimeId: string) => {
-    const nextRuntime = runtimes.find(
-      (runtime) => runtime.preflight.runtime.id === nextRuntimeId
-    );
-    const nextModel = selectModel(models, undefined, nextRuntimeId);
-    setRuntimeId(nextRuntimeId);
-    setModelId(nextModel?.id ?? '');
-    setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-    setModelDiscoveryFailed(false);
-    if (
-      nextRuntime?.preflight.capabilities.modelCatalog.activation === 'EXPLICIT' &&
-      nextRuntime.preflight.readiness.checks.modelCatalog !== 'AVAILABLE'
-    ) {
-      await discoverRuntimeModels(nextRuntimeId);
-    }
-  };
-
   const acceptProposal = () => {
     if (!proposal) {
       return;
@@ -529,8 +484,8 @@ export function NewTaskPanel({
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
-    isDiscoveringModels ||
-    modelDiscoveryFailed ||
+    modelDiscoveryStatus !== 'idle' ||
+    modelCatalogFailed ||
     !title.trim() ||
     !prompt.trim() ||
     !selectedRepositoryId ||
@@ -838,149 +793,69 @@ export function NewTaskPanel({
                 {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
                 {selectedModel ? ` · ${selectedModel.displayName}` : ''}
                 {effectiveReasoningEffort
-                  ? ` · ${formatEffortLabel(effectiveReasoningEffort)}`
+                  ? ` · ${formatReasoningEffort(effectiveReasoningEffort)}`
                   : ''}
               </span>
               <ChevronIcon />
             </summary>
 
             <div className="newtask-settings__content">
-              <div className="field-grid field-grid--two">
-                <label className="field">
-                  <span className="field__label">Agent</span>
-                  <select
-                    aria-label="Agent runtime"
-                    value={runtimeId}
-                    onChange={(event) => {
-                      void selectRuntime(event.target.value);
-                    }}
-                    disabled={composerLocked || isDiscoveringModels || runtimes.length === 0}
-                  >
-                    {runtimes.map((runtime) => (
-                      <option
-                        key={runtime.preflight.runtime.id}
-                        value={runtime.preflight.runtime.id}
+              <AgentModelSelector
+                label="Run configuration"
+                runtimeId={runtimeId}
+                modelId={modelId}
+                reasoningEffort={effectiveReasoningEffort}
+                models={models}
+                runtimes={runtimes}
+                disabled={composerLocked}
+                onDiscoverModels={onDiscoverAgentRuntimeModels}
+                onDiscoveryStatusChange={setModelDiscoveryStatus}
+                onSelectionChange={(nextRuntimeId, nextModelId) => {
+                  const nextModel = models.find(
+                    (candidate) =>
+                      candidate.runtimeId === nextRuntimeId && candidate.id === nextModelId
+                  );
+                  setRuntimeId(nextRuntimeId);
+                  setModelId(nextModel?.id ?? '');
+                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                }}
+                onReasoningEffortChange={setReasoningEffort}
+                access={
+                  <div className="tm-agent-console__row">
+                    <span className="tm-agent-console__label">Access</span>
+                    <div className="tm-agent-console__access">
+                      <div
+                        className="tm-agent-console__access-options"
+                        role="group"
+                        aria-label="Execution policy"
                       >
-                        {runtime.preflight.runtime.displayName}
-                        {runtimeReadinessView(runtime).optionSuffix}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span className="field__label">
-                    {isDiscoveringModels ? 'Discovering models…' : 'Model'}
-                  </span>
-                  <select
-                    aria-label="Model"
-                    aria-busy={isDiscoveringModels}
-                    value={modelId}
-                    onChange={(event) => {
-                      const nextModel = runtimeModels.find(
-                        (candidate) => candidate.id === event.target.value
-                      );
-                      setModelId(event.target.value);
-                      setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-                    }}
-                    disabled={
-                      composerLocked || isDiscoveringModels || runtimeModels.length === 0
-                    }
-                  >
-                    {runtimeModels
-                      .filter((candidate) => !candidate.hidden || candidate.id === modelId)
-                      .map((candidate) => (
-                        <option key={candidate.id} value={candidate.id}>
-                          {candidate.displayName}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              </div>
-              {modelCatalogRequiresExplicitActivation && onDiscoverAgentRuntimeModels ? (
-                <div className="newtask-model-discovery">
-                  <button
-                    type="button"
-                    className="outline-button"
-                    disabled={composerLocked || isDiscoveringModels}
-                    onClick={() => void discoverRuntimeModels(runtimeId)}
-                  >
-                    {modelDiscoveryFailed || modelCatalogFailed
-                      ? 'Retry model discovery'
-                      : 'Load models'}
-                  </button>
-                </div>
-              ) : null}
-              {reasoningEfforts.length > 0 ? (
-                <div className="field-grid">
-                  <div className="field">
-                    <span className="field__label">Reasoning effort</span>
-                    <div className="segmented-effort" role="group" aria-label="Reasoning effort">
-                      {selectedModel?.defaultReasoningEffort === undefined ? (
-                        <button
-                          type="button"
-                          className={`segmented-effort__button ${
-                            effectiveReasoningEffort === ''
-                              ? 'segmented-effort__button--active'
-                              : ''
-                          }`}
-                          disabled={composerLocked || !selectedModel}
-                          aria-pressed={effectiveReasoningEffort === ''}
-                          onClick={() => setReasoningEffort('')}
-                        >
-                          Provider default
-                        </button>
-                      ) : null}
-                      {reasoningEfforts.map((effort) => (
-                        <button
-                          key={effort}
-                          type="button"
-                          className={`segmented-effort__button ${
-                            effort === effectiveReasoningEffort
-                              ? 'segmented-effort__button--active'
-                              : ''
-                          }`}
-                          disabled={composerLocked || !selectedModel}
-                          aria-pressed={effort === effectiveReasoningEffort}
-                          onClick={() => setReasoningEffort(effort)}
-                        >
-                          {formatEffortLabel(effort)}
-                        </button>
-                      ))}
+                        {permissionPresets.map((preset) => {
+                          const presetDisabled =
+                            preset.sandbox === 'DANGER_FULL_ACCESS' &&
+                            activeAttachmentItems.length > 0;
+                          return (
+                            <button
+                              type="button"
+                              className={preset.id === permissionPreset?.id ? 'is-selected' : ''}
+                              aria-pressed={preset.id === permissionPreset?.id}
+                              disabled={composerLocked || presetDisabled}
+                              key={preset.id}
+                              title={presetDisabled ? 'Remove attachments to use full access.' : undefined}
+                              onClick={() => setPermissionPresetId(preset.id)}
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <small>
+                        {permissionPreset?.detail ??
+                          'The selected agent does not expose an execution policy.'}
+                      </small>
                     </div>
                   </div>
-                </div>
-              ) : null}
-
-              <div className="field-grid">
-                <label className="field">
-                  <span className="field__label">
-                    Execution policy
-                    <HelpTooltip>
-                      {permissionPreset?.detail ??
-                        'The selected runtime does not expose an execution policy.'}
-                    </HelpTooltip>
-                  </span>
-                  <select
-                    aria-label="Execution policy"
-                    value={permissionPreset?.id ?? ''}
-                    onChange={(event) => setPermissionPresetId(event.target.value)}
-                    disabled={composerLocked || permissionPresets.length === 0}
-                  >
-                    {permissionPresets.map((preset) => (
-                      <option
-                        key={preset.id}
-                        value={preset.id}
-                        disabled={
-                          preset.sandbox === 'DANGER_FULL_ACCESS' &&
-                          activeAttachmentItems.length > 0
-                        }
-                      >
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+                }
+              />
 
               <div className="network-toggle">
                 <div className="network-toggle__copy">
@@ -1076,28 +951,6 @@ export function NewTaskPanel({
         </footer>
       </form>
     </div>
-  );
-}
-
-function HelpTooltip({ children }: { children: string }) {
-  return (
-    <span className="info-tip" onClick={(event) => event.preventDefault()}>
-      <button type="button" className="info-tip__button" aria-label="More info">
-        <InfoIcon />
-      </button>
-      <span className="info-tip__bubble" role="tooltip">
-        {children}
-      </span>
-    </span>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none">
-      <path d="M12 11v6" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-      <circle cx="12" cy="6.5" r="1.6" fill="currentColor" />
-    </svg>
   );
 }
 
@@ -1235,13 +1088,6 @@ function TextFileIcon() {
       />
     </svg>
   );
-}
-
-function formatEffortLabel(effort: string): string {
-  if (effort.toLowerCase() === 'xhigh') {
-    return 'X-high';
-  }
-  return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
 function RefinementProposal({

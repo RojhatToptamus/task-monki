@@ -11,10 +11,11 @@ import {
   codexCapabilities
 } from '../../core/agent/codex/codexCapabilities';
 import {
-  ModelSettingRow,
   SettingsView,
-  describeExternalToolAvailability
+  describeExternalToolAvailability,
+  selectSettingsModels
 } from './SettingsView';
+import { AgentModelSetting } from './AgentModelSelector';
 
 const codexModel: AgentModel = {
   id: 'codex:test-model',
@@ -100,10 +101,10 @@ describe('SettingsView', () => {
 
   it('offers effort only when the selected model reports effort choices', () => {
     const withoutEffort = renderToStaticMarkup(
-      <ModelSettingRow
+      <AgentModelSetting
         label="Implementation"
         runtimeId="codex"
-        value="codex:no-effort"
+        modelId="codex:no-effort"
         models={[
           {
             ...codexModel,
@@ -114,36 +115,34 @@ describe('SettingsView', () => {
           }
         ]}
         runtimes={runtimes.slice(0, 1)}
-        onRuntimeChange={() => undefined}
-        onModelChange={() => undefined}
-        onEffortChange={() => undefined}
+        onSelectionChange={() => undefined}
+        onReasoningEffortChange={() => undefined}
       />
     );
     const withEffort = renderToStaticMarkup(
-      <ModelSettingRow
+      <AgentModelSetting
         label="Implementation"
         runtimeId="codex"
-        value={codexModel.id}
-        effortValue="low"
+        modelId={codexModel.id}
+        reasoningEffort="low"
         models={[codexModel]}
         runtimes={runtimes.slice(0, 1)}
-        onRuntimeChange={() => undefined}
-        onModelChange={() => undefined}
-        onEffortChange={() => undefined}
+        onSelectionChange={() => undefined}
+        onReasoningEffortChange={() => undefined}
       />
     );
 
-    expect(withoutEffort).not.toContain('>Effort<');
-    expect(withEffort).toContain('>Effort<');
-    expect(withEffort).toContain('<option value="high">High</option>');
-    expect(withEffort).toContain('<option value="xhigh">X-high</option>');
+    expect(withoutEffort).not.toContain('>Reasoning<');
+    expect(withEffort).toContain('>Reasoning<');
+    expect(withEffort).toContain('>High</small>');
+    expect(withEffort).toContain('>X-high</small>');
 
     const providerDefault = renderToStaticMarkup(
-      <ModelSettingRow
+      <AgentModelSetting
         label="Implementation"
         runtimeId="codex"
-        value="codex:no-effort-default"
-        effortValue=""
+        modelId="codex:no-effort-default"
+        reasoningEffort=""
         models={[
           {
             ...codexModel,
@@ -153,21 +152,20 @@ describe('SettingsView', () => {
           }
         ]}
         runtimes={runtimes}
-        onRuntimeChange={() => undefined}
-        onModelChange={() => undefined}
-        onEffortChange={() => undefined}
+        onSelectionChange={() => undefined}
+        onReasoningEffortChange={() => undefined}
       />
     );
-    expect(providerDefault).toContain('<option value="" selected="">Provider default</option>');
+    expect(providerDefault).toContain('>Default</small>');
   });
 
   it('offers explicit model loading without starting discovery during render', () => {
     const discoverModels = vi.fn(async () => undefined);
     const html = renderToStaticMarkup(
-      <ModelSettingRow
+      <AgentModelSetting
         label="Implementation"
         runtimeId="cursor-agent-acp"
-        value="cursor-agent-acp:cursor/default"
+        modelId="cursor-agent-acp:cursor/default"
         models={[
           {
             ...codexModel,
@@ -205,8 +203,7 @@ describe('SettingsView', () => {
           }
         ]}
         onDiscoverModels={discoverModels}
-        onRuntimeChange={() => undefined}
-        onModelChange={() => undefined}
+        onSelectionChange={() => undefined}
       />
     );
 
@@ -216,22 +213,72 @@ describe('SettingsView', () => {
 
   it('does not offer a model for an unavailable purpose runtime', () => {
     const html = renderToStaticMarkup(
-      <ModelSettingRow
+      <AgentModelSetting
         label="Prompt refinement"
         runtimeId="codex"
-        value={codexModel.id}
+        modelId={codexModel.id}
         models={[codexModel]}
         runtimes={[]}
-        onRuntimeChange={() => undefined}
-        onModelChange={() => undefined}
-        onEffortChange={() => undefined}
+        onSelectionChange={() => undefined}
+        onReasoningEffortChange={() => undefined}
       />
     );
 
-    expect(html).toContain('Not available');
+    expect(html).toContain('No agent available');
+    expect(html).toContain('No agent supports this operation.');
     expect(html).not.toContain('Test model');
-    expect(html).not.toContain('>Effort<');
-    expect(html.match(/disabled=""/gu)).toHaveLength(2);
+    expect(html).not.toContain('>Reasoning<');
+    expect(html.match(/disabled=""/gu)).toHaveLength(1);
+  });
+
+  it('selects refinement and review models from any capable enabled runtime', () => {
+    const providerModel: AgentModel = {
+      ...codexModel,
+      id: 'provider-runtime:provider/model',
+      runtimeId: 'provider-runtime',
+      modelProvider: 'provider',
+      model: 'model',
+      displayName: 'Provider model'
+    };
+    const providerRuntime: AgentRuntimeState = {
+      preflight: {
+        runtime: {
+          id: 'provider-runtime',
+          displayName: 'Provider runtime',
+          kind: 'HTTP_AGENT',
+          transport: 'HTTP_SSE',
+          lifecycleScope: 'APPLICATION'
+        },
+        readiness: createRuntimeReadiness('READY', 'Ready'),
+        capabilities: {
+          ...codexCapabilities(),
+          runtimeId: 'provider-runtime',
+          review: { maturity: 'unsupported' },
+          detachedReview: { maturity: 'stable' }
+        }
+      },
+      models: [providerModel],
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+
+    const selected = selectSettingsModels(
+      [codexModel, providerModel],
+      [runtimes[0]!, providerRuntime],
+      {
+        ...DEFAULT_TASK_MANAGER_APP_SETTINGS,
+        promptRefinementRuntimeId: 'provider-runtime',
+        promptRefinementModel: 'model',
+        promptRefinementModelProvider: 'provider',
+        reviewRuntimeId: 'provider-runtime',
+        reviewModel: 'model',
+        reviewModelProvider: 'provider'
+      }
+    );
+
+    expect(selected.promptRefinementRuntimeId).toBe('provider-runtime');
+    expect(selected.selectedPromptRefinementModel?.id).toBe(providerModel.id);
+    expect(selected.reviewRuntimeId).toBe('provider-runtime');
+    expect(selected.selectedReviewModel?.id).toBe(providerModel.id);
   });
 
   it('renders intentional agent catalog loading and empty states', () => {

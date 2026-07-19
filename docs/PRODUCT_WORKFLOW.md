@@ -49,6 +49,21 @@ Start. Attachment-backed creation still requires a runtime/model with an
 attested attachment boundary because Task Monki must validate modality and
 isolation before adopting the draft.
 
+## Runtime and model configuration
+
+First-launch defaults, New Task, and Settings use the same runtime/model
+selector. Implementation defaults can use every enabled runtime. Prompt
+refinement and review receive narrower runtime lists derived from their typed
+capabilities, so those operations are never assumed to be Codex-only and an
+unsupported provider is never offered for them. Reasoning choices come from the
+selected model's native catalog.
+
+Provider catalogs keep their native scope. Cursor model discovery begins only
+after the user selects Cursor and its current ACP process has no cached catalog.
+Loading, failure, and retry remain inside the selector. The adapter reuses the
+catalog for that process and invalidates it when the executable configuration,
+process identity, or observed authentication state changes.
+
 ## Saved views
 
 All tasks is the global workflow view. A board is only a named saved filter over

@@ -23,12 +23,12 @@ import { shouldShowExecutablePathControls } from '../model/executableSettings';
 import type { RepositorySetupState } from '../model/repositories';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { describeTaskAttention } from './BoardView';
+import { AgentModelSetting } from './AgentModelSelector';
 import { humanizeEnum } from './display';
 import { Chip, dotStyle } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
 import {
   ExecutablePathEditor,
-  ModelSettingRow,
   SettingsView,
   describeExternalToolAvailability,
   selectSettingsModels
@@ -403,17 +403,21 @@ function FirstLaunchSetup({
             tone={selectedModels.selectedDefaultModel ? 'complete' : 'pending'}
           >
             <div className="tm-setup__model">
-              <ModelSettingRow
+              <AgentModelSetting
                 label="Default task model"
                 hint="Used for new implementation tasks"
                 runtimeId={selectedModels.defaultRuntimeId}
-                value={selectedModels.selectedDefaultModel?.id ?? ''}
-                effortValue={selectedModels.selectedDefaultEffort}
+                modelId={selectedModels.selectedDefaultModel?.id ?? ''}
+                reasoningEffort={selectedModels.selectedDefaultEffort}
                 models={models}
                 runtimes={runtimes}
                 onDiscoverModels={onDiscoverAgentRuntimeModels}
-                onRuntimeChange={(runtimeId) => {
-                  const nextModel = selectModel(models, undefined, runtimeId);
+                onSelectionChange={(runtimeId, modelId) => {
+                  const nextModel =
+                    models.find(
+                      (candidate) =>
+                        candidate.runtimeId === runtimeId && candidate.id === modelId
+                    ) ?? selectModel(models, undefined, runtimeId);
                   onSetAppSettings({
                     defaultRuntimeId: runtimeId,
                     defaultModel: nextModel?.model ?? null,
@@ -422,19 +426,7 @@ function FirstLaunchSetup({
                       resolveReasoningEffort(nextModel, undefined) ?? null
                   });
                 }}
-                onModelChange={(modelId) => {
-                  const nextModel = models.find((candidate) => candidate.id === modelId);
-                  onSetAppSettings({
-                    defaultModel: nextModel?.model ?? null,
-                    defaultModelProvider: nextModel?.modelProvider ?? null,
-                    defaultReasoningEffort:
-                      resolveReasoningEffort(
-                        nextModel,
-                        appSettings.defaultReasoningEffort
-                      ) ?? null
-                  });
-                }}
-                onEffortChange={(reasoningEffort) =>
+                onReasoningEffortChange={(reasoningEffort) =>
                   onSetAppSettings({
                     defaultReasoningEffort: reasoningEffort || null
                   })
