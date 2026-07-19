@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AgentProviderAdapter } from '../core/agent/AgentProviderAdapter';
 import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -76,7 +77,7 @@ describe('Task Monki development seed data', () => {
     expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
       DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
     );
-    expect((await fs.stat(manifest.envFilePath)).mode & 0o777).toBe(0o600);
+    expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
       DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
