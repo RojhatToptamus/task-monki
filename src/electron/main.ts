@@ -4,6 +4,7 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  safeStorage,
   shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -15,22 +16,35 @@ import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   CreatePullRequestRequest,
   DeleteTaskRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  DiscardPreviewRecipeDraftRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
+  ApprovePreviewPlanRequest,
   GitHubPreflightRequest,
   InspectOpenTargetRequest,
+  OpenPreviewRequest,
   ExecuteOpenTargetActionRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
+  ReadPreviewLogRequest,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
   RespondToInteractionRequest,
   RefinePromptRequest,
   StartRunRequest,
+  StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
   StartReviewRequest,
   SteerRunRequest,
   RetryRunRequest,
@@ -38,7 +52,9 @@ import type {
   ReadProtocolMessageRequest,
   TestExternalToolRequest,
   TransitionTaskRequest,
-  UpdateAppSettingsRequest
+  StopPreviewRequest,
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
 import {
   ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS,
@@ -54,12 +70,15 @@ import {
 } from '../shared/rendererSecurity';
 import {
   AttachmentIpcOperationGate,
-  assertAttachmentIpcBatch,
+  assertAttachmentIpcBatch
 } from './attachmentIpcSecurity';
 import { createElectronOpenTargetHost } from './openTargetHost';
 import { getMacDockIconPath } from './dockIcon';
 import { getMacTrafficLightPosition, getMainWindowChromeOptions } from './windowChrome';
 import { shouldCreateWindowOnActivate } from './windowLifecycle';
+import { resolveNativePreviewLauncherPath } from '../core/preview/runtime/launcherPath';
+import { parseSelectedEnvValue } from '../core/preview/private/PreviewEnvImport';
+import { createElectronPreviewUrlHost } from './previewOpenHost';
 import {
   createRendererTrustPolicy,
   isSafeExternalUrl,
@@ -67,6 +86,7 @@ import {
   isTrustedRendererPermissionRequest,
   type RendererTrustPolicy
 } from './rendererTrust';
+const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
 let service: TaskManagerService;
@@ -145,8 +165,8 @@ function createWindow(): void {
       rendererTrustPolicy = undefined;
     }
   });
-  const createdWindow = mainWindow;
 
+  const createdWindow = mainWindow;
   createdWindow.webContents.on('did-finish-load', () => {
     syncWindowChrome(createdWindow);
   });
@@ -355,7 +375,6 @@ function installIpcHandlers(): void {
   handleTrustedIpc('attachment:clipboard:readImage', () =>
     attachmentIpcGate.run(ATTACHMENT_MAX_IMAGE_BYTES, () => readClipboardImage())
   );
-
   handleTrustedIpc('task:create', async (_, input: CreateTaskRequest) => {
     const task = await service.createTask(input);
     broadcast({
@@ -434,6 +453,107 @@ function installIpcHandlers(): void {
     return service.refreshGitHub(input);
   });
 
+  handleTrustedIpc('preview:resolve', async (_, input: ResolvePreviewRequest) =>
+    service.resolvePreview(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:get',
+    async (_, input: GetPreviewRecipeGenerationRequest) =>
+      service.getPreviewRecipeGeneration(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:generate',
+    async (_, input: GeneratePreviewRecipeRequest) => service.generatePreviewRecipe(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:validate',
+    async (_, input: ValidatePreviewRecipeDraftRequest) =>
+      service.validatePreviewRecipeDraft(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:accept',
+    async (_, input: AcceptPreviewRecipeDraftRequest) =>
+      service.acceptPreviewRecipeDraft(input)
+  );
+  handleTrustedIpc(
+    'preview:recipe-generation:discard',
+    async (_, input: DiscardPreviewRecipeDraftRequest) =>
+      service.discardPreviewRecipeDraft(input)
+  );
+  handleTrustedIpc('preview:approve', async (_, input: ApprovePreviewPlanRequest) =>
+    service.approvePreviewPlan(input)
+  );
+  handleTrustedIpc('preview:start', async (_, input: StartPreviewRequest) =>
+    service.startPreview(input)
+  );
+  handleTrustedIpc('preview:stop', async (_, input: StopPreviewRequest) =>
+    service.stopPreview(input)
+  );
+  handleTrustedIpc('preview:open', async (_, input: OpenPreviewRequest) =>
+    service.openPreview(input)
+  );
+  handleTrustedIpc('preview:log:read', async (_, input: ReadPreviewLogRequest) =>
+    service.readPreviewLog(input)
+  );
+  handleTrustedIpc('preview:resetData', async (_, input: ResetPreviewDataRequest) =>
+    service.resetPreviewData(input)
+  );
+  handleTrustedIpc('preview:retrySetup', async (_, input: RetryPreviewSetupRequest) =>
+    service.retryPreviewSetup(input)
+  );
+  handleTrustedIpc('preview:binding:set', async (_, input: SetPreviewLocalAttachmentBindingRequest) =>
+    service.setPreviewLocalAttachmentBinding(input)
+  );
+  handleTrustedIpc('preview:binding:delete', async (_, input: DeletePreviewLocalAttachmentBindingRequest) =>
+    service.deletePreviewLocalAttachmentBinding(input)
+  );
+  handleTrustedIpc('preview:private:set', async (_, input: { taskId: string; inputId: string; value: string }) =>
+    service.setPreviewPrivateInput(input)
+  );
+  handleTrustedIpc('preview:private:delete', async (_, input: { taskId: string; inputId: string }) =>
+    service.deletePreviewPrivateInput(input)
+  );
+  handleTrustedIpc('preview:private:retryCleanup', async () => service.retryPreviewPrivateVaultCleanup());
+  handleTrustedIpc('preview:private:import', async (_, input: { taskId: string; inputId: string; key: string }) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(input.key)) return { status: 'FAILED', code: 'INVALID_KEY' };
+    const options: OpenDialogOptions = { title: `Import ${input.key}`, properties: ['openFile'] };
+    const selected = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+    if (selected.canceled || !selected.filePaths[0]) return { status: 'CANCELED' };
+    try {
+      const selectedPath = selected.filePaths[0];
+      const before = await fs.promises.lstat(selectedPath);
+      if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_PRIVATE_ENV_IMPORT_BYTES || (typeof process.getuid === 'function' && before.uid !== process.getuid()) || (before.mode & 0o077) !== 0) {
+        return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' };
+      }
+      const handle = await fs.promises.open(selectedPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      let bytes: Buffer | undefined;
+      try {
+        bytes = await readBoundedFile(handle, MAX_PRIVATE_ENV_IMPORT_BYTES);
+        const after = await handle.stat();
+        if (
+          !after.isFile() ||
+          before.dev !== after.dev ||
+          before.ino !== after.ino ||
+          before.size !== after.size ||
+          before.mtimeMs !== after.mtimeMs ||
+          (after.mode & 0o077) !== 0 ||
+          (typeof process.getuid === 'function' && after.uid !== process.getuid())
+        ) {
+          return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' };
+        }
+        const parsed = parseSelectedEnvValue(bytes, input.key);
+        if (parsed.status !== 'VALUE') {
+          const codes = { INVALID_KEY: 'INVALID_KEY', KEY_MISSING: 'KEY_MISSING', KEY_DUPLICATE: 'KEY_DUPLICATE', INVALID_FILE: 'UNSAFE_IMPORT_FILE' } as const;
+          return { status: 'FAILED', code: codes[parsed.status] };
+        }
+        const result = await service.setPreviewPrivateInput({ taskId: input.taskId, inputId: input.inputId, value: parsed.value });
+        return result.status === 'STORED' ? { status: 'IMPORTED' } : result;
+      } finally {
+        bytes?.fill(0);
+        await handle.close();
+      }
+    } catch { return { status: 'FAILED', code: 'UNSAFE_IMPORT_FILE' }; }
+  });
   handleTrustedIpc('task:transition', async (_, input: TransitionTaskRequest) => {
     return service.transitionTask(input);
   });
@@ -481,7 +601,6 @@ function readClipboardImage(): ClipboardAttachmentImage | undefined {
     bytes: copy.buffer
   };
 }
-
 type TrustedIpcHandler<TArgs extends unknown[], TResult> = (
   event: IpcMainInvokeEvent,
   ...args: TArgs
@@ -508,6 +627,22 @@ function handleTrustedIpc<TArgs extends unknown[], TResult>(
 
 function broadcast(event: AppUpdateEvent): void {
   mainWindow?.webContents.send('app:update', event);
+}
+
+async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: number): Promise<Buffer> {
+  const allocation = Buffer.alloc(maximumBytes + 1);
+  let offset = 0;
+  try {
+    while (offset < allocation.length) {
+      const { bytesRead } = await handle.read(allocation, offset, allocation.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > maximumBytes) throw new Error('Selected private input file is too large.');
+    return Buffer.from(allocation.subarray(0, offset));
+  } finally {
+    allocation.fill(0);
+  }
 }
 
 function configureDesktopCliPath(): void {
@@ -560,7 +695,22 @@ void app.whenReady().then(async () => {
       appSettingsStore: new AppSettingsStore(
         path.join(userDataDir, 'app-settings.json')
       ),
-      openTargetHost: createElectronOpenTargetHost()
+      openTargetHost: createElectronOpenTargetHost(),
+      previewEnabled: true,
+      previewRoot: path.join(app.getPath('userData'), 'preview-runtime'),
+      previewLauncherPath: resolveNativePreviewLauncherPath({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appPath: app.getAppPath()
+      }),
+      previewLauncherExecPath: process.execPath,
+      previewLauncherEnv: { ELECTRON_RUN_AS_NODE: '1' },
+      previewSecretProtector: {
+        isAvailable: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+        encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
+        decrypt: async (value) => Buffer.from(safeStorage.decryptString(value), 'utf8')
+      },
+      previewOpenHost: createElectronPreviewUrlHost()
     }
   );
   serviceCreated = true;

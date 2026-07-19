@@ -10,6 +10,10 @@ import {
   type ExternalToolStatusReport,
   type GitSnapshotRecord,
   type InteractionRequestRecord,
+  type PreviewRecipeGenerationSnapshot,
+  type PreviewRecipeValidation,
+  type PreviewResolvedAttachmentTarget,
+  type ResolvePreviewResult,
   type Task,
   type TaskManagerAppSettings,
   type TaskSnapshot,
@@ -17,6 +21,7 @@ import {
   type WorkflowPhase,
   type WorktreeRecord
 } from '../../shared/contracts';
+import type { PreviewExecutionReadiness } from '../../shared/preview';
 import { taskManagerApi } from '../api/taskManagerClient';
 import {
   selectActiveRun,
@@ -44,6 +49,8 @@ import {
   resolveSelectedRepositoryPath,
   tasksForRepository
 } from '../model/repositories';
+import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
+import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
@@ -73,6 +80,16 @@ const emptySnapshot: TaskSnapshot = {
   agentSettingsObservations: [],
   agentSubagentObservations: [],
   interactionRequests: [],
+  previewPlans: [],
+  previewLocalBindings: [],
+  previewApprovals: [],
+  previewComposeProjects: [],
+  previewGenerations: [],
+  previewManagedEnvironments: [],
+  previewManagedResources: [],
+  previewGenerationAttachments: [],
+  previewNodeAttempts: [],
+  previewResources: [],
   events: [],
   artifacts: [],
   attachments: []
@@ -82,6 +99,30 @@ type NotificationTone = 'info' | 'success' | 'error';
 
 function prefersDarkScheme(): boolean {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
+}
+
+function retainTaskEntries<T>(
+  current: Record<string, T>,
+  tasks: Array<Pick<Task, 'id'>>
+): Record<string, T> {
+  const liveTaskIds = new Set(tasks.map((task) => task.id));
+  const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
+  return retainedEntries.length === Object.keys(current).length
+    ? current
+    : Object.fromEntries(retainedEntries);
+}
+
+function isPreviewRecipeGenerationSnapshot(
+  value: unknown
+): value is PreviewRecipeGenerationSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as { taskId?: unknown; status?: unknown };
+  return (
+    typeof candidate.taskId === 'string' &&
+    ['EMPTY', 'GENERATING', 'READY', 'NEEDS_INPUT', 'FAILED'].includes(
+      String(candidate.status)
+    )
+  );
 }
 
 interface AppNotification {
@@ -115,6 +156,15 @@ export function App() {
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
   const [providerState, setProviderState] = useState<AgentProviderState>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [previewExecutionReadiness, setPreviewExecutionReadiness] = useState<
+    Record<string, PreviewExecutionReadiness>
+  >({});
+  const [previewResolutions, setPreviewResolutions] = useState<
+    Record<string, ResolvePreviewResult>
+  >({});
+  const [previewRecipeGenerations, setPreviewRecipeGenerations] = useState<
+    Record<string, PreviewRecipeGenerationSnapshot>
+  >({});
   const windowChromePlatform = resolveWindowChromePlatform();
 
   const openNewTask = useCallback(() => setIsNewTaskOpen(true), []);
@@ -168,6 +218,15 @@ export function App() {
   const refresh = useCallback(async () => {
     const next = await taskManagerApi.listTasks();
     setSnapshot(next);
+    setPreviewExecutionReadiness((current) => {
+      const liveTaskIds = new Set(next.tasks.map((task) => task.id));
+      const retainedEntries = Object.entries(current).filter(([taskId]) => liveTaskIds.has(taskId));
+      return retainedEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(retainedEntries);
+    });
+    setPreviewResolutions((current) => retainTaskEntries(current, next.tasks));
+    setPreviewRecipeGenerations((current) => retainTaskEntries(current, next.tasks));
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
     const next = await taskManagerApi.getExternalToolStatus();
@@ -258,12 +317,32 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
-    return taskManagerApi.onUpdate((event) => {
+    const scheduler = createUpdateRefreshScheduler({
+      delayMs: 50,
+      refresh,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
+    const unsubscribe = taskManagerApi.onUpdate((event) => {
       if (event.type === 'provider.updated') {
         void taskManagerApi.getAgentProviderState().then(setProviderState);
       }
-      void refresh();
+      if (
+        event.type === 'preview.recipe-generation.updated' &&
+        isPreviewRecipeGenerationSnapshot(event.payload)
+      ) {
+        const recipeGeneration = event.payload;
+        setPreviewRecipeGenerations((current) => ({
+          ...current,
+          [event.taskId]: recipeGeneration
+        }));
+      }
+      scheduler.request();
     });
+    return () => {
+      unsubscribe();
+      scheduler.dispose();
+    };
   }, [refresh]);
 
   const theme = appSettings.theme;
@@ -395,6 +474,44 @@ export function App() {
           )
         : [],
     [selectedTask, snapshot.agentSubagentObservations]
+  );
+  const selectedPreviewPlans = selectedTask
+    ? snapshot.previewPlans.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewApprovals = selectedTask
+    ? snapshot.previewApprovals.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewGenerations = selectedTask
+    ? snapshot.previewGenerations.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewGenerationAttachments = selectedTask
+    ? snapshot.previewGenerationAttachments.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewManagedResources = selectedTask
+    ? snapshot.previewManagedResources.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewComposeProjects = selectedTask
+    ? snapshot.previewComposeProjects.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewLocalBindings = selectedTask
+    ? snapshot.previewLocalBindings.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewRuntimeResources = selectedTask
+    ? snapshot.previewResources.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewNodeAttempts = selectedTask
+    ? snapshot.previewNodeAttempts.filter((record) => record.taskId === selectedTask.id)
+    : [];
+  const selectedPreviewTaskRoutes = useMemo(
+    () => selectedTask
+      ? selectPreviewTaskRouteOptions(
+          snapshot.tasks,
+          snapshot.previewPlans,
+          snapshot.previewGenerations,
+          selectedTask.id
+        )
+      : [],
+    [selectedTask, snapshot.previewGenerations, snapshot.previewPlans, snapshot.tasks]
   );
   const selectedGitSnapshots = useMemo(
     () =>
@@ -540,6 +657,223 @@ export function App() {
       await refresh();
     } catch (caught) {
       reportActionError(caught, 'Failed to refresh GitHub.');
+    }
+  };
+
+  const resolvePreview = async (taskId: string, scenarioId?: string) => {
+    setError(undefined);
+    try {
+      const result = await taskManagerApi.resolvePreview({ taskId, scenarioId });
+      setPreviewResolutions((current) => ({ ...current, [taskId]: result }));
+      if (result.status === 'UNAVAILABLE') return;
+      if (result.status === 'CONFIGURATION_REQUIRED') {
+        await refresh();
+        return;
+      }
+      setPreviewExecutionReadiness((current) => ({
+        ...current,
+        [taskId]: result.executionReadiness
+      }));
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not resolve preview configuration.');
+      throw caught;
+    }
+  };
+
+  const setPreviewLocalBinding = async (
+    taskId: string,
+    attachmentId: string,
+    target: PreviewResolvedAttachmentTarget,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.setPreviewLocalAttachmentBinding({ taskId, attachmentId, target });
+    } catch (caught) {
+      reportActionError(caught, 'Could not configure the Preview target.');
+      throw caught;
+    }
+    notify('Preview target configured.', 'success');
+    try {
+      await resolvePreview(taskId, scenarioId);
+    } catch {
+      // Resolution reports its own failure. The public binding was still saved successfully.
+      await refresh().catch(() => undefined);
+    }
+  };
+
+  const getPreviewRecipeGeneration = async (taskId: string) => {
+    const state = await taskManagerApi.getPreviewRecipeGeneration({ taskId });
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
+  };
+
+  const generatePreviewRecipe = async (taskId: string) => {
+    try {
+      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const state = await taskManagerApi.generatePreviewRecipe({
+        taskId,
+        model: refinementModel?.model
+      });
+      setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+      return state;
+    } catch (caught) {
+      reportActionError(caught, 'Could not generate a Preview recipe.');
+      throw caught;
+    }
+  };
+
+  const validatePreviewRecipeDraft = (
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ): Promise<PreviewRecipeValidation> =>
+    taskManagerApi.validatePreviewRecipeDraft({ taskId, draftId, yaml });
+
+  const acceptPreviewRecipeDraft = async (
+    taskId: string,
+    draftId: string,
+    yaml: string
+  ) => {
+    try {
+      const result = await taskManagerApi.acceptPreviewRecipeDraft({ taskId, draftId, yaml });
+      setPreviewRecipeGenerations((current) => ({
+        ...current,
+        [taskId]: { taskId, status: 'EMPTY' }
+      }));
+      if (result.resolution) {
+        const resolution = result.resolution;
+        setPreviewResolutions((current) => ({ ...current, [taskId]: resolution }));
+        if (resolution.status === 'PLAN') {
+          setPreviewExecutionReadiness((current) => ({
+            ...current,
+            [taskId]: resolution.executionReadiness
+          }));
+        }
+      }
+      await refresh();
+      notify(
+        result.checkError ?? 'Preview recipe saved. Review the resolved plan before approving it.',
+        result.checkError ? 'info' : 'success'
+      );
+      return result;
+    } catch (caught) {
+      reportActionError(caught, 'Could not accept the Preview recipe.');
+      throw caught;
+    }
+  };
+
+  const discardPreviewRecipeDraft = async (taskId: string) => {
+    const state = await taskManagerApi.discardPreviewRecipeDraft({ taskId });
+    setPreviewRecipeGenerations((current) => ({ ...current, [taskId]: state }));
+    return state;
+  };
+
+  const writePreviewRecipeManually = async (taskId: string, worktreeId: string) => {
+    try {
+      const result = await taskManagerApi.executeOpenTargetAction({
+        target: { type: 'worktree', worktreeId, taskId },
+        action: 'open'
+      });
+      if (!result.ok) throw new Error(result.message ?? 'Could not open the task worktree.');
+      notify('Worktree opened. Create .taskmonki/preview.yaml, then check Preview.', 'info');
+    } catch (caught) {
+      reportActionError(caught, 'Could not open the task worktree.');
+      throw caught;
+    }
+  };
+
+  const approvePreview = async (taskId: string, planId: string, executionDigest: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.approvePreviewPlan({ taskId, planId, executionDigest });
+      notify('Preview plan approved.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not approve preview plan.');
+      throw caught;
+    }
+  };
+
+  const startPreview = async (taskId: string, scenarioId?: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.startPreview({ taskId, scenarioId });
+      notify('Preview is ready.', 'success');
+      await refresh();
+    } catch (caught) {
+      await refresh();
+      notify('Preview start did not complete. Review its status and logs.', 'error');
+      throw caught;
+    }
+  };
+
+  const stopPreview = async (taskId: string, generationId: string) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.stopPreview({ taskId, generationId });
+      notify('Preview stopped.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not stop preview safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const resetPreviewData = async (
+    taskId: string,
+    generationId: string,
+    resourceId: string,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.resetPreviewData({ taskId, generationId, resourceId, scenarioId });
+      notify('Preview data reset and scenario completed.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not reset preview data safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const retryPreviewSetup = async (
+    taskId: string,
+    generationId: string,
+    scenarioId: string
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.retryPreviewSetup({ taskId, generationId, scenarioId });
+      notify('Preview setup completed.', 'success');
+      await refresh();
+    } catch (caught) {
+      reportActionError(caught, 'Could not retry preview setup safely.');
+      await refresh();
+      throw caught;
+    }
+  };
+
+  const openPreview = async (taskId: string, generationId: string, routeId: string) => {
+    setError(undefined);
+    try {
+      const result = await taskManagerApi.openPreview({ taskId, generationId, routeId });
+      if (!result.opened) window.open(result.url, '_blank', 'noopener,noreferrer');
+    } catch (caught) {
+      reportActionError(caught, 'Could not open preview.');
+      throw caught;
+    }
+  };
+
+  const readPreviewLog = async (taskId: string, artifactId: string, offset: number, maxBytes: number) => {
+    try {
+      return await taskManagerApi.readPreviewLog({ taskId, artifactId, offset, maxBytes });
+    } catch (caught) {
+      reportActionError(caught, 'Could not read preview logs.');
+      throw caught;
     }
   };
 
@@ -1012,6 +1346,23 @@ export function App() {
             artifacts={snapshot.artifacts}
             attachments={selectedTaskAttachments}
             interactions={selectedInteractions}
+            previewPlans={selectedPreviewPlans}
+            previewApprovals={selectedPreviewApprovals}
+            previewGenerations={selectedPreviewGenerations}
+            previewGenerationAttachments={selectedPreviewGenerationAttachments}
+            previewManagedResources={selectedPreviewManagedResources}
+            previewComposeProjects={selectedPreviewComposeProjects}
+            previewLocalBindings={selectedPreviewLocalBindings}
+            previewTaskRoutes={selectedPreviewTaskRoutes}
+            previewRuntimeResources={selectedPreviewRuntimeResources}
+            previewNodeAttempts={selectedPreviewNodeAttempts}
+            previewExecutionReadiness={selectedTask
+              ? previewExecutionReadiness[selectedTask.id]
+              : undefined}
+            previewResolution={selectedTask ? previewResolutions[selectedTask.id] : undefined}
+            previewRecipeGeneration={selectedTask
+              ? previewRecipeGenerations[selectedTask.id]
+              : undefined}
             showMascot={appSettings.showMascot}
             onPrepareWorktree={prepareWorktree}
             onStart={startRun}
@@ -1025,6 +1376,21 @@ export function App() {
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
             onRefreshGitHub={refreshGitHub}
+            onResolvePreview={resolvePreview}
+            onSetPreviewLocalBinding={setPreviewLocalBinding}
+            onGetPreviewRecipeGeneration={getPreviewRecipeGeneration}
+            onGeneratePreviewRecipe={generatePreviewRecipe}
+            onValidatePreviewRecipeDraft={validatePreviewRecipeDraft}
+            onAcceptPreviewRecipeDraft={acceptPreviewRecipeDraft}
+            onDiscardPreviewRecipeDraft={discardPreviewRecipeDraft}
+            onWritePreviewRecipeManually={writePreviewRecipeManually}
+            onApprovePreview={approvePreview}
+            onStartPreview={startPreview}
+            onOpenPreview={openPreview}
+            onStopPreview={stopPreview}
+            onResetPreviewData={resetPreviewData}
+            onRetryPreviewSetup={retryPreviewSetup}
+            onReadPreviewLog={readPreviewLog}
             onTransition={transitionTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}

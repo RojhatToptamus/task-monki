@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { AttachmentFileStore } from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
+import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 
 function createStore(storeDir: string): FileTaskStore {
   return new FileTaskStore(storeDir);
@@ -295,8 +296,55 @@ describe('FileTaskStore attachments', () => {
     await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
 
     const migrated = await createStore(dir).snapshot();
-    expect(migrated.schemaVersion).toBe(11);
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(migrated.attachments).toEqual([]);
+  });
+
+  it('migrates the released schema 11 attachment store by adding preview collections', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const draft = await store.createAttachmentDraft();
+    await store.stageTaskAttachment({
+      draftId: draft.id,
+      displayName: 'context.txt',
+      bytes: bytes('preserve me')
+    });
+    const task = await store.createTask({
+      title: 'Released attachment store',
+      prompt: 'Preserve the attachment.',
+      repositoryPath: dir,
+      creationToken: 'task-create-schema-eleven-0001',
+      attachmentDraftId: draft.id
+    });
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 11;
+    for (const key of [
+      'previewPlans',
+      'previewApprovals',
+      'previewComposeProjects',
+      'previewGenerations',
+      'previewManagedEnvironments',
+      'previewManagedResources',
+      'previewGenerationAttachments',
+      'previewLocalBindings',
+      'previewNodeAttempts',
+      'previewResources'
+    ]) {
+      delete persisted[key];
+    }
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+
+    const migratedStore = createStore(dir);
+    const migrated = await migratedStore.snapshot();
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(migrated.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(migrated.attachments).toHaveLength(1);
+    expect(migrated.previewPlans).toEqual([]);
+    await expect(migratedStore.readTaskAttachment(migrated.attachments[0]!.id))
+      .resolves.toMatchObject({ displayName: 'context.txt' });
   });
 
   it('migrates schema 10 blobs into path-free task-owned storage', async () => {
@@ -304,7 +352,7 @@ describe('FileTaskStore attachments', () => {
 
     const migrated = createStore(fixture.dir);
     const snapshot = await migrated.snapshot();
-    expect(snapshot.schemaVersion).toBe(11);
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(snapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(
@@ -347,7 +395,7 @@ describe('FileTaskStore attachments', () => {
 
     const restarted = createStore(fixture.dir);
     const restartedSnapshot = await restarted.snapshot();
-    expect(restartedSnapshot.schemaVersion).toBe(11);
+    expect(restartedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(restartedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(
@@ -359,7 +407,7 @@ describe('FileTaskStore attachments', () => {
 
     const repeated = createStore(fixture.dir);
     const repeatedSnapshot = await repeated.snapshot();
-    expect(repeatedSnapshot.schemaVersion).toBe(11);
+    expect(repeatedSnapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(repeatedSnapshot.attachments[0]).not.toHaveProperty('storageKey');
     expect(
       new TextDecoder().decode(

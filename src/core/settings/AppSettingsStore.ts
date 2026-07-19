@@ -1,5 +1,5 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import type {
   CodexExternalToolSettings,
   ExternalExecutablePathSettings,
@@ -12,6 +12,12 @@ import {
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
+import {
+  readPrivateFile,
+  writePrivateFileAtomically
+} from '../filesystem/secureFilesystem';
+
+const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -42,9 +48,9 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = await fs.readFile(this.filePath, 'utf8');
+      raw = await readPrivateFile(this.filePath, MAX_APP_SETTINGS_FILE_BYTES);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
@@ -56,7 +62,8 @@ export class AppSettingsStore implements AppSettingsStorage {
     }
 
     try {
-      this.settings = normalizeAppSettings(JSON.parse(raw) as unknown);
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+      this.settings = normalizeAppSettings(JSON.parse(decoded) as unknown);
     } catch {
       await this.moveInvalidSettingsFileAside();
       this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
@@ -75,18 +82,15 @@ export class AppSettingsStore implements AppSettingsStorage {
   }
 
   private async persist(): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.settings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.rename(tmpPath, this.filePath);
+    await writePrivateFileAtomically(
+      this.filePath,
+      `${JSON.stringify(this.settings, null, 2)}\n`
+    );
   }
 
   private async moveInvalidSettingsFileAside(): Promise<void> {
     const timestamp = new Date().toISOString().replace(/[^0-9A-Za-z_-]/g, '-');
-    const backupPath = `${this.filePath}.invalid-${timestamp}`;
+    const backupPath = `${this.filePath}.invalid-${timestamp}-${randomUUID()}`;
     try {
       await fs.rename(this.filePath, backupPath);
     } catch (error) {
@@ -139,7 +143,8 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
     codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
     externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    repositories
+    repositories,
+    previewGateway: normalizePreviewGateway(record.previewGateway)
   };
 }
 
@@ -193,6 +198,12 @@ export function mergeAppSettings(
       ...input.repositories
     });
   }
+  if (input.previewGateway) {
+    patch.previewGateway = normalizePreviewGateway({
+      ...current.previewGateway,
+      ...input.previewGateway
+    });
+  }
   return normalizeAppSettings({
     ...current,
     ...patch
@@ -233,6 +244,16 @@ function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
   return {
     knownPaths,
     selectedPath
+  };
+}
+
+function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
+  const record = isRecord(value) ? value : {};
+  const port = record.port;
+  return {
+    port: Number.isInteger(port) && Number(port) >= 10_000 && Number(port) <= 65_535
+      ? Number(port)
+      : null
   };
 }
 

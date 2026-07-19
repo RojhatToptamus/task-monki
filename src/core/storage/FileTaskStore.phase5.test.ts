@@ -106,7 +106,7 @@ describe('FileTaskStore Phase 5 provider observations', () => {
     });
 
     await expect(
-      store.readProtocolMessage({ ...reference, sha256: 'invalid' })
+      store.readProtocolMessage({ ...reference, sha256: '0'.repeat(64) })
     ).rejects.toThrow('integrity');
   });
 });

@@ -10,6 +10,7 @@ import type {
   AgentProviderCapabilities,
   AgentGoalSnapshotRecord,
   AgentReviewTarget,
+  AgentServerInstance,
   AgentSessionRecord,
   AgentSessionSnapshot,
   AgentSubagentStatus,
@@ -171,6 +172,10 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   };
   private restartAttempt = 0;
   private restartTimer?: NodeJS.Timeout;
+  private restartWork?: Promise<void>;
+  private runtimeLossWork?: Promise<void>;
+  private initializeWork?: Promise<void>;
+  private shutdownWork?: Promise<void>;
   private inboundQueue: Promise<void> = Promise.resolve();
   private readonly interruptRequestTimeoutMs: number;
   private readonly interruptCompletionTimeoutMs: number;
@@ -179,6 +184,27 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   private readonly interruptTimers = new Map<string, NodeJS.Timeout>();
   private initialized = false;
   private runtimeConfigRestartPending = false;
+  private shuttingDown = false;
+  private terminalShutdownRequested = false;
+  private supervisorExitListenerAttached = false;
+  private readonly handleSupervisorExit = (
+    server: AgentServerInstance,
+    unexpected: boolean
+  ): void => {
+    if (!unexpected || this.shuttingDown) return;
+    const previousRuntimeLoss = this.runtimeLossWork ?? Promise.resolve();
+    const pendingInbound = this.inboundQueue;
+    const work = Promise.all([previousRuntimeLoss, pendingInbound])
+      .then(() => this.handleRuntimeLoss(server.id))
+      .then(() => {
+        if (!this.shuttingDown) this.scheduleRestart();
+      })
+      .catch(() => undefined);
+    this.runtimeLossWork = work;
+    void work.then(() => {
+      if (this.runtimeLossWork === work) this.runtimeLossWork = undefined;
+    });
+  };
   private securityBoundaryViolation?: string;
 
   constructor(
@@ -195,33 +221,39 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       ...options,
       appVersion: options.appVersion ?? '0.1.0'
     });
-    this.supervisor.events.on('exit', (server, unexpected) => {
-      if (unexpected) {
-        // Stdout messages are parsed before the child close event, but their
-        // durable materialization is intentionally serialized through
-        // `inboundQueue`. Put runtime-loss handling on the same queue so a
-        // just-received approval cannot be persisted as PENDING after the
-        // server-loss sweep has already completed.
-        this.enqueueInbound(async () => {
-          try {
-            await this.handleRuntimeLoss(server.id);
-          } finally {
-            this.scheduleRestart();
-          }
-        });
-      }
-    });
+    this.attachSupervisorExitListener();
   }
 
-  async initialize(): Promise<void> {
-    if (this.initialized) {
-      return;
+  get currentRuntimeExecutable(): string | undefined {
+    return this.supervisor.currentServer?.executable;
+  }
+
+  initialize(): Promise<void> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('Codex App Server is shutting down.'));
     }
-    this.initialized = true;
+    if (this.initialized) {
+      return Promise.resolve();
+    }
+    if (this.initializeWork) return this.initializeWork;
+    const work = this.completeInitialize().finally(() => {
+      if (this.initializeWork === work) this.initializeWork = undefined;
+    });
+    this.initializeWork = work;
+    return work;
+  }
+
+  private async completeInitialize(): Promise<void> {
+    this.attachSupervisorExitListener();
     await this.recoverPersistedRuntimeLosses();
+    this.assertRuntimeActive();
     await this.ensureClient();
+    this.assertRuntimeActive();
     await this.refreshPreflight();
+    this.assertRuntimeActive();
     await this.reconcileRuns(true);
+    this.assertRuntimeActive();
+    this.initialized = true;
   }
 
   async preflight(): Promise<AgentPreflight> {
@@ -998,6 +1030,14 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   shutdown(): Promise<void> {
+    this.terminalShutdownRequested = true;
+    return this.stopRuntime();
+  }
+
+  private stopRuntime(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    this.shuttingDown = true;
+    this.detachSupervisorExitListener();
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -1006,7 +1046,17 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       clearTimeout(timer);
     }
     this.interruptTimers.clear();
-    return this.supervisor.shutdown();
+    const work = this.completeShutdown();
+    this.shutdownWork = work;
+    void work.then(
+      () => {
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      },
+      () => {
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      }
+    );
+    return work;
   }
 
   async updateRuntimeConfig(input: {
@@ -1014,6 +1064,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     toolSettings: CodexExternalToolSettings;
     restart: boolean;
   }): Promise<void> {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
     this.externalToolSettings = normalizeCodexExternalToolSettings(input.toolSettings);
     this.supervisor.setExecutable(input.executable);
     this.supervisor.setToolSettings(input.toolSettings);
@@ -1035,7 +1088,8 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       return;
     }
 
-    await this.shutdown();
+    await this.stopRuntime();
+    if (this.terminalShutdownRequested) return;
     this.runtimeConfigRestartPending = false;
     this.boundClient = undefined;
     this.models = [];
@@ -1048,6 +1102,9 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
       warnings: []
     };
     this.emitProviderUpdate();
+    this.supervisor.resumeAfterShutdown();
+    this.shuttingDown = false;
+    this.attachSupervisorExitListener();
     await this.initialize();
   }
 
@@ -1078,11 +1135,19 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
     if (this.securityBoundaryViolation) {
       throw new Error(this.securityBoundaryViolation);
     }
+    this.assertRuntimeActive();
     const client = await this.supervisor.start();
+    this.assertRuntimeActive();
     if (client !== this.boundClient) {
       this.bindClient(client);
     }
     return client;
+  }
+
+  private assertRuntimeActive(): void {
+    if (this.shuttingDown) {
+      throw new Error('Codex App Server is shutting down.');
+    }
   }
 
   private bindClient(client: CodexRpcClient): void {
@@ -2382,21 +2447,70 @@ export class CodexAppServerAdapter implements AgentProviderAdapter {
   }
 
   private scheduleRestart(): void {
-    if (this.restartTimer || this.restartAttempt >= this.restartDelaysMs.length) {
+    if (
+      this.shuttingDown ||
+      this.restartTimer ||
+      this.restartWork ||
+      this.restartAttempt >= this.restartDelaysMs.length
+    ) {
       return;
     }
     const delay = this.restartDelaysMs[this.restartAttempt++];
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
-      void this.ensureClient()
-        .then(() => this.refreshPreflight(true))
-        .then(() => this.reconcile())
+      if (this.shuttingDown) return;
+      let retry = false;
+      const work = this.ensureClient()
+        .then(() => this.shuttingDown ? undefined : this.refreshPreflight(true))
+        .then(() => this.shuttingDown ? undefined : this.reconcile())
         .then(() => {
-          this.restartAttempt = 0;
+          if (!this.shuttingDown) this.restartAttempt = 0;
         })
-        .catch(() => this.scheduleRestart());
+        .catch(() => {
+          retry = true;
+        });
+      this.restartWork = work;
+      void work.then(() => {
+        if (this.restartWork === work) this.restartWork = undefined;
+        if (retry && !this.shuttingDown) this.scheduleRestart();
+      });
     }, delay);
     this.restartTimer.unref();
+  }
+
+  private attachSupervisorExitListener(): void {
+    if (this.supervisorExitListenerAttached) return;
+    this.supervisor.events.on('exit', this.handleSupervisorExit);
+    this.supervisorExitListenerAttached = true;
+  }
+
+  private detachSupervisorExitListener(): void {
+    if (!this.supervisorExitListenerAttached) return;
+    this.supervisor.events.off('exit', this.handleSupervisorExit);
+    this.supervisorExitListenerAttached = false;
+  }
+
+  private async completeShutdown(): Promise<void> {
+    const supervisorShutdown = this.supervisor.shutdown();
+    await Promise.all([
+      this.runtimeLossWork ?? Promise.resolve(),
+      this.restartWork ?? Promise.resolve(),
+      this.initializeWork?.catch(() => undefined) ?? Promise.resolve(),
+      supervisorShutdown
+    ]);
+    await this.inboundQueue;
+    this.unbindClient();
+    this.initialized = false;
+    this.restartAttempt = 0;
+  }
+
+  private unbindClient(): void {
+    const client = this.boundClient;
+    if (!client) return;
+    client.events.removeAllListeners('notification');
+    client.events.removeAllListeners('serverRequest');
+    client.events.removeAllListeners('unsupportedServerRequest');
+    this.boundClient = undefined;
   }
 
   private async recordReconciliation(

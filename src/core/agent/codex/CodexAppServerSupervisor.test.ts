@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type {
   CodexAppsMode,
@@ -5,10 +8,13 @@ import type {
   CodexWebSearchMode
 } from '../../../shared/agent';
 import {
+  CodexAppServerSupervisor,
   CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS,
   codexAppServerArgv,
   resolveCodexAppServerArgv
 } from './CodexAppServerSupervisor';
+import { FileTaskStore } from '../../storage/FileTaskStore';
+import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import {
   codexExternalToolConfigOverrides,
   parseDisabledCodexMcpServerConfigOverrides,
@@ -190,4 +196,118 @@ describe('Codex App Server launch configuration', () => {
       ])
     );
   });
+
+  it('joins runtime resolution and cannot spawn after shutdown begins', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-supervisor-start-race-'));
+    const markerPath = path.join(dir, 'version-started');
+    const releasePath = path.join(dir, 'release-version');
+    const executable = await writeNodeExecutable(
+      dir,
+      'gated-codex',
+      gatedRuntimeScript(markerPath, releasePath)
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const supervisor = new CodexAppServerSupervisor(store, {
+      cwd: dir,
+      executable,
+      appVersion: 'test',
+      requestTimeoutMs: 2_000
+    });
+
+    const start = supervisor.start();
+    const rejectedStart = expect(start).rejects.toThrow(
+      'Codex App Server is shutting down.'
+    );
+    await waitForPath(markerPath);
+    let shutdownSettled = false;
+    const shutdown = supervisor.shutdown().then(() => { shutdownSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(shutdownSettled).toBe(false);
+
+    await fs.writeFile(releasePath, 'release');
+    await rejectedStart;
+    await shutdown;
+
+    const internals = supervisor as unknown as {
+      child?: unknown;
+      client?: unknown;
+      startPromise?: Promise<unknown>;
+      shutdownPromise?: Promise<unknown>;
+    };
+    expect((await store.snapshot()).agentServers).toHaveLength(0);
+    expect(internals.child).toBeUndefined();
+    expect(internals.client).toBeUndefined();
+    expect(internals.startPromise).toBeUndefined();
+    expect(internals.shutdownPromise).toBeUndefined();
+    await expect(supervisor.start()).rejects.toThrow(
+      'Codex App Server is shutting down.'
+    );
+
+    supervisor.resumeAfterShutdown();
+    const restarted = await supervisor.start();
+    expect(restarted).toBe(supervisor.currentClient);
+    await supervisor.shutdown();
+    expect((await store.snapshot()).agentServers).toHaveLength(1);
+    expect(internals.child).toBeUndefined();
+    expect(internals.client).toBeUndefined();
+  }, 15_000);
 });
+
+function gatedRuntimeScript(markerPath: string, releasePath: string): string {
+  return `
+const fs = require('node:fs');
+if (process.argv.includes('--version')) {
+  fs.writeFileSync(${JSON.stringify(markerPath)}, 'started');
+  const timer = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(releasePath)})) return;
+    clearInterval(timer);
+    process.stdout.write('codex-cli 0.141.0\\n');
+    process.exit(0);
+  }, 5);
+  return;
+}
+if (process.argv[2] === 'mcp' && process.argv[3] === 'list') {
+  process.stdout.write('[]\\n');
+  process.exit(0);
+}
+if (process.argv[2] === 'app-server' && process.argv.includes('--help')) {
+  process.stdout.write('Usage: codex app-server [OPTIONS]\\n  --stdio\\n');
+  process.exit(0);
+}
+const readline = require('node:readline');
+const lines = readline.createInterface({ input: process.stdin });
+lines.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (!('id' in message)) return;
+  if (message.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ id: message.id, result: {
+      userAgent: 'fake', codexHome: process.cwd(), platformFamily: 'unix', platformOs: 'macos'
+    } }) + '\\n');
+    return;
+  }
+  if (message.method === 'thread/start') {
+    process.stdout.write(JSON.stringify({ id: message.id, result: {
+      activePermissionProfile: { id: 'task_monki_capability_probe', extends: null },
+      runtimeWorkspaceRoots: [message.params.cwd]
+    } }) + '\\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: message.id, error: {
+    code: -32602, message: 'capability exists; test params are intentionally invalid'
+  } }) + '\\n');
+});
+`;
+}
+
+async function waitForPath(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}

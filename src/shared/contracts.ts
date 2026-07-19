@@ -16,6 +16,39 @@ import type {
   InteractionRequestRecord
 } from './agent';
 import type {
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
+  ApprovePreviewPlanRequest,
+  DiscardPreviewRecipeDraftRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
+  PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  PreviewResourceRecord,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  SetPreviewLocalAttachmentBindingRequest,
+  StartPreviewRequest,
+  StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest
+} from './preview';
+import type {
   AttachmentContent,
   AttachmentSubmissionRecord,
   AttachmentDraftSnapshot,
@@ -29,8 +62,9 @@ import type {
 
 export * from './agent';
 export * from './attachments';
+export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 11 as const;
+export const TASK_STORE_SCHEMA_VERSION = 16 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -333,7 +367,14 @@ export type DomainEventType =
   | 'CANCEL_REQUESTED'
   | 'ARTIFACT_CREATED'
   | 'PROJECTION_UPDATED'
-  | 'REPOSITORY_PREFLIGHT_COMPLETED';
+  | 'REPOSITORY_PREFLIGHT_COMPLETED'
+  | 'PREVIEW_PLAN_RESOLVED'
+  | 'PREVIEW_PLAN_APPROVED'
+  | 'PREVIEW_GENERATION_CREATED'
+  | 'PREVIEW_GENERATION_UPDATED'
+  | 'PREVIEW_NODE_UPDATED'
+  | 'PREVIEW_RESOURCE_UPDATED'
+  | 'PREVIEW_RECONCILED';
 
 export type ArtifactKind =
   | 'agent-prompt'
@@ -342,7 +383,10 @@ export type ArtifactKind =
   | 'agent-final'
   | 'diff'
   | 'git-snapshot'
-  | 'pr-body';
+  | 'pr-body'
+  | 'preview-source-manifest'
+  | 'preview-stdout'
+  | 'preview-stderr';
 
 export interface Finding {
   id: string;
@@ -627,6 +671,8 @@ export interface DomainEvent {
   agentItemId?: string;
   interactionRequestId?: string;
   worktreeId?: string;
+  previewPlanId?: string;
+  previewGenerationId?: string;
   source:
     | 'ui'
     | 'provider'
@@ -636,7 +682,8 @@ export interface DomainEvent {
     | 'projection'
     | 'git'
     | 'github'
-    | 'prompt';
+    | 'prompt'
+    | 'preview';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -676,6 +723,16 @@ export interface TaskSnapshot {
   agentSettingsObservations: AgentSettingsObservationRecord[];
   agentSubagentObservations: AgentSubagentObservationRecord[];
   interactionRequests: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
   attachments: TaskAttachmentRecord[];
@@ -807,6 +864,7 @@ export interface UpdateAppSettingsRequest {
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
   repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+  previewGateway?: Partial<import('./agent').PreviewGatewaySettings>;
 }
 
 export type ExternalToolId = 'git' | 'codex' | 'gh';
@@ -946,11 +1004,15 @@ export interface AppUpdateEvent {
     | 'provider.updated'
     | 'projection.updated'
     | 'finding.updated'
+    | 'preview.updated'
+    | 'preview.recipe-generation.updated'
+    | 'preview.log.updated'
     | 'task.deleted';
   taskId: string;
   iterationId?: string;
   runId?: string;
   worktreeId?: string;
+  previewGenerationId?: string;
   payload: unknown;
   at: string;
 }
@@ -994,6 +1056,35 @@ export interface TaskManagerApi {
   publishBranch(input: PublishBranchRequest): Promise<BranchPublicationRecord>;
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
+  resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult>;
+  getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation>;
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult>;
+  discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  approvePreviewPlan(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord>;
+  startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
+  resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord>;
+  retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord>;
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord>;
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;

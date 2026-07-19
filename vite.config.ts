@@ -78,6 +78,8 @@ export default defineConfig(() => {
     },
     test: {
       environment: 'node',
+      minWorkers: 1,
+      maxWorkers: 4,
       include: [
         'src/**/*.{test,spec}.{ts,tsx}',
         'scripts/**/*.{test,spec}.mjs'

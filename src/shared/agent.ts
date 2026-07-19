@@ -154,7 +154,11 @@ export interface TaskManagerRepositorySettings {
   selectedPath: string | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 3 as const;
+export interface PreviewGatewaySettings {
+  port: number | null;
+}
+
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 4 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -170,6 +174,7 @@ export interface TaskManagerAppSettings {
   codexExternalTools: CodexExternalToolSettings;
   externalExecutables: ExternalExecutablePathSettings;
   repositories: TaskManagerRepositorySettings;
+  previewGateway: PreviewGatewaySettings;
 }
 
 export const DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS: CodexExternalToolSettings = {
@@ -197,7 +202,8 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   repositories: {
     knownPaths: [],
     selectedPath: null
-  }
+  },
+  previewGateway: { port: null }
 };
 
 export type AgentObservationSource =

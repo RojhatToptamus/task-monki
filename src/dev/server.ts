@@ -13,6 +13,7 @@ import {
 } from './devApiSecurity';
 import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
 import { DevProcessLifecycle } from './devProcessLifecycle';
+import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 import { chooseRepositoryFolder } from './folderPicker';
 
 const port = parseDevPort(
@@ -31,7 +32,10 @@ const storeDir =
   process.env.TASK_MANAGER_STORE_DIR ?? path.join(defaultDevDataDir, 'dev-store');
 const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
-const inertSeedMode = process.env.TASK_MANAGER_DEV_SEED_MODE === '1';
+const previewRoot =
+  process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
+const agentProviderStartupDisabledReason =
+  deterministicDevSeedProviderDisabledReason(process.env);
 const taskStore = new FileTaskStore(storeDir);
 
 const service = new TaskManagerService(
@@ -40,6 +44,8 @@ const service = new TaskManagerService(
   undefined,
   {
     appSettingsStore: new AppSettingsStore(appSettingsPath),
+    previewEnabled: true,
+    previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
     // A same-user provider process can read ordinary filesystem secrets. Keep
     // the browser-only HTTP development surface unreachable from agent commands
     // by requiring non-escalatable, network-disabled turns. Startup also makes
@@ -47,9 +53,12 @@ const service = new TaskManagerService(
     // external tools are forced off with fail-closed MCP discovery. Packaged
     // Electron uses guarded IPC and does not enable this restriction.
     allowAgentNetworkAccess: false,
-    agentProviderStartupDisabledReason: inertSeedMode
-      ? 'Codex is disabled while deterministic development seed scenarios are loaded. Regenerate or use a normal development store to run agent work.'
-      : undefined
+    agentProviderStartupDisabledReason,
+    previewRoot,
+    previewLauncherPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/native-preview-launcher.mjs'
+    )
   }
 );
 const security = {
@@ -86,6 +95,9 @@ async function start(): Promise<void> {
   console.log(`Renderer origin: ${security.expectedOrigin}`);
   console.log(`Store: ${storeDir}`);
   console.log(`Default repository: ${defaultRepositoryPath}`);
+  if (agentProviderStartupDisabledReason) {
+    console.log(`Agent provider: ${agentProviderStartupDisabledReason}`);
+  }
 }
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -99,8 +111,8 @@ async function cleanupResources(): Promise<void> {
   const activeTokenLease = tokenLease;
   devServer = undefined;
   tokenLease = undefined;
-
   const cleanupErrors: unknown[] = [];
+  const serviceCleanup = attemptCleanup(() => service.shutdown(), cleanupErrors);
 
   await attemptCleanup(() => activeTokenLease?.dispose(), cleanupErrors);
   if (activeServer) {
@@ -108,7 +120,7 @@ async function cleanupResources(): Promise<void> {
     await attemptCleanup(() => closeServer(activeServer.server), cleanupErrors);
     await attemptCleanup(() => activeServer.dispose(), cleanupErrors);
   }
-  await attemptCleanup(() => service.shutdown(), cleanupErrors);
+  await serviceCleanup;
 
   if (cleanupErrors.length > 0) {
     throw cleanupErrors[0];

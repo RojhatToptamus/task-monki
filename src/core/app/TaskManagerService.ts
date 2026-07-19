@@ -1,12 +1,17 @@
 import type {
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
   CreateTaskRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
@@ -40,11 +45,30 @@ import type {
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
+  ApprovePreviewPlanRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
+  StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest,
   AttachmentContent,
   AttachmentDraftSnapshot,
   DiscardTaskAttachmentDraftRequest,
   ReadTaskAttachmentRequest,
-  StageTaskAttachmentBatchRequest,
+  StageTaskAttachmentBatchRequest
 } from '../../shared/contracts';
 import {
   ATTACHMENT_MAX_COUNT,
@@ -83,12 +107,28 @@ import {
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
+import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
+import { createPreviewManager } from '../preview/createPreviewManager';
+import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
+import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
 import {
   assertAttachmentSandboxSupportsDelivery,
   AgentAttachmentDeliveryError,
   assertModelSupportsAttachments
 } from '../agent/AgentAttachmentDelivery';
 import { AttachmentStoreError } from '../storage/AttachmentFileStore';
+
+type TaskManagerLifecycleState =
+  | 'NEW'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'SHUTTING_DOWN'
+  | 'STOPPED';
+
+interface TaskActionWork {
+  label: string;
+  work: Promise<unknown>;
+}
 
 export class TaskManagerService {
   readonly events: AppEventBus;
@@ -100,10 +140,18 @@ export class TaskManagerService {
   private readonly appSettingsStore: AppSettingsStorage;
   private readonly externalToolResolver: ExternalToolResolver;
   private readonly openTargets: OpenTargetService;
+  private readonly previews: PreviewManager;
+  private readonly previewRecipeGenerator: PreviewRecipeGenerationService;
+  private readonly previewEnabled: boolean;
+  private readonly previewReconcile: boolean;
   private readonly browserDevAgentBoundary: boolean;
-  private readonly taskActionLocks = new Map<string, string>();
-  private readonly activeAttachmentDrafts = new Set<string>();
   private readonly agentProviderStartupDisabledReason?: string;
+  private readonly taskActionLocks = new Map<string, TaskActionWork>();
+  private readonly activeControlActions = new Set<Promise<unknown>>();
+  private readonly activeAttachmentDrafts = new Set<string>();
+  private lifecycleState: TaskManagerLifecycleState = 'NEW';
+  private initWork?: Promise<void>;
+  private shutdownWork?: Promise<void>;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
   private codexExecutable: string | undefined;
 
@@ -120,6 +168,19 @@ export class TaskManagerService {
       appSettingsStore?: AppSettingsStorage;
       agentProviderAdapter?: AgentProviderAdapter;
       openTargetHost?: OpenTargetHost;
+      previewManager?: PreviewManager;
+      previewRecipeGenerator?: PreviewRecipeGenerationService;
+      previewRoot?: string;
+      previewLauncherPath?: string;
+      previewLauncherExecPath?: string;
+      previewLauncherEnv?: NodeJS.ProcessEnv;
+      previewOciExecutablePath?: string;
+      previewOciContextName?: string;
+      previewOciEnv?: NodeJS.ProcessEnv;
+      previewOpenHost?: PreviewUrlHost;
+      previewSecretProtector?: import('../preview/private/PreviewPrivateVault').PreviewSecretProtector;
+      previewEnabled?: boolean;
+      previewReconcile?: boolean;
       allowAgentNetworkAccess?: boolean;
       agentProviderStartupDisabledReason?: string;
     } = {}
@@ -139,6 +200,30 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
+    this.previewEnabled = options.previewEnabled === true;
+    this.previewReconcile = options.previewReconcile !== false;
+    this.previewRecipeGenerator =
+      options.previewRecipeGenerator ?? new PreviewRecipeGenerationService();
+    this.previews =
+      options.previewManager ??
+      createPreviewManager(store, events, {
+        previewRoot:
+          options.previewRoot ??
+          process.env.TASK_MANAGER_PREVIEW_ROOT ??
+          path.join(os.tmpdir(), 'task-monki-preview-runtime'),
+        launcherPath:
+          options.previewLauncherPath ??
+          path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
+        launcherExecPath: options.previewLauncherExecPath,
+        launcherEnv: options.previewLauncherEnv,
+        ociExecutablePath:
+          options.previewOciExecutablePath ?? process.env.TASK_MANAGER_OCI_BIN,
+        ociContextName:
+          options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
+        ociEnv: options.previewOciEnv,
+        openHost: options.previewOpenHost,
+        secretProtector: options.previewSecretProtector
+      });
     this.codexAdapter = new CodexAppServerAdapter(store, events, {
       cwd: agentCwd,
       executable: options.codexPath,
@@ -168,15 +253,58 @@ export class TaskManagerService {
     });
   }
 
-  async init(): Promise<void> {
-    await this.store.init();
-    this.appSettings = await this.loadBoundarySafeAppSettings();
-    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
-    await this.agents.initialize();
-    if (this.agentProviderStartupDisabledReason) {
-      return;
+  init(): Promise<void> {
+    if (this.lifecycleState === 'READY') return Promise.resolve();
+    if (this.initWork) return this.initWork;
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      return Promise.reject(new Error('Task Manager is shutting down.'));
     }
+    this.lifecycleState = 'INITIALIZING';
+    const work = this.initializeInternal()
+      .then(() => {
+        this.assertInitializing();
+        this.lifecycleState = 'READY';
+      })
+      .catch((error: unknown) => {
+        if (this.lifecycleState === 'INITIALIZING') {
+          this.lifecycleState = 'NEW';
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.initWork === work) this.initWork = undefined;
+      });
+    this.initWork = work;
+    return work;
+  }
+
+  private async initializeInternal(): Promise<void> {
+    await this.store.init();
+    this.assertInitializing();
+    this.appSettings = await this.loadBoundarySafeAppSettings();
+    this.assertInitializing();
+    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
+    this.assertInitializing();
+    if (this.previewEnabled) {
+      const gateway = await this.previews.init(this.appSettings.previewGateway.port ?? 0, {
+        reconcile: this.previewReconcile
+      });
+      this.assertInitializing();
+      if (this.appSettings.previewGateway.port !== gateway.port) {
+        this.appSettings = await this.appSettingsStore.update({
+          previewGateway: { port: gateway.port }
+        });
+        this.assertInitializing();
+      }
+    }
+    await this.agents.initialize();
+    this.assertInitializing();
+    if (this.agentProviderStartupDisabledReason) return;
     const snapshot = await this.store.snapshot();
+    this.assertInitializing();
     const recoveryTaskIds = new Set(
       snapshot.runs
         .filter((run) => run.recoveryState !== 'NONE')
@@ -187,6 +315,7 @@ export class TaskManagerService {
         this.refreshEvidence({ taskId }).catch(() => undefined)
       )
     );
+    this.assertInitializing();
   }
 
   getDefaultRepositoryPath(): string {
@@ -198,7 +327,13 @@ export class TaskManagerService {
     return structuredClone(this.appSettings);
   }
 
-  async updateAppSettings(
+  updateAppSettings(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    return this.withControlAction(() => this.updateAppSettingsInternal(input));
+  }
+
+  private async updateAppSettingsInternal(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
     if (
@@ -267,6 +402,12 @@ export class TaskManagerService {
   }
 
   async executeOpenTargetAction(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult> {
+    return this.withControlAction(() => this.executeOpenTargetActionInternal(input));
+  }
+
+  private async executeOpenTargetActionInternal(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
     this.appSettings = await this.appSettingsStore.get();
@@ -357,6 +498,7 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
+    this.assertAcceptingWork();
     const acknowledgedTask = await this.store.resolveTaskCreationRetry(input);
     if (acknowledgedTask) {
       return acknowledgedTask;
@@ -406,12 +548,13 @@ export class TaskManagerService {
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
+    this.assertAcceptingWork();
     await this.assertAttachmentProviderBoundaryAvailable();
     const refined = await this.promptRefiner.refine(
       input.repositoryPath,
       input.input,
       input.model,
-      this.codexExecutable,
+      this.codexAdapter.currentRuntimeExecutable ?? this.codexExecutable,
       this.appSettings.codexExternalTools,
       this.browserDevAgentBoundary
     );
@@ -425,6 +568,14 @@ export class TaskManagerService {
   }
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
+    return this.withTaskAction(input.taskId, 'Worktree preparation', () =>
+      this.prepareWorktreeUnlocked(input)
+    );
+  }
+
+  private async prepareWorktreeUnlocked(
+    input: PrepareWorktreeRequest
+  ): Promise<WorktreeRecord> {
     const task = await this.requireTask(input.taskId);
     const existing = await this.store.getCurrentWorktree(task.id);
     if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
@@ -485,7 +636,7 @@ export class TaskManagerService {
       const task = await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-      const worktree = await this.prepareWorktree({ taskId: task.id });
+      const worktree = await this.prepareWorktreeUnlocked({ taskId: task.id });
       return this.startPreparedRun({
         task,
         worktree,
@@ -532,10 +683,14 @@ export class TaskManagerService {
   }
 
   cancelRun(input: CancelRunRequest): Promise<void> {
-    return this.agents.interruptRun(input.runId);
+    return this.withControlAction(() => this.agents.interruptRun(input.runId));
   }
 
-  async steerRun(input: SteerRunRequest): Promise<void> {
+  steerRun(input: SteerRunRequest): Promise<void> {
+    return this.withControlAction(() => this.steerRunInternal(input));
+  }
+
+  private async steerRunInternal(input: SteerRunRequest): Promise<void> {
     const run = await this.requireRunForTask(input.runId, input.taskId);
     const snapshot = await this.store.snapshot();
     const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
@@ -764,31 +919,366 @@ export class TaskManagerService {
     });
   }
 
-  async syncAgentGoal(input: SyncAgentGoalRequest) {
+  syncAgentGoal(input: SyncAgentGoalRequest) {
+    return this.withControlAction(() => this.syncAgentGoalInternal(input));
+  }
+
+  private async syncAgentGoalInternal(input: SyncAgentGoalRequest) {
     await this.assertAttachmentProviderBoundaryAvailable();
     const task = await this.requireTask(input.taskId);
     return this.agents.syncGoal(task, input.sessionId);
   }
 
   respondToInteraction(input: RespondToInteractionRequest) {
-    return this.agents.respondToInteraction(input);
+    return this.withControlAction(() => this.agents.respondToInteraction(input));
   }
 
-  async shutdown(): Promise<void> {
-    try {
-      await this.agents.shutdown();
-    } finally {
-      await this.store.close();
+  shutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    if (this.lifecycleState === 'STOPPED') return Promise.resolve();
+    this.lifecycleState = 'SHUTTING_DOWN';
+    const pendingInitialization = this.initWork;
+    const pendingTaskActions = [...this.taskActionLocks.values()].map(
+      ({ work }) => work
+    );
+    const pendingControlActions = [...this.activeControlActions];
+    const work = this.completeShutdown(
+      pendingInitialization,
+      pendingTaskActions,
+      pendingControlActions
+    )
+      .finally(() => {
+        this.lifecycleState = 'STOPPED';
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      });
+    this.shutdownWork = work;
+    return work;
+  }
+
+  private async completeShutdown(
+    pendingInitialization: Promise<void> | undefined,
+    pendingTaskActions: Promise<unknown>[],
+    pendingControlActions: Promise<unknown>[]
+  ): Promise<void> {
+    const initialRuntimeShutdown = this.shutdownRuntimeOwners();
+    const pendingWork = Promise.allSettled([
+      pendingInitialization ?? Promise.resolve(),
+      ...pendingTaskActions,
+      ...pendingControlActions
+    ]);
+    const [initialRuntimeResult] = await Promise.allSettled([
+      initialRuntimeShutdown,
+      pendingWork
+    ]);
+    const [finalRuntimeResult] = await Promise.allSettled([
+      this.shutdownRuntimeOwners()
+    ]);
+    const [storeCloseResult] = await Promise.allSettled([this.store.close()]);
+    if (initialRuntimeResult.status === 'rejected') {
+      throw initialRuntimeResult.reason;
     }
+    if (finalRuntimeResult.status === 'rejected') {
+      throw finalRuntimeResult.reason;
+    }
+    if (storeCloseResult.status === 'rejected') {
+      throw storeCloseResult.reason;
+    }
+  }
+
+  private async shutdownRuntimeOwners(): Promise<void> {
+    const [agentResult, previewResult, previewRecipeGenerationResult] = await Promise.allSettled([
+      this.agents.shutdown(),
+      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown(),
+      this.previewRecipeGenerator.shutdown()
+    ]);
+    if (agentResult.status === 'rejected') throw agentResult.reason;
+    if (previewResult.status === 'rejected') throw previewResult.reason;
+    if (previewRecipeGenerationResult.status === 'rejected') {
+      throw previewRecipeGenerationResult.reason;
+    }
+  }
+
+  async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const result = await this.previews.resolve(context, input.scenarioId);
+      this.events.emit({
+        type: 'preview.updated',
+        taskId: input.taskId,
+        iterationId: context.iteration.id,
+        worktreeId: context.worktree.id,
+        payload: result,
+        at: new Date().toISOString()
+      });
+      return result;
+    });
+  }
+
+  async getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.get(input.taskId);
+  }
+
+  async generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    this.assertAgentProviderAvailable();
+    const context = await this.withTaskAction(
+      input.taskId,
+      'Preview recipe generation preparation',
+      () => this.requirePreviewContext(input.taskId)
+    );
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.generate({
+        taskId: input.taskId,
+        worktreePath: context.worktree.worktreePath,
+        model: input.model,
+        codexExecutable: this.codexAdapter.currentRuntimeExecutable ?? this.codexExecutable,
+        onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
+      })
+    );
+  }
+
+  async validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.validate(input.taskId, input.draftId, input.yaml);
+  }
+
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previewRecipeGenerator.writeAcceptedRecipe({
+        taskId: input.taskId,
+        draftId: input.draftId,
+        yaml: input.yaml,
+        worktreePath: context.worktree.worktreePath
+      });
+      this.emitPreviewRecipeGenerationUpdate(
+        context,
+        this.previewRecipeGenerator.completeAcceptance(input.taskId)
+      );
+      let resolution: ResolvePreviewResult | undefined;
+      let checkError: string | undefined;
+      try {
+        resolution = await this.previews.resolve(context);
+        this.events.emit({
+          type: 'preview.updated',
+          taskId: input.taskId,
+          iterationId: context.iteration.id,
+          worktreeId: context.worktree.id,
+          payload: resolution,
+          at: new Date().toISOString()
+        });
+      } catch {
+        checkError =
+          'The recipe was saved, but Preview could not finish checking it. Use Check preview to retry.';
+      }
+      return {
+        recipePath: '.taskmonki/preview.yaml',
+        resolution,
+        checkError
+      };
+    });
+  }
+
+  async discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    const context = await this.requirePreviewContext(input.taskId);
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.discard(input.taskId, (state) =>
+        this.emitPreviewRecipeGenerationUpdate(context, state)
+      )
+    );
+  }
+
+  private emitPreviewRecipeGenerationUpdate(
+    context: PreviewTaskContext,
+    state: PreviewRecipeGenerationSnapshot
+  ): void {
+    this.events.emit({
+      type: 'preview.recipe-generation.updated',
+      taskId: context.task.id,
+      iterationId: context.iteration.id,
+      worktreeId: context.worktree.id,
+      payload: state,
+      at: new Date().toISOString()
+    });
+  }
+
+  approvePreviewPlan(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    return this.withControlAction(() => this.approvePreviewPlanInternal(input));
+  }
+
+  setPreviewPrivateInput(input: { taskId: string; inputId: string; value: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input update', () =>
+      this.previews.setPrivateInput(input.taskId, input.inputId, input.value)
+    );
+  }
+
+  deletePreviewPrivateInput(input: { taskId: string; inputId: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input deletion', () =>
+      this.previews.deletePrivateInput(input.taskId, input.inputId)
+    );
+  }
+
+  retryPreviewPrivateVaultCleanup() {
+    return this.withControlAction(() => this.previews.retryPrivateVaultCleanup());
+  }
+
+  private async approvePreviewPlanInternal(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    this.assertPreviewEnabled();
+    const approval = await this.previews.approve(input);
+    this.events.emit({
+      type: 'preview.updated',
+      taskId: input.taskId,
+      payload: approval,
+      at: approval.approvedAt
+    });
+    return approval;
+  }
+
+  async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(input);
+  }
+
+  private async startPreviewWithSetup(
+    input: StartPreviewRequest,
+    setupRetry?: RetryPreviewSetupRequest,
+    reset?: ResetPreviewDataRequest
+  ): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    if (process.platform !== 'darwin') {
+      throw new Error('Native previews are supported on macOS only.');
+    }
+    return this.withTaskAction(input.taskId, reset ? 'Preview data reset' : 'Preview startup', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const currentSnapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
+      const blockingGeneration = currentSnapshot.previewGenerations.find(
+        (generation) =>
+          generation.taskId === input.taskId &&
+          generation.routingState !== 'ACTIVE' &&
+          (
+            generation.state === 'CLEANUP_INCOMPLETE' ||
+            (generation.state === 'RECOVERY_REQUIRED' && !reset) ||
+            !['STOPPED', 'FAILED', 'RECOVERY_REQUIRED'].includes(generation.state)
+          )
+      );
+      if (blockingGeneration) {
+        throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
+      }
+      const gitSnapshot = await this.refreshEvidence({ taskId: input.taskId });
+      if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
+        throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
+      }
+      if (reset) await this.previews.resetData({ ...reset, context });
+      const setupRetryResourceIds = setupRetry
+        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
+        : undefined;
+      const prepared = await this.previews.prepare({
+        context,
+        gitSnapshot,
+        reobserveGit: () => this.refreshEvidence({ taskId: input.taskId })
+      }, input.scenarioId, setupRetryResourceIds);
+      return this.previews.execute(prepared);
+    });
+  }
+
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.withControlAction(() => this.stopPreviewInternal(input));
+  }
+
+  private async stopPreviewInternal(
+    input: StopPreviewRequest
+  ): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    const generation = await this.store.getPreviewGeneration(input.generationId);
+    if (!generation || generation.taskId !== input.taskId) {
+      throw new Error('Preview generation was not found for this task.');
+    }
+    const cancelingStartup =
+      generation.routingState === 'CANDIDATE' &&
+      !['FAILED', 'STOPPED', 'CLEANUP_INCOMPLETE', 'RECOVERY_REQUIRED'].includes(generation.state);
+    if (cancelingStartup) {
+      return this.previews.stop(generation.id);
+    }
+    return this.withTaskAction(input.taskId, 'Preview stop', () =>
+      this.previews.stop(generation.id)
+    );
+  }
+
+  async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      undefined,
+      input
+    );
+  }
+
+  async retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      input
+    );
+  }
+
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord> {
+    return this.withTaskAction(input.taskId, 'Preview binding update', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      return this.previews.setLocalAttachmentBinding({ ...input, context });
+    });
+  }
+
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void> {
+    return this.withTaskAction(input.taskId, 'Preview binding deletion', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previews.deleteLocalAttachmentBinding({ ...input, context });
+    });
+  }
+
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    return this.withControlAction(() => this.openPreviewInternal(input));
+  }
+
+  private openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    this.assertPreviewEnabled();
+    return this.previews.open(input);
+  }
+
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
+    this.assertPreviewEnabled();
+    return this.previews.readLog(input);
   }
 
   private async assertAttachmentProviderBoundaryAvailable(): Promise<void> {
-    if (this.agentProviderStartupDisabledReason) {
-      throw new Error(this.agentProviderStartupDisabledReason);
-    }
+    this.assertAgentProviderAvailable();
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
+    this.assertAcceptingWork();
     const task = await this.requireTask(input.taskId);
     const worktree = await this.requireWorktree(task);
     const verified = await this.worktrees.verify(worktree);
@@ -800,6 +1290,7 @@ export class TaskManagerService {
     const snapshot = await inspectGitSnapshot(storedWorktree);
     const diffEvidence = await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
+    await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({
       type: 'git.updated',
       taskId: task.id,
@@ -1039,6 +1530,11 @@ export class TaskManagerService {
         throw new Error(blockedReason);
       }
 
+      // Preview cleanup is part of deletion authority. The store keeps its
+      // resource ledger intact if any process or workspace identity is ambiguous.
+      await this.previews.stopTask(task.id);
+      await this.previewRecipeGenerator.discard(task.id);
+
       let removedWorktree = false;
       if (input.removeWorktree) {
         const worktrees = snapshot.worktrees.filter(
@@ -1051,6 +1547,7 @@ export class TaskManagerService {
       }
 
       await this.store.deleteTask(task.id);
+      await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
       const result = { taskId: task.id, removedWorktree };
       this.events.emit({
         type: 'task.deleted',
@@ -1174,6 +1671,21 @@ export class TaskManagerService {
     return worktree;
   }
 
+  private async requirePreviewContext(taskId: string) {
+    const task = await this.requireTask(taskId);
+    const worktree = await this.requireWorktree(task);
+    const verified = await this.worktrees.verify(worktree);
+    const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    if (storedWorktree.status !== 'PRESENT') {
+      throw new Error(`Worktree is not ready for preview: ${storedWorktree.status}.`);
+    }
+    const iteration = await this.store.getCurrentIteration(task.id);
+    if (!iteration || iteration.id !== storedWorktree.iterationId) {
+      throw new Error('Preview worktree does not match the current task iteration.');
+    }
+    return { task, iteration, worktree: storedWorktree };
+  }
+
   private emitGitHubUpdate(taskId: string, worktree: WorktreeRecord, payload: unknown): void {
     this.events.emit({
       type: 'github.updated',
@@ -1198,17 +1710,58 @@ export class TaskManagerService {
     label: string,
     action: () => Promise<T>
   ): Promise<T> {
+    this.assertAcceptingWork();
     const current = this.taskActionLocks.get(taskId);
     if (current) {
-      throw new Error(`${current} is already running for this task.`);
+      throw new Error(`${current.label} is already running for this task.`);
     }
-    this.taskActionLocks.set(taskId, label);
+    const work = Promise.resolve().then(action);
+    const entry: TaskActionWork = { label, work };
+    this.taskActionLocks.set(taskId, entry);
     try {
-      return await action();
+      return await work;
     } finally {
-      if (this.taskActionLocks.get(taskId) === label) {
+      if (this.taskActionLocks.get(taskId) === entry) {
         this.taskActionLocks.delete(taskId);
       }
+    }
+  }
+
+  private withControlAction<T>(action: () => Promise<T>): Promise<T> {
+    this.assertAcceptingWork();
+    const work = Promise.resolve().then(action);
+    this.activeControlActions.add(work);
+    void work.then(
+      () => this.activeControlActions.delete(work),
+      () => this.activeControlActions.delete(work)
+    );
+    return work;
+  }
+
+  private assertInitializing(): void {
+    if (this.lifecycleState !== 'INITIALIZING') {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAcceptingWork(): void {
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAgentProviderAvailable(): void {
+    if (this.agentProviderStartupDisabledReason) {
+      throw new Error(this.agentProviderStartupDisabledReason);
+    }
+  }
+
+  private assertPreviewEnabled(): void {
+    if (!this.previewEnabled) {
+      throw new Error('Preview runtime is not configured in this Task Monki host.');
     }
   }
 

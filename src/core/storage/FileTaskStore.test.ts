@@ -104,6 +104,49 @@ describe('FileTaskStore', () => {
   });
 
   it.runIf(process.platform !== 'win32')(
+    'refuses a symlink swapped into a managed artifact path',
+    async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-artifact-swap-'));
+      const store = new FileTaskStore(dir);
+      const task = await store.createTask({
+        title: 'Artifact swap',
+        prompt: 'Keep output contained.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/artifact-swap',
+        worktreePath: dir,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        provider: 'codex'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'ANALYSIS',
+        prompt: task.prompt
+      });
+      const output = (await store.snapshot()).artifacts.find(
+        (artifact) => artifact.id === run.outputArtifactId
+      )!;
+      const outside = path.join(dir, 'outside.txt');
+      await fs.writeFile(outside, 'outside', 'utf8');
+      await fs.rm(output.path);
+      await fs.symlink(outside, output.path);
+
+      await expect(store.appendArtifact(output.id, 'leak')).rejects.toThrow(
+        'could not be opened safely'
+      );
+      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'reconciles managed artifact orphans after a published delete survives restart',
     async () => {
       const dir = await fs.mkdtemp(
@@ -250,6 +293,21 @@ describe('FileTaskStore', () => {
       'artifact path failed its managed-path integrity check'
     );
     await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside');
+  });
+
+  it('fails closed instead of recursively deleting a temporary-path directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-temp-'));
+    await new FileTaskStore(dir).snapshot();
+    const temporaryDirectory = path.join(dir, 'store.json.attacker.tmp');
+    await fs.mkdir(temporaryDirectory);
+    await fs.writeFile(path.join(temporaryDirectory, 'keep.txt'), 'keep', 'utf8');
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'temporary path failed its integrity check'
+    );
+    await expect(
+      fs.readFile(path.join(temporaryDirectory, 'keep.txt'), 'utf8')
+    ).resolves.toBe('keep');
   });
 
   it('recovers queued persistence after a write failure', async () => {
@@ -428,6 +486,458 @@ describe('FileTaskStore', () => {
     >;
     expect(rewritten.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(rewritten.testRuns).toBeUndefined();
+  });
+
+  it('migrates representative schema 9 data without loss and initializes preview collections', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema9-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Existing schema 9 task',
+      prompt: 'Preserve all existing records.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/schema-nine',
+      worktreePath: dir,
+      baseSha: 'base-sha'
+    });
+
+    const storePath = path.join(dir, 'store.json');
+    const current = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    const {
+      previewPlans: _plans,
+      previewApprovals: _approvals,
+      previewGenerations: _generations,
+      previewNodeAttempts: _attempts,
+      previewResources: _resources,
+      ...schemaNine
+    } = current;
+    await fs.writeFile(
+      storePath,
+      `${JSON.stringify({ ...schemaNine, schemaVersion: 9 }, null, 2)}\n`,
+      'utf8'
+    );
+
+    const migrated = await new FileTaskStore(dir).snapshot();
+    expect(migrated.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(migrated.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(migrated.iterations).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: iteration.id })])
+    );
+    expect(migrated.worktrees).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: worktree.id })])
+    );
+    expect(migrated.previewPlans).toEqual([]);
+    expect(migrated.previewLocalBindings).toEqual([]);
+    expect(migrated.previewApprovals).toEqual([]);
+    expect(migrated.previewGenerations).toEqual([]);
+    expect(migrated.previewManagedEnvironments).toEqual([]);
+    expect(migrated.previewManagedResources).toEqual([]);
+    expect(migrated.previewGenerationAttachments).toEqual([]);
+    expect(migrated.previewNodeAttempts).toEqual([]);
+    expect(migrated.previewResources).toEqual([]);
+  });
+
+  it('rejects the disposable schema 12 Phase 3 prototype instead of migrating its ownership model', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema12-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({ title: 'Prototype', prompt: 'Reject it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    await fs.writeFile(storePath, `${JSON.stringify({ ...persisted, schemaVersion: 12 }, null, 2)}\n`);
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow('Unsupported Task Monki store schema 12');
+  });
+
+  it('migrates schema 14 by adding task-scoped Compose authority without changing existing data', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema14-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Phase 4 task', prompt: 'Preserve it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 14;
+    delete persisted.previewComposeProjects;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(snapshot.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(snapshot.previewComposeProjects).toEqual([]);
+  });
+
+  it('migrates schema 15 by adding the attachment collection without changing preview data', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-schema15-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Phase 5 task',
+      prompt: 'Preserve preview authority',
+      repositoryPath: dir
+    });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 15;
+    delete persisted.attachments;
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
+    expect(snapshot.tasks).toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id })]));
+    expect(snapshot.attachments).toEqual([]);
+  });
+
+  it('repairs schema 13 stores by removing obsolete generation-owned OCI duplicates', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-oci-duplicate-'));
+    const store = new FileTaskStore(dir);
+    await store.createTask({ title: 'OCI duplicate', prompt: 'Repair it', repositoryPath: dir });
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as Record<string, unknown>;
+    persisted.schemaVersion = 13;
+    delete persisted.previewLocalBindings;
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    persisted.previewResources = [{
+      id: 'legacy-container', taskId: 'task', generationId: 'generation', logicalNodeId: 'database',
+      adapterKind: 'OCI_CONTAINER', state: 'RUNNING', ownershipMarkerDigest: 'marker',
+      oci: { engine, objectId: 'container', objectName: 'container', labelsDigest: 'labels' },
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    }];
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.previewResources).toEqual([]);
+    const rewritten = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
+      previewResources: unknown[];
+    };
+    expect(rewritten.previewResources).toEqual([]);
+  });
+
+  it('allows stopped environment history but enforces one live environment per task', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-managed-environment-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Managed environment', prompt: 'Test', repositoryPath: dir });
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const environment = (id: string, state: 'READY' | 'STOPPED') => ({
+      id, previewKey: 'task-preview', taskId: task.id, state, engine,
+      network: { engine, objectId: `network-${id}`, objectName: `network-${id}`, labelsDigest: 'labels' },
+      ownershipMarkerDigest: 'marker', createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z'
+    });
+    await store.savePreviewManagedEnvironment(environment('old', 'STOPPED'));
+    await store.savePreviewManagedEnvironment(environment('live', 'READY'));
+    await store.savePreviewManagedEnvironment(environment('old', 'STOPPED'));
+
+    await expect(store.savePreviewManagedEnvironment(environment('duplicate', 'READY')))
+      .rejects.toThrow('only one managed environment');
+  });
+
+  it('persists preview records and refuses task deletion while ownership is unresolved', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Preview task',
+      prompt: 'Run the preview.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/preview',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const now = new Date().toISOString();
+    const plan = await store.savePreviewPlan({
+      id: 'plan-1',
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml',
+      recipeVersion: 1,
+      recipeDigest: 'recipe',
+      executionDigest: 'execution',
+      executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      warnings: [],
+      createdAt: now
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval-1',
+      taskId: task.id,
+      planId: plan.id,
+      executionDigest: plan.executionDigest,
+      scope: 'TASK',
+      approvedAt: now
+    });
+    const generation = await store.savePreviewGeneration({
+      id: 'generation-1',
+      previewKey: 'preview-task',
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      planId: plan.id,
+      approvalId: approval.id,
+      executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git-1',
+      sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty',
+      workspacePath: path.join(dir, 'preview-runtime', 'generation-1'),
+      state: 'CREATED',
+      routingState: 'CANDIDATE',
+      freshness: 'CURRENT',
+      routes: [],
+      createdAt: now,
+      updatedAt: now
+    });
+    await store.savePreviewPlan({
+      ...plan,
+      id: 'plan-2',
+      recipeDigest: 'recipe-2',
+      executionDigest: 'execution-2',
+      createdAt: new Date(Date.parse(now) + 1).toISOString()
+    });
+    await expect(
+      store.savePreviewGeneration({ ...generation, state: 'PREPARING_SOURCE' })
+    ).resolves.toMatchObject({ state: 'PREPARING_SOURCE' });
+    await expect(
+      store.savePreviewGeneration({ ...generation, id: 'generation-2' })
+    ).rejects.toThrow('missing or mismatched task authority');
+    const resource = await store.savePreviewResource({
+      id: 'resource-1',
+      taskId: task.id,
+      generationId: generation.id,
+      logicalNodeId: 'web',
+      adapterKind: 'NATIVE_PROCESS',
+      state: 'INTENDED',
+      ownershipMarkerDigest: 'marker',
+      updatedAt: now
+    });
+
+    await expect(store.deleteTask(task.id)).rejects.toThrow('active or unverified preview resource');
+    await store.savePreviewResource({ ...resource, state: 'STOPPED', updatedAt: new Date().toISOString() });
+    await store.savePreviewGeneration({
+      ...generation,
+      state: 'STOPPED',
+      stoppedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await store.deleteTask(task.id);
+
+    await expect(store.savePreviewGeneration(generation)).rejects.toThrow(
+      'missing or mismatched task authority'
+    );
+
+    const snapshot = await new FileTaskStore(dir).snapshot();
+    expect(snapshot.previewPlans).toEqual([]);
+    expect(snapshot.previewApprovals).toEqual([]);
+    expect(snapshot.previewGenerations).toEqual([]);
+    expect(snapshot.previewResources).toEqual([]);
+  });
+
+  it('reads bounded artifact ranges without splitting UTF-8 code points', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-artifact-range-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Logs', prompt: 'Tail safely', repositoryPath: dir });
+    const artifact = await store.createPreviewArtifact(task.id, 'preview-stdout');
+    await store.appendBoundedArtifact(artifact.id, 'a😀b');
+    const first = await store.readArtifactRange(artifact.id, 0, 4);
+    expect(first).toEqual({ chunk: 'a', nextOffset: 1, endOfFile: false });
+    const second = await store.readArtifactRange(artifact.id, first.nextOffset, 4);
+    expect(second).toEqual({ chunk: '😀', nextOffset: 5, endOfFile: false });
+    await expect(store.readArtifactRange(artifact.id, second.nextOffset, 64)).resolves.toEqual({
+      chunk: 'b', nextOffset: 6, endOfFile: true
+    });
+    await expect(store.readArtifactRange(artifact.id, 1, 3)).rejects.toThrow('4-65536');
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('bounds terminal preview history and removes its child evidence and files', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-preview-prune-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'History', prompt: 'Bound it', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/history', worktreePath: dir, baseSha: 'base'
+    });
+    const now = Date.now();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      warnings: [], createdAt: new Date(now).toISOString()
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: new Date(now).toISOString()
+    });
+    const engine = {
+      contextName: 'desktop-linux', endpointDigest: 'endpoint', engineId: 'engine',
+      serverVersion: '1', apiVersion: '1', operatingSystem: 'linux', architecture: 'arm64'
+    };
+    const environment = await store.savePreviewManagedEnvironment({
+      id: 'environment', previewKey: 'task-history', taskId: task.id, state: 'READY', engine,
+      network: { engine, objectId: 'network', objectName: 'network', labelsDigest: 'network-labels' },
+      ownershipMarkerDigest: 'environment-marker', createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString()
+    });
+    const managedResource = await store.savePreviewManagedResource({
+      id: 'managed-database', taskId: task.id, environmentId: environment.id,
+      logicalResourceId: 'database', type: 'postgres', state: 'READY', planDigest: 'resource-plan',
+      ownershipMarkerDigest: 'resource-marker',
+      container: { engine, objectId: 'container', objectName: 'container', labelsDigest: 'container-labels' },
+      volume: { engine, objectId: 'volume', objectName: 'volume', labelsDigest: 'volume-labels' },
+      binding: {
+        id: 'binding', digest: 'binding-digest', host: '127.0.0.1', ports: { postgres: 41000 },
+        username: 'safe_user', database: 'app'
+      },
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
+    });
+    const artifactPaths = new Map<string, string>();
+    for (let index = 0; index < 4; index += 1) {
+      const timestamp = new Date(now + index).toISOString();
+      const generationId = `generation-${index}`;
+      await store.savePreviewGeneration({
+        id: generationId, previewKey: 'task-history', taskId: task.id, iterationId: iteration.id,
+        worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
+        executionDigest: plan.executionDigest, sourceGitSnapshotId: `git-${index}`,
+        sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty', workspacePath: `/preview/${index}`,
+        state: 'STOPPED', routingState: 'RETIRED', freshness: 'CURRENT', routes: [],
+        createdAt: timestamp, updatedAt: timestamp, stoppedAt: timestamp
+      });
+      await store.savePreviewGenerationAttachments([{
+        id: `attachment-${index}`, taskId: task.id, generationId,
+        managedResourceId: managedResource.id, logicalResourceId: managedResource.logicalResourceId,
+        bindingId: managedResource.binding!.id, attachedAt: timestamp
+      }]);
+      const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
+      const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
+      artifactPaths.set(generationId, stdout.path);
+      await store.savePreviewNodeAttempt({
+        id: `attempt-${index}`, taskId: task.id, generationId, nodeId: 'web', kind: 'SERVICE',
+        attempt: 1, commandDigest: 'command', state: 'STOPPED',
+        stdoutArtifactId: stdout.id, stderrArtifactId: stderr.id
+      });
+    }
+    await expect(store.prunePreviewHistory(task.id, 2)).resolves.toBe(2);
+    const snapshot = await store.snapshot();
+    expect(snapshot.previewGenerations.map((generation) => generation.id).sort()).toEqual([
+      'generation-2', 'generation-3'
+    ]);
+    expect(snapshot.previewNodeAttempts).toHaveLength(2);
+    expect(snapshot.previewManagedEnvironments).toEqual([environment]);
+    expect(snapshot.previewManagedResources).toEqual([managedResource]);
+    expect(snapshot.previewGenerationAttachments.map((attachment) => attachment.generationId).sort()).toEqual([
+      'generation-2', 'generation-3'
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain('postgresql://');
+    await expect(fs.access(artifactPaths.get('generation-0')!)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(artifactPaths.get('generation-3')!)).resolves.toBeUndefined();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('bounds completed argv probe attempts and resources while a generation remains active', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-probe-prune-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Probe history', prompt: 'Bound it live', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/probe-history', worktreePath: dir, baseSha: 'base'
+    });
+    const now = Date.now();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      warnings: [], createdAt: new Date(now).toISOString()
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: new Date(now).toISOString()
+    });
+    const generation = await store.savePreviewGeneration({
+      id: 'generation', previewKey: 'task-probe', taskId: task.id, iterationId: iteration.id,
+      worktreeId: worktree.id, planId: plan.id, approvalId: approval.id,
+      executionDigest: plan.executionDigest, sourceGitSnapshotId: 'git', sourceHeadSha: 'head',
+      sourceDirtyFingerprint: 'dirty', workspacePath: '/preview', state: 'READY',
+      routingState: 'ACTIVE', freshness: 'CURRENT', routes: [],
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
+    });
+    const artifactPaths = new Map<number, string>();
+    for (let index = 1; index <= 8; index += 1) {
+      const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
+      const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
+      artifactPaths.set(index, stdout.path);
+      await store.savePreviewNodeAttempt({
+        id: `attempt-${index}`, taskId: task.id, generationId: generation.id,
+        nodeId: 'web-probe', kind: 'PROBE', attempt: index, commandDigest: 'probe',
+        state: 'SUCCEEDED', stdoutArtifactId: stdout.id, stderrArtifactId: stderr.id,
+        endedAt: new Date(now + index).toISOString()
+      });
+      await store.savePreviewResource({
+        id: `resource-${index}`, taskId: task.id, generationId: generation.id,
+        logicalNodeId: 'web-probe', adapterKind: 'NATIVE_PROCESS', state: 'EXITED',
+        ownershipMarkerDigest: 'marker', updatedAt: new Date(now + index).toISOString()
+      });
+    }
+
+    await expect(store.prunePreviewProbeHistory(generation.id, 'web-probe', 3)).resolves.toBe(5);
+    const snapshot = await store.snapshot();
+    expect(snapshot.previewNodeAttempts.filter((attempt) => attempt.nodeId === 'web-probe')).toHaveLength(3);
+    expect(snapshot.previewResources.filter((resource) => resource.logicalNodeId === 'web-probe')).toHaveLength(3);
+    expect(
+      snapshot.events.some(
+        (event) =>
+          event.previewGenerationId === generation.id &&
+          (event.payload as { nodeId?: string } | undefined)?.nodeId === 'web-probe'
+      )
+    ).toBe(false);
+    await expect(fs.access(artifactPaths.get(1)!)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.access(artifactPaths.get(8)!)).resolves.toBeUndefined();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('rolls back both in-memory generation roles when atomic cutover persistence fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-cutover-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({ title: 'Cutover', prompt: 'Stay atomic', repositoryPath: dir });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task, branchName: 'codex/cutover', worktreePath: dir, baseSha: 'base'
+    });
+    const now = new Date().toISOString();
+    const plan = await store.savePreviewPlan({
+      id: 'plan', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      recipePath: '.taskmonki/preview.yaml', recipeVersion: 1, recipeDigest: 'recipe',
+      executionDigest: 'execution', executionPlan: { version: 1, jobs: [], resources: [], services: [], workers: [], routes: [], scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default' },
+      warnings: [], createdAt: now
+    });
+    const approval = await store.savePreviewApproval({
+      id: 'approval', taskId: task.id, planId: plan.id, executionDigest: plan.executionDigest,
+      scope: 'TASK', approvedAt: now
+    });
+    const authority = {
+      previewKey: 'task-cutover', taskId: task.id, iterationId: iteration.id, worktreeId: worktree.id,
+      planId: plan.id, approvalId: approval.id, executionDigest: plan.executionDigest,
+      sourceGitSnapshotId: 'git', sourceHeadSha: 'head', sourceDirtyFingerprint: 'dirty',
+      freshness: 'CURRENT' as const, routes: [], createdAt: now, updatedAt: now
+    };
+    const active = await store.savePreviewGeneration({
+      ...authority, id: 'active', workspacePath: '/active', state: 'READY', routingState: 'ACTIVE'
+    });
+    const candidate = await store.savePreviewGeneration({
+      ...authority, id: 'candidate', workspacePath: '/candidate', state: 'WAITING_READY',
+      routingState: 'CANDIDATE', replacesGenerationId: active.id
+    });
+    const mutable = store as unknown as { persistQueued(): Promise<void> };
+    const persistQueued = mutable.persistQueued.bind(store);
+    mutable.persistQueued = async () => { throw new Error('injected persistence failure'); };
+    await expect(store.cutoverPreviewGenerations({
+      candidate: { ...candidate, state: 'READY', routingState: 'ACTIVE' },
+      replaced: { ...active, routingState: 'RETIRED' }
+    })).rejects.toThrow('persistence failure');
+    mutable.persistQueued = persistQueued;
+    expect(await store.getPreviewGeneration(active.id)).toMatchObject({ routingState: 'ACTIVE' });
+    expect(await store.getPreviewGeneration(candidate.id)).toMatchObject({ routingState: 'CANDIDATE' });
+    await fs.rm(dir, { recursive: true, force: true });
   });
 
   it('links forked alternative tasks to their source task and run', async () => {

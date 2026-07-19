@@ -103,12 +103,14 @@ snapshot is visible but final manifest cleanup is interrupted, startup verifies
 the task-owned files and removes the stale manifest. An adopted directory with
 no durable task record is an orphan and is removed at startup.
 
-Schema 10 content-addressed records migrate once to schema 11. Migration copies
+Schema 10 content-addressed records migrate once to the combined schema 16. Migration copies
 each legacy blob into its owning task directory, verifies the resulting bytes,
 and removes `storageKey` from durable metadata. Task Monki durably publishes and
-synchronizes the schema 11 store snapshot before removing the legacy managed
+synchronizes the schema 16 store snapshot before removing the legacy managed
 directories. An already-verified task-owned copy makes an interrupted migration
 safe to repeat even if the corresponding legacy blob is no longer present.
+Released schema 11 stores already use path-free task-owned attachment records;
+their migration preserves those records and adds the Preview collections.
 
 Fork alternatives receive independent task-owned copies. This intentionally
 avoids shared-reference accounting and garbage collection at the small bounded
