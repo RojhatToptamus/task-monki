@@ -302,8 +302,8 @@ describe('NewTaskPanel', () => {
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
     expect(html).toContain('Execution policy');
-    expect(html).toContain('Sandboxed');
-    expect(html).toContain('<option value="sandboxed" selected="">Sandboxed</option>');
+    expect(html).toContain('Restricted');
+    expect(html).toContain('<option value="restricted" selected="">Restricted</option>');
     expect(html).toContain('Ask for approval');
     expect(html).toContain('Approve for me');
     expect(html).toContain('Full access');

@@ -168,7 +168,7 @@ function taskFixture(id: string, repositoryPath: string): Task {
       githubPullRequest: 'UNLINKED',
       ciChecks: 'NOT_APPLICABLE',
       reviews: 'NOT_APPLICABLE',
-      codexReview: { status: 'NOT_RUN' },
+      agentReview: { status: 'NOT_RUN' },
       merge: 'NOT_APPLICABLE',
       artifact: 'NONE',
       health: 'HEALTHY',

@@ -10,16 +10,22 @@ export interface CodexPermissionProfileEvidence {
   runtimeWorkspaceRoots?: unknown;
 }
 
-export function codexPermissionProfileId(sessionId: string): string {
+export function codexPermissionProfileId(
+  sessionId: string,
+  sandbox: AgentExecutionSettings['sandbox']
+): string {
   if (!SAFE_SESSION_ID.test(sessionId)) {
     throw new Error('Cannot create a Codex permission profile for an invalid session id.');
+  }
+  if (sandbox === 'DANGER_FULL_ACCESS') {
+    return ':danger-full-access';
   }
   return `${PROFILE_PREFIX}${sessionId}`;
 }
 
 /**
- * Builds a complete, collision-resistant profile in the thread-local config
- * layer. Restricted profiles deny every path that is not listed here.
+ * Builds a complete, collision-resistant restricted profile, or selects
+ * Codex's documented unrestricted built-in for Full access.
  */
 export function codexPermissionProfileConfig(input: {
   sessionId: string;
@@ -50,20 +56,25 @@ export function codexPermissionProfileConfig(input: {
     filesystem[attachmentPath] = 'read';
   }
 
-  const profileId = codexPermissionProfileId(input.sessionId);
+  const profileId = codexPermissionProfileId(input.sessionId, input.settings.sandbox);
   return {
     ...(input.settings.reasoningEffort
       ? { model_reasoning_effort: input.settings.reasoningEffort }
       : {}),
     default_permissions: profileId,
-    permissions: {
-      [profileId]: {
-        filesystem,
-        network: {
-          enabled: attachmentPaths.length === 0 && input.settings.networkAccess === true
-        }
-      }
-    },
+    ...(input.settings.sandbox === 'DANGER_FULL_ACCESS'
+      ? {}
+      : {
+          permissions: {
+            [profileId]: {
+              filesystem,
+              network: {
+                enabled:
+                  attachmentPaths.length === 0 && input.settings.networkAccess === true
+              }
+            }
+          }
+        }),
     features: {
       multi_agent: false,
       multi_agent_v2: false,
@@ -74,10 +85,11 @@ export function codexPermissionProfileConfig(input: {
 
 export function assertCodexPermissionProfileEvidence(input: {
   sessionId: string;
+  sandbox: AgentExecutionSettings['sandbox'];
   worktreePath: string;
   response: CodexPermissionProfileEvidence;
 }): void {
-  const expectedProfileId = codexPermissionProfileId(input.sessionId);
+  const expectedProfileId = codexPermissionProfileId(input.sessionId, input.sandbox);
   const active = input.response.activePermissionProfile;
   if (!active || active.id !== expectedProfileId || active.extends != null) {
     throw new Error('Codex did not attest the Task Monki permission profile.');
@@ -97,9 +109,10 @@ export function assertCodexPermissionProfileEvidence(input: {
 
 export function assertCodexActivePermissionProfile(
   sessionId: string,
+  sandbox: AgentExecutionSettings['sandbox'],
   active: CodexPermissionProfileEvidence['activePermissionProfile']
 ): void {
-  const expectedProfileId = codexPermissionProfileId(sessionId);
+  const expectedProfileId = codexPermissionProfileId(sessionId, sandbox);
   if (!active || active.id !== expectedProfileId || active.extends != null) {
     throw new Error('Codex changed or removed the Task Monki permission profile.');
   }

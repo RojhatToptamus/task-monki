@@ -22,7 +22,7 @@ import type {
   ArtifactRecord,
   BranchPublicationRecord,
   CiRollupRecord,
-  CodexReviewGateStatus,
+  AgentReviewGateStatus,
   CreateTaskRequest,
   DomainEvent,
   GitSnapshotRecord,
@@ -50,6 +50,7 @@ import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
   createInitialProjection,
+  getImplementationRetryReason,
   isImplementationRunMode,
   isTaskCreationToken,
   verifiedChecksMatchMergeHead
@@ -68,9 +69,9 @@ import {
 import { applyEventToState, createEmptyState, type StoreState } from '../projection/reducer';
 import { createDomainEvent } from './domainEvent';
 import {
-  codexReviewStatusFromResult,
-  parseCodexReviewResult
-} from '../review/CodexReviewContract';
+  agentReviewStatusFromResult,
+  parseAgentReviewResult
+} from '../review/AgentReviewContract';
 import {
   AttachmentAdoptionAmbiguousError,
   AttachmentFileStore,
@@ -273,6 +274,9 @@ function shouldCompleteFromPullRequestSync(
   ci: CiRollupRecord,
   merge: MergeSnapshotRecord
 ): boolean {
+  if (!taskAllowsMergeCompletion(task)) {
+    return false;
+  }
   if (merge.status !== 'MERGED' || !completionPolicyRequiresMerge(task.completionPolicy)) {
     return false;
   }
@@ -292,6 +296,14 @@ function shouldCompleteFromPullRequestSync(
       mergeHeadSha: merge.headSha,
       mergePullRequestNumber: merge.pullRequestNumber
     })
+  );
+}
+
+function taskAllowsMergeCompletion(task: Task): boolean {
+  return (
+    ['READY', 'REVIEW', 'IN_REVIEW'].includes(task.workflowPhase) &&
+    task.projection.agentReview?.status !== 'RUNNING' &&
+    !getImplementationRetryReason(task)
   );
 }
 
@@ -381,7 +393,6 @@ function taskCreationMetadata(
       CODEX_RUNTIME_ID;
     const { runtimeId: _runtimeId, ...portableAgentSettings } =
       fingerprintInput.agentSettings ?? {};
-    const isLegacyDefaultRuntime = requestedRuntimeId === CODEX_RUNTIME_ID;
     canonicalRequest = stableJsonStringify({
       title: fingerprintInput.title.trim(),
       prompt: fingerprintInput.prompt.trim(),
@@ -389,10 +400,8 @@ function taskCreationMetadata(
       completionPolicy: normalizeCreateTaskCompletionPolicy(
         fingerprintInput.completionPolicy
       ),
-      runtimeId: isLegacyDefaultRuntime ? undefined : requestedRuntimeId,
-      agentSettings: isLegacyDefaultRuntime
-        ? portableAgentSettings
-        : { ...portableAgentSettings, runtimeId: requestedRuntimeId },
+      runtimeId: requestedRuntimeId,
+      agentSettings: { ...portableAgentSettings, runtimeId: requestedRuntimeId },
       attachmentDraftId: fingerprintInput.attachmentDraftId ?? null
     });
   } catch {
@@ -3216,6 +3225,10 @@ export class FileTaskStore {
       }),
       false
     );
+    const taskBeforeMerge = this.state.tasks.find((task) => task.id === merge.taskId);
+    const shouldComplete = taskBeforeMerge
+      ? shouldCompleteFromPullRequestSync(taskBeforeMerge, pullRequest, ci, merge)
+      : false;
     await this.appendEvent(
       createDomainEvent({
         type: 'MERGE_SNAPSHOT_CAPTURED',
@@ -3228,12 +3241,12 @@ export class FileTaskStore {
       false
     );
 
-    if (merge.status === 'MERGED') {
+    if (shouldComplete) {
       const now = new Date().toISOString();
       this.state = {
         ...this.state,
         tasks: this.state.tasks.map((task) =>
-          task.id === merge.taskId && shouldCompleteFromPullRequestSync(task, pullRequest, ci, merge)
+          task.id === merge.taskId
             ? {
                 ...task,
                 workflowPhase: 'DONE',
@@ -4666,6 +4679,7 @@ function validatePersistedRelationships(state: StoreState): void {
       ? sessions.get(task.currentAgentSessionId)
       : undefined;
     const run = task.currentRunId ? runs.get(task.currentRunId) : undefined;
+    assertAgentReviewOwnership(runs, artifacts, gitSnapshots, task);
     if (
       (task.currentIterationId && (!iteration || iteration.taskId !== task.id)) ||
       (task.currentWorktreeId &&
@@ -4682,12 +4696,67 @@ function validatePersistedRelationships(state: StoreState): void {
           run.taskId !== task.id ||
           (iteration && run.iterationId !== iteration.id) ||
           (worktree && run.worktreeId !== worktree.id) ||
-          (session && run.sessionId !== session.id))) ||
-      (task.projection.codexReview?.reviewedGitSnapshotId &&
-        gitSnapshots.get(task.projection.codexReview.reviewedGitSnapshotId)?.taskId !==
-          task.id)
+          (session && run.sessionId !== session.id)))
     ) {
       invalidPersistedRelationship('task current record');
+    }
+  }
+}
+
+function assertAgentReviewOwnership(
+  runs: ReadonlyMap<string, RunRecord>,
+  artifacts: ReadonlyMap<string, ArtifactRecord>,
+  gitSnapshots: ReadonlyMap<string, GitSnapshotRecord>,
+  task: Task
+): void {
+  const review = task.projection.agentReview;
+  if (!review) return;
+
+  const reviewRun = review.runId ? runs.get(review.runId) : undefined;
+  if (
+    review.runId &&
+    (!reviewRun || reviewRun.taskId !== task.id || reviewRun.mode !== 'REVIEW')
+  ) {
+    invalidPersistedRelationship('task agent review ownership');
+  }
+
+  if (review.sourceRunId) {
+    const sourceRun = runs.get(review.sourceRunId);
+    if (
+      !reviewRun ||
+      !sourceRun ||
+      sourceRun.taskId !== task.id ||
+      sourceRun.iterationId !== reviewRun.iterationId ||
+      sourceRun.worktreeId !== reviewRun.worktreeId ||
+      !isImplementationRunMode(sourceRun.mode)
+    ) {
+      invalidPersistedRelationship('task agent review source ownership');
+    }
+  }
+
+  if (review.reviewedGitSnapshotId) {
+    const snapshot = gitSnapshots.get(review.reviewedGitSnapshotId);
+    if (
+      !reviewRun ||
+      !snapshot ||
+      snapshot.taskId !== task.id ||
+      snapshot.iterationId !== reviewRun.iterationId ||
+      snapshot.worktreeId !== reviewRun.worktreeId
+    ) {
+      invalidPersistedRelationship('task agent review snapshot ownership');
+    }
+  }
+
+  if (review.finalArtifactId) {
+    const artifact = artifacts.get(review.finalArtifactId);
+    if (
+      !reviewRun ||
+      !artifact ||
+      artifact.taskId !== task.id ||
+      artifact.runId !== reviewRun.id ||
+      artifact.kind !== 'agent-final'
+    ) {
+      invalidPersistedRelationship('task agent review artifact ownership');
     }
   }
 }
@@ -5223,7 +5292,6 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       return normalizedTask;
     }
 
-    const isActiveReview = activeRunStatuses.includes(currentRun.status);
     const hasActiveNonReviewRun =
       taskCurrentRun !== undefined &&
       taskCurrentRun.mode !== 'REVIEW' &&
@@ -5238,6 +5306,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
     );
     const shouldRepairPhase =
       !shouldRepairImplementationPhase &&
+      !getImplementationRetryReason(normalizedTask) &&
       !hasActiveNonReviewRun &&
       !hasNewerNonReviewWorkThatIsNotReviewReady &&
       normalizedTask.workflowPhase !== 'REVIEW' &&
@@ -5245,19 +5314,19 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       normalizedTask.workflowPhase !== 'DONE' &&
       normalizedTask.workflowPhase !== 'CANCELED' &&
       normalizedTask.workflowPhase !== 'ARCHIVED';
-    const currentReview = normalizedTask.projection.codexReview;
+    const currentReview = normalizedTask.projection.agentReview;
     const sameProjectedReview = currentReview?.runId === currentRun.id;
     const reviewResult =
-      parseCodexReviewResult(currentRun.finalMessage) ??
+      parseAgentReviewResult(currentRun.finalMessage) ??
       (sameProjectedReview ? currentReview?.result : undefined);
     const projectedReviewStatus =
       sameProjectedReview && currentReview?.status !== 'RUNNING'
         ? currentReview?.status
         : undefined;
-    const reviewStatus: CodexReviewGateStatus =
+    const reviewStatus: AgentReviewGateStatus =
       (sameProjectedReview && currentReview?.status === 'STALE'
         ? 'STALE'
-        : codexReviewStatusFromResult(reviewResult)) ??
+        : agentReviewStatusFromResult(reviewResult)) ??
       projectedReviewStatus ??
       (currentRun.status === 'COMPLETED'
         ? 'INCONCLUSIVE'
@@ -5298,7 +5367,7 @@ function normalizeLoadedState(state: StoreState): { state: StoreState; changed: 
       projection: {
         ...normalizedTask.projection,
         agentRun: repairedAgentRun ?? normalizedTask.projection.agentRun,
-        codexReview: {
+        agentReview: {
           ...currentReview,
           status: reviewStatus,
           runId: currentRun.id,
@@ -5423,16 +5492,26 @@ function isStaleInterruptingReviewRun(
 }
 
 function findReviewRunForRepair(task: Task, runs: RunRecord[]): RunRecord | undefined {
-  const projectedRunId = task.projection.codexReview?.runId;
+  const projectedRunId = task.projection.agentReview?.runId;
   if (projectedRunId) {
-    const projectedRun = runs.find((run) => run.id === projectedRunId && run.mode === 'REVIEW');
+    const projectedRun = runs.find(
+      (run) =>
+        run.id === projectedRunId &&
+        run.taskId === task.id &&
+        run.mode === 'REVIEW' &&
+        (!task.currentIterationId || run.iterationId === task.currentIterationId)
+    );
     if (projectedRun) {
       return projectedRun;
     }
   }
   if (task.currentRunId) {
     const currentRun = runs.find(
-      (run) => run.id === task.currentRunId && run.mode === 'REVIEW'
+      (run) =>
+        run.id === task.currentRunId &&
+        run.taskId === task.id &&
+        run.mode === 'REVIEW' &&
+        (!task.currentIterationId || run.iterationId === task.currentIterationId)
     );
     if (currentRun) {
       return currentRun;

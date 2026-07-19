@@ -34,10 +34,11 @@ export interface AgentComposerCopy {
 }
 
 export function getPostRunActionState(
-  run: Pick<RunRecord, 'status'>
+  run: Pick<RunRecord, 'status'>,
+  requiresRecovery = false
 ): PostRunActionState {
-  const canFollowUp = run.status === 'COMPLETED';
-  const canContinue = RECOVERY_STATUSES.has(run.status);
+  const canFollowUp = run.status === 'COMPLETED' && !requiresRecovery;
+  const canContinue = requiresRecovery || RECOVERY_STATUSES.has(run.status);
   return {
     canFollowUp,
     canContinue,

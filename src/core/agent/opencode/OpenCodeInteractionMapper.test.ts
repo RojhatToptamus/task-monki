@@ -161,6 +161,38 @@ describe('OpenCodeInteractionMapper', () => {
     );
   });
 
+  it('uses nonempty native patterns when resources cannot identify a command', () => {
+    expect(
+      mapOpenCodePermission(
+        {
+          id: 'per_pattern',
+          sessionID: 'ses_1',
+          action: 'bash',
+          resources: ['   '],
+          patterns: ['npm test']
+        },
+        '/repo'
+      )
+    ).toEqual(
+      expect.objectContaining({
+        type: 'COMMAND_APPROVAL',
+        request: expect.objectContaining({ command: 'npm test' })
+      })
+    );
+
+    expect(
+      mapOpenCodePermission(
+        {
+          id: 'per_empty',
+          sessionID: 'ses_1',
+          action: 'bash',
+          resources: [42 as unknown as string]
+        },
+        '/repo'
+      ).request
+    ).not.toHaveProperty('command');
+  });
+
   it('keeps question answer ordering stable for the native reply endpoint', () => {
     const mapped = mapOpenCodeQuestion({
       id: 'que_1',

@@ -56,6 +56,9 @@ export interface AgentRuntimeCapabilities {
   userInputRequests: AgentCapability;
   goals: AgentCapability;
   plans: AgentCapability;
+  /** Provider-neutral review prompt in a separately attested read-only session. */
+  detachedReview: AgentCapability;
+  /** Runtime-native review operation, when the provider exposes one. */
   review: AgentCapability;
   subagents: AgentCapability;
   backgroundTerminals: AgentCapability;
@@ -118,7 +121,7 @@ export type AgentRecoveryState =
   | 'UNRECOVERABLE';
 
 /** Durable server evidence vocabulary; registered runtimes are defined independently. */
-export type AgentRuntimeKind = 'APP_SERVER' | 'HTTP_AGENT' | 'ACP_AGENT' | 'NATIVE_AGENT';
+export type AgentRuntimeKind = 'APP_SERVER' | 'HTTP_AGENT' | 'ACP_AGENT';
 export type AgentTransport = 'STDIO' | 'HTTP_SSE' | 'UNIX_SOCKET' | 'IN_PROCESS';
 export type AgentServerStatus =
   | 'STARTING'
@@ -579,7 +582,7 @@ export type AgentInteractionAction =
 
 export type AgentProviderPermissionAction = Extract<
   AgentInteractionAction,
-  'ACCEPT' | 'ACCEPT_FOR_SESSION' | 'DECLINE' | 'DECLINE_FOR_SESSION'
+  'ACCEPT' | 'DECLINE'
 >;
 
 export function isAgentProviderPermissionAction(
@@ -587,15 +590,13 @@ export function isAgentProviderPermissionAction(
 ): action is AgentProviderPermissionAction {
   return (
     action === 'ACCEPT' ||
-    action === 'ACCEPT_FOR_SESSION' ||
-    action === 'DECLINE' ||
-    action === 'DECLINE_FOR_SESSION'
+    action === 'DECLINE'
   );
 }
 
 export interface AgentNetworkApprovalContext {
-  host: string;
-  protocol: string;
+  host?: string;
+  protocol?: string;
 }
 
 export interface AgentNetworkPolicyAmendment {
@@ -609,6 +610,7 @@ export interface AgentCommandApprovalRequest {
   reason?: string;
   command?: string;
   cwd?: string;
+  paths?: string[];
   commandActions?: AgentJsonValue[];
   networkApprovalContext?: AgentNetworkApprovalContext;
   proposedExecPolicyAmendment?: string[];
@@ -618,6 +620,8 @@ export interface AgentCommandApprovalRequest {
     id: string;
     label: string;
     action: AgentProviderPermissionAction;
+    /** The provider, not Task Monki, owns the remembered choice and its lifetime. */
+    providerRemembersChoice: boolean;
   }>;
 }
 
@@ -717,7 +721,6 @@ export type AgentCommandApprovalDecision =
   | {
       interactionType: 'COMMAND_APPROVAL';
       action: 'ACCEPT_FOR_SESSION';
-      providerOptionId?: string;
     }
   | {
       interactionType: 'COMMAND_APPROVAL';
@@ -737,7 +740,6 @@ export type AgentCommandApprovalDecision =
   | {
       interactionType: 'COMMAND_APPROVAL';
       action: 'DECLINE_FOR_SESSION';
-      providerOptionId?: string;
     }
   | { interactionType: 'COMMAND_APPROVAL'; action: 'CANCEL' };
 
@@ -811,7 +813,8 @@ export interface AgentModel {
   /** Runtime-qualified stable identity used by settings and selectors. */
   id: string;
   runtimeId: AgentRuntimeId;
-  modelProvider: AgentModelProviderId;
+  /** Upstream provider identity, when the runtime's catalog reports it. */
+  modelProvider?: AgentModelProviderId;
   model: string;
   displayName: string;
   description?: string;

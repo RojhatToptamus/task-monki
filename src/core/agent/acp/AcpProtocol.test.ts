@@ -3,6 +3,7 @@ import {
   decodeAcpMessage,
   flattenSelectOptions,
   parseConfigOptions,
+  parseInitializeResponse,
   parseInitializeModelExtension,
   parseNewSessionResponse,
   parseParameterizedModelCatalog,
@@ -20,6 +21,32 @@ describe('ACP stable-v1 protocol codec', () => {
     expect(
       decodeAcpMessage('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
     ).toMatchObject({ id: 1, method: 'initialize' });
+  });
+
+  it('validates known initialize capabilities without interpreting opaque metadata', () => {
+    const metadata = { providerExtension: { nested: ['opaque'] } };
+    expect(
+      parseInitializeResponse({
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, _meta: metadata },
+          sessionCapabilities: { resume: {}, _meta: metadata },
+          _meta: metadata
+        }
+      }).agentCapabilities
+    ).toMatchObject({
+      loadSession: true,
+      promptCapabilities: { image: true, _meta: metadata },
+      sessionCapabilities: { resume: {}, _meta: metadata },
+      _meta: metadata
+    });
+    expect(() =>
+      parseInitializeResponse({
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: 'yes' }
+      })
+    ).toThrow('agentCapabilities.loadSession must be a boolean');
   });
 
   it('preserves native grouped config selectors and metadata', () => {
@@ -342,6 +369,21 @@ describe('ACP stable-v1 protocol codec', () => {
         ]
       })
     ).toThrow('duplicate option IDs');
+  });
+
+  it.each([
+    ['title', { title: { unsafe: true } }],
+    ['kind', { kind: 'shell' }],
+    ['content', { content: { type: 'text' } }],
+    ['locations', { locations: '/tmp/file' }]
+  ])('rejects an invalid permission tool-call %s', (_field, invalidField) => {
+    expect(() =>
+      parsePermissionRequest({
+        sessionId: 'session-1',
+        toolCall: { toolCallId: 'tool-1', ...invalidField },
+        options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }]
+      })
+    ).toThrow('permission tool call is invalid');
   });
 
   it('validates typed session updates while retaining unknown extension fields', () => {

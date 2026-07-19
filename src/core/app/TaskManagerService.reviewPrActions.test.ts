@@ -102,7 +102,7 @@ describe('TaskManagerService review and PR action coordination', () => {
         currentRunId: current.id,
         workflowPhase: 'IN_PROGRESS',
         projection: {
-          codexReview: {
+          agentReview: {
             runId: historicalReview.id,
             sourceRunId: implementation.id,
             status: 'STALE'

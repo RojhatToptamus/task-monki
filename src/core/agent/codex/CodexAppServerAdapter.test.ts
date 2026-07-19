@@ -102,6 +102,25 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     try {
       await adapter.initialize();
+      const providerDefault = await adapter.resolveExecution({
+        settings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          reasoningEffort: 'low',
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'on-request'
+        },
+        attachments: []
+      });
+      expect(providerDefault.settings.modelProvider).toBeUndefined();
+      expect(providerDefault.model).toMatchObject({
+        id: 'codex:fake-model',
+        runtimeId: 'codex',
+        model: 'fake-model'
+      });
+      expect(providerDefault.model).not.toHaveProperty('modelProvider');
+
       const resolved = await adapter.resolveExecution({
         settings: {
           runtimeId: 'codex',
@@ -197,6 +216,76 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
       expect.objectContaining({ model: 'fake-model' })
     ]);
     await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('uses Codex native unrestricted permissions for Full access', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-full-access-'));
+    const worktreePath = path.join(dir, 'worktree');
+    await fs.mkdir(worktreePath);
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const settings = {
+      runtimeId: 'codex' as const,
+      model: 'fake-model',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'never' as const
+    };
+
+    try {
+      await adapter.initialize();
+      const task = await store.createTask({
+        title: 'Full access contract',
+        prompt: 'Use the native unrestricted profile.',
+        repositoryPath: worktreePath,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/full-access-contract',
+        worktreePath,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex'
+      });
+
+      await adapter.createSession({
+        runtimeId: 'codex',
+        localSessionId: session.id,
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        worktreePath,
+        settings
+      });
+
+      const server = (await store.snapshot()).agentServers.find(
+        (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+      );
+      const outbound = readOutboundMessages(
+        await fs.readFile(server!.protocolJournalPath, 'utf8')
+      );
+      const start = outbound.find((message) => message.method === 'thread/start');
+      expect(start?.params).toMatchObject({
+        config: { default_permissions: ':danger-full-access' }
+      });
+      expect(start?.params).not.toHaveProperty('sandbox');
+      expect((start?.params as { config?: unknown }).config).not.toHaveProperty(
+        'permissions'
+      );
+    } finally {
+      await adapter.shutdown();
+    }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
@@ -397,9 +486,10 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     // the path-free durable-record rule because Codex receives managed paths.
     const firstThreadStart = outbound.find((message) => message.method === 'thread/start');
     expect(firstThreadStart?.params).toMatchObject({
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review'
-      });
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review',
+      modelProvider: null
+    });
     const turnStarts = outbound.filter((message) => message.method === 'turn/start');
     expect(turnStarts).toHaveLength(1);
     expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
@@ -3311,7 +3401,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toContain('did not emit a terminal event');
-    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
     expect(storedTask?.projection.agentRun).toBe('COMPLETED');
     expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
       'AGENT_MUTATION_AMBIGUOUS'
@@ -3368,7 +3458,7 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toContain('no active turn to interrupt');
     expect(storedSession?.status).toBe('IDLE');
-    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
     expect(storedTask?.projection.agentRun).toBe('COMPLETED');
     expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
       'AGENT_MUTATION_AMBIGUOUS'
@@ -3661,23 +3751,6 @@ async function waitForSnapshot(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for snapshot: ${description}.`);
-}
-
-async function waitForRunProviderTurnId(
-  store: FileTaskStore,
-  runId: string,
-  providerTurnId: string
-) {
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const run = await store.getRun(runId);
-    if (run?.providerTurnId === providerTurnId) {
-      return run;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(
-    `Timed out waiting for run ${runId} to use provider turn ${providerTurnId}.`
-  );
 }
 
 async function waitForAgentItem(

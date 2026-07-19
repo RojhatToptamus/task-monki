@@ -56,7 +56,7 @@ import { interactionTerminalStatus } from '../AgentInteractionPolicy';
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
-} from '../../review/CodexReviewContract';
+} from '../../review/AgentReviewContract';
 import {
   ACP_MAX_MESSAGE_BYTES,
   flattenSelectOptions,
@@ -75,7 +75,6 @@ import {
   type AcpPermissionOption,
   type AcpSessionConfigOption,
   type AcpSessionModelState,
-  type AcpSessionModeState,
   type AcpSessionUpdate,
   type AcpToolCallUpdate
 } from './AcpProtocol';
@@ -124,7 +123,6 @@ import {
   normalizeAcpOperationalModelState,
   normalizeAcpOperationalSession,
   redactAcpNativeValue,
-  redactNativeString,
   sanitizeAcpNativeSession
 } from './AcpNativeRedaction';
 
@@ -518,16 +516,6 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   async readNativeState(): Promise<import('../../../shared/agent').AgentJsonValue> {
-    const snapshot = await this.store.snapshot();
-    const persistedSessions = snapshot.agentSessions
-      .filter((session) => session.runtimeId === this.descriptor.id)
-      .map((session) =>
-        persistedNativeSessionView(
-          session.id,
-          session.providerSessionId,
-          session.observedSettings?.runtimeOptions?.[this.descriptor.id]
-        )
-      );
     const liveSessions = [...this.nativeSessions.values()].flatMap((state) => {
       if (!isSafeProviderIdentifier(state.sessionId, this.sensitiveValues)) {
         this.noteSensitiveIdentifierOmission();
@@ -538,24 +526,11 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       }
       return [sanitizeAcpNativeSession(state, this.sensitiveValues)];
     });
-    const safePersistedSessions = persistedSessions.flatMap((session) => {
-      if (containsSensitiveProviderValue(session, this.sensitiveValues)) {
-        this.noteSensitiveIdentifierOmission();
-        return [];
-      }
-      return [session];
-    });
     return this.redactProviderValue(redactAcpNativeValue({
       protocol: { wireVersion: 1, schemaArtifactVersion: '1.19.0' },
       initialize: acpInitializeNativeView(this.initializeResponse, this.sensitiveValues),
       clientCapabilities: clientCapabilitiesForAcpProfile(this.profile),
-      sessions: [
-        ...liveSessions,
-        ...safePersistedSessions.filter(
-          (session) =>
-            !session.providerSessionId || !this.nativeSessions.has(session.providerSessionId)
-        )
-      ]
+      sessions: liveSessions
     }));
   }
 
@@ -2709,9 +2684,12 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
       options: permission.options,
       session,
       run,
-      allowOpaqueExecuteOnce: this.profile.allowOpaqueExecuteOnce === true,
-      allowRememberedApprovals:
+      allowOpaqueExecutePermissions:
+        this.profile.allowOpaqueExecutePermissions === true,
+      rememberedPermissionOwner:
         this.profile.allowRememberedPermissions === true
+          ? this.descriptor.displayName
+          : undefined
     });
     if (!this.isCurrentClientEvent(client, generation, raw)) return;
     const automaticOption = selectAutomaticAcpPermissionOption({
@@ -3504,8 +3482,8 @@ export class AcpRuntimeAdapter implements AgentRuntimeAdapter {
             terminalReason: prompt.stopReason,
             ...(failureDiagnostic ? { error: failureDiagnostic } : {}),
             finalArtifactId: finalArtifact.id,
-            codexReviewStatus: agentReviewStatusFromResult(reviewResult),
-            codexReviewResult: reviewResult
+            agentReviewStatus: agentReviewStatusFromResult(reviewResult),
+            agentReviewResult: reviewResult
           }
         }),
         PROMPT_OWNED_RUN_STATUSES
@@ -4866,7 +4844,10 @@ function providerOptions(interaction: InteractionRequestRecord): AcpPermissionOp
     return {
       optionId: option.id,
       name: option.label,
-      kind: acpPermissionKindForAgentAction(option.action)
+      kind: acpPermissionKindForAgentAction(
+        option.action,
+        option.providerRemembersChoice
+      )
     };
   });
 }
@@ -5088,23 +5069,6 @@ function jsonSafeRecord(
   return isRecord(safe)
     ? (safe as { [key: string]: import('../../../shared/agent').AgentJsonValue })
     : {};
-}
-
-function persistedNativeSessionView(
-  localSessionId: string,
-  providerSessionId: string | undefined,
-  runtimeOptions: unknown
-): Record<string, unknown> & { providerSessionId?: string } {
-  const options = isRecord(runtimeOptions) ? runtimeOptions : {};
-  return {
-    localSessionId,
-    ...(providerSessionId ? { providerSessionId } : {}),
-    ...(isRecord(options.models) ? { models: options.models } : {}),
-    ...(isRecord(options.modes) ? { modes: options.modes } : {}),
-    ...(Array.isArray(options.configOptions)
-      ? { configOptions: options.configOptions }
-      : {})
-  };
 }
 
 function acpSessionControlSet(

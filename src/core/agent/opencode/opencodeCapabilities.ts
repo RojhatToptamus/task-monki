@@ -83,6 +83,10 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
       maturity: 'stable',
       detail: 'OpenCode todo updates are retained as plan revisions.'
     },
+    detachedReview: {
+      maturity: 'inferred',
+      detail: 'OpenCode output can inform a Git audit, but the runtime cannot attest an isolated read-only workspace.'
+    },
     review: {
       maturity: 'unsupported',
       detail: 'OpenCode has no native review primitive, and its provider-controlled full-access process cannot attest the read-only isolation required for Task Monki detached review.'
@@ -123,10 +127,6 @@ export function opencodeCapabilities(): AgentRuntimeCapabilities {
         maturity: 'stable',
         detail: 'OpenCode retains its native file-part capability for OpenCode-owned tools and integrations; Task Monki does not expose it as managed attachment delivery.'
       },
-      genericDetachedReview: {
-        maturity: 'inferred',
-        detail: 'OpenCode output can inform a Git audit, but the runtime is not eligible for Task Monki detached review because it cannot attest an isolated read-only workspace.'
-      }
     }
   };
 }

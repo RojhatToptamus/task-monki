@@ -227,6 +227,13 @@ In Progress:
 - After a failed, interrupted, lost, or recovery-required implementation run,
   keep the task in progress and make retry the primary recovery action. Continue
   and fork alternative remain available; do not offer agent review.
+- A provider may finish its turn after the user declines an execution request.
+  If Task Monki then observes the same Git HEAD and dirty fingerprint as before
+  that run, keep the task in progress and offer retry or continue. The provider
+  turn remains completed telemetry, but the implementation is not review-ready.
+  Persist this as a run-scoped implementation retry requirement; ordinary Git,
+  GitHub, or workflow updates do not clear it. Starting replacement
+  implementation work clears it.
 - Do not show review completion actions.
 
 Review:
@@ -329,7 +336,9 @@ history, or provider remote thread data.
   - Merged PR evidence may move eligible merge-policy tasks to Done
     automatically. It must not auto-complete `MANUAL` tasks or
     `MERGED_AND_VERIFIED` tasks whose GitHub checks are missing, not passing,
-    or passing for a different PR head than the merge evidence.
+    or passing for a different PR head than the merge evidence. It also must
+    not bypass implementation work, a failed or retry-required implementation,
+    or a running detached review.
 - Mark done anyway
   - Moves the task to Done in Task Monki despite missing or non-passing review,
     or Git evidence. It should be styled and confirmed as an owner

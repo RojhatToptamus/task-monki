@@ -7,6 +7,7 @@ import type {
 import { buildInteractionPolicy } from '../AgentInteractionPolicy';
 import {
   agentActionForAcpPermissionKind,
+  acpPermissionKindRemembersChoice,
   interactionActionsForAcpOptions
 } from './AcpEventMapper';
 import type { AcpPermissionOption, AcpToolCallUpdate } from './AcpProtocol';
@@ -23,28 +24,24 @@ export function materializeAcpPermission(input: {
   options: readonly AcpPermissionOption[];
   session: AgentSessionRecord;
   run: RunRecord;
-  allowOpaqueExecuteOnce?: boolean;
-  allowRememberedApprovals?: boolean;
+  allowOpaqueExecutePermissions?: boolean;
+  rememberedPermissionOwner?: string;
 }): MaterializedAcpPermission {
+  const paths = pathsFromToolCall(input.toolCall);
   const request: AgentCommandApprovalRequest = {
     startedAtMs: Date.now(),
     approvalId: input.toolCall.toolCallId,
-    reason: input.toolCall.title ?? 'The ACP agent requested tool permission.',
+    ...(input.toolCall.title ? { reason: input.toolCall.title } : {}),
     command: commandFromToolCall(input.toolCall),
-    cwd: cwdFromToolCall(input.toolCall) ?? input.session.worktreePath,
-    commandActions: [toAgentJson(input.toolCall)],
-    providerOptions: input.options.map((option) => ({
-      id: option.optionId,
-      label: option.name,
-      action: agentActionForAcpPermissionKind(option.kind)
-    }))
+    cwd: cwdFromToolCall(input.toolCall),
+    ...(paths.length > 0 ? { paths } : {}),
+    commandActions: [toAgentJson(input.toolCall)]
   };
   const warnings: string[] = [];
   let localAllowed: AgentInteractionAction[];
   let hardBlocked = false;
 
   if (['edit', 'delete', 'move', 'read'].includes(input.toolCall.kind ?? '')) {
-    const paths = pathsFromToolCall(input.toolCall);
     const policy = buildInteractionPolicy({
       type: 'FILE_CHANGE_APPROVAL',
       request: {
@@ -79,17 +76,14 @@ export function materializeAcpPermission(input: {
     hardBlocked = policy.warnings.length > 0;
     if (!request.command) {
       warnings.push('ACP did not provide a verifiable command for this execution request.');
-      if (input.allowOpaqueExecuteOnce) {
+      if (input.allowOpaqueExecutePermissions) {
         // Cursor's native ACP contract reports some terminal operations
-        // without command text. The profile may also expose the provider's
-        // exact remembered option, whose scope remains provider-owned and is
-        // selected only by an explicit user decision.
+        // without command text. The profile may expose the provider's exact
+        // choices, but Task Monki never infers a command or permission scope.
         localAllowed = localAllowed.filter(
           (action) =>
             action === 'ACCEPT' ||
-            (input.allowRememberedApprovals && action === 'ACCEPT_FOR_SESSION') ||
             action === 'DECLINE' ||
-            action === 'DECLINE_FOR_SESSION' ||
             action === 'CANCEL'
         );
       } else {
@@ -118,32 +112,38 @@ export function materializeAcpPermission(input: {
   if (hardBlocked) {
     localAllowed = localAllowed.filter((action) => !isApproval(action));
   }
-  const allowRememberedMutation =
-    input.allowRememberedApprovals &&
-    ['edit', 'delete', 'move'].includes(input.toolCall.kind ?? '') &&
-    localAllowed.includes('ACCEPT');
-  if (allowRememberedMutation) {
-    if (!localAllowed.includes('ACCEPT_FOR_SESSION')) {
-      localAllowed.push('ACCEPT_FOR_SESSION');
+  const permittedOptions = input.options.filter((option) => {
+    const action = agentActionForAcpPermissionKind(option.kind);
+    if (
+      acpPermissionKindRemembersChoice(option.kind) &&
+      input.rememberedPermissionOwner === undefined
+    ) {
+      return false;
     }
-  } else if (!input.allowRememberedApprovals) {
-    localAllowed = localAllowed.filter((action) => action !== 'ACCEPT_FOR_SESSION');
-  }
-  const providerAllowed = interactionActionsForAcpOptions(input.options);
-  const allowedActions = providerAllowed.filter((action) =>
-    action === 'DECLINE' || action === 'DECLINE_FOR_SESSION' || action === 'CANCEL'
-      ? true
-      : localAllowed.includes(action)
+    if (action === 'DECLINE') return true;
+    if (!localAllowed.includes('ACCEPT')) return false;
+    return true;
+  });
+  request.providerOptions = permittedOptions.map((option) => ({
+    id: option.optionId,
+    label: option.name,
+    action: agentActionForAcpPermissionKind(option.kind),
+    providerRemembersChoice: acpPermissionKindRemembersChoice(option.kind)
+  }));
+  const allowedActions = interactionActionsForAcpOptions(permittedOptions);
+  const hasRememberedOption = request.providerOptions.some(
+    (option) => option.providerRemembersChoice
   );
+  const rememberedPermissionOwner = input.rememberedPermissionOwner ?? 'The provider';
   return {
     request,
     allowedActions,
     warnings: [
       ...new Set([
         ...warnings,
-        ...(allowedActions.includes('ACCEPT_FOR_SESSION')
+        ...(hasRememberedOption
           ? [
-              'The provider controls what its remembered permission covers and may stop reporting matching operations in this or later provider sessions.'
+              `Selecting a remembered option allows ${rememberedPermissionOwner} to persist the choice. ${rememberedPermissionOwner} owns its scope, storage, lifetime, and revocation, which may extend beyond this ACP session or process.`
             ]
           : []),
         'The ACP agent executes this tool in its own process. Provider details are untrusted telemetry.'
@@ -159,29 +159,20 @@ export function selectAutomaticAcpPermissionOption(input: {
   options: readonly AcpPermissionOption[];
   materialized: MaterializedAcpPermission;
 }): AcpPermissionOption | undefined {
-  if (input.approvalPolicy === 'never') {
-    const oneTime = input.options.filter((option) => option.kind === 'allow_once');
-    if (oneTime.length > 0) {
-      return oneTime.length === 1 && input.materialized.allowedActions.includes('ACCEPT')
-        ? oneTime[0]
-        : undefined;
-    }
-    const remembered = input.options.filter((option) => option.kind === 'allow_always');
-    return remembered.length === 1 &&
-      input.materialized.allowedActions.includes('ACCEPT_FOR_SESSION')
-      ? remembered[0]
-      : undefined;
-  }
-
-  if (
-    input.approvalPolicy !== 'auto-accept-edits' ||
-    !['edit', 'delete', 'move'].includes(input.toolCall.kind ?? '') ||
-    !input.materialized.allowedActions.includes('ACCEPT')
-  ) {
+  const autoAcceptsOneTime =
+    input.approvalPolicy === 'never' ||
+    (input.approvalPolicy === 'auto-accept-edits' &&
+      ['edit', 'delete', 'move'].includes(input.toolCall.kind ?? ''));
+  if (!autoAcceptsOneTime || !input.materialized.allowedActions.includes('ACCEPT')) {
     return undefined;
   }
 
-  const oneTime = input.options.filter((option) => option.kind === 'allow_once');
+  const permittedOptionIds = new Set(
+    input.materialized.request.providerOptions?.map((option) => option.id)
+  );
+  const oneTime = input.options.filter(
+    (option) => option.kind === 'allow_once' && permittedOptionIds.has(option.optionId)
+  );
   return oneTime.length === 1 ? oneTime[0] : undefined;
 }
 
@@ -224,7 +215,10 @@ function pathsFromToolCall(toolCall: AcpToolCallUpdate): string[] {
   return [...paths];
 }
 
-function networkContext(toolCall: AcpToolCallUpdate): { host: string; protocol: string } {
+function networkContext(toolCall: AcpToolCallUpdate): {
+  host?: string;
+  protocol?: string;
+} {
   const raw = isRecord(toolCall.rawInput) ? toolCall.rawInput : {};
   const candidate = ['url', 'uri', 'host']
     .map((key) => raw[key])
@@ -234,10 +228,10 @@ function networkContext(toolCall: AcpToolCallUpdate): { host: string; protocol: 
       const url = new URL(candidate.includes('://') ? candidate : `https://${candidate}`);
       return { host: url.hostname, protocol: url.protocol.replace(/:$/u, '') };
     } catch {
-      return { host: candidate, protocol: 'unknown' };
+      return { host: candidate };
     }
   }
-  return { host: 'provider-requested-network', protocol: 'unknown' };
+  return {};
 }
 
 function isApproval(action: AgentInteractionAction): boolean {

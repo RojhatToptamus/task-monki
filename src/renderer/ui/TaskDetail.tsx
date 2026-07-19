@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
+  getImplementationRetryReason,
   PULL_REQUEST_TITLE_MAX_LENGTH,
   normalizePullRequestTitle
 } from '../../shared/contracts';
@@ -23,8 +24,7 @@ import type {
   AgentRuntimeState,
   AgentServerInstance,
   UpdateAgentNativeSessionRequest,
-  CodexReviewFinding,
-  CodexReviewGateStatus,
+  AgentReviewFinding,
   InteractionRequestRecord,
   MergeSnapshotRecord,
   PullRequestSnapshotRecord,
@@ -61,6 +61,7 @@ import {
   findCompletedCurrentImplementationRun,
   isActiveNonReviewRun,
   isCompletedCurrentImplementationRun,
+  isImplementationRetryRequired,
   selectNextAction,
   type NextActionId,
   type NextActionModel
@@ -345,6 +346,7 @@ export function TaskDetail(props: TaskDetailProps) {
     view: prStatus,
     deliveryBusy: deliveryActionBusy,
     pauseReason: reviewPauseReason,
+    implementationRetryReason: getImplementationRetryReason(task),
     hasInvestigationSource: Boolean(deliverySourceRun)
   });
   const taskActivityLedger = useMemo(
@@ -584,6 +586,7 @@ export function TaskDetail(props: TaskDetailProps) {
     onPrepareWorktree: props.onPrepareWorktree,
     onStart: props.onStart
   });
+  const implementationRetryRequired = isImplementationRetryRequired(task, run);
 
   const headActions: HeadAction[] = [];
   if (shouldShowMoveToReviewHeaderAction(task, run)) {
@@ -665,7 +668,8 @@ export function TaskDetail(props: TaskDetailProps) {
     canCommit: canCreateDeliveryCommit(task),
     awaitingMoveToReview,
     runInFlight: Boolean(activeImplementationRun) || reviewPending,
-    implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status
+    implementationRunStatus: run?.mode === 'REVIEW' ? undefined : run?.status,
+    implementationRetryRequired
   });
 
   const detailHeadClassName = props.showMascot
@@ -822,6 +826,7 @@ export function TaskDetail(props: TaskDetailProps) {
 
                 <AgentControlPanel
                   run={run}
+                  requiresRecovery={implementationRetryRequired}
                   interactions={interactions}
                   onSteer={props.onSteer}
                   onInterrupt={props.onCancel}
@@ -1553,7 +1558,7 @@ function ReviewRequestDrawer({
   onSubmit
 }: {
   task: Task;
-  findings: CodexReviewFinding[];
+  findings: AgentReviewFinding[];
   selectedFindingIds: string[];
   instruction: string;
   busy: boolean;
@@ -1643,11 +1648,12 @@ function isReviewPhase(phase: WorkflowPhase): boolean {
 }
 
 export function shouldShowMoveToReviewHeaderAction(
-  task: Pick<Task, 'currentRunId' | 'workflowPhase'>,
+  task: Pick<Task, 'currentRunId' | 'workflowPhase' | 'projection'>,
   run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
 ): boolean {
   return (
     isCompletedCurrentImplementationRun(task, run) &&
+    !isImplementationRetryRequired(task, run) &&
     !['REVIEW', 'IN_REVIEW', 'DONE', 'CANCELED', 'ARCHIVED'].includes(task.workflowPhase)
   );
 }
@@ -1742,7 +1748,7 @@ function healthFindingTone(severity: Finding['severity']): Tone {
 
 function defaultReviewFollowUpInstruction(
   task: Task,
-  reviewGate: NonNullable<Task['projection']['codexReview']>,
+  reviewGate: NonNullable<Task['projection']['agentReview']>,
   reviewRun: RunRecord | undefined,
   selectedFindingIds: string[]
 ): string {
@@ -1786,7 +1792,7 @@ function defaultReviewFollowUpInstruction(
   return lines.join('\n');
 }
 
-function defaultSelectedFindingIds(findings: CodexReviewFinding[]): string[] {
+function defaultSelectedFindingIds(findings: AgentReviewFinding[]): string[] {
   const blocking = findings.filter(
     (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
   );

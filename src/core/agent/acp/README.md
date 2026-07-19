@@ -216,15 +216,16 @@ visible. Permission choices retain the provider's opaque option IDs. Task Monki
 intersects the offered choices with its own command/path/network policy and
 sends back the exact ID selected under the provider's own label; it never
 chooses the first option merely because two options share a semantic kind.
-Cursor and Grok preserve a provider's remembered option when the current
-operation passes Task Monki's local policy; the UI warns that the provider owns
-the remembered scope and may stop reporting matching operations. Remembered
-rejection remains available when offered. Reserved Git/GitHub delivery
+Cursor and Grok preserve a provider's remembered option when the profile and
+current operation pass Task Monki's policy; the UI warns that the provider owns
+its scope, storage, lifetime, and revocation, which may extend beyond the ACP
+process. Remembered rejection remains available when offered. Reserved Git/GitHub delivery
 commands, outside-worktree file scope, and disabled-network requests fail
 closed. When Cursor omits command details for a terminal request, its profile
 may expose the provider's exact one-time and provider-remembered approval
-options. The user must choose either option explicitly under Supervised access;
-Task Monki does not infer the remembered scope. Other ACP profiles fail closed
+options. The user chooses among them under Ask for approval; no access mode ever
+automatically selects the remembered option. Task Monki does not infer its
+scope. Other ACP profiles fail closed
 on opaque execution scope. Task Monki never implements a provider grant by
 writing repository files or silently changing global configuration.
 Only `end_turn` completes a prompt successfully. `cancelled` interrupts it;
@@ -239,13 +240,14 @@ completions.
 ## Security and execution policy
 
 ACP does not attest an OS filesystem or network sandbox for the provider
-process. Claude and unrecognized profiles therefore expose only **Supervised**.
-Cursor and Grok expose **Supervised**, **Auto-accept edits**, and **Full
+process. Claude and unrecognized profiles therefore expose only **Ask for
+approval**. Cursor and Grok expose **Ask for approval**, **Auto-accept edits**, and **Full
 access**, all with `DANGER_FULL_ACCESS`, required network, and the user as
 reviewer. These policies control only responses to permission requests the
-provider sends: Supervised asks the user, Auto-accept edits chooses an exact
-`allow_once` only for verified in-worktree mutations, and Full access chooses an
-exact positive option automatically. They do not change Cursor into its
+provider sends: Ask for approval asks the user, Auto-accept edits chooses an
+exact `allow_once` only for verified in-worktree mutations, and Full access
+automatically chooses only an exact `allow_once`. Remembered options always
+require an explicit user choice and remain provider-owned. These modes do not change Cursor into its
 read-only native `ask` mode and do not claim process confinement. Restricted
 workspace, read-only, network-disabled, and automated-reviewer settings are
 rejected instead of being silently downgraded.
@@ -324,7 +326,7 @@ session, or submitting any prompt.
 
 Focused tests include strict framing and bounds, stable-schema parsing, profile
 launch-contract identity, Grok extension gating and `session/set_model`, config
-mapping, all opaque permission option kinds, policy intersection, supervised
+mapping, all opaque permission option kinds, policy intersection, ACP
 process negotiation, and an end-to-end fake ACP agent covering session
 creation, streaming, permission response, plans, and terminal completion,
 definitive and ambiguous failures, durable-response failure, runtime loss, and

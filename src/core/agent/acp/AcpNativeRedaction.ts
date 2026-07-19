@@ -8,8 +8,7 @@ import {
 import type {
   AcpInitializeResponse,
   AcpSessionConfigOption,
-  AcpSessionModelState,
-  AcpSessionModeState
+  AcpSessionModelState
 } from './AcpProtocol';
 import type { AcpNativeSessionState } from './AcpEventMapper';
 

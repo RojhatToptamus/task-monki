@@ -73,7 +73,7 @@ Do not spread Codex protocol terms into product workflow decisions unless the
 term is part of a provider-neutral Task Monki concept. For example:
 
 - Good: `RunRecord.mode === "REVIEW"` and the local review-gate projection
-  (`projection.codexReview` retains its legacy schema-12 field name).
+  (`projection.agentReview` remains provider-neutral).
 - Risky: UI decisions based directly on a raw `thread/status/changed` payload.
 
 ## Generated bindings

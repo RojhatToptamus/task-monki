@@ -1,4 +1,5 @@
-import type { Task } from '../../shared/contracts';
+import { getImplementationRetryReason, type Task } from '../../shared/contracts';
+import { isImplementationOutcomeBlocked } from '../model/nextAction';
 
 type AttentionTone = 'warning' | 'error' | 'info';
 
@@ -22,6 +23,15 @@ const IN_FLIGHT_RUNS = new Set([
  * decision banners, and card chips. Returns undefined when nothing is blocked.
  */
 export function describeTaskAttention(task: Task): AttentionDescriptor | undefined {
+  if (isImplementationOutcomeBlocked(task)) {
+    return {
+      label: 'Needs retry',
+      detail:
+        getImplementationRetryReason(task) ??
+        'Retry or continue the implementation before review.',
+      tone: 'warning'
+    };
+  }
   switch (task.projection.agentRun) {
     case 'AWAITING_APPROVAL':
       return {

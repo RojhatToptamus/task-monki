@@ -38,42 +38,45 @@ describe('ACP permission safety intersection', () => {
       session,
       run
     });
-    expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
+    expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
     expect(policy.warnings.join(' ')).toContain('commit, publication, merge');
   });
 
-  it('keeps remembered opaque execution behind both explicit profile gates', async () => {
+  it('keeps opaque execution and remembered choices behind explicit profile gates', async () => {
     const { session, run } = await ownership();
     const oneTime = materializeAcpPermission({
       toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
       options,
       session,
       run,
-      allowOpaqueExecuteOnce: true
+      allowOpaqueExecutePermissions: true
     });
     const remembered = materializeAcpPermission({
       toolCall: { toolCallId: 'tool-2', kind: 'execute', title: 'Do something' },
       options,
       session,
       run,
-      allowOpaqueExecuteOnce: true,
-      allowRememberedApprovals: true
+      allowOpaqueExecutePermissions: true,
+      rememberedPermissionOwner: 'Cursor Agent'
     });
-    expect(oneTime.allowedActions).toEqual([
-      'ACCEPT',
-      'DECLINE',
-      'DECLINE_FOR_SESSION',
-      'CANCEL'
-    ]);
-    expect(remembered.allowedActions).toEqual([
-      'ACCEPT',
-      'ACCEPT_FOR_SESSION',
-      'DECLINE',
-      'DECLINE_FOR_SESSION',
-      'CANCEL'
-    ]);
+    expect(oneTime.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+    expect(oneTime.request.providerOptions?.map((option) => option.id)).not.toContain(
+      'yes-always'
+    );
+    expect(oneTime.request.providerOptions?.map((option) => option.id)).not.toContain(
+      'no-always'
+    );
+    expect(remembered.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+    expect(remembered.request.providerOptions).toContainEqual({
+      id: 'yes-always',
+      label: 'Always',
+      action: 'ACCEPT',
+      providerRemembersChoice: true
+    });
     expect(remembered.warnings.join(' ')).toContain('verifiable command');
-    expect(remembered.warnings.join(' ')).toContain('provider controls what its remembered');
+    expect(remembered.warnings.join(' ')).toContain(
+      'Cursor Agent owns its scope, storage, lifetime, and revocation'
+    );
   });
 
   it('fails closed for opaque execution outside an explicitly attested profile', async () => {
@@ -84,7 +87,7 @@ describe('ACP permission safety intersection', () => {
       session,
       run
     });
-    expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
+    expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
   });
 
   it('rejects file scope outside the owned worktree', async () => {
@@ -99,7 +102,7 @@ describe('ACP permission safety intersection', () => {
       session,
       run
     });
-    expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
+    expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
     expect(policy.warnings.join(' ')).toContain('outside the writable task boundary');
   });
 
@@ -117,8 +120,18 @@ describe('ACP permission safety intersection', () => {
     });
     expect(policy.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
     expect(policy.request.providerOptions).toEqual([
-      { id: 'yes-once', label: 'Allow', action: 'ACCEPT' },
-      { id: 'no-once', label: 'Reject', action: 'DECLINE' }
+      {
+        id: 'yes-once',
+        label: 'Allow',
+        action: 'ACCEPT',
+        providerRemembersChoice: false
+      },
+      {
+        id: 'no-once',
+        label: 'Reject',
+        action: 'DECLINE',
+        providerRemembersChoice: false
+      }
     ]);
   });
 
@@ -133,20 +146,22 @@ describe('ACP permission safety intersection', () => {
       options,
       session,
       run,
-      allowRememberedApprovals: true
+      rememberedPermissionOwner: 'Cursor Agent'
     });
 
-    expect(policy.allowedActions).toEqual([
-      'ACCEPT',
-      'ACCEPT_FOR_SESSION',
-      'DECLINE',
-      'DECLINE_FOR_SESSION',
-      'CANCEL'
-    ]);
-    expect(policy.warnings.join(' ')).toContain('provider controls what its remembered');
+    expect(policy.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+    expect(policy.request.providerOptions).toContainEqual({
+      id: 'yes-always',
+      label: 'Always',
+      action: 'ACCEPT',
+      providerRemembersChoice: true
+    });
+    expect(policy.warnings.join(' ')).toContain(
+      'Cursor Agent owns its scope, storage, lifetime, and revocation'
+    );
   });
 
-  it('exposes an exact remembered option only for a verified file mutation when enabled', async () => {
+  it('exposes an exact remembered option for a verified file mutation only when enabled', async () => {
     const { session, run } = await ownership();
     const filePath = path.join(session.worktreePath, 'src', 'safe.ts');
     const enabled = materializeAcpPermission({
@@ -154,7 +169,7 @@ describe('ACP permission safety intersection', () => {
       options,
       session,
       run,
-      allowRememberedApprovals: true
+      rememberedPermissionOwner: 'Cursor Agent'
     });
     const disabled = materializeAcpPermission({
       toolCall: { toolCallId: 'tool-file', kind: 'edit', locations: [{ path: filePath }] },
@@ -163,19 +178,12 @@ describe('ACP permission safety intersection', () => {
       run
     });
 
-    expect(enabled.allowedActions).toEqual([
-      'ACCEPT',
-      'ACCEPT_FOR_SESSION',
-      'DECLINE',
-      'DECLINE_FOR_SESSION',
-      'CANCEL'
-    ]);
-    expect(disabled.allowedActions).toEqual([
-      'ACCEPT',
-      'DECLINE',
-      'DECLINE_FOR_SESSION',
-      'CANCEL'
-    ]);
+    expect(enabled.request.providerOptions?.map((option) => option.id)).toContain(
+      'yes-always'
+    );
+    expect(disabled.request.providerOptions?.map((option) => option.id)).not.toContain(
+      'yes-always'
+    );
   });
 
   it('blocks network tool approval when the task policy disables network', async () => {
@@ -190,16 +198,16 @@ describe('ACP permission safety intersection', () => {
       session,
       run
     });
-    expect(policy.allowedActions).toEqual(['DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL']);
+    expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
     expect(policy.warnings.join(' ')).toContain('does not allow command network access');
   });
 });
 
 describe('ACP automatic permission selection', () => {
-  it('does not select an option for supervised access', async () => {
+  it('does not select an option for ask-for-approval access', async () => {
     const { session, run } = await ownership();
     const toolCall = {
-      toolCallId: 'tool-supervised',
+      toolCallId: 'tool-ask-for-approval',
       kind: 'edit' as const,
       locations: [{ path: path.join(session.worktreePath, 'src', 'safe.ts') }]
     };
@@ -278,7 +286,7 @@ describe('ACP automatic permission selection', () => {
     ).toBeUndefined();
   });
 
-  it('prefers one-time full-access approval and falls back to an offered remembered option', async () => {
+  it('uses a one-time full-access approval and never falls back to a remembered option', async () => {
     const { session, run } = await ownership();
     const toolCall = { toolCallId: 'tool-full', kind: 'execute' as const };
     const materialized = materializeAcpPermission({
@@ -286,8 +294,8 @@ describe('ACP automatic permission selection', () => {
       options,
       session,
       run,
-      allowOpaqueExecuteOnce: true,
-      allowRememberedApprovals: true
+      allowOpaqueExecutePermissions: true,
+      rememberedPermissionOwner: 'Cursor Agent'
     });
 
     expect(
@@ -305,7 +313,7 @@ describe('ACP automatic permission selection', () => {
         options: [options[1]!, options[2]!],
         materialized
       })
-    ).toBe(options[1]);
+    ).toBeUndefined();
 
     const outsideMutation = {
       toolCallId: 'tool-full-outside',
@@ -317,7 +325,7 @@ describe('ACP automatic permission selection', () => {
       options,
       session,
       run,
-      allowRememberedApprovals: true
+      rememberedPermissionOwner: 'Cursor Agent'
     });
     expect(
       selectAutomaticAcpPermissionOption({
@@ -331,7 +339,11 @@ describe('ACP automatic permission selection', () => {
 
   it('leaves ambiguous positive provider choices for explicit user selection', async () => {
     const { session, run } = await ownership();
-    const toolCall = { toolCallId: 'tool-ambiguous', kind: 'edit' as const };
+    const toolCall = {
+      toolCallId: 'tool-ambiguous',
+      kind: 'edit' as const,
+      locations: [{ path: path.join(session.worktreePath, 'src', 'safe.ts') }]
+    };
     const duplicateOneTime = [
       options[0]!,
       { optionId: 'yes-once-other', name: 'Allow this edit', kind: 'allow_once' as const },
@@ -363,7 +375,7 @@ describe('ACP automatic permission selection', () => {
       options: duplicateRemembered,
       session,
       run,
-      allowRememberedApprovals: true
+      rememberedPermissionOwner: 'Cursor Agent'
     });
 
     expect(

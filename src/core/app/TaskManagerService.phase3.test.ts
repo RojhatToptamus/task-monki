@@ -156,6 +156,35 @@ describe('Phase 3 delivery guards', () => {
     ).toBeUndefined();
   });
 
+  it.each(['REVIEW', 'IN_REVIEW', 'DONE'] as const)(
+    'blocks %s while replacement implementation is required',
+    (phase) => {
+      const reason = 'Retry or continue this implementation before review.';
+      expect(
+        transitionBlocker(
+          {
+            currentRunId: 'current-run',
+            completionPolicy: 'LOCAL_ACCEPTANCE',
+            projection: {
+              implementationRetry: { runId: 'current-run', reason }
+            }
+          } as never,
+          phase,
+          {
+            hasWorktree: true,
+            currentRun: {
+              id: 'current-run',
+              mode: 'IMPLEMENTATION',
+              status: 'COMPLETED'
+            },
+            pullRequestStatus: 'OPEN_DRAFT',
+            mergeStatus: 'MERGED'
+          }
+        )
+      ).toBe(reason);
+    }
+  );
+
   it('preserves explicit implementation run safety settings', () => {
     expect(
       mergeRunSettings({

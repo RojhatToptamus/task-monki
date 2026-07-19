@@ -13,6 +13,7 @@ import { humanizeEnum } from './display';
 
 interface AgentControlPanelProps {
   run?: RunRecord;
+  requiresRecovery?: boolean;
   interactions: InteractionRequestRecord[];
   onSteer(runId: string, instruction: string): Promise<void>;
   onInterrupt(runId: string): Promise<void>;
@@ -26,6 +27,7 @@ interface AgentControlPanelProps {
 
 export function AgentControlPanel({
   run,
+  requiresRecovery = false,
   interactions,
   onSteer,
   onInterrupt,
@@ -42,7 +44,7 @@ export function AgentControlPanel({
 
   const isRunning = run.status === 'RUNNING';
   const { canFollowUp, canContinue, canRetry, continuationLabel, continuationKind } =
-    getPostRunActionState(run);
+    getPostRunActionState(run, requiresRecovery);
   const composerCopy = mode ? getAgentComposerCopy(mode, continuationKind) : undefined;
   const staleInteractions = interactions.filter((interaction) =>
     ['STALE', 'ABORTED_SERVER_LOST'].includes(interaction.status)

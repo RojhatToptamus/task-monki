@@ -6,7 +6,7 @@ import type {
   AgentRunMode,
   BranchPublicationStatus,
   CiChecksStatus,
-  CodexReviewResult,
+  AgentReviewResult,
   CompletionPolicy,
   DomainEvent,
   GitHubCheckDetailRecord,
@@ -157,47 +157,47 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
     'interaction:STALE'
   ]),
   scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without an agent review.', [
-    'codex-review:NOT_RUN'
+    'agent-review:NOT_RUN'
   ]),
   scenario('review-running', 'review', 'Review running', 'Agent review run is active.', [
-    'codex-review:RUNNING'
+    'agent-review:RUNNING'
   ]),
   scenario('review-passed', 'review', 'Review passed', 'Agent review passed with structured result.', [
-    'codex-review:PASSED'
+    'agent-review:PASSED'
   ]),
   scenario(
     'review-needs-changes',
     'review',
     'Review needs changes',
     'Agent review found actionable issues.',
-    ['codex-review:NEEDS_CHANGES']
+    ['agent-review:NEEDS_CHANGES']
   ),
   scenario(
     'review-inconclusive',
     'review',
     'Review inconclusive',
     'Agent review completed without a definitive verdict.',
-    ['codex-review:INCONCLUSIVE']
+    ['agent-review:INCONCLUSIVE']
   ),
   scenario('review-failed', 'review', 'Review failed', 'Agent review failed before completion.', [
-    'codex-review:FAILED'
+    'agent-review:FAILED'
   ]),
   scenario('review-canceled', 'review', 'Review canceled', 'Agent review was canceled.', [
-    'codex-review:CANCELED'
+    'agent-review:CANCELED'
   ]),
   scenario(
     'review-stale-after-follow-up',
     'review',
     'Stale review after follow-up',
     'A completed follow-up made the previous review stale.',
-    ['codex-review:STALE', 'mode:FOLLOW_UP']
+    ['agent-review:STALE', 'mode:FOLLOW_UP']
   ),
   scenario(
     'review-follow-up-active',
     'review',
     'Follow-up active',
     'Follow-up implementation is running after review findings.',
-    ['codex-review:STALE', 'agent:RUNNING']
+    ['agent-review:STALE', 'agent:RUNNING']
   ),
   scenario(
     'no-pr-git-not-inspected',
@@ -1066,7 +1066,7 @@ async function createReviewScenario(
 
   const result = reviewResultFor(definition.slug);
   await completeRun(ctx, review, result.summary, state.gitSnapshot?.id, {
-    codexReviewResult: result
+    agentReviewResult: result
   });
 
   if (
@@ -1621,10 +1621,10 @@ async function recordPr(
   });
 }
 
-function reviewResultFor(slug: string): CodexReviewResult {
+function reviewResultFor(slug: string): AgentReviewResult {
   if (slug === 'review-needs-changes' || slug === 'review-stale-after-follow-up' || slug === 'review-follow-up-active') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'NEEDS_CHANGES',
       summary: 'Seed review found changes that should be addressed.',
       findings: [
@@ -1642,14 +1642,14 @@ function reviewResultFor(slug: string): CodexReviewResult {
   }
   if (slug === 'review-inconclusive') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'INCONCLUSIVE',
       summary: 'Seed review could not reach a confident verdict.',
       findings: []
     };
   }
   return {
-    schemaVersion: 'codex-review/v1',
+    schemaVersion: 'agent-review/v1',
     verdict: 'PASSED',
     summary: 'Seed review passed.',
     findings: []

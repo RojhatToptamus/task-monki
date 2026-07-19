@@ -126,8 +126,8 @@ describe('Task Monki development seed data', () => {
     );
     const runningReviewActivity = buildReviewActivityViewModel({
       reviewRun: runningReviewRun,
-      reviewRunning: runningReviewTask.projection.codexReview?.status === 'RUNNING',
-      useRunActivity: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      reviewRunning: runningReviewTask.projection.agentReview?.status === 'RUNNING',
+      useRunActivity: runningReviewTask.projection.agentReview?.status === 'RUNNING',
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
@@ -204,7 +204,7 @@ describe('Task Monki development seed data', () => {
     ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
-    expect(reviewTask.projection.codexReview).toMatchObject({ status: 'NEEDS_CHANGES' });
+    expect(reviewTask.projection.agentReview).toMatchObject({ status: 'NEEDS_CHANGES' });
     expect(
       snapshot.runs.find((run) => run.taskId === reviewTask.id && run.mode === 'REVIEW')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -216,7 +216,7 @@ describe('Task Monki development seed data', () => {
 
     const staleReview = taskForScenario(manifest, snapshot, 'review-stale-after-follow-up');
     expect(staleReview.workflowPhase).toBe('REVIEW');
-    expect(staleReview.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(staleReview.projection.agentReview).toMatchObject({ status: 'STALE' });
     expect(
       snapshot.runs.find((run) => run.taskId === staleReview.id && run.mode === 'FOLLOW_UP')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -224,7 +224,7 @@ describe('Task Monki development seed data', () => {
     const activeFollowUp = taskForScenario(manifest, snapshot, 'review-follow-up-active');
     expect(activeFollowUp.workflowPhase).toBe('IN_PROGRESS');
     expect(activeFollowUp.projection.agentRun).toBe('RUNNING');
-    expect(activeFollowUp.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(activeFollowUp.projection.agentReview).toMatchObject({ status: 'STALE' });
 
     const failedChecks = prView(snapshot, taskForScenario(manifest, snapshot, 'delivery-checks-failed'));
     expect(failedChecks).toMatchObject({

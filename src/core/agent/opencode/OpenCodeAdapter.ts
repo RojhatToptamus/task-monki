@@ -1,7 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   AgentExecutionSettings,
@@ -28,6 +27,7 @@ import {
 } from '../AgentAttachmentDelivery';
 import {
   REDACTED_CREDENTIAL,
+  credentialPrefixCarryLength,
   redactCredentialText,
   redactCredentialValue
 } from '../AgentCredentialRedaction';
@@ -116,7 +116,7 @@ import { openCodeSensitiveEnvironmentValues } from './OpenCodeEnvironmentPolicy'
 import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
-} from '../../review/CodexReviewContract';
+} from '../../review/AgentReviewContract';
 
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -444,6 +444,9 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
       throw new Error(
         `OpenCode did not report an available connected model in the ${catalogLabel}${input.settings.modelProvider ? ` for provider ${input.settings.modelProvider}` : ''}.`
       );
+    }
+    if (!model.modelProvider) {
+      throw new Error('OpenCode returned a model without its connected provider identity.');
     }
     const variant = input.settings.reasoningEffort ?? model.defaultReasoningEffort;
     if (
@@ -3497,6 +3500,29 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     if (!this.isCurrentSessionServerGeneration(session.id, serverId)) {
       return 'recovery-required';
     }
+    if (approvalPolicy === undefined) {
+      let quarantineFailure: unknown;
+      try {
+        await this.quarantineSessionRuntime(
+          session.id,
+          'session/reconcile-permission-policy',
+          `The native OpenCode session does not attest the requested ${run.requestedSettings.approvalPolicy} approval policy.`
+        );
+      } catch (cause) {
+        quarantineFailure = cause;
+      }
+      const currentRun = await this.store.getRun(run.id);
+      if (currentRun && !TERMINAL_RUN_STATES.includes(currentRun.status)) {
+        await this.recordReconciliation(
+          currentRun,
+          'RECOVERY_REQUIRED',
+          'REQUIRES_USER_ACTION',
+          false
+        );
+      }
+      if (quarantineFailure) throw quarantineFailure;
+      return 'recovery-required';
+    }
     if (recoveredSettings) {
       const duplicate = (await this.store.snapshot()).agentSettingsObservations.some(
         (observation) =>
@@ -3953,8 +3979,8 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
           terminalReason: error,
           error,
           finalArtifactId: finalArtifact.id,
-          codexReviewStatus: agentReviewStatusFromResult(reviewResult),
-          codexReviewResult: reviewResult
+          agentReviewStatus: agentReviewStatusFromResult(reviewResult),
+          agentReviewResult: reviewResult
         }
       }),
       [current.status]
@@ -4722,6 +4748,7 @@ export class OpenCodeAdapter implements AgentRuntimeAdapter {
     return models.flatMap((model) => {
       if (
         !this.isSafeOperationalIdentifier(model.id) ||
+        !model.modelProvider ||
         !this.isSafeOperationalIdentifier(model.modelProvider) ||
         !this.isSafeOperationalIdentifier(model.model)
       ) {
@@ -5152,24 +5179,6 @@ function streamPartIsTerminal(
     part.state?.time?.end !== undefined ||
     asRecord(part.time)?.end !== undefined
   );
-}
-
-/** Retains only a suffix that could become an exact inherited credential. */
-function credentialPrefixCarryLength(
-  value: string,
-  sensitiveValues: readonly string[]
-): number {
-  let longest = 0;
-  for (const sensitive of sensitiveValues) {
-    const candidateLimit = Math.min(value.length, sensitive.length - 1);
-    for (let length = candidateLimit; length > longest; length -= 1) {
-      if (value.endsWith(sensitive.slice(0, length))) {
-        longest = length;
-        break;
-      }
-    }
-  }
-  return longest;
 }
 
 function stringProperty(record: Record<string, unknown>, key: string): string | undefined {

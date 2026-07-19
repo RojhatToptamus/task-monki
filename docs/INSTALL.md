@@ -90,11 +90,21 @@ uses that agent's native model operation rather than translating it into a
 generic model name. Controls are available only while the session is idle and
 are disabled for active or recovery-required work.
 
-Cursor and Grok offer **Supervised**, **Auto-accept edits**, and **Full access**
-through their native ACP permission requests; Claude Agent ACP remains
-supervised-only. The provider process still runs outside a Task Monki filesystem
-or network sandbox, so these modes govern Task Monki's responses to reported
-requests rather than confining unreported provider activity.
+Cursor and Grok offer **Ask for approval**, **Auto-accept edits**, and **Full
+access** through their native ACP permission requests; Claude Agent ACP remains
+Ask-for-approval only. Full access automatically selects only an exact
+`allow_once` option. A provider-remembered choice such as Cursor's
+`allow_always` always requires explicit confirmation, retains the provider's
+exact label and ID, and may outlive the ACP process because the provider owns
+its scope, storage, lifetime, and revocation. The provider process still runs
+outside a Task Monki filesystem or network sandbox, so these modes govern Task
+Monki's responses to reported requests rather than confining unreported
+provider activity.
+
+Codex is different: it enforces and attests its managed sandbox. **Restricted**
+permits only worktree writes with network and exceptions disabled; **Ask for
+approval** and **Approve for me** review eligible sandbox exceptions; **Full
+access** intentionally removes the sandbox.
 
 OpenCode likewise has no attested process sandbox. Its two presets both report
 full process access: Ask for approval gates native mutation and external-

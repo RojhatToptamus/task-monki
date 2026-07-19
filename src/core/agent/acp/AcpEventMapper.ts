@@ -21,8 +21,7 @@ import {
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
 import {
   redactAcpNativeValue,
-  redactNativeString,
-  sanitizeAcpNativeSession
+  redactNativeString
 } from './AcpNativeRedaction';
 
 export interface AcpNativeSessionState {
@@ -140,29 +139,30 @@ export function agentActionForAcpPermissionKind(
 ): AgentProviderPermissionAction {
   switch (kind) {
     case 'allow_once':
-      return 'ACCEPT';
     case 'allow_always':
-      return 'ACCEPT_FOR_SESSION';
+      return 'ACCEPT';
     case 'reject_once':
-      return 'DECLINE';
     case 'reject_always':
-      return 'DECLINE_FOR_SESSION';
+      return 'DECLINE';
   }
 }
 
 export function acpPermissionKindForAgentAction(
-  action: AgentProviderPermissionAction
+  action: AgentProviderPermissionAction,
+  providerRemembersChoice: boolean
 ): AcpPermissionOption['kind'] {
   switch (action) {
     case 'ACCEPT':
-      return 'allow_once';
-    case 'ACCEPT_FOR_SESSION':
-      return 'allow_always';
+      return providerRemembersChoice ? 'allow_always' : 'allow_once';
     case 'DECLINE':
-      return 'reject_once';
-    case 'DECLINE_FOR_SESSION':
-      return 'reject_always';
+      return providerRemembersChoice ? 'reject_always' : 'reject_once';
   }
+}
+
+export function acpPermissionKindRemembersChoice(
+  kind: AcpPermissionOption['kind']
+): boolean {
+  return kind === 'allow_always' || kind === 'reject_always';
 }
 
 export function observedSettingsFromAcpState(
@@ -193,7 +193,7 @@ export function observedSettingsFromAcpState(
       thoughtLevel?.currentValue ?? providerModelReasoningEffort ?? undefined,
     runtimeOptions: {
       ...requested.runtimeOptions,
-      [profile.descriptor.id]: nativeOptionsValue(state)
+      [profile.descriptor.id]: nativeSelectionOptionsValue(state)
     }
   };
 }
@@ -207,12 +207,22 @@ export function acpThoughtLevelSelector(
   );
 }
 
-export function nativeOptionsValue(state: AcpNativeSessionState): AgentJsonValue {
-  const safe = sanitizeAcpNativeSession(state);
+export function nativeSelectionOptionsValue(
+  state: AcpNativeSessionState
+): AgentJsonValue {
+  const configValues = Object.fromEntries(
+    state.configOptions
+      .filter(
+        (option) =>
+          option.category !== 'model' &&
+          option.category !== 'thought_level' &&
+          !(state.modes && option.category === 'mode')
+      )
+      .map((option) => [option.id, option.currentValue])
+  );
   return redactAcpNativeValue({
-    modes: safe.modes,
-    models: safe.models,
-    configOptions: safe.configOptions
+    ...(state.modes?.currentModeId ? { modeId: state.modes.currentModeId } : {}),
+    ...(Object.keys(configValues).length > 0 ? { configValues } : {})
   });
 }
 

@@ -178,6 +178,41 @@ describe('runProviderSmoke', () => {
     expect(providerSmokeSucceeded(report)).toBe(true);
   });
 
+  it('activates an explicitly selected runtime catalog once before queuing models', async () => {
+    const repositoryPath = await createThrowawayRepository(cleanupPaths);
+    const cursorModel = model('cursor-agent-acp:cursor/claude-haiku-4-5');
+    const cursorBeforeDiscovery = runtime(
+      'cursor-agent-acp',
+      'DISCOVERED',
+      true,
+      [model('cursor-agent-acp:cursor/auto')],
+      true
+    );
+    const service = new FakeProviderSmokeService(repositoryPath, {
+      catalogs: [
+        catalogWith([
+          cursorBeforeDiscovery,
+          runtime('grok-acp', 'DISCOVERED', true, [model('grok-acp:xai/grok-build')], true)
+        ]),
+        catalogWith([
+          runtime('cursor-agent-acp', 'READY', true, [cursorModel], true),
+          runtime('grok-acp', 'DISCOVERED', true, [model('grok-acp:xai/grok-build')], true)
+        ])
+      ]
+    });
+
+    const report = await runHarness(repositoryPath, service, cleanupPaths, {
+      runtimeIds: ['cursor-agent-acp']
+    });
+
+    expect(service.discoveredRuntimeIds).toEqual(['cursor-agent-acp']);
+    expect(service.startedModels).toEqual([
+      { model: 'claude-haiku-4-5', reasoningEffort: undefined }
+    ]);
+    expect(report.results.map((result) => result.modelId)).toEqual([cursorModel.id]);
+    expect(report.authoritative).toBe(true);
+  });
+
   it('marks successful but unattested model selection as UNATTESTED', async () => {
     const repositoryPath = await createThrowawayRepository(cleanupPaths);
     const candidate = model('codex:openai/unattested');
@@ -571,7 +606,8 @@ function runtime(
   runtimeId: string,
   status: string,
   canStart: boolean,
-  models: AgentModel[]
+  models: AgentModel[],
+  explicitModelDiscovery = false
 ) {
   return {
     preflight: {
@@ -581,7 +617,10 @@ function runtime(
         canStart,
         summary: status,
         detail: canStart ? `${runtimeId} is available.` : `${runtimeId} is unavailable.`
-      }
+      },
+      capabilities: explicitModelDiscovery
+        ? { modelCatalog: { activation: 'EXPLICIT' } }
+        : { modelCatalog: {} }
     },
     models,
     refreshedAt: '2026-07-14T00:00:00.000Z'
@@ -624,6 +663,7 @@ class FakeProviderSmokeService implements ProviderSmokeService {
   private taskSequence = 0;
   private runSequence = 0;
   cancelCount = 0;
+  readonly discoveredRuntimeIds: string[] = [];
   readonly cancellationTransitions: Array<{
     runId: string;
     status: RunRecord['status'];
@@ -644,6 +684,18 @@ class FakeProviderSmokeService implements ProviderSmokeService {
     if (catalog instanceof Error) throw catalog;
     if (!catalog) throw new Error('Fake catalog is missing.');
     return structuredClone(catalog);
+  }
+
+  async discoverAgentRuntimeModels(runtimeId: string) {
+    this.discoveredRuntimeIds.push(runtimeId);
+    const index = Math.min(this.catalogIndex, this.behavior.catalogs.length - 1);
+    const catalog = this.behavior.catalogs[index];
+    if (catalog instanceof Error) throw catalog;
+    const runtime = catalog?.runtimes.find(
+      (candidate) => candidate.preflight.runtime.id === runtimeId
+    );
+    if (!runtime) throw new Error(`Fake runtime is missing: ${runtimeId}`);
+    return structuredClone(runtime);
   }
 
   getDefaultRepositoryPath(): string {

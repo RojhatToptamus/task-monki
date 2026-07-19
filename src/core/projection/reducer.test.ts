@@ -46,7 +46,7 @@ describe('projection reducer', () => {
   it('preserves a completed review summary across matching Git and provider goal updates', () => {
     const projection = {
       ...createInitialProjection(now),
-      codexReview: {
+      agentReview: {
         status: 'PASSED' as const,
         reviewedHeadSha: 'abc',
         reviewedDirtyFingerprint: 'fp-1',
@@ -67,7 +67,7 @@ describe('projection reducer', () => {
       createEvent('AGENT_GOAL_UPDATED', { syncState: 'IN_SYNC' })
     );
 
-    expect(afterGit.codexReview?.status).toBe('PASSED');
+    expect(afterGit.agentReview?.status).toBe('PASSED');
     expect(afterGit.summary).toBe('Review passed with no findings.');
     expect(afterGoal.summary).toBe('Review passed with no findings.');
   });
@@ -75,7 +75,7 @@ describe('projection reducer', () => {
   it('promotes the completed review summary across the matching post-review Git snapshot', () => {
     const projection = {
       ...createInitialProjection(now),
-      codexReview: {
+      agentReview: {
         status: 'PASSED' as const,
         reviewedHeadSha: 'abc',
         reviewedDirtyFingerprint: 'fp-1',
@@ -92,14 +92,14 @@ describe('projection reducer', () => {
       })
     );
 
-    expect(afterGit.codexReview?.status).toBe('PASSED');
+    expect(afterGit.agentReview?.status).toBe('PASSED');
     expect(afterGit.summary).toBe('Review passed with no findings.');
   });
 
   it('surfaces review staleness when a Git snapshot differs from the reviewed diff', () => {
     const projection = {
       ...createInitialProjection(now),
-      codexReview: {
+      agentReview: {
         status: 'PASSED' as const,
         reviewedHeadSha: 'abc',
         reviewedDirtyFingerprint: 'fp-1',
@@ -116,7 +116,7 @@ describe('projection reducer', () => {
       })
     );
 
-    expect(next.codexReview?.status).toBe('STALE');
+    expect(next.agentReview?.status).toBe('STALE');
     expect(next.summary).toBe('The current diff changed after this agent review.');
   });
 
@@ -192,6 +192,71 @@ describe('projection reducer', () => {
     expect(failed.tasks[0].projection.agentRun).toBe('FAILED');
     expect(interrupted.tasks[0].workflowPhase).toBe('IN_PROGRESS');
     expect(interrupted.tasks[0].projection.agentRun).toBe('INTERRUPTED');
+  });
+
+  it('blocks review without rewriting a provider-completed run', () => {
+    const implementation = createRun({
+      mode: 'IMPLEMENTATION',
+      status: 'COMPLETED'
+    });
+    const task = createTask({
+      workflowPhase: 'REVIEW',
+      currentRunId: implementation.id,
+      projection: {
+        ...createInitialProjection(now),
+        requestedAction: 'SUCCEEDED',
+        agentRun: 'COMPLETED'
+      }
+    });
+    const next = applyEventToState(
+      { ...createEmptyState(), tasks: [task], runs: [implementation] },
+      createEvent('IMPLEMENTATION_OUTCOME_BLOCKED', {
+        reason: 'A provider execution request was declined and this run produced no Git change.'
+      })
+    );
+
+    expect(next.runs[0].status).toBe('COMPLETED');
+    expect(next.tasks[0].workflowPhase).toBe('IN_PROGRESS');
+    expect(next.tasks[0].projection).toMatchObject({
+      requestedAction: 'FAILED',
+      agentRun: 'COMPLETED',
+      health: 'WARNING',
+      implementationRetry: {
+        runId: implementation.id,
+        reason: expect.stringMatching(/declined.*no Git change/i)
+      }
+    });
+    expect(next.tasks[0].projection.summary).toMatch(/declined.*no Git change/i);
+
+    const afterTransition = applyEventToState(
+      next,
+      createEvent('TRANSITION_COMPLETED', { toPhase: 'IN_PROGRESS' })
+    );
+    expect(afterTransition.tasks[0].projection.implementationRetry?.runId).toBe(
+      implementation.id
+    );
+
+    const replacement = createRun({
+      id: 'run-2',
+      mode: 'RETRY',
+      status: 'STARTING'
+    });
+    const replacementTask = {
+      ...afterTransition.tasks[0],
+      currentRunId: replacement.id
+    };
+    const afterRetryStarted = applyEventToState(
+      {
+        ...afterTransition,
+        tasks: [replacementTask],
+        runs: [...afterTransition.runs, replacement]
+      },
+      {
+        ...createEvent('AGENT_RUN_STARTED', { mode: 'RETRY' }),
+        runId: replacement.id
+      }
+    );
+    expect(afterRetryStarted.tasks[0].projection.implementationRetry).toBeUndefined();
   });
 
   it('enters review only when reconciliation proves implementation completed', () => {
@@ -323,11 +388,11 @@ describe('projection reducer', () => {
     expect(started.tasks[0].currentRunId).toBe('implementation-run');
     expect(started.tasks[0].projection.agentRun).toBe('COMPLETED');
     expect(running.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(running.tasks[0].projection.codexReview?.status).toBe('RUNNING');
+    expect(running.tasks[0].projection.agentReview?.status).toBe('RUNNING');
     expect(running.tasks[0].projection.agentRun).toBe('COMPLETED');
     expect(completed.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(completed.tasks[0].projection.codexReview?.status).toBe('INCONCLUSIVE');
-    expect(completed.tasks[0].projection.codexReview?.finalArtifactId).toBe('artifact-review');
+    expect(completed.tasks[0].projection.agentReview?.status).toBe('INCONCLUSIVE');
+    expect(completed.tasks[0].projection.agentReview?.finalArtifactId).toBe('artifact-review');
     expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
   });
 
@@ -351,7 +416,7 @@ describe('projection reducer', () => {
       projection: {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
-        codexReview: { status: 'RUNNING', runId: 'review-run' }
+        agentReview: { status: 'RUNNING', runId: 'review-run' }
       }
     };
     const completed = applyEventToState(
@@ -366,8 +431,8 @@ describe('projection reducer', () => {
       {
         ...createEvent('AGENT_RUN_COMPLETED', {
           terminalStatus: 'completed',
-          codexReviewResult: {
-            schemaVersion: 'codex-review/v1',
+          agentReviewResult: {
+            schemaVersion: 'agent-review/v1',
             verdict: 'PASSED',
             summary: 'Found a blocker despite provider verdict.',
             findings: [
@@ -386,7 +451,7 @@ describe('projection reducer', () => {
       }
     );
 
-    const review = completed.tasks[0].projection.codexReview;
+    const review = completed.tasks[0].projection.agentReview;
     expect(completed.tasks[0].projection.agentRun).toBe('COMPLETED');
     expect(review?.status).toBe('NEEDS_CHANGES');
     expect(review?.summary).toBe('Found a blocker despite provider verdict.');
@@ -412,7 +477,7 @@ describe('projection reducer', () => {
       updatedAt: now,
       projection: {
         ...createInitialProjection(now),
-        codexReview: {
+        agentReview: {
           status: 'INCONCLUSIVE',
           runId: 'review-run',
           reviewedHeadSha: 'abc',
@@ -432,14 +497,14 @@ describe('projection reducer', () => {
         runId: undefined
       }
     );
-    expect(withNewDiff.tasks[0].projection.codexReview?.status).toBe('STALE');
+    expect(withNewDiff.tasks[0].projection.agentReview?.status).toBe('STALE');
 
     const followUpTask = {
       ...task,
       projection: {
         ...task.projection,
-        codexReview: {
-          ...task.projection.codexReview!,
+        agentReview: {
+          ...task.projection.agentReview!,
           status: 'INCONCLUSIVE' as const
         }
       }
@@ -456,7 +521,7 @@ describe('projection reducer', () => {
       }
     );
     expect(followUpState.tasks[0].workflowPhase).toBe('IN_PROGRESS');
-    expect(followUpState.tasks[0].projection.codexReview?.status).toBe('STALE');
+    expect(followUpState.tasks[0].projection.agentReview?.status).toBe('STALE');
 
     const completedFollowUpState = applyEventToState(
       followUpState,
@@ -466,7 +531,7 @@ describe('projection reducer', () => {
       }
     );
     expect(completedFollowUpState.tasks[0].workflowPhase).toBe('REVIEW');
-    expect(completedFollowUpState.tasks[0].projection.codexReview?.status).toBe('STALE');
+    expect(completedFollowUpState.tasks[0].projection.agentReview?.status).toBe('STALE');
   });
 
   it('keeps a current review result fresh when a delivery commit records the reviewed diff', () => {
@@ -490,7 +555,7 @@ describe('projection reducer', () => {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
         git: 'DIRTY',
-        codexReview: {
+        agentReview: {
           status: 'PASSED',
           runId: 'review-run',
           reviewedHeadSha: 'abc',
@@ -527,12 +592,12 @@ describe('projection reducer', () => {
       runId: undefined
     });
 
-    expect(committed.tasks[0].projection.codexReview).toMatchObject({
+    expect(committed.tasks[0].projection.agentReview).toMatchObject({
       status: 'PASSED',
       reviewedHeadSha: 'commit-1'
     });
-    expect(committed.tasks[0].projection.codexReview?.reviewedDirtyFingerprint).toBeUndefined();
-    expect(refreshed.tasks[0].projection.codexReview?.status).toBe('PASSED');
+    expect(committed.tasks[0].projection.agentReview?.reviewedDirtyFingerprint).toBeUndefined();
+    expect(refreshed.tasks[0].projection.agentReview?.status).toBe('PASSED');
   });
 
   it('does not resurrect a stale review when a delivery commit follows a changed diff', () => {
@@ -555,7 +620,7 @@ describe('projection reducer', () => {
       projection: {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
-        codexReview: {
+        agentReview: {
           status: 'STALE',
           runId: 'review-run',
           reviewedHeadSha: 'abc',
@@ -575,7 +640,7 @@ describe('projection reducer', () => {
       }
     );
 
-    expect(committed.tasks[0].projection.codexReview).toMatchObject({
+    expect(committed.tasks[0].projection.agentReview).toMatchObject({
       status: 'STALE',
       reviewedHeadSha: 'abc',
       reviewedDirtyFingerprint: 'fp-1'
@@ -623,73 +688,34 @@ describe('projection reducer', () => {
     expect(withDivergence.tasks[0].projection.health).toBe('WARNING');
   });
 
-  it('only auto-completes merged snapshots when completion policy gates are satisfied', () => {
+  it('records merged snapshots without treating incomplete event data as completion evidence', () => {
     const mergeEvent = createEvent('MERGE_SNAPSHOT_CAPTURED', { status: 'MERGED' });
-    const verifiedWithFailingChecks = applyEventToState(
-      {
-        ...createEmptyState(),
-        tasks: [
-          createTask({
-            completionPolicy: 'MERGED_AND_VERIFIED',
-            projection: {
-              ...createInitialProjection(now),
-              ciChecks: 'FAILING',
-              health: 'ERROR',
-              summary: 'GitHub checks: FAILING.'
-            }
-          })
-        ]
-      },
-      mergeEvent
-    );
-    const manualTask = applyEventToState(
-      {
-        ...createEmptyState(),
-        tasks: [
-          createTask({
-            completionPolicy: 'MANUAL',
-            projection: { ...createInitialProjection(now), ciChecks: 'PASSING' }
-          })
-        ]
-      },
-      mergeEvent
-    );
-    const verifiedWithPassingChecks = applyEventToState(
-      {
-        ...createEmptyState(),
-        tasks: [
-          createTask({
-            completionPolicy: 'MERGED_AND_VERIFIED',
-            projection: { ...createInitialProjection(now), ciChecks: 'PASSING' }
-          })
-        ]
-      },
-      mergeEvent
-    );
     const mergePolicyTask = applyEventToState(
       {
         ...createEmptyState(),
         tasks: [
           createTask({
             completionPolicy: 'MERGED',
-            projection: { ...createInitialProjection(now), ciChecks: 'FAILING' }
+            projection: {
+              ...createInitialProjection(now),
+              ciChecks: 'FAILING',
+              health: 'ERROR'
+            }
           })
         ]
       },
       mergeEvent
     );
 
-    expect(verifiedWithFailingChecks.tasks[0].workflowPhase).toBe('IN_REVIEW');
-    expect(verifiedWithFailingChecks.tasks[0].projection.health).toBe('ERROR');
-    expect(verifiedWithFailingChecks.tasks[0].projection.summary).toBe(
-      'GitHub reports the pull request merged.'
-    );
-    expect(manualTask.tasks[0].workflowPhase).toBe('IN_REVIEW');
-    expect(verifiedWithPassingChecks.tasks[0].workflowPhase).toBe('IN_REVIEW');
-    expect(verifiedWithPassingChecks.tasks[0].projection.summary).toBe(
-      'GitHub reports the pull request merged.'
-    );
-    expect(mergePolicyTask.tasks[0].workflowPhase).toBe('DONE');
+    expect(mergePolicyTask.tasks[0]).toMatchObject({
+      workflowPhase: 'IN_REVIEW',
+      resolution: 'NONE',
+      projection: {
+        merge: 'MERGED',
+        health: 'ERROR',
+        summary: 'GitHub reports the pull request merged.'
+      }
+    });
   });
 });
 

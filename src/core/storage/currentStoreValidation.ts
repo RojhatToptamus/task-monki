@@ -42,7 +42,7 @@ const GIT_STATUSES = [
   'NOT_INSPECTED', 'CLEAN', 'DIRTY', 'COMMITTED_UNPUSHED', 'PUSHED',
   'CONFLICTED', 'DIVERGED', 'UNAVAILABLE', 'UNKNOWN'
 ] as const;
-const AGENT_RUNTIME_KINDS = ['APP_SERVER', 'HTTP_AGENT', 'ACP_AGENT', 'NATIVE_AGENT'] as const;
+const AGENT_RUNTIME_KINDS = ['APP_SERVER', 'HTTP_AGENT', 'ACP_AGENT'] as const;
 const AGENT_TRANSPORTS = ['STDIO', 'HTTP_SSE', 'UNIX_SOCKET', 'IN_PROCESS'] as const;
 const AGENT_ITEM_TYPES = [
   'USER_MESSAGE', 'AGENT_MESSAGE', 'REASONING_SUMMARY', 'PLAN',
@@ -63,7 +63,7 @@ const INTERACTION_ACTIONS = [
   'ANSWER', 'DECLINE', 'DECLINE_FOR_SESSION', 'CANCEL'
 ] as const;
 const PROVIDER_PERMISSION_ACTIONS = [
-  'ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'DECLINE_FOR_SESSION'
+  'ACCEPT', 'DECLINE'
 ] as const;
 const GOAL_SYNC_STATES = [
   'IN_SYNC', 'DIVERGED', 'CLEARED', 'SYNC_FAILED', 'UNKNOWN'
@@ -105,6 +105,7 @@ const DOMAIN_EVENT_TYPES = [
   'AGENT_PROTOCOL_INCIDENT', 'AGENT_ITEM_UPDATED',
   'AGENT_INTERACTION_REQUESTED', 'AGENT_INTERACTION_RESOLVED',
   'AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED',
+  'IMPLEMENTATION_OUTCOME_BLOCKED',
   'AGENT_MUTATION_AMBIGUOUS', 'AGENT_REVIEW_POLICY_VIOLATION',
   'AGENT_RUNTIME_LOST', 'AGENT_RUNTIME_RECONCILED', 'PROCESS_EXITED',
   'PROCESS_SIGNALED', 'CANCEL_REQUESTED', 'ARTIFACT_CREATED',
@@ -164,7 +165,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA256 = /^[a-f0-9]{64}$/u;
 
 /**
- * Validates JSON-loaded schema-12 primitives before domain code can observe
+ * Validates JSON-loaded schema-13 primitives before domain code can observe
  * them. Relationship, artifact, attachment, and runtime ownership invariants
  * remain in FileTaskStore where their indexes and filesystem context live.
  */
@@ -548,8 +549,9 @@ function interactionRequestPayload(type: string, value: unknown): void {
           request.networkApprovalContext,
           'interactionRequests'
         );
-        strings(context, 'interactionRequests', ['host', 'protocol']);
+        optionalStrings(context, 'interactionRequests', ['host', 'protocol']);
       }
+      optionalStringArray(request, 'paths', 'interactionRequests');
       optionalStringArray(request, 'proposedExecPolicyAmendment', 'interactionRequests');
       if (request.proposedNetworkPolicyAmendments !== undefined) {
         if (!Array.isArray(request.proposedNetworkPolicyAmendments)) {
@@ -560,7 +562,7 @@ function interactionRequestPayload(type: string, value: unknown): void {
         }
       }
       if (request.providerOptions !== undefined) {
-        if (!Array.isArray(request.providerOptions) || request.providerOptions.length === 0) {
+        if (!Array.isArray(request.providerOptions)) {
           invalid('interactionRequests');
         }
         const optionIds = new Set<string>();
@@ -568,6 +570,7 @@ function interactionRequestPayload(type: string, value: unknown): void {
           const record = persistedRecord(option, 'interactionRequests');
           strings(record, 'interactionRequests', ['id', 'label']);
           enumField(record, 'action', PROVIDER_PERMISSION_ACTIONS, 'interactionRequests');
+          booleanField(record, 'providerRemembersChoice', 'interactionRequests');
           if (optionIds.has(record.id as string)) invalid('interactionRequests');
           optionIds.add(record.id as string);
         }
@@ -670,20 +673,15 @@ function interactionDecision(type: string, value: unknown, requestValue: unknown
         ] as const,
         'interactionRequests'
       );
-      if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {
-        stringArray(decision, 'amendment', 'interactionRequests');
-      } else if (decision.action === 'APPLY_NETWORK_POLICY_AMENDMENT') {
-        networkPolicyAmendment(decision.amendment);
-      } else if (
-        ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'DECLINE_FOR_SESSION'].includes(
-          decision.action as string
-        )
-      ) {
+      {
         const request = persistedRecord(requestValue, 'interactionRequests');
         const providerOptions = request.providerOptions;
-        if (providerOptions === undefined) {
-          if (decision.providerOptionId !== undefined) invalid('interactionRequests');
-        } else {
+        if (providerOptions !== undefined) {
+          if (!['ACCEPT', 'DECLINE'].includes(decision.action as string)) {
+            if (decision.action !== 'CANCEL') invalid('interactionRequests');
+            if (decision.providerOptionId !== undefined) invalid('interactionRequests');
+            return;
+          }
           stringField(decision, 'providerOptionId', 'interactionRequests');
           const selected = (providerOptions as unknown[])
             .map((option) => persistedRecord(option, 'interactionRequests'))
@@ -694,9 +692,16 @@ function interactionDecision(type: string, value: unknown, requestValue: unknown
           ) {
             invalid('interactionRequests');
           }
+          return;
         }
-      } else if (decision.providerOptionId !== undefined) {
+      }
+      if (decision.providerOptionId !== undefined) {
         invalid('interactionRequests');
+      }
+      if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {
+        stringArray(decision, 'amendment', 'interactionRequests');
+      } else if (decision.action === 'APPLY_NETWORK_POLICY_AMENDMENT') {
+        networkPolicyAmendment(decision.amendment);
       }
       return;
     case 'FILE_CHANGE_APPROVAL':
@@ -917,6 +922,11 @@ function projection(value: unknown): void {
   enumField(record, 'health', HEALTH_STATUSES, 'tasks.projection');
   optionalInteger(record, 'githubPullRequestNumber', 'tasks.projection', 1);
   optionalStrings(record, 'tasks.projection', ['githubPullRequestUrl']);
+  if (record.implementationRetry !== undefined) {
+    const retry = persistedRecord(record.implementationRetry, 'tasks.projection');
+    uuidField(retry, 'runId', 'tasks.projection');
+    strings(retry, 'tasks.projection', ['reason']);
+  }
   timestamp(record, 'updatedAt', 'tasks.projection');
   if (!Array.isArray(record.findings)) invalid('tasks.projection');
   for (const finding of record.findings) {
@@ -926,8 +936,8 @@ function projection(value: unknown): void {
     timestamp(item, 'createdAt', 'tasks.projection');
     optionalTimestamp(item, 'clearedAt', 'tasks.projection');
   }
-  if (record.codexReview !== undefined) {
-    const review = persistedRecord(record.codexReview, 'tasks.projection');
+  if (record.agentReview !== undefined) {
+    const review = persistedRecord(record.agentReview, 'tasks.projection');
     enumField(review, 'status', REVIEW_GATE_STATUSES, 'tasks.projection');
     optionalStrings(review, 'tasks.projection', [
       'reviewedHeadSha', 'reviewedDirtyFingerprint', 'summary'
@@ -942,7 +952,7 @@ function projection(value: unknown): void {
 
 function reviewResult(value: unknown): void {
   const record = persistedRecord(value, 'tasks.projection');
-  enumField(record, 'schemaVersion', ['codex-review/v1'] as const, 'tasks.projection');
+  enumField(record, 'schemaVersion', ['agent-review/v1'] as const, 'tasks.projection');
   enumField(
     record,
     'verdict',
@@ -975,7 +985,10 @@ function settings(value: unknown, collection: string): void {
   optionalEnumField(record, 'sandbox', SANDBOXES, collection);
   optionalEnumField(record, 'approvalsReviewer', APPROVALS_REVIEWERS, collection);
   optionalBoolean(record, 'networkAccess', collection);
-  if (record.runtimeOptions !== undefined) persistedRecord(record.runtimeOptions, collection);
+  if (record.runtimeOptions !== undefined) {
+    persistedRecord(record.runtimeOptions, collection);
+    jsonValue(record.runtimeOptions, collection);
+  }
 }
 
 function tokenUsage(value: unknown, collection: string): void {

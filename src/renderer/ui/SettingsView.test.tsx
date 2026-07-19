@@ -137,6 +137,28 @@ describe('SettingsView', () => {
     expect(withEffort).toContain('>Effort<');
     expect(withEffort).toContain('<option value="high">High</option>');
     expect(withEffort).toContain('<option value="xhigh">X-high</option>');
+
+    const providerDefault = renderToStaticMarkup(
+      <ModelSettingRow
+        label="Implementation"
+        runtimeId="codex"
+        value="codex:no-effort-default"
+        effortValue=""
+        models={[
+          {
+            ...codexModel,
+            id: 'codex:no-effort-default',
+            model: 'no-effort-default',
+            defaultReasoningEffort: undefined
+          }
+        ]}
+        runtimes={runtimes}
+        onRuntimeChange={() => undefined}
+        onModelChange={() => undefined}
+        onEffortChange={() => undefined}
+      />
+    );
+    expect(providerDefault).toContain('<option value="" selected="">Provider default</option>');
   });
 
   it('offers explicit model loading without starting discovery during render', () => {

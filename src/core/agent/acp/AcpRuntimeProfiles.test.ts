@@ -30,9 +30,9 @@ describe('ACP runtime profiles', () => {
     expect(CURSOR_ACP_PROFILE.executableCandidates).toEqual(['cursor-agent']);
     expect(CURSOR_ACP_PROFILE.launchContractProbe.argv).toEqual(['help', 'acp']);
     expect(CURSOR_ACP_PROFILE.defaultModel).toBe('default');
-    expect(CURSOR_ACP_PROFILE.allowOpaqueExecuteOnce).toBe(true);
-    expect(GROK_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
-    expect(CLAUDE_AGENT_ACP_PROFILE.allowOpaqueExecuteOnce).toBeUndefined();
+    expect(CURSOR_ACP_PROFILE.allowOpaqueExecutePermissions).toBe(true);
+    expect(GROK_ACP_PROFILE.allowOpaqueExecutePermissions).toBeUndefined();
+    expect(CLAUDE_AGENT_ACP_PROFILE.allowOpaqueExecutePermissions).toBeUndefined();
     expect(CLAUDE_AGENT_ACP_PROFILE.argv).toEqual([]);
   });
 
@@ -177,11 +177,11 @@ describe('ACP runtime profiles', () => {
 
   it('exposes only the access policies each provider profile can enforce', () => {
     const policy = acpCapabilities(CURSOR_ACP_PROFILE).executionPolicy;
-    expect(policy.defaultPresetId).toBe('supervised');
+    expect(policy.defaultPresetId).toBe('ask-for-approval');
     expect(policy.presets).toEqual([
       expect.objectContaining({
-        id: 'supervised',
-        label: 'Supervised',
+        id: 'ask-for-approval',
+        label: 'Ask for approval',
         sandbox: 'DANGER_FULL_ACCESS',
         approvalPolicy: 'on-request'
       }),
@@ -204,10 +204,10 @@ describe('ACP runtime profiles', () => {
       policy.presets
     );
     expect(acpCapabilities(CLAUDE_AGENT_ACP_PROFILE).executionPolicy.presets).toEqual([
-      expect.objectContaining({ id: 'supervised', approvalPolicy: 'on-request' })
+      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);
     expect(acpCapabilities(TEST_ACP_PROFILE).executionPolicy.presets).toEqual([
-      expect.objectContaining({ id: 'supervised', approvalPolicy: 'on-request' })
+      expect.objectContaining({ id: 'ask-for-approval', approvalPolicy: 'on-request' })
     ]);
   });
 

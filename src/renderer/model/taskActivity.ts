@@ -260,6 +260,18 @@ function itemForEvent(
       return runFailedItem(event, run?.mode ?? mode, payload);
     case 'AGENT_RUN_INTERRUPTED':
       return runInterruptedItem(event, run?.mode ?? mode, payload);
+    case 'IMPLEMENTATION_OUTCOME_BLOCKED':
+      return item(
+        event,
+        'risk',
+        'Task Monki',
+        'Implementation needs another pass',
+        evidence(
+          'Retry or continue before this task can advance.',
+          evidenceRows(stringField(payload, 'reason'))
+        ),
+        'action'
+      );
     case 'CANCEL_REQUESTED':
       if (event.runId && terminalRunIds.has(event.runId)) {
         return undefined;
@@ -386,7 +398,7 @@ function runCompletedItem(
   payload: Record<string, unknown>
 ): TaskActivityCandidate {
   if (mode === 'REVIEW') {
-    const reviewStatus = stringField(payload, 'codexReviewStatus');
+    const reviewStatus = stringField(payload, 'agentReviewStatus');
 
     switch (reviewStatus) {
       case 'PASSED':
@@ -949,13 +961,13 @@ function runtimeReconciledItem(
 }
 
 function currentStaleReviewItem(task: Task): TaskActivityItem | undefined {
-  const review = task.projection.codexReview;
+  const review = task.projection.agentReview;
   if (review?.status !== 'STALE') {
     return undefined;
   }
   const at = review.updatedAt ?? task.projection.updatedAt ?? task.updatedAt;
   return {
-    id: `codex-review-stale:${review.runId ?? task.id}:${at}`,
+    id: `agent-review-stale:${review.runId ?? task.id}:${at}`,
     at,
     actor: 'Task Monki',
     title: 'Review became stale',

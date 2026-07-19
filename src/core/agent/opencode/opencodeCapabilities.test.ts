@@ -24,13 +24,13 @@ describe('opencodeCapabilities', () => {
       detail: expect.stringContaining('target worktree runtime')
     });
     expect(capabilities.extensions.nativeFileParts?.maturity).toBe('stable');
-    expect(capabilities.extensions.genericDetachedReview?.maturity).toBe('inferred');
+    expect(capabilities.detachedReview.maturity).toBe('inferred');
     expect(capabilities.review).toEqual({
       maturity: 'unsupported',
       detail: expect.stringContaining('cannot attest the read-only isolation')
     });
-    expect(capabilities.extensions.genericDetachedReview?.detail).toContain(
-      'not eligible'
+    expect(capabilities.detachedReview.detail).toContain(
+      'cannot attest an isolated read-only workspace'
     );
   });
 });

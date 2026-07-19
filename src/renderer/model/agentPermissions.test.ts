@@ -10,8 +10,8 @@ import type { AgentExecutionPolicyPreset } from '../../shared/contracts';
 
 describe('agent permission settings', () => {
   it('maps runtime-owned permission presets to execution settings', () => {
-    const sandboxed = settingsForExecutionPolicyPreset(preset({
-      id: 'sandboxed',
+    const restricted = settingsForExecutionPolicyPreset(preset({
+      id: 'restricted',
       sandbox: 'WORKSPACE_WRITE',
       approvalPolicy: 'never',
       approvalsReviewer: 'user',
@@ -19,13 +19,13 @@ describe('agent permission settings', () => {
     }), {
       networkAccess: true
     });
-    expect(sandboxed).toEqual({
+    expect(restricted).toEqual({
       sandbox: 'WORKSPACE_WRITE',
       networkAccess: false,
       approvalPolicy: 'never',
       approvalsReviewer: 'user'
     });
-    expect(browserDevSettingsViolations(sandboxed)).toEqual([]);
+    expect(browserDevSettingsViolations(restricted)).toEqual([]);
     expect(
       settingsForExecutionPolicyPreset(preset({
         id: 'ask',
@@ -88,7 +88,7 @@ describe('agent permission settings', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       })
-    ).toBe('SANDBOXED');
+    ).toBe('RESTRICTED');
     expect(
       formatAgentPermissionMode({
         sandbox: 'WORKSPACE_WRITE',
@@ -96,7 +96,7 @@ describe('agent permission settings', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       })
-    ).toBe('Sandboxed');
+    ).toBe('Restricted');
     expect(
       inferAgentPermissionMode({
         sandbox: 'WORKSPACE_WRITE',

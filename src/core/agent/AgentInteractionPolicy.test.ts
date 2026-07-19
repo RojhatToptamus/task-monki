@@ -30,6 +30,18 @@ describe('Agent interaction policy', () => {
     expect(outside.warnings).toHaveLength(2);
   });
 
+  it('fails closed when a command request has no verifiable command or structured action', () => {
+    const policy = buildInteractionPolicy({
+      type: 'COMMAND_APPROVAL',
+      request: { startedAtMs: 1, command: '   ' },
+      session: sessionFixture(),
+      run: runFixture()
+    });
+
+    expect(policy.allowedActions).toEqual(['DECLINE', 'CANCEL']);
+    expect(policy.warnings).toContain('Task Monki could not verify the requested command.');
+  });
+
   it('exposes only provider-supplied command amendments', () => {
     const policy = buildInteractionPolicy({
       type: 'COMMAND_APPROVAL',
@@ -74,8 +86,24 @@ describe('Agent interaction policy', () => {
         command: 'npm test',
         cwd: '/tmp/worktree',
         providerOptions: [
-          { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' },
-          { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+          {
+            id: 'allow-once',
+            label: 'Allow once',
+            action: 'ACCEPT',
+            providerRemembersChoice: false
+          },
+          {
+            id: 'allow-always',
+            label: 'Allow always',
+            action: 'ACCEPT',
+            providerRemembersChoice: true
+          },
+          {
+            id: 'reject-once',
+            label: 'Reject',
+            action: 'DECLINE',
+            providerRemembersChoice: false
+          }
         ]
       },
       allowedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL']
@@ -95,7 +123,7 @@ describe('Agent interaction policy', () => {
         {
           interactionType: 'COMMAND_APPROVAL',
           action: 'ACCEPT',
-          providerOptionId: 'allow-always'
+          providerOptionId: 'reject-once'
         },
         sessionFixture(),
         runFixture()
@@ -113,6 +141,86 @@ describe('Agent interaction policy', () => {
         runFixture()
       )
     ).not.toThrow();
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'allow-always'
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).not.toThrow();
+    expect(() =>
+      validateInteractionDecision(
+        interaction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT_FOR_SESSION' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('exact provider option or cancellation');
+  });
+
+  it('keeps empty provider requests fail-closed without changing generic approvals', () => {
+    const providerInteraction = interactionFixture({
+      request: {
+        startedAtMs: 1,
+        providerOptions: []
+      },
+      allowedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'CANCEL']
+    });
+
+    expect(() =>
+      validateInteractionDecision(
+        providerInteraction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('exact option ID');
+    expect(() =>
+      validateInteractionDecision(
+        providerInteraction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT_FOR_SESSION' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('exact provider option or cancellation');
+    expect(() =>
+      validateInteractionDecision(
+        providerInteraction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'CANCEL' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).not.toThrow();
+
+    const genericInteraction = interactionFixture({
+      request: { startedAtMs: 1, command: 'npm test' },
+      allowedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL']
+    });
+    expect(() =>
+      validateInteractionDecision(
+        genericInteraction,
+        { interactionType: 'COMMAND_APPROVAL', action: 'ACCEPT_FOR_SESSION' },
+        sessionFixture(),
+        runFixture()
+      )
+    ).not.toThrow();
+    expect(() =>
+      validateInteractionDecision(
+        genericInteraction,
+        {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'allow-once'
+        },
+        sessionFixture(),
+        runFixture()
+      )
+    ).toThrow('no provider permission options');
   });
 
   it('does not delegate Task Monki-controlled Git delivery actions to Codex', () => {

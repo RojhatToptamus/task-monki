@@ -8,6 +8,7 @@ import type {
   Task
 } from '../../shared/contracts';
 import { createInitialProjection } from '../../shared/contracts';
+import type { AgentJsonValue } from '../../shared/agent';
 import { createEmptyState, type StoreState } from '../projection/reducer';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
 
@@ -37,12 +38,44 @@ describe('validateCurrentStoreRecords', () => {
     );
   });
 
+  it('validates the durable implementation retry requirement against its run identity', () => {
+    const state = createEmptyState();
+    const task = validTask();
+    task.projection.implementationRetry = {
+      runId: 'not-a-run-id',
+      reason: 'Retry before review.'
+    };
+    state.tasks = [task];
+
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'tasks.projection contains a malformed record'
+    );
+  });
+
   it('requires Task Monki ownership for durable agent sessions', () => {
     const state = createEmptyState();
     state.agentSessions = [{ ...validSession(), ownership: 'PROVIDER' as never }];
 
     expect(() => validateCurrentStoreRecords(state)).toThrow(
       'agentSessions contains a malformed record'
+    );
+  });
+
+  it('rejects provider runtime options deeper than the durable JSON bound', () => {
+    const state = createEmptyState();
+    const session = validSession();
+    let nested: Record<string, AgentJsonValue> = {};
+    const runtimeOptions: Record<string, AgentJsonValue> = { root: nested };
+    for (let depth = 0; depth < 65; depth += 1) {
+      const child: Record<string, AgentJsonValue> = {};
+      nested.child = child;
+      nested = child;
+    }
+    session.requestedSettings = { runtimeOptions };
+    state.agentSessions = [session];
+
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'agentSessions.requestedSettings contains a malformed record'
     );
   });
 
@@ -71,15 +104,6 @@ describe('validateCurrentStoreRecords', () => {
     expect(() => validateCurrentStoreRecords(state)).toThrow(
       'agentServers contains a malformed record'
     );
-  });
-
-  it('accepts a native-agent kind retained in durable server evidence', () => {
-    const state = createEmptyState();
-    const server = validServer();
-    server.runtimeKind = 'NATIVE_AGENT';
-    state.agentServers = [server];
-
-    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
   });
 
   it('rejects a malformed provider permission request payload', () => {
@@ -119,8 +143,15 @@ describe('validateCurrentStoreRecords', () => {
     interaction.request = {
       startedAtMs: Date.now(),
       command: 'npm test',
+      paths: ['/tmp/task-monki-validation-worktree/package.json'],
+      networkApprovalContext: {},
       providerOptions: [
-        { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' }
+        {
+          id: 'allow-once',
+          label: 'Allow once',
+          action: 'ACCEPT',
+          providerRemembersChoice: false
+        }
       ]
     };
     interaction.decision = {
@@ -144,8 +175,18 @@ describe('validateCurrentStoreRecords', () => {
       startedAtMs: Date.now(),
       command: 'npm test',
       providerOptions: [
-        { id: 'same', label: 'Allow once', action: 'ACCEPT' },
-        { id: 'same', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+        {
+          id: 'same',
+          label: 'Allow once',
+          action: 'ACCEPT',
+          providerRemembersChoice: false
+        },
+        {
+          id: 'same',
+          label: 'Allow always',
+          action: 'ACCEPT',
+          providerRemembersChoice: true
+        }
       ]
     };
     state.interactionRequests = [interaction];
@@ -157,13 +198,99 @@ describe('validateCurrentStoreRecords', () => {
       startedAtMs: Date.now(),
       command: 'npm test',
       providerOptions: [
-        { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
+        {
+          id: 'allow-always',
+          label: 'Allow always',
+          action: 'ACCEPT',
+          providerRemembersChoice: true
+        }
       ]
     };
     interaction.decision = {
       interactionType: 'COMMAND_APPROVAL',
-      action: 'ACCEPT',
+      action: 'DECLINE',
       providerOptionId: 'allow-always'
+    };
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+  });
+
+  it('keeps an empty provider option catalog fail-closed in durable state', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.request = {
+      startedAtMs: Date.now(),
+      providerOptions: []
+    };
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'CANCEL'
+    };
+    state.interactionRequests = [interaction];
+
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT'
+    };
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT_FOR_SESSION'
+    };
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+
+    interaction.request = { startedAtMs: Date.now(), command: 'npm test' };
+    expect(() => validateCurrentStoreRecords(state)).not.toThrow();
+
+    interaction.decision = {
+      interactionType: 'COMMAND_APPROVAL',
+      action: 'ACCEPT',
+      providerOptionId: 'allow-once'
+    };
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+  });
+
+  it('rejects malformed provider metadata and command paths', () => {
+    const state = createEmptyState();
+    const interaction = validInteraction();
+    interaction.request = {
+      startedAtMs: Date.now(),
+      paths: [7 as never],
+      providerOptions: [
+        {
+          id: 'allow-once',
+          label: 'Allow once',
+          action: 'ACCEPT',
+          providerRemembersChoice: false
+        }
+      ]
+    };
+    state.interactionRequests = [interaction];
+
+    expect(() => validateCurrentStoreRecords(state)).toThrow(
+      'interactionRequests contains a malformed record'
+    );
+
+    interaction.request = {
+      startedAtMs: Date.now(),
+      providerOptions: [
+        {
+          id: 'allow-once',
+          label: 'Allow once',
+          action: 'ACCEPT',
+          providerRemembersChoice: 'false' as never
+        }
+      ]
     };
     expect(() => validateCurrentStoreRecords(state)).toThrow(
       'interactionRequests contains a malformed record'

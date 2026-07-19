@@ -66,11 +66,12 @@ export interface AcpRuntimeProfile {
   allowRememberedPermissions?: true;
   /**
    * Allows this profile's documented permission contract to expose positive
-   * provider choices when an execute request omits command text. A remembered
-   * choice additionally requires allowRememberedPermissions. All other
-   * profiles fail closed because Task Monki cannot verify scope.
+   * provider choices when an execute request omits command text. Remembered
+   * choices additionally require allowRememberedPermissions and always remain
+   * explicit. All other profiles fail closed because Task Monki cannot verify
+   * scope.
    */
-  allowOpaqueExecuteOnce?: true;
+  allowOpaqueExecutePermissions?: true;
   /** Profile-owned facts only; negotiated ACP capabilities are added at runtime. */
   extensions: Readonly<
     Record<string, { maturity: 'stable' | 'experimental' | 'inferred'; detail: string }>
@@ -216,7 +217,7 @@ export const CURSOR_ACP_PROFILE: AcpRuntimeProfile = {
       'Cursor Agent could not continue because the current account plan or usage allowance requires an upgrade.'
   },
   allowRememberedPermissions: true,
-  allowOpaqueExecuteOnce: true,
+  allowOpaqueExecutePermissions: true,
   environmentPolicy: {
     contractId: 'task-monki/cursor-agent-acp-environment@v1',
     allowedKeys: [
@@ -333,8 +334,8 @@ export function acpCapabilities(
     switch (approvalPolicy) {
       case 'on-request':
         return {
-          id: 'supervised',
-          label: 'Supervised',
+          id: 'ask-for-approval',
+          label: 'Ask for approval',
           detail:
             'Task Monki asks before provider-reported operations. The ACP agent process is not sandboxed, so unreported activity cannot be confined.',
           sandbox: 'DANGER_FULL_ACCESS' as const,
@@ -358,7 +359,7 @@ export function acpCapabilities(
           id: 'full-access',
           label: 'Full access',
           detail:
-            'Positive provider permission requests are accepted automatically. The ACP agent process has unconfined filesystem and network access.',
+            'Exact one-time provider permission requests are accepted automatically. Remembered choices always require explicit confirmation. The ACP agent process has unconfined filesystem and network access.',
           sandbox: 'DANGER_FULL_ACCESS' as const,
           approvalPolicy,
           approvalsReviewer: 'user' as const,
@@ -369,7 +370,7 @@ export function acpCapabilities(
   return {
     runtimeId: profile.descriptor.id,
     executionPolicy: {
-      defaultPresetId: 'supervised',
+      defaultPresetId: 'ask-for-approval',
       presets: executionPresets,
       detail:
         'Access modes govern Task Monki responses to reported ACP permission requests. ACP does not provide an enforceable process sandbox.'
@@ -431,6 +432,10 @@ export function acpCapabilities(
     },
     goals: { maturity: 'unsupported', detail: 'ACP stable v1 has no goal API.' },
     plans: { maturity: 'stable', detail: 'Plans arrive as typed session/update records.' },
+    detachedReview: {
+      maturity: 'unsupported',
+      detail: 'Current ACP profiles cannot attest an isolated read-only review workspace.'
+    },
     review: {
       maturity: 'unsupported',
       detail: 'ACP stable v1 has no detached review primitive; review requires a higher-level workflow.'

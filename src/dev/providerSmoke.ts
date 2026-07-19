@@ -68,7 +68,7 @@ export interface ProviderSmokeResult {
   runtimeId: string;
   runtimeStatus: AgentRuntimeReadinessStatus;
   modelId: string;
-  modelProvider: string;
+  modelProvider?: string;
   model: string;
   displayName: string;
   reasoningEffort?: string;
@@ -145,6 +145,7 @@ export type ProviderSmokeService = Pick<
   TaskManagerService,
   | 'init'
   | 'getAgentRuntimeCatalog'
+  | 'discoverAgentRuntimeModels'
   | 'getDefaultRepositoryPath'
   | 'createTask'
   | 'startRun'
@@ -343,6 +344,9 @@ export async function runProviderSmoke(
     try {
       await service.init();
       let catalog = await service.getAgentRuntimeCatalog();
+      if (await activateSelectedModelCatalogs(service, catalog, options)) {
+        catalog = await service.getAgentRuntimeCatalog();
+      }
       rememberCatalog(catalog, discoveredRuntimes, discoveredModels);
       enqueueTargets(
         catalog,
@@ -547,6 +551,32 @@ export async function runProviderSmoke(
   });
   console.log(`[provider-smoke] Report: ${reportPath}`);
   return report;
+}
+
+async function activateSelectedModelCatalogs(
+  service: ProviderSmokeService,
+  catalog: AgentRuntimeCatalog,
+  options: Pick<ProviderSmokeOptions, 'runtimeIds' | 'modelIds'>
+): Promise<boolean> {
+  const selectedRuntimeIds = new Set(options.runtimeIds);
+  const selectedModelRuntimeIds = new Set(
+    options.modelIds.map((modelId) => modelId.split(':', 1)[0]!)
+  );
+  const runtimes = catalog.runtimes.filter(({ preflight }) => {
+    const runtimeId = preflight.runtime.id;
+    if (
+      !preflight.readiness.canStart ||
+      preflight.capabilities.modelCatalog.activation !== 'EXPLICIT'
+    ) {
+      return false;
+    }
+    if (selectedRuntimeIds.size > 0) return selectedRuntimeIds.has(runtimeId);
+    return selectedModelRuntimeIds.size === 0 || selectedModelRuntimeIds.has(runtimeId);
+  });
+  for (const runtime of runtimes) {
+    await service.discoverAgentRuntimeModels(runtime.preflight.runtime.id);
+  }
+  return runtimes.length > 0;
 }
 
 async function runTarget(
@@ -904,12 +934,21 @@ function selectionAttestation(
     observedReasoningEffort,
     observationSource: String(observation.source)
   };
-  if (!observedModel || !observedModelProvider) {
+  if (!observedModel) {
+    return { attestation: 'REQUESTED_ONLY', ...details };
+  }
+  if (
+    !observedModelProvider &&
+    (target.model.modelProvider !== undefined ||
+      PROVIDER_DERIVED_OBSERVATION_SOURCES.has(observation.source))
+  ) {
     return { attestation: 'REQUESTED_ONLY', ...details };
   }
   const modelMatches =
     target.model.model === 'default' || observedModel === target.model.model;
-  const providerMatches = observedModelProvider === target.model.modelProvider;
+  const providerMatches =
+    target.model.modelProvider === undefined ||
+    observedModelProvider === target.model.modelProvider;
   if (!modelMatches || !providerMatches) {
     return { attestation: 'OBSERVED_MISMATCH', ...details };
   }
@@ -940,11 +979,14 @@ function observationMatchesTarget(
   target: ProviderSmokeTarget,
   settings: TaskSnapshot['agentSettingsObservations'][number]['settings']
 ): boolean {
-  if (!settings.model || !settings.modelProvider) return false;
+  if (!settings.model) return false;
   if (target.model.model !== 'default' && settings.model !== target.model.model) {
     return false;
   }
-  if (settings.modelProvider !== target.model.modelProvider) return false;
+  if (
+    target.model.modelProvider !== undefined &&
+    settings.modelProvider !== target.model.modelProvider
+  ) return false;
   return !target.reasoningEffort || settings.reasoningEffort === target.reasoningEffort;
 }
 
@@ -1332,7 +1374,7 @@ async function within<T>(
 }
 
 function formatTargetSelection(target: ProviderSmokeTarget): string {
-  return `${target.model.modelProvider}/${target.model.model}${
+  return `${target.model.modelProvider ?? 'provider-default'}/${target.model.model}${
     target.reasoningEffort ? ` at reasoning ${target.reasoningEffort}` : ''
   }`;
 }

@@ -159,11 +159,14 @@ reused across runs and reviews. PDFs, Office files, video, audio, archives,
 databases, and arbitrary binaries remain unsupported because they require a
 separately secured extraction or tool boundary.
 
-The adapter supplies a complete, collision-resistant permission profile through
-the existing thread-local config layer. It grants `:minimal`, the exact
-worktree, and exact verified task attachment files. Multi-agent V1/V2
-and memories are disabled in the same config. Runtime discovery proves this
-surface with a disposable ephemeral thread before selecting a Codex binary.
+For scoped execution, the adapter supplies a complete, collision-resistant
+permission profile through the existing thread-local config layer. It grants
+`:minimal`, the exact worktree, and exact verified task attachment files.
+Full access instead selects Codex's documented `:danger-full-access` built-in;
+Task Monki does not label a worktree-scoped custom profile as unrestricted.
+Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
+discovery proves the custom-profile surface with a disposable ephemeral thread
+before selecting a Codex binary.
 
 Thread create, resume, fork, each ordinary turn, recovery, and the explicit
 fork-plus-inline review path all require the returned active profile and sole
@@ -171,10 +174,11 @@ runtime workspace root before provider input. Live settings drift terminates
 the provider and fails active runs. Attachment reads therefore need no separate
 permission escalation or path expansion flow.
 
-Full access remains available for attachment-free tasks but is rejected when
-attachments are present. Attachment tasks also force network off and require
-Codex web search, MCP servers, and apps to be disabled because filesystem rules
-do not confine same-user external tools.
+Full access remains available for attachment-free tasks and requires the
+runtime to attest the exact `:danger-full-access` profile and sole Task Monki
+worktree root. It is rejected when attachments are present. Attachment tasks
+also force network off and require Codex web search, MCP servers, and apps to be
+disabled because filesystem rules do not confine same-user external tools.
 
 Codex serializes a submitted `localImage` into an image data URL in its
 model-facing conversation history. Opaque delivery paths can still occur in
@@ -200,7 +204,7 @@ than inferred from Codex events.
   - Another attempt after a previous run.
 - `REVIEW`
   - Detached read-only quality gate. It inspects the current diff and stores
-    `projection.codexReview`.
+    `projection.agentReview`.
 - Provider-origin child runs
   - Observed child/subagent activity. These do not replace the task workflow.
 

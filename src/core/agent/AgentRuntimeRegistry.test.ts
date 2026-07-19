@@ -57,7 +57,7 @@ describe('AgentRuntimeRegistry', () => {
       })
     ]);
     expect(catalog.models).toEqual([
-      expect.objectContaining({ runtimeId: 'codex', modelProvider: 'openai' })
+      expect.not.objectContaining({ modelProvider: expect.anything() })
     ]);
   });
 
@@ -352,7 +352,7 @@ function model(runtimeId: string): AgentModel {
   return {
     id: `${runtimeId}:test/model`,
     runtimeId,
-    modelProvider: runtimeId === 'codex' ? 'openai' : runtimeId,
+    ...(runtimeId === 'codex' ? {} : { modelProvider: runtimeId }),
     model: 'test/model',
     displayName: `${runtimeId} model`,
     hidden: false,
@@ -381,6 +381,7 @@ function unsupportedCapabilities(runtimeId: string): AgentRuntimeCapabilities {
     userInputRequests: unsupported,
     goals: unsupported,
     plans: unsupported,
+    detachedReview: unsupported,
     review: unsupported,
     subagents: unsupported,
     backgroundTerminals: unsupported,

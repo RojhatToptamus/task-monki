@@ -177,6 +177,24 @@ export function redactCredentialValue<T>(
   return redacted as T;
 }
 
+/** Length of a suffix that may become an exact credential in the next chunk. */
+export function credentialPrefixCarryLength(
+  value: string,
+  sensitiveValues: readonly string[]
+): number {
+  let longest = 0;
+  for (const sensitive of sensitiveValues) {
+    const candidateLimit = Math.min(value.length, sensitive.length - 1);
+    for (let length = candidateLimit; length > longest; length -= 1) {
+      if (value.endsWith(sensitive.slice(0, length))) {
+        longest = length;
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
 function normalizedSensitiveValues(values: readonly string[]): string[] {
   return [...new Set(values)]
     .filter((value) => value.length > 0)

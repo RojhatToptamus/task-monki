@@ -10,7 +10,6 @@ import type {
   TaskIteration,
   WorktreeRecord
 } from '../../shared/contracts';
-import { TASK_STORE_SCHEMA_VERSION } from '../../shared/contracts';
 import { ArtifactAppendAmbiguousError, FileTaskStore } from './FileTaskStore';
 import { createDomainEvent } from './domainEvent';
 
@@ -1630,6 +1629,16 @@ describe('FileTaskStore', () => {
       prompt: 'Require explicit completion.',
       repositoryPath: dir
     });
+    const archivedTask = await store.createTask({
+      title: 'Archived task',
+      prompt: 'Retain remote evidence without reactivating the task.',
+      repositoryPath: dir
+    });
+    const mismatchedTask = await store.createTask({
+      title: 'Mismatched merge task',
+      prompt: 'Reject a merge snapshot for another head.',
+      repositoryPath: dir
+    });
     const mergedRecords = await store.createIterationAndWorktree({
       task: mergedTask,
       branchName: 'codex/merged-task',
@@ -1660,6 +1669,18 @@ describe('FileTaskStore', () => {
       worktreePath: path.join(dir, 'manual'),
       baseSha: 'base'
     });
+    const archivedRecords = await store.createIterationAndWorktree({
+      task: archivedTask,
+      branchName: 'codex/archived-task',
+      worktreePath: path.join(dir, 'archived'),
+      baseSha: 'base'
+    });
+    const mismatchedRecords = await store.createIterationAndWorktree({
+      task: mismatchedTask,
+      branchName: 'codex/mismatched-task',
+      worktreePath: path.join(dir, 'mismatched'),
+      baseSha: 'base'
+    });
 
     const storePath = path.join(dir, 'store.json');
     const persisted = JSON.parse(await fs.readFile(storePath, 'utf8')) as {
@@ -1678,6 +1699,7 @@ describe('FileTaskStore', () => {
     await fs.writeFile(storePath, JSON.stringify(persisted, null, 2));
 
     const reloaded = new FileTaskStore(dir);
+    await reloaded.transitionTask(archivedTask.id, 'ARCHIVED', 'Archive before merge refresh.');
     await recordOpenPullRequest(reloaded, mergedTask.id, mergedRecords.iteration, mergedRecords.worktree, {
       mergeStatus: 'MERGED'
     });
@@ -1721,6 +1743,25 @@ describe('FileTaskStore', () => {
       manualRecords.worktree,
       { mergeStatus: 'MERGED', pullRequestNumber: 86 }
     );
+    await recordOpenPullRequest(
+      reloaded,
+      archivedTask.id,
+      archivedRecords.iteration,
+      archivedRecords.worktree,
+      { mergeStatus: 'MERGED', pullRequestNumber: 87 }
+    );
+    await recordOpenPullRequest(
+      reloaded,
+      mismatchedTask.id,
+      mismatchedRecords.iteration,
+      mismatchedRecords.worktree,
+      {
+        mergeStatus: 'MERGED',
+        mergeHeadSha: 'merged-head',
+        pullRequestHeadSha: 'stale-head',
+        pullRequestNumber: 88
+      }
+    );
 
     const snapshot = await reloaded.snapshot();
     expect(snapshot.tasks.find((task) => task.id === mergedTask.id)).toMatchObject({
@@ -1747,6 +1788,70 @@ describe('FileTaskStore', () => {
       completionPolicy: 'MANUAL',
       workflowPhase: 'READY',
       resolution: 'NONE'
+    });
+    expect(snapshot.tasks.find((task) => task.id === archivedTask.id)).toMatchObject({
+      completionPolicy: 'MERGED',
+      workflowPhase: 'ARCHIVED',
+      resolution: 'NONE',
+      projection: { merge: 'MERGED' }
+    });
+    expect(snapshot.tasks.find((task) => task.id === mismatchedTask.id)).toMatchObject({
+      completionPolicy: 'MERGED',
+      workflowPhase: 'READY',
+      resolution: 'NONE',
+      projection: { merge: 'MERGED' }
+    });
+  });
+
+  it('does not auto-complete a merged task whose implementation failed', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-store-pr-retry-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Retry before review',
+      prompt: 'Make the requested change.',
+      repositoryPath: dir
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/retry-before-merge',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: task.runtimeId
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    await store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_FAILED',
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: run.id,
+        source: 'provider',
+        payload: { error: 'Provider implementation failed.' }
+      })
+    );
+
+    await recordOpenPullRequest(store, task.id, iteration, worktree, {
+      mergeStatus: 'MERGED'
+    });
+
+    expect(await store.getTask(task.id)).toMatchObject({
+      completionPolicy: 'MERGED',
+      workflowPhase: 'IN_PROGRESS',
+      resolution: 'NONE',
+      projection: {
+        merge: 'MERGED',
+        agentRun: 'FAILED'
+      }
     });
   });
 
@@ -2074,8 +2179,8 @@ describe('FileTaskStore', () => {
         source: 'provider',
         payload: {
           mode: 'REVIEW',
-          codexReviewResult: {
-            schemaVersion: 'codex-review/v1',
+          agentReviewResult: {
+            schemaVersion: 'agent-review/v1',
             verdict: 'PASSED',
             summary: 'No blocking issues found.',
             findings: []
@@ -2084,11 +2189,97 @@ describe('FileTaskStore', () => {
       })
     );
 
-    expect((await store.getTask(task.id))?.projection.codexReview?.status).toBe('PASSED');
+    expect((await store.getTask(task.id))?.projection.agentReview?.status).toBe('PASSED');
     await store.close();
     const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
-    expect(reloadedTask.projection.codexReview?.status).toBe('PASSED');
-    expect(reloadedTask.projection.codexReview?.result?.verdict).toBe('PASSED');
+    expect(reloadedTask.projection.agentReview?.status).toBe('PASSED');
+    expect(reloadedTask.projection.agentReview?.result?.verdict).toBe('PASSED');
+  });
+
+  it.each([
+    ['review run', 'runId'],
+    ['source run', 'sourceRunId'],
+    ['final artifact', 'finalArtifactId']
+  ] as const)('rejects an agent review whose %s belongs to another task', async (_label, field) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-review-ownership-'));
+    const store = new FileTaskStore(dir);
+
+    const createReview = async (title: string) => {
+      const task = await store.createTask({
+        title,
+        prompt: 'Implement and review.',
+        repositoryPath: dir
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: `codex/${title.toLowerCase().replaceAll(' ', '-')}`,
+        worktreePath: path.join(dir, task.id),
+        baseSha: 'base'
+      });
+      const sourceSession = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: task.runtimeId
+      });
+      const sourceRun = await store.createRun({
+        task,
+        session: sourceSession,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.transitionTask(task.id, 'REVIEW', 'Implementation complete.');
+      const reviewSession = await store.createAgentSession({
+        task: (await store.getTask(task.id))!,
+        iteration,
+        worktree,
+        runtimeId: task.runtimeId,
+        role: 'REVIEW',
+        parentSessionId: sourceSession.id,
+        forkedFromSessionId: sourceSession.id
+      });
+      const reviewRun = await store.createRun({
+        task: (await store.getTask(task.id))!,
+        session: reviewSession,
+        mode: 'REVIEW',
+        prompt: 'Review the implementation.',
+        continuedFromRunId: sourceRun.id
+      });
+      const finalArtifact = await store.writeFinalArtifact(
+        task.id,
+        reviewRun.id,
+        'Review complete.\n'
+      );
+      return { task, sourceRun, reviewRun, finalArtifact };
+    };
+
+    const target = await createReview('Target review');
+    const foreign = await createReview('Foreign review');
+    await store.close();
+
+    const foreignId = {
+      runId: foreign.reviewRun.id,
+      sourceRunId: foreign.sourceRun.id,
+      finalArtifactId: foreign.finalArtifact.id
+    }[field];
+    const storePath = path.join(dir, 'store.json');
+    const persisted = JSON.parse(await fs.readFile(storePath, 'utf8'));
+    persisted.tasks = persisted.tasks.map((task: any) =>
+      task.id === target.task.id
+        ? {
+            ...task,
+            projection: {
+              ...task.projection,
+              agentReview: { ...task.projection.agentReview, [field]: foreignId }
+            }
+          }
+        : task
+    );
+    await fs.writeFile(storePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    await expect(new FileTaskStore(dir).snapshot()).rejects.toThrow(
+      'task agent review'
+    );
   });
 
   it.each([
@@ -2185,10 +2376,15 @@ describe('FileTaskStore', () => {
   it.each([
     { mode: 'ANALYSIS' as const, expectedPhase: 'IN_PROGRESS' as const },
     { mode: 'COMPACTION' as const, expectedPhase: 'IN_PROGRESS' as const },
-    { mode: 'FOLLOW_UP' as const, expectedPhase: 'REVIEW' as const }
+    { mode: 'FOLLOW_UP' as const, expectedPhase: 'REVIEW' as const },
+    {
+      mode: 'RETRY' as const,
+      expectedPhase: 'IN_PROGRESS' as const,
+      blockReason: 'A provider execution request was declined and produced no Git change.'
+    }
   ])(
     'keeps restart workflow repair anchored to the exact current $mode run',
-    async ({ mode, expectedPhase }) => {
+    async ({ mode, expectedPhase, blockReason }) => {
       const dir = await fs.mkdtemp(
         path.join(os.tmpdir(), `task-manager-historical-review-${mode.toLowerCase()}-`)
       );
@@ -2257,8 +2453,8 @@ describe('FileTaskStore', () => {
           source: 'provider',
           payload: {
             mode: 'REVIEW',
-            codexReviewResult: {
-              schemaVersion: 'codex-review/v1',
+            agentReviewResult: {
+              schemaVersion: 'agent-review/v1',
               verdict: 'PASSED',
               summary: 'The implementation passed review.',
               findings: []
@@ -2287,17 +2483,32 @@ describe('FileTaskStore', () => {
           payload: { terminalStatus: 'completed' }
         })
       );
+      if (blockReason) {
+        await store.appendEvent(
+          createDomainEvent({
+            type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
+            taskId: task.id,
+            iterationId: iteration.id,
+            runId: currentRun.id,
+            worktreeId: worktree.id,
+            source: 'git',
+            payload: { reason: blockReason }
+          })
+        );
+      }
 
       const beforeRestart = (await store.getTask(task.id))!;
       expect(beforeRestart.workflowPhase).toBe(expectedPhase);
       expect(beforeRestart.currentRunId).toBe(currentRun.id);
-      expect(beforeRestart.projection.codexReview?.status).toBe('STALE');
+      expect(beforeRestart.projection.agentReview?.status).toBe('STALE');
+      expect(beforeRestart.projection.implementationRetry?.reason).toBe(blockReason);
 
       await store.close();
       const reloadedTask = (await new FileTaskStore(dir).getTask(task.id))!;
       expect(reloadedTask.workflowPhase).toBe(expectedPhase);
       expect(reloadedTask.currentRunId).toBe(currentRun.id);
-      expect(reloadedTask.projection.codexReview?.status).toBe('STALE');
+      expect(reloadedTask.projection.agentReview?.status).toBe('STALE');
+      expect(reloadedTask.projection.implementationRetry?.reason).toBe(blockReason);
     }
   );
 
@@ -2351,8 +2562,8 @@ describe('FileTaskStore', () => {
     const storedTask = (await store.getTask(task.id))!;
     expect(storedTask.workflowPhase).toBe('REVIEW');
     expect(storedTask.currentRunId).toBe(implementationRun.id);
-    expect(storedTask.projection.codexReview?.status).toBe('RUNNING');
-    expect(storedTask.projection.codexReview?.runId).toBe(reviewRun.id);
+    expect(storedTask.projection.agentReview?.status).toBe('RUNNING');
+    expect(storedTask.projection.agentReview?.runId).toBe(reviewRun.id);
   });
 
   it('repairs persisted active review runs that were incorrectly moved to in progress', async () => {
@@ -2426,7 +2637,7 @@ describe('FileTaskStore', () => {
             projection: {
               ...candidate.projection,
               agentRun: 'RUNNING',
-              codexReview: undefined
+              agentReview: undefined
             }
           }
         : candidate
@@ -2439,8 +2650,8 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.workflowPhase).toBe('REVIEW');
     expect(repairedTask?.currentRunId).toBe(implementationRun.id);
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.codexReview?.status).toBe('RUNNING');
-    expect(repairedTask?.projection.codexReview?.runId).toBe(reviewRun.id);
+    expect(repairedTask?.projection.agentReview?.status).toBe('RUNNING');
+    expect(repairedTask?.projection.agentReview?.runId).toBe(reviewRun.id);
   });
 
   it('repairs interrupting reviews whose provider session is already idle', async () => {
@@ -2524,7 +2735,7 @@ describe('FileTaskStore', () => {
             projection: {
               ...candidate.projection,
               agentRun: 'COMPLETED',
-              codexReview: {
+              agentReview: {
                 status: 'RUNNING',
                 runId: reviewRun.id,
                 summary: 'Codex is reviewing the current diff.',
@@ -2547,8 +2758,8 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.workflowPhase).toBe('REVIEW');
     expect(repairedTask?.currentRunId).toBe(implementationRun.id);
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.codexReview?.status).toBe('CANCELED');
-    expect(repairedTask?.projection.codexReview?.summary).toBe(
+    expect(repairedTask?.projection.agentReview?.status).toBe('CANCELED');
+    expect(repairedTask?.projection.agentReview?.summary).toBe(
       'Agent review was stopped before completion.'
     );
   });
@@ -2631,7 +2842,7 @@ describe('FileTaskStore', () => {
             projection: {
               ...candidate.projection,
               agentRun: 'COMPLETED',
-              codexReview: {
+              agentReview: {
                 status: 'RUNNING',
                 runId: reviewRun.id,
                 summary: 'Codex is reviewing the current diff.',
@@ -2654,8 +2865,8 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.workflowPhase).toBe('REVIEW');
     expect(repairedTask?.currentRunId).toBe(implementationRun.id);
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.codexReview?.status).toBe('FAILED');
-    expect(repairedTask?.projection.codexReview?.summary).toBe(
+    expect(repairedTask?.projection.agentReview?.status).toBe('FAILED');
+    expect(repairedTask?.projection.agentReview?.summary).toBe(
       'Agent review stopped sending updates before Task Monki received a terminal event.'
     );
   });
@@ -2710,7 +2921,7 @@ describe('FileTaskStore', () => {
 
 \`\`\`json
 {
-  "schemaVersion": "codex-review/v1",
+  "schemaVersion": "agent-review/v1",
   "verdict": "NEEDS_CHANGES",
   "summary": "A keyboard shortcut listener leaks.",
   "findings": [
@@ -2751,7 +2962,7 @@ describe('FileTaskStore', () => {
             projection: {
               ...candidate.projection,
               agentRun: 'RUNNING',
-              codexReview: undefined
+              agentReview: undefined
             }
           }
         : candidate
@@ -2764,11 +2975,11 @@ describe('FileTaskStore', () => {
     expect(repairedTask?.workflowPhase).toBe('REVIEW');
     expect(repairedTask?.currentRunId).toBe(implementationRun.id);
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.codexReview?.status).toBe('NEEDS_CHANGES');
-    expect(repairedTask?.projection.codexReview?.summary).toBe(
+    expect(repairedTask?.projection.agentReview?.status).toBe('NEEDS_CHANGES');
+    expect(repairedTask?.projection.agentReview?.summary).toBe(
       'A keyboard shortcut listener leaks.'
     );
-    expect(repairedTask?.projection.codexReview?.result?.findings[0]?.id).toBe(
+    expect(repairedTask?.projection.agentReview?.result?.findings[0]?.id).toBe(
       'listener-leak'
     );
   });
@@ -2857,7 +3068,7 @@ Full review comments:
             projection: {
               ...candidate.projection,
               agentRun: 'COMPLETED',
-              codexReview: {
+              agentReview: {
                 status: 'INCONCLUSIVE',
                 runId: reviewRun.id,
                 sourceRunId: implementationRun.id,
@@ -2876,12 +3087,12 @@ Full review comments:
     expect(repairedTask?.workflowPhase).toBe('REVIEW');
     expect(repairedTask?.currentRunId).toBe(implementationRun.id);
     expect(repairedTask?.projection.agentRun).toBe('COMPLETED');
-    expect(repairedTask?.projection.codexReview?.status).toBe('NEEDS_CHANGES');
-    expect(repairedTask?.projection.codexReview?.summary).toBe(
+    expect(repairedTask?.projection.agentReview?.status).toBe('NEEDS_CHANGES');
+    expect(repairedTask?.projection.agentReview?.summary).toBe(
       'The patch introduces review-flow regressions that can bypass the review gate.'
     );
-    expect(repairedTask?.projection.codexReview?.result?.findings).toHaveLength(2);
-    expect(repairedTask?.projection.codexReview?.result?.findings[0]).toMatchObject({
+    expect(repairedTask?.projection.agentReview?.result?.findings).toHaveLength(2);
+    expect(repairedTask?.projection.agentReview?.result?.findings[0]).toMatchObject({
       severity: 'MAJOR',
       title: 'Pause source-run controls while reviews run',
       path: 'src/renderer/ui/AgentControlPanel.tsx',

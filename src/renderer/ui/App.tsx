@@ -531,7 +531,7 @@ export function App() {
     (runtime) =>
       runtime.preflight.readiness.canStart &&
       (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity === 'stable')
+        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
   );
   const configuredReviewRuntimeId =
     appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;

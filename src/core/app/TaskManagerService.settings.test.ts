@@ -202,17 +202,19 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
     await service.shutdown();
   });
 
-  it('defers provider restart while a run requires recovery', async () => {
+  it('applies deferred Codex settings after the last Codex run terminalizes', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-recovery-'));
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
     const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
     const service = createCodexSettingsTestService({
       store,
       repositoryPath: dir,
-      executable
+      executable,
+      events
     });
     await service.init();
     try {
@@ -256,6 +258,86 @@ describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_M
       ).toContainEqual(
         expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
       );
+
+      await store.updateRun(run.id, { status: 'FAILED' });
+      events.emit({
+        type: 'run.terminal',
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: run.id,
+        worktreeId: worktree.id,
+        payload: { status: 'FAILED' },
+        at: new Date().toISOString()
+      });
+
+      const restarted = await waitForAgentServerSnapshot(store, 2, true);
+      expect(codexServers(restarted).map((server) => server.status).sort()).toEqual([
+        'EXITED',
+        'READY'
+      ]);
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).not.toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('restarts idle Codex while another provider owns active work', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-other-run-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable,
+      additionalAdapters: [opencode]
+    });
+    await service.init();
+    try {
+      const task = await store.createTask({
+        title: 'Other provider stays active',
+        prompt: 'Keep OpenCode active.',
+        repositoryPath: dir,
+        runtimeId: 'opencode',
+        agentSettings: { runtimeId: 'opencode' }
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/other-provider-active',
+        worktreePath: path.join(dir, 'other-worktree'),
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'opencode'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.updateRun(run.id, { status: 'RUNNING' });
+
+      await service.updateAppSettings({
+        codexExternalTools: { webSearchMode: 'cached' }
+      });
+
+      const restarted = await waitForAgentServerSnapshot(store, 2, true);
+      expect(codexServers(restarted).map((server) => server.status).sort()).toEqual([
+        'EXITED',
+        'READY'
+      ]);
+      expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
     } finally {
       await service.shutdown();
     }
@@ -959,8 +1041,10 @@ function createCodexSettingsTestService(input: {
   store: FileTaskStore;
   repositoryPath: string;
   executable: string;
+  events?: AppEventBus;
+  additionalAdapters?: readonly AgentRuntimeAdapter[];
 }): TaskManagerService {
-  const events = new AppEventBus();
+  const events = input.events ?? new AppEventBus();
   const codex = new CodexAppServerAdapter(input.store, events, {
     cwd: input.repositoryPath,
     executable: input.executable,
@@ -971,16 +1055,22 @@ function createCodexSettingsTestService(input: {
     codexPath: input.executable,
     appSettingsStore: new MemoryAppSettingsStore(),
     worktreeRoot: path.join(input.repositoryPath, 'worktrees'),
-    agentRuntimeAdapters: [codex]
+    agentRuntimeAdapters: [codex, ...(input.additionalAdapters ?? [])]
   });
 }
 
 async function waitForAgentServerSnapshot(
-  store: FileTaskStore
+  store: FileTaskStore,
+  minimumCodexServers = 1,
+  requireReady = false
 ): Promise<Awaited<ReturnType<FileTaskStore['snapshot']>>> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const snapshot = await store.snapshot();
-    if (codexServers(snapshot).length > 0) {
+    const servers = codexServers(snapshot);
+    if (
+      servers.length >= minimumCodexServers &&
+      (!requireReady || servers.some((server) => server.status === 'READY'))
+    ) {
       return snapshot;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));

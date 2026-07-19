@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { RunRecord, Task } from '../../shared/contracts';
+import { createInitialProjection, type RunRecord, type Task } from '../../shared/contracts';
 import { shouldShowMoveToReviewHeaderAction } from './TaskDetail';
 
 describe('TaskDetail Move to review header action', () => {
@@ -19,12 +19,26 @@ describe('TaskDetail Move to review header action', () => {
 
     expect(shouldShowMoveToReviewHeaderAction(task, run)).toBe(true);
   });
+
+  it('hides the action when Task Monki blocked review after provider completion', () => {
+    const task = taskFixture();
+    task.projection.requestedAction = 'FAILED';
+    task.projection.agentRun = 'COMPLETED';
+    task.projection.implementationRetry = {
+      runId: 'current-run',
+      reason: 'Retry before review.'
+    };
+    const run = runFixture({ mode: 'IMPLEMENTATION' });
+
+    expect(shouldShowMoveToReviewHeaderAction(task, run)).toBe(false);
+  });
 });
 
-function taskFixture(): Pick<Task, 'currentRunId' | 'workflowPhase'> {
+function taskFixture(): Pick<Task, 'currentRunId' | 'workflowPhase' | 'projection'> {
   return {
     currentRunId: 'current-run',
-    workflowPhase: 'IN_PROGRESS'
+    workflowPhase: 'IN_PROGRESS',
+    projection: createInitialProjection('2026-07-19T00:00:00.000Z')
   };
 }
 

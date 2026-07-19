@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
-  codexReviewStatusFromResult,
-  parseCodexReviewResult
-} from './CodexReviewContract';
+  agentReviewStatusFromResult,
+  parseAgentReviewResult
+} from './AgentReviewContract';
 
-describe('CodexReviewContract', () => {
+describe('AgentReviewContract', () => {
   it('parses the fenced structured review result', () => {
-    const result = parseCodexReviewResult(`
+    const result = parseAgentReviewResult(`
 Review found one blocker.
 
 \`\`\`json
 {
-  "schemaVersion": "codex-review/v1",
+  "schemaVersion": "agent-review/v1",
   "verdict": "NEEDS_CHANGES",
   "summary": "Keyboard shortcut handling leaks listeners.",
   "findings": [
@@ -32,11 +32,11 @@ Review found one blocker.
     expect(result?.summary).toBe('Keyboard shortcut handling leaks listeners.');
     expect(result?.findings[0]?.severity).toBe('BLOCKER');
     expect(result?.findings[0]?.path).toBe('src/renderer/ui/App.tsx');
-    expect(codexReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 
   it('derives needs-changes from blocker or major findings even with a passing verdict', () => {
-    const result = parseCodexReviewResult(`{
+    const result = parseAgentReviewResult(`{
       "verdict": "PASSED",
       "summary": "Provider verdict is inconsistent with findings.",
       "findings": [
@@ -49,11 +49,11 @@ Review found one blocker.
     }`);
 
     expect(result?.findings[0]?.id).toBe('major-shortcut-shadows-reload');
-    expect(codexReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 
   it('parses native Codex review comments when no JSON result is returned', () => {
-    const result = parseCodexReviewResult(`
+    const result = parseAgentReviewResult(`
 The patch introduces review-flow regressions that can bypass the review gate.
 
 Full review comments:
@@ -83,6 +83,6 @@ Full review comments:
       line: 96,
       endLine: 99
     });
-    expect(codexReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
+    expect(agentReviewStatusFromResult(result)).toBe('NEEDS_CHANGES');
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   interactionActionsForAcpOptions,
   mapAcpStopReason,
+  nativeSelectionOptionsValue,
   permissionOutcomeForDecision,
   requestedNativeConfigValues
 } from './AcpEventMapper';
@@ -37,9 +38,9 @@ describe('ACP event mapping', () => {
 
   it.each([
     ['ACCEPT', 'provider-once-71'],
-    ['ACCEPT_FOR_SESSION', 'provider-always-23'],
+    ['ACCEPT', 'provider-always-23'],
     ['DECLINE', 'provider-reject-11'],
-    ['DECLINE_FOR_SESSION', 'provider-never-99']
+    ['DECLINE', 'provider-never-99']
   ] as const)('maps %s back to the exact opaque option ID', (action, optionId) => {
     expect(
       permissionOutcomeForDecision(options, {
@@ -59,14 +60,14 @@ describe('ACP event mapping', () => {
     expect(
       permissionOutcomeForDecision(duplicateKindOptions, {
         interactionType: 'COMMAND_APPROVAL',
-        action: 'ACCEPT_FOR_SESSION',
+        action: 'ACCEPT',
         providerOptionId: 'allow-edits-session'
       })
     ).toEqual({ outcome: 'selected', optionId: 'allow-edits-session' });
     expect(() =>
       permissionOutcomeForDecision(duplicateKindOptions, {
         interactionType: 'COMMAND_APPROVAL',
-        action: 'ACCEPT_FOR_SESSION'
+        action: 'ACCEPT'
       })
     ).toThrow('exact provider option ID');
   });
@@ -98,6 +99,42 @@ describe('ACP event mapping', () => {
         }
       })
     ).toEqual({});
+  });
+
+  it('does not persist a stale mode-category config beside the native mode', () => {
+    expect(
+      nativeSelectionOptionsValue({
+        sessionId: 'provider-session',
+        modes: {
+          currentModeId: 'plan',
+          availableModes: [
+            { id: 'code', name: 'Code' },
+            { id: 'plan', name: 'Plan' }
+          ]
+        },
+        models: null,
+        configOptions: [
+          {
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: 'code',
+            options: [
+              { value: 'code', name: 'Code' },
+              { value: 'plan', name: 'Plan' }
+            ]
+          },
+          {
+            id: 'telemetry',
+            name: 'Telemetry',
+            category: 'other',
+            type: 'boolean',
+            currentValue: false
+          }
+        ]
+      })
+    ).toEqual({ modeId: 'plan', configValues: { telemetry: false } });
   });
 
   it('fails closed instead of silently downgrading Task Monki security settings', () => {

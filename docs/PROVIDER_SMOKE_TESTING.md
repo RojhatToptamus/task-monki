@@ -2,8 +2,10 @@
 
 Date: 2026-07-14
 
-`npm run smoke:providers` verifies real provider/model execution through
-`TaskManagerService`. It is intentionally separate from deterministic seeded UI
+`npm run smoke:providers` verifies real provider/model connectivity, selection,
+streaming, and terminal lifecycle through `TaskManagerService`. It deliberately
+does not verify tool execution or repository mutation. It is intentionally
+separate from deterministic seeded UI
 testing: provider smoke runs use a caller-supplied disposable Git repository,
 real runtime discovery, real Task Monki task/worktree/session/run records, and
 real provider quota or credits.
@@ -57,6 +59,9 @@ Run `npm run smoke:providers -- --help` for all options.
 ## What the harness verifies
 
 - Runtime and model discovery use the same registry exposed to the app.
+- A selected runtime whose catalog requires explicit activation is discovered
+  once before its models are queued. The runtime adapter remains responsible
+  for reusing or invalidating its process-local catalog cache.
 - `DISCOVERED`, `READY`, and `DEGRADED` runtimes are eligible because
   on-demand runtimes may not become `READY` until their first native session.
 - Visible model catalogs are refreshed after each run so models learned during

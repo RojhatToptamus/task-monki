@@ -63,6 +63,7 @@ import {
 import { redactExternalPermissionPaths } from '../AgentPermissionRedaction';
 import {
   REDACTED_CREDENTIAL,
+  credentialPrefixCarryLength,
   redactCredentialText,
   redactCredentialValue
 } from '../AgentCredentialRedaction';
@@ -131,11 +132,11 @@ import {
   buildInteractionPolicy,
   interactionTerminalStatus
 } from '../AgentInteractionPolicy';
-import { CODEX_REVIEW_DEVELOPER_INSTRUCTIONS } from '../../../shared/promptTemplates';
+import { AGENT_REVIEW_DEVELOPER_INSTRUCTIONS } from '../../../shared/promptTemplates';
 import {
-  codexReviewStatusFromResult,
-  parseCodexReviewResult
-} from '../../review/CodexReviewContract';
+  agentReviewStatusFromResult,
+  parseAgentReviewResult
+} from '../../review/AgentReviewContract';
 import { PromptRefinementService } from '../../prompt/PromptRefinementService';
 const ACTIVE_RUN_STATES: RunRecord['status'][] = [
   'QUEUED',
@@ -404,21 +405,16 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           : 'Codex did not report a default model.'
       );
     }
-    // `model/list` does not report the Codex model-provider dimension. Keep an
-    // explicit provider selected by an existing task/session instead of
-    // incorrectly reclassifying every Codex model as the catalog fallback.
-    const modelProvider =
-      input.settings.modelProvider && input.settings.modelProvider !== 'codex'
-        ? input.settings.modelProvider
-        : model.modelProvider;
-    const resolvedModel =
-      modelProvider === model.modelProvider
-        ? model
-        : {
-            ...model,
-            id: `${this.descriptor.id}:${modelProvider}/${model.model}`,
-            modelProvider
-          };
+    // `model/list` does not report the provider dimension. Preserve an
+    // explicit provider, otherwise let App Server use its configured provider.
+    const modelProvider = input.settings.modelProvider;
+    const resolvedModel = modelProvider
+      ? {
+          ...model,
+          id: `${this.descriptor.id}:${modelProvider}/${model.model}`,
+          modelProvider
+        }
+      : model;
     assertModelSupportsAttachments(model, input.attachments);
     const effort = input.settings.reasoningEffort ?? model.defaultReasoningEffort;
     if (effort && !model.supportedReasoningEfforts.includes(effort)) {
@@ -519,6 +515,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     await this.assertProviderPermissionProfileOrFence({
       sessionId: session.id,
+      settings,
       worktreePath: session.worktreePath,
       operation: 'thread/start',
       providerReference: response.thread.id,
@@ -1044,6 +1041,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     await this.assertProviderPermissionProfileOrFence({
       sessionId: target.id,
+      settings: input.settings,
       worktreePath: target.worktreePath,
       operation: 'thread/fork',
       providerReference: response.thread.id,
@@ -1107,7 +1105,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       assertModelSupportsAttachments(selectedModel, attachments);
     }
     const attachmentDelivery = prepareAgentAttachmentDelivery({
-      prompt: CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
+      prompt: AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
       attachments: await verifyAgentTurnAttachments(attachments),
       includeLocalImages: false
     });
@@ -1137,6 +1135,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     await this.assertProviderPermissionProfileOrFence({
       sessionId: reviewSession.id,
+      settings,
       worktreePath: reviewSession.worktreePath,
       operation: 'thread/fork',
       providerReference: reviewBase.thread.id,
@@ -1563,6 +1562,28 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     };
     this.emitProviderUpdate();
     await this.initialize();
+    this.emitProviderUpdate();
+  }
+
+  async applyPendingRuntimeConfigIfIdle(): Promise<boolean> {
+    if (!this.runtimeConfigRestartPending) {
+      return false;
+    }
+    const snapshot = await this.store.snapshot();
+    if (
+      snapshot.runs.some(
+        (run) =>
+          run.runtimeId === this.descriptor.id && ACTIVE_RUN_STATES.includes(run.status)
+      )
+    ) {
+      return false;
+    }
+    await this.updateRuntimeConfig({
+      executable: this.supervisorOptions.executable,
+      toolSettings: this.externalToolSettings,
+      restart: true
+    });
+    return true;
   }
 
   getProviderState(): { preflight: AgentPreflight; models: AgentModel[]; refreshedAt: string } {
@@ -1592,6 +1613,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
 
   private async assertProviderPermissionProfileOrFence(input: {
     sessionId: string;
+    settings: AgentExecutionSettings;
     worktreePath: string;
     operation: string;
     providerReference: string;
@@ -1600,6 +1622,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     try {
       assertProviderPermissionProfile(
         input.sessionId,
+        input.settings,
         input.worktreePath,
         input.response
       );
@@ -2936,6 +2959,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       try {
         assertCodexActivePermissionProfile(
           session.id,
+          session.requestedSettings.sandbox,
           settings.activePermissionProfile
         );
       } catch (error) {
@@ -3551,8 +3575,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
       : undefined;
     const safeTurn = this.redactProviderValue(turn);
     const reviewResult =
-      run.mode === 'REVIEW' ? parseCodexReviewResult(safeFinalMessage) : undefined;
-    const codexReviewStatus = codexReviewStatusFromResult(reviewResult);
+      run.mode === 'REVIEW' ? parseAgentReviewResult(safeFinalMessage) : undefined;
+    const agentReviewStatus = agentReviewStatusFromResult(reviewResult);
     const finalArtifact = await this.store.writeFinalArtifact(
       run.taskId,
       run.id,
@@ -3583,8 +3607,8 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
           error: safeTurn.error?.message,
           finalArtifactId: finalArtifact.id,
           terminalReason: safeTurn.error?.message,
-          codexReviewStatus,
-          codexReviewResult: reviewResult
+          agentReviewStatus,
+          agentReviewResult: reviewResult
         }
       }),
       ACTIVE_RUN_STATES
@@ -4171,6 +4195,7 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter {
     }
     await this.assertProviderPermissionProfileOrFence({
       sessionId: session.id,
+      settings,
       worktreePath: session.worktreePath,
       operation: 'thread/resume',
       providerReference: response.thread.id,
@@ -4343,27 +4368,6 @@ function redactOptionalProviderText(
   return value ? redactCredentialText(value, sensitiveValues) : undefined;
 }
 
-/**
- * Retains only a suffix that could still become an inherited credential when
- * the next chunk from the same provider stream arrives.
- */
-function credentialPrefixCarryLength(
-  value: string,
-  sensitiveValues: readonly string[]
-): number {
-  let longest = 0;
-  for (const sensitive of sensitiveValues) {
-    const candidateLimit = Math.min(value.length, sensitive.length - 1);
-    for (let length = candidateLimit; length > longest; length -= 1) {
-      if (value.endsWith(sensitive.slice(0, length))) {
-        longest = length;
-        break;
-      }
-    }
-  }
-  return longest;
-}
-
 function toApprovalPolicy(
   settings: AgentExecutionSettings
 ): 'on-request' | 'never' {
@@ -4420,11 +4424,13 @@ function postAcknowledgementPersistenceError(
 
 function assertProviderPermissionProfile(
   sessionId: string,
+  settings: AgentExecutionSettings,
   worktreePath: string,
   response: unknown
 ): void {
   assertCodexPermissionProfileEvidence({
     sessionId,
+    sandbox: settings.sandbox,
     worktreePath,
     response: response as CodexPermissionProfileEvidence
   });

@@ -441,7 +441,7 @@ describe('AgentOrchestrator Phase 4', () => {
       terminalReason: 'provider review failed to start'
     });
     expect(failedReview.finalArtifactId).toBeTruthy();
-    expect(snapshot.tasks[0]?.projection.codexReview).toMatchObject({
+    expect(snapshot.tasks[0]?.projection.agentReview).toMatchObject({
       status: 'FAILED',
       runId: failedReview.id,
       finalArtifactId: failedReview.finalArtifactId,

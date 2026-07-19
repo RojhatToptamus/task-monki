@@ -1,10 +1,13 @@
 import type {
   AgentRunStatus,
-  CodexReviewGateStatus,
+  AgentReviewGateStatus,
   RunRecord,
   Task
 } from '../../shared/contracts';
-import { isImplementationRunMode } from '../../shared/contracts';
+import {
+  getImplementationRetryReason,
+  isImplementationRunMode
+} from '../../shared/contracts';
 import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
 
 /**
@@ -41,7 +44,7 @@ export interface NextActionModel {
 
 export interface NextActionInput {
   task: Task;
-  reviewStatus: CodexReviewGateStatus;
+  reviewStatus: AgentReviewGateStatus;
   finishEvidence: FinishEvidenceState;
   requirements: FinishRequirement[];
   /** A completed non-review run exists to review / attach findings to. */
@@ -56,6 +59,8 @@ export interface NextActionInput {
   runInFlight: boolean;
   /** Current implementation-side run status, used to keep recovery ahead of review. */
   implementationRunStatus?: AgentRunStatus;
+  /** Provider completed, but Task Monki blocked review after independent evidence checks. */
+  implementationRetryRequired?: boolean;
 }
 
 const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
@@ -77,7 +82,7 @@ function firstUnresolved(requirements: FinishRequirement[]): string | undefined 
 }
 
 function countActionableFindings(task: Task): number {
-  return task.projection.codexReview?.result?.findings?.length ?? 0;
+  return task.projection.agentReview?.result?.findings?.length ?? 0;
 }
 
 export function isActiveNonReviewRun(
@@ -115,6 +120,22 @@ export function findCompletedCurrentImplementationRun(
   return runs.find((run) => isCompletedCurrentImplementationRun(task, run));
 }
 
+export function isImplementationRetryRequired(
+  task: Pick<Task, 'currentRunId' | 'workflowPhase' | 'projection'>,
+  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
+): boolean {
+  return (
+    isCompletedCurrentImplementationRun(task, run) &&
+    isImplementationOutcomeBlocked(task)
+  );
+}
+
+export function isImplementationOutcomeBlocked(
+  task: Pick<Task, 'currentRunId' | 'projection'>
+): boolean {
+  return Boolean(getImplementationRetryReason(task));
+}
+
 export function selectNextAction(input: NextActionInput): NextActionModel {
   const {
     task,
@@ -126,7 +147,8 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     canCommit,
     awaitingMoveToReview,
     runInFlight,
-    implementationRunStatus
+    implementationRunStatus,
+    implementationRetryRequired
   } = input;
 
   if (task.workflowPhase === 'DONE') {
@@ -146,16 +168,19 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
   }
 
   if (
-    implementationRunStatus &&
-    ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
-      implementationRunStatus
-    )
+    implementationRetryRequired ||
+    (implementationRunStatus &&
+      ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+        implementationRunStatus
+      ))
   ) {
     return {
       sentence:
-        implementationRunStatus === 'FAILED'
-          ? 'The run failed — retry in this session or continue from the current worktree.'
-          : 'The run did not complete — retry or continue before starting review.',
+        implementationRetryRequired
+          ? 'The implementation needs another pass — retry or continue before starting review.'
+          : implementationRunStatus === 'FAILED'
+            ? 'The run failed — retry in this session or continue from the current worktree.'
+            : 'The run did not complete — retry or continue before starting review.',
       secondaries: []
     };
   }

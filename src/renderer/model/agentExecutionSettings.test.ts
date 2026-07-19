@@ -66,12 +66,31 @@ describe('resolveModelExecutionSettings', () => {
       resolveModelExecutionSettings(models, 'spark', undefined, 'codex', 'anthropic')
     ).toBeUndefined();
   });
+
+  it('preserves an explicit provider for a catalog that does not report providers', () => {
+    const providerlessModels = models.map(({ modelProvider: _modelProvider, ...model }) => model);
+
+    expect(
+      resolveModelExecutionSettings(
+        providerlessModels,
+        'spark',
+        'low',
+        'codex',
+        'azure-openai'
+      )
+    ).toMatchObject({
+      runtimeId: 'codex',
+      model: 'spark',
+      modelProvider: 'azure-openai',
+      reasoningEffort: 'low'
+    });
+  });
 });
 
 describe('resolveReasoningEffort', () => {
-  it('uses the first supported effort when the model has no explicit default', () => {
+  it('preserves the provider default when no explicit default is advertised', () => {
     expect(resolveReasoningEffort({ ...models[0]!, defaultReasoningEffort: undefined }, undefined))
-      .toBe('low');
+      .toBeUndefined();
   });
 
   it('drops a stale effort when a same-id provider catalog update changes support', () => {

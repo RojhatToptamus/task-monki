@@ -19,7 +19,7 @@ export function resolveModelExecutionSettings(
   return {
     runtimeId: selected.runtimeId,
     model: selected.model,
-    modelProvider: selected.modelProvider,
+    modelProvider: selected.modelProvider ?? preferredModelProvider,
     reasoningEffort: resolveReasoningEffort(selected, preferredReasoningEffort)
   };
 }
@@ -33,7 +33,9 @@ export function selectModel(
   const runtimeModels = preferredRuntimeId
     ? models.filter((model) => model.runtimeId === preferredRuntimeId)
     : models;
-  const providerModels = preferredModelProvider
+  const providerModels = preferredModelProvider && runtimeModels.some(
+    (model) => model.modelProvider !== undefined
+  )
     ? runtimeModels.filter((model) => model.modelProvider === preferredModelProvider)
     : runtimeModels;
   const configuredModel = providerModels.find(
@@ -67,5 +69,5 @@ export function resolveReasoningEffort(
   ) {
     return preferredReasoningEffort;
   }
-  return model.defaultReasoningEffort ?? model.supportedReasoningEfforts[0];
+  return model.defaultReasoningEffort;
 }

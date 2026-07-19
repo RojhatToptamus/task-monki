@@ -119,12 +119,23 @@ describe('TaskManagerService runtime execution defaults', () => {
     ]);
     const configureRuntime = vi.fn(async () => undefined);
     Object.defineProperty(adapter, 'configureRuntime', { value: configureRuntime });
+    const cursorAdapter = new ScriptedAgentRuntimeAdapter(store);
+    Object.defineProperty(cursorAdapter, 'descriptor', {
+      value: TEST_ACP_PROFILE.descriptor
+    });
+    vi.spyOn(cursorAdapter, 'capabilities').mockResolvedValue(
+      acpCapabilities(TEST_ACP_PROFILE)
+    );
+    const configureCursor = vi.fn(async () => undefined);
+    Object.defineProperty(cursorAdapter, 'configureRuntime', {
+      value: configureCursor
+    });
     const settingsStore = new MemoryAppSettingsStore({
       defaultRuntimeId: 'opencode',
       runtimeExecutablePaths: { opencode: '/opt/agents/opencode' }
     });
     const service = new TaskManagerService(store, dir, undefined, {
-      agentRuntimeAdapters: [adapter],
+      agentRuntimeAdapters: [adapter, cursorAdapter],
       appSettingsStore: settingsStore,
       agentProviderStartupDisabledReason: 'settings-only test'
     });
@@ -134,17 +145,30 @@ describe('TaskManagerService runtime execution defaults', () => {
       executable: '/opt/agents/opencode',
       restart: false
     });
+    configureRuntime.mockClear();
+    configureCursor.mockClear();
 
     await service.updateAppSettings({
       runtimeExecutablePaths: { opencode: '/usr/local/bin/opencode' }
     });
-    expect(configureRuntime).toHaveBeenLastCalledWith({
+    expect(configureRuntime).toHaveBeenCalledWith({
       executable: '/usr/local/bin/opencode',
       restart: true
     });
+    expect(configureCursor).not.toHaveBeenCalled();
     expect((await settingsStore.get()).runtimeExecutablePaths).toEqual({
       opencode: '/usr/local/bin/opencode'
     });
+    await expect(
+      service.updateAppSettings({
+        runtimeExecutablePaths: { 'unknown-runtime': '/tmp/not-a-runtime' }
+      })
+    ).rejects.toThrow('unknown-runtime');
+    await expect(
+      service.updateAppSettings({
+        runtimeExecutablePaths: { codex: '/tmp/not-the-codex-source-of-truth' }
+      })
+    ).rejects.toThrow('does not use a provider runtime executable path');
     await service.shutdown();
   });
 

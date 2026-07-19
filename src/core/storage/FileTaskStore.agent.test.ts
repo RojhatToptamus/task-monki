@@ -630,7 +630,7 @@ describe('FileTaskStore agent persistence', () => {
   });
 
   it.each([
-    ['the preceding schema', TASK_STORE_SCHEMA_VERSION - 1],
+    ['schema 12', 12],
     ['a missing schema', undefined]
   ])('rejects %s instead of maintaining compatibility code', async (_label, version) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-old-store-'));

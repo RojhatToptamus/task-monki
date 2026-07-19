@@ -43,6 +43,25 @@ describe('AgentControlPanel', () => {
     expect(html).not.toContain('Recovery requires review');
     expect(html).not.toContain('Run review');
   });
+
+  it('makes retry primary when Task Monki blocks review after provider completion', () => {
+    const html = renderToStaticMarkup(
+      <AgentControlPanel
+        run={runFixture({ status: 'COMPLETED' })}
+        requiresRecovery
+        interactions={[]}
+        onSteer={async () => {}}
+        onInterrupt={async () => {}}
+        onContinue={async () => {}}
+        onRetry={async () => {}}
+      />
+    );
+
+    expect(html).toContain('Unfinished work');
+    expect(html).toMatch(/class="primary-button"[^>]*>Retry in session<\/button>/);
+    expect(html).not.toContain('Follow up');
+    expect(html).not.toContain('Run review');
+  });
 });
 
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {

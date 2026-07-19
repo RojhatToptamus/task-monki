@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection } from '../../shared/contracts';
-import type { CodexReviewFinding, RunRecord, Task } from '../../shared/contracts';
+import type { AgentReviewFinding, RunRecord, Task } from '../../shared/contracts';
 import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
 import {
   findCompletedCurrentImplementationRun,
@@ -51,7 +51,7 @@ function baseInput(overrides: Partial<NextActionInput> = {}): NextActionInput {
   };
 }
 
-const findings: CodexReviewFinding[] = [
+const findings: AgentReviewFinding[] = [
   { id: 'a', severity: 'BLOCKER', title: 'A', explanation: 'x' }
 ];
 
@@ -85,6 +85,21 @@ describe('selectNextAction', () => {
     expect(model.sentence).not.toMatch(/ready for review/i);
   });
 
+  it('keeps a locally blocked completed implementation ahead of the review gate', () => {
+    const model = selectNextAction(
+      baseInput({
+        implementationRunStatus: 'COMPLETED',
+        implementationRetryRequired: true,
+        awaitingMoveToReview: false,
+        hasReviewSource: false
+      })
+    );
+
+    expect(model.primary).toBeUndefined();
+    expect(model.sentence).toMatch(/retry.*continue/i);
+    expect(model.sentence).not.toMatch(/ready for review/i);
+  });
+
   it('does not offer review from an older completed run while the current run is interrupting', () => {
     const priorCompletedRun = run({ id: 'prior-run', status: 'COMPLETED' });
     const currentRun = run({ id: 'current-run', status: 'INTERRUPTING' });
@@ -110,11 +125,11 @@ describe('selectNextAction', () => {
         task: createTask({
           projection: {
             ...createInitialProjection(now),
-            codexReview: {
+            agentReview: {
               status: 'NEEDS_CHANGES',
               runId: 'r',
               result: {
-                schemaVersion: 'codex-review/v1',
+                schemaVersion: 'agent-review/v1',
                 verdict: 'NEEDS_CHANGES',
                 summary: 's',
                 findings

@@ -63,6 +63,13 @@ export interface AcpPromptCapabilities {
   image?: boolean;
   audio?: boolean;
   embeddedContext?: boolean;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface AcpMcpCapabilities {
+  http?: boolean;
+  sse?: boolean;
+  _meta?: Record<string, unknown> | null;
 }
 
 export interface AcpSessionCapabilities {
@@ -77,7 +84,7 @@ export interface AcpSessionCapabilities {
 export interface AcpAgentCapabilities {
   loadSession?: boolean;
   promptCapabilities?: AcpPromptCapabilities;
-  mcpCapabilities?: { http?: boolean; sse?: boolean };
+  mcpCapabilities?: AcpMcpCapabilities;
   sessionCapabilities?: AcpSessionCapabilities;
   auth?: Record<string, unknown>;
   _meta?: Record<string, unknown> | null;
@@ -324,9 +331,7 @@ export function parseInitializeResponse(value: unknown): AcpInitializeResponse {
   if (!Number.isSafeInteger(record.protocolVersion)) {
     throw new Error('ACP initialize response has no valid protocolVersion.');
   }
-  const agentCapabilities = isRecord(record.agentCapabilities)
-    ? (record.agentCapabilities as AcpAgentCapabilities)
-    : {};
+  const agentCapabilities = parseAgentCapabilities(record.agentCapabilities);
   const agentInfo = record.agentInfo == null
     ? null
     : isRecord(record.agentInfo) && typeof record.agentInfo.name === 'string'
@@ -339,6 +344,79 @@ export function parseInitializeResponse(value: unknown): AcpInitializeResponse {
     agentInfo,
     _meta: optionalMeta(record._meta)
   };
+}
+
+function parseAgentCapabilities(value: unknown): AcpAgentCapabilities {
+  if (value === undefined) return {};
+  const capabilities = requireRecord(value, 'ACP agentCapabilities');
+  if (
+    capabilities.loadSession !== undefined &&
+    typeof capabilities.loadSession !== 'boolean'
+  ) {
+    throw new Error('ACP agentCapabilities.loadSession must be a boolean.');
+  }
+
+  validateBooleanCapabilityGroup(
+    capabilities.promptCapabilities,
+    'promptCapabilities',
+    ['image', 'audio', 'embeddedContext']
+  );
+  validateBooleanCapabilityGroup(
+    capabilities.mcpCapabilities,
+    'mcpCapabilities',
+    ['http', 'sse']
+  );
+
+  if (capabilities.sessionCapabilities !== undefined) {
+    const sessions = requireRecord(
+      capabilities.sessionCapabilities,
+      'ACP agentCapabilities.sessionCapabilities'
+    );
+    for (const member of [
+      'list',
+      'delete',
+      'additionalDirectories',
+      'resume',
+      'close'
+    ]) {
+      validateOpaqueCapability(sessions[member], `sessionCapabilities.${member}`);
+    }
+    validateOptionalObject(sessions._meta, 'sessionCapabilities._meta');
+  }
+
+  if (capabilities.auth !== undefined) {
+    const auth = requireRecord(capabilities.auth, 'ACP agentCapabilities.auth');
+    validateOpaqueCapability(auth.logout, 'auth.logout');
+    validateOptionalObject(auth._meta, 'auth._meta');
+  }
+  validateOptionalObject(capabilities._meta, '_meta');
+  return capabilities as AcpAgentCapabilities;
+}
+
+function validateBooleanCapabilityGroup(
+  value: unknown,
+  group: string,
+  members: readonly string[]
+): void {
+  if (value === undefined) return;
+  const capabilities = requireRecord(value, `ACP agentCapabilities.${group}`);
+  for (const member of members) {
+    if (capabilities[member] !== undefined && typeof capabilities[member] !== 'boolean') {
+      throw new Error(`ACP agentCapabilities.${group}.${member} must be a boolean.`);
+    }
+  }
+  validateOptionalObject(capabilities._meta, `${group}._meta`);
+}
+
+function validateOpaqueCapability(value: unknown, member: string): void {
+  validateOptionalObject(value, member);
+  if (isRecord(value)) validateOptionalObject(value._meta, `${member}._meta`);
+}
+
+function validateOptionalObject(value: unknown, member: string): void {
+  if (value !== undefined && value !== null && !isRecord(value)) {
+    throw new Error(`ACP agentCapabilities.${member} must be an object or null.`);
+  }
 }
 
 export function parseNewSessionResponse(value: unknown): AcpSessionSetupResponse & {
@@ -468,6 +546,23 @@ export function parsePermissionRequest(value: unknown): AcpRequestPermissionPara
   if (typeof toolCall.toolCallId !== 'string' || !toolCall.toolCallId) {
     throw new Error('ACP permission request has no toolCallId.');
   }
+  if (
+    (toolCall.title !== undefined &&
+      toolCall.title !== null &&
+      typeof toolCall.title !== 'string') ||
+    (toolCall.kind !== undefined && toolCall.kind !== null && !isToolKind(toolCall.kind)) ||
+    (toolCall.status !== undefined &&
+      toolCall.status !== null &&
+      !isToolCallStatus(toolCall.status)) ||
+    (toolCall.content !== undefined &&
+      toolCall.content !== null &&
+      !Array.isArray(toolCall.content)) ||
+    (toolCall.locations !== undefined &&
+      toolCall.locations !== null &&
+      !Array.isArray(toolCall.locations))
+  ) {
+    throw new Error('ACP permission tool call is invalid.');
+  }
   if (!Array.isArray(record.options) || record.options.length === 0) {
     throw new Error('ACP permission request has no options.');
   }
@@ -495,7 +590,27 @@ export function parsePermissionRequest(value: unknown): AcpRequestPermissionPara
   });
   return {
     sessionId: record.sessionId,
-    toolCall: toolCall as unknown as AcpToolCallUpdate,
+    toolCall: {
+      toolCallId: toolCall.toolCallId,
+      ...(toolCall.title !== undefined ? { title: toolCall.title as string | null } : {}),
+      ...(toolCall.kind !== undefined ? { kind: toolCall.kind as AcpToolKind | null } : {}),
+      ...(toolCall.status !== undefined
+        ? { status: toolCall.status as AcpToolCallStatus | null }
+        : {}),
+      ...(toolCall.content !== undefined
+        ? { content: toolCall.content as unknown[] | null }
+        : {}),
+      ...(toolCall.locations !== undefined
+        ? { locations: toolCall.locations as unknown[] | null }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(toolCall, 'rawInput')
+        ? { rawInput: toolCall.rawInput }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(toolCall, 'rawOutput')
+        ? { rawOutput: toolCall.rawOutput }
+        : {}),
+      _meta: optionalMeta(toolCall._meta)
+    },
     options,
     _meta: optionalMeta(record._meta)
   };
@@ -755,6 +870,25 @@ function isPermissionKind(value: unknown): value is AcpPermissionOptionKind {
   return ['allow_once', 'allow_always', 'reject_once', 'reject_always'].includes(
     String(value)
   );
+}
+
+function isToolKind(value: unknown): value is AcpToolKind {
+  return [
+    'read',
+    'edit',
+    'delete',
+    'move',
+    'search',
+    'execute',
+    'think',
+    'fetch',
+    'switch_mode',
+    'other'
+  ].includes(String(value));
+}
+
+function isToolCallStatus(value: unknown): value is AcpToolCallStatus {
+  return ['pending', 'in_progress', 'completed', 'failed'].includes(String(value));
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

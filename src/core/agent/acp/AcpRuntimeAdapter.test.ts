@@ -1408,9 +1408,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       expect(await store.getAgentSession(session.id)).toMatchObject({
         observedSettings: {
           model: 'grok-build',
-          runtimeOptions: {
-            'test-acp': { models: { currentModelId: 'grok-build' } }
-          }
+          runtimeOptions: { 'test-acp': { modeId: 'code', configValues: { telemetry: true } } }
         }
       });
       expect(observedEvents).toContainEqual(
@@ -1514,21 +1512,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
         providerSessionId: session.providerSessionId
       });
       expect((await store.getAgentSession(session.id))?.status).toBe('NOT_LOADED');
-      expect(await adapter.readNativeState()).toMatchObject({
-        sessions: [
-          expect.objectContaining({
-            localSessionId: session.id,
-            providerSessionId: session.providerSessionId,
-            models: expect.objectContaining({
-              currentModelId: 'grok-composer-2.5-fast'
-            }),
-            modes: expect.objectContaining({ currentModeId: 'code' }),
-            configOptions: expect.arrayContaining([
-              expect.objectContaining({ id: 'telemetry', currentValue: true })
-            ])
-          })
-        ]
-      });
+      expect(await adapter.readNativeState()).toMatchObject({ sessions: [] });
       const run = await store.createRun({
         task,
         session: (await store.getAgentSession(session.id))!,
@@ -1553,8 +1537,18 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       );
       expect(pending.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
       expect('providerOptions' in pending.request && pending.request.providerOptions).toEqual([
-        { id: 'native-allow-42', label: 'Allow once', action: 'ACCEPT' },
-        { id: 'native-reject-7', label: 'Reject', action: 'DECLINE' }
+        {
+          id: 'native-allow-42',
+          label: 'Allow once',
+          action: 'ACCEPT',
+          providerRemembersChoice: false
+        },
+        {
+          id: 'native-reject-7',
+          label: 'Reject',
+          action: 'DECLINE',
+          providerRemembersChoice: false
+        }
       ]);
       await expect(
         adapter.releaseSession({
@@ -1813,7 +1807,7 @@ describe('AcpRuntimeAdapter end-to-end', () => {
       await waitFor(async () => {
         const current = await store.getRun(persistenceRun.id);
         return current?.status === 'RECOVERY_REQUIRED' ? current : undefined;
-      });
+      }, 20_000);
       await store.updateRun(persistenceRun.id, {
         status: 'INTERRUPTED',
         endedAt: new Date().toISOString()
@@ -2526,26 +2520,26 @@ describe('AcpRuntimeAdapter permission materialization', () => {
   it.each([
     {
       profileName: 'Cursor',
-      allowOpaqueExecuteOnce: true,
-      expectedActions: ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL']
+      allowOpaqueExecutePermissions: true,
+      expectedActions: ['ACCEPT', 'DECLINE', 'CANCEL']
     },
     {
       profileName: 'another ACP runtime',
-      allowOpaqueExecuteOnce: false,
+      allowOpaqueExecutePermissions: false,
       expectedActions: ['DECLINE', 'CANCEL']
     }
   ])(
     'keeps opaque execute approval profile-scoped for $profileName',
-    async ({ allowOpaqueExecuteOnce, expectedActions }) => {
-      const runtimeId = allowOpaqueExecuteOnce
+    async ({ allowOpaqueExecutePermissions, expectedActions }) => {
+      const runtimeId = allowOpaqueExecutePermissions
         ? 'test-cursor-opaque-permission'
         : 'test-acp-opaque-permission';
       const harness = await createPermissionHarness({
         runtimeId,
         approvalPolicy: 'on-request',
-        ...(allowOpaqueExecuteOnce
+        ...(allowOpaqueExecutePermissions
           ? {
-              allowOpaqueExecuteOnce: true as const,
+              allowOpaqueExecutePermissions: true as const,
               allowRememberedPermissions: true as const
             }
           : {})
@@ -2586,7 +2580,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         );
         expect(pending.allowedActions).toEqual(expectedActions);
 
-        if (allowOpaqueExecuteOnce) {
+        if (allowOpaqueExecutePermissions) {
           const interactionService = new AgentInteractionService(store, events, () => adapter);
           await interactionService.respond({
             taskId: task.id,
@@ -2617,7 +2611,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
 
   it.each([
     {
-      name: 'supervised access',
+      name: 'ask for approval',
       approvalPolicy: 'on-request',
       toolKind: 'execute',
       automatic: false,
@@ -2654,9 +2648,9 @@ describe('AcpRuntimeAdapter permission materialization', () => {
         runtimeId,
         approvalPolicy,
         allowRememberedPermissions: true,
-        allowOpaqueExecuteOnce: true
+        allowOpaqueExecutePermissions: true
       });
-      const { adapter, client, directory, run, server, store } = harness;
+      const { adapter, client, directory, server, store } = harness;
 
       try {
         const requestId = `${approvalPolicy}-automatic`;
@@ -2719,19 +2713,29 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           );
           expect(pending.allowedActions).toEqual([
             'ACCEPT',
-            'ACCEPT_FOR_SESSION',
             'DECLINE',
             'CANCEL'
           ]);
           expect(pending.request).toMatchObject({
             providerOptions: [
-              { id: `${requestId}-once`, label: 'Allow once', action: 'ACCEPT' },
+              {
+                id: `${requestId}-once`,
+                label: 'Allow once',
+                action: 'ACCEPT',
+                providerRemembersChoice: false
+              },
               {
                 id: `${requestId}-always`,
                 label: 'Allow for session',
-                action: 'ACCEPT_FOR_SESSION'
+                action: 'ACCEPT',
+                providerRemembersChoice: true
               },
-              { id: `${requestId}-reject`, label: 'Reject', action: 'DECLINE' }
+              {
+                id: `${requestId}-reject`,
+                label: 'Reject',
+                action: 'DECLINE',
+                providerRemembersChoice: false
+              }
             ]
           });
         }
@@ -2768,7 +2772,6 @@ describe('AcpRuntimeAdapter permission materialization', () => {
           );
           expect(pending.allowedActions).toEqual([
             'ACCEPT',
-            'ACCEPT_FOR_SESSION',
             'DECLINE',
             'CANCEL'
           ]);
@@ -2778,6 +2781,104 @@ describe('AcpRuntimeAdapter permission materialization', () => {
       }
     }
   );
+
+  it('requires an explicit exact choice when Full access receives only a remembered grant', async () => {
+    const harness = await createPermissionHarness({
+      runtimeId: 'test-acp-full-access-remembered-only',
+      approvalPolicy: 'never',
+      allowRememberedPermissions: true,
+      allowOpaqueExecutePermissions: true
+    });
+    const { adapter, client, events, run, server, store, task } = harness;
+
+    try {
+      const requestId = 'full-access-remembered-only';
+      const request = {
+        jsonrpc: '2.0' as const,
+        id: requestId,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'permission-materialization-session',
+          toolCall: {
+            toolCallId: `${requestId}-tool`,
+            title: 'Run command',
+            kind: 'execute'
+          },
+          options: [
+            {
+              optionId: 'provider-remembered-grant',
+              name: 'Allow always',
+              kind: 'allow_always'
+            },
+            {
+              optionId: 'provider-reject-once',
+              name: 'Reject',
+              kind: 'reject_once'
+            }
+          ]
+        }
+      };
+      const raw = await store.appendProtocolMessage(
+        server.id,
+        'INBOUND',
+        JSON.stringify(request)
+      );
+      client.events.emit('request', request, raw);
+
+      const pending = await waitFor(async () =>
+        (await store.snapshot()).interactionRequests.find(
+          (interaction) =>
+            interaction.providerRequestId === requestId &&
+            interaction.status === 'PENDING'
+        )
+      );
+      expect(pending.allowedActions).toEqual(['ACCEPT', 'DECLINE', 'CANCEL']);
+      expect(pending.request).toMatchObject({
+        providerOptions: [
+          {
+            id: 'provider-remembered-grant',
+            label: 'Allow always',
+            action: 'ACCEPT',
+            providerRemembersChoice: true
+          },
+          {
+            id: 'provider-reject-once',
+            label: 'Reject',
+            action: 'DECLINE',
+            providerRemembersChoice: false
+          }
+        ]
+      });
+      expect(pending.policyWarnings.join(' ')).toContain(
+        'owns its scope, storage, lifetime, and revocation'
+      );
+
+      const interactionService = new AgentInteractionService(store, events, () => adapter);
+      await interactionService.respond({
+        taskId: task.id,
+        runId: run.id,
+        interactionRequestId: pending.id,
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT',
+          providerOptionId: 'provider-remembered-grant'
+        }
+      });
+
+      expect(await readProtocolMessages(server.protocolJournalPath)).toContainEqual({
+        jsonrpc: '2.0',
+        id: requestId,
+        result: {
+          outcome: {
+            outcome: 'selected',
+            optionId: 'provider-remembered-grant'
+          }
+        }
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  });
 
   it.each([
     {
@@ -2792,7 +2893,7 @@ describe('AcpRuntimeAdapter permission materialization', () => {
     }
   ])(
     'cancels and quarantines when $boundary cannot be persisted',
-    async ({ boundary, failure, failDuringPersistence }) => {
+    async ({ failure, failDuringPersistence }) => {
       const directory = await fs.mkdtemp(
         path.join(os.tmpdir(), 'task-monki-acp-permission-persistence-')
       );
@@ -3449,7 +3550,7 @@ async function readProtocolMessages(
 async function createPermissionHarness(input: {
   runtimeId: string;
   approvalPolicy: 'on-request' | 'auto-accept-edits' | 'never';
-  allowOpaqueExecuteOnce?: true;
+  allowOpaqueExecutePermissions?: true;
   allowRememberedPermissions?: true;
 }) {
   const directory = await fs.mkdtemp(
@@ -3464,7 +3565,9 @@ async function createPermissionHarness(input: {
     ...TEST_ACP_PROFILE,
     descriptor: { ...TEST_ACP_PROFILE.descriptor, id: input.runtimeId },
     approvalPolicies: ['on-request', 'auto-accept-edits', 'never'],
-    ...(input.allowOpaqueExecuteOnce ? { allowOpaqueExecuteOnce: true } : {}),
+    ...(input.allowOpaqueExecutePermissions
+      ? { allowOpaqueExecutePermissions: true }
+      : {}),
     ...(input.allowRememberedPermissions
       ? { allowRememberedPermissions: true }
       : {}),

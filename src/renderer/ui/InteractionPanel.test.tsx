@@ -57,21 +57,41 @@ describe('InteractionPanel', () => {
     expect(html).not.toContain('Stop current turn');
   });
 
-  it('renders provider-native permission choices instead of inventing their scope', () => {
+  it('renders provider-native tool context and exact permission choices', () => {
     const interaction = commandInteraction();
-    interaction.runtimeId = 'grok-acp';
+    interaction.runtimeId = 'cursor-agent-acp';
+    interaction.policyWarnings = [
+      'Selecting a remembered option allows Cursor Agent to persist the choice. Cursor Agent owns its scope, storage, lifetime, and revocation, which may extend beyond this ACP session or process.'
+    ];
     interaction.request = {
       startedAtMs: Date.now(),
       command: 'npm test',
       cwd: '/tmp/task/react-repo',
+      paths: ['src/core/agent.ts', 'src/core/agent.test.ts'],
+      reason: 'Run the project test suite before finishing.',
+      networkApprovalContext: {
+        protocol: 'https',
+        host: 'registry.npmjs.org'
+      },
       providerOptions: [
         {
           id: 'allow-edits-session',
           label: 'Allow edits this session',
-          action: 'ACCEPT_FOR_SESSION'
+          action: 'ACCEPT',
+          providerRemembersChoice: true
         },
-        { id: 'allow-once', label: 'Yes, proceed', action: 'ACCEPT' },
-        { id: 'reject-once', label: 'No, tell Grok why', action: 'DECLINE' }
+        {
+          id: 'allow-once',
+          label: 'Yes, proceed',
+          action: 'ACCEPT',
+          providerRemembersChoice: false
+        },
+        {
+          id: 'reject-once',
+          label: 'No, tell Grok why',
+          action: 'DECLINE',
+          providerRemembersChoice: false
+        }
       ]
     };
     interaction.allowedActions = ['ACCEPT', 'DECLINE', 'CANCEL'];
@@ -84,9 +104,25 @@ describe('InteractionPanel', () => {
       />
     );
 
+    expect(html).toContain('Tool approval');
+    expect(html).not.toContain('Command approval');
+    expect(html).toContain('Provider context');
+    expect(html).toContain('<strong>Untrusted:</strong>');
+    expect(html).toContain('Run the project test suite before finishing.');
+    expect(html).toContain('<code>npm test</code>');
+    expect(html).toContain('src/core/agent.ts');
+    expect(html).toContain('/tmp/task/react-repo');
+    expect(html).toContain('https · registry.npmjs.org');
     expect(html).toContain('Yes, proceed');
     expect(html).toContain('No, tell Grok why');
-    expect(html).not.toContain('Allow edits this session');
+    expect(html).toContain('Allow edits this session');
+    expect(html).toMatch(/class="primary-button"[^>]*>Yes, proceed<\/button>/);
+    expect(html).toMatch(
+      /class="outline-button"[^>]*>Allow edits this session<\/button>/
+    );
+    expect(html).toContain(
+      'Cursor Agent owns its scope, storage, lifetime, and revocation'
+    );
     expect(html).not.toContain('Allow for session');
   });
 
@@ -94,11 +130,9 @@ describe('InteractionPanel', () => {
     const interaction = commandInteraction();
     interaction.request = {
       startedAtMs: Date.now(),
-      providerOptions: [
-        { id: 'allow-always', label: 'Allow always', action: 'ACCEPT_FOR_SESSION' }
-      ]
+      providerOptions: []
     };
-    interaction.allowedActions = ['CANCEL'];
+    interaction.allowedActions = ['ACCEPT', 'DECLINE', 'CANCEL'];
 
     const html = renderToStaticMarkup(
       <InteractionPanel
@@ -109,7 +143,10 @@ describe('InteractionPanel', () => {
     );
 
     expect(html).toContain('Cancel');
-    expect(html).not.toContain('Allow always');
+    expect(html).not.toContain('Allow once');
+    expect(html).not.toContain('>Deny<');
+    expect(html).not.toContain('Working directory');
+    expect(html).not.toContain('/tmp/task');
   });
 });
 

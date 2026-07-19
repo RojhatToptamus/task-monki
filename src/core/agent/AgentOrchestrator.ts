@@ -436,9 +436,8 @@ export class AgentOrchestrator {
       reviewRuntimeId === sourceSession.runtimeId &&
       capabilities.review.maturity !== 'unsupported' &&
       typeof adapter.startReview === 'function';
-    const supportsGenericDetachedReview =
-      capabilities.extensions.genericDetachedReview?.maturity === 'stable';
-    if (!useNativeReview && !supportsGenericDetachedReview) {
+    const supportsDetachedReview = capabilities.detachedReview.maturity === 'stable';
+    if (!useNativeReview && !supportsDetachedReview) {
       throw new Error(
         `${adapter.descriptor.displayName} cannot run a detached review because it does not attest stable read-only review isolation.`
       );

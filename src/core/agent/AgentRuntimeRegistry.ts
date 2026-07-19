@@ -220,7 +220,7 @@ export class AgentRuntimeRegistry {
             model.runtimeId !== adapter.descriptor.id ||
             !model.id.startsWith(`${adapter.descriptor.id}:`) ||
             !model.model.trim() ||
-            !model.modelProvider.trim()
+            (model.modelProvider !== undefined && !model.modelProvider.trim())
           ) {
             throw new Error(
               `Runtime ${adapter.descriptor.id} returned an invalid or unqualified model identity: ${model.id}.`
@@ -506,6 +506,7 @@ async function safeCapabilities(
     userInputRequests: unavailable(detail),
     goals: unavailable(detail),
     plans: unavailable(detail),
+    detachedReview: unavailable(detail),
     review: unavailable(detail),
     subagents: unavailable(detail),
     backgroundTerminals: unavailable(detail),

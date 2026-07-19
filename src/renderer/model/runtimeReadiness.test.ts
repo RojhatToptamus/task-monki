@@ -143,6 +143,7 @@ function state(
         userInputRequests: { maturity: 'unsupported' },
         goals: { maturity: 'unsupported' },
         plans: { maturity: 'unsupported' },
+        detachedReview: { maturity: 'unsupported' },
         review: { maturity: 'unsupported' },
         subagents: { maturity: 'unsupported' },
         backgroundTerminals: { maturity: 'unsupported' },

@@ -37,6 +37,31 @@ describe('describeTaskAttention', () => {
     });
   });
 
+  it('surfaces a blocked completed implementation as needing retry', () => {
+    const attention = describeTaskAttention(
+      taskFixture({
+        currentRunId: 'run-1',
+        workflowPhase: 'IN_PROGRESS',
+        projection: {
+          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
+          requestedAction: 'FAILED',
+          agentRun: 'COMPLETED',
+          summary: 'A later Git refresh completed.',
+          implementationRetry: {
+            runId: 'run-1',
+            reason: 'The declined execution produced no Git change.'
+          }
+        }
+      })
+    );
+
+    expect(attention).toEqual({
+      label: 'Needs retry',
+      detail: 'The declined execution produced no Git change.',
+      tone: 'warning'
+    });
+  });
+
   it('labels failing GitHub checks as delivery attention', () => {
     const attention = describeTaskAttention(
       taskFixture({

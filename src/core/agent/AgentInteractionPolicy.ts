@@ -21,9 +21,7 @@ import type {
   InteractionRequestType,
   RunRecord
 } from '../../shared/contracts';
-import {
-  isRedactedExternalPathReference
-} from './AgentPermissionRedaction';
+import { isRedactedExternalPathReference } from './AgentPermissionRedaction';
 
 export interface AgentInteractionPolicy {
   allowedActions: AgentInteractionAction[];
@@ -168,6 +166,12 @@ function commandPolicy(
   run: RunRecord
 ): AgentInteractionPolicy {
   const warnings: string[] = [];
+  if (
+    !request.command?.trim() &&
+    (!request.commandActions || request.commandActions.length === 0)
+  ) {
+    warnings.push('Task Monki could not verify the requested command.');
+  }
   if (request.cwd && !isAllowedWorkspacePath(session.worktreePath, request.cwd)) {
     warnings.push('The command working directory is outside the task worktree.');
   }
@@ -263,25 +267,32 @@ function validateCommandDecision(
 ): void {
   const providerOptionId =
     'providerOptionId' in decision ? decision.providerOptionId : undefined;
-  if (
-    request.providerOptions?.length &&
-    isAgentProviderPermissionAction(decision.action)
-  ) {
-    if (!providerOptionId) {
-      throw new Error('A provider permission decision requires its exact option ID.');
-    }
-    const option = request.providerOptions?.find(
-      (candidate) => candidate.id === providerOptionId
-    );
-    if (!option) {
-      throw new Error('The selected provider permission option is not part of this request.');
-    }
-    if (option.action !== decision.action) {
+  if (request.providerOptions !== undefined) {
+    if (decision.action === 'CANCEL') {
+      if (providerOptionId !== undefined) {
+        throw new Error('Cancellation cannot select a provider permission option.');
+      }
+    } else if (!isAgentProviderPermissionAction(decision.action)) {
       throw new Error(
-        'The selected provider permission option does not match the requested decision.'
+        'A provider permission request accepts only an exact provider option or cancellation.'
       );
+    } else {
+      if (!providerOptionId) {
+        throw new Error('A provider permission decision requires its exact option ID.');
+      }
+      const option = request.providerOptions.find(
+        (candidate) => candidate.id === providerOptionId
+      );
+      if (!option) {
+        throw new Error('The selected provider permission option is not part of this request.');
+      }
+      if (option.action !== decision.action) {
+        throw new Error(
+          'The selected provider permission option does not match the requested decision.'
+        );
+      }
     }
-  } else if (providerOptionId) {
+  } else if (providerOptionId !== undefined) {
     throw new Error('This command approval request has no provider permission options.');
   }
   if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {

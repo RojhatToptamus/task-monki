@@ -6,7 +6,7 @@ import type {
   WorktreeRecord
 } from './contracts';
 import {
-  CODEX_REVIEW_DEVELOPER_INSTRUCTIONS,
+  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS,
   TASK_MONKI_CONTEXT_LINE,
   TASK_MONKI_ENGINEERING_QUALITY_CONTRACT,
   TASK_MONKI_PROGRESS_CONTRACT,
@@ -166,20 +166,20 @@ describe('prompt templates', () => {
   });
 
   it('asks review runs for concise interim progress without changing final output shape', () => {
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(TASK_MONKI_CONTEXT_LINE);
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).not.toContain(
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(TASK_MONKI_CONTEXT_LINE);
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).not.toContain(
       TASK_MONKI_ENGINEERING_QUALITY_CONTRACT
     );
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
       'progress messages beginning with "Progress:"'
     );
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
       'Inspecting changed files for regressions'
     );
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
       'Do not include these Progress lines in the final review output'
     );
-    expect(CODEX_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
+    expect(AGENT_REVIEW_DEVELOPER_INSTRUCTIONS).toContain(
       'exactly one fenced JSON block'
     );
   });

@@ -33,7 +33,7 @@ import type {
 export * from './agent';
 export * from './attachments';
 
-export const TASK_STORE_SCHEMA_VERSION = 12 as const;
+export const TASK_STORE_SCHEMA_VERSION = 13 as const;
 
 const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 
@@ -251,8 +251,8 @@ export interface AgentReviewFinding {
 }
 
 export interface AgentReviewResult {
-  /** Legacy wire value retained so schema-12 review artifacts remain readable. */
-  schemaVersion: 'codex-review/v1';
+  /** Durable schema-13 wire value for provider-neutral review artifacts. */
+  schemaVersion: 'agent-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
   findings: AgentReviewFinding[];
@@ -270,17 +270,6 @@ export interface AgentReviewGateProjection {
   result?: AgentReviewResult;
   updatedAt?: string;
 }
-
-/** @deprecated Use the provider-neutral agent-review type. */
-export type CodexReviewGateStatus = AgentReviewGateStatus;
-/** @deprecated Use the provider-neutral agent-review type. */
-export type CodexReviewFindingSeverity = AgentReviewFindingSeverity;
-/** @deprecated Use the provider-neutral agent-review type. */
-export type CodexReviewFinding = AgentReviewFinding;
-/** @deprecated Use the provider-neutral agent-review type. */
-export type CodexReviewResult = AgentReviewResult;
-/** @deprecated The persisted projection field retains this legacy name in schema 12. */
-export type CodexReviewGateProjection = AgentReviewGateProjection;
 
 export type MergeStatus =
   | 'NOT_APPLICABLE'
@@ -339,6 +328,7 @@ export type DomainEventType =
   | 'AGENT_RUN_COMPLETED'
   | 'AGENT_RUN_FAILED'
   | 'AGENT_RUN_INTERRUPTED'
+  | 'IMPLEMENTATION_OUTCOME_BLOCKED'
   | 'AGENT_MUTATION_AMBIGUOUS'
   | 'AGENT_REVIEW_POLICY_VIOLATION'
   | 'AGENT_RUNTIME_LOST'
@@ -383,14 +373,21 @@ export interface StatusProjection {
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
   /**
-   * Local agent diff-review gate. The legacy field name is retained for
-   * durable-store compatibility and is independent from GitHub PR reviews.
+   * Local agent diff-review gate, independent from GitHub PR reviews.
    */
-  codexReview?: CodexReviewGateProjection;
+  agentReview?: AgentReviewGateProjection;
   merge: MergeStatus;
   artifact: ArtifactStatus;
   health: HealthStatus;
   summary: string;
+  /**
+   * Task Monki-owned outcome for a provider-completed implementation that
+   * cannot advance until replacement implementation work starts.
+   */
+  implementationRetry?: {
+    runId: string;
+    reason: string;
+  };
   findings: Finding[];
   updatedAt: string;
 }
@@ -1069,7 +1066,7 @@ export function createInitialProjection(now: string): StatusProjection {
     githubPullRequest: 'UNLINKED',
     ciChecks: 'NOT_APPLICABLE',
     reviews: 'NOT_APPLICABLE',
-    codexReview: { status: 'NOT_RUN' },
+    agentReview: { status: 'NOT_RUN' },
     merge: 'NOT_APPLICABLE',
     artifact: 'NONE',
     health: 'INFO',
@@ -1077,4 +1074,14 @@ export function createInitialProjection(now: string): StatusProjection {
     findings: [],
     updatedAt: now
   };
+}
+
+export function getImplementationRetryReason(
+  task: Pick<Task, 'currentRunId' | 'projection'>
+): string | undefined {
+  const retry = task.projection.implementationRetry;
+  if (!retry || retry.runId !== task.currentRunId) {
+    return undefined;
+  }
+  return retry.reason;
 }

@@ -6,11 +6,11 @@ import type {
   AgentJsonValue,
   AgentMcpElicitationRequest,
   AgentPermissionApprovalRequest,
-  AgentProviderPermissionAction,
   AgentSessionRecord,
   AgentUserInputRequest,
   InteractionRequestRecord
 } from '../../shared/contracts';
+import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
 
 interface InteractionPanelProps {
@@ -58,7 +58,7 @@ export function InteractionPanel({
         {commandApproval ? (
           <h3>
             <span className="interaction-card__dot" aria-hidden="true" />
-            {interactionTitle(active.type)}
+            {interactionTitle(active)}
           </h3>
         ) : (
           <div>
@@ -66,7 +66,7 @@ export function InteractionPanel({
               <span className="interaction-card__dot" aria-hidden="true" />
               Action required
             </span>
-            <h3>{interactionTitle(active.type)}</h3>
+            <h3>{interactionTitle(active)}</h3>
           </div>
         )}
         {commandApproval ? (
@@ -200,8 +200,8 @@ function CommandRequest({
 }: InteractionSectionProps) {
   const request = interaction.request as AgentCommandApprovalRequest;
   const displayCommand = unwrapShellCommand(request.command);
-  const providerOptions = providerCommandOptions(interaction, request);
-  const hasProviderOptions = Boolean(request.providerOptions?.length);
+  const providerOptions = availableProviderCommandOptions(interaction, request);
+  const providerNativeRequest = request.providerOptions !== undefined;
   const canRememberCommand =
     hasAction(interaction, 'ACCEPT_EXEC_POLICY_AMENDMENT') &&
     Boolean(request.proposedExecPolicyAmendment?.length);
@@ -236,13 +236,14 @@ function CommandRequest({
 
   return (
     <>
+      {providerNativeRequest ? <ProviderCommandContext request={request} /> : null}
       {displayCommand ? (
         <pre className="interaction-command">
           <code>{displayCommand}</code>
         </pre>
       ) : null}
       <div className="interaction-command__footer">
-        {!hasProviderOptions && canRememberCommand && canAllowForSession ? (
+        {!providerNativeRequest && canRememberCommand && canAllowForSession ? (
           <label className="interaction-remember">
             <input
               type="checkbox"
@@ -256,20 +257,20 @@ function CommandRequest({
           <span />
         )}
         <div className="interaction-actions interaction-actions--command">
-          {hasProviderOptions ? (
+          {providerNativeRequest ? (
             providerOptions.length > 0 ? (
               providerOptions.map((option) => (
                 <ActionButton
                   key={option.id}
                   label={option.label}
-                  variant={option.action === 'ACCEPT' ? 'primary' : 'secondary'}
+                  variant={
+                    option.action === 'ACCEPT' && !option.providerRemembersChoice
+                      ? 'primary'
+                      : 'secondary'
+                  }
                   disabled={disabled}
                   onClick={() =>
-                    onRespond({
-                      interactionType: 'COMMAND_APPROVAL',
-                      action: option.action,
-                      providerOptionId: option.id
-                    })
+                    onRespond(option.decision)
                   }
                 />
               ))
@@ -325,6 +326,52 @@ function CommandRequest({
         </div>
       </div>
     </>
+  );
+}
+
+function ProviderCommandContext({
+  request
+}: {
+  request: AgentCommandApprovalRequest;
+}) {
+  const network = formatProviderNetworkContext(request.networkApprovalContext);
+  const hasDetails =
+    Boolean(request.reason) ||
+    Boolean(request.paths?.length) ||
+    Boolean(request.cwd) ||
+    Boolean(network);
+
+  if (!hasDetails) {
+    return null;
+  }
+
+  return (
+    <dl className="interaction-details">
+      {request.reason ? (
+        <>
+          <dt>Provider context</dt>
+          <dd><strong>Untrusted:</strong> {request.reason}</dd>
+        </>
+      ) : null}
+      {request.paths?.length ? (
+        <>
+          <dt>Paths</dt>
+          <dd><pre>{request.paths.join('\n')}</pre></dd>
+        </>
+      ) : null}
+      {request.cwd ? (
+        <>
+          <dt>Working directory</dt>
+          <dd><code>{request.cwd}</code></dd>
+        </>
+      ) : null}
+      {network ? (
+        <>
+          <dt>Network</dt>
+          <dd><code>{network}</code></dd>
+        </>
+      ) : null}
+    </dl>
   );
 }
 
@@ -803,19 +850,13 @@ function ActionButton({
   );
 }
 
-function providerCommandOptions(
-  interaction: InteractionRequestRecord,
-  request: AgentCommandApprovalRequest
-): Array<{
-  id: string;
-  label: string;
-  action: AgentProviderPermissionAction;
-}> {
-  return (request.providerOptions ?? []).flatMap((option) => {
-    return hasAction(interaction, option.action)
-      ? [{ id: option.id, label: option.label, action: option.action }]
-      : [];
-  });
+function formatProviderNetworkContext(
+  context: AgentCommandApprovalRequest['networkApprovalContext']
+): string | undefined {
+  if (context?.protocol && context.host) {
+    return `${context.protocol} · ${context.host}`;
+  }
+  return context?.protocol ?? context?.host;
 }
 
 function InteractionTechnicalDetails({
@@ -911,10 +952,13 @@ function hasAction(
   return interaction.allowedActions.includes(action);
 }
 
-function interactionTitle(type: InteractionRequestRecord['type']): string {
-  switch (type) {
+function interactionTitle(interaction: InteractionRequestRecord): string {
+  switch (interaction.type) {
     case 'COMMAND_APPROVAL':
-      return 'Command approval';
+      return (interaction.request as AgentCommandApprovalRequest).providerOptions !==
+        undefined
+        ? 'Tool approval'
+        : 'Command approval';
     case 'FILE_CHANGE_APPROVAL':
       return 'File change approval';
     case 'PERMISSION_APPROVAL':

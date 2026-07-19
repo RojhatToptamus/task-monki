@@ -285,7 +285,7 @@ function ModelSettings({
     (runtime) =>
       runtime.preflight.readiness.canStart &&
       (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-        runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity === 'stable')
+        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
   );
 
   return (
@@ -425,7 +425,7 @@ export function selectSettingsModels(
         (runtime) =>
           runtime.preflight.readiness.canStart &&
           (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
-            runtime.preflight.capabilities.extensions.genericDetachedReview?.maturity === 'stable')
+            runtime.preflight.capabilities.detachedReview.maturity === 'stable')
       )
       .map((runtime) => runtime.preflight.runtime.id)
   );
@@ -603,6 +603,9 @@ export function ModelSettingRow({
               value={effortValue}
               onChange={(event) => onEffortChange(event.target.value)}
             >
+              {selected?.defaultReasoningEffort === undefined ? (
+                <option value="">Provider default</option>
+              ) : null}
               {efforts.map((effort) => (
                 <option key={effort} value={effort}>
                   {formatEffortLabel(effort)}

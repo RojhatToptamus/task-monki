@@ -54,7 +54,7 @@ describe('inboxInteractionDecisions', () => {
     });
   });
 
-  it('returns the exact native option IDs for an ACP permission request', () => {
+  it('requires opening the task for provider-native choices and their context', () => {
     const d = inboxInteractionDecisions(
       interaction(
         'COMMAND_APPROVAL',
@@ -62,34 +62,42 @@ describe('inboxInteractionDecisions', () => {
         {
           startedAtMs: 1,
           providerOptions: [
-            { id: 'allow-once', label: 'Allow once', action: 'ACCEPT' },
+            {
+              id: 'allow-once',
+              label: 'Allow once',
+              action: 'ACCEPT',
+              providerRemembersChoice: false
+            },
             {
               id: 'allow-always',
               label: 'Allow always',
-              action: 'ACCEPT_FOR_SESSION'
+              action: 'ACCEPT',
+              providerRemembersChoice: true
             },
-            { id: 'reject-once', label: 'Reject', action: 'DECLINE' }
+            {
+              id: 'reject-once',
+              label: 'Reject',
+              action: 'DECLINE',
+              providerRemembersChoice: false
+            }
           ]
         }
       )
     );
 
-    expect(d.approve).toEqual({
-      label: 'Allow once',
-      decision: {
-        interactionType: 'COMMAND_APPROVAL',
-        action: 'ACCEPT',
-        providerOptionId: 'allow-once'
-      }
-    });
-    expect(d.deny).toEqual({
-      label: 'Reject',
-      decision: {
-        interactionType: 'COMMAND_APPROVAL',
-        action: 'DECLINE',
-        providerOptionId: 'reject-once'
-      }
-    });
+    expect(d).toEqual({});
+  });
+
+  it('does not fall back to generic actions for an empty provider-native choice list', () => {
+    const d = inboxInteractionDecisions(
+      interaction(
+        'COMMAND_APPROVAL',
+        ['ACCEPT', 'DECLINE', 'CANCEL'],
+        { startedAtMs: 1, providerOptions: [] }
+      )
+    );
+
+    expect(d).toEqual({});
   });
 
   it('grants the current turn for a permission approval, carrying its permissions', () => {

@@ -8,6 +8,7 @@ import type {
   ReviewRollupRecord,
   Task
 } from '../../shared/contracts';
+import { getImplementationRetryReason } from '../../shared/contracts';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
@@ -86,10 +87,14 @@ export function buildPrStatusActionState(input: {
   view: PrStatusViewModel;
   deliveryBusy?: boolean;
   pauseReason?: PrStatusActionPauseReason;
+  implementationRetryReason?: string;
   hasInvestigationSource?: boolean;
 }): PrStatusActionState {
   const busyReason = input.deliveryBusy ? 'GitHub action is in progress.' : undefined;
-  const mutationPauseReason = busyReason ?? prStatusPauseText(input.pauseReason);
+  const mutationPauseReason =
+    busyReason ??
+    prStatusPauseText(input.pauseReason) ??
+    input.implementationRetryReason;
   const missingInvestigationSource =
     input.view.canInvestigateFailure && !input.hasInvestigationSource
       ? 'No completed run is available.'
@@ -319,6 +324,14 @@ function createDraftPrAvailability(
   gitSnapshot?: GitSnapshotRecord,
   branchPublication?: BranchPublicationRecord
 ): { showAction: boolean; line?: string; disabledReason?: string } {
+  const retryReason = getImplementationRetryReason(task);
+  if (retryReason) {
+    return {
+      showAction: true,
+      line: retryReason,
+      disabledReason: retryReason
+    };
+  }
   if (task.projection.worktree !== 'PRESENT') {
     return {
       showAction: false,

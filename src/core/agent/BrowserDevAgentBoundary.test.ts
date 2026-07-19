@@ -67,6 +67,7 @@ function unsupportedCapabilities(): AgentRuntimeCapabilities {
     userInputRequests: unsupported,
     goals: unsupported,
     plans: unsupported,
+    detachedReview: unsupported,
     review: unsupported,
     subagents: unsupported,
     backgroundTerminals: unsupported,

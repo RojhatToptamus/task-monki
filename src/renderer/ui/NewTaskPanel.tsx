@@ -743,6 +743,21 @@ export function NewTaskPanel({
                   <div className="field">
                     <span className="field__label">Reasoning effort</span>
                     <div className="segmented-effort" role="group" aria-label="Reasoning effort">
+                      {selectedModel?.defaultReasoningEffort === undefined ? (
+                        <button
+                          type="button"
+                          className={`segmented-effort__button ${
+                            effectiveReasoningEffort === ''
+                              ? 'segmented-effort__button--active'
+                              : ''
+                          }`}
+                          disabled={composerLocked || !selectedModel}
+                          aria-pressed={effectiveReasoningEffort === ''}
+                          onClick={() => setReasoningEffort('')}
+                        >
+                          Provider default
+                        </button>
+                      ) : null}
                       {reasoningEfforts.map((effort) => (
                         <button
                           key={effort}

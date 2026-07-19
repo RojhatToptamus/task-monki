@@ -1,12 +1,42 @@
 import {
   normalizeAgentApprovalsReviewer,
+  type AgentCommandApprovalDecision,
+  type AgentCommandApprovalRequest,
   type AgentApprovalsReviewer,
   type AgentExecutionPolicyPreset,
-  type AgentExecutionSettings
+  type AgentExecutionSettings,
+  type AgentProviderPermissionAction,
+  type InteractionRequestRecord
 } from '../../shared/contracts';
 
+export interface AgentProviderCommandOption {
+  id: string;
+  label: string;
+  action: AgentProviderPermissionAction;
+  providerRemembersChoice: boolean;
+  decision: AgentCommandApprovalDecision;
+}
+
+export function availableProviderCommandOptions(
+  interaction: InteractionRequestRecord,
+  request: AgentCommandApprovalRequest
+): AgentProviderCommandOption[] {
+  return (request.providerOptions ?? []).flatMap((option) =>
+    interaction.allowedActions.includes(option.action)
+      ? [{
+          ...option,
+          decision: {
+            interactionType: 'COMMAND_APPROVAL',
+            action: option.action,
+            providerOptionId: option.id
+          }
+        }]
+      : []
+  );
+}
+
 export type AgentPermissionMode =
-  | 'SANDBOXED'
+  | 'RESTRICTED'
   | 'ASK_FOR_APPROVAL'
   | 'AUTO_ACCEPT_EDITS'
   | 'APPROVE_FOR_ME'
@@ -69,7 +99,7 @@ export function inferAgentPermissionMode(
     approvalPolicy === 'never' &&
     approvalsReviewer === 'user'
   ) {
-    return 'SANDBOXED';
+    return 'RESTRICTED';
   }
   if (
     sandbox === 'WORKSPACE_WRITE' &&
@@ -92,8 +122,8 @@ export function formatAgentPermissionMode(
   settings: AgentExecutionSettings
 ): string {
   switch (inferAgentPermissionMode(settings)) {
-    case 'SANDBOXED':
-      return 'Sandboxed';
+    case 'RESTRICTED':
+      return 'Restricted';
     case 'ASK_FOR_APPROVAL':
       return 'Ask for approval';
     case 'AUTO_ACCEPT_EDITS':

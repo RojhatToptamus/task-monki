@@ -21,7 +21,7 @@ Task Monki has two separate concepts that both use the word review:
    - The task belongs in the Review board column.
 
 2. Agent review gate
-   - A detached AI quality check stored in `projection.codexReview`.
+   - A detached AI quality check stored in `projection.agentReview`.
    - Runs as its own `RunRecord` with `mode: "REVIEW"`.
    - Does not become the task's implementation run.
    - Can be `NOT_RUN`, `RUNNING`, `PASSED`, `NEEDS_CHANGES`, `INCONCLUSIVE`,
@@ -42,9 +42,8 @@ The important product rule is:
   - Detached review runs do not replace this as the source implementation run.
 - `Task.projection.agentRun`
   - The active or terminal state for the current implementation-side run.
-- `Task.projection.codexReview`
-  - The local review gate projection for the last agent review. The field name
-    is retained for schema-12 store compatibility.
+- `Task.projection.agentReview`
+  - The local review gate projection for the last agent review.
   - Includes the review run id, source run id, reviewed head/dirty fingerprint,
     summary, final artifact id, and structured findings when available.
 - `RunRecord.mode`
@@ -91,7 +90,7 @@ Expected UI:
    runtime advertises stable detached-review isolation. Runtimes without either
    capability are not eligible review runtimes.
 6. Reducer keeps the task workflow phase in Review.
-7. `projection.codexReview.status` becomes `RUNNING`.
+7. `projection.agentReview.status` becomes `RUNNING`.
 
 The review session must carry the configured runtime, model provider, model,
 service tier, cwd, and reasoning effort. Cross-runtime review never reuses a
@@ -124,7 +123,7 @@ Expected UI:
 When the review run emits a terminal event:
 
 - `AGENT_RUN_COMPLETED`
-  - Parses `codexReviewResult` when provided.
+  - Parses `agentReviewResult` when provided.
   - Falls back to native/raw review output parsing.
   - Stores structured findings and summary when available.
   - Status becomes:
@@ -287,7 +286,7 @@ Agent review:
 - Otherwise, only when stable detached-review isolation is advertised, creates
   a fresh provider session and starts a normal read-only review turn against
   the same Task Monki worktree.
-- The review run id is tracked through `projection.codexReview.runId`.
+- The review run id is tracked through `projection.agentReview.runId`.
 
 The review session must not be confused with the task's active implementation
 session. That distinction is what keeps Review phase checks separate from
@@ -302,7 +301,7 @@ Use these as invariants:
   - board: In Progress
   - card: Running or Fixing review feedback
 - Running agent review:
-  - `codexReview.status: RUNNING`
+  - `agentReview.status: RUNNING`
   - board: Review, even if workflow data is stale
   - card: AI reviewing
 - Successfully completed implementation/follow-up/retry from In Progress:
@@ -340,7 +339,7 @@ When the UI shows the wrong state:
 3. Check the current run's `mode`, `status`, `sessionId`, `providerTurnId`,
    `continuedFromRunId`, and `retryOfRunId`.
 4. Check `Task.projection.agentRun`.
-5. Check `Task.projection.codexReview.status`, `runId`, `sourceRunId`,
+5. Check `Task.projection.agentReview.status`, `runId`, `sourceRunId`,
    `reviewedHeadSha`, and `reviewedDirtyFingerprint`.
 6. Check whether the visible run is a review run or implementation-side run.
 7. Check latest Git snapshot head and dirty fingerprint.

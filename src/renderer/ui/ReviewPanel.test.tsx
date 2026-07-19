@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type {
-  CodexReviewGateProjection,
+  AgentReviewGateProjection,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
@@ -43,7 +43,7 @@ describe('ReviewPanel', () => {
           reviewedDirtyFingerprint: 'fingerprint-old',
           summary: 'Previous review found a blocker.',
           result: {
-            schemaVersion: 'codex-review/v1',
+            schemaVersion: 'agent-review/v1',
             verdict: 'NEEDS_CHANGES',
             summary: 'Previous review found a blocker.',
             findings: [
@@ -73,7 +73,7 @@ describe('ReviewPanel', () => {
   });
 });
 
-function reviewGateFixture(): CodexReviewGateProjection {
+function reviewGateFixture(): AgentReviewGateProjection {
   return {
     status: 'PASSED',
     runId: 'review-run',

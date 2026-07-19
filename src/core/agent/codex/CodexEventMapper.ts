@@ -24,9 +24,8 @@ import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
 export function mapModel(model: Model): AgentModel {
   return {
-    id: `${CODEX_RUNTIME_ID}:openai/${model.model}`,
+    id: `${CODEX_RUNTIME_ID}:${model.id}`,
     runtimeId: CODEX_RUNTIME_ID,
-    modelProvider: 'openai',
     model: model.model,
     displayName: model.displayName,
     description: model.description,

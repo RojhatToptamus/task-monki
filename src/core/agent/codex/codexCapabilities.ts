@@ -20,14 +20,14 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
   return {
     runtimeId: CODEX_RUNTIME_ID,
     executionPolicy: {
-      defaultPresetId: 'sandboxed',
+      defaultPresetId: 'restricted',
       detail:
         'Codex enforces managed filesystem/process boundaries and supports native or Task Monki-reviewed approvals.',
       presets: [
         {
-          id: 'sandboxed',
-          label: 'Sandboxed',
-          detail: 'Workspace writes are allowed inside the managed sandbox; network and escalation are disabled.',
+          id: 'restricted',
+          label: 'Restricted',
+          detail: 'Worktree only; network disabled; no exceptions.',
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
@@ -36,7 +36,7 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         {
           id: 'ask-for-approval',
           label: 'Ask for approval',
-          detail: 'Workspace access is sandboxed and escalation requests are sent to you.',
+          detail: 'Sandboxed; you review eligible exceptions.',
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'user',
@@ -45,7 +45,7 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         {
           id: 'approve-for-me',
           label: 'Approve for me',
-          detail: 'Workspace access is sandboxed and supported escalation requests use the automatic reviewer.',
+          detail: 'Sandboxed; the automatic reviewer evaluates eligible exceptions.',
           sandbox: 'WORKSPACE_WRITE',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'auto_review',
@@ -54,7 +54,7 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         {
           id: 'full-access',
           label: 'Full access',
-          detail: 'Codex runs without the managed sandbox or approval escalation boundary.',
+          detail: 'Unrestricted.',
           sandbox: 'DANGER_FULL_ACCESS',
           approvalPolicy: 'never',
           approvalsReviewer: 'user',
@@ -75,8 +75,13 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
     userInputRequests: experimental('The current request-user-input schema is marked experimental.'),
     goals: stable('One persisted goal is available per materialized thread.'),
     plans: stable('turn/plan/updated provides provider-reported plan state.'),
+    detachedReview: stable(
+      'Codex can run the provider-neutral review contract in an attested read-only session.'
+    ),
     review: stable('review/start supports inline or detached review work.'),
-    subagents: stable('Current protocol exposes parent IDs and collaboration activity.'),
+    subagents: unsupported(
+      'Task Monki permission profiles disable Codex multi-agent execution; unsolicited child activity remains telemetry only.'
+    ),
     backgroundTerminals: experimental('List, terminate, and cleanup methods require experimental API access.'),
     dynamicTools: experimental('Client-registered dynamic tools require experimental API access.'),
     attachmentDelivery: stable('Verified local images and text-like managed files use an attested permission profile.'),
@@ -86,13 +91,12 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         'Codex attests the active permission profile, exact workspace roots, and disabled network/tool boundary.'
       ),
       'task-monki.prompt-refinement': stable('Uses a read-only ephemeral Codex execution.'),
-      genericDetachedReview: stable(
-        'Codex can run the provider-neutral review contract in an attested read-only session.'
-      ),
       'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),
       'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),
-      'codex.collaboration': stable('Native subagent lineage and collaboration activity notifications.')
+      'codex.collaboration': unsupported(
+        'Task Monki disables Codex multi-agent execution in every managed permission profile.'
+      )
     }
   };
 }

@@ -39,6 +39,7 @@ import type {
   TestExternalToolRequest,
   ExternalToolProbeResult,
   InspectOpenTargetRequest,
+  InteractionRequestRecord,
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
@@ -55,6 +56,7 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
+  getImplementationRetryReason,
   isImplementationRunMode,
   normalizeAgentApprovalsReviewer,
   normalizePullRequestTitle,
@@ -118,7 +120,7 @@ export class TaskManagerService {
   private runtimeLifecycleTail: Promise<void> = Promise.resolve();
   private readonly activeRuntimeOperations = new Set<Promise<void>>();
   private runtimeLifecycleClosing = false;
-  private readonly postRunEvidenceTasks = new Set<Promise<void>>();
+  private readonly postRunEvidenceTasks = new Map<string, Promise<void>>();
   private readonly disposeAgentEventListener: () => void;
   private shutdownPromise?: Promise<void>;
   private readonly agentProviderStartupDisabledReason?: string;
@@ -205,6 +207,7 @@ export class TaskManagerService {
     this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
         this.trackPostRunEvidence(event.runId);
+        this.scheduleDeferredCodexRuntimeRestart(event.runId);
       }
     });
   }
@@ -217,7 +220,9 @@ export class TaskManagerService {
       await this.applyRuntimeSettings({
         restartCodex: false,
         updateCodex: true,
-        updateAgentRuntimes: true,
+        updateAgentRuntimeIds: this.runtimeRegistry
+          .list()
+          .map((adapter) => adapter.descriptor.id),
         restartAgentRuntimes: false
       });
       await this.agents.initialize(
@@ -236,6 +241,31 @@ export class TaskManagerService {
       await Promise.all(
         [...recoveryTaskIds].map((taskId) =>
           this.refreshEvidence({ taskId }).catch(() => undefined)
+        )
+      );
+      const recovered = await this.store.snapshot();
+      const completedCurrentImplementationRuns = recovered.tasks.flatMap((task) => {
+        const run = task.currentRunId
+          ? recovered.runs.find((candidate) => candidate.id === task.currentRunId)
+          : undefined;
+        const requiresReconciliation =
+          run &&
+          (!run.afterGitSnapshotId ||
+            (['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) &&
+              !getImplementationRetryReason(task) &&
+              recovered.interactionRequests.some((interaction) =>
+                isDeclinedExecutionInteraction(interaction, run.id)
+              )));
+        return run &&
+          isImplementationRunMode(run.mode) &&
+          run.status === 'COMPLETED' &&
+          requiresReconciliation
+          ? [run.id]
+          : [];
+      });
+      await Promise.allSettled(
+        completedCurrentImplementationRuns.map((runId) =>
+          this.ensurePostRunEvidence(runId)
         )
       );
     });
@@ -291,7 +321,7 @@ export class TaskManagerService {
       const capabilities = await adapter.capabilities();
       const supportsReview =
         capabilities.review.maturity !== 'unsupported' ||
-        capabilities.extensions.genericDetachedReview?.maturity === 'stable';
+        capabilities.detachedReview.maturity === 'stable';
       if (!supportsReview) {
         throw new Error(
           `${adapter.descriptor.displayName} does not support an isolated review workflow.`
@@ -347,19 +377,20 @@ export class TaskManagerService {
       input.runtimeExecutablePaths
     );
     const affectsRuntimeAvailability = input.disabledRuntimeIds !== undefined;
+    const updatedAgentRuntimeIds = Object.keys(input.runtimeExecutablePaths ?? {});
     let runtimeConfigurationChanged = false;
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
       runtimeConfigurationChanged = Boolean(
-        affectsCodexRuntime || input.runtimeExecutablePaths
+        affectsCodexRuntime || updatedAgentRuntimeIds.length > 0
       );
-      const hasActiveAgentRun = await this.hasActiveAgentRun();
+      const activeRuntimeIds = await this.activeAgentRuntimeIds();
       try {
         await this.applyRuntimeSettings({
-          restartCodex: affectsCodexRuntime && !hasActiveAgentRun,
+          restartCodex: affectsCodexRuntime && !activeRuntimeIds.has('codex'),
           updateCodex: affectsCodexRuntime,
-          updateAgentRuntimes: Boolean(input.runtimeExecutablePaths),
-          restartAgentRuntimes: !hasActiveAgentRun
+          updateAgentRuntimeIds: updatedAgentRuntimeIds,
+          restartAgentRuntimes: activeRuntimeIds.size === 0
         });
       } catch {
         // The setting is still saved; provider/tool status reports the runtime failure.
@@ -770,7 +801,20 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Agent run', () =>
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
-        const task = await this.requireTask(input.taskId);
+        let task = await this.requireTask(input.taskId);
+        const mode = input.mode ?? 'IMPLEMENTATION';
+        if (task.currentRunId) {
+          if (isImplementationRunMode(mode)) {
+            await this.awaitPostRunEvidence(task.currentRunId);
+          } else {
+            await this.ensurePostRunEvidence(task.currentRunId);
+          }
+          task = await this.requireTask(input.taskId);
+        }
+        const retryReason = getImplementationRetryReason(task);
+        if (retryReason && !isImplementationRunMode(mode)) {
+          throw new Error(retryReason);
+        }
         this.assertRuntimeEnabled(task.runtimeId);
         const snapshot = await this.store.snapshot();
         this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
@@ -778,7 +822,7 @@ export class TaskManagerService {
         return this.startPreparedRun({
           task,
           worktree,
-          mode: input.mode,
+          mode,
           settings: input.settings
         });
       })
@@ -857,6 +901,7 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Agent follow-up', () =>
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
+        await this.awaitPostRunEvidence(input.runId);
         const { task, run, iteration, worktree } = await this.requireContinuationContext(
           input.taskId,
           input.runId
@@ -897,6 +942,7 @@ export class TaskManagerService {
     return this.withTaskAction(input.taskId, 'Agent retry', () =>
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
+        await this.awaitPostRunEvidence(input.runId);
         const { task, run, iteration, worktree } = await this.requireContinuationContext(
           input.taskId,
           input.runId
@@ -1014,7 +1060,7 @@ export class TaskManagerService {
   private async applyRuntimeSettings(input: {
     restartCodex: boolean;
     updateCodex: boolean;
-    updateAgentRuntimes?: boolean;
+    updateAgentRuntimeIds?: readonly string[];
     restartAgentRuntimes?: boolean;
   }): Promise<ExternalToolStatusReport> {
     const status = await this.externalToolResolver.getStatus(
@@ -1032,10 +1078,15 @@ export class TaskManagerService {
           !this.appSettings.disabledRuntimeIds.includes(this.codexAdapter.descriptor.id)
       });
     }
-    if (input.updateAgentRuntimes) {
+    if (input.updateAgentRuntimeIds) {
+      const updatedRuntimeIds = new Set(input.updateAgentRuntimeIds);
       await Promise.all(
         this.runtimeRegistry.list().map(async (adapter) => {
-          if (!adapter.configureRuntime || adapter.descriptor.id === 'codex') {
+          if (
+            !updatedRuntimeIds.has(adapter.descriptor.id) ||
+            !adapter.configureRuntime ||
+            adapter.descriptor.id === 'codex'
+          ) {
             return;
           }
           if (
@@ -1113,6 +1164,17 @@ export class TaskManagerService {
         );
       }
     }
+    for (const runtimeId of Object.keys(prospective.runtimeExecutablePaths)) {
+      if (runtimeId === 'codex') {
+        throw new Error('Codex does not use a provider runtime executable path.');
+      }
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      if (!adapter.configureRuntime) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not use a provider runtime executable path.`
+        );
+      }
+    }
 
     const newlyDisabled = new Set(
       prospective.disabledRuntimeIds.filter(
@@ -1137,22 +1199,32 @@ export class TaskManagerService {
     throw new Error(`${runtime} is disabled. Enable it in Settings before starting agent work.`);
   }
 
-  private async hasActiveAgentRun(): Promise<boolean> {
+  private async activeAgentRuntimeIds(): Promise<Set<AgentRuntimeId>> {
     const snapshot = await this.store.snapshot();
-    return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
+    return new Set(
+      snapshot.runs
+        .filter((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status))
+        .map((run) => run.runtimeId)
+    );
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
     return this.withTaskAction(input.taskId, 'Agent review', () =>
       this.withRuntimeOperation(async () => {
         await this.assertAgentRuntimeAvailable();
-        const task = await this.requireTask(input.taskId);
-        const snapshot = await this.store.snapshot();
-        this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
+        let task = await this.requireTask(input.taskId);
         const runId = input.runId ?? task.currentRunId;
         if (!runId) {
           throw new Error('Complete an agent turn before starting a detached review.');
         }
+        await this.ensurePostRunEvidence(runId);
+        task = await this.requireTask(input.taskId);
+        const implementationRetryReason = getImplementationRetryReason(task);
+        if (implementationRetryReason) {
+          throw new Error(implementationRetryReason);
+        }
+        const snapshot = await this.store.snapshot();
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
         const run = await this.requireRunForTask(runId, task.id);
         if (
           [
@@ -1169,7 +1241,8 @@ export class TaskManagerService {
         if (
           run.id !== task.currentRunId ||
           !isImplementationRunMode(run.mode) ||
-          run.status !== 'COMPLETED'
+          run.status !== 'COMPLETED' ||
+          task.workflowPhase !== 'REVIEW'
         ) {
           throw new Error(
             'A review requires a successfully completed implementation run. Retry or continue this run first.'
@@ -1311,7 +1384,8 @@ export class TaskManagerService {
   private async createDeliveryCommitUnlocked(
     input: CreateDeliveryCommitRequest
   ): Promise<GitSnapshotRecord> {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
     const worktree = await this.requireWorktree(task);
@@ -1364,7 +1438,8 @@ export class TaskManagerService {
   }
 
   private async publishBranchUnlocked(input: PublishBranchRequest) {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'publishing the branch');
     const worktree = await this.requireWorktree(task);
@@ -1401,7 +1476,8 @@ export class TaskManagerService {
   private async createPullRequestUnlocked(
     input: CreatePullRequestRequest
   ): Promise<PullRequestSnapshotRecord> {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
@@ -1457,6 +1533,10 @@ export class TaskManagerService {
       }
       try {
         const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
+        const currentTask = await this.requireTask(task.id);
+        if (currentTask.currentRunId) {
+          await this.ensurePostRunEvidence(currentTask.currentRunId);
+        }
         const stored = await this.store.recordPullRequestSync(sync);
         this.emitGitHubUpdate(task.id, worktree, stored);
         return stored;
@@ -1478,7 +1558,9 @@ export class TaskManagerService {
 
   async transitionTask(input: TransitionTaskRequest): Promise<Task> {
     return this.withTaskAction(input.taskId, 'Workflow transition', async () => {
-      const task = await this.requireTask(input.taskId);
+      const task = ['REVIEW', 'IN_REVIEW', 'DONE'].includes(input.toPhase)
+        ? await this.requireTaskWithPostRunEvidence(input.taskId)
+        : await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
       const latestGit = snapshot.gitSnapshots
@@ -1591,49 +1673,174 @@ export class TaskManagerService {
     ) {
       return;
     }
-    try {
-      const snapshot = await this.refreshEvidence({ taskId: run.taskId });
-      await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
-      if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
-        const state = await this.store.snapshot();
-        const before = state.gitSnapshots.find(
-          (candidate) => candidate.id === run.beforeGitSnapshotId
+    const snapshot = await this.refreshEvidence({ taskId: run.taskId });
+    await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
+    if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
+      await this.reconcileImplementationOutcome(run, snapshot);
+    }
+    if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
+      const state = await this.store.snapshot();
+      const before = state.gitSnapshots.find(
+        (candidate) => candidate.id === run.beforeGitSnapshotId
+      );
+      if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'AGENT_REVIEW_POLICY_VIOLATION',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            source: 'git',
+            payload: {
+              beforeDirtyFingerprint: before.dirtyFingerprint,
+              afterDirtyFingerprint: snapshot.dirtyFingerprint
+            }
+          })
         );
-        if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
-          await this.store.appendEvent(
-            createDomainEvent({
-              type: 'AGENT_REVIEW_POLICY_VIOLATION',
-              taskId: run.taskId,
-              iterationId: run.iterationId,
-              runId: run.id,
-              worktreeId: run.worktreeId,
-              agentSessionId: run.sessionId,
-              source: 'git',
-              payload: {
-                beforeDirtyFingerprint: before.dirtyFingerprint,
-                afterDirtyFingerprint: snapshot.dirtyFingerprint
-              }
-            })
-          );
-        }
       }
-    } catch {
-      // The terminal event already completed the run. Evidence refresh failures remain visible
-      // through explicit refresh attempts and stored runtime/provider artifacts.
     }
   }
 
+  private async reconcileImplementationOutcome(
+    run: RunRecord,
+    after: GitSnapshotRecord
+  ): Promise<void> {
+    const state = await this.store.snapshot();
+    const task = state.tasks.find((candidate) => candidate.id === run.taskId);
+    if (
+      task?.currentRunId !== run.id ||
+      !['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) ||
+      getImplementationRetryReason(task)
+    ) {
+      return;
+    }
+    const declinedExecution = state.interactionRequests.some((interaction) =>
+      isDeclinedExecutionInteraction(interaction, run.id)
+    );
+    if (!declinedExecution) {
+      return;
+    }
+    const before = state.gitSnapshots.find(
+      (candidate) => candidate.id === run.beforeGitSnapshotId
+    );
+    if (!before) {
+      throw new Error(`Run ${run.id} is missing its pre-run Git evidence.`);
+    }
+    if (
+      before.headSha !== after.headSha ||
+      before.dirtyFingerprint !== after.dirtyFingerprint
+    ) {
+      return;
+    }
+    const reason =
+      'A provider execution request was declined and this run produced no Git change. Retry or continue before review.';
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'git',
+        payload: {
+          reason,
+          beforeGitSnapshotId: before.id,
+          afterGitSnapshotId: after.id
+        }
+      })
+    );
+  }
+
+  private scheduleDeferredCodexRuntimeRestart(runId: string): void {
+    const codex = this.codexAdapter;
+    if (!codex || this.runtimeLifecycleClosing) {
+      return;
+    }
+    void this.enqueueRuntimeLifecycle(async () => {
+      const run = await this.store.getRun(runId);
+      if (run?.runtimeId !== codex.descriptor.id) {
+        return;
+      }
+      await codex.applyPendingRuntimeConfigIfIdle();
+    }).catch(() => undefined);
+  }
+
   private trackPostRunEvidence(runId: string): void {
-    const pending = this.capturePostRunEvidence(runId).catch(() => undefined);
-    this.postRunEvidenceTasks.add(pending);
-    void pending.finally(() => {
-      this.postRunEvidenceTasks.delete(pending);
-    });
+    if (this.postRunEvidenceTasks.has(runId)) {
+      return;
+    }
+    const pending = this.capturePostRunEvidence(runId);
+    this.postRunEvidenceTasks.set(runId, pending);
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.postRunEvidenceTasks.get(runId) === pending) {
+          this.postRunEvidenceTasks.delete(runId);
+        }
+      });
+  }
+
+  private async awaitPostRunEvidence(runId: string): Promise<void> {
+    await this.postRunEvidenceTasks.get(runId)?.catch(() => undefined);
+  }
+
+  private async ensurePostRunEvidence(runId: string): Promise<void> {
+    await this.awaitPostRunEvidence(runId);
+    const run = await this.store.getRun(runId);
+    if (!run || !isImplementationRunMode(run.mode) || run.status !== 'COMPLETED') {
+      return;
+    }
+    let completedRun = run;
+    const state = await this.store.snapshot();
+    const task = state.tasks.find((candidate) => candidate.id === completedRun.taskId);
+    if (task?.currentRunId !== completedRun.id) {
+      return;
+    }
+    const existingAfterId = completedRun.afterGitSnapshotId;
+    let after = state.gitSnapshots.find(
+      (candidate) => candidate.id === existingAfterId
+    );
+    if (!after) {
+      await this.capturePostRunEvidence(completedRun.id);
+      const capturedRun = await this.store.getRun(completedRun.id);
+      if (!capturedRun) {
+        throw new Error(`Run not found after post-run evidence capture: ${runId}.`);
+      }
+      completedRun = capturedRun;
+      const refreshed = await this.store.snapshot();
+      const capturedAfterId = completedRun.afterGitSnapshotId;
+      after = refreshed.gitSnapshots.find(
+        (candidate) => candidate.id === capturedAfterId
+      );
+    }
+    if (!after) {
+      throw new Error(`Run ${completedRun.id} is missing its post-run Git evidence.`);
+    }
+    await this.reconcileImplementationOutcome(completedRun, after);
+  }
+
+  private async requireTaskWithPostRunEvidence(taskId: string): Promise<Task> {
+    let task = await this.requireTask(taskId);
+    if (task.currentRunId) {
+      await this.ensurePostRunEvidence(task.currentRunId);
+      task = await this.requireTask(taskId);
+    }
+    return task;
+  }
+
+  private assertImplementationOutcomeReady(task: Task): void {
+    const reason = getImplementationRetryReason(task);
+    if (reason) {
+      throw new Error(reason);
+    }
   }
 
   private async drainPostRunEvidence(): Promise<void> {
     while (this.postRunEvidenceTasks.size > 0) {
-      await Promise.all([...this.postRunEvidenceTasks]);
+      await Promise.allSettled([...this.postRunEvidenceTasks.values()]);
     }
   }
 
@@ -2068,9 +2275,17 @@ export function transitionBlocker(
     ) {
       return 'The current implementation run must complete successfully before moving to review.';
     }
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
+    }
     return undefined;
   }
   if (toPhase === 'IN_REVIEW') {
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
+    }
     if (evidence.pullRequestStatus !== 'OPEN_DRAFT' && evidence.pullRequestStatus !== 'OPEN_READY') {
       return 'A matching open GitHub pull request is required before IN_REVIEW.';
     }
@@ -2080,6 +2295,10 @@ export function transitionBlocker(
     return undefined;
   }
   if (toPhase === 'DONE') {
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
+    }
     if (completionPolicyRequiresMerge(task.completionPolicy) && evidence.mergeStatus !== 'MERGED') {
       return 'GitHub must report the pull request merged before DONE.';
     }
@@ -2101,6 +2320,27 @@ export function transitionBlocker(
     return activeTaskOperationBlocker(task);
   }
   return undefined;
+}
+
+function isDeclinedInteractionAction(action: string | undefined): boolean {
+  return action === 'DECLINE' || action === 'DECLINE_FOR_SESSION';
+}
+
+function isDeclinedExecutionInteraction(
+  interaction: Pick<
+    InteractionRequestRecord,
+    'runId' | 'type' | 'status' | 'decision'
+  >,
+  runId: string
+): boolean {
+  return (
+    interaction.runId === runId &&
+    ['COMMAND_APPROVAL', 'FILE_CHANGE_APPROVAL', 'PERMISSION_APPROVAL'].includes(
+      interaction.type
+    ) &&
+    interaction.status === 'DECLINED' &&
+    isDeclinedInteractionAction(interaction.decision?.action)
+  );
 }
 
 function latestForIteration<T extends { iterationId: string }>(

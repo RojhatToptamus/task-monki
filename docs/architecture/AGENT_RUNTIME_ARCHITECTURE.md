@@ -108,7 +108,7 @@ packaging understandable.
 
 ## Durable identity and routing
 
-Store schema 12 persists `runtimeId` on tasks, sessions, runs, server
+Store schema 13 persists `runtimeId` on tasks, sessions, runs, server
 instances, interactions, settings observations, goals, plans, usage, and
 subagent observations.
 
@@ -205,6 +205,11 @@ enabling it initializes normal discovery again. If provider shutdown or settings
 persistence fails, the prior enabled state is retained and Task Monki restores
 every runtime whose termination was confirmed rather than publishing two
 availability authorities.
+Codex executable and external-tool changes restart an idle Codex runtime
+immediately. If Codex owns active or recovery-required work, the adapter marks
+the configuration pending and the lifecycle coordinator applies it after the
+last Codex run terminalizes; activity in another runtime does not defer that
+Codex-owned restart.
 
 ## Capabilities without a lowest common denominator
 
@@ -252,7 +257,10 @@ The renderer renders the typed control contract and never parses
 
 Model IDs used by Task Monki are runtime-qualified, for example
 `opencode:anthropic/model-id`. Persisted execution settings retain `runtimeId`,
-`modelProvider`, and the runtime's raw model ID separately.
+the runtime's raw model ID, and `modelProvider` when the runtime actually
+reports that dimension. Codex `model/list` does not report a provider, so its
+catalog remains provider-unscoped and App Server chooses its configured
+provider unless a task explicitly supplies one.
 
 UI selectors always choose runtime first, then show only models owned by that
 runtime and optional model provider. Changing runtime deterministically resets
@@ -290,8 +298,10 @@ against the new worktree session before mutation or prompt submission.
 
 Codex remains a full native integration. App Server owns authentication,
 threads, turns, native review, approvals, goals, plans, model discovery,
-subagents, and streaming events. Task Monki uses generated version-matched
-bindings and the existing fail-closed permission-profile attestation. See
+and streaming events. Task Monki's managed profiles disable multi-agent
+execution, so subagent creation is not advertised as supported; any unsolicited
+child activity is diagnostic telemetry only. Task Monki uses generated
+version-matched bindings and the existing fail-closed permission-profile attestation. See
 `docs/APP_SERVER_ARCHITECTURE.md` and
 `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`.
 
@@ -432,20 +442,22 @@ may expose the exact one-time choice and, when advertised, the exact provider-
 remembered choice; it never creates a Task Monki session grant. Grok, Claude,
 and unrecognized ACP profiles fail closed when execution scope cannot be
 verified. Cursor and Grok may also expose exact provider-remembered options
-when their local command/path/network check permits the request. The provider
-owns that remembered scope and may stop reporting matching operations; Task
-Monki does not imitate it with repository files or global configuration.
-Provider-remembered rejection remains available when offered.
+when the profile and local command/path/network policy permit the request. The
+provider owns the remembered choice's scope, storage, lifetime, and revocation,
+which may extend beyond the ACP process; Task Monki does not imitate it with
+repository files or global configuration. Provider-remembered rejection
+remains available when offered.
 
 Cursor and Grok expose three runtime-owned policies without changing the native
-ACP agent mode: **Supervised** publishes permitted provider options to the user;
+ACP agent mode: **Ask for approval** publishes permitted provider options to the user;
 **Auto-accept edits** selects an exact one-time positive option only for a
 verified edit, delete, or move inside the task worktree; **Full access** selects
-the provider's exact one-time positive option, falling back to its remembered
-positive option only when no one-time option exists. Commands and unverifiable
-operations remain interactive under Auto-accept edits. Every automatic response
-is durably journaled before delivery, and ambiguous delivery quarantines the
-owning ACP process.
+the provider's exact one-time positive option. No policy automatically selects
+a remembered option; if only a remembered positive choice is available, the
+user must explicitly select that exact provider option. Commands and
+unverifiable operations remain interactive under Auto-accept edits. Every
+automatic response is durably journaled before delivery, and ambiguous delivery
+quarantines the owning ACP process.
 
 ACP modes and configuration selectors are not flattened into common settings.
 The stable v1.19 schema does not define initialize model metadata, a session
@@ -647,29 +659,40 @@ Rules:
 - a granting response requires both the run and exact owning session to retain
   the interaction's matching awaiting state; decline and cancel remain
   available when stale state must be recovered;
-- `DECLINE_FOR_SESSION` exists only when the runtime reports a remembered deny
-  option;
 - ACP keeps exact native option IDs and labels plus a normalized local action
-  in `providerOptions`, requires the chosen ID on the durable decision, and
-  returns it verbatim;
+  and provider-owned persistence marker in `providerOptions`, requires the
+  chosen ID on the durable decision, and returns it verbatim;
 - a provider-remembered option is exposed only after the current request passes
-  Task Monki's local command/path/network checks; its exact provider label and
-  scope remain provider-owned, and Task Monki creates no persistent grant;
+  the profile and Task Monki policy checks; its exact provider label is shown,
+  persistence is never described as Task Monki session scope, and Task Monki
+  creates no persistent grant;
 - runtime loss makes unanswered interactions stale or aborted; it does not
   auto-approve or synthesize a response.
+
+A provider-completed turn does not override a durable user rejection. After
+post-run Git capture, an implementation with a declined execution interaction
+and unchanged HEAD plus dirty fingerprint receives a Task Monki workflow
+outcome that keeps it in progress for retry or continuation. The provider run
+remains `COMPLETED`; Task Monki does not append a contradictory terminal event
+or infer success or failure from provider prose. The projection stores the
+retry requirement against the exact run so unrelated failed transitions and
+later evidence refreshes cannot create or erase it. Review and delivery actions
+reconcile missing post-run evidence before proceeding, including after process
+restart, and fail closed when that evidence cannot be captured. Only a
+replacement implementation-side run clears the requirement.
 
 ## Review
 
 Review is a Task Monki quality gate, not a Codex-only workflow. A same-runtime
 adapter may use a native review feature. Otherwise the orchestrator creates a
 read-only review session and starts the provider-neutral structured review
-prompt as a normal turn only when the runtime advertises stable detached-review
+prompt as a normal turn only when the runtime's typed `detachedReview`
+capability advertises stable detached-review
 isolation. Cross-runtime review is allowed without changing the task's
 implementation runtime; runtimes with only inferred isolation are not eligible.
 
-The durable projection field `projection.codexReview` retains its schema-12
-name for store compatibility; its semantics and user-facing copy are
-provider-neutral. See
+The durable projection field `projection.agentReview` and its structured
+result schema are provider-neutral. See
 `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
 
 ## Attachments

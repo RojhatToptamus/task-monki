@@ -164,7 +164,7 @@ function isUsefulReviewSentence(text: string): boolean {
 }
 
 function looksLikeFinalReviewOutput(text: string): boolean {
-  return /```|schemaVersion|codex-review\/v1|"verdict"|"findings"|\bverdict:\s*(passed|needs_changes|inconclusive)\b/i.test(
+  return /```|schemaVersion|agent-review\/v1|"verdict"|"findings"|\bverdict:\s*(passed|needs_changes|inconclusive)\b/i.test(
     text
   );
 }

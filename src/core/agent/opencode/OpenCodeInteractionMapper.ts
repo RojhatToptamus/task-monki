@@ -88,12 +88,20 @@ export function mapOpenCodePermission(
   permission: OpenCodePermissionRequest,
   worktreePath: string
 ): MappedOpenCodeInteraction {
-  const action = (permission.action ?? permission.permission ?? 'unknown').toLowerCase();
-  const resources = permission.resources ?? permission.patterns ?? [];
+  const nativeAction =
+    typeof permission.action === 'string'
+      ? permission.action
+      : typeof permission.permission === 'string'
+        ? permission.permission
+        : 'unknown';
+  const action = nativeAction.toLowerCase();
+  const resources = firstNonEmptyStringArray(permission.resources, permission.patterns);
   const startedAtMs = permission.time?.created ?? Date.now();
   const providerItemId = permission.source?.callID ?? permission.tool?.callID;
   if (action.includes('bash') || action.includes('shell')) {
-    const command = stringMetadata(permission.metadata, 'command') ?? resources.join(' && ');
+    const command =
+      nonEmptyStringMetadata(permission.metadata, 'command') ??
+      (resources.length > 0 ? resources.join(' && ') : undefined);
     return {
       type: 'COMMAND_APPROVAL',
       providerItemId,
@@ -101,7 +109,7 @@ export function mapOpenCodePermission(
         startedAtMs,
         approvalId: permission.id,
         reason: `OpenCode requested ${action} permission.`,
-        command,
+        ...(command ? { command } : {}),
         cwd: stringMetadata(permission.metadata, 'cwd') ?? worktreePath
       }
     };
@@ -211,8 +219,28 @@ function stringMetadata(
   metadata: Record<string, unknown> | undefined,
   key: string
 ): string | undefined {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
   const value = metadata?.[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function nonEmptyStringMetadata(
+  metadata: Record<string, unknown> | undefined,
+  key: string
+): string | undefined {
+  const value = stringMetadata(metadata, key);
+  return value?.trim() ? value : undefined;
+}
+
+function firstNonEmptyStringArray(...candidates: unknown[]): string[] {
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const values = candidate.filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0
+    );
+    if (values.length > 0) return values;
+  }
+  return [];
 }
 
 function looksLikeSecretQuestion(header: string, question: string): boolean {

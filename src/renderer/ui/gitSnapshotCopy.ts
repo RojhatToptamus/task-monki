@@ -1,4 +1,4 @@
-import type { CodexReviewGateProjection, GitSnapshotRecord } from '../../shared/contracts';
+import type { AgentReviewGateProjection, GitSnapshotRecord } from '../../shared/contracts';
 
 export function describeGitSnapshot(snapshot?: GitSnapshotRecord): string {
   if (!snapshot) {
@@ -14,7 +14,7 @@ export function describeGitSnapshot(snapshot?: GitSnapshotRecord): string {
 }
 
 export function describeReviewedDiff(
-  reviewGate: CodexReviewGateProjection,
+  reviewGate: AgentReviewGateProjection,
   currentSnapshot?: GitSnapshotRecord
 ): string {
   const head = reviewGate.reviewedHeadSha ?? currentSnapshot?.headSha;

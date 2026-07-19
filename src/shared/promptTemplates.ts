@@ -24,7 +24,7 @@ Return a concise human-readable review followed by exactly one fenced JSON block
 The JSON block must match this schema:
 
 {
-  "schemaVersion": "codex-review/v1",
+  "schemaVersion": "agent-review/v1",
   "verdict": "PASSED" | "NEEDS_CHANGES" | "INCONCLUSIVE",
   "summary": "One short sentence explaining the review result.",
   "findings": [
@@ -51,10 +51,6 @@ Use verdict NEEDS_CHANGES when any BLOCKER or MAJOR finding exists.
 Use verdict PASSED when there are no blocker or major findings.
 Use verdict INCONCLUSIVE only when the diff cannot be reviewed confidently.
 If there are no findings, return an empty findings array.`;
-
-/** @deprecated Use the provider-neutral review contract. */
-export const CODEX_REVIEW_DEVELOPER_INSTRUCTIONS =
-  AGENT_REVIEW_DEVELOPER_INSTRUCTIONS;
 
 export const TASK_MONKI_PROGRESS_CONTRACT = `Task Monki progress contract (defaults for non-trivial repository work):
 - For non-trivial implementation, follow-up, retry, or alternative work, maintain a concise provider plan as progress telemetry.

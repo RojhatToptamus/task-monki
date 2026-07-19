@@ -435,6 +435,49 @@ describe('OpenCodeAdapter', () => {
     await fixture.adapter.shutdown();
   });
 
+  it('quarantines active recovery when native permissions no longer attest its policy', async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initialize();
+    const session = await materializeSession(fixture);
+    const run = await createRun(fixture, session);
+    await fixture.adapter.startTurn({
+      localRunId: run.id,
+      session: {
+        localSessionId: session.id,
+        providerSessionId: session.providerSessionId
+      },
+      mode: 'IMPLEMENTATION',
+      prompt: fixture.task.prompt,
+      authoritativeGoal: fixture.task.prompt,
+      settings: SETTINGS
+    });
+    fixture.harness.sessions.get(session.providerSessionId!)!.permission!.push({
+      permission: 'edit',
+      pattern: '*',
+      action: 'allow'
+    });
+
+    await expect(fixture.adapter.reconcile()).resolves.toEqual({
+      reconciledSessionIds: [],
+      recoveryRequiredSessionIds: [session.id]
+    });
+
+    const recoveredRun = await fixture.store.getRun(run.id);
+    expect(recoveredRun).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION',
+      terminalReason: expect.stringContaining(
+        'does not attest the requested on-request approval policy'
+      )
+    });
+    expect(recoveredRun?.observedSettings?.approvalPolicy).toBeUndefined();
+    const recoveredSession = await fixture.store.getAgentSession(session.id);
+    expect(recoveredSession).toMatchObject({ status: 'NOT_LOADED' });
+    expect(recoveredSession?.observedSettings?.approvalPolicy).toBeUndefined();
+    expect(fixture.harness.sessionSupervisor.shutdownCount).toBe(1);
+    await fixture.adapter.shutdown();
+  });
+
   it('repairs and attests the effective native permission suffix before prompting', async () => {
     const fixture = await createFixture();
     await fixture.adapter.initialize();
@@ -3184,7 +3227,7 @@ describe('OpenCodeAdapter', () => {
       discovery: 'deferred-to-worktree-catalog'
     });
 
-    const turn = await fixture.adapter.startTurn({
+    await fixture.adapter.startTurn({
       localRunId: run.id,
       session: { localSessionId: session.id },
       mode: 'IMPLEMENTATION',
@@ -4140,7 +4183,7 @@ async function createFixture(options: AdapterFixtureOptions = {}): Promise<Adapt
     worktreePath,
     baseSha: 'base-sha'
   });
-  const harness = new FakeOpenCodeHarness(store);
+  const harness = new FakeOpenCodeHarness();
   harness.catalogs.set(path.resolve(appCwd), defaultProviderCatalog());
   harness.catalogs.set(path.resolve(worktreePath), defaultProviderCatalog());
   const runtime = fakeRuntime();
@@ -4286,8 +4329,6 @@ class FakeOpenCodeHarness {
   returnSourceIdOnFork = false;
   sessionDirectoryTransform: (directory: string) => string = (directory) => directory;
   private nextSession = 0;
-
-  constructor(private readonly store: FileTaskStore) {}
 
   get catalogSupervisor(): FakeOpenCodeSupervisor {
     return this.supervisors[0]!;
