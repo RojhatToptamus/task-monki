@@ -38,7 +38,7 @@ export class WorktreeService {
     task: Task,
     base: { baseRef?: string; baseSha: string }
   ): WorktreeSpec {
-    const branchName = `codex/task-${task.id.slice(0, 8)}-${slugify(task.title)}`;
+    const branchName = `task-monki/task-${task.id.slice(0, 8)}-${slugify(task.title)}`;
     return {
       branchName,
       worktreePath: path.join(this.rootDir, task.id),

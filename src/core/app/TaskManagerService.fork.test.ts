@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { FileTaskStore } from '../storage/FileTaskStore';
-import { ScriptedAgentProviderAdapter } from '../../testSupport/taskMonkiScenario';
+import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import { TaskManagerService } from './TaskManagerService';
 
 const exec = promisify(execFile);
@@ -19,10 +19,10 @@ describe('TaskManagerService fork alternatives', () => {
     const baseSha = await initRepository(repositoryPath);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const agent = new ScriptedAgentProviderAdapter(store);
+    const agent = new ScriptedAgentRuntimeAdapter(store);
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      agentProviderAdapter: agent
+      agentRuntimeAdapters: [agent]
     });
     const repository = await service.addRepository(repositoryPath);
 
@@ -41,7 +41,7 @@ describe('TaskManagerService fork alternatives', () => {
       task: sourceTask,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const sourceRun = await store.createRun({
       task: sourceTask,
@@ -83,7 +83,10 @@ describe('TaskManagerService fork alternatives', () => {
 
     const prompt = await store.readArtifact(forkedRun.promptArtifactId);
     expect(prompt).toContain('Alternative attempt for this Task Monki goal');
-    expect(prompt).toContain('Try a smaller state-machine approach.');
+    expect(prompt.match(/Task Monki progress contract/g)).toHaveLength(1);
+    expect(prompt.endsWith('Alternative direction:\nTry a smaller state-machine approach.')).toBe(
+      true
+    );
 
     const secondForkedRun = await service.retryRun({
       taskId: sourceTask.id,
@@ -112,7 +115,7 @@ describe('TaskManagerService fork alternatives', () => {
     const store = new FileTaskStore(path.join(dir, 'store'));
     const service = new TaskManagerService(store, repositoryPath, undefined, {
       worktreeRoot,
-      codexPath: 'codex-not-used'
+      agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(store)]
     });
     const repository = await service.addRepository(repositoryPath);
 
@@ -131,7 +134,7 @@ describe('TaskManagerService fork alternatives', () => {
       task: sourceTask,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const sourceRun = await store.createRun({
       task: sourceTask,

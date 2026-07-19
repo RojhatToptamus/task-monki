@@ -2,8 +2,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { AgentProviderAdapter } from '../core/agent/AgentProviderAdapter';
-import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
+import type { AgentRuntimeAdapter } from '../core/agent/AgentRuntimeAdapter';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
@@ -42,7 +45,7 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
+    snapshot = await readStoreSnapshot(manifest.storeDir);
   }, 180_000);
 
   afterAll(async () => {
@@ -184,8 +187,12 @@ describe('Task Monki development seed data', () => {
       expect.arrayContaining([
         expect.objectContaining({ category: 'read', label: 'Read' }),
         expect.objectContaining({ category: 'edit', label: 'Edited' }),
-        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' }),
-        expect.objectContaining({ category: 'permission', label: 'Waiting', detail: 'for approval' })
+        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' })
+      ])
+    );
+    expect(approvalProgress?.activityTail).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'permission', label: 'Waiting' })
       ])
     );
 
@@ -195,8 +202,8 @@ describe('Task Monki development seed data', () => {
     );
     const runningReviewActivity = buildReviewActivityViewModel({
       reviewRun: runningReviewRun,
-      reviewRunning: runningReviewTask.projection.codexReview?.status === 'RUNNING',
-      useRunActivity: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      reviewRunning: runningReviewTask.projection.agentReview?.status === 'RUNNING',
+      useRunActivity: runningReviewTask.projection.agentReview?.status === 'RUNNING',
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
@@ -273,7 +280,7 @@ describe('Task Monki development seed data', () => {
     ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
-    expect(reviewTask.projection.codexReview).toMatchObject({ status: 'NEEDS_CHANGES' });
+    expect(reviewTask.projection.agentReview).toMatchObject({ status: 'NEEDS_CHANGES' });
     expect(
       snapshot.runs.find((run) => run.taskId === reviewTask.id && run.mode === 'REVIEW')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -285,7 +292,7 @@ describe('Task Monki development seed data', () => {
 
     const staleReview = taskForScenario(manifest, snapshot, 'review-stale-after-follow-up');
     expect(staleReview.workflowPhase).toBe('REVIEW');
-    expect(staleReview.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(staleReview.projection.agentReview).toMatchObject({ status: 'STALE' });
     expect(
       snapshot.runs.find((run) => run.taskId === staleReview.id && run.mode === 'FOLLOW_UP')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -293,7 +300,7 @@ describe('Task Monki development seed data', () => {
     const activeFollowUp = taskForScenario(manifest, snapshot, 'review-follow-up-active');
     expect(activeFollowUp.workflowPhase).toBe('IN_PROGRESS');
     expect(activeFollowUp.projection.agentRun).toBe('RUNNING');
-    expect(activeFollowUp.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(activeFollowUp.projection.agentReview).toMatchObject({ status: 'STALE' });
 
     const failedChecks = prView(snapshot, taskForScenario(manifest, snapshot, 'delivery-checks-failed'));
     expect(failedChecks).toMatchObject({
@@ -373,15 +380,16 @@ describe('Task Monki development seed data', () => {
     const before = await store.snapshot();
     const initialize = vi.fn(async () => undefined);
     const adapter = {
+      descriptor: CODEX_RUNTIME_DESCRIPTOR,
       initialize,
       capabilities: vi.fn(async () => codexCapabilities()),
       shutdown: vi.fn(async () => undefined)
-    } as unknown as AgentProviderAdapter;
+    } as unknown as AgentRuntimeAdapter;
     const disabledReason =
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
       codexPath: path.join(rootDir, 'missing-codex')
@@ -391,8 +399,19 @@ describe('Task Monki development seed data', () => {
     try {
       const after = await store.snapshot();
       expect(initialize).not.toHaveBeenCalled();
-      await expect(service.getAgentProviderState()).resolves.toMatchObject({
-        preflight: { ready: false, problems: [disabledReason] },
+      await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
+        runtimes: [
+          {
+            preflight: {
+              readiness: {
+                status: 'DISABLED',
+                canStart: false,
+                detail: disabledReason
+              }
+            },
+            models: []
+          }
+        ],
         models: []
       });
       expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
@@ -510,6 +529,15 @@ function prView(snapshot: TaskSnapshot, task: Task) {
     reviewRollup: selectLatestReviewRollup(snapshot, task),
     mergeSnapshot: selectLatestMergeSnapshot(snapshot, task)
   });
+}
+
+async function readStoreSnapshot(storeDir: string): Promise<TaskSnapshot> {
+  const store = new FileTaskStore(storeDir);
+  try {
+    return await store.snapshot();
+  } finally {
+    await store.close();
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

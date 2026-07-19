@@ -38,7 +38,6 @@ import type {
   RetryPreviewSetupRequest,
   ResolvePreviewRequest,
   ResolvePreviewResult,
-  RepositoryPreflight,
   RunRecord,
   StartRunRequest,
   StartPreviewRequest,
@@ -60,6 +59,7 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   TestExternalToolRequest,
+  UpdateAgentNativeSessionRequest,
   UpdateAppSettingsRequest,
   ValidatePreviewRecipeDraftRequest
 } from '../../shared/contracts';
@@ -197,7 +197,11 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
-    getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
+  getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
+    discoverAgentRuntimeModels: (runtimeId) =>
+      post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),
+    updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
+      post(baseUrl, '/api/agent/session/native', input),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
     stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
       post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {

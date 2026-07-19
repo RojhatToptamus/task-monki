@@ -6,12 +6,11 @@ import type {
   AgentRunMode,
   BranchPublicationStatus,
   CiChecksStatus,
-  CodexReviewResult,
+  AgentReviewResult,
   CompletionPolicy,
   DomainEvent,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
-  GitStatus,
   InteractionRequestRecord,
   InteractionRequestType,
   MergeStatus,
@@ -168,48 +167,48 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('interaction-stale', 'agent', 'Stale interaction', 'An approval request became stale.', [
     'interaction:STALE'
   ]),
-  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without Codex review.', [
-    'codex-review:NOT_RUN'
+  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without an agent review.', [
+    'agent-review:NOT_RUN'
   ]),
-  scenario('review-running', 'review', 'Review running', 'Codex review run is active.', [
-    'codex-review:RUNNING'
+  scenario('review-running', 'review', 'Review running', 'Agent review run is active.', [
+    'agent-review:RUNNING'
   ]),
-  scenario('review-passed', 'review', 'Review passed', 'Codex review passed with structured result.', [
-    'codex-review:PASSED'
+  scenario('review-passed', 'review', 'Review passed', 'Agent review passed with structured result.', [
+    'agent-review:PASSED'
   ]),
   scenario(
     'review-needs-changes',
     'review',
     'Review needs changes',
-    'Codex review found actionable issues.',
-    ['codex-review:NEEDS_CHANGES']
+    'Agent review found actionable issues.',
+    ['agent-review:NEEDS_CHANGES']
   ),
   scenario(
     'review-inconclusive',
     'review',
     'Review inconclusive',
-    'Codex review completed without a definitive verdict.',
-    ['codex-review:INCONCLUSIVE']
+    'Agent review completed without a definitive verdict.',
+    ['agent-review:INCONCLUSIVE']
   ),
-  scenario('review-failed', 'review', 'Review failed', 'Codex review failed before completion.', [
-    'codex-review:FAILED'
+  scenario('review-failed', 'review', 'Review failed', 'Agent review failed before completion.', [
+    'agent-review:FAILED'
   ]),
-  scenario('review-canceled', 'review', 'Review canceled', 'Codex review was canceled.', [
-    'codex-review:CANCELED'
+  scenario('review-canceled', 'review', 'Review canceled', 'Agent review was canceled.', [
+    'agent-review:CANCELED'
   ]),
   scenario(
     'review-stale-after-follow-up',
     'review',
     'Stale review after follow-up',
     'A completed follow-up made the previous review stale.',
-    ['codex-review:STALE', 'mode:FOLLOW_UP']
+    ['agent-review:STALE', 'mode:FOLLOW_UP']
   ),
   scenario(
     'review-follow-up-active',
     'review',
     'Follow-up active',
     'Follow-up implementation is running after review findings.',
-    ['codex-review:STALE', 'agent:RUNNING']
+    ['agent-review:STALE', 'agent:RUNNING']
   ),
   scenario(
     'no-pr-git-not-inspected',
@@ -497,7 +496,7 @@ export async function seedTaskMonkiDevelopmentData(
   });
 
   const server = await store.createAgentServer({
-    provider: 'codex',
+    runtimeId: 'codex',
     runtimeKind: 'APP_SERVER',
     transport: 'STDIO',
     executable: 'codex-seed-runtime',
@@ -593,6 +592,7 @@ export async function seedTaskMonkiDevelopmentData(
     fs.chmod(paths.manifestPath, 0o600),
     fs.chmod(paths.envFilePath, 0o600)
   ]);
+  await store.close();
   return manifest;
 }
 
@@ -1370,7 +1370,7 @@ async function seedActiveRunProgress(
     iterationId: run.iterationId,
     runId: run.id,
     sessionId: run.sessionId,
-    provider: 'codex',
+    runtimeId: 'codex',
     explanation: input.explanation ?? 'Implementation is in progress.',
     steps,
     rawMessage: await rawMessage(ctx, 'INBOUND', {
@@ -1551,7 +1551,7 @@ async function createReviewScenario(
 
   const result = reviewResultFor(definition.slug);
   await completeRun(ctx, review, result.summary, state.gitSnapshot?.id, {
-    codexReviewResult: result
+    agentReviewResult: result
   });
 
   if (
@@ -1802,7 +1802,7 @@ async function createRun(
     task,
     iteration: state.iteration,
     worktree: state.worktree,
-    provider: 'codex',
+    runtimeId: 'codex',
     role: options.role ?? (mode === 'REVIEW' ? 'REVIEW' : 'PRIMARY'),
     requestedSettings: DEFAULT_AGENT_SETTINGS
   });
@@ -1860,6 +1860,7 @@ async function createInteraction(
 ): Promise<InteractionRequestRecord> {
   const requestRawMessage = await rawMessage(ctx, 'INBOUND', { type, runId: run.id });
   return ctx.store.createInteractionRequest({
+    runtimeId: run.runtimeId,
     serverInstanceId: ctx.serverInstanceId,
     providerRequestId: `seed-request-${++ctx.protocolCounter}`,
     taskId: run.taskId,
@@ -1896,7 +1897,7 @@ async function createInteraction(
           },
     allowedActions:
       type === 'USER_INPUT'
-        ? ['ANSWER', 'CANCEL']
+        ? ['ANSWER']
         : ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL'],
     policyWarnings: type === 'USER_INPUT' ? [] : ['Seeded approval warning.'],
     requestRawMessage
@@ -2105,10 +2106,10 @@ async function recordPr(
   });
 }
 
-function reviewResultFor(slug: string): CodexReviewResult {
+function reviewResultFor(slug: string): AgentReviewResult {
   if (slug === 'review-needs-changes' || slug === 'review-stale-after-follow-up' || slug === 'review-follow-up-active') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'NEEDS_CHANGES',
       summary: 'Seed review found changes that should be addressed.',
       findings: [
@@ -2126,14 +2127,14 @@ function reviewResultFor(slug: string): CodexReviewResult {
   }
   if (slug === 'review-inconclusive') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'INCONCLUSIVE',
       summary: 'Seed review could not reach a confident verdict.',
       findings: []
     };
   }
   return {
-    schemaVersion: 'codex-review/v1',
+    schemaVersion: 'agent-review/v1',
     verdict: 'PASSED',
     summary: 'Seed review passed.',
     findings: []

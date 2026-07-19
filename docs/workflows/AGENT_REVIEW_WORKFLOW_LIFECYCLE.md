@@ -1,4 +1,4 @@
-# Codex Review Workflow Lifecycle
+# Agent Review Workflow Lifecycle
 
 Date: 2026-07-11
 
@@ -6,7 +6,7 @@ Status: authoritative for review, follow-up, stale-review, and review
 interruption behavior.
 
 This document defines the Task Monki review workflow model and the operational
-rules for Codex review runs, follow-up implementation runs, cancellation,
+rules for agent review runs, follow-up implementation runs, cancellation,
 recovery, and board state. Use it when changing review/session code or
 debugging bugs where the UI shows the wrong run as active.
 
@@ -20,8 +20,8 @@ Task Monki has two separate concepts that both use the word review:
      PR creation.
    - The task belongs in the Review board column.
 
-2. Codex review gate
-   - A detached AI quality check stored in `projection.codexReview`.
+2. Agent review gate
+   - A detached AI quality check stored in `projection.agentReview`.
    - Runs as its own `RunRecord` with `mode: "REVIEW"`.
    - Does not become the task's implementation run.
    - Can be `NOT_RUN`, `RUNNING`, `PASSED`, `NEEDS_CHANGES`, `INCONCLUSIVE`,
@@ -29,7 +29,7 @@ Task Monki has two separate concepts that both use the word review:
 
 The important product rule is:
 
-> A Codex review is a check inside the Review phase. Requested changes are new
+> An agent review is a check inside the Review phase. Requested changes are new
 > implementation work and therefore belong in In Progress until the follow-up
 > run finishes.
 
@@ -42,8 +42,8 @@ The important product rule is:
   - Detached review runs do not replace this as the source implementation run.
 - `Task.projection.agentRun`
   - The active or terminal state for the current implementation-side run.
-- `Task.projection.codexReview`
-  - The local review gate projection for the last Codex review.
+- `Task.projection.agentReview`
+  - The local review gate projection for the last agent review.
   - Includes the review run id, source run id, reviewed head/dirty fingerprint,
     summary, final artifact id, and structured findings when available.
 - `RunRecord.mode`
@@ -51,8 +51,8 @@ The important product rule is:
   - `REVIEW` inspects a diff and should use read-only settings.
 - `AgentSessionRecord`
   - Primary sessions back implementation/follow-up/retry runs.
-  - Review sessions use `role: "REVIEW"` and are forked from the source
-    provider session when the Codex provider supports detached review.
+  - Review sessions use `role: "REVIEW"`. A runtime may use a native review
+    primitive, or Task Monki may start an ordinary read-only review turn.
 
 ## State flow
 
@@ -62,36 +62,48 @@ The important product rule is:
 2. `TaskManagerService.startRun` prepares or verifies the worktree.
 3. `AgentOrchestrator.startTurn` creates a run with `mode: "IMPLEMENTATION"`.
 4. Reducer moves the task to `IN_PROGRESS`.
-5. When the run completes, fails, or is interrupted, reducer moves an
-   `IN_PROGRESS` task to `REVIEW`.
+5. Only a successfully completed implementation run moves an `IN_PROGRESS`
+   task to `REVIEW`. Failed, interrupted, lost, and recovery-required runs stay
+   in `IN_PROGRESS` until the owner retries or continues them.
 
 Expected UI:
 
 - Board column: In Progress while active.
 - Card chip: Running, needs approval, needs input, failed, etc.
-- After terminal run: Review column.
+- After successful completion: Review column.
+- After an unsuccessful terminal run: In Progress with Retry in session as the
+  primary recovery action; review is unavailable.
 - Review gate: `NOT_RUN` unless a previous review exists.
 
-### Starting Codex review
+### Starting agent review
 
-1. User clicks Run Codex review from a task in Review.
+1. User clicks Run agent review from a task in Review.
 2. `TaskManagerService.startReview` rejects active implementation-side runs.
-3. The current source run is kept as the implementation source.
+3. The current source run must be the latest successfully completed
+   implementation-side run. Failed and superseded runs are rejected.
 4. `AgentOrchestrator.startReview` creates a `mode: "REVIEW"` run and a review
    agent session.
-5. `CodexAppServerAdapter.startReview` forks the provider thread and calls
-   `review/start`.
+5. When the selected review runtime is the source runtime and advertises a
+   native review primitive, its adapter uses that primitive. Otherwise Task
+   Monki materializes a review session in the selected runtime and starts the
+   provider-neutral read-only review prompt as a normal turn only when that
+   runtime advertises stable detached-review isolation. Runtimes without either
+   capability are not eligible review runtimes.
 6. Reducer keeps the task workflow phase in Review.
-7. `projection.codexReview.status` becomes `RUNNING`.
+7. `projection.agentReview.status` becomes `RUNNING`.
 
-The review fork must carry the configured review model, service tier, cwd, and
-reasoning effort. Codex exposes reasoning effort for `thread/fork` through the
+The review session must carry the configured runtime, model provider, model,
+service tier, cwd, and reasoning effort. Cross-runtime review never reuses a
+model identifier from the implementation runtime.
+
+For Codex's native path, reasoning effort for `thread/fork` is exposed through the
 request `config.model_reasoning_effort` field rather than a top-level `effort`
 field. If that config is omitted, the fork can run at the provider default or an
 inherited effort such as `xhigh`, making reviews much slower than the user's
 selected review setting.
 
-After creating the review fork, Task Monki must call `review/start` with
+On that Codex path, after creating the review fork, Task Monki must call
+`review/start` with
 `delivery: "inline"` on that fork. Asking `review/start` for another detached
 thread can cause the provider to create a second review thread with a different
 cwd, so the AI reviews unrelated local changes instead of the task worktree.
@@ -111,7 +123,7 @@ Expected UI:
 When the review run emits a terminal event:
 
 - `AGENT_RUN_COMPLETED`
-  - Parses `codexReviewResult` when provided.
+  - Parses `agentReviewResult` when provided.
   - Falls back to native/raw review output parsing.
   - Stores structured findings and summary when available.
   - Status becomes:
@@ -152,7 +164,7 @@ Expected UI:
 3. `TaskManagerService.continueRun` starts a `mode: "FOLLOW_UP"` run from the
    source implementation run.
 4. Reducer moves the task to `IN_PROGRESS`.
-5. Reducer marks the old Codex review `STALE`.
+5. Reducer marks the old agent review `STALE`.
 6. The old review findings remain visible only as previous-review context.
 
 Expected UI while follow-up is active:
@@ -168,7 +180,7 @@ Expected UI while follow-up is active:
   - no Commit
   - no Create draft PR
 - When the review gate is `NOT_RUN` but another task action pauses review
-  actions, keep `Run Codex review` visible and disabled with the pause reason
+  actions, keep `Run agent review` visible and disabled with the pause reason
   on hover instead of replacing it with inline explanatory text.
 - Header and evidence-side delivery actions are also disabled while review
   actions are paused, so Commit/Create PR cannot bypass the active follow-up.
@@ -182,10 +194,10 @@ is still changing the implementation.
 
 ### Follow-up completion
 
-When the follow-up terminal event arrives:
+When the follow-up completes successfully:
 
 1. Reducer moves the task from `IN_PROGRESS` back to `REVIEW`.
-2. The old Codex review remains `STALE`.
+2. The old agent review remains `STALE`.
 3. The task needs a fresh review because the implementation diff changed.
 
 Expected UI:
@@ -196,9 +208,13 @@ Expected UI:
 - Old findings: still visible as context, not as current actionable verdict.
 - Primary next action: Run review again.
 
+If the follow-up fails, is interrupted, is lost, or requires recovery, it stays
+in `IN_PROGRESS`. Retry or continue the implementation before a fresh review is
+allowed; the previous review remains stale context only.
+
 ## Staleness rules
 
-A Codex review becomes stale when:
+An agent review becomes stale when:
 
 - a new non-review agent run starts after a terminal review result; or
 - a new Git snapshot has a different head SHA or dirty fingerprint than the
@@ -237,9 +253,13 @@ Provider edge cases:
     should locally stop/reconcile the review instead of leaving the UI stuck in
     Reviewing.
 - The provider may not emit a terminal event after interruption.
-  - Task Monki records ambiguous delivery, then locally reconciles if timeout
-    recovery proves the run should stop.
-- The Codex App Server may exit.
+  - Task Monki uses the owning runtime's bounded interruption deadline and
+    reconciles authoritative provider snapshots without replaying the prompt.
+  - An acknowledged interrupt plus provider terminal evidence becomes
+    interrupted. If evidence remains inconclusive, confirmed termination of the
+    owning local runtime becomes a local interruption; an unconfirmed stop
+    remains recovery-required and fenced from reuse.
+- The selected agent runtime may exit or lose its event stream.
   - Runtime loss/recovery events must reconcile the run before the UI offers
     actions that assume a live active turn.
   - Late protocol errors after an App Server has already reached `EXITED`,
@@ -258,13 +278,15 @@ Implementation/follow-up:
   separate task and start a fresh implementation session in that task's own
   worktree.
 
-Codex review:
+Agent review:
 
 - Uses a local review session with `role: "REVIEW"`.
-- Forks from the source run's provider thread.
-- Calls `review/start` inline on the forked provider thread.
-- Stores `reviewThreadId` on the review session.
-- The review run id is tracked through `projection.codexReview.runId`.
+- May use a different registered runtime from the source implementation.
+- Uses native fork/review APIs only when the owning runtime advertises them.
+- Otherwise, only when stable detached-review isolation is advertised, creates
+  a fresh provider session and starts a normal read-only review turn against
+  the same Task Monki worktree.
+- The review run id is tracked through `projection.agentReview.runId`.
 
 The review session must not be confused with the task's active implementation
 session. That distinction is what keeps Review phase checks separate from
@@ -278,13 +300,21 @@ Use these as invariants:
   - `workflowPhase: IN_PROGRESS`
   - board: In Progress
   - card: Running or Fixing review feedback
-- Running Codex review:
-  - `codexReview.status: RUNNING`
+- Running agent review:
+  - `agentReview.status: RUNNING`
   - board: Review, even if workflow data is stale
   - card: AI reviewing
-- Terminal implementation/follow-up/retry from In Progress:
+- Successfully completed implementation/follow-up/retry from In Progress:
   - `workflowPhase: REVIEW`
   - board: Review
+- Failed, interrupted, lost, or recovery-required implementation/follow-up/retry:
+  - `workflowPhase: IN_PROGRESS`
+  - board: In Progress
+  - primary recovery action: Retry in session
+  - agent review unavailable
+  - store initialization repairs a persisted `REVIEW` mismatch back to
+    `IN_PROGRESS` when the current implementation-side run has one of these
+    unsuccessful states
 - Terminal review:
   - workflow phase remains Review
   - card reflects review gate result
@@ -292,6 +322,13 @@ Use these as invariants:
   - board: Review after follow-up completes
   - card: Needs re-review
   - old findings: context only
+- Historical review after newer non-implementation work:
+  - a completed analysis or compaction run remains the exact current run
+  - board: In Progress; the historical review remains visible as read-only context
+  - no review or review-derived follow-up action may target the older implementation
+  - store initialization must not promote the task to Review from that older
+    review; only the exact current completed implementation-side run is a valid
+    review source
 
 ## Debugging checklist
 
@@ -302,7 +339,7 @@ When the UI shows the wrong state:
 3. Check the current run's `mode`, `status`, `sessionId`, `providerTurnId`,
    `continuedFromRunId`, and `retryOfRunId`.
 4. Check `Task.projection.agentRun`.
-5. Check `Task.projection.codexReview.status`, `runId`, `sourceRunId`,
+5. Check `Task.projection.agentReview.status`, `runId`, `sourceRunId`,
    `reviewedHeadSha`, and `reviewedDirtyFingerprint`.
 6. Check whether the visible run is a review run or implementation-side run.
 7. Check latest Git snapshot head and dirty fingerprint.
@@ -322,6 +359,9 @@ When the UI shows the wrong state:
 ## UI rules
 
 - Do not show Request changes for a stale review.
+- Derive every review entry action from the exact current completed
+  implementation-side run. Never fall back to the source of a historical
+  review or another completed run in the iteration.
 - Do not show review completion actions while any implementation-side run is
   active.
 - Apply that pause consistently across review cards, finish panels, header

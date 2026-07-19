@@ -1,6 +1,6 @@
 import type {
-  CodexReviewFinding,
-  CodexReviewGateProjection,
+  AgentReviewFinding,
+  AgentReviewGateProjection,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
@@ -34,7 +34,7 @@ export function ReviewPanel({
   reviewPending,
   onStopReview
 }: {
-  reviewGate: CodexReviewGateProjection;
+  reviewGate: AgentReviewGateProjection;
   reviewRun?: RunRecord;
   gitSnapshot?: GitSnapshotRecord;
   reviewActivity?: ReviewActivityViewModel;
@@ -137,7 +137,7 @@ export function ReviewPanel({
   );
 }
 
-function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
+function ReviewFindingsList({ findings }: { findings: AgentReviewFinding[] }) {
   if (findings.length === 0) {
     return null;
   }
@@ -172,7 +172,7 @@ function ReviewFindingsList({ findings }: { findings: CodexReviewFinding[] }) {
   );
 }
 
-function SeverityDistribution({ findings }: { findings: CodexReviewFinding[] }) {
+function SeverityDistribution({ findings }: { findings: AgentReviewFinding[] }) {
   const counts = FINDING_LEVELS.map((level) => ({
     ...level,
     count: findings.filter((finding) => finding.severity === level.severity).length
@@ -221,7 +221,7 @@ function formatReviewTime(value: string | undefined): string {
   }).format(new Date(timestamp));
 }
 
-function reviewGateUi(status: CodexReviewGateProjection['status']): {
+function reviewGateUi(status: AgentReviewGateProjection['status']): {
   label: string;
   tone: Tone;
 } {
@@ -246,7 +246,7 @@ function reviewGateUi(status: CodexReviewGateProjection['status']): {
 }
 
 function reviewBody(
-  reviewGate: CodexReviewGateProjection,
+  reviewGate: AgentReviewGateProjection,
   reviewRun?: RunRecord
 ): string {
   if (reviewRun?.terminalReason) {

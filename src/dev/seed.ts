@@ -99,7 +99,7 @@ function readScenarioSet(value: string): DevSeedScenarioSet {
 }
 
 function printHelp(): void {
-  console.log(`Usage: node dist-electron/dev/seed.js [options]
+  console.log(`Usage: node dist-tools/dev/seed.js [options]
 
 Options:
   --reset                    Reset the seed-owned root before generating data.

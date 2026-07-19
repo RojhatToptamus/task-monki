@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord, PreviewGenerationRecord } from '../../shared/contracts';
 import { git } from '../git/gitCli';
 import { previewRouteHostname } from '../preview/PreviewRouteHostname';
-import type { FileTaskStore } from '../storage/FileTaskStore';
+import { FileTaskStore } from '../storage/FileTaskStore';
 import { createTaskMonkiScenario, type TaskMonkiScenario } from '../../testSupport/taskMonkiScenario';
 
 const scenarios: TaskMonkiScenario[] = [];
@@ -1003,16 +1003,16 @@ routes:
     });
     const internals = scenario.service as unknown as {
       previews: { resetData(input: unknown): Promise<void> };
-      refreshEvidence(input: { taskId: string }): Promise<GitSnapshotRecord>;
+      refreshEvidenceInternal(input: { taskId: string }): Promise<GitSnapshotRecord>;
     };
-    const originalRefresh = internals.refreshEvidence.bind(scenario.service);
+    const originalRefresh = internals.refreshEvidenceInternal.bind(scenario.service);
     const originalReset = internals.previews.resetData.bind(internals.previews);
     let resetCalls = 0;
     internals.previews.resetData = async () => {
       resetCalls += 1;
       throw new Error('reset orchestration reached');
     };
-    internals.refreshEvidence = async () => ({
+    internals.refreshEvidenceInternal = async () => ({
       id: 'conflicted', taskId: task.id, iterationId: worktree.iterationId,
       worktreeId: worktree.id, status: 'CONFLICTED', capturedAt: now
     } as GitSnapshotRecord);
@@ -1022,7 +1022,7 @@ routes:
     })).rejects.toThrow('Git status is CONFLICTED');
     expect(resetCalls).toBe(0);
 
-    internals.refreshEvidence = originalRefresh;
+    internals.refreshEvidenceInternal = originalRefresh;
     await expect(scenario.service.resetPreviewData({
       taskId: task.id, generationId: recovery.id, resourceId: 'database', scenarioId: 'default'
     })).rejects.toThrow('reset orchestration reached');
@@ -1064,7 +1064,9 @@ routes:
     );
     expect(new Set(resources.map((resource) => resource.native?.launcher.pid)).size).toBe(3);
     await scenario.service.shutdown();
-    const stopped = await scenario.store.getPreviewGenerations();
+    const reopenedStore = new FileTaskStore(path.join(scenario.rootDir, 'store'));
+    const stopped = await reopenedStore.getPreviewGenerations();
+    await reopenedStore.close();
     expect(stopped.every((generation) => generation.state === 'STOPPED')).toBe(true);
     for (const generation of generations) {
       await expect(fs.access(generation.workspacePath)).rejects.toMatchObject({ code: 'ENOENT' });

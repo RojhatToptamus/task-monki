@@ -3,11 +3,14 @@ import { DEFAULT_TASK_MANAGER_APP_SETTINGS } from '../../shared/contracts';
 import { TaskManagerService } from './TaskManagerService';
 
 describe('TaskManagerService shutdown coordination', () => {
-  it('begins provider shutdown before waiting for preview cleanup', async () => {
+  it('shuts runtime owners down once and waits for preview cleanup', async () => {
     const events: string[] = [];
     let releasePreview!: () => void;
     const previewGate = new Promise<void>((resolve) => { releasePreview = resolve; });
+    let markPreviewStarted!: () => void;
+    const previewStarted = new Promise<void>((resolve) => { markPreviewStarted = resolve; });
     const service = Object.create(TaskManagerService.prototype) as TaskManagerService;
+    initializeRuntimeLifecycle(service);
     const internals = service as unknown as {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
@@ -31,6 +34,7 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.previews = {
       async shutdown() {
         events.push('preview-started');
+        markPreviewStarted();
         await previewGate;
         events.push('preview-finished');
       }
@@ -38,14 +42,11 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.previewRecipeGenerator = { shutdown: () => Promise.resolve() };
 
     const shutdown = service.shutdown();
-    await Promise.resolve();
+    await previewStarted;
     expect(events).toEqual(['agent-started', 'preview-started']);
     releasePreview();
     await shutdown;
     expect(events).toEqual([
-      'agent-started',
-      'preview-started',
-      'preview-finished',
       'agent-started',
       'preview-started',
       'preview-finished'
@@ -59,6 +60,7 @@ describe('TaskManagerService shutdown coordination', () => {
     const storeInitStarted = new Promise<void>((resolve) => { markStoreInitStarted = resolve; });
     const calls: string[] = [];
     const service = Object.create(TaskManagerService.prototype) as TaskManagerService;
+    initializeRuntimeLifecycle(service);
     const internals = service as unknown as {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
@@ -106,11 +108,12 @@ describe('TaskManagerService shutdown coordination', () => {
     await storeInitStarted;
 
     const shutdown = service.shutdown();
-    expect(calls).toEqual(['store-init', 'agent-shutdown', 'preview-shutdown']);
+    expect(calls).toEqual(['store-init']);
     releaseStoreInit();
 
     await expect(firstInit).rejects.toThrow('Task Manager is shutting down.');
     await shutdown;
+    expect(calls).toEqual(['store-init', 'agent-shutdown', 'preview-shutdown']);
     expect(calls).not.toContain('settings-read');
     expect(internals.lifecycleState).toBe('STOPPED');
     await expect(service.init()).rejects.toThrow('Task Manager is shutting down.');
@@ -122,6 +125,7 @@ describe('TaskManagerService shutdown coordination', () => {
     let markActionStarted!: () => void;
     const actionStarted = new Promise<void>((resolve) => { markActionStarted = resolve; });
     const service = Object.create(TaskManagerService.prototype) as TaskManagerService;
+    initializeRuntimeLifecycle(service);
     const internals = service as unknown as {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
@@ -170,7 +174,7 @@ describe('TaskManagerService shutdown coordination', () => {
     expect(internals.lifecycleState).toBe('STOPPED');
   });
 
-  it('joins an admitted settings restart and performs a final runtime shutdown sweep', async () => {
+  it('joins an admitted settings restart before shutting runtime owners down once', async () => {
     let releaseSettingsRestart!: () => void;
     const settingsRestartGate = new Promise<void>((resolve) => {
       releaseSettingsRestart = resolve;
@@ -181,22 +185,28 @@ describe('TaskManagerService shutdown coordination', () => {
     });
     const events: string[] = [];
     const service = Object.create(TaskManagerService.prototype) as TaskManagerService;
+    initializeRuntimeLifecycle(service);
     const internals = service as unknown as {
       lifecycleState: string;
       taskActionLocks: Map<string, unknown>;
       activeControlActions: Set<Promise<unknown>>;
       previewEnabled: boolean;
-      store: { close(): Promise<void> };
+      store: { close(): Promise<void>; snapshot(): Promise<{ runs: [] }> };
       browserDevAgentBoundary: boolean;
+      runtimeRegistry: {
+        require(runtimeId: string): { descriptor: { displayName: string }; shutdown(): Promise<void> };
+        initialize(runtimeIds: readonly string[]): Promise<[]>;
+      };
       appSettings: typeof DEFAULT_TASK_MANAGER_APP_SETTINGS;
       appSettingsStore: {
+        get(): Promise<typeof DEFAULT_TASK_MANAGER_APP_SETTINGS>;
         update(input: unknown): Promise<typeof DEFAULT_TASK_MANAGER_APP_SETTINGS>;
       };
       hasActiveAgentRun(): Promise<boolean>;
       applyRuntimeSettings(input: unknown): Promise<unknown>;
       agents: {
         shutdown(): Promise<void>;
-        getProviderState(): Promise<unknown>;
+        getRuntimeCatalog(): Promise<unknown>;
       };
       previews: { shutdown(): Promise<void> };
       previewRecipeGenerator: { shutdown(): Promise<void> };
@@ -206,10 +216,23 @@ describe('TaskManagerService shutdown coordination', () => {
     internals.taskActionLocks = new Map();
     internals.activeControlActions = new Set();
     internals.previewEnabled = true;
-    internals.store = { close: () => Promise.resolve() };
+    internals.store = {
+      close: () => Promise.resolve(),
+      snapshot: () => Promise.resolve({ runs: [] })
+    };
     internals.browserDevAgentBoundary = false;
+    internals.runtimeRegistry = {
+      require: () => ({
+        descriptor: { displayName: 'Codex' },
+        shutdown: () => Promise.resolve()
+      }),
+      initialize: () => Promise.resolve([])
+    };
     internals.appSettings = structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS);
     internals.appSettingsStore = {
+      async get() {
+        return structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS);
+      },
       async update() {
         return {
           ...structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS),
@@ -235,7 +258,7 @@ describe('TaskManagerService shutdown coordination', () => {
         shutdownCount += 1;
         events.push(`agent-shutdown-${shutdownCount}`);
       },
-      async getProviderState() {
+      async getRuntimeCatalog() {
         return {};
       }
     };
@@ -250,18 +273,20 @@ describe('TaskManagerService shutdown coordination', () => {
     const update = service.updateAppSettings({
       codexExternalTools: { webSearchMode: 'cached' }
     });
-    await settingsRestartStarted;
+    await Promise.race([
+      settingsRestartStarted,
+      update.then(
+        () => Promise.reject(new Error('Settings update finished before restarting the runtime.')),
+        (error) => Promise.reject(error)
+      )
+    ]);
     let shutdownSettled = false;
     const shutdown = service.shutdown().then(() => {
       shutdownSettled = true;
     });
     await Promise.resolve();
 
-    expect(events).toEqual([
-      'settings-restart-started',
-      'agent-shutdown-1',
-      'preview-shutdown-1'
-    ]);
+    expect(events).toEqual(['settings-restart-started']);
     expect(shutdownSettled).toBe(false);
     releaseSettingsRestart();
     await update;
@@ -269,11 +294,9 @@ describe('TaskManagerService shutdown coordination', () => {
 
     expect(events).toEqual([
       'settings-restart-started',
-      'agent-shutdown-1',
-      'preview-shutdown-1',
       'settings-restart-finished',
-      'agent-shutdown-2',
-      'preview-shutdown-2'
+      'agent-shutdown-1',
+      'preview-shutdown-1'
     ]);
     expect(internals.activeControlActions.size).toBe(0);
     expect(internals.lifecycleState).toBe('STOPPED');
@@ -282,3 +305,13 @@ describe('TaskManagerService shutdown coordination', () => {
     );
   });
 });
+
+function initializeRuntimeLifecycle(service: TaskManagerService): void {
+  Object.assign(service as unknown as Record<string, unknown>, {
+    runtimeLifecycleTail: Promise.resolve(),
+    activeRuntimeOperations: new Set<Promise<void>>(),
+    runtimeLifecycleClosing: false,
+    postRunEvidenceTasks: new Map<string, Promise<void>>(),
+    disposeAgentEventListener: () => undefined
+  });
+}

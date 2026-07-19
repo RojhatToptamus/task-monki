@@ -1,7 +1,7 @@
 import type {
   DomainEvent,
-  CodexReviewFinding,
-  CodexReviewResult,
+  AgentReviewFinding,
+  AgentReviewResult,
   Finding,
   HealthStatus,
   RunRecord,
@@ -12,8 +12,8 @@ import type {
 } from '../../shared/contracts';
 import {
   TASK_STORE_SCHEMA_VERSION,
-  completionPolicyRequiresMerge,
-  createInitialProjection
+  createInitialProjection,
+  isImplementationRunMode
 } from '../../shared/contracts';
 
 export interface StoreState extends TaskSnapshot {}
@@ -142,7 +142,7 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
     next.tasks[taskIndex] = {
       ...task,
       workflowPhase: reduceWorkflowPhase(task, event, currentRun),
-      projection: reduceProjection(task.projection, event, currentRun, task),
+      projection: reduceProjection(task.projection, event, currentRun),
       updatedAt: event.receivedAt
     };
   }
@@ -153,6 +153,8 @@ export function applyEventToState(state: StoreState, event: DomainEvent): StoreS
 function isAgentRunScopedEvent(eventType: DomainEvent['type']): boolean {
   return (
     eventType.startsWith('AGENT_') ||
+    eventType === 'IMPLEMENTATION_OUTCOME_BLOCKED' ||
+    eventType === 'ARTIFACT_CREATED' ||
     eventType === 'PROCESS_STARTED' ||
     eventType === 'PROCESS_EXITED' ||
     eventType === 'PROCESS_SIGNALED' ||
@@ -246,6 +248,13 @@ export function reduceRun(run: RunRecord, event: DomainEvent): RunRecord {
           getString(event.payload, 'signal') ??
           'interrupted'
       };
+    case 'ARTIFACT_CREATED':
+      return getString(event.payload, 'kind') === 'agent-final'
+        ? {
+            ...run,
+            finalArtifactId: getString(event.payload, 'artifactId') ?? run.finalArtifactId
+          }
+        : run;
     case 'AGENT_MUTATION_AMBIGUOUS':
       return {
         ...run,
@@ -307,53 +316,58 @@ function reduceWorkflowPhase(task: Task, event: DomainEvent, run?: RunRecord): T
     case 'PROCESS_STARTED':
       return isReviewRunEvent(task, event, run) ? task.workflowPhase : 'IN_PROGRESS';
     case 'AGENT_RUN_COMPLETED':
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        task.workflowPhase === 'IN_PROGRESS'
+        ? 'REVIEW'
+        : task.workflowPhase;
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
-      return task.workflowPhase === 'IN_PROGRESS' ? 'REVIEW' : task.workflowPhase;
+      // A stopped implementation is not review-ready. Keep it in the
+      // implementation phase so the next action remains retry or continue.
+      return task.workflowPhase;
+    case 'IMPLEMENTATION_OUTCOME_BLOCKED':
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        run.status === 'COMPLETED' &&
+        task.workflowPhase === 'REVIEW'
+        ? 'IN_PROGRESS'
+        : task.workflowPhase;
     case 'AGENT_RUNTIME_RECONCILED':
-      return getBoolean(event.payload, 'terminal') === true &&
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        getBoolean(event.payload, 'terminal') === true &&
+        getString(event.payload, 'status') === 'COMPLETED' &&
         task.workflowPhase === 'IN_PROGRESS'
         ? 'REVIEW'
         : task.workflowPhase;
     case 'TRANSITION_COMPLETED':
       return getString(event.payload, 'toPhase') as Task['workflowPhase'] ?? task.workflowPhase;
-    case 'MERGE_SNAPSHOT_CAPTURED':
-      if (mergedSnapshotSatisfiesCompletionPolicy(task, event)) {
-        return 'DONE';
-      }
-      return task.workflowPhase;
     default:
       return task.workflowPhase;
   }
-}
-
-function mergedSnapshotSatisfiesCompletionPolicy(task: Task, event: DomainEvent): boolean {
-  if (
-    getString(event.payload, 'status') !== 'MERGED' ||
-    !completionPolicyRequiresMerge(task.completionPolicy)
-  ) {
-    return false;
-  }
-  return task.completionPolicy === 'MERGED';
 }
 
 function isReviewRunEvent(task: Task, event: DomainEvent, run?: RunRecord): boolean {
   return (
     run?.mode === 'REVIEW' ||
     getString(event.payload, 'mode') === 'REVIEW' ||
-    Boolean(event.runId && task.projection.codexReview?.runId === event.runId)
+    Boolean(event.runId && task.projection.agentReview?.runId === event.runId)
   );
 }
 
 export function reduceProjection(
   projection: StatusProjection | undefined,
   event: DomainEvent,
-  run?: RunRecord,
-  task?: Task
+  run?: RunRecord
 ): StatusProjection {
-  const base = projection ?? createInitialProjection(event.receivedAt);
+  const current = projection ?? createInitialProjection(event.receivedAt);
+  const base =
+    event.type === 'AGENT_RUN_STARTED' && run && isImplementationRunMode(run.mode)
+      ? { ...current, implementationRetry: undefined }
+      : current;
   const findings = mergeFindings(base.findings, findingsForEvent(event, run));
-  if (isCodexReviewProjectionEvent(base, event, run)) {
+  if (isAgentReviewProjectionEvent(base, event, run)) {
     return reduceReviewProjection(base, event, run, findings);
   }
 
@@ -443,12 +457,12 @@ export function reduceProjection(
         requestedAction: 'STARTING',
         agentRun: 'STARTING',
         osProcess: 'SPAWNING',
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         summary:
           getString(event.payload, 'mode') === 'IMPLEMENTATION'
             ? 'Starting an implementation turn in the task worktree.'
             : getString(event.payload, 'mode') === 'REVIEW'
-              ? 'Starting a Codex review of the current diff.'
+              ? 'Starting an agent review of the current diff.'
             : 'Starting an agent turn.',
         findings,
         updatedAt: event.receivedAt
@@ -466,16 +480,16 @@ export function reduceProjection(
       };
     case 'GIT_SNAPSHOT_CAPTURED': {
       const gitStatus = getGitStatus(event.payload);
-      const codexReview = reduceCodexReview(base.codexReview, event, run);
+      const agentReview = reduceAgentReview(base.agentReview, event, run);
       return {
         ...base,
         git: gitStatus ?? base.git,
-        codexReview,
+        agentReview,
         health:
           gitStatus === 'CONFLICTED' || gitStatus === 'UNAVAILABLE'
             ? 'ERROR'
             : base.health,
-        summary: gitSnapshotSummary(base, codexReview, gitStatus),
+        summary: gitSnapshotSummary(base, agentReview, gitStatus),
         findings,
         updatedAt: event.receivedAt
       };
@@ -485,7 +499,7 @@ export function reduceProjection(
         ...base,
         git: 'COMMITTED_UNPUSHED',
         ciChecks: base.githubPullRequest === 'UNLINKED' ? base.ciChecks : 'STALE',
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health: maxHealth(base.health, 'WARNING'),
         summary: 'Delivery commit created. Push and refresh PR status for current GitHub evidence.',
         findings,
@@ -573,25 +587,18 @@ export function reduceProjection(
       };
     case 'MERGE_SNAPSHOT_CAPTURED': {
       const merge = getMergeStatus(event.payload) ?? base.merge;
-      const completionSatisfied = task
-        ? mergedSnapshotSatisfiesCompletionPolicy(task, event)
-        : merge === 'MERGED';
       return {
         ...base,
         merge,
         health:
           merge === 'MERGED'
-            ? completionSatisfied
-              ? 'HEALTHY'
-              : base.health
+            ? base.health
             : merge === 'CLOSED_UNMERGED' || merge === 'BLOCKED'
               ? 'ERROR'
               : base.health,
         summary:
-          merge === 'MERGED' && completionSatisfied
-            ? 'GitHub reports the pull request merged. Completion policy is satisfied.'
-            : merge === 'MERGED'
-              ? 'GitHub reports the pull request merged.'
+          merge === 'MERGED'
+            ? 'GitHub reports the pull request merged.'
             : `GitHub merge state: ${merge}.`,
         findings,
         updatedAt: event.receivedAt
@@ -698,7 +705,7 @@ export function reduceProjection(
         requestedAction: 'SUCCEEDED',
         agentRun: 'COMPLETED',
         osProcess: terminalOsProcess(base.osProcess),
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         artifact: 'FINAL_MESSAGE_PRESENT',
         health: findings.some((finding) => finding.severity === 'WARNING') ? 'WARNING' : 'HEALTHY',
         summary: 'Agent turn completed. Review the provider result and independent Git evidence.',
@@ -711,7 +718,7 @@ export function reduceProjection(
         requestedAction: 'FAILED',
         agentRun: 'FAILED',
         osProcess: terminalOsProcess(base.osProcess),
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health: 'ERROR',
         summary: 'Agent turn failed. Review provider activity and diagnostics.',
         findings,
@@ -723,18 +730,43 @@ export function reduceProjection(
         requestedAction: 'CANCELED',
         agentRun: 'INTERRUPTED',
         osProcess: terminalOsProcess(base.osProcess),
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health: 'WARNING',
         summary: 'Agent turn was interrupted; the session remains available for continuation.',
         findings,
         updatedAt: event.receivedAt
       };
+    case 'IMPLEMENTATION_OUTCOME_BLOCKED': {
+      const reason =
+        getString(event.payload, 'reason') ??
+        'Implementation needs another pass before review.';
+      return {
+        ...base,
+        requestedAction: 'FAILED',
+        health: 'WARNING',
+        summary: reason,
+        implementationRetry: event.runId
+          ? { runId: event.runId, reason }
+          : base.implementationRetry,
+        findings,
+        updatedAt: event.receivedAt
+      };
+    }
+    case 'ARTIFACT_CREATED':
+      return getString(event.payload, 'kind') === 'agent-final'
+        ? {
+            ...base,
+            artifact: 'FINAL_MESSAGE_PRESENT',
+            findings,
+            updatedAt: event.receivedAt
+          }
+        : base;
     case 'AGENT_MUTATION_AMBIGUOUS':
       return {
         ...base,
         requestedAction: 'FAILED',
         agentRun: 'RECOVERY_REQUIRED',
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health: 'WARNING',
         summary:
           'Turn submission may have reached the provider. Task Monki will not resubmit it automatically.',
@@ -755,7 +787,7 @@ export function reduceProjection(
         requestedAction: 'FAILED',
         agentRun: 'RECOVERY_REQUIRED',
         osProcess: 'ORPHANED',
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health: 'WARNING',
         summary: 'The agent runtime exited; Task Monki is reconciling the persisted session.',
         findings,
@@ -767,7 +799,7 @@ export function reduceProjection(
         agentRun:
           (getString(event.payload, 'status') as StatusProjection['agentRun'] | undefined) ??
           base.agentRun,
-        codexReview: reduceCodexReview(base.codexReview, event, run),
+        agentReview: reduceAgentReview(base.agentReview, event, run),
         health:
           getString(event.payload, 'recoveryState') === 'RECOVERED'
             ? base.health
@@ -806,7 +838,7 @@ export function reduceProjection(
   }
 }
 
-function isCodexReviewProjectionEvent(
+function isAgentReviewProjectionEvent(
   projection: StatusProjection,
   event: DomainEvent,
   run?: RunRecord
@@ -815,7 +847,7 @@ function isCodexReviewProjectionEvent(
     getString(event.payload, 'mode') === 'REVIEW' ||
     Boolean(
       event.runId &&
-        (run?.mode === 'REVIEW' || projection.codexReview?.runId === event.runId)
+        (run?.mode === 'REVIEW' || projection.agentReview?.runId === event.runId)
     )
   );
 }
@@ -831,36 +863,37 @@ function reduceReviewProjection(
     case 'AGENT_RUN_COMPLETED':
     case 'AGENT_RUN_FAILED':
     case 'AGENT_RUN_INTERRUPTED':
+    case 'ARTIFACT_CREATED':
     case 'AGENT_MUTATION_AMBIGUOUS':
     case 'AGENT_RUNTIME_LOST':
     case 'AGENT_RUNTIME_RECONCILED': {
-      const codexReview = reduceCodexReview(base.codexReview, event, run);
+      const agentReview = reduceAgentReview(base.agentReview, event, run);
       return {
         ...base,
-        codexReview,
+        agentReview,
         findings,
-        summary: codexReview?.summary ?? base.summary,
+        summary: agentReview?.summary ?? base.summary,
         updatedAt: event.receivedAt
       };
     }
     case 'AGENT_ACTIVITY_RECEIVED':
       return {
         ...base,
-        summary: `Latest Codex review event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
+        summary: `Latest agent review event: ${getString(event.payload, 'eventType') ?? 'unknown'}.`,
         findings,
         updatedAt: event.receivedAt
       };
     case 'CANCEL_REQUESTED':
       return {
         ...base,
-        summary: 'Codex review stop requested; waiting for the review turn to end.',
+        summary: 'Agent review stop requested; waiting for the review turn to end.',
         findings,
         updatedAt: event.receivedAt
       };
     case 'PROCESS_STARTED':
       return {
         ...base,
-        summary: 'Codex review process is active.',
+        summary: 'Agent review process is active.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -875,7 +908,7 @@ function reduceReviewProjection(
     case 'AGENT_INTERACTION_RESOLVED':
       return {
         ...base,
-        summary: 'Codex review interaction state changed.',
+        summary: 'Agent review interaction state changed.',
         findings,
         updatedAt: event.receivedAt
       };
@@ -894,11 +927,11 @@ function reduceReviewProjection(
   }
 }
 
-function reduceCodexReview(
-  review: StatusProjection['codexReview'] | undefined,
+function reduceAgentReview(
+  review: StatusProjection['agentReview'] | undefined,
   event: DomainEvent,
   run?: RunRecord
-): StatusProjection['codexReview'] {
+): StatusProjection['agentReview'] {
   const base = review ?? { status: 'NOT_RUN' as const };
   const eventMode = getString(event.payload, 'mode') ?? run?.mode;
   const eventRunId = event.runId ?? run?.id;
@@ -918,7 +951,7 @@ function reduceCodexReview(
             getString(event.payload, 'beforeGitSnapshotId') ?? run?.beforeGitSnapshotId,
           reviewedHeadSha: getString(event.payload, 'reviewedHeadSha'),
           reviewedDirtyFingerprint: getString(event.payload, 'reviewedDirtyFingerprint'),
-          summary: 'Codex is reviewing the current diff.',
+          summary: 'An agent is reviewing the current diff.',
           updatedAt: event.receivedAt
         };
       }
@@ -926,7 +959,7 @@ function reduceCodexReview(
         return {
           ...base,
           status: 'STALE',
-          summary: 'Implementation changed after this Codex review.',
+          summary: 'Implementation changed after this agent review.',
           updatedAt: event.receivedAt
         };
       }
@@ -936,7 +969,7 @@ function reduceCodexReview(
       if (!targetsReviewRun) {
         return base;
       }
-      const result = getCodexReviewResult(event.payload);
+      const result = getAgentReviewResult(event.payload);
       return {
         ...base,
         status:
@@ -947,7 +980,7 @@ function reduceCodexReview(
         result,
         summary:
           result?.summary ??
-          'Codex review completed, but no structured pass/fail verdict was provided.',
+          'Agent review completed, but no structured pass/fail verdict was provided.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_FAILED':
@@ -964,7 +997,16 @@ function reduceCodexReview(
           getString(event.payload, 'error') ??
           getString(event.payload, 'terminalReason') ??
           getString(event.payload, 'reason') ??
-          'Codex review did not complete.',
+          'Agent review did not complete.',
+        updatedAt: event.receivedAt
+      };
+    case 'ARTIFACT_CREATED':
+      if (!targetsReviewRun || getString(event.payload, 'kind') !== 'agent-final') {
+        return base;
+      }
+      return {
+        ...base,
+        finalArtifactId: getString(event.payload, 'artifactId') ?? base.finalArtifactId,
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUN_INTERRUPTED':
@@ -974,7 +1016,7 @@ function reduceCodexReview(
       return {
         ...base,
         status: 'CANCELED',
-        summary: 'Codex review was stopped before it produced a final result.',
+        summary: 'Agent review was stopped before it produced a final result.',
         updatedAt: event.receivedAt
       };
     case 'AGENT_RUNTIME_RECONCILED':
@@ -989,7 +1031,7 @@ function reduceCodexReview(
             : getString(event.payload, 'status') === 'INTERRUPTED'
               ? 'CANCELED'
               : 'FAILED',
-        summary: 'Codex review state was reconciled after runtime restart.',
+        summary: 'Agent review state was reconciled after runtime restart.',
         updatedAt: event.receivedAt
       };
     case 'GIT_SNAPSHOT_CAPTURED':
@@ -999,7 +1041,7 @@ function reduceCodexReview(
       return {
         ...base,
         status: 'STALE',
-        summary: 'The current diff changed after this Codex review.',
+        summary: 'The current diff changed after this agent review.',
         updatedAt: event.receivedAt
       };
     case 'DELIVERY_COMMIT_CREATED': {
@@ -1027,28 +1069,28 @@ function terminalOsProcess(osProcess: StatusProjection['osProcess']): StatusProj
 
 function gitSnapshotSummary(
   base: StatusProjection,
-  codexReview: StatusProjection['codexReview'] | undefined,
+  agentReview: StatusProjection['agentReview'] | undefined,
   gitStatus: StatusProjection['git'] | undefined
 ): string {
   if (
-    codexReview?.status === 'STALE' &&
-    base.codexReview?.status !== 'STALE' &&
-    codexReview.summary
+    agentReview?.status === 'STALE' &&
+    base.agentReview?.status !== 'STALE' &&
+    agentReview.summary
   ) {
-    return codexReview.summary;
+    return agentReview.summary;
   }
   if (
-    codexReview &&
-    isTerminalReviewGate(codexReview) &&
-    codexReview.summary
+    agentReview &&
+    isTerminalReviewGate(agentReview) &&
+    agentReview.summary
   ) {
-    return codexReview.summary;
+    return agentReview.summary;
   }
   return `Git snapshot captured: ${gitStatus ?? 'UNKNOWN'}.`;
 }
 
 function isTerminalReviewGate(
-  review: StatusProjection['codexReview'] | undefined
+  review: StatusProjection['agentReview'] | undefined
 ): boolean {
   return Boolean(
     review &&
@@ -1063,7 +1105,7 @@ function isTerminalReviewGate(
 }
 
 function snapshotDiffersFromReview(
-  review: NonNullable<StatusProjection['codexReview']>,
+  review: NonNullable<StatusProjection['agentReview']>,
   payload: unknown
 ): boolean {
   const headSha = getString(payload, 'headSha');
@@ -1083,10 +1125,10 @@ function snapshotDiffersFromReview(
 function reviewGateStatusFromPayload(
   payload: unknown
 ): Extract<
-  NonNullable<StatusProjection['codexReview']>['status'],
+  NonNullable<StatusProjection['agentReview']>['status'],
   'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
 > | undefined {
-  const value = getString(payload, 'codexReviewStatus') ?? getString(payload, 'reviewVerdict');
+  const value = getString(payload, 'agentReviewStatus');
   if (value === 'PASSED' || value === 'NEEDS_CHANGES' || value === 'INCONCLUSIVE') {
     return value;
   }
@@ -1094,9 +1136,9 @@ function reviewGateStatusFromPayload(
 }
 
 function reviewGateStatusFromResult(
-  result: CodexReviewResult | undefined
+  result: AgentReviewResult | undefined
 ): Extract<
-  NonNullable<StatusProjection['codexReview']>['status'],
+  NonNullable<StatusProjection['agentReview']>['status'],
   'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'
 > | undefined {
   if (!result) {
@@ -1116,11 +1158,11 @@ function reviewGateStatusFromResult(
   return 'INCONCLUSIVE';
 }
 
-function getCodexReviewResult(payload: unknown): CodexReviewResult | undefined {
+function getAgentReviewResult(payload: unknown): AgentReviewResult | undefined {
   if (!payload || typeof payload !== 'object') {
     return undefined;
   }
-  const value = (payload as Record<string, unknown>).codexReviewResult;
+  const value = (payload as Record<string, unknown>).agentReviewResult;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
@@ -1136,17 +1178,17 @@ function getCodexReviewResult(payload: unknown): CodexReviewResult | undefined {
     return undefined;
   }
   const findings = findingsValue
-    .map(getCodexReviewFinding)
-    .filter((finding): finding is CodexReviewFinding => Boolean(finding));
+    .map(getAgentReviewFinding)
+    .filter((finding): finding is AgentReviewFinding => Boolean(finding));
   return {
-    schemaVersion: 'codex-review/v1',
+    schemaVersion: 'agent-review/v1',
     verdict,
     summary,
     findings
   };
 }
 
-function getCodexReviewFinding(value: unknown): CodexReviewFinding | undefined {
+function getAgentReviewFinding(value: unknown): AgentReviewFinding | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }

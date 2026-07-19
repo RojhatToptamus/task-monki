@@ -89,7 +89,7 @@ describe('TaskManagerService repository lifecycle', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     await harness.store.createRun({
       task,

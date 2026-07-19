@@ -54,6 +54,32 @@ describe('buildPrStatusViewModel', () => {
     );
   });
 
+  it('keeps delivery unavailable until a blocked implementation is retried', () => {
+    const reason = 'Retry or continue this implementation before review.';
+    const task = taskFixture({
+      currentRunId: 'run-1',
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'DIRTY',
+        implementationRetry: { runId: 'run-1', reason }
+      }
+    });
+    const view = buildPrStatusViewModel({
+      task,
+      gitSnapshot: gitFixture({ status: 'DIRTY', workingDiffFileCount: 1 })
+    });
+    const actions = buildPrStatusActionState({
+      view,
+      implementationRetryReason: reason
+    });
+
+    expect(view.canCreateDraftPr).toBe(true);
+    expect(view.createDraftPrDisabledReason).toBe(reason);
+    expect(actions.createOrPushDisabled).toBe(true);
+    expect(actions.createOrPushReason).toBe(reason);
+  });
+
   it('explains why no PR action is unavailable before a worktree exists', () => {
     const view = buildPrStatusViewModel({
       task: taskFixture({
@@ -741,6 +767,7 @@ describe('buildBoardDeliveryLine', () => {
 function taskFixture(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
     repositoryId: '/tmp/repo',

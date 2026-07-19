@@ -1,5 +1,6 @@
 node_modules/
 dist-electron/
+dist-tools/
 dist-renderer/
 release/
 build/icon.iconset/

@@ -1,4 +1,4 @@
-import type { AgentRunStatus, CodexReviewGateStatus, WorkflowPhase } from '../../shared/contracts';
+import type { AgentRunStatus, AgentReviewGateStatus, WorkflowPhase } from '../../shared/contracts';
 import type { PrStatusKind } from './prStatus';
 
 export type MascotState =
@@ -27,7 +27,7 @@ export const MASCOT_VIDEO_SOURCES: Record<MascotState, string> = {
 export interface MascotTaskStateInput {
   workflowPhase: WorkflowPhase;
   agentRun: AgentRunStatus | 'IDLE';
-  reviewStatus: CodexReviewGateStatus;
+  reviewStatus: AgentReviewGateStatus;
   prStatusKind?: PrStatusKind;
   reviewActive?: boolean;
 }
@@ -76,7 +76,7 @@ export function getMascotStateForTask(input: MascotTaskStateInput): MascotState 
 }
 
 function mascotStateFromReview(
-  status: CodexReviewGateStatus,
+  status: AgentReviewGateStatus,
   prStatusKind: PrStatusKind | undefined
 ): MascotState {
   switch (status) {

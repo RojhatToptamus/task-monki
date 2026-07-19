@@ -1,32 +1,32 @@
 import type {
-  CodexReviewFinding,
-  CodexReviewFindingSeverity,
-  CodexReviewGateStatus,
-  CodexReviewResult
+  AgentReviewFinding,
+  AgentReviewFindingSeverity,
+  AgentReviewGateStatus,
+  AgentReviewResult
 } from '../../shared/contracts';
 
-const SEVERITIES: CodexReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'];
+const SEVERITIES: AgentReviewFindingSeverity[] = ['BLOCKER', 'MAJOR', 'MINOR', 'NIT'];
 
-export const CODEX_REVIEW_RESULT_SCHEMA_VERSION = 'codex-review/v1' as const;
+export const AGENT_REVIEW_RESULT_SCHEMA_VERSION = 'agent-review/v1' as const;
 
-export function parseCodexReviewResult(text: string | undefined): CodexReviewResult | undefined {
+export function parseAgentReviewResult(text: string | undefined): AgentReviewResult | undefined {
   if (!text?.trim()) {
     return undefined;
   }
   const jsonText = extractJsonBlock(text) ?? extractBareJson(text);
   if (!jsonText) {
-    return parseNativeCodexReviewResult(text);
+    return parseNativeAgentReviewResult(text);
   }
   try {
     return normalizeReviewResult(JSON.parse(jsonText));
   } catch {
-    return parseNativeCodexReviewResult(text);
+    return parseNativeAgentReviewResult(text);
   }
 }
 
-export function codexReviewStatusFromResult(
-  result: CodexReviewResult | undefined
-): Extract<CodexReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> | undefined {
+export function agentReviewStatusFromResult(
+  result: AgentReviewResult | undefined
+): Extract<AgentReviewGateStatus, 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE'> | undefined {
   if (!result) {
     return undefined;
   }
@@ -44,7 +44,7 @@ export function codexReviewStatusFromResult(
   return 'INCONCLUSIVE';
 }
 
-export function normalizeReviewResult(value: unknown): CodexReviewResult | undefined {
+export function normalizeReviewResult(value: unknown): AgentReviewResult | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -52,13 +52,13 @@ export function normalizeReviewResult(value: unknown): CodexReviewResult | undef
   const findingsValue = Array.isArray(value.findings) ? value.findings : [];
   const findings = findingsValue
     .map((finding, index) => normalizeFinding(finding, index))
-    .filter((finding): finding is CodexReviewFinding => Boolean(finding));
+    .filter((finding): finding is AgentReviewFinding => Boolean(finding));
   const summary =
     typeof value.summary === 'string' && value.summary.trim()
       ? value.summary.trim()
       : defaultSummary(verdict, findings);
   return {
-    schemaVersion: CODEX_REVIEW_RESULT_SCHEMA_VERSION,
+    schemaVersion: AGENT_REVIEW_RESULT_SCHEMA_VERSION,
     verdict,
     summary,
     findings
@@ -79,7 +79,7 @@ function extractBareJson(text: string): string | undefined {
   return text.slice(start, end + 1).trim();
 }
 
-function normalizeVerdict(value: unknown): CodexReviewResult['verdict'] {
+function normalizeVerdict(value: unknown): AgentReviewResult['verdict'] {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
   if (normalized === 'PASSED' || normalized === 'PASS') {
     return 'PASSED';
@@ -90,7 +90,7 @@ function normalizeVerdict(value: unknown): CodexReviewResult['verdict'] {
   return 'INCONCLUSIVE';
 }
 
-function normalizeFinding(value: unknown, index: number): CodexReviewFinding | undefined {
+function normalizeFinding(value: unknown, index: number): AgentReviewFinding | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -118,15 +118,15 @@ function normalizeFinding(value: unknown, index: number): CodexReviewFinding | u
   };
 }
 
-function normalizeSeverity(value: unknown): CodexReviewFindingSeverity | undefined {
+function normalizeSeverity(value: unknown): AgentReviewFindingSeverity | undefined {
   const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
-  return SEVERITIES.includes(normalized as CodexReviewFindingSeverity)
-    ? (normalized as CodexReviewFindingSeverity)
+  return SEVERITIES.includes(normalized as AgentReviewFindingSeverity)
+    ? (normalized as AgentReviewFindingSeverity)
     : undefined;
 }
 
-function parseNativeCodexReviewResult(text: string): CodexReviewResult | undefined {
-  const findings = parseNativeCodexFindings(text);
+function parseNativeAgentReviewResult(text: string): AgentReviewResult | undefined {
+  const findings = parseNativeAgentFindings(text);
   if (findings.length > 0) {
     const verdict = findings.some(
       (finding) => finding.severity === 'BLOCKER' || finding.severity === 'MAJOR'
@@ -134,7 +134,7 @@ function parseNativeCodexReviewResult(text: string): CodexReviewResult | undefin
       ? 'NEEDS_CHANGES'
       : 'PASSED';
     return {
-      schemaVersion: CODEX_REVIEW_RESULT_SCHEMA_VERSION,
+      schemaVersion: AGENT_REVIEW_RESULT_SCHEMA_VERSION,
       verdict,
       summary: nativeSummary(text, findings),
       findings
@@ -143,7 +143,7 @@ function parseNativeCodexReviewResult(text: string): CodexReviewResult | undefin
 
   if (/\bno findings\b/i.test(text) || /\bno actionable findings\b/i.test(text)) {
     return {
-      schemaVersion: CODEX_REVIEW_RESULT_SCHEMA_VERSION,
+      schemaVersion: AGENT_REVIEW_RESULT_SCHEMA_VERSION,
       verdict: 'PASSED',
       summary: nativeSummary(text, []),
       findings: []
@@ -153,9 +153,9 @@ function parseNativeCodexReviewResult(text: string): CodexReviewResult | undefin
   return undefined;
 }
 
-function parseNativeCodexFindings(text: string): CodexReviewFinding[] {
+function parseNativeAgentFindings(text: string): AgentReviewFinding[] {
   const lines = text.split(/\r?\n/);
-  const findings: CodexReviewFinding[] = [];
+  const findings: AgentReviewFinding[] = [];
   let current:
     | {
         priority: string;
@@ -213,7 +213,7 @@ function parseNativeCodexFindings(text: string): CodexReviewFinding[] {
   return findings;
 }
 
-function severityFromPriority(priority: string): CodexReviewFindingSeverity | undefined {
+function severityFromPriority(priority: string): AgentReviewFindingSeverity | undefined {
   switch (priority) {
     case 'P0':
     case 'P1':
@@ -260,7 +260,7 @@ function normalizeNativePath(path: string): string | undefined {
   return relativeMatch?.[1] ?? normalized;
 }
 
-function nativeSummary(text: string, findings: CodexReviewFinding[]): string {
+function nativeSummary(text: string, findings: AgentReviewFinding[]): string {
   const beforeComments = text.split(/Full review comments:/i)[0]?.trim();
   if (beforeComments) {
     return beforeComments;
@@ -274,20 +274,20 @@ function nativeSummary(text: string, findings: CodexReviewFinding[]): string {
 }
 
 function defaultSummary(
-  verdict: CodexReviewResult['verdict'],
-  findings: CodexReviewFinding[]
+  verdict: AgentReviewResult['verdict'],
+  findings: AgentReviewFinding[]
 ): string {
   if (findings.length === 0 && verdict === 'PASSED') {
-    return 'Codex review passed with no findings.';
+    return 'Agent review passed with no findings.';
   }
   if (findings.length > 0) {
-    return `Codex review found ${findings.length} finding${findings.length === 1 ? '' : 's'}.`;
+    return `Agent review found ${findings.length} finding${findings.length === 1 ? '' : 's'}.`;
   }
-  return 'Codex review completed without a structured summary.';
+  return 'Agent review completed without a structured summary.';
 }
 
 function stableFindingId(
-  severity: CodexReviewFindingSeverity,
+  severity: AgentReviewFindingSeverity,
   title: string,
   index: number
 ): string {

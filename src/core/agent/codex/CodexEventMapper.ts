@@ -20,11 +20,12 @@ import type { TokenUsageBreakdown } from './protocol/generated/v2/TokenUsageBrea
 import type { TurnPlanStep } from './protocol/generated/v2/TurnPlanStep';
 import type { ThreadStatus } from './protocol/generated/v2/ThreadStatus';
 import type { Turn } from './protocol/generated/v2/Turn';
+import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
 export function mapModel(model: Model): AgentModel {
   return {
-    id: model.id,
-    provider: 'codex',
+    id: `${CODEX_RUNTIME_ID}:${model.id}`,
+    runtimeId: CODEX_RUNTIME_ID,
     model: model.model,
     displayName: model.displayName,
     description: model.description,

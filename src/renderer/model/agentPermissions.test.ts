@@ -4,23 +4,36 @@ import {
   formatAgentNetworkAccess,
   formatAgentPermissionMode,
   inferAgentPermissionMode,
-  settingsForPermissionMode
+  settingsForExecutionPolicyPreset
 } from './agentPermissions';
+import type { AgentExecutionPolicyPreset } from '../../shared/contracts';
 
 describe('agent permission settings', () => {
-  it('maps the Codex-style permission presets to execution settings', () => {
-    const sandboxed = settingsForPermissionMode('SANDBOXED', {
+  it('maps runtime-owned permission presets to execution settings', () => {
+    const restricted = settingsForExecutionPolicyPreset(preset({
+      id: 'restricted',
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      networkAccess: 'DISABLED'
+    }), {
       networkAccess: true
     });
-    expect(sandboxed).toEqual({
+    expect(restricted).toEqual({
       sandbox: 'WORKSPACE_WRITE',
       networkAccess: false,
       approvalPolicy: 'never',
       approvalsReviewer: 'user'
     });
-    expect(browserDevSettingsViolations(sandboxed)).toEqual([]);
+    expect(browserDevSettingsViolations(restricted)).toEqual([]);
     expect(
-      settingsForPermissionMode('ASK_FOR_APPROVAL', { networkAccess: true })
+      settingsForExecutionPolicyPreset(preset({
+        id: 'ask',
+        sandbox: 'WORKSPACE_WRITE',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user',
+        networkAccess: 'OPTIONAL'
+      }), { networkAccess: true })
     ).toEqual({
       sandbox: 'WORKSPACE_WRITE',
       networkAccess: true,
@@ -28,23 +41,41 @@ describe('agent permission settings', () => {
       approvalsReviewer: 'user'
     });
     expect(
-      settingsForPermissionMode('APPROVE_FOR_ME', { networkAccess: true })
+      settingsForExecutionPolicyPreset(preset({
+        id: 'auto',
+        sandbox: 'WORKSPACE_WRITE',
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+        networkAccess: 'OPTIONAL'
+      }), { networkAccess: true })
     ).toEqual({
       sandbox: 'WORKSPACE_WRITE',
       networkAccess: true,
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review'
     });
-    expect(settingsForPermissionMode('APPROVE_FOR_ME')).toEqual({
+    expect(settingsForExecutionPolicyPreset(preset({
+      id: 'auto',
+      sandbox: 'WORKSPACE_WRITE',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review',
+      networkAccess: 'OPTIONAL'
+    }))).toEqual({
       sandbox: 'WORKSPACE_WRITE',
       networkAccess: false,
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review'
     });
-    expect(settingsForPermissionMode('FULL_ACCESS')).toEqual({
+    expect(settingsForExecutionPolicyPreset(preset({
+      id: 'provider-full',
+      sandbox: 'DANGER_FULL_ACCESS',
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+      networkAccess: 'REQUIRED'
+    }))).toEqual({
       sandbox: 'DANGER_FULL_ACCESS',
       networkAccess: true,
-      approvalPolicy: 'never',
+      approvalPolicy: 'on-request',
       approvalsReviewer: 'user'
     });
   });
@@ -57,7 +88,7 @@ describe('agent permission settings', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       })
-    ).toBe('SANDBOXED');
+    ).toBe('RESTRICTED');
     expect(
       formatAgentPermissionMode({
         sandbox: 'WORKSPACE_WRITE',
@@ -65,7 +96,7 @@ describe('agent permission settings', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user'
       })
-    ).toBe('Sandboxed');
+    ).toBe('Restricted');
     expect(
       inferAgentPermissionMode({
         sandbox: 'WORKSPACE_WRITE',
@@ -89,5 +120,38 @@ describe('agent permission settings', () => {
         approvalsReviewer: 'user'
       })
     ).toBe('Enabled');
+    expect(
+      formatAgentPermissionMode({
+        runtimeId: 'opencode',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('Ask for approval');
+    expect(
+      inferAgentPermissionMode({
+        runtimeId: 'cursor',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'auto-accept-edits',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('AUTO_ACCEPT_EDITS');
+    expect(
+      formatAgentPermissionMode({
+        runtimeId: 'cursor',
+        sandbox: 'DANGER_FULL_ACCESS',
+        networkAccess: true,
+        approvalPolicy: 'auto-accept-edits',
+        approvalsReviewer: 'user'
+      })
+    ).toBe('Auto-accept edits');
   });
 });
+
+function preset(
+  input: Omit<AgentExecutionPolicyPreset, 'label' | 'detail'>
+): AgentExecutionPolicyPreset {
+  return { ...input, label: input.id, detail: `${input.id} policy` };
+}

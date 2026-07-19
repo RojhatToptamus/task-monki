@@ -22,6 +22,16 @@ describe('getPostRunActionState', () => {
     });
   });
 
+  it('treats a provider-completed but locally blocked implementation as recovery', () => {
+    expect(getPostRunActionState({ status: 'COMPLETED' }, true)).toEqual({
+      canFollowUp: false,
+      canContinue: true,
+      canRetry: true,
+      continuationLabel: 'Continue',
+      continuationKind: 'recovery'
+    });
+  });
+
   it('does not offer post-run actions while a run is active', () => {
     expect(getPostRunActionState({ status: 'RUNNING' })).toEqual({
       canFollowUp: false,

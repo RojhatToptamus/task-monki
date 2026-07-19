@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type {
   AgentInteractionDecision,
   Board,
@@ -7,8 +7,8 @@ import type {
   Task
 } from '../../shared/contracts';
 import {
-  DEFAULT_PROMPT_REFINEMENT_MODEL,
   type AgentModel,
+  type AgentRuntimeState,
   type ExternalToolId,
   type ExternalToolProbeResult,
   type ExternalToolStatusReport,
@@ -16,20 +16,23 @@ import {
   type TestExternalToolRequest,
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
-import { resolveReasoningEffort } from '../model/agentExecutionSettings';
+import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
 import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
-import {
-  areRequiredExternalToolsReady,
-  buildExecutableTestRequest,
-  selectExecutableDisplayStatus,
-  shouldShowExecutablePathControls
-} from '../model/executableSettings';
+import { shouldShowExecutablePathControls } from '../model/executableSettings';
 import type { RepositorySetupState } from '../model/repositories';
+import { runtimeReadinessView } from '../model/runtimeReadiness';
 import { describeTaskAttention } from './BoardView';
+import { AgentModelSetting } from './AgentModelSelector';
 import { humanizeEnum } from './display';
 import { Chip, dotStyle } from './StatusBadge';
 import { TaskActionsMenu } from './TaskActionsMenu';
+import {
+  ExecutablePathEditor,
+  SettingsView,
+  describeExternalToolAvailability,
+  selectSettingsModels
+} from './SettingsView';
 import type { ThemePreference } from './theme';
 import {
   BOARD_COLUMNS,
@@ -38,8 +41,7 @@ import {
   tasksForView,
   tasksSpanMultipleRepositories,
   type NavView,
-  type TaskCardVM,
-  type Tone
+  type TaskCardVM
 } from './taskView';
 
 interface MainColumnProps {
@@ -51,12 +53,19 @@ interface MainColumnProps {
   theme: ThemePreference;
   onSetTheme(theme: ThemePreference): void;
   appSettings: TaskManagerAppSettings;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
   externalToolStatus?: ExternalToolStatusReport;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  agentRuntimesLoading: boolean;
+  onRefreshExternalTools(): Promise<void>;
+  onRefreshAgentRuntimes(): Promise<void>;
+  onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
   error?: string;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
   activeRepository?: Repository;
   repositorySetupState: RepositorySetupState;
   addingRepository: boolean;
@@ -97,7 +106,7 @@ const VIEW_TITLES: Record<NavView, { title: string; subtitle(tasks: Task[]): str
   },
   settings: {
     title: 'Settings',
-    subtitle: () => 'Workspace defaults and provider configuration'
+    subtitle: () => 'Agents, models, tools, and appearance'
   }
 };
 
@@ -130,10 +139,14 @@ export function MainColumn({
   appSettings,
   onSetAppSettings,
   externalToolStatus,
+  agentRuntimesLoading,
   onRefreshExternalTools,
+  onRefreshAgentRuntimes,
+  onDiscoverAgentRuntimeModels,
   onTestExternalTool,
   error,
   models,
+  runtimes,
   activeRepository,
   repositorySetupState,
   addingRepository,
@@ -151,6 +164,14 @@ export function MainColumn({
     repositorySetupState === 'complete'
       ? SETUP_VIEW_TITLES.needsReview
       : SETUP_VIEW_TITLES[repositorySetupState];
+  const disabledRuntimeIds = new Set(appSettings.disabledRuntimeIds);
+  const enabledRuntimes = runtimes.filter(
+    (runtime) => !disabledRuntimeIds.has(runtime.preflight.runtime.id)
+  );
+  const enabledRuntimeIds = new Set(
+    enabledRuntimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  const enabledModels = models.filter((model) => enabledRuntimeIds.has(model.runtimeId));
 
   return (
     <main className="tm-main">
@@ -182,11 +203,13 @@ export function MainColumn({
           addingRepository={addingRepository}
           appSettings={appSettings}
           externalToolStatus={externalToolStatus}
-          models={models}
+          models={enabledModels}
+          runtimes={enabledRuntimes}
           activeRepositoryPath={activeRepository?.path ?? ''}
           onAddRepository={onAddRepository}
           onFinishSetup={onFinishSetup}
           onRefreshExternalTools={onRefreshExternalTools}
+          onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
           onTestExternalTool={onTestExternalTool}
           onSetAppSettings={onSetAppSettings}
         />
@@ -221,16 +244,19 @@ export function MainColumn({
         />
       ) : null}
       {!showRepositorySetup && view === 'settings' ? (
-        <Settings
+        <SettingsView
           theme={theme}
           onSetTheme={onSetTheme}
           appSettings={appSettings}
           onSetAppSettings={onSetAppSettings}
           externalToolStatus={externalToolStatus}
+          agentRuntimesLoading={agentRuntimesLoading}
           onRefreshExternalTools={onRefreshExternalTools}
+          onRefreshAgentRuntimes={onRefreshAgentRuntimes}
+          onDiscoverAgentRuntimeModels={onDiscoverAgentRuntimeModels}
           onTestExternalTool={onTestExternalTool}
           models={models}
-          repository={activeRepository}
+          runtimes={runtimes}
         />
       ) : null}
     </main>
@@ -243,10 +269,12 @@ function FirstLaunchSetup({
   appSettings,
   externalToolStatus,
   models,
+  runtimes,
   activeRepositoryPath,
   onAddRepository,
   onFinishSetup,
   onRefreshExternalTools,
+  onDiscoverAgentRuntimeModels,
   onTestExternalTool,
   onSetAppSettings
 }: {
@@ -255,17 +283,27 @@ function FirstLaunchSetup({
   appSettings: TaskManagerAppSettings;
   externalToolStatus?: ExternalToolStatusReport;
   models: AgentModel[];
+  runtimes: AgentRuntimeState[];
   activeRepositoryPath: string;
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
+  onRefreshExternalTools(): Promise<void>;
+  onDiscoverAgentRuntimeModels(runtimeId: string): Promise<void>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
 }) {
   const [isRefreshingTools, setIsRefreshingTools] = useState(false);
   const [isFinishingSetup, setIsFinishingSetup] = useState(false);
-  const selectedModels = selectSettingsModels(models, appSettings);
-  const requiredToolsReady = areRequiredExternalToolsReady(externalToolStatus);
+  const selectedModels = selectSettingsModels(models, runtimes, appSettings);
+  const selectedRuntime = runtimes.find(
+    (runtime) => runtime.preflight.runtime.id === selectedModels.defaultRuntimeId
+  );
+  const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
+  const gitReady = externalToolStatus?.tools.git.status === 'ok';
+  const requiredToolsReady = Boolean(gitReady && selectedRuntimeReadiness.canStart);
   const isLoading = state === 'loading';
   const hasRepository = Boolean(activeRepositoryPath);
   const addRepositoryDisabled = isLoading || addingRepository;
@@ -277,8 +315,12 @@ function FirstLaunchSetup({
   const repositoryStepTone = isLoading ? 'pending' : hasRepository ? 'complete' : 'active';
   const repositoryActionLabel = hasRepository ? 'Change repository' : 'Add repository';
   const toolsDetail = externalToolStatus
-    ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and Codex are required.`
-    : 'Git and Codex are required before task runs can start.';
+    ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}. Git and ${
+        selectedRuntime?.preflight.runtime.displayName ?? 'an agent runtime'
+      } are required.`
+    : `Git and ${
+        selectedRuntime?.preflight.runtime.displayName ?? 'an agent runtime'
+      } are required before task runs can start.`;
 
   const refreshTools = async () => {
     setIsRefreshingTools(true);
@@ -349,6 +391,7 @@ function FirstLaunchSetup({
             <SetupToolList
               appSettings={appSettings}
               externalToolStatus={externalToolStatus}
+              selectedRuntime={selectedRuntime}
               onSetAppSettings={onSetAppSettings}
               onTestExternalTool={onTestExternalTool}
             />
@@ -356,28 +399,34 @@ function FirstLaunchSetup({
 
           <SetupStep
             title="Defaults"
-            detail="Default model for new implementation tasks."
-            tone={models.length > 0 ? 'complete' : 'pending'}
+            detail="Default runtime and model for new implementation tasks."
+            tone={selectedModels.selectedDefaultModel ? 'complete' : 'pending'}
           >
             <div className="tm-setup__model">
-              <ModelSettingRow
+              <AgentModelSetting
                 label="Default task model"
                 hint="Used for new implementation tasks"
-                value={selectedModels.selectedDefaultModel?.model ?? ''}
-                effortValue={selectedModels.selectedDefaultEffort}
+                runtimeId={selectedModels.defaultRuntimeId}
+                modelId={selectedModels.selectedDefaultModel?.id ?? ''}
+                reasoningEffort={selectedModels.selectedDefaultEffort}
                 models={models}
-                onModelChange={(model) => {
-                  const nextModel = models.find((candidate) => candidate.model === model);
+                runtimes={runtimes}
+                onDiscoverModels={onDiscoverAgentRuntimeModels}
+                onSelectionChange={(runtimeId, modelId) => {
+                  const nextModel =
+                    models.find(
+                      (candidate) =>
+                        candidate.runtimeId === runtimeId && candidate.id === modelId
+                    ) ?? selectModel(models, undefined, runtimeId);
                   onSetAppSettings({
-                    defaultModel: model || null,
+                    defaultRuntimeId: runtimeId,
+                    defaultModel: nextModel?.model ?? null,
+                    defaultModelProvider: nextModel?.modelProvider ?? null,
                     defaultReasoningEffort:
-                      resolveReasoningEffort(
-                        nextModel,
-                        appSettings.defaultReasoningEffort
-                      ) ?? null
+                      resolveReasoningEffort(nextModel, undefined) ?? null
                   });
                 }}
-                onEffortChange={(reasoningEffort) =>
+                onReasoningEffortChange={(reasoningEffort) =>
                   onSetAppSettings({
                     defaultReasoningEffort: reasoningEffort || null
                   })
@@ -436,14 +485,20 @@ function SetupStep({
 function SetupToolList({
   appSettings,
   externalToolStatus,
+  selectedRuntime,
   onSetAppSettings,
   onTestExternalTool
 }: {
   appSettings: TaskManagerAppSettings;
   externalToolStatus?: ExternalToolStatusReport;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
+  selectedRuntime?: AgentRuntimeState;
+  onSetAppSettings(
+    settings: UpdateAppSettingsRequest,
+    successMessage?: string
+  ): void | Promise<unknown>;
   onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
 }) {
+  const runtimeReadiness = runtimeReadinessView(selectedRuntime);
   const rows: Array<{
     key: ExternalToolId;
     label: string;
@@ -463,17 +518,21 @@ function SetupToolList({
           externalExecutables: { gitExecutablePath }
         })
     },
-    {
-      key: 'codex',
-      label: 'Codex',
-      hint: 'Required for agent runs',
-      value: appSettings.externalExecutables.codexExecutablePath,
-      status: externalToolStatus?.tools.codex,
-      onSetPath: (codexExecutablePath) =>
-        onSetAppSettings({
-          externalExecutables: { codexExecutablePath }
-        })
-    },
+    ...(selectedRuntime?.preflight.runtime.id === 'codex'
+      ? [
+          {
+            key: 'codex' as const,
+            label: 'Codex',
+            hint: 'Required by the selected agent runtime',
+            value: appSettings.externalExecutables.codexExecutablePath,
+            status: externalToolStatus?.tools.codex,
+            onSetPath: (codexExecutablePath: string | null) =>
+              onSetAppSettings({
+                externalExecutables: { codexExecutablePath }
+              })
+          }
+        ]
+      : []),
     {
       key: 'gh',
       label: 'GitHub CLI',
@@ -489,21 +548,50 @@ function SetupToolList({
 
   return (
     <div className="tm-setup-tools">
+      <div className="tm-setup-tools__row">
+        <span
+          className={`tm-setup-tools__dot tm-setup-tools__dot--${runtimeReadiness.tone}`}
+        />
+        <div className="tm-setup-tools__copy">
+          <strong>{selectedRuntime?.preflight.runtime.displayName ?? 'Agent runtime'}</strong>
+          <span>Required for agent runs</span>
+        </div>
+        <div className="tm-setup-tools__meta">
+          <strong>{runtimeReadiness.label}</strong>
+          <span>
+            {selectedRuntime?.preflight.runtimeVersion &&
+            selectedRuntime.preflight.readiness.status === 'READY'
+              ? `Version ${selectedRuntime.preflight.runtimeVersion}`
+              : runtimeReadiness.detail}
+          </span>
+        </div>
+      </div>
       {rows.map((row) => {
-        const badge = describeToolStatus(row.status);
+        const badge = describeExternalToolAvailability(row.status);
         const shouldConfigure = shouldShowExecutablePathControls(row.status, row.value);
         if (shouldConfigure) {
           return (
-            <ExecutableSettingRow
-              key={row.key}
-              tool={row.key}
-              label={row.label === 'GitHub CLI' ? 'GitHub CLI' : `${row.label} executable`}
-              hint={row.hint}
-              value={row.value}
-              status={row.status}
-              onSetPath={row.onSetPath}
-              onTest={onTestExternalTool}
-            />
+            <div className="tm-setup-tools__configuration" key={row.key}>
+              <div className="tm-setup-tools__row">
+                <span className={`tm-setup-tools__dot tm-setup-tools__dot--${badge.tone}`} />
+                <div className="tm-setup-tools__copy">
+                  <strong>{row.label}</strong>
+                  <span>{row.hint}</span>
+                </div>
+                <div className="tm-setup-tools__meta">
+                  <strong>{badge.label}</strong>
+                  <span>{describeToolStatusDetail(row.status)}</span>
+                </div>
+              </div>
+              <ExecutablePathEditor
+                label={`${row.label} executable`}
+                value={row.value}
+                tool={row.key}
+                status={row.status}
+                onSetPath={row.onSetPath}
+                onTest={onTestExternalTool}
+              />
+            </div>
           );
         }
         return (
@@ -872,592 +960,6 @@ function InboxDecisionCard({
   );
 }
 
-interface SelectedSettingsModels {
-  selectedDefaultModel?: AgentModel;
-  selectedPromptRefinementModel?: AgentModel;
-  selectedReviewModel?: AgentModel;
-  selectedDefaultEffort: string;
-  selectedReviewEffort: string;
-}
-
-function selectSettingsModels(
-  models: AgentModel[],
-  appSettings: TaskManagerAppSettings
-): SelectedSettingsModels {
-  const defaultModel = models.find((model) => model.isDefault) ?? models[0];
-  const selectedDefaultModel =
-    models.find((model) => model.model === appSettings.defaultModel) ?? defaultModel;
-  const selectedReviewModel =
-    models.find((model) => model.model === appSettings.reviewModel) ?? selectedDefaultModel;
-  const selectedPromptRefinementModel =
-    models.find((model) => model.model === appSettings.promptRefinementModel) ??
-    models.find((model) => model.model === DEFAULT_PROMPT_REFINEMENT_MODEL) ??
-    selectedDefaultModel;
-  const selectedDefaultEffort =
-    resolveReasoningEffort(selectedDefaultModel, appSettings.defaultReasoningEffort) ?? '';
-  const selectedReviewEffort =
-    resolveReasoningEffort(selectedReviewModel, appSettings.reviewReasoningEffort) ?? '';
-
-  return {
-    selectedDefaultModel,
-    selectedPromptRefinementModel,
-    selectedReviewModel,
-    selectedDefaultEffort,
-    selectedReviewEffort
-  };
-}
-
-function Settings({
-  theme,
-  onSetTheme,
-  appSettings,
-  onSetAppSettings,
-  externalToolStatus,
-  onRefreshExternalTools,
-  onTestExternalTool,
-  models,
-  repository
-}: {
-  theme: ThemePreference;
-  onSetTheme(theme: ThemePreference): void;
-  appSettings: TaskManagerAppSettings;
-  onSetAppSettings(settings: UpdateAppSettingsRequest, successMessage?: string): void;
-  externalToolStatus?: ExternalToolStatusReport;
-  onRefreshExternalTools(): Promise<ExternalToolStatusReport>;
-  onTestExternalTool(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-  models: AgentModel[];
-  repository?: Repository;
-}) {
-  const selectedModels = selectSettingsModels(models, appSettings);
-  const rows: Array<{ k: string; hint: string; v: string }> = [
-    {
-      k: 'Repository',
-      hint: 'Default for new tasks',
-      v: repository?.name ?? 'Not set'
-    }
-  ];
-
-  return (
-    <div className="tm-settings">
-      <SettingsGroup title="Appearance">
-        <div className="tm-settings__row">
-          <div style={{ minWidth: 0 }}>
-            <div className="tm-settings__k">Theme</div>
-          </div>
-          <div className="tm-segtoggle" role="group" aria-label="Theme">
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'light' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('light')}
-            >
-              Light
-            </button>
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'dark' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('dark')}
-            >
-              Dark
-            </button>
-            <button
-              type="button"
-              className={`tm-segtoggle__btn ${theme === 'device' ? 'tm-segtoggle__btn--active' : ''}`}
-              onClick={() => onSetTheme('device')}
-            >
-              Device
-            </button>
-          </div>
-        </div>
-        <SettingsSwitchRow
-          label="Mascot animation"
-          hint="Show the task detail mascot"
-          checked={appSettings.showMascot}
-          onChange={(showMascot) => onSetAppSettings({ showMascot })}
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Models">
-        <ModelSettingRow
-          label="Default task model"
-          hint="Used for new implementation tasks"
-          value={selectedModels.selectedDefaultModel?.model ?? ''}
-          effortValue={selectedModels.selectedDefaultEffort}
-          models={models}
-          onModelChange={(model) => {
-            const nextModel = models.find((candidate) => candidate.model === model);
-            onSetAppSettings({
-              defaultModel: model || null,
-              defaultReasoningEffort: resolveReasoningEffort(
-                nextModel,
-                appSettings.defaultReasoningEffort
-              ) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
-            onSetAppSettings({
-              defaultReasoningEffort: reasoningEffort || null
-            })
-          }
-        />
-        <ModelSettingRow
-          label="Prompt refinement model"
-          hint="Used when improving task descriptions"
-          value={selectedModels.selectedPromptRefinementModel?.model ?? ''}
-          models={models}
-          onModelChange={(model) =>
-            onSetAppSettings({
-              promptRefinementModel: model || null
-            })
-          }
-        />
-        <ModelSettingRow
-          label="Review model"
-          hint="Used for AI quality-gate reviews"
-          value={selectedModels.selectedReviewModel?.model ?? ''}
-          effortValue={selectedModels.selectedReviewEffort}
-          models={models}
-          onModelChange={(model) => {
-            const nextModel = models.find((candidate) => candidate.model === model);
-            onSetAppSettings({
-              reviewModel: model || null,
-              reviewReasoningEffort: resolveReasoningEffort(
-                nextModel,
-                appSettings.reviewReasoningEffort
-              ) ?? null
-            });
-          }}
-          onEffortChange={(reasoningEffort) =>
-            onSetAppSettings({
-              reviewReasoningEffort: reasoningEffort || null
-            })
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Codex tools">
-        <ExternalToolSettingRow
-          label="Web search"
-          hint="Codex search tool"
-          value={appSettings.codexExternalTools.webSearchMode}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'cached', label: 'Cached' },
-            { value: 'live', label: 'Live' }
-          ]}
-          onChange={(webSearchMode) =>
-            onSetAppSettings({
-              codexExternalTools: { webSearchMode }
-            })
-          }
-        />
-        <ExternalToolSettingRow
-          label="MCP servers"
-          hint="Configured Codex servers"
-          value={appSettings.codexExternalTools.mcpServers}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'all', label: 'All enabled' }
-          ]}
-          onChange={(mcpServers) =>
-            onSetAppSettings({
-              codexExternalTools: { mcpServers }
-            })
-          }
-        />
-        <ExternalToolSettingRow
-          label="Apps"
-          hint="Codex apps and connectors"
-          value={appSettings.codexExternalTools.apps}
-          options={[
-            { value: 'disabled', label: 'Disabled' },
-            { value: 'enabled', label: 'Enabled' }
-          ]}
-          onChange={(apps) =>
-            onSetAppSettings({
-              codexExternalTools: { apps }
-            })
-          }
-        />
-      </SettingsGroup>
-
-      <SettingsGroup title="Executables">
-        <ExecutableSettingRow
-          tool="git"
-          label="Git executable"
-          hint="Required for repository evidence"
-          value={appSettings.externalExecutables.gitExecutablePath}
-          status={externalToolStatus?.tools.git}
-          onSetPath={(gitExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { gitExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <ExecutableSettingRow
-          tool="codex"
-          label="Codex executable"
-          hint="Required for agent runs"
-          value={appSettings.externalExecutables.codexExecutablePath}
-          status={externalToolStatus?.tools.codex}
-          onSetPath={(codexExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { codexExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <ExecutableSettingRow
-          tool="gh"
-          label="GitHub CLI"
-          hint="Optional for PR delivery"
-          value={appSettings.externalExecutables.ghExecutablePath}
-          status={externalToolStatus?.tools.gh}
-          onSetPath={(ghExecutablePath) =>
-            onSetAppSettings({
-              externalExecutables: { ghExecutablePath }
-            })
-          }
-          onTest={onTestExternalTool}
-        />
-        <div className="tm-settings__row">
-          <div style={{ minWidth: 0 }}>
-            <div className="tm-settings__k">Tool status</div>
-            <div className="tm-settings__hint">
-              {externalToolStatus
-                ? `Checked ${formatSettingsTime(externalToolStatus.refreshedAt)}`
-                : 'Not checked'}
-            </div>
-          </div>
-          <button
-            type="button"
-            className="tm-settings__button"
-            onClick={() => void onRefreshExternalTools()}
-          >
-            Refresh
-          </button>
-        </div>
-      </SettingsGroup>
-
-      <SettingsGroup title="Workspace">
-        {rows.map((row) => (
-          <div className="tm-settings__row" key={row.k}>
-            <div style={{ minWidth: 0 }}>
-              <div className="tm-settings__k">{row.k}</div>
-              <div className="tm-settings__hint">{row.hint}</div>
-            </div>
-            <span className="tm-settings__v">{row.v}</span>
-          </div>
-        ))}
-      </SettingsGroup>
-    </div>
-  );
-}
-
-function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="tm-settings__group" aria-label={title}>
-      <h2 className="tm-settings__group-title">{title}</h2>
-      <div className="tm-settings__card">{children}</div>
-    </section>
-  );
-}
-
-function SettingsSwitchRow({
-  label,
-  hint,
-  checked,
-  onChange
-}: {
-  label: string;
-  hint: string;
-  checked: boolean;
-  onChange(checked: boolean): void;
-}) {
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">{hint}</div>
-      </div>
-      <button
-        type="button"
-        className={`network-toggle__switch ${checked ? 'network-toggle__switch--on' : ''}`}
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-        onClick={() => onChange(!checked)}
-      >
-        <span />
-      </button>
-    </div>
-  );
-}
-
-function ExternalToolSettingRow<Value extends string>({
-  label,
-  hint,
-  value,
-  options,
-  onChange
-}: {
-  label: string;
-  hint: string;
-  value: Value;
-  options: Array<{ value: Value; label: string }>;
-  onChange(value: Value): void;
-}) {
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">{hint}</div>
-      </div>
-      <div className="tm-settings__controls">
-        <select
-          className="tm-settings__select tm-settings__select--effort"
-          value={value}
-          onChange={(event) => onChange(event.target.value as Value)}
-          aria-label={label}
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  );
-}
-
-function ExecutableSettingRow({
-  tool,
-  label,
-  hint,
-  value,
-  status,
-  onSetPath,
-  onTest
-}: {
-  tool: ExternalToolId;
-  label: string;
-  hint: string;
-  value: string | null;
-  status?: ExternalToolProbeResult;
-  onSetPath(path: string | null): void;
-  onTest(input: TestExternalToolRequest): Promise<ExternalToolProbeResult>;
-}) {
-  const savedPath = value ?? '';
-  const [mode, setMode] = useState<'auto' | 'custom'>(savedPath ? 'custom' : 'auto');
-  const [draftPath, setDraftPath] = useState(savedPath);
-  const [isTesting, setIsTesting] = useState(false);
-  const [testResult, setTestResult] = useState<ExternalToolProbeResult>();
-  // Feedback shown below the controls after the user clicks Test. Kept separate
-  // from `testResult` (which feeds the passive badge) so the outcome message is
-  // only tied to an explicit test action.
-  const [testFeedback, setTestFeedback] = useState<ExecutableTestFeedback>();
-
-  const resetTestFeedback = () => {
-    setTestResult(undefined);
-    setTestFeedback(undefined);
-  };
-
-  useEffect(() => {
-    setMode(savedPath ? 'custom' : 'auto');
-    setDraftPath(savedPath);
-    resetTestFeedback();
-  }, [savedPath]);
-
-  const isCustom = mode === 'custom';
-  const normalizedDraft = draftPath.trim();
-  const hasPendingCustomPath = isCustom && normalizedDraft !== savedPath;
-  const displayStatus = selectExecutableDisplayStatus(status, testResult);
-  const badge = describeToolStatus(displayStatus);
-  const resolvedMeta = displayStatus
-    ? compactSettingsText(displayStatus.resolvedPath ?? displayStatus.executable)
-    : null;
-  const versionMeta =
-    displayStatus?.status === 'ok' && displayStatus.version ? displayStatus.version : null;
-
-  const runTest = async () => {
-    setIsTesting(true);
-    setTestResult(undefined);
-    setTestFeedback({ state: 'running' });
-    try {
-      const result = await onTest(buildExecutableTestRequest(tool, mode, draftPath));
-      setTestResult(result);
-      setTestFeedback(
-        result.status === 'ok'
-          ? {
-              state: 'passed',
-              path: result.resolvedPath ?? result.executable,
-              version: result.version
-            }
-          : { state: 'failed', message: result.error ?? 'The tool could not be verified.' }
-      );
-    } catch (caught) {
-      setTestFeedback({
-        state: 'failed',
-        message: caught instanceof Error ? caught.message : 'The test could not be run.'
-      });
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
-  return (
-    <div className="tm-exec">
-      <div className="tm-exec__head">
-        <div className="tm-exec__title" style={{ minWidth: 0 }}>
-          <div className="tm-settings__k">{label}</div>
-          <div className="tm-settings__hint">{hint}</div>
-        </div>
-        <span className={`tm-exec__badge tm-exec__badge--${badge.tone}`}>
-          <span className="tm-exec__dot" aria-hidden="true" />
-          {badge.label}
-        </span>
-      </div>
-
-      {resolvedMeta ? (
-        <div className="tm-exec__meta">
-          <span className="tm-exec__source">{humanizeEnum(displayStatus!.source)}</span>
-          <span className="tm-exec__path">{resolvedMeta}</span>
-          {versionMeta ? <span className="tm-exec__version">{versionMeta}</span> : null}
-        </div>
-      ) : null}
-
-      <div className="tm-exec__controls">
-        <select
-          className="tm-settings__select tm-settings__select--mode"
-          value={mode}
-          onChange={(event) => {
-            const nextMode = event.target.value === 'custom' ? 'custom' : 'auto';
-            setMode(nextMode);
-            resetTestFeedback();
-            if (nextMode === 'auto') {
-              setDraftPath('');
-              onSetPath(null);
-            }
-          }}
-          aria-label={`${label} mode`}
-        >
-          <option value="auto">Auto</option>
-          <option value="custom">Custom</option>
-        </select>
-        <input
-          className="tm-settings__input"
-          value={draftPath}
-          onChange={(event) => {
-            setDraftPath(event.target.value);
-            resetTestFeedback();
-          }}
-          disabled={!isCustom}
-          placeholder={displayStatus?.resolvedPath ?? displayStatus?.executable ?? 'Auto-detect'}
-          aria-label={`${label} path`}
-        />
-        <div className="tm-exec__actions">
-          {hasPendingCustomPath ? (
-            <button
-              type="button"
-              className="tm-settings__button tm-settings__button--primary"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                resetTestFeedback();
-                onSetPath(normalizedDraft || null);
-              }}
-            >
-              Save
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="tm-settings__button"
-            disabled={isTesting}
-            aria-busy={isTesting}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => void runTest()}
-          >
-            Test
-          </button>
-          <button
-            type="button"
-            className="tm-settings__button"
-            disabled={!savedPath && !draftPath}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => {
-              setMode('auto');
-              setDraftPath('');
-              resetTestFeedback();
-              onSetPath(null);
-            }}
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {testFeedback ? <ExecutableTestFeedbackStrip feedback={testFeedback} /> : null}
-    </div>
-  );
-}
-
-type ExecutableTestFeedback =
-  | { state: 'running' }
-  | { state: 'passed'; path: string; version: string | null }
-  | { state: 'failed'; message: string };
-
-function ExecutableTestFeedbackStrip({ feedback }: { feedback: ExecutableTestFeedback }) {
-  if (feedback.state === 'running') {
-    return (
-      <div className="tm-exec__test tm-exec__test--running" role="status" aria-live="polite">
-        <span className="tm-exec__spinner" aria-hidden="true" />
-        <span>Testing…</span>
-      </div>
-    );
-  }
-
-  if (feedback.state === 'passed') {
-    return (
-      <div className="tm-exec__test tm-exec__test--passed" role="status" aria-live="polite">
-        <span className="tm-exec__test-icon" aria-hidden="true">
-          ✓
-        </span>
-        <span className="tm-exec__test-text">
-          <strong>Test passed</strong>
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="tm-exec__test tm-exec__test--failed" role="alert" aria-live="assertive">
-      <span className="tm-exec__test-icon" aria-hidden="true">
-        ✕
-      </span>
-      <span className="tm-exec__test-text">
-        <strong>Test failed</strong>
-        <span className="tm-exec__test-message">{feedback.message}</span>
-      </span>
-    </div>
-  );
-}
-
-function describeToolStatus(
-  status: ExternalToolProbeResult | undefined
-): { tone: 'ok' | 'error' | 'muted'; label: string } {
-  if (!status) {
-    return { tone: 'muted', label: 'Not checked' };
-  }
-  if (status.status === 'ok') {
-    return { tone: 'ok', label: 'Available' };
-  }
-  return {
-    tone: status.required ? 'error' : 'muted',
-    label: status.required ? 'Unavailable' : 'Optional'
-  };
-}
-
 function compactSettingsText(value: string, maxLength = 72): string {
   if (value.length <= maxLength) {
     return value;
@@ -1473,76 +975,4 @@ function formatSettingsTime(value: string): string {
     return 'recently';
   }
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-function ModelSettingRow({
-  label,
-  hint,
-  value,
-  effortValue = '',
-  models,
-  onModelChange,
-  onEffortChange
-}: {
-  label: string;
-  hint: string;
-  value: string;
-  effortValue?: string;
-  models: AgentModel[];
-  onModelChange(value: string): void;
-  onEffortChange?(value: string): void;
-}) {
-  const selected = models.find((model) => model.model === value);
-  const efforts = [
-    ...new Set(
-      [
-        ...(selected?.supportedReasoningEfforts ?? []),
-        selected?.defaultReasoningEffort,
-        effortValue
-      ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-    )
-  ];
-  return (
-    <div className="tm-settings__row">
-      <div style={{ minWidth: 0 }}>
-        <div className="tm-settings__k">{label}</div>
-        <div className="tm-settings__hint">
-          {hint}
-          {onEffortChange && effortValue ? ` · ${effortValue}` : ''}
-        </div>
-      </div>
-      <div className="tm-settings__controls">
-        <select
-          className="tm-settings__select tm-settings__select--model"
-          value={value}
-          onChange={(event) => onModelChange(event.target.value)}
-          disabled={models.length === 0}
-          aria-label={`${label} model`}
-        >
-          {models
-            .filter((model) => !model.hidden || model.model === value)
-            .map((model) => (
-              <option key={model.id} value={model.model}>
-                {model.displayName}
-              </option>
-            ))}
-        </select>
-        {onEffortChange ? (
-          <select
-            className="tm-settings__select tm-settings__select--effort"
-            value={effortValue}
-            onChange={(event) => onEffortChange(event.target.value)}
-            disabled={efforts.length === 0}
-            aria-label={`${label} reasoning effort`}
-          >
-            {efforts.map((effort) => (
-              <option key={effort} value={effort}>
-                {effort}
-              </option>
-            ))}
-          </select>
-        ) : null}
-      </div>
-    </div>
-  );
 }

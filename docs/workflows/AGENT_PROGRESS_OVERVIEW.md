@@ -354,7 +354,7 @@ Elapsed time is UI-only. It does not affect workflow state.
 
 `src/renderer/ui/ReviewPanel.tsx` renders detached review state. It stays
 provider-neutral in product copy even though the stored contract is currently
-named `codexReview`.
+named `agentReview`.
 
 While review is running, it shows one current-activity row. While resting, it
 shows review status, reviewed diff, findings, stale context, raw review output

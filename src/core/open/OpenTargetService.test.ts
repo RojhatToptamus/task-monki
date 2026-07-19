@@ -599,6 +599,7 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     tasks: [
       {
         id: 'task-1',
+        runtimeId: 'codex',
         title: 'Task',
         prompt: 'Do it',
         repositoryId: 'repository-1',

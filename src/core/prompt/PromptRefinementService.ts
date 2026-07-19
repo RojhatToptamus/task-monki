@@ -11,6 +11,7 @@ import {
 } from '../agent/codex/CodexToolConfig';
 import {
   buildCodexEphemeralReadOnlyCommand,
+  CodexEphemeralRunError,
   startCodexEphemeralReadOnlyRun
 } from '../agent/codex/CodexEphemeralReadOnlyRunner';
 import {
@@ -32,7 +33,16 @@ export interface PromptRefinementRunRequest {
 
 export type PromptRefinementRunner = (request: PromptRefinementRunRequest) => Promise<string>;
 
+export class PromptRefinementTerminationUnconfirmedError extends Error {
+  constructor(cause: unknown) {
+    super('Prompt refinement process termination could not be confirmed.', { cause });
+    this.name = 'PromptRefinementTerminationUnconfirmedError';
+  }
+}
+
 export class PromptRefinementService {
+  private terminationFence?: PromptRefinementTerminationUnconfirmedError;
+
   constructor(private readonly runModel: PromptRefinementRunner = runCodexRefinement) {}
 
   async refine(
@@ -46,6 +56,9 @@ export class PromptRefinementService {
     const trimmed = input.trim();
     if (!trimmed) {
       throw new Error('Prompt text is required.');
+    }
+    if (this.terminationFence) {
+      return buildDeterministicFallback(repositoryPath, trimmed);
     }
 
     try {
@@ -62,7 +75,10 @@ export class PromptRefinementService {
         ...refined,
         source: 'model'
       };
-    } catch {
+    } catch (cause) {
+      if (cause instanceof PromptRefinementTerminationUnconfirmedError) {
+        this.terminationFence = cause;
+      }
       return buildDeterministicFallback(repositoryPath, trimmed);
     }
   }
@@ -111,7 +127,17 @@ async function runCodexRefinement({
     toolSettings,
     failClosedMcpDiscovery
   });
-  return run.result;
+  try {
+    return await run.result;
+  } catch (cause) {
+    if (
+      cause instanceof CodexEphemeralRunError &&
+      cause.code === 'TERMINATION_UNCONFIRMED'
+    ) {
+      throw new PromptRefinementTerminationUnconfirmedError(cause);
+    }
+    throw cause;
+  }
 }
 
 function parseModelRefinement(output: string): Pick<

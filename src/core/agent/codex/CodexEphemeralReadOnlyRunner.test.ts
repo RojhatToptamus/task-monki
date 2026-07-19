@@ -48,4 +48,23 @@ describe('CodexEphemeralReadOnlyRunner', () => {
       code: 'TIMED_OUT'
     } satisfies Partial<CodexEphemeralRunError>);
   });
+
+  it('reports an unconfirmed stop distinctly', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter() as SupervisedProcess['events'];
+    const run = superviseCodexEphemeralProcess(
+      {
+        pid: 123,
+        events,
+        cancel: () => Promise.reject(new Error('still running'))
+      },
+      30
+    );
+    const observedResult = run.result.catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(30);
+    await expect(observedResult).resolves.toMatchObject({
+      code: 'TERMINATION_UNCONFIRMED'
+    } satisfies Partial<CodexEphemeralRunError>);
+  });
 });

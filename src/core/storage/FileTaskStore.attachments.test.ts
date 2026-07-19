@@ -2,7 +2,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { AttachmentFileStore } from './AttachmentFileStore';
+import {
+  AttachmentAdoptionAmbiguousError,
+  AttachmentFileStore
+} from './AttachmentFileStore';
 import { FileTaskStore } from './FileTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
@@ -133,6 +136,61 @@ describe('FileTaskStore attachments', () => {
     expect((await store.snapshot()).tasks).toEqual([]);
   });
 
+  it('reports ambiguous adoption when task persistence rollback cannot be proven', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const repository = await addTestRepository(store, dir);
+    const { draftId } = await stageText(store, 'notes.txt', 'keep me recoverable');
+    const storePath = path.join(dir, 'store.json');
+    const draftPath = path.join(dir, 'attachments', 'staging', draftId);
+    const tasksRoot = path.join(dir, 'attachments', 'tasks');
+    const renameFile = fs.rename.bind(fs);
+    let publicationFailureInjected = false;
+    let rollbackFailureInjected = false;
+    const rename = vi.spyOn(fs, 'rename').mockImplementation(async (source, destination) => {
+      if (!publicationFailureInjected && String(destination) === storePath) {
+        publicationFailureInjected = true;
+        throw new Error('Injected task publication failure.');
+      }
+      if (
+        !rollbackFailureInjected &&
+        path.dirname(String(source)) === tasksRoot &&
+        String(destination) === draftPath
+      ) {
+        rollbackFailureInjected = true;
+        throw new Error('Injected task attachment rollback failure.');
+      }
+      await renameFile(source, destination);
+    });
+
+    let failure: unknown;
+    try {
+      failure = await store.createTask({
+        title: 'Ambiguous attachment task',
+        prompt: 'Do not report this create as retryable.',
+        repositoryId: repository.id,
+        attachmentDraftId: draftId
+      }).catch((error: unknown) => error);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect(publicationFailureInjected).toBe(true);
+    expect(rollbackFailureInjected).toBe(true);
+    expect(failure).toBeInstanceOf(AttachmentAdoptionAmbiguousError);
+    const receipt = (failure as AttachmentAdoptionAmbiguousError).receipt;
+    await expect(
+      fs.access(path.join(tasksRoot, receipt.taskId))
+    ).resolves.toBeUndefined();
+    expect((await store.snapshot()).tasks).toEqual([]);
+    await store.close();
+
+    const recovery = new AttachmentFileStore(dir);
+    await recovery.rollbackDraftForTask(receipt);
+    await expect(recovery.listDraft(draftId)).resolves.toMatchObject({ id: draftId });
+    await recovery.close();
+  });
+
   it('reconciles a durable task when draft cleanup was interrupted', async () => {
     const dir = await temporaryDirectory();
     const store = createStore(dir);
@@ -259,10 +317,53 @@ describe('FileTaskStore attachments', () => {
     await fs.writeFile(delivery.absolutePath, 'tampered');
     if (process.platform !== 'win32') await fs.chmod(delivery.absolutePath, 0o400);
 
+    await store.close();
     const restarted = createStore(dir);
     await expect(restarted.reconcileRunAttachments()).rejects.toMatchObject({
       code: 'ATTACHMENT_INTEGRITY_MISMATCH'
     });
+  });
+
+  it('preserves durable task records when a referenced attachment is missing at startup', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const { draftId } = await stageText(store, 'missing.txt', 'authoritative bytes');
+    const attachedTask = await store.createTask({
+      title: 'Attached task',
+      prompt: 'Use the attachment.',
+      repositoryId: (await addTestRepository(store, dir)).id,
+      attachmentDraftId: draftId
+    });
+    const siblingTask = await store.createTask({
+      title: 'Sibling task',
+      prompt: 'Remain durable.',
+      repositoryId: (await addTestRepository(store, dir)).id
+    });
+    const [delivery] = await store.verifyTaskAttachments(attachedTask.id);
+    await store.close();
+
+    const storePath = path.join(dir, 'store.json');
+    const persistedBeforeRestart = await fs.readFile(storePath, 'utf8');
+    await fs.unlink(delivery.absolutePath);
+
+    const restarted = createStore(dir);
+    try {
+      await expect(restarted.snapshot()).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await restarted.close();
+    }
+
+    expect(await fs.readFile(storePath, 'utf8')).toBe(persistedBeforeRestart);
+    const persisted = JSON.parse(persistedBeforeRestart) as {
+      tasks: Array<{ id: string }>;
+      attachments: Array<{ taskId: string }>;
+    };
+    expect(persisted.tasks.map((task) => task.id)).toEqual(
+      expect.arrayContaining([attachedTask.id, siblingTask.id])
+    );
+    expect(persisted.attachments).toContainEqual(
+      expect.objectContaining({ taskId: attachedTask.id })
+    );
   });
 
   it.runIf(process.platform !== 'win32')('fails closed when a task-owned attachment is writable at restart', async () => {
@@ -280,9 +381,60 @@ describe('FileTaskStore attachments', () => {
     const [delivery] = await store.prepareRunAttachments(run.id, task.id);
     await fs.chmod(delivery.absolutePath, 0o600);
 
+    await store.close();
     await expect(createStore(dir).reconcileRunAttachments()).rejects.toMatchObject({
       code: 'ATTACHMENT_INTEGRITY_MISMATCH'
     });
+  });
+
+  it('holds store ownership until admitted attachment I/O finishes', async () => {
+    const dir = await temporaryDirectory();
+    const store = createStore(dir);
+    const draft = await store.createAttachmentDraft();
+    const linkFile = fs.link.bind(fs);
+    let signalLinkStarted!: () => void;
+    let releaseLink!: () => void;
+    const linkStarted = new Promise<void>((resolve) => { signalLinkStarted = resolve; });
+    const linkGate = new Promise<void>((resolve) => { releaseLink = resolve; });
+    let delayed = false;
+    const link = vi.spyOn(fs, 'link').mockImplementation(async (source, destination) => {
+      if (
+        !delayed &&
+        String(destination).startsWith(
+          path.join(dir, 'attachments', 'staging', draft.id, path.sep)
+        )
+      ) {
+        delayed = true;
+        signalLinkStarted();
+        await linkGate;
+      }
+      await linkFile(source, destination);
+    });
+    const contender = createStore(dir);
+
+    try {
+      const staging = store.stageTaskAttachment({
+        draftId: draft.id,
+        displayName: 'drain.txt',
+        bytes: bytes('finish admitted attachment work')
+      });
+      await linkStarted;
+      const closing = store.close();
+
+      await expect(contender.snapshot()).rejects.toThrow(
+        `already owned by process ${process.pid}`
+      );
+      await expect(store.createAttachmentDraft()).rejects.toThrow('Task store is closed');
+      releaseLink();
+      await expect(staging).resolves.toMatchObject({ displayName: 'drain.txt' });
+      await expect(closing).resolves.toBeUndefined();
+      await expect(contender.snapshot()).resolves.toMatchObject({ tasks: [] });
+    } finally {
+      releaseLink();
+      link.mockRestore();
+      await store.close();
+      await contender.close();
+    }
   });
 
 });
@@ -317,7 +469,7 @@ async function createRun(
     task,
     iteration,
     worktree,
-    provider: 'codex'
+    runtimeId: 'codex'
   });
   return store.createRun({
     task,

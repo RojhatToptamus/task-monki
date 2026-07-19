@@ -6,13 +6,16 @@ import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
   execFilePortable,
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
 } from './CodexRuntimeVersion';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 
 export const TASK_MONKI_CODEX_BIN_ENV = 'TASK_MONKI_CODEX_BIN';
 
@@ -270,7 +273,10 @@ export async function probeCodexVersion(
 ): Promise<string> {
   const { stdout } = await execFilePortable(executable, ['--version'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: 10_000,
     maxBuffer: 1024 * 1024
   });
@@ -340,11 +346,14 @@ async function probeJsonRpcCapabilities(
   const child = spawnPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
-      ...sanitizeEnvironment(options.environment ?? process.env),
+      ...sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       CODEX_HOME: codexHome
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-    detached: false
+    detached: process.platform !== 'win32'
   }) as ChildProcessWithoutNullStreams;
 
   let stderr = '';
@@ -480,13 +489,24 @@ async function probeJsonRpcCapabilities(
   } finally {
     reader.close();
     child.stdin.destroy();
-    if (child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
-      if (!(await waitForClose(child, 1_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
+    let cleanupFailure: unknown;
+    try {
+      if (isPortableProcessTreeRunning(child)) {
+        await terminatePortableProcessTree(child, 'SIGTERM');
+        if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+          await terminatePortableProcessTree(child, 'SIGKILL');
+          if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+            throw new Error(
+              `Codex capability probe process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
+            );
+          }
+        }
       }
+    } catch (cause) {
+      cleanupFailure = cause;
     }
     await fs.rm(codexHome, { recursive: true, force: true });
+    if (cleanupFailure) throw cleanupFailure;
   }
 }
 
@@ -595,7 +615,10 @@ async function execFileText(
   try {
     const { stdout, stderr } = await execFilePortable(executable, argv, {
       cwd: options.cwd,
-      env: sanitizeEnvironment(options.environment ?? process.env),
+      env: sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       timeout: 10_000,
       maxBuffer: 1024 * 1024
     });
@@ -769,25 +792,5 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
-  });
-}
-
-function waitForClose(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
-): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
   });
 }

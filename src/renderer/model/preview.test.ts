@@ -20,6 +20,7 @@ const task: Task = {
   title: 'Task',
   prompt: 'Prompt',
   repositoryId: 'repository-1',
+  runtimeId: 'codex',
   workflowPhase: 'REVIEW',
   resolution: 'NONE',
   completionPolicy: 'LOCAL_ACCEPTANCE',

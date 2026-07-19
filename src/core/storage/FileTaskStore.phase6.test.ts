@@ -7,6 +7,76 @@ import { FileTaskStore } from './FileTaskStore';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('FileTaskStore Phase 6 subagent observations', () => {
+  it('persists provider-observed children with inherited runtime settings across restart', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase6-restart-'));
+    const store = new FileTaskStore(dir);
+    const task = await store.createTask({
+      title: 'Restart observed subagent',
+      prompt: 'Preserve durable runtime ownership.',
+      repositoryId: (await addTestRepository(store, dir)).id,
+      runtimeId: 'opencode',
+      agentSettings: {
+        runtimeId: 'opencode',
+        model: 'big-pickle',
+        modelProvider: 'opencode',
+        sandbox: 'DANGER_FULL_ACCESS',
+        approvalPolicy: 'on-request'
+      }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/phase6-restart',
+      worktreePath: dir,
+      baseSha: 'base'
+    });
+    const parent = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'opencode',
+      requestedSettings: task.agentSettings
+    });
+    await store.updateAgentSession(parent.id, {
+      providerSessionId: 'session-parent',
+      materialized: true
+    });
+    const server = await store.createAgentServer({
+      runtimeId: 'opencode',
+      runtimeKind: 'HTTP_AGENT',
+      transport: 'HTTP_SSE',
+      executable: 'opencode',
+      argv: ['serve']
+    });
+    const raw = await store.appendProtocolMessage(
+      server.id,
+      'INBOUND',
+      '{"type":"session.created"}'
+    );
+    const observed = await store.observeSubagent({
+      parentSessionId: parent.id,
+      providerChildSessionId: 'session-child',
+      providerParentSessionId: 'session-parent',
+      source: 'THREAD_STARTED_PARENT',
+      materialized: true,
+      rawMessage: raw
+    });
+
+    expect(observed.session.requestedSettings).toEqual(parent.requestedSettings);
+    await store.close();
+
+    const restarted = new FileTaskStore(dir);
+    const snapshot = await restarted.snapshot();
+    expect(
+      snapshot.agentSessions.find(
+        (session) => session.providerSessionId === 'session-child'
+      )
+    ).toMatchObject({
+      runtimeId: 'opencode',
+      requestedSettings: parent.requestedSettings
+    });
+    await restarted.close();
+  });
+
   it('materializes explicit child hierarchy without replacing the task run', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase6-store-'));
     const store = new FileTaskStore(dir);
@@ -25,7 +95,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     await store.updateAgentSession(parent.id, {
       providerSessionId: 'thread-parent',
@@ -39,7 +109,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       prompt: task.prompt
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -126,13 +196,13 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex'
+      runtimeId: 'codex'
     });
     const secondParent = await store.createAgentSession({
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       role: 'ALTERNATIVE'
     });
     await store.updateAgentSession(firstParent.id, {
@@ -142,7 +212,7 @@ describe('FileTaskStore Phase 6 subagent observations', () => {
       providerSessionId: 'thread-parent-b'
     });
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',

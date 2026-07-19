@@ -69,6 +69,7 @@ function taskFixture(
     title: id,
     prompt: 'Do it.',
     repositoryId,
+    runtimeId: 'codex',
     workflowPhase,
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

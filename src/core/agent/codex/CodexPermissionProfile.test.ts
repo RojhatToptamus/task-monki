@@ -64,13 +64,15 @@ describe('Codex permission profile', () => {
   it('rejects Full access only for attachments and validates managed paths', () => {
     const worktree = nativeAbsolute('worktrees', 'task-1');
     const attachment = nativeAbsolute('attachments', 'file.txt');
-    expect(() =>
-      codexPermissionProfileConfig({
-        sessionId: 'session-1',
-        settings: { sandbox: 'DANGER_FULL_ACCESS' },
-        worktreePath: worktree
-      })
-    ).not.toThrow();
+    const fullAccess = codexPermissionProfileConfig({
+      sessionId: 'session-1',
+      settings: { sandbox: 'DANGER_FULL_ACCESS' },
+      worktreePath: worktree
+    });
+    expect(fullAccess).toMatchObject({
+      default_permissions: ':danger-full-access'
+    });
+    expect(fullAccess).not.toHaveProperty('permissions');
     expect(() =>
       codexPermissionProfileConfig({
         sessionId: 'session-1',
@@ -102,7 +104,9 @@ describe('Codex permission profile', () => {
         attachmentPaths: [path.join(worktree, '..data', 'file.txt')]
       })
     ).toThrow('outside the task worktree');
-    expect(() => codexPermissionProfileId('bad/id')).toThrow('invalid session id');
+    expect(() => codexPermissionProfileId('bad/id', 'WORKSPACE_WRITE')).toThrow(
+      'invalid session id'
+    );
   });
 
   it('disables network access whenever managed attachments are present', () => {
@@ -122,10 +126,25 @@ describe('Codex permission profile', () => {
     expect(() =>
       assertCodexPermissionProfileEvidence({
         sessionId: 'session-1',
+        sandbox: 'WORKSPACE_WRITE',
         worktreePath: worktree,
         response: {
           activePermissionProfile: {
             id: 'task_monki_session-1',
+            extends: null
+          },
+          runtimeWorkspaceRoots: [worktree]
+        }
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertCodexPermissionProfileEvidence({
+        sessionId: 'session-1',
+        sandbox: 'DANGER_FULL_ACCESS',
+        worktreePath: worktree,
+        response: {
+          activePermissionProfile: {
+            id: ':danger-full-access',
             extends: null
           },
           runtimeWorkspaceRoots: [worktree]
@@ -157,6 +176,7 @@ describe('Codex permission profile', () => {
       expect(() =>
         assertCodexPermissionProfileEvidence({
           sessionId: 'session-1',
+          sandbox: 'WORKSPACE_WRITE',
           worktreePath: worktree,
           response
         })
@@ -166,6 +186,7 @@ describe('Codex permission profile', () => {
     expect(() =>
       assertCodexPermissionProfileEvidence({
         sessionId: 'session-1',
+        sandbox: 'WORKSPACE_WRITE',
         worktreePath: process.cwd(),
         response: {
           activePermissionProfile: {
@@ -185,6 +206,7 @@ describe('Codex permission profile', () => {
       expect(() =>
         assertCodexPermissionProfileEvidence({
           sessionId: 'session-case',
+          sandbox: 'WORKSPACE_WRITE',
           worktreePath: worktree.toUpperCase(),
           response: {
             activePermissionProfile: {

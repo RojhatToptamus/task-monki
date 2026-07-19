@@ -78,6 +78,9 @@ export default defineConfig(() => {
     },
     test: {
       environment: 'node',
+      // Process, filesystem, and local-Git integration tests intentionally run
+      // real subprocesses. Bound file-level concurrency so the suite tests
+      // lifecycle behavior instead of saturating the host process table.
       minWorkers: 1,
       maxWorkers: 4,
       include: [

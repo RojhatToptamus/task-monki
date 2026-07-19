@@ -32,7 +32,7 @@ GitHub delivery actions.
 
 ## Source Of Truth
 
-Task Monki owns workflow and evidence. GitHub and Codex provider output are not
+Task Monki owns workflow and evidence. GitHub and agent-runtime output are not
 workflow truth until Task Monki records them.
 
 Records used by the card:
@@ -747,7 +747,7 @@ o GitHub changes requested
 [refresh]
 ```
 
-Tone: `error`. This is GitHub review evidence, not Codex review evidence.
+Tone: `error`. This is GitHub review evidence, not Task Monki agent-review evidence.
 
 ### GITHUB_REVIEW_WAITING
 
@@ -860,12 +860,12 @@ delivery action in flight:
   disables refresh, create/push, investigate
   disabled title: GitHub action is in progress.
 
-Codex review starting:
+agent review starting:
   disables create/push/investigate
   refresh remains available
   disabled title: Delivery actions pause while review starts.
 
-Codex review running:
+agent review running:
   disables create/push/investigate
   refresh remains available
   disabled title: Delivery actions pause while review runs.
@@ -883,14 +883,14 @@ failing checks with no source run:
 Review and Finish use the reverse pause relationship:
 
 ```text
-GitHub delivery running -> Run Codex review stays visible but disabled.
+GitHub delivery running -> Run review stays visible but disabled.
 GitHub delivery running -> Finish actions pause during GitHub actions.
 review running          -> Finish actions pause while review runs.
 implementation running  -> Finish actions pause while the agent runs.
 ```
 
 When review is `NOT_RUN` and another task action pauses review actions, the
-`Run Codex review` button remains in place, disabled, with the pause reason on
+`Run review` remains in place, disabled, with the pause reason on
 the `tm-actiontitle` wrapper. Do not replace it with dangling explanatory text.
 
 The delivery `Commit` action now uses `runDeliveryAction`, so PR Status and

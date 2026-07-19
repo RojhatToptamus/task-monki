@@ -49,6 +49,7 @@ export class AgentAttachmentDeliveryError extends Error {
       | 'ATTACHMENT_SIZE_MISMATCH'
       | 'ATTACHMENT_HASH_MISMATCH'
       | 'MODEL_DOES_NOT_SUPPORT_IMAGES'
+      | 'ATTACHMENTS_REQUIRE_NETWORK_ISOLATION'
       | 'ATTACHMENTS_REQUIRE_MANAGED_SANDBOX',
     message: string
   ) {
@@ -105,13 +106,13 @@ export function assertModelSupportsAttachments(
 
 /**
  * Provider-facing paths are protected by the managed read-only/workspace-write
- * boundary. Full access intentionally has no filesystem isolation, so a model
- * turn could replace a delivery copy or its parent between verification and
- * use. Restricted V1 therefore fails closed instead of presenting mutable
- * bytes as verified attachment evidence.
+ * boundary and a network-disabled turn. Full access has no filesystem
+ * isolation, while network access can exfiltrate verified bytes through
+ * provider tools or commands. Restricted V1 therefore fails closed instead of
+ * presenting unconfined bytes as verified attachment evidence.
  */
 export function assertAttachmentSandboxSupportsDelivery(
-  settings: Pick<AgentExecutionSettings, 'sandbox'>,
+  settings: Pick<AgentExecutionSettings, 'sandbox' | 'networkAccess'>,
   attachments: readonly unknown[]
 ): void {
   if (
@@ -121,6 +122,12 @@ export function assertAttachmentSandboxSupportsDelivery(
     throw new AgentAttachmentDeliveryError(
       'ATTACHMENTS_REQUIRE_MANAGED_SANDBOX',
       'Attachments require Ask for approval, Approve for me, or read-only access. Full access cannot safely protect attachment copies.'
+    );
+  }
+  if (attachments.length > 0 && settings.networkAccess !== false) {
+    throw new AgentAttachmentDeliveryError(
+      'ATTACHMENTS_REQUIRE_NETWORK_ISOLATION',
+      'Network access must be disabled while attachments are included.'
     );
   }
 }

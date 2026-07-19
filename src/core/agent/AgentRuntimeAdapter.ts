@@ -1,7 +1,12 @@
 import type {
   AgentModel,
   AgentPreflight,
-  AgentProviderCapabilities,
+  AgentRuntimeCapabilities,
+  AgentRuntimeDescriptor,
+  AgentRuntimeId,
+  AgentSessionControlSet,
+  AgentSessionControlValue,
+  AgentJsonValue,
   AgentGoalSnapshotRecord,
   AgentReviewTarget,
   AgentRunMode,
@@ -11,15 +16,22 @@ import type {
   AgentInteractionDecision,
   InteractionRequestRecord
 } from '../../shared/agent';
+import type { RefinePromptResponse } from '../../shared/contracts';
 import type { AgentTurnAttachment } from './AgentAttachmentDelivery';
 
 export interface CreateAgentSession {
+  runtimeId: AgentRuntimeId;
   localSessionId: string;
   taskId: string;
   iterationId: string;
   worktreeId: string;
   worktreePath: string;
   settings: AgentExecutionSettings;
+  /**
+   * Storage-verified task attachments whose exact managed paths must be part
+   * of a provider session's initial confinement boundary.
+   */
+  attachments?: AgentTurnAttachment[];
 }
 
 export interface AgentSessionRef {
@@ -84,6 +96,22 @@ export interface AgentReconciliationResult {
   recoveryRequiredSessionIds: string[];
 }
 
+export interface ResolveAgentExecution {
+  settings: AgentExecutionSettings;
+  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[];
+}
+
+export interface ResolvedAgentExecution {
+  settings: AgentExecutionSettings;
+  model: AgentModel;
+}
+
+export interface RefineAgentPrompt {
+  repositoryPath: string;
+  input: string;
+  settings: AgentExecutionSettings;
+}
+
 export class AgentMutationAmbiguousError extends Error {
   constructor(
     readonly operation: string,
@@ -104,13 +132,32 @@ export class AgentProviderSessionMissingError extends Error {
   }
 }
 
-export interface AgentProviderAdapter {
+export interface AgentRuntimeAdapter {
+  readonly descriptor: AgentRuntimeDescriptor;
   initialize(): Promise<void>;
   preflight(): Promise<AgentPreflight>;
-  capabilities(): Promise<AgentProviderCapabilities>;
+  capabilities(): Promise<AgentRuntimeCapabilities>;
   listModels(): Promise<AgentModel[]>;
+  /** Refresh a provider-owned model catalog after an explicit user request. */
+  discoverModels?(): Promise<void>;
+  readNativeState?(): Promise<AgentJsonValue | undefined>;
+  listSessionControls?(): Promise<AgentSessionControlSet[]>;
+  applySessionControl?(input: {
+    localSessionId: string;
+    controlId: string;
+    value: AgentSessionControlValue;
+    revision: string;
+  }): Promise<{ native: AgentJsonValue; controls: AgentSessionControlSet }>;
+  configureRuntime?(input: {
+    executable?: string;
+    restart: boolean;
+  }): Promise<void>;
+  resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution>;
+  refinePrompt?(input: RefineAgentPrompt): Promise<RefinePromptResponse>;
   createSession(input: CreateAgentSession): Promise<AgentSessionRecord>;
   attachSession(ref: AgentSessionRef): Promise<AgentSessionRecord>;
+  /** Release runtime resources without deleting the provider-owned conversation. */
+  releaseSession?(ref: AgentSessionRef): Promise<void>;
   readSession(ref: AgentSessionRef): Promise<AgentSessionSnapshot>;
   startTurn(input: StartAgentTurn): Promise<AgentTurn>;
   steerTurn?(input: SteerAgentTurn): Promise<void>;
@@ -119,6 +166,8 @@ export interface AgentProviderAdapter {
   startReview?(input: StartAgentReview): Promise<AgentTurn>;
   syncGoal?(input: SyncAgentGoal): Promise<AgentGoalSnapshotRecord>;
   respondToInteraction(input: AgentInteractionResponse): Promise<void>;
+  /** Release runtime-owned processes/streams for a task after Task Monki proves no work is active. */
+  releaseTask?(taskId: string): Promise<void>;
   reconcile(): Promise<AgentReconciliationResult>;
   shutdown(): Promise<void>;
 }

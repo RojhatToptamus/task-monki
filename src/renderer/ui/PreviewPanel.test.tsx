@@ -537,6 +537,7 @@ function taskFixture(): Task {
     title: 'Preview task',
     prompt: 'Implement a preview.',
     repositoryId: 'repository-1',
+    runtimeId: 'codex',
     workflowPhase: 'IN_PROGRESS',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

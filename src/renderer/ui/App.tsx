@@ -18,7 +18,7 @@ import {
   type Board,
   type BoardColor,
   type AgentInteractionDecision,
-  type AgentProviderState,
+  type AgentRuntimeCatalog,
   type AgentRetryStrategy,
   type DeleteTaskResult,
   type ExternalToolStatusReport,
@@ -33,6 +33,7 @@ import {
   type Task,
   type TaskManagerAppSettings,
   type TaskSnapshot,
+  type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
   type WorkflowPhase,
   type WorktreeRecord
@@ -54,7 +55,7 @@ import {
   formatShortId
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
-import { areRequiredExternalToolsReady } from '../model/executableSettings';
+import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
 import { selectBoardTasks } from '../model/boards';
 import {
   dragNewTaskCanvas,
@@ -68,7 +69,6 @@ import {
   resolveSelectedRepositoryId,
   type RepositoryOption
 } from '../model/repositories';
-import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
 import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
@@ -195,7 +195,7 @@ export function App() {
     DEFAULT_TASK_MANAGER_APP_SETTINGS
   );
   const [externalToolStatus, setExternalToolStatus] = useState<ExternalToolStatusReport>();
-  const [providerState, setProviderState] = useState<AgentProviderState>();
+  const [runtimeCatalog, setRuntimeCatalog] = useState<AgentRuntimeCatalog>();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
@@ -433,9 +433,39 @@ export function App() {
     setPreviewRecipeGenerations((current) => retainTaskEntries(current, next.tasks));
   }, []);
   const refreshExternalToolStatus = useCallback(async () => {
-    const next = await taskManagerApi.getExternalToolStatus();
-    setExternalToolStatus(next);
-    return next;
+    setError(undefined);
+    try {
+      const next = await taskManagerApi.getExternalToolStatus();
+      setExternalToolStatus(next);
+    } catch (caught) {
+      reportActionError(caught, 'Failed to refresh tool status.');
+    }
+  }, [reportActionError]);
+  const refreshAgentRuntimes = useCallback(async () => {
+    setError(undefined);
+    try {
+      setRuntimeCatalog(await taskManagerApi.getAgentRuntimeCatalog());
+    } catch (caught) {
+      reportActionError(caught, 'Failed to refresh agent runtimes.');
+    }
+  }, [reportActionError]);
+  const discoverAgentRuntimeModels = useCallback(async (runtimeId: string) => {
+    const runtime = await taskManagerApi.discoverAgentRuntimeModels(runtimeId);
+    setRuntimeCatalog((current) => {
+      if (!current) return current;
+      const runtimeIndex = current.runtimes.findIndex(
+        (candidate) => candidate.preflight.runtime.id === runtimeId
+      );
+      if (runtimeIndex < 0) return current;
+      const runtimes = [...current.runtimes];
+      runtimes[runtimeIndex] = runtime;
+      return {
+        ...current,
+        runtimes,
+        models: runtimes.flatMap((candidate) => candidate.models),
+        refreshedAt: runtime.refreshedAt
+      };
+    });
   }, []);
   const testExternalTool = useCallback(
     async (input: Parameters<typeof taskManagerApi.testExternalTool>[0]) => {
@@ -490,14 +520,14 @@ export function App() {
 
     async function load() {
       try {
-        const [provider, settings, tools] = await Promise.all([
-          taskManagerApi.getAgentProviderState(),
+        const [catalog, settings, tools] = await Promise.all([
+          taskManagerApi.getAgentRuntimeCatalog(),
           taskManagerApi.getAppSettings(),
           taskManagerApi.getExternalToolStatus(),
           refresh()
         ]);
         if (!canceled) {
-          setProviderState(provider);
+          setRuntimeCatalog(catalog);
           setAppSettings(settings);
           setExternalToolStatus(tools);
         }
@@ -519,15 +549,23 @@ export function App() {
   }, [refresh]);
 
   useEffect(() => {
-    const scheduler = createUpdateRefreshScheduler({
+    const snapshotRefresh = createUpdateRefreshScheduler({
       delayMs: 50,
       refresh,
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
     });
+    const runtimeCatalogRefresh = createUpdateRefreshScheduler({
+      delayMs: 100,
+      refresh: async () => {
+        setRuntimeCatalog(await taskManagerApi.getAgentRuntimeCatalog());
+      },
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
     const unsubscribe = taskManagerApi.onUpdate((event) => {
-      if (event.type === 'provider.updated') {
-        void taskManagerApi.getAgentProviderState().then(setProviderState);
+      if (event.type === 'runtime.updated') {
+        runtimeCatalogRefresh.request();
       }
       if (
         event.type === 'preview.recipe-generation.updated' &&
@@ -539,11 +577,12 @@ export function App() {
           [event.taskId]: recipeGeneration
         }));
       }
-      scheduler.request();
+      snapshotRefresh.request();
     });
     return () => {
       unsubscribe();
-      scheduler.dispose();
+      snapshotRefresh.dispose();
+      runtimeCatalogRefresh.dispose();
     };
   }, [refresh]);
 
@@ -759,28 +798,101 @@ export function App() {
   const deleteCandidateGitSnapshot = deleteCandidate
     ? selectLatestGitSnapshot(snapshot, deleteCandidate)
     : undefined;
-  const providerModels = providerState?.models ?? [];
+  const disabledRuntimeIds = useMemo(
+    () => new Set(appSettings.disabledRuntimeIds),
+    [appSettings.disabledRuntimeIds]
+  );
+  const enabledRuntimes = useMemo(
+    () =>
+      runtimeCatalog?.runtimes.filter(
+        (runtime) => !disabledRuntimeIds.has(runtime.preflight.runtime.id)
+      ) ?? [],
+    [disabledRuntimeIds, runtimeCatalog?.runtimes]
+  );
+  const enabledRuntimeIds = useMemo(
+    () => new Set(enabledRuntimes.map((runtime) => runtime.preflight.runtime.id)),
+    [enabledRuntimes]
+  );
+  const runtimeModels = runtimeCatalog?.models ?? [];
+  const enabledRuntimeModels = useMemo(
+    () => runtimeModels.filter((model) => enabledRuntimeIds.has(model.runtimeId)),
+    [enabledRuntimeIds, runtimeModels]
+  );
+  const readyPromptRefinementRuntimes = enabledRuntimes.filter(
+    (runtime) =>
+      runtime.preflight.readiness.canStart &&
+      runtime.preflight.capabilities.promptRefinement.maturity !== 'unsupported'
+  );
+  const configuredPromptRefinementRuntimeId =
+    appSettings.promptRefinementRuntimeId ?? appSettings.defaultRuntimeId;
+  const promptRefinementRuntime =
+    readyPromptRefinementRuntimes.find(
+      (runtime) =>
+        runtime.preflight.runtime.id === configuredPromptRefinementRuntimeId
+    ) ?? readyPromptRefinementRuntimes[0];
+  const readyReviewRuntimes = enabledRuntimes.filter(
+    (runtime) =>
+      runtime.preflight.readiness.canStart &&
+      (runtime.preflight.capabilities.review.maturity !== 'unsupported' ||
+        runtime.preflight.capabilities.detachedReview.maturity === 'stable')
+  );
+  const configuredReviewRuntimeId =
+    appSettings.reviewRuntimeId ?? selectedTask?.runtimeId;
+  const reviewRuntime =
+    readyReviewRuntimes.find(
+      (runtime) => runtime.preflight.runtime.id === configuredReviewRuntimeId
+    ) ??
+    readyReviewRuntimes.find(
+      (runtime) => runtime.preflight.runtime.id === selectedTask?.runtimeId
+    ) ??
+    readyReviewRuntimes[0];
+  const refineDisabledReason = promptRefinementRuntime
+    ? undefined
+    : 'No ready agent runtime supports isolated prompt refinement.';
+  const selectedTaskRuntimeState = selectedTask
+    ? runtimeCatalog?.runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === selectedTask.runtimeId
+      )
+    : undefined;
   const defaultTaskSettings = useMemo(
     () =>
       resolveModelExecutionSettings(
-        providerModels,
+        enabledRuntimeModels,
         appSettings.defaultModel,
-        appSettings.defaultReasoningEffort
+        appSettings.defaultReasoningEffort,
+        appSettings.defaultRuntimeId,
+        appSettings.defaultModelProvider
       ),
-    [appSettings.defaultModel, appSettings.defaultReasoningEffort, providerModels]
+    [
+      appSettings.defaultModel,
+      appSettings.defaultModelProvider,
+      appSettings.defaultReasoningEffort,
+      appSettings.defaultRuntimeId,
+      enabledRuntimeModels
+    ]
   );
   const reviewExecutionSettings = useMemo(
     () =>
       resolveModelExecutionSettings(
-        providerModels,
+        enabledRuntimeModels,
         appSettings.reviewModel ?? appSettings.defaultModel,
-        appSettings.reviewReasoningEffort
+        appSettings.reviewReasoningEffort,
+        reviewRuntime?.preflight.runtime.id ??
+          appSettings.reviewRuntimeId ??
+          selectedTask?.runtimeId ??
+          appSettings.defaultRuntimeId,
+        appSettings.reviewModelProvider
       ),
     [
       appSettings.defaultModel,
+      appSettings.defaultRuntimeId,
       appSettings.reviewModel,
+      appSettings.reviewModelProvider,
       appSettings.reviewReasoningEffort,
-      providerModels
+      appSettings.reviewRuntimeId,
+      reviewRuntime?.preflight.runtime.id,
+      selectedTask?.runtimeId,
+      enabledRuntimeModels
     ]
   );
 
@@ -799,11 +911,21 @@ export function App() {
 
   const refinePrompt = async (repositoryId: string, input: string) => {
     try {
-      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const refinementModel = selectModel(
+        enabledRuntimeModels,
+        appSettings.promptRefinementModel,
+        promptRefinementRuntime?.preflight.runtime.id,
+        appSettings.promptRefinementModelProvider
+      );
       const refined = await taskManagerApi.refinePrompt({
         repositoryId,
         input,
-        model: refinementModel?.model
+        runtimeId:
+          refinementModel?.runtimeId ??
+          promptRefinementRuntime?.preflight.runtime.id,
+        model: refinementModel?.model,
+        modelProvider:
+          refinementModel?.modelProvider ?? appSettings.promptRefinementModelProvider
       });
       notify('Prompt refined.', 'success');
       return refined;
@@ -918,7 +1040,7 @@ export function App() {
 
   const generatePreviewRecipe = async (taskId: string) => {
     try {
-      const refinementModel = selectModel(providerModels, appSettings.promptRefinementModel);
+      const refinementModel = selectModel(enabledRuntimeModels, appSettings.promptRefinementModel);
       const state = await taskManagerApi.generatePreviewRecipe({
         taskId,
         model: refinementModel?.model
@@ -1240,6 +1362,24 @@ export function App() {
     }
   };
 
+  const updateAgentNativeSession = async (
+    input: UpdateAgentNativeSessionRequest
+  ) => {
+    setError(undefined);
+    try {
+      await taskManagerApi.updateAgentNativeSession(input);
+      const [catalog] = await Promise.all([
+        taskManagerApi.getAgentRuntimeCatalog(),
+        refresh()
+      ]);
+      setRuntimeCatalog(catalog);
+      notify('Provider session updated.', 'success');
+    } catch (caught) {
+      reportActionError(caught, 'Failed to update provider session.');
+      throw caught;
+    }
+  };
+
   const respondToInteraction = async (
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -1423,10 +1563,22 @@ export function App() {
       throw new Error(message);
     }
     try {
-      const latestToolStatus = await taskManagerApi.getExternalToolStatus();
+      const [latestToolStatus, latestRuntimeCatalog] = await Promise.all([
+        taskManagerApi.getExternalToolStatus(),
+        taskManagerApi.getAgentRuntimeCatalog()
+      ]);
       setExternalToolStatus(latestToolStatus);
-      if (!areRequiredExternalToolsReady(latestToolStatus)) {
-        throw new Error('Git and Codex must be available before setup can finish.');
+      setRuntimeCatalog(latestRuntimeCatalog);
+      const selectedRuntime = latestRuntimeCatalog.runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === appSettings.defaultRuntimeId
+      );
+      if (
+        latestToolStatus.tools.git.status !== 'ok' ||
+        !selectedRuntime?.preflight.readiness.canStart
+      ) {
+        throw new Error(
+          `Git and ${selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent runtime'} must be available before setup can finish.`
+        );
       }
       const nextSettings = await taskManagerApi.updateAppSettings({
         firstLaunchSetupCompleted: true
@@ -1443,7 +1595,7 @@ export function App() {
       reportActionError(caught, 'Could not finish setup.');
       throw caught;
     }
-  }, [activeRepositoryId, notify, reportActionError]);
+  }, [activeRepositoryId, appSettings.defaultRuntimeId, notify, reportActionError]);
 
   const selectTask = (taskId: string) => {
     setSelectedTaskId(taskId);
@@ -1723,7 +1875,7 @@ export function App() {
             usageSnapshots={selectedUsage}
             settingsObservations={selectedSettings}
             subagentObservations={selectedSubagentObservations}
-            providerState={providerState}
+            runtimeState={selectedTaskRuntimeState}
             server={snapshot.agentServers.find(
               (candidate) => candidate.id === selectedRun?.serverInstanceId
             )}
@@ -1756,6 +1908,7 @@ export function App() {
             onRetry={retryRun}
             onReview={startReview}
             onSyncAgentGoal={syncAgentGoal}
+            onUpdateAgentNativeSession={updateAgentNativeSession}
             onRespondToInteraction={respondToInteraction}
             onCreateDeliveryCommit={createDeliveryCommit}
             onCreatePullRequest={createPullRequest}
@@ -1791,10 +1944,14 @@ export function App() {
             appSettings={appSettings}
             onSetAppSettings={updateAppSettings}
             externalToolStatus={externalToolStatus}
+            agentRuntimesLoading={isLoading && runtimeCatalog === undefined}
             onRefreshExternalTools={refreshExternalToolStatus}
+            onRefreshAgentRuntimes={refreshAgentRuntimes}
+            onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
             onTestExternalTool={testExternalTool}
             error={error}
-            models={providerModels}
+            models={runtimeModels}
+            runtimes={runtimeCatalog?.runtimes ?? []}
             activeRepository={activeRepository}
             repositorySetupState={repositorySetupState}
             addingRepository={isAddingRepository}
@@ -1813,15 +1970,17 @@ export function App() {
             <NewTaskPanel
               repositoryId={activeRepositoryId}
               repositories={snapshot.repositories}
-              models={providerModels}
-              preflight={providerState?.preflight}
+              models={enabledRuntimeModels}
+              runtimes={enabledRuntimes}
               defaultAgentSettings={defaultTaskSettings}
               disabled={!canCreateTask}
+              refineDisabledReason={refineDisabledReason}
               onCreate={createTask}
               onRefinePrompt={refinePrompt}
               onStageAttachmentBatch={taskManagerApi.stageTaskAttachmentBatch}
               onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
               onReadClipboardImage={taskManagerApi.readClipboardImage}
+              onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
               returnFocusRef={newTaskButtonRef}
               onResize={keepNewTaskPanelInView}
               onClose={closeNewTask}
@@ -2192,8 +2351,8 @@ function DeleteTaskModal({
           <div>
             <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
             <p>
-              Removes this task, its Task Monki records, and managed attachments. Codex history
-              and shared protocol-journal traces may remain.
+              Removes this task, its Task Monki records, and managed attachments. Provider
+              history and external protocol-journal traces may remain.
             </p>
           </div>
         </div>
@@ -2213,7 +2372,7 @@ function DeleteTaskModal({
               <li>Repository and Git history</li>
               <li>Remote branch, PR, and commits</li>
               <li>Fork alternatives and source tasks</li>
-              <li>Codex history and shared protocol-journal traces</li>
+              <li>Provider history and external protocol-journal traces</li>
             </ul>
           </section>
         </div>

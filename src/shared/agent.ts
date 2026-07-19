@@ -1,4 +1,10 @@
-export type AgentProviderId = string;
+/** Stable identifier for an agent runtime integration, not a model vendor. */
+export type AgentRuntimeId = string;
+
+/** Stable identifier reported by the upstream model provider. */
+export type AgentModelProviderId = string;
+
+export const CODEX_RUNTIME_ID = 'codex' as const;
 
 export type CapabilityMaturity =
   | 'stable'
@@ -11,9 +17,34 @@ export interface AgentCapability {
   detail?: string;
 }
 
-export interface AgentProviderCapabilities {
-  provider: AgentProviderId;
-  modelCatalog: AgentCapability;
+export interface AgentModelCatalogCapability extends AgentCapability {
+  /** Catalog activation is allowed only in direct response to a user selection. */
+  activation?: 'EXPLICIT';
+}
+
+export interface AgentExecutionPolicyPreset {
+  /** Runtime-owned stable ID; it is not assumed to exist on another runtime. */
+  id: string;
+  label: string;
+  detail: string;
+  sandbox: NonNullable<AgentExecutionSettings['sandbox']>;
+  approvalPolicy: string;
+  approvalsReviewer: AgentApprovalsReviewer;
+  networkAccess: 'DISABLED' | 'OPTIONAL' | 'REQUIRED';
+}
+
+export interface AgentExecutionPolicyCapability {
+  defaultPresetId: string;
+  presets: AgentExecutionPolicyPreset[];
+  detail: string;
+}
+
+export interface AgentRuntimeCapabilities {
+  runtimeId: AgentRuntimeId;
+  /** Truthful Task Monki execution presets supplied by this runtime adapter. */
+  executionPolicy: AgentExecutionPolicyCapability;
+  promptRefinement: AgentCapability;
+  modelCatalog: AgentModelCatalogCapability;
   reasoningEffort: AgentCapability;
   persistentSessions: AgentCapability;
   sessionResume: AgentCapability;
@@ -25,10 +56,32 @@ export interface AgentProviderCapabilities {
   userInputRequests: AgentCapability;
   goals: AgentCapability;
   plans: AgentCapability;
+  /** Provider-neutral review prompt in a separately attested read-only session. */
+  detachedReview: AgentCapability;
+  /** Runtime-native review operation, when the provider exposes one. */
   review: AgentCapability;
   subagents: AgentCapability;
   backgroundTerminals: AgentCapability;
   dynamicTools: AgentCapability;
+  attachmentDelivery: AgentCapability;
+  runtimeRecovery: AgentCapability;
+  /** Safe provider-owned boolean/select controls for an existing session. */
+  sessionControls?: AgentCapability;
+  /** Runtime-native features that Task Monki preserves without pretending they are universal. */
+  extensions: Record<string, AgentCapability>;
+}
+
+export type AgentRuntimeLifecycleScope = 'APPLICATION' | 'SESSION';
+export type AgentRuntimeStartupPolicy = 'EAGER' | 'ON_DEMAND';
+
+export interface AgentRuntimeDescriptor {
+  id: AgentRuntimeId;
+  displayName: string;
+  kind: AgentRuntimeKind;
+  transport: AgentTransport;
+  lifecycleScope: AgentRuntimeLifecycleScope;
+  /** EAGER runtimes are prepared at app startup; ON_DEMAND runtimes only perform passive discovery until selected or recovered. */
+  startupPolicy?: AgentRuntimeStartupPolicy;
 }
 
 export type AgentRunStatus =
@@ -53,6 +106,11 @@ export type AgentRunMode =
   | 'COMPACTION'
   | 'SUBAGENT';
 
+/** Modes whose successful completion produces implementation work for review. */
+export function isImplementationRunMode(mode: AgentRunMode): boolean {
+  return mode === 'IMPLEMENTATION' || mode === 'FOLLOW_UP' || mode === 'RETRY';
+}
+
 export type AgentRunOrigin = 'TASK_MONKI' | 'PROVIDER_SUBAGENT';
 
 export type AgentRecoveryState =
@@ -62,8 +120,9 @@ export type AgentRecoveryState =
   | 'REQUIRES_USER_ACTION'
   | 'UNRECOVERABLE';
 
-export type AgentRuntimeKind = 'APP_SERVER';
-export type AgentTransport = 'STDIO' | 'UNIX_SOCKET' | 'IN_PROCESS';
+/** Durable server evidence vocabulary; registered runtimes are defined independently. */
+export type AgentRuntimeKind = 'APP_SERVER' | 'HTTP_AGENT' | 'ACP_AGENT';
+export type AgentTransport = 'STDIO' | 'HTTP_SSE' | 'UNIX_SOCKET' | 'IN_PROCESS';
 export type AgentServerStatus =
   | 'STARTING'
   | 'READY'
@@ -111,14 +170,17 @@ export type AgentSessionStatus =
 export type AgentApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
 
 export interface AgentExecutionSettings {
+  runtimeId?: AgentRuntimeId;
   model?: string;
-  modelProvider?: string;
+  modelProvider?: AgentModelProviderId;
   reasoningEffort?: string;
   serviceTier?: string;
   sandbox?: 'READ_ONLY' | 'WORKSPACE_WRITE' | 'DANGER_FULL_ACCESS';
   networkAccess?: boolean;
   approvalPolicy?: string;
   approvalsReviewer?: AgentApprovalsReviewer;
+  /** Runtime-owned settings keyed by runtime ID; other adapters must ignore them. */
+  runtimeOptions?: Record<AgentRuntimeId, AgentJsonValue>;
 }
 
 export const DEFAULT_AGENT_APPROVALS_REVIEWER: AgentApprovalsReviewer = 'user';
@@ -153,7 +215,7 @@ export interface PreviewGatewaySettings {
   port: number | null;
 }
 
-export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 5 as const;
+export const TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION = 9 as const;
 
 export interface TaskManagerAppSettings {
   schemaVersion: typeof TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION;
@@ -161,13 +223,21 @@ export interface TaskManagerAppSettings {
   sidebarCollapsed: boolean;
   showMascot: boolean;
   firstLaunchSetupCompleted: boolean;
+  disabledRuntimeIds: AgentRuntimeId[];
+  defaultRuntimeId: AgentRuntimeId;
   defaultModel?: string;
+  defaultModelProvider?: AgentModelProviderId;
   defaultReasoningEffort?: string;
   promptRefinementModel?: string;
+  promptRefinementRuntimeId?: AgentRuntimeId;
+  promptRefinementModelProvider?: AgentModelProviderId;
   reviewModel?: string;
+  reviewRuntimeId?: AgentRuntimeId;
+  reviewModelProvider?: AgentModelProviderId;
   reviewReasoningEffort?: string;
   codexExternalTools: CodexExternalToolSettings;
   externalExecutables: ExternalExecutablePathSettings;
+  runtimeExecutablePaths: Record<AgentRuntimeId, string | null>;
   /** UI preference only; repository records remain authoritative in the task store. */
   selectedRepositoryId: string | null;
   previewGateway: PreviewGatewaySettings;
@@ -193,13 +263,17 @@ export const DEFAULT_TASK_MANAGER_APP_SETTINGS: TaskManagerAppSettings = {
   sidebarCollapsed: false,
   showMascot: true,
   firstLaunchSetupCompleted: false,
+  disabledRuntimeIds: [],
+  defaultRuntimeId: CODEX_RUNTIME_ID,
   codexExternalTools: DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS,
   externalExecutables: DEFAULT_EXTERNAL_EXECUTABLE_PATH_SETTINGS,
+  runtimeExecutablePaths: {},
   selectedRepositoryId: null,
   previewGateway: { port: null }
 };
 
 export type AgentObservationSource =
+  | 'TASK_MONKI_RESOLUTION'
   | 'THREAD_START_RESPONSE'
   | 'THREAD_RESUME_RESPONSE'
   | 'THREAD_FORK_RESPONSE'
@@ -213,7 +287,7 @@ export interface AgentSettingsObservationRecord {
   iterationId: string;
   sessionId: string;
   runId?: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   source: AgentObservationSource;
   settings: AgentExecutionSettings;
   detail?: string;
@@ -247,7 +321,7 @@ export interface AgentGoalSnapshotRecord {
   taskId: string;
   iterationId: string;
   sessionId: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   taskGoalHash: string;
   lastSynchronizedTaskGoalHash?: string;
   providerObjective?: string;
@@ -275,7 +349,7 @@ export interface AgentPlanRevisionRecord {
   iterationId: string;
   runId: string;
   sessionId: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   revision: number;
   explanation?: string;
   steps: AgentPlanStep[];
@@ -297,7 +371,7 @@ export interface AgentUsageSnapshotRecord {
   iterationId: string;
   sessionId: string;
   runId?: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   total: AgentTokenUsageBreakdown;
   last: AgentTokenUsageBreakdown;
   modelContextWindow?: number;
@@ -344,7 +418,7 @@ export interface AgentRuntimeResolutionDiagnostics {
 
 export interface AgentServerInstance {
   id: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   runtimeKind: AgentRuntimeKind;
   transport: AgentTransport;
   status: AgentServerStatus;
@@ -371,7 +445,7 @@ export interface AgentSessionRecord {
   taskId: string;
   iterationId: string;
   worktreeId: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   role: AgentSessionRole;
   providerSessionId?: string;
   providerSessionTreeId?: string;
@@ -400,6 +474,7 @@ export interface AgentSessionRecord {
 
 export interface AgentSubagentObservationRecord {
   id: string;
+  runtimeId: AgentRuntimeId;
   taskId: string;
   iterationId: string;
   sessionId: string;
@@ -447,6 +522,8 @@ export type AgentItemType =
 
 export interface AgentProtocolMessageReference {
   serverInstanceId: string;
+  /** Omitted for the unnumbered segment-zero `<server>.ndjson` file. */
+  segment?: number;
   sequence: number;
   direction: 'INBOUND' | 'OUTBOUND';
   recordedAt: string;
@@ -499,11 +576,26 @@ export type AgentInteractionAction =
   | 'GRANT_SESSION'
   | 'ANSWER'
   | 'DECLINE'
+  | 'DECLINE_FOR_SESSION'
   | 'CANCEL';
 
+export type AgentProviderPermissionAction = Extract<
+  AgentInteractionAction,
+  'ACCEPT' | 'DECLINE'
+>;
+
+export function isAgentProviderPermissionAction(
+  action: AgentInteractionAction
+): action is AgentProviderPermissionAction {
+  return (
+    action === 'ACCEPT' ||
+    action === 'DECLINE'
+  );
+}
+
 export interface AgentNetworkApprovalContext {
-  host: string;
-  protocol: string;
+  host?: string;
+  protocol?: string;
 }
 
 export interface AgentNetworkPolicyAmendment {
@@ -517,10 +609,19 @@ export interface AgentCommandApprovalRequest {
   reason?: string;
   command?: string;
   cwd?: string;
+  paths?: string[];
   commandActions?: AgentJsonValue[];
   networkApprovalContext?: AgentNetworkApprovalContext;
   proposedExecPolicyAmendment?: string[];
   proposedNetworkPolicyAmendments?: AgentNetworkPolicyAmendment[];
+  /** Exact provider choice identity plus Task Monki's normalized local action. */
+  providerOptions?: Array<{
+    id: string;
+    label: string;
+    action: AgentProviderPermissionAction;
+    /** The provider, not Task Monki, owns the remembered choice and its lifetime. */
+    providerRemembersChoice: boolean;
+  }>;
 }
 
 export interface AgentFileChangeApprovalRequest {
@@ -611,8 +712,15 @@ export type AgentInteractionRequestPayload =
   | AgentDynamicToolRequest;
 
 export type AgentCommandApprovalDecision =
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'ACCEPT' }
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'ACCEPT_FOR_SESSION' }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'ACCEPT';
+      providerOptionId?: string;
+    }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'ACCEPT_FOR_SESSION';
+    }
   | {
       interactionType: 'COMMAND_APPROVAL';
       action: 'ACCEPT_EXEC_POLICY_AMENDMENT';
@@ -623,7 +731,15 @@ export type AgentCommandApprovalDecision =
       action: 'APPLY_NETWORK_POLICY_AMENDMENT';
       amendment: AgentNetworkPolicyAmendment;
     }
-  | { interactionType: 'COMMAND_APPROVAL'; action: 'DECLINE' }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'DECLINE';
+      providerOptionId?: string;
+    }
+  | {
+      interactionType: 'COMMAND_APPROVAL';
+      action: 'DECLINE_FOR_SESSION';
+    }
   | { interactionType: 'COMMAND_APPROVAL'; action: 'CANCEL' };
 
 export type AgentFileChangeApprovalDecision =
@@ -669,6 +785,7 @@ export type AgentInteractionDecision =
 
 export interface InteractionRequestRecord {
   id: string;
+  runtimeId: AgentRuntimeId;
   serverInstanceId: string;
   providerRequestId: string | number;
   taskId: string;
@@ -692,8 +809,11 @@ export interface InteractionRequestRecord {
 }
 
 export interface AgentModel {
+  /** Runtime-qualified stable identity used by settings and selectors. */
   id: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
+  /** Upstream provider identity, when the runtime's catalog reports it. */
+  modelProvider?: AgentModelProviderId;
   model: string;
   displayName: string;
   description?: string;
@@ -704,21 +824,151 @@ export interface AgentModel {
   defaultServiceTier?: string;
   inputModalities: string[];
   isDefault: boolean;
+  /** Lossless runtime-native model metadata that does not fit common selectors. */
+  native?: AgentJsonValue;
 }
+
+export type AgentRuntimeReadinessStatus =
+  | 'NOT_INSTALLED'
+  | 'INCOMPATIBLE'
+  | 'AUTHENTICATION_REQUIRED'
+  | 'ACCOUNT_UNSUPPORTED'
+  | 'DISCOVERED'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'DEGRADED'
+  | 'FAILED'
+  | 'UNSUPPORTED_SECURITY_POLICY'
+  | 'DISABLED';
+
+export type AgentRuntimeDiagnosticSeverity = 'INFO' | 'WARNING' | 'ERROR';
+
+export type AgentRuntimeDiagnosticStage =
+  | 'DISCOVERY'
+  | 'COMPATIBILITY'
+  | 'INITIALIZATION'
+  | 'AUTHENTICATION'
+  | 'MODEL_CATALOG'
+  | 'HEALTH'
+  | 'CONFIGURATION'
+  | 'SECURITY';
+
+export interface AgentRuntimeDiagnostic {
+  /** Stable machine-readable reason; renderer code must not parse `message`. */
+  code: string;
+  severity: AgentRuntimeDiagnosticSeverity;
+  stage: AgentRuntimeDiagnosticStage;
+  message: string;
+  detail?: string;
+}
+
+export interface AgentRuntimeReadinessChecks {
+  discovery: 'UNKNOWN' | 'NOT_FOUND' | 'FOUND';
+  compatibility: 'UNKNOWN' | 'COMPATIBLE' | 'INCOMPATIBLE';
+  initialization: 'NOT_STARTED' | 'NEGOTIATING' | 'INITIALIZED' | 'FAILED';
+  authentication:
+    | 'UNKNOWN'
+    | 'PROVIDER_MANAGED'
+    | 'AUTHENTICATED'
+    | 'REQUIRED'
+    | 'FAILED'
+    | 'UNSUPPORTED_ACCOUNT';
+  modelCatalog: 'UNKNOWN' | 'AVAILABLE' | 'EMPTY' | 'FAILED';
+}
+
+export interface AgentRuntimeNextAction {
+  kind: 'INSTALL' | 'AUTHENTICATE' | 'CONFIGURE' | 'RETRY' | 'VIEW_DETAILS';
+  label: string;
+  /** Informational command only. Task Monki never executes it implicitly. */
+  command?: string;
+}
+
+type StartableAgentRuntimeStatus = 'DISCOVERED' | 'READY' | 'DEGRADED';
+type BlockedAgentRuntimeStatus = Exclude<
+  AgentRuntimeReadinessStatus,
+  StartableAgentRuntimeStatus
+>;
+
+export type AgentRuntimeReadiness =
+  | {
+      status: StartableAgentRuntimeStatus;
+      canStart: true;
+      summary: string;
+      detail: string;
+      checks: AgentRuntimeReadinessChecks;
+      diagnostics: AgentRuntimeDiagnostic[];
+      nextAction?: AgentRuntimeNextAction;
+    }
+  | {
+      status: BlockedAgentRuntimeStatus;
+      canStart: false;
+      summary: string;
+      detail: string;
+      checks: AgentRuntimeReadinessChecks;
+      diagnostics: AgentRuntimeDiagnostic[];
+      nextAction?: AgentRuntimeNextAction;
+    };
 
 export interface AgentPreflight {
-  provider: AgentProviderId;
-  ready: boolean;
-  capabilities: AgentProviderCapabilities;
+  runtime: AgentRuntimeDescriptor;
+  readiness: AgentRuntimeReadiness;
+  capabilities: AgentRuntimeCapabilities;
   runtimeVersion?: string;
   accountLabel?: string;
-  problems: string[];
-  warnings: string[];
 }
 
-export interface AgentProviderState {
+export type AgentSessionControlValue = string | boolean;
+
+export interface AgentSessionControlChoice {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export type AgentSessionControl =
+  | {
+      id: string;
+      label: string;
+      description?: string;
+      group?: string;
+      kind: 'BOOLEAN';
+      value: boolean;
+      mutable: boolean;
+    }
+  | {
+      id: string;
+      label: string;
+      description?: string;
+      group?: string;
+      kind: 'SELECT';
+      value: string;
+      choices: AgentSessionControlChoice[];
+      mutable: boolean;
+    };
+
+/** Provider-owned controls projected into safe boolean/select UI primitives. */
+export interface AgentSessionControlSet {
+  localSessionId: string;
+  providerSessionId?: string;
+  /** Optimistic concurrency token for the exact control catalog and values. */
+  revision: string;
+  controls: AgentSessionControl[];
+}
+
+export interface AgentRuntimeState {
   preflight: AgentPreflight;
   models: AgentModel[];
+  /** Runtime-native catalog/configuration view, redacted as required by its adapter. */
+  native?: AgentJsonValue;
+  /** Typed actionable controls; the renderer never interprets opaque native metadata. */
+  sessionControls?: AgentSessionControlSet[];
+  refreshedAt: string;
+}
+
+export interface AgentRuntimeCatalog {
+  runtimes: AgentRuntimeState[];
+  models: AgentModel[];
+  defaultRuntimeId: AgentRuntimeId;
   refreshedAt: string;
 }
 

@@ -10,6 +10,7 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 export type CodexEphemeralRunErrorCode =
   | 'TIMED_OUT'
   | 'CANCELED'
+  | 'TERMINATION_UNCONFIRMED'
   | 'PROCESS_FAILED'
   | 'NO_FINAL_MESSAGE';
 
@@ -128,7 +129,10 @@ export function superviseCodexEphemeralProcess(
       timedOut = true;
       void cancelProcess().catch(() => {
         finish(() => reject(
-          new CodexEphemeralRunError('PROCESS_FAILED', 'The timed-out agent process could not be stopped.')
+          new CodexEphemeralRunError(
+            'TERMINATION_UNCONFIRMED',
+            'The timed-out agent process could not be stopped.'
+          )
         ));
       });
     }, timeoutMs);

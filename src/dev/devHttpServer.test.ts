@@ -122,6 +122,66 @@ describe('development HTTP server', () => {
     expect(updateAppSettings).toHaveBeenCalledTimes(1);
   });
 
+  it('routes only typed revisioned session controls through the authenticated API', async () => {
+    const updateAgentNativeSession = vi.fn(async (input: unknown) => ({
+      ...(input as Record<string, unknown>),
+      native: { modes: { currentModeId: 'plan' } },
+      controls: { localSessionId: 'session-1', revision: 'revision-2', controls: [] }
+    }));
+    const running = await startServer({ updateAgentNativeSession });
+    const request = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'grok-acp',
+      controlId: 'mode',
+      value: 'plan',
+      revision: 'revision-1'
+    };
+
+    const response = await fetch(`${running.baseUrl}/api/agent/session/native`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify(request)
+    });
+
+    expect(response.status).toBe(200);
+    expect(updateAgentNativeSession).toHaveBeenCalledWith(request);
+    await expect(response.json()).resolves.toMatchObject({
+      runtimeId: 'grok-acp',
+      native: { modes: { currentModeId: 'plan' } }
+    });
+  });
+
+  it('routes explicit runtime model discovery without coupling it to catalog reads', async () => {
+    const catalog = {
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+    const getAgentRuntimeCatalog = vi.fn(async () => catalog);
+    const discoverAgentRuntimeModels = vi.fn(async () => catalog);
+    const running = await startServer({
+      getAgentRuntimeCatalog,
+      discoverAgentRuntimeModels
+    });
+
+    const passive = await fetch(`${running.baseUrl}/api/agent/runtimes`, {
+      headers: running.headers
+    });
+    expect(passive.status).toBe(200);
+    expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
+
+    const explicit = await fetch(`${running.baseUrl}/api/agent/runtimes/discover`, {
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
+    });
+    expect(explicit.status).toBe(200);
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledOnce();
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
+  });
+
   it('keeps current preview endpoints behind the hardened boundary', async () => {
     const startPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
     const running = await startServer({ startPreview });

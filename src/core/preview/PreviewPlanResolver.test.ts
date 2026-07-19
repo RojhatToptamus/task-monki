@@ -78,7 +78,7 @@ describe('PreviewPlanResolver', () => {
       }
     } as never);
     const plan = await resolver.resolve({
-      task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
+      task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
       iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
       worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
       parsed: parsePreviewRecipe(`
@@ -107,7 +107,7 @@ routes: { app: { service: web, port: http, primary: true } }
 function resolve(worktreePath: string, cwd: string) {
   const now = '2026-01-01T00:00:00.000Z';
   return new PreviewPlanResolver().resolve({
-    task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
+    task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
     iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
     worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
     parsed: parsePreviewRecipe(`version: 1
@@ -147,7 +147,7 @@ function resolveOci(
     }
   } as never);
   return resolver.resolve({
-    task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
+    task: { id: 'task', title: 'Task', prompt: 'Prompt', repositoryId: 'repository-1', runtimeId: 'codex', workflowPhase: 'REVIEW', resolution: 'NONE', completionPolicy: 'LOCAL_ACCEPTANCE', phaseVersion: 1, currentIterationId: 'iteration', currentWorktreeId: 'worktree', forkedAlternativeTaskIds: [], agentSettings: {}, createdAt: now, updatedAt: now, projection: createInitialProjection(now) },
     iteration: { id: 'iteration', taskId: 'task', actionRequestId: 'action', generationKey: 'generation', branchName: 'codex/task', baseSha: 'base', status: 'ACTIVE', worktreeId: 'worktree', createdAt: now, updatedAt: now },
     worktree: { id: 'worktree', taskId: 'task', iterationId: 'iteration', repositoryId: 'repository-1', worktreePath, branchName: 'codex/task', baseSha: 'base', status: 'PRESENT', createdAt: now, updatedAt: now },
     parsed: parsePreviewRecipe(`version: 1

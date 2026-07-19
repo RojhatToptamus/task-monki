@@ -14,6 +14,7 @@ function interaction(
 ): InteractionRequestRecord {
   return {
     id: 'i1',
+    runtimeId: 'codex',
     serverInstanceId: 's',
     providerRequestId: 1,
     taskId: 't1',
@@ -51,6 +52,52 @@ describe('inboxInteractionDecisions', () => {
       interactionType: 'COMMAND_APPROVAL',
       action: 'DECLINE'
     });
+  });
+
+  it('requires opening the task for provider-native choices and their context', () => {
+    const d = inboxInteractionDecisions(
+      interaction(
+        'COMMAND_APPROVAL',
+        ['ACCEPT', 'DECLINE', 'CANCEL'],
+        {
+          startedAtMs: 1,
+          providerOptions: [
+            {
+              id: 'allow-once',
+              label: 'Allow once',
+              action: 'ACCEPT',
+              providerRemembersChoice: false
+            },
+            {
+              id: 'allow-always',
+              label: 'Allow always',
+              action: 'ACCEPT',
+              providerRemembersChoice: true
+            },
+            {
+              id: 'reject-once',
+              label: 'Reject',
+              action: 'DECLINE',
+              providerRemembersChoice: false
+            }
+          ]
+        }
+      )
+    );
+
+    expect(d).toEqual({});
+  });
+
+  it('does not fall back to generic actions for an empty provider-native choice list', () => {
+    const d = inboxInteractionDecisions(
+      interaction(
+        'COMMAND_APPROVAL',
+        ['ACCEPT', 'DECLINE', 'CANCEL'],
+        { startedAtMs: 1, providerOptions: [] }
+      )
+    );
+
+    expect(d).toEqual({});
   });
 
   it('grants the current turn for a permission approval, carrying its permissions', () => {

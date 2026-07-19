@@ -10,6 +10,7 @@ import type {
   AgentUserInputRequest,
   InteractionRequestRecord
 } from '../../shared/contracts';
+import { availableProviderCommandOptions } from '../model/agentPermissions';
 import { StructuredData } from './display';
 
 interface InteractionPanelProps {
@@ -57,7 +58,7 @@ export function InteractionPanel({
         {commandApproval ? (
           <h3>
             <span className="interaction-card__dot" aria-hidden="true" />
-            {interactionTitle(active.type)}
+            {interactionTitle(active)}
           </h3>
         ) : (
           <div>
@@ -65,7 +66,7 @@ export function InteractionPanel({
               <span className="interaction-card__dot" aria-hidden="true" />
               Action required
             </span>
-            <h3>{interactionTitle(active.type)}</h3>
+            <h3>{interactionTitle(active)}</h3>
           </div>
         )}
         {commandApproval ? (
@@ -119,12 +120,14 @@ function InteractionBody({
 
   return (
     <>
-      {interaction.policyWarnings.map((warning) => (
-        <p className="interaction-card__warning" key={warning}>
-          <span aria-hidden="true" />
-          {warning}
-        </p>
-      ))}
+      {interaction.type === 'COMMAND_APPROVAL'
+        ? null
+        : interaction.policyWarnings.map((warning) => (
+            <p className="interaction-card__warning" key={warning}>
+              <span aria-hidden="true" />
+              {warning}
+            </p>
+          ))}
       {interaction.type === 'COMMAND_APPROVAL' ? (
         <CommandRequest
           interaction={interaction}
@@ -199,6 +202,8 @@ function CommandRequest({
 }: InteractionSectionProps) {
   const request = interaction.request as AgentCommandApprovalRequest;
   const displayCommand = unwrapShellCommand(request.command);
+  const providerOptions = availableProviderCommandOptions(interaction, request);
+  const providerNativeRequest = request.providerOptions !== undefined;
   const canRememberCommand =
     hasAction(interaction, 'ACCEPT_EXEC_POLICY_AMENDMENT') &&
     Boolean(request.proposedExecPolicyAmendment?.length);
@@ -233,13 +238,22 @@ function CommandRequest({
 
   return (
     <>
+      {providerNativeRequest ? (
+        <ProviderCommandContext request={request} displayCommand={displayCommand} />
+      ) : null}
       {displayCommand ? (
         <pre className="interaction-command">
           <code>{displayCommand}</code>
         </pre>
       ) : null}
+      {interaction.policyWarnings.map((warning) => (
+        <p className="interaction-card__warning" key={warning}>
+          <span aria-hidden="true" />
+          {warning}
+        </p>
+      ))}
       <div className="interaction-command__footer">
-        {canRememberCommand && canAllowForSession ? (
+        {!providerNativeRequest && canRememberCommand && canAllowForSession ? (
           <label className="interaction-remember">
             <input
               type="checkbox"
@@ -253,38 +267,135 @@ function CommandRequest({
           <span />
         )}
         <div className="interaction-actions interaction-actions--command">
-          <RejectButtons
-            interaction={interaction}
-            interactionType="COMMAND_APPROVAL"
-            disabled={disabled}
-            declineLabel="Deny"
-            showCancel={false}
-            onRespond={onRespond}
-          />
-          {hasAction(interaction, 'ACCEPT') ? (
-            <ActionButton
-              label="Allow once"
-              variant="secondary"
-              disabled={disabled}
-              onClick={() =>
-                onRespond({
-                  interactionType: 'COMMAND_APPROVAL',
-                  action: 'ACCEPT'
-                })
-              }
-            />
-          ) : null}
-          {canAllowForSession || canRememberCommand ? (
-            <ActionButton
-              label={useAlwaysAllow || !canAllowForSession ? 'Always allow' : 'Allow for session'}
-              disabled={disabled}
-              onClick={submitPersistentChoice}
-            />
-          ) : null}
+          {providerNativeRequest ? (
+            <>
+              {providerOptions.map((option) => (
+                <ActionButton
+                  key={option.id}
+                  label={option.label}
+                  variant={
+                    option.action === 'ACCEPT' && !option.providerRemembersChoice
+                      ? 'primary'
+                      : 'secondary'
+                  }
+                  disabled={disabled}
+                  onClick={() => onRespond(option.decision)}
+                />
+              ))}
+              {hasAction(interaction, 'CANCEL') ? (
+                <ActionButton
+                  label="Cancel request"
+                  variant="secondary"
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'CANCEL'
+                    })
+                  }
+                />
+              ) : null}
+            </>
+          ) : (
+            <>
+              <RejectButtons
+                interaction={interaction}
+                interactionType="COMMAND_APPROVAL"
+                disabled={disabled}
+                declineLabel="Deny"
+                showCancel={false}
+                onRespond={onRespond}
+              />
+              {hasAction(interaction, 'ACCEPT') ? (
+                <ActionButton
+                  label="Allow once"
+                  variant="secondary"
+                  disabled={disabled}
+                  onClick={() =>
+                    onRespond({
+                      interactionType: 'COMMAND_APPROVAL',
+                      action: 'ACCEPT'
+                    })
+                  }
+                />
+              ) : null}
+              {canAllowForSession || canRememberCommand ? (
+                <ActionButton
+                  label={
+                    useAlwaysAllow || !canAllowForSession
+                      ? 'Always allow'
+                      : 'Allow for session'
+                  }
+                  disabled={disabled}
+                  onClick={submitPersistentChoice}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     </>
   );
+}
+
+function ProviderCommandContext({
+  request,
+  displayCommand
+}: {
+  request: AgentCommandApprovalRequest;
+  displayCommand?: string;
+}) {
+  const network = formatProviderNetworkContext(request.networkApprovalContext);
+  const reason = providerReason(request.reason, displayCommand);
+  const hasDetails =
+    Boolean(reason) ||
+    Boolean(request.paths?.length) ||
+    Boolean(request.cwd) ||
+    Boolean(network);
+
+  if (!hasDetails) {
+    return null;
+  }
+
+  return (
+    <dl className="interaction-details">
+      {reason ? (
+        <>
+          <dt>Reason</dt>
+          <dd>{reason}</dd>
+        </>
+      ) : null}
+      {request.paths?.length ? (
+        <>
+          <dt>Paths</dt>
+          <dd><pre>{request.paths.join('\n')}</pre></dd>
+        </>
+      ) : null}
+      {request.cwd ? (
+        <>
+          <dt>Working directory</dt>
+          <dd><code>{request.cwd}</code></dd>
+        </>
+      ) : null}
+      {network ? (
+        <>
+          <dt>Network</dt>
+          <dd><code>{network}</code></dd>
+        </>
+      ) : null}
+    </dl>
+  );
+}
+
+function providerReason(
+  reason: string | undefined,
+  displayCommand: string | undefined
+): string | undefined {
+  if (!reason) return undefined;
+  const normalize = (value: string) => value.trim().replace(/^`|`$/gu, '');
+  return displayCommand && normalize(reason) === normalize(displayCommand)
+    ? undefined
+    : reason;
 }
 
 function FileChangeRequest({
@@ -704,6 +815,22 @@ function RejectButtons({
           {declineLabel}
         </button>
       ) : null}
+      {interactionType === 'COMMAND_APPROVAL' &&
+      hasAction(interaction, 'DECLINE_FOR_SESSION') ? (
+        <button
+          type="button"
+          className="outline-button"
+          disabled={disabled}
+          onClick={() =>
+            void onRespond({
+              interactionType: 'COMMAND_APPROVAL',
+              action: 'DECLINE_FOR_SESSION'
+            })
+          }
+        >
+          Deny for session
+        </button>
+      ) : null}
       {showCancel && hasAction(interaction, 'CANCEL') ? (
         <button
           type="button"
@@ -744,6 +871,15 @@ function ActionButton({
       {label}
     </button>
   );
+}
+
+function formatProviderNetworkContext(
+  context: AgentCommandApprovalRequest['networkApprovalContext']
+): string | undefined {
+  if (context?.protocol && context.host) {
+    return `${context.protocol} · ${context.host}`;
+  }
+  return context?.protocol ?? context?.host;
 }
 
 function InteractionTechnicalDetails({
@@ -839,10 +975,13 @@ function hasAction(
   return interaction.allowedActions.includes(action);
 }
 
-function interactionTitle(type: InteractionRequestRecord['type']): string {
-  switch (type) {
+function interactionTitle(interaction: InteractionRequestRecord): string {
+  switch (interaction.type) {
     case 'COMMAND_APPROVAL':
-      return 'Command approval';
+      return (interaction.request as AgentCommandApprovalRequest).providerOptions !==
+        undefined
+        ? 'Tool approval'
+        : 'Command approval';
     case 'FILE_CHANGE_APPROVAL':
       return 'File change approval';
     case 'PERMISSION_APPROVAL':

@@ -116,6 +116,7 @@ function repositoryFixture(
 function taskFixture(id: string, repositoryId: string): Task {
   return {
     id,
+    runtimeId: 'codex',
     title: id,
     prompt: 'Do the work.',
     repositoryId,
@@ -139,7 +140,7 @@ function taskFixture(id: string, repositoryId: string): Task {
       githubPullRequest: 'UNLINKED',
       ciChecks: 'NOT_APPLICABLE',
       reviews: 'NOT_APPLICABLE',
-      codexReview: { status: 'NOT_RUN' },
+      agentReview: { status: 'NOT_RUN' },
       merge: 'NOT_APPLICABLE',
       artifact: 'NONE',
       health: 'HEALTHY',

@@ -792,8 +792,8 @@ export class PreviewManager {
   }
 
   async stop(generationId: string): Promise<PreviewGenerationRecord> {
-    const generation = await this.requireGeneration(generationId);
     this.startups.get(generationId)?.abort();
+    const generation = await this.requireGeneration(generationId);
     const cancelingCandidate =
       generation.routingState === 'CANDIDATE' &&
       Boolean(generation.replacesGenerationId) &&

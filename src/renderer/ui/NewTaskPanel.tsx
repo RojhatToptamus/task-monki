@@ -10,7 +10,7 @@ import {
 import type {
   AgentExecutionSettings,
   AgentModel,
-  AgentPreflight,
+  AgentRuntimeState,
   CreateTaskRequest,
   RefinePromptResponse,
   Repository
@@ -23,9 +23,7 @@ import {
   type StageTaskAttachmentBatchRequest
 } from '../../shared/attachments';
 import {
-  AGENT_PERMISSION_MODE_OPTIONS,
-  settingsForPermissionMode,
-  type SelectableAgentPermissionMode
+  settingsForExecutionPolicyPreset
 } from '../model/agentPermissions';
 import {
   formatAttachmentBytes
@@ -35,6 +33,12 @@ import {
   taskCreationNeedsUnchangedRetry,
   type AttachmentComposerItem
 } from '../model/taskAttachmentComposer';
+import {
+  formatReasoningEffort,
+  resolveReasoningEffort,
+  selectModel
+} from '../model/agentExecutionSettings';
+import { runtimeReadinessView } from '../model/runtimeReadiness';
 import {
   clampNewTaskPanelWidth,
   DEFAULT_NEW_TASK_PANEL_WIDTH,
@@ -47,21 +51,27 @@ import {
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
+import {
+  AgentModelSelector,
+  type ModelDiscoveryStatus
+} from './AgentModelSelector';
 import { useTaskAttachments } from './useTaskAttachments';
 
 interface NewTaskPanelProps {
   repositoryId: string;
   repositories: Repository[];
   models: AgentModel[];
-  preflight?: AgentPreflight;
+  runtimes: AgentRuntimeState[];
   defaultAgentSettings?: AgentExecutionSettings;
   disabled?: boolean;
+  refineDisabledReason?: string;
   attachmentsEnabled?: boolean;
   onCreate(input: CreateTaskRequest): Promise<void>;
   onRefinePrompt(repositoryId: string, input: string): Promise<RefinePromptResponse>;
   onStageAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
+  onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   returnFocusRef?: RefObject<HTMLElement | null>;
   onResize?(): void;
   onClose(): void;
@@ -71,34 +81,44 @@ export function NewTaskPanel({
   repositoryId,
   repositories,
   models,
-  preflight,
+  runtimes,
   defaultAgentSettings,
   disabled,
+  refineDisabledReason,
   attachmentsEnabled = true,
   onCreate,
   onRefinePrompt,
   onStageAttachmentBatch,
   onDiscardAttachmentDraft,
   onReadClipboardImage,
+  onDiscoverAgentRuntimeModels,
   returnFocusRef,
   onResize,
   onClose
 }: NewTaskPanelProps) {
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [runtimeId, setRuntimeId] = useState(
+    defaultAgentSettings?.runtimeId ??
+      runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
+      runtimes[0]?.preflight.runtime.id ??
+      ''
+  );
+  const [modelId, setModelId] = useState('');
   const [requestedRepositoryId, setRequestedRepositoryId] = useState(
     () =>
       repositories.find(
         (repository) => repository.id === repositoryId && repository.status === 'AVAILABLE'
       )?.id ?? repositories.find((repository) => repository.status === 'AVAILABLE')?.id ?? ''
   );
-  const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
-  const [permissionMode, setPermissionMode] =
-    useState<SelectableAgentPermissionMode>('SANDBOXED');
+  const [permissionPresetId, setPermissionPresetId] = useState('');
   const [networkAccess, setNetworkAccess] = useState(false);
+  const permissionRuntimeRef = useRef('');
   const [error, setError] = useState<string | undefined>();
   const [isRefining, setIsRefining] = useState(false);
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>('idle');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [creationOutcomeUnknown, setCreationOutcomeUnknown] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -131,22 +151,81 @@ export function NewTaskPanel({
   const [restorable, setRestorable] = useState<string>();
 
   useEffect(() => {
-    if (model) {
+    const availableRuntimeIds = new Set(
+      runtimes.map((runtime) => runtime.preflight.runtime.id)
+    );
+    const nextRuntimeId = availableRuntimeIds.has(runtimeId)
+      ? runtimeId
+      : defaultAgentSettings?.runtimeId && availableRuntimeIds.has(defaultAgentSettings.runtimeId)
+        ? defaultAgentSettings.runtimeId
+        : runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
+          runtimes[0]?.preflight.runtime.id ??
+          '';
+    if (nextRuntimeId !== runtimeId) {
+      setRuntimeId(nextRuntimeId);
       return;
     }
-    const defaultModel =
-      models.find((candidate) => candidate.model === defaultAgentSettings?.model) ??
-      models.find((candidate) => candidate.isDefault) ??
-      models[0];
+    const scopedModels = models.filter((candidate) => candidate.runtimeId === nextRuntimeId);
+    if (scopedModels.some((candidate) => candidate.id === modelId)) {
+      return;
+    }
+    const defaultModel = selectModel(
+      scopedModels,
+      defaultAgentSettings?.model,
+      nextRuntimeId,
+      defaultAgentSettings?.modelProvider
+    );
     if (defaultModel) {
-      setModel(defaultModel.model);
+      setModelId(defaultModel.id);
       setReasoningEffort(
         defaultAgentSettings?.reasoningEffort ?? defaultModel.defaultReasoningEffort ?? ''
       );
+    } else {
+      setModelId('');
+      setReasoningEffort('');
     }
-  }, [defaultAgentSettings?.model, defaultAgentSettings?.reasoningEffort, model, models]);
+  }, [defaultAgentSettings, modelId, models, runtimeId, runtimes]);
 
-  const selectedModel = models.find((candidate) => candidate.model === model);
+  const selectedRuntime = runtimes.find(
+    (runtime) => runtime.preflight.runtime.id === runtimeId
+  );
+  const selectedRuntimeReadiness = runtimeReadinessView(selectedRuntime);
+  const modelCatalogFailed =
+    selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED';
+  const executionPolicy = selectedRuntime?.preflight.capabilities.executionPolicy;
+  const permissionPresets = executionPolicy?.presets ?? [];
+  const permissionPreset =
+    permissionPresets.find((preset) => preset.id === permissionPresetId) ??
+    permissionPresets.find(
+      (preset) => preset.id === executionPolicy?.defaultPresetId
+    ) ??
+    permissionPresets[0];
+
+  useEffect(() => {
+    const defaultPresetId =
+      executionPolicy?.defaultPresetId ?? permissionPresets[0]?.id ?? '';
+    if (
+      permissionRuntimeRef.current !== runtimeId ||
+      !permissionPresets.some((preset) => preset.id === permissionPresetId)
+    ) {
+      permissionRuntimeRef.current = runtimeId;
+      setPermissionPresetId(defaultPresetId);
+      setNetworkAccess(false);
+    }
+  }, [executionPolicy?.defaultPresetId, permissionPresetId, permissionPresets, runtimeId]);
+
+  const runtimeSupportsAttachments = Boolean(
+    selectedRuntime &&
+      selectedRuntime.preflight.capabilities.attachmentDelivery.maturity !== 'unsupported'
+  );
+  const effectiveAttachmentsEnabled = attachmentsEnabled && runtimeSupportsAttachments;
+  const runtimeModels = models.filter((candidate) => candidate.runtimeId === runtimeId);
+  const selectedModel = runtimeModels.find((candidate) => candidate.id === modelId);
+  const effectiveReasoningEffort =
+    resolveReasoningEffort(selectedModel, reasoningEffort) ?? '';
+  const networkDisabledByPreset = permissionPreset?.networkAccess === 'DISABLED';
+  const networkRequiredByPreset = permissionPreset?.networkAccess === 'REQUIRED';
+  const fullAccessSelected = permissionPreset?.sandbox === 'DANGER_FULL_ACCESS';
   const availableRepositories = repositories.filter(
     (repository) => repository.status === 'AVAILABLE'
   );
@@ -161,21 +240,9 @@ export function NewTaskPanel({
   const selectedRepository = availableRepositories.find(
     (repository) => repository.id === selectedRepositoryId
   );
-  const sandboxedSelected = permissionMode === 'SANDBOXED';
-  const fullAccessSelected = permissionMode === 'FULL_ACCESS';
-  const reasoningEfforts = [
-    ...new Set(
-      [
-        ...(selectedModel?.supportedReasoningEfforts ?? []),
-        selectedModel?.defaultReasoningEffort,
-        reasoningEffort
-      ].filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-    )
-  ];
-
   const composerLocked = Boolean(disabled) || isSubmitting || creationOutcomeUnknown;
   const attachments = useTaskAttachments({
-    enabled: attachmentsEnabled,
+    enabled: effectiveAttachmentsEnabled,
     blocked: composerLocked || fullAccessSelected,
     model: selectedModel,
     onStageBatch: onStageAttachmentBatch,
@@ -207,8 +274,16 @@ export function NewTaskPanel({
   const attachmentsRestrictNetwork = activeAttachmentItems.length > 0;
   const effectiveNetworkAccess =
     !attachmentsRestrictNetwork &&
-    (fullAccessSelected || (!sandboxedSelected && networkAccess));
+    (networkRequiredByPreset ||
+      (permissionPreset?.networkAccess === 'OPTIONAL' && networkAccess));
   const selectedModelRejectsImages = Boolean(attachmentModelError);
+  const selectedRuntimeRejectsAttachments =
+    activeAttachmentItems.length > 0 && !effectiveAttachmentsEnabled;
+  const canDeferModelSelection = Boolean(
+    selectedRuntime &&
+      !selectedRuntime.preflight.readiness.canStart &&
+      activeAttachmentItems.length === 0
+  );
 
   useEffect(() => {
     titleInputRef.current?.focus({ preventScroll: true });
@@ -312,7 +387,10 @@ export function NewTaskPanel({
     let created = false;
     try {
       const attachmentDraftId = await attachments.prepareForCreate();
-      const permissionSettings = settingsForPermissionMode(permissionMode, {
+      if (!permissionPreset) {
+        throw new Error('The selected runtime does not expose an execution policy.');
+      }
+      const permissionSettings = settingsForExecutionPolicyPreset(permissionPreset, {
         networkAccess: effectiveNetworkAccess
       });
       try {
@@ -323,11 +401,13 @@ export function NewTaskPanel({
           creationToken: getOrCreateTaskCreationToken(taskCreationTokenRef),
           attachmentDraftId,
           agentSettings: {
-            model: model || undefined,
-            modelProvider: defaultAgentSettings?.modelProvider ?? 'openai',
-            reasoningEffort: reasoningEffort || undefined,
+            runtimeId: runtimeId || undefined,
+            model: selectedModel?.model,
+            modelProvider: selectedModel?.modelProvider,
+            reasoningEffort: effectiveReasoningEffort || undefined,
             ...permissionSettings
-          }
+          },
+          runtimeId: runtimeId || undefined
         });
         created = true;
       } catch (caught) {
@@ -358,6 +438,10 @@ export function NewTaskPanel({
 
   const refine = async () => {
     setError(undefined);
+    if (refineDisabledReason) {
+      setError(refineDisabledReason);
+      return;
+    }
     if (!selectedRepositoryId) {
       setError('Select a repository before refining the description.');
       return;
@@ -400,11 +484,16 @@ export function NewTaskPanel({
     Boolean(disabled) ||
     isSubmitting ||
     isRefining ||
+    modelDiscoveryStatus !== 'idle' ||
+    modelCatalogFailed ||
     !title.trim() ||
     !prompt.trim() ||
     !selectedRepositoryId ||
+    !runtimeId ||
+    (!selectedModel && !canDeferModelSelection) ||
     attachmentsBusy ||
     attachmentsHaveErrors ||
+    selectedRuntimeRejectsAttachments ||
     selectedModelRejectsImages;
   const slideoverStyle = {
     '--slideover-width': `${panelWidth}px`
@@ -555,11 +644,13 @@ export function NewTaskPanel({
                     disabled={
                       composerLocked ||
                       isRefining ||
+                      Boolean(refineDisabledReason) ||
                       !prompt.trim() ||
                       !selectedRepositoryId ||
                       Boolean(proposal)
                     }
                     aria-busy={isRefining}
+                    title={refineDisabledReason}
                     onClick={() => void refine()}
                   >
                     <SparkleIcon />
@@ -620,9 +711,16 @@ export function NewTaskPanel({
                     disabled={attachmentInteractionBlocked}
                     title={
                       fullAccessSelected
-                        ? 'Choose a managed permission mode to attach files.'
-                        : attachmentsEnabled
-                          ? 'Stored locally and shared read-only with Codex for this task.'
+                        ? 'Choose a runtime policy with managed attachment isolation.'
+                        : effectiveAttachmentsEnabled
+                        ? `Stored locally and shared read-only with ${
+                            selectedRuntime?.preflight.runtime.displayName ?? 'the selected agent'
+                          } for this task.`
+                          : !runtimeSupportsAttachments
+                            ? `${
+                                selectedRuntime?.preflight.runtime.displayName ??
+                                'The selected agent runtime'
+                              } does not support task attachments.`
                           : 'Attachments require file-read isolation between tasks.'
                     }
                     onClick={() => attachmentInputRef.current?.click()}
@@ -632,9 +730,11 @@ export function NewTaskPanel({
                   </button>
                   <span className="task-attachment-hint">
                     {fullAccessSelected
-                      ? 'Unavailable with Full access'
-                      : !attachmentsEnabled
-                      ? 'Unavailable in this build'
+                      ? `Unavailable with ${permissionPreset?.label ?? 'this policy'}`
+                      : !effectiveAttachmentsEnabled
+                      ? runtimeSupportsAttachments
+                        ? 'Unavailable in this build'
+                        : 'Unavailable for this runtime'
                       : isReadingClipboardImage
                       ? 'Reading clipboard image…'
                       : activeAttachmentItems.length > 0
@@ -644,7 +744,7 @@ export function NewTaskPanel({
                       : 'Paste or drop files'}
                   </span>
                 </div>
-                {attachmentsEnabled && isDraggingFiles ? (
+                {effectiveAttachmentsEnabled && isDraggingFiles ? (
                   <div className="task-attachment-drop" aria-hidden="true">
                     <PaperclipIcon />
                     <span>Drop to attach</span>
@@ -668,6 +768,14 @@ export function NewTaskPanel({
                   {attachmentModelError}
                 </p>
               ) : null}
+              {selectedRuntimeRejectsAttachments ? (
+                <p
+                  className="task-attachment-message task-attachment-message--error"
+                  role="alert"
+                >
+                  Remove the attachments or choose a runtime that supports them.
+                </p>
+              ) : null}
               {proposal ? (
                 <RefinementProposal
                   refined={proposal.prompt}
@@ -682,84 +790,72 @@ export function NewTaskPanel({
             <summary>
               <span className="newtask-settings__title">Run configuration</span>
               <span className="newtask-settings__summary">
-                {selectedModel?.displayName ?? 'Default model'}
-                {reasoningEffort ? ` · ${formatEffortLabel(reasoningEffort)}` : ''}
+                {selectedRuntime?.preflight.runtime.displayName ?? 'Default runtime'}
+                {selectedModel ? ` · ${selectedModel.displayName}` : ''}
+                {effectiveReasoningEffort
+                  ? ` · ${formatReasoningEffort(effectiveReasoningEffort)}`
+                  : ''}
               </span>
               <ChevronIcon />
             </summary>
 
             <div className="newtask-settings__content">
-              <div className="field-grid field-grid--two">
-                <label className="field">
-                  <span className="field__label">Codex model</span>
-                  <select
-                    value={model}
-                    onChange={(event) => {
-                      const nextModel = models.find(
-                        (candidate) => candidate.model === event.target.value
-                      );
-                      setModel(event.target.value);
-                      setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
-                    }}
-                    disabled={composerLocked || models.length === 0}
-                  >
-                    {models
-                      .filter((candidate) => !candidate.hidden || candidate.model === model)
-                      .map((candidate) => (
-                        <option key={candidate.id} value={candidate.model}>
-                          {candidate.displayName}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <div className="field">
-                  <span className="field__label">Reasoning effort</span>
-                  <div className="segmented-effort" role="group" aria-label="Reasoning effort">
-                    {reasoningEfforts.map((effort) => (
-                      <button
-                        key={effort}
-                        type="button"
-                        className={`segmented-effort__button ${
-                          effort === reasoningEffort ? 'segmented-effort__button--active' : ''
-                        }`}
-                        disabled={composerLocked || !selectedModel}
-                        aria-pressed={effort === reasoningEffort}
-                        onClick={() => setReasoningEffort(effort)}
+              <AgentModelSelector
+                label="Run configuration"
+                runtimeId={runtimeId}
+                modelId={modelId}
+                reasoningEffort={effectiveReasoningEffort}
+                models={models}
+                runtimes={runtimes}
+                disabled={composerLocked}
+                onDiscoverModels={onDiscoverAgentRuntimeModels}
+                onDiscoveryStatusChange={setModelDiscoveryStatus}
+                onSelectionChange={(nextRuntimeId, nextModelId) => {
+                  const nextModel = models.find(
+                    (candidate) =>
+                      candidate.runtimeId === nextRuntimeId && candidate.id === nextModelId
+                  );
+                  setRuntimeId(nextRuntimeId);
+                  setModelId(nextModel?.id ?? '');
+                  setReasoningEffort(nextModel?.defaultReasoningEffort ?? '');
+                }}
+                onReasoningEffortChange={setReasoningEffort}
+                access={
+                  <div className="tm-agent-console__row">
+                    <span className="tm-agent-console__label">Access</span>
+                    <div className="tm-agent-console__access">
+                      <div
+                        className="tm-agent-console__access-options"
+                        role="group"
+                        aria-label="Execution policy"
                       >
-                        {formatEffortLabel(effort)}
-                      </button>
-                    ))}
+                        {permissionPresets.map((preset) => {
+                          const presetDisabled =
+                            preset.sandbox === 'DANGER_FULL_ACCESS' &&
+                            activeAttachmentItems.length > 0;
+                          return (
+                            <button
+                              type="button"
+                              className={preset.id === permissionPreset?.id ? 'is-selected' : ''}
+                              aria-pressed={preset.id === permissionPreset?.id}
+                              disabled={composerLocked || presetDisabled}
+                              key={preset.id}
+                              title={presetDisabled ? 'Remove attachments to use full access.' : undefined}
+                              onClick={() => setPermissionPresetId(preset.id)}
+                            >
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <small>
+                        {permissionPreset?.detail ??
+                          'The selected agent does not expose an execution policy.'}
+                      </small>
+                    </div>
                   </div>
-                </div>
-              </div>
-
-              <div className="field-grid">
-                <label className="field">
-                  <span className="field__label">
-                    Permission mode
-                    <HelpTooltip>Applies to this task's implementation runs.</HelpTooltip>
-                  </span>
-                  <select
-                    value={permissionMode}
-                    onChange={(event) =>
-                      setPermissionMode(event.target.value as SelectableAgentPermissionMode)
-                    }
-                    disabled={composerLocked}
-                  >
-                    {AGENT_PERMISSION_MODE_OPTIONS.map((option) => (
-                      <option
-                        key={option.value}
-                        value={option.value}
-                        disabled={
-                          option.value === 'FULL_ACCESS' && activeAttachmentItems.length > 0
-                        }
-                      >
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+                }
+              />
 
               <div className="network-toggle">
                 <div className="network-toggle__copy">
@@ -769,11 +865,13 @@ export function NewTaskPanel({
                   <span className="network-toggle__state">
                     {attachmentsRestrictNetwork
                       ? 'Disabled while attachments are included.'
-                      : sandboxedSelected
-                        ? 'Disabled by Sandboxed mode.'
-                      : effectiveNetworkAccess
-                        ? 'Enabled - commands may use the network during this task.'
-                        : 'Disabled - network use stays outside the task boundary.'}
+                      : networkDisabledByPreset
+                        ? `Disabled by ${permissionPreset?.label ?? 'this mode'}.`
+                        : networkRequiredByPreset
+                          ? 'Required by this execution policy.'
+                          : effectiveNetworkAccess
+                            ? 'Enabled - commands may use the network during this task.'
+                            : 'Disabled - network use stays outside the task boundary.'}
                   </span>
                 </div>
                 <button
@@ -786,8 +884,8 @@ export function NewTaskPanel({
                   aria-checked={effectiveNetworkAccess}
                   disabled={
                     composerLocked ||
-                    sandboxedSelected ||
-                    fullAccessSelected ||
+                    networkDisabledByPreset ||
+                    networkRequiredByPreset ||
                     attachmentsRestrictNetwork
                   }
                   onClick={() => setNetworkAccess((current) => !current)}
@@ -803,15 +901,21 @@ export function NewTaskPanel({
               {error}
             </p>
           ) : null}
-          {!preflight?.ready ? (
+          {selectedRuntime && !selectedRuntimeReadiness.canStart ? (
             <p className="form-error">
-              {preflight?.problems.join(' ') ||
-                'Codex App Server is unavailable. You can create the task now and start it after Codex is ready.'}
+              {selectedRuntimeReadiness.detail}
+              {selectedRuntimeReadiness.nextAction
+                ? ` ${selectedRuntimeReadiness.nextAction}.`
+                : ''}{' '}
+              You can create the task now and start it after the runtime is available.
             </p>
           ) : null}
-          {preflight?.warnings.map((warning) => (
-            <p className="form-warning" key={warning}>
-              {warning}
+          {selectedRuntime?.preflight.readiness.status === 'DEGRADED' ? (
+            <p className="form-warning">{selectedRuntimeReadiness.detail}</p>
+          ) : null}
+          {selectedRuntimeReadiness.warnings.map((warning) => (
+            <p className="form-warning" key={`${warning.code}:${warning.message}`}>
+              {warning.message}
             </p>
           ))}
         </div>
@@ -847,28 +951,6 @@ export function NewTaskPanel({
         </footer>
       </form>
     </div>
-  );
-}
-
-function HelpTooltip({ children }: { children: string }) {
-  return (
-    <span className="info-tip" onClick={(event) => event.preventDefault()}>
-      <button type="button" className="info-tip__button" aria-label="More info">
-        <InfoIcon />
-      </button>
-      <span className="info-tip__bubble" role="tooltip">
-        {children}
-      </span>
-    </span>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg aria-hidden="true" width="9" height="9" viewBox="0 0 24 24" fill="none">
-      <path d="M12 11v6" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-      <circle cx="12" cy="6.5" r="1.6" fill="currentColor" />
-    </svg>
   );
 }
 
@@ -1006,13 +1088,6 @@ function TextFileIcon() {
       />
     </svg>
   );
-}
-
-function formatEffortLabel(effort: string): string {
-  if (effort.toLowerCase() === 'xhigh') {
-    return 'X-high';
-  }
-  return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
 function RefinementProposal({

@@ -1,30 +1,47 @@
 import {
   normalizeAgentApprovalsReviewer,
+  type AgentCommandApprovalDecision,
+  type AgentCommandApprovalRequest,
   type AgentApprovalsReviewer,
-  type AgentExecutionSettings
+  type AgentExecutionPolicyPreset,
+  type AgentExecutionSettings,
+  type AgentProviderPermissionAction,
+  type InteractionRequestRecord
 } from '../../shared/contracts';
 
+export interface AgentProviderCommandOption {
+  id: string;
+  label: string;
+  action: AgentProviderPermissionAction;
+  providerRemembersChoice: boolean;
+  decision: AgentCommandApprovalDecision;
+}
+
+export function availableProviderCommandOptions(
+  interaction: InteractionRequestRecord,
+  request: AgentCommandApprovalRequest
+): AgentProviderCommandOption[] {
+  return (request.providerOptions ?? []).flatMap((option) =>
+    interaction.allowedActions.includes(option.action)
+      ? [{
+          ...option,
+          decision: {
+            interactionType: 'COMMAND_APPROVAL',
+            action: option.action,
+            providerOptionId: option.id
+          }
+        }]
+      : []
+  );
+}
+
 export type AgentPermissionMode =
-  | 'SANDBOXED'
+  | 'RESTRICTED'
   | 'ASK_FOR_APPROVAL'
+  | 'AUTO_ACCEPT_EDITS'
   | 'APPROVE_FOR_ME'
   | 'FULL_ACCESS'
   | 'CUSTOM';
-
-export type SelectableAgentPermissionMode = Exclude<
-  AgentPermissionMode,
-  'CUSTOM'
->;
-
-export const AGENT_PERMISSION_MODE_OPTIONS: Array<{
-  value: SelectableAgentPermissionMode;
-  label: string;
-}> = [
-  { value: 'SANDBOXED', label: 'Sandboxed' },
-  { value: 'ASK_FOR_APPROVAL', label: 'Ask for approval' },
-  { value: 'APPROVE_FOR_ME', label: 'Approve for me' },
-  { value: 'FULL_ACCESS', label: 'Full access' }
-];
 
 export interface AgentPermissionSettings {
   sandbox: NonNullable<AgentExecutionSettings['sandbox']>;
@@ -33,44 +50,21 @@ export interface AgentPermissionSettings {
   approvalsReviewer: AgentApprovalsReviewer;
 }
 
-export function settingsForPermissionMode(
-  mode: SelectableAgentPermissionMode,
+export function settingsForExecutionPolicyPreset(
+  preset: AgentExecutionPolicyPreset,
   options: { networkAccess?: boolean } = {}
 ): AgentPermissionSettings {
-  const networkAccess =
-    mode === 'SANDBOXED'
-        ? false
-        : (options.networkAccess ?? false);
-  switch (mode) {
-    case 'SANDBOXED':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess: false,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      };
-    case 'APPROVE_FOR_ME':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess,
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review'
-      };
-    case 'ASK_FOR_APPROVAL':
-      return {
-        sandbox: 'WORKSPACE_WRITE',
-        networkAccess,
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'user'
-      };
-    case 'FULL_ACCESS':
-      return {
-        sandbox: 'DANGER_FULL_ACCESS',
-        networkAccess: true,
-        approvalPolicy: 'never',
-        approvalsReviewer: 'user'
-      };
-  }
+  return {
+    sandbox: preset.sandbox,
+    networkAccess:
+      preset.networkAccess === 'REQUIRED'
+        ? true
+        : preset.networkAccess === 'DISABLED'
+          ? false
+          : options.networkAccess === true,
+    approvalPolicy: preset.approvalPolicy,
+    approvalsReviewer: preset.approvalsReviewer
+  };
 }
 
 export function inferAgentPermissionMode(
@@ -86,12 +80,26 @@ export function inferAgentPermissionMode(
     return 'FULL_ACCESS';
   }
   if (
+    sandbox === 'DANGER_FULL_ACCESS' &&
+    approvalPolicy === 'on-request' &&
+    approvalsReviewer === 'user'
+  ) {
+    return 'ASK_FOR_APPROVAL';
+  }
+  if (
+    sandbox === 'DANGER_FULL_ACCESS' &&
+    approvalPolicy === 'auto-accept-edits' &&
+    approvalsReviewer === 'user'
+  ) {
+    return 'AUTO_ACCEPT_EDITS';
+  }
+  if (
     (sandbox === 'WORKSPACE_WRITE' || sandbox === 'READ_ONLY') &&
     settings.networkAccess !== true &&
     approvalPolicy === 'never' &&
     approvalsReviewer === 'user'
   ) {
-    return 'SANDBOXED';
+    return 'RESTRICTED';
   }
   if (
     sandbox === 'WORKSPACE_WRITE' &&
@@ -114,10 +122,12 @@ export function formatAgentPermissionMode(
   settings: AgentExecutionSettings
 ): string {
   switch (inferAgentPermissionMode(settings)) {
-    case 'SANDBOXED':
-      return 'Sandboxed';
+    case 'RESTRICTED':
+      return 'Restricted';
     case 'ASK_FOR_APPROVAL':
       return 'Ask for approval';
+    case 'AUTO_ACCEPT_EDITS':
+      return 'Auto-accept edits';
     case 'APPROVE_FOR_ME':
       return 'Approve for me';
     case 'FULL_ACCESS':

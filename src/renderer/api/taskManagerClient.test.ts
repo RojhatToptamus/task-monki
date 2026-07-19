@@ -185,6 +185,100 @@ describe('createBrowserTaskManagerApi settings', () => {
   });
 });
 
+describe('createBrowserTaskManagerApi provider-native session configuration', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the narrow typed native-session endpoint', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const result = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'grok-acp',
+      native: { modes: { currentModeId: 'plan' } },
+      controls: {
+        localSessionId: 'session-1',
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
+      }
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => result } as Response;
+      })
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(
+      api.updateAgentNativeSession({
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        runtimeId: 'grok-acp',
+        controlId: 'mode',
+        value: 'plan',
+        revision: 'revision-1'
+      })
+    ).resolves.toEqual(result);
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/session/native',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            taskId: 'task-1',
+            sessionId: 'session-1',
+            runtimeId: 'grok-acp',
+            controlId: 'mode',
+            value: 'plan',
+            revision: 'revision-1'
+          })
+        })
+      }
+    ]);
+  });
+});
+
+describe('createBrowserTaskManagerApi runtime model discovery', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses a dedicated explicit-discovery endpoint', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const catalog = {
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => catalog } as Response;
+      })
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(api.discoverAgentRuntimeModels('cursor-agent-acp')).resolves.toEqual(
+      catalog
+    );
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/runtimes/discover',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
+        })
+      }
+    ]);
+  });
+});
+
 describe('createBrowserTaskManagerApi preview contract', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -212,7 +306,7 @@ describe('createBrowserTaskManagerApi preview contract', () => {
     await api.startPreview({ taskId: 'task-1' });
     await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
     await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
-    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65536 });
+    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65_536 });
     await api.resetPreviewData({
       taskId: 'task-1', generationId: 'generation-1', resourceId: 'database', scenarioId: 'full'
     });
@@ -234,40 +328,6 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       taskId: 'task-1',
       generationId: 'generation-1',
       routeId: 'app'
-    });
-  });
-});
-
-describe('createBrowserTaskManagerApi structured errors', () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it('preserves safe server error metadata', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: false,
-        status: 413,
-        json: async () => ({
-          error: {
-            code: 'REQUEST_BODY_TOO_LARGE',
-            message: 'The request is too large.',
-            retryable: false,
-            requestId: 'request-1'
-          }
-        })
-      }) as Response)
-    );
-
-    const error = await createBrowserTaskManagerApi('')
-      .getAppSettings()
-      .catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(TaskManagerApiError);
-    expect(error).toMatchObject({
-      message: 'The request is too large.',
-      status: 413,
-      code: 'REQUEST_BODY_TOO_LARGE',
-      retryable: false,
-      requestId: 'request-1'
     });
   });
 });

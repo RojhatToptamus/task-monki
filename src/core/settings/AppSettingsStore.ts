@@ -35,9 +35,19 @@ export class AppSettingsStore implements AppSettingsStorage {
 
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     await this.init();
-    this.settings = mergeAppSettings(this.settings, input);
-    await this.persistQueued();
-    return cloneSettings(this.settings);
+    const operation = this.writeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const candidate = mergeAppSettings(this.settings, input);
+        await this.persist(candidate);
+        this.settings = candidate;
+        return cloneSettings(candidate);
+      });
+    this.writeQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   private async init(): Promise<void> {
@@ -64,21 +74,12 @@ export class AppSettingsStore implements AppSettingsStorage {
     this.loaded = true;
   }
 
-  private async persistQueued(): Promise<void> {
-    const operation = this.writeQueue
-      .catch(() => undefined)
-      .then(() => this.persist());
-    this.writeQueue = operation.catch(() => undefined);
-    await operation;
-  }
-
-  private async persist(): Promise<void> {
+  private async persist(settings = this.settings): Promise<void> {
     await writePrivateFileAtomically(
       this.filePath,
-      `${JSON.stringify(this.settings, null, 2)}\n`
+      `${JSON.stringify(settings, null, 2)}\n`
     );
   }
-
 }
 
 export class MemoryAppSettingsStore implements AppSettingsStorage {
@@ -123,13 +124,21 @@ export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
     sidebarCollapsed: record.sidebarCollapsed,
     showMascot: record.showMascot,
     firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
+    disabledRuntimeIds: [...record.disabledRuntimeIds],
+    defaultRuntimeId: record.defaultRuntimeId,
     defaultModel: record.defaultModel,
+    defaultModelProvider: record.defaultModelProvider,
     defaultReasoningEffort: record.defaultReasoningEffort,
     promptRefinementModel: record.promptRefinementModel,
+    promptRefinementRuntimeId: record.promptRefinementRuntimeId,
+    promptRefinementModelProvider: record.promptRefinementModelProvider,
     reviewModel: record.reviewModel,
+    reviewRuntimeId: record.reviewRuntimeId,
+    reviewModelProvider: record.reviewModelProvider,
     reviewReasoningEffort: record.reviewReasoningEffort,
     codexExternalTools: { ...record.codexExternalTools },
     externalExecutables: { ...record.externalExecutables },
+    runtimeExecutablePaths: { ...record.runtimeExecutablePaths },
     selectedRepositoryId: record.selectedRepositoryId,
     previewGateway: { ...record.previewGateway }
   };
@@ -155,8 +164,17 @@ export function mergeAppSettings(
       'firstLaunchSetupCompleted'
     );
   }
+  if (input.disabledRuntimeIds !== undefined) {
+    patch.disabledRuntimeIds = normalizeRuntimeIds(input.disabledRuntimeIds);
+  }
+  if (input.defaultRuntimeId !== undefined) {
+    patch.defaultRuntimeId = requireString(input.defaultRuntimeId, 'defaultRuntimeId');
+  }
   if ('defaultModel' in input) {
     patch.defaultModel = normalizeOptionalString(input.defaultModel);
+  }
+  if ('defaultModelProvider' in input) {
+    patch.defaultModelProvider = normalizeOptionalString(input.defaultModelProvider);
   }
   if ('defaultReasoningEffort' in input) {
     patch.defaultReasoningEffort = normalizeOptionalString(input.defaultReasoningEffort);
@@ -164,8 +182,22 @@ export function mergeAppSettings(
   if ('promptRefinementModel' in input) {
     patch.promptRefinementModel = normalizeOptionalString(input.promptRefinementModel);
   }
+  if ('promptRefinementRuntimeId' in input) {
+    patch.promptRefinementRuntimeId = normalizeOptionalString(input.promptRefinementRuntimeId);
+  }
+  if ('promptRefinementModelProvider' in input) {
+    patch.promptRefinementModelProvider = normalizeOptionalString(
+      input.promptRefinementModelProvider
+    );
+  }
   if ('reviewModel' in input) {
     patch.reviewModel = normalizeOptionalString(input.reviewModel);
+  }
+  if ('reviewRuntimeId' in input) {
+    patch.reviewRuntimeId = normalizeOptionalString(input.reviewRuntimeId);
+  }
+  if ('reviewModelProvider' in input) {
+    patch.reviewModelProvider = normalizeOptionalString(input.reviewModelProvider);
   }
   if ('reviewReasoningEffort' in input) {
     patch.reviewReasoningEffort = normalizeOptionalString(input.reviewReasoningEffort);
@@ -186,6 +218,15 @@ export function mergeAppSettings(
     patch.externalExecutables = normalizeExternalExecutables({
       ...current.externalExecutables,
       ...input.externalExecutables
+    });
+  }
+  if (input.runtimeExecutablePaths !== undefined) {
+    if (!isRecord(input.runtimeExecutablePaths)) {
+      throw new Error('runtimeExecutablePaths must be an object.');
+    }
+    patch.runtimeExecutablePaths = normalizeRuntimeExecutablePaths({
+      ...current.runtimeExecutablePaths,
+      ...input.runtimeExecutablePaths
     });
   }
   if ('selectedRepositoryId' in input) {
@@ -239,6 +280,27 @@ function normalizeExternalExecutables(value: unknown): ExternalExecutablePathSet
   };
 }
 
+function normalizeRuntimeExecutablePaths(
+  value: unknown
+): TaskManagerAppSettings['runtimeExecutablePaths'] {
+  if (!isRecord(value)) {
+    throw new Error('Runtime executable settings are invalid.');
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([runtimeId, executable]) => [
+      requireString(runtimeId, 'Runtime id'),
+      normalizeExecutablePath(executable)
+    ])
+  );
+}
+
+function normalizeRuntimeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error('disabledRuntimeIds must be an array.');
+  }
+  return [...new Set(value.map((runtimeId) => requireString(runtimeId, 'Runtime id')))];
+}
+
 function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
   if (!isRecord(value) || Object.keys(value).length !== 1) {
     throw new Error('Preview gateway settings are invalid.');
@@ -265,6 +327,12 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function requireString(value: unknown, name: string): string {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) throw new Error(`${name} must be a non-empty string.`);
+  return normalized;
+}
+
 function requireBoolean(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new Error(`${name} must be a boolean.`);
   return value;
@@ -279,25 +347,39 @@ function isCurrentAppSettingsRecord(
     'sidebarCollapsed',
     'showMascot',
     'firstLaunchSetupCompleted',
+    'disabledRuntimeIds',
+    'defaultRuntimeId',
     'defaultModel',
+    'defaultModelProvider',
     'defaultReasoningEffort',
     'promptRefinementModel',
+    'promptRefinementRuntimeId',
+    'promptRefinementModelProvider',
     'reviewModel',
+    'reviewRuntimeId',
+    'reviewModelProvider',
     'reviewReasoningEffort',
     'codexExternalTools',
     'externalExecutables',
+    'runtimeExecutablePaths',
     'selectedRepositoryId',
     'previewGateway'
   ]);
   const optionalStrings = [
     record.defaultModel,
+    record.defaultModelProvider,
     record.defaultReasoningEffort,
     record.promptRefinementModel,
+    record.promptRefinementRuntimeId,
+    record.promptRefinementModelProvider,
     record.reviewModel,
+    record.reviewRuntimeId,
+    record.reviewModelProvider,
     record.reviewReasoningEffort
   ];
   const tools = record.codexExternalTools;
   const executables = record.externalExecutables;
+  const runtimeExecutablePaths = record.runtimeExecutablePaths;
   const previewGateway = record.previewGateway;
   return (
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
@@ -305,6 +387,10 @@ function isCurrentAppSettingsRecord(
     typeof record.sidebarCollapsed === 'boolean' &&
     typeof record.showMascot === 'boolean' &&
     typeof record.firstLaunchSetupCompleted === 'boolean' &&
+    Array.isArray(record.disabledRuntimeIds) &&
+    record.disabledRuntimeIds.every(isCanonicalRequiredString) &&
+    new Set(record.disabledRuntimeIds).size === record.disabledRuntimeIds.length &&
+    isCanonicalRequiredString(record.defaultRuntimeId) &&
     optionalStrings.every(isCanonicalOptionalString) &&
     isRecord(tools) &&
     Object.keys(tools).length === 3 &&
@@ -316,6 +402,11 @@ function isCurrentAppSettingsRecord(
     isCanonicalNullableString(executables.gitExecutablePath) &&
     isCanonicalNullableString(executables.codexExecutablePath) &&
     isCanonicalNullableString(executables.ghExecutablePath) &&
+    isRecord(runtimeExecutablePaths) &&
+    Object.entries(runtimeExecutablePaths).every(
+      ([runtimeId, executable]) =>
+        isCanonicalRequiredString(runtimeId) && isCanonicalNullableString(executable)
+    ) &&
     isCanonicalNullableString(record.selectedRepositoryId) &&
     isRecord(previewGateway) &&
     Object.keys(previewGateway).length === 1 &&
@@ -324,6 +415,10 @@ function isCurrentAppSettingsRecord(
         Number(previewGateway.port) >= 10_000 &&
         Number(previewGateway.port) <= 65_535))
   );
+}
+
+function isCanonicalRequiredString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value;
 }
 
 function isCanonicalOptionalString(value: unknown): boolean {

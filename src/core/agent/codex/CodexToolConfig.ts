@@ -4,6 +4,7 @@ import {
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import { execFilePortable } from '../../process/portableChildProcess';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
 interface CodexMcpServerListEntry {
@@ -117,7 +118,10 @@ export async function listDisabledCodexMcpServerConfigOverrides(
 ): Promise<string[]> {
   const { stdout } = await execFilePortable(executable, ['mcp', 'list', '--json'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: CODEX_MCP_LIST_TIMEOUT_MS,
     maxBuffer: 1024 * 1024
   });

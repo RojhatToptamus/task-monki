@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mapModel,
   mapThreadStatus,
   settingsFromThreadResponse,
   settingsFromThreadSettings,
@@ -8,6 +9,38 @@ import {
 } from './CodexEventMapper';
 
 describe('Codex event mapping', () => {
+  it('does not invent a provider that model/list did not report', () => {
+    expect(
+      mapModel({
+        id: 'gpt-test',
+        model: 'gpt-test',
+        displayName: 'GPT Test',
+        description: 'Test model',
+        hidden: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: 'low',
+        inputModalities: ['text'],
+        serviceTiers: [],
+        defaultServiceTier: null,
+        isDefault: true
+      } as never)
+    ).toMatchObject({ id: 'codex:gpt-test', runtimeId: 'codex', model: 'gpt-test' });
+    expect(
+      mapModel({
+        id: 'gpt-test',
+        model: 'gpt-test',
+        displayName: 'GPT Test',
+        description: 'Test model',
+        hidden: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: 'low',
+        inputModalities: ['text'],
+        serviceTiers: [],
+        defaultServiceTier: null,
+        isDefault: true
+      } as never)
+    ).not.toHaveProperty('modelProvider');
+  });
   it('keeps workspace writes scoped to the task worktree with network disabled', () => {
     expect(
       toSandboxPolicy(

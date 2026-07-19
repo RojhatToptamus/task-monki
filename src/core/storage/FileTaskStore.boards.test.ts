@@ -41,13 +41,14 @@ describe('FileTaskStore boards', () => {
     });
     expect(updated).toMatchObject({ name: 'Ready work', color: 'ROSE', repositoryIds: [] });
     await store.close();
-    expect((await new FileTaskStore(dir).snapshot()).boards).toEqual([updated]);
 
     const reloaded = new FileTaskStore(dir);
+    expect((await reloaded.snapshot()).boards).toEqual([updated]);
     await reloaded.deleteBoard(board.id);
     const snapshot = await reloaded.snapshot();
     expect(snapshot.boards).toEqual([]);
     expect(snapshot.tasks.map((candidate) => candidate.id)).toContain(task.id);
+    await reloaded.close();
   });
 
   it('rejects filters that reference an unknown repository', async () => {

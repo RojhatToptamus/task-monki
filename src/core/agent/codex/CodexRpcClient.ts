@@ -2,6 +2,12 @@ import { EventEmitter } from 'node:events';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentProtocolMessageReference } from '../../../shared/agent';
+import {
+  REDACTED_CREDENTIAL,
+  redactCredentialText,
+  redactCredentialValue
+} from '../AgentCredentialRedaction';
+import { redactProtocolJournalRecord } from '../journal/AgentProtocolRedaction';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import {
   decodeCodexProtocolMessage,
@@ -109,6 +115,8 @@ export class CodexRpcClient {
   private readonly pending = new Map<RequestId, PendingRequest>();
   private readonly expiredRequests = new Set<RequestId>();
   private readonly reader;
+  private readonly closedSignal: Promise<Error>;
+  private resolveClosedSignal!: (error: Error) => void;
   private inboundQueue: Promise<void> = Promise.resolve();
   private nextRequestId = 1;
   private closed = false;
@@ -118,9 +126,17 @@ export class CodexRpcClient {
     output: Readable,
     private readonly store: FileTaskStore,
     readonly serverInstanceId: string,
-    private readonly requestTimeoutMs = 30_000
+    private readonly requestTimeoutMs = 30_000,
+    private readonly sensitiveValues: readonly string[] = []
   ) {
+    this.closedSignal = new Promise((resolve) => {
+      this.resolveClosedSignal = resolve;
+    });
     this.reader = createInterface({ input: output, crlfDelay: Infinity });
+    // Writable failures are reported to each write callback below. Keep the
+    // stream error observed as well so an EPIPE cannot surface as an uncaught
+    // process-level exception while that callback settles the RPC operation.
+    this.input.on('error', () => undefined);
     this.reader.on('line', (line) => {
       this.inboundQueue = this.inboundQueue.then(
         () => this.handleLine(line),
@@ -178,7 +194,11 @@ export class CodexRpcClient {
         mutation
       });
 
-      void this.write({ method, id, params }).catch((error: unknown) => {
+      void this.write(
+        { method, id, params },
+        undefined,
+        mutation ? method : undefined
+      ).catch((error: unknown) => {
         const pending = this.pending.get(id);
         if (!pending) {
           return;
@@ -186,16 +206,7 @@ export class CodexRpcClient {
         clearTimeout(pending.timer);
         this.pending.delete(id);
         const message = error instanceof Error ? error.message : String(error);
-        reject(
-          mutation
-            ? new CodexAmbiguousMutationError(
-                method,
-                `Codex App Server mutation delivery is ambiguous: ${message}`
-              )
-            : error instanceof Error
-              ? error
-              : new Error(message)
-        );
+        reject(error instanceof Error ? error : new Error(message));
       });
     });
   }
@@ -209,11 +220,20 @@ export class CodexRpcClient {
     result: unknown,
     onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>
   ): Promise<AgentProtocolMessageReference> {
-    return this.write({ id, result }, onJournaled);
+    return this.write({ id, result }, onJournaled, 'server-request/response');
   }
 
   async respondError(id: RequestId, error: CodexRpcErrorPayload): Promise<void> {
-    await this.write({ id, error });
+    await this.write({ id, error }, undefined, 'server-request/error-response');
+  }
+
+  /**
+   * Waits until every line observed by the stdout reader has been journaled
+   * and delivered to protocol listeners. The supervisor calls this only after
+   * the child stdio streams have closed, so no later line can join the queue.
+   */
+  drainInbound(): Promise<void> {
+    return this.inboundQueue;
   }
 
   close(reason = 'Codex App Server connection closed.'): void {
@@ -222,6 +242,8 @@ export class CodexRpcClient {
     }
     this.closed = true;
     this.reader.close();
+    this.resolveClosedSignal(new Error(reason));
+    this.input.destroy();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(
@@ -242,17 +264,43 @@ export class CodexRpcClient {
 
   private async write(
     message: unknown,
-    onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>
+    onJournaled?: (reference: AgentProtocolMessageReference) => Promise<void>,
+    ambiguousOperation?: string
   ): Promise<AgentProtocolMessageReference> {
     const raw = JSON.stringify(message);
+    const safe = redactProtocolJournalRecord(
+      raw,
+      { transport: 'stdio' },
+      this.sensitiveValues
+    );
     const reference = await this.store.appendProtocolMessage(
       this.serverInstanceId,
       'OUTBOUND',
-      raw,
-      { transport: 'stdio' }
+      safe.raw,
+      safe.metadata
     );
     await onJournaled?.(reference);
-    await writeLine(this.input, `${raw}\n`);
+    if (this.closed) {
+      throw new Error('Codex App Server connection is closed.');
+    }
+    try {
+      await Promise.race([
+        writeLine(this.input, `${raw}\n`),
+        this.closedSignal.then((error) => Promise.reject(error))
+      ]);
+    } catch (error) {
+      const message = redactCredentialText(
+        error instanceof Error ? error.message : String(error),
+        this.sensitiveValues
+      );
+      const safeError = new Error(message);
+      throw ambiguousOperation
+        ? new CodexAmbiguousMutationError(
+            ambiguousOperation,
+            `Codex App Server mutation delivery is ambiguous: ${message}`
+          )
+        : safeError;
+    }
     return reference;
   }
 
@@ -263,11 +311,16 @@ export class CodexRpcClient {
 
     let rawReference: AgentProtocolMessageReference | undefined;
     try {
+      const safe = redactProtocolJournalRecord(
+        redactInboundStreamingJournalPayload(line),
+        { transport: 'stdio' },
+        this.sensitiveValues
+      );
       rawReference = await this.store.appendProtocolMessage(
         this.serverInstanceId,
         'INBOUND',
-        line,
-        { transport: 'stdio' }
+        safe.raw,
+        safe.metadata
       );
       const decoded = decodeCodexProtocolMessage(line);
       switch (decoded.kind) {
@@ -285,10 +338,17 @@ export class CodexRpcClient {
           return;
       }
     } catch (error) {
+      const safeError = new Error(
+        redactCredentialText(
+          error instanceof Error ? error.message : String(error),
+          this.sensitiveValues
+        ),
+        { cause: error }
+      );
       this.events.emit(
         'protocolError',
-        error instanceof Error ? error : new Error(String(error)),
-        line,
+        safeError,
+        REDACTED_MALFORMED_PROTOCOL_FRAME,
         rawReference
       );
     }
@@ -308,7 +368,11 @@ export class CodexRpcClient {
 
     if (response.error) {
       pending.reject(
-        new CodexRpcError(response.error.code, response.error.message, response.error.data)
+        new CodexRpcError(
+          response.error.code,
+          redactCredentialText(response.error.message, this.sensitiveValues),
+          redactCredentialValue(response.error.data, this.sensitiveValues)
+        )
       );
       return;
     }
@@ -337,6 +401,85 @@ export class CodexRpcClient {
     }
   }
 }
+
+/**
+ * Streaming payloads can split a credential across otherwise harmless JSON
+ * records, which makes record-local exact-value redaction insufficient. The
+ * journal does not need provider-authored free-form deltas for correlation, so
+ * remove those fields structurally while preserving method and identity data.
+ * Normalized output remains available through the run artifact.
+ */
+function redactInboundStreamingJournalPayload(raw: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return REDACTED_MALFORMED_PROTOCOL_FRAME;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return REDACTED_MALFORMED_PROTOCOL_FRAME;
+  }
+
+  const message = value as Record<string, unknown>;
+  if (typeof message.method !== 'string') {
+    return 'id' in message ? raw : REDACTED_MALFORMED_PROTOCOL_FRAME;
+  }
+  const params = message.params;
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
+    return REDACTED_MALFORMED_PROTOCOL_FRAME;
+  }
+
+  const field = STREAMING_JOURNAL_FIELDS.get(message.method);
+  if (field) {
+    const originalParams = params as Record<string, unknown>;
+    if (!(field in originalParams)) {
+      return raw;
+    }
+    return JSON.stringify({
+      ...message,
+      params: { ...originalParams, [field]: REDACTED_CREDENTIAL }
+    });
+  }
+
+  if (message.method === 'thread/realtime/outputAudio/delta') {
+    const originalParams = params as Record<string, unknown>;
+    const audio = originalParams.audio;
+    if (!audio || typeof audio !== 'object' || Array.isArray(audio)) {
+      return raw;
+    }
+    const originalAudio = audio as Record<string, unknown>;
+    if (!('data' in originalAudio)) {
+      return raw;
+    }
+    return JSON.stringify({
+      ...message,
+      params: {
+        ...originalParams,
+        audio: { ...originalAudio, data: REDACTED_CREDENTIAL }
+      }
+    });
+  }
+
+  return raw;
+}
+
+const REDACTED_MALFORMED_PROTOCOL_FRAME = JSON.stringify({
+  malformedProtocolFrame: REDACTED_CREDENTIAL
+});
+
+const STREAMING_JOURNAL_FIELDS = new Map<string, string>([
+  ['item/agentMessage/delta', 'delta'],
+  ['item/plan/delta', 'delta'],
+  ['item/commandExecution/outputDelta', 'delta'],
+  ['item/fileChange/outputDelta', 'delta'],
+  ['item/reasoning/summaryTextDelta', 'delta'],
+  ['item/reasoning/textDelta', 'delta'],
+  ['turn/diff/updated', 'diff'],
+  ['command/exec/outputDelta', 'deltaBase64'],
+  ['process/outputDelta', 'deltaBase64'],
+  ['item/mcpToolCall/progress', 'message'],
+  ['thread/realtime/transcript/delta', 'delta']
+]);
 
 function writeLine(stream: Writable, line: string): Promise<void> {
   return new Promise((resolve, reject) => {

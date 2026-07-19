@@ -7,8 +7,10 @@ import type {
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import {
+  isPortableProcessTreeRunning,
   spawnPortable,
-  terminatePortableProcessTree
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
 } from '../../process/portableChildProcess';
 import type { FileTaskStore } from '../../storage/FileTaskStore';
 import { CodexRpcClient } from './CodexRpcClient';
@@ -23,7 +25,13 @@ import {
   normalizeCodexExternalToolSettings,
   resolveCodexExternalToolConfigOverrides
 } from './CodexToolConfig';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 import { CODEX_PROTOCOL_RUNTIME_VERSION, CODEX_PROTOCOL_SCHEMA_HASH } from './protocol/metadata';
+import {
+  REDACTED_CREDENTIAL,
+  isSensitiveCredentialFieldName,
+  redactCredentialText
+} from '../AgentCredentialRedaction';
 
 export const CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS = [
   'command/exec/outputDelta',
@@ -40,7 +48,11 @@ export const CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS = [
 
 interface SupervisorEvents {
   ready: [server: AgentServerInstance];
-  exit: [server: AgentServerInstance, unexpected: boolean];
+  exit: [
+    server: AgentServerInstance,
+    unexpected: boolean,
+    processTreeExited: boolean
+  ];
   protocolError: [error: Error];
   diagnostic: [text: string];
 }
@@ -53,6 +65,12 @@ export interface CodexAppServerSupervisorOptions {
   environment?: NodeJS.ProcessEnv;
   toolSettings?: CodexExternalToolSettings;
   failClosedMcpDiscovery?: boolean;
+  runtimeResolver?: typeof resolveCodexRuntime;
+  argvResolver?: typeof resolveCodexAppServerArgv;
+  spawnProcess?: typeof spawnPortable;
+  shutdownGraceTimeoutMs?: number;
+  shutdownKillTimeoutMs?: number;
+  closeHandlingTimeoutMs?: number;
 }
 
 export interface CodexAppServerLaunchConfig {
@@ -115,10 +133,17 @@ export class CodexAppServerSupervisor {
   private client?: CodexRpcClient;
   private server?: AgentServerInstance;
   private startPromise?: Promise<CodexRpcClient>;
-  private closePromise?: Promise<void>;
-  private shutdownPromise?: Promise<void>;
+  private readonly closeHandlings = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>();
+  private readonly processTreeTerminations = new WeakMap<
+    ChildProcessWithoutNullStreams,
+    Promise<void>
+  >();
+  private readonly closingChildren = new WeakSet<ChildProcessWithoutNullStreams>();
+  private readonly diagnosticTails = new WeakMap<ChildProcessWithoutNullStreams, string>();
+  private readonly diagnosticLineBuffers = new WeakMap<ChildProcessWithoutNullStreams, string>();
+  private readonly terminationReasons = new WeakMap<ChildProcessWithoutNullStreams, string>();
   private shuttingDown = false;
-  private diagnosticTail = '';
+  private lifecycleFailure?: Error;
   private runtimeDiagnostics: CodexRuntimeProbeResult[] = [];
 
   constructor(
@@ -134,6 +159,10 @@ export class CodexAppServerSupervisor {
     return this.client;
   }
 
+  get processTreeRunning(): boolean {
+    return this.child ? isPortableProcessTreeRunning(this.child) : false;
+  }
+
   get lastRuntimeDiagnostics(): readonly CodexRuntimeProbeResult[] {
     return this.runtimeDiagnostics;
   }
@@ -147,95 +176,132 @@ export class CodexAppServerSupervisor {
   }
 
   start(): Promise<CodexRpcClient> {
-    if (this.shuttingDown) {
-      return Promise.reject(new Error('Codex App Server is shutting down.'));
+    if (this.lifecycleFailure) {
+      return Promise.reject(
+        new Error(
+          `Codex App Server lifecycle is fenced after an unpersisted process exit: ${this.lifecycleFailure.message}`,
+          { cause: this.lifecycleFailure }
+        )
+      );
     }
-    if (this.client && this.child && !this.child.killed) {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('Codex App Server supervisor has been shut down.'));
+    }
+    if (
+      this.client &&
+      this.child &&
+      !this.closingChildren.has(this.child) &&
+      !this.child.killed &&
+      this.child.exitCode === null &&
+      this.child.signalCode === null &&
+      isPortableProcessTreeRunning(this.child)
+    ) {
       return Promise.resolve(this.client);
     }
     if (!this.startPromise) {
-      this.startPromise = this.startInternal().finally(() => {
-        this.startPromise = undefined;
-      });
+      const priorChild = this.child;
+      this.startPromise = (priorChild
+        ? this.waitForHandledClose(
+            priorChild,
+            this.options.closeHandlingTimeoutMs ?? 3_000
+          ).then((handled) => {
+            if (!handled) {
+              throw new Error('Timed out finalizing the prior Codex App Server exit.');
+            }
+            if (isPortableProcessTreeRunning(priorChild)) {
+              throw new Error(
+                `Refusing to start Codex App Server while prior process tree ${priorChild.pid ?? '<unknown>'} may still be alive.`
+              );
+            }
+          })
+        : Promise.resolve()
+      ).then(() => this.startInternal()).finally(() => {
+          this.startPromise = undefined;
+        });
     }
     return this.startPromise;
   }
 
-  shutdown(): Promise<void> {
-    if (this.shutdownPromise) return this.shutdownPromise;
+  async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const work = this.shutdownInternal().finally(() => {
-      if (this.shutdownPromise === work) this.shutdownPromise = undefined;
-    });
-    this.shutdownPromise = work;
-    return work;
-  }
-
-  resumeAfterShutdown(): void {
-    if (!this.shuttingDown) return;
-    if (
-      this.shutdownPromise ||
-      this.startPromise ||
-      this.closePromise ||
-      this.hasLiveChild()
-    ) {
-      throw new Error('Codex App Server shutdown has not finished.');
-    }
-    this.shuttingDown = false;
-  }
-
-  private async shutdownInternal(): Promise<void> {
-    const pendingStart = this.startPromise;
-    await this.stopCurrentChild('Codex App Server shut down.');
-    await pendingStart?.catch(() => undefined);
-    await this.stopCurrentChild('Codex App Server shut down.');
-  }
-
-  private async stopCurrentChild(reason: string): Promise<void> {
-    const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) {
-      this.closeClient(reason);
-      await this.closePromise;
-      await this.disposeCurrentClient();
-      return;
-    }
-
-    if (this.server) {
-      const stored = await this.store.getAgentServer(this.server.id);
-      if (stored) {
-        this.server = stored;
-      }
-      if (
-        this.server.status !== 'STARTING' &&
-        !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)
-      ) {
-        this.server = await this.store.updateAgentServer(this.server.id, {
-          status: 'STOPPING'
-        });
+    const failures: unknown[] = [];
+    const starting = this.startPromise;
+    const childAtShutdown = this.child;
+    this.client?.close('Codex App Server shut down.');
+    if (this.server && ['READY', 'RUNNING', 'DEGRADED'].includes(this.server.status)) {
+      try {
+        const stored = await this.store.getAgentServer(this.server.id);
+        if (stored) this.server = stored;
+        if (this.server && ['READY', 'RUNNING', 'DEGRADED'].includes(this.server.status)) {
+          this.server = await this.store.updateAgentServer(this.server.id, { status: 'STOPPING' });
+        }
+      } catch (cause) {
+        failures.push(cause);
       }
     }
-    this.closeClient(reason);
-    await terminatePortableProcessTree(child, 'SIGTERM');
-    if (!(await waitForClose(child, 3_000))) {
-      await terminatePortableProcessTree(child, 'SIGKILL');
-      await waitForClose(child, 2_000);
+    if (childAtShutdown) {
+      try {
+        await this.ensureProcessTreeExit(
+          childAtShutdown,
+          this.options.shutdownGraceTimeoutMs ?? 3_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      } catch (cause) {
+        failures.push(cause);
+      }
     }
-    await this.closePromise;
-    await this.disposeCurrentClient();
+    await starting?.catch(() => undefined);
+    const lateChild = this.child;
+    if (lateChild && lateChild !== childAtShutdown) {
+      try {
+        await this.ensureProcessTreeExit(
+          lateChild,
+          this.options.shutdownGraceTimeoutMs ?? 3_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    for (const child of new Set([childAtShutdown, lateChild].filter(Boolean))) {
+      try {
+        if (!(await this.waitForHandledClose(
+          child as ChildProcessWithoutNullStreams,
+          this.options.closeHandlingTimeoutMs ?? 3_000
+        ))) {
+          failures.push(new Error('Timed out finalizing the Codex App Server exit.'));
+        }
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Codex App Server shutdown was incomplete.');
+    }
   }
 
   /**
-   * Security-boundary failures must stop the child before waiting on storage.
+   * Safety-boundary failures must stop the child before waiting on storage.
    * The ordinary graceful shutdown records STOPPING first, which is the right
-   * lifecycle order for normal exits but leaves a permissions violation live
-   * while that write is pending.
+   * lifecycle order for normal exits but can leave an unsafe or unrecoverable
+   * provider generation live while that write is pending.
+   *
+   * This fence is intentionally one-way. Recovery requires a new supervisor;
+   * the stopped generation can never be restarted or reused.
    */
-  async terminateForSecurityBoundary(reason: string): Promise<void> {
+  async terminateAndFence(reason: string): Promise<void> {
     this.shuttingDown = true;
     const child = this.child;
-    this.closeClient(reason);
-    if (child && child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
+    const safeReason = this.redactDiagnostic(reason);
+    const handledClose = child ? this.closeHandlings.get(child) : undefined;
+    if (child) this.terminationReasons.set(child, safeReason);
+    this.client?.close(safeReason);
+    if (child && isPortableProcessTreeRunning(child)) {
+      await this.ensureProcessTreeExit(
+        child,
+        this.options.shutdownGraceTimeoutMs ?? 1_000,
+        this.options.shutdownKillTimeoutMs ?? 2_000
+      );
     }
 
     if (this.server) {
@@ -245,126 +311,183 @@ export class CodexAppServerSupervisor {
       }
       if (!['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
         await this.store
-          .updateAgentServer(this.server.id, { status: 'STOPPING', exitReason: reason })
+          .updateAgentServer(this.server.id, { status: 'STOPPING', exitReason: safeReason })
           .catch(() => undefined);
       }
     }
-    if (child && child.exitCode === null && child.signalCode === null) {
-      if (!(await waitForClose(child, 1_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
-        await waitForClose(child, 2_000);
+    if (handledClose) {
+      if (!(await waitForPromise(
+        handledClose,
+        this.options.closeHandlingTimeoutMs ?? 3_000
+      ))) {
+        throw new Error('Timed out finalizing the fenced Codex App Server shutdown.');
       }
     }
-    await this.closePromise;
-    await this.disposeCurrentClient();
   }
 
   async terminateUnresponsive(reason: string): Promise<void> {
+    const safeReason = this.redactDiagnostic(reason);
     const child = this.child;
-    if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
-      this.server = await this.store.updateAgentServer(this.server.id, {
-        status: 'LOST',
-        disconnectedAt: new Date().toISOString(),
-        exitReason: reason
-      });
-    }
-    this.closeClient(reason);
-    if (child && child.exitCode === null && child.signalCode === null) {
-      await terminatePortableProcessTree(child, 'SIGTERM');
-      if (!(await waitForClose(child, 1_000))) {
-        await terminatePortableProcessTree(child, 'SIGKILL');
-        await waitForClose(child, 2_000);
+    const failures: unknown[] = [];
+    if (child) this.terminationReasons.set(child, safeReason);
+    // Closing and terminating the process is the safety boundary. It must not
+    // depend on a diagnostic store write succeeding.
+    this.client?.close(safeReason);
+    if (child && isPortableProcessTreeRunning(child)) {
+      try {
+        await this.ensureProcessTreeExit(
+          child,
+          this.options.shutdownGraceTimeoutMs ?? 1_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      } catch (cause) {
+        failures.push(cause);
       }
-      await this.closePromise;
     }
-    await this.disposeCurrentClient();
+    if (child) {
+      try {
+        if (!(await this.waitForHandledClose(
+          child,
+          this.options.closeHandlingTimeoutMs ?? 3_000
+        ))) {
+          failures.push(
+            new Error('Timed out finalizing the unresponsive Codex App Server exit.')
+          );
+        }
+      } catch (cause) {
+        failures.push(cause);
+      }
+    }
+    try {
+      if (this.server && !['EXITED', 'FAILED', 'LOST'].includes(this.server.status)) {
+        this.server = await this.store.updateAgentServer(this.server.id, {
+          status: 'LOST',
+          disconnectedAt: new Date().toISOString(),
+          exitReason: safeReason
+        });
+      }
+    } catch (cause) {
+      failures.push(cause);
+    }
+    if (failures.length > 0) {
+      const failure = new AggregateError(
+        failures,
+        `Codex App Server termination could not be fully confirmed and persisted: ${failures
+          .map((cause) => this.redactDiagnostic(errorMessage(cause)))
+          .join('; ')}`
+      );
+      this.lifecycleFailure = failure;
+      throw failure;
+    }
   }
 
   private async startInternal(): Promise<CodexRpcClient> {
-    let runtime: ResolvedCodexRuntime;
+    let server: AgentServerInstance | undefined;
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let client: CodexRpcClient | undefined;
     try {
-      runtime = await resolveCodexRuntime({
+      this.assertStartupActive();
+      const runtime = await (this.options.runtimeResolver ?? resolveCodexRuntime)({
         executable: this.options.executable,
         cwd: this.options.cwd,
         environment: this.options.environment,
         requestTimeoutMs: this.options.requestTimeoutMs
       });
-    } catch (error) {
-      this.assertStartupAllowed();
-      throw error;
-    }
-    const executable = runtime.executable;
-    const runtimeVersion = runtime.version;
-    this.runtimeDiagnostics = runtime.diagnostics;
-    this.assertStartupAllowed();
-    this.diagnosticTail = '';
-    const argv = await resolveCodexAppServerArgv({
-      executable,
-      cwd: this.options.cwd,
-      environment: this.options.environment,
-      toolSettings: this.options.toolSettings,
-      failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
-      launch: runtime.compatibility.launch
-    });
-    this.assertStartupAllowed();
-
-    const server = await this.store.createAgentServer({
-      provider: 'codex',
-      runtimeKind: 'APP_SERVER',
-      transport: 'STDIO',
-      executable,
-      argv,
-      runtimeVersion,
-      schemaVersion: CODEX_PROTOCOL_RUNTIME_VERSION,
-      schemaHash: CODEX_PROTOCOL_SCHEMA_HASH,
-      runtimeResolution: codexRuntimeResolutionDiagnostics(runtime)
-    });
-    this.server = server;
-
-    try {
-      this.assertStartupAllowed();
-      const child = spawnPortable(executable, argv, {
+      this.assertStartupActive();
+      const executable = runtime.executable;
+      const runtimeVersion = runtime.version;
+      this.runtimeDiagnostics = runtime.diagnostics.map((probe) => ({
+        ...probe,
+        detail: probe.detail ? this.redactDiagnostic(probe.detail) : probe.detail
+      }));
+      const argv = await (this.options.argvResolver ?? resolveCodexAppServerArgv)({
+        executable,
         cwd: this.options.cwd,
-        env: sanitizeEnvironment(this.options.environment ?? process.env),
+        environment: this.options.environment,
+        toolSettings: this.options.toolSettings,
+        failClosedMcpDiscovery: this.options.failClosedMcpDiscovery,
+        launch: runtime.compatibility.launch
+      });
+      this.assertStartupActive();
+
+      server = await this.store.createAgentServer({
+        runtimeId: 'codex',
+        runtimeKind: 'APP_SERVER',
+        transport: 'STDIO',
+        executable,
+        argv: redactCodexArgv(argv),
+        runtimeVersion,
+        schemaVersion: CODEX_PROTOCOL_RUNTIME_VERSION,
+        schemaHash: CODEX_PROTOCOL_SCHEMA_HASH,
+        runtimeResolution: codexRuntimeResolutionDiagnostics(runtime, (value) =>
+          this.redactDiagnostic(value)
+        )
+      });
+      this.server = server;
+      this.assertStartupActive();
+
+      child = (this.options.spawnProcess ?? spawnPortable)(executable, argv, {
+        cwd: this.options.cwd,
+        env: sanitizeEnvironment(
+          this.options.environment ?? process.env,
+          CODEX_ENVIRONMENT_POLICY.allowedKeys
+        ),
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: false
+        detached: process.platform !== 'win32'
       }) as ChildProcessWithoutNullStreams;
       this.child = child;
+      this.diagnosticTails.set(child, '');
+      this.diagnosticLineBuffers.set(child, '');
 
+      let resolveHandledClose!: () => void;
+      let rejectHandledClose!: (cause: unknown) => void;
+      const handledClose = new Promise<void>((resolve, reject) => {
+        resolveHandledClose = resolve;
+        rejectHandledClose = reject;
+      });
+      this.closeHandlings.set(child, handledClose);
+      void handledClose.catch(() => undefined);
+      child.once('close', (exitCode, signal) => {
+        this.closingChildren.add(child!);
+        void this.handleClose(child!, client, server!, exitCode, signal).then(
+          resolveHandledClose,
+          rejectHandledClose
+        );
+      });
+      child.stderr.on('data', (chunk: Buffer) => this.appendDiagnostic(child!, chunk));
+      child.once('error', (error) => {
+        this.appendDiagnostic(child!, Buffer.from(`${error.message}\n`));
+      });
+
+      this.assertStartupActive();
       await waitForSpawn(child);
-      this.assertStartupAllowed();
-      await this.store.updateAgentServer(server.id, {
+      this.assertStartupActive();
+      const running = await this.store.updateAgentServer(server.id, {
         status: 'RUNNING',
         pid: child.pid
       });
-      this.assertStartupAllowed();
+      if (this.server?.id === server.id) this.server = running;
+      this.assertStartupActive();
 
-      const client = new CodexRpcClient(
+      client = new CodexRpcClient(
         child.stdin,
         child.stdout,
         this.store,
         server.id,
-        this.options.requestTimeoutMs
+        this.options.requestTimeoutMs,
+        codexSensitiveEnvironmentValues(this.options.environment ?? process.env)
       );
       this.client = client;
       client.events.on('protocolError', (error) => {
-        this.events.emit('protocolError', error);
-        void this.failProtocol(error);
-      });
-
-      child.stderr.on('data', (chunk: Buffer) => {
-        const text = chunk.toString('utf8');
-        this.diagnosticTail = `${this.diagnosticTail}${text}`.slice(-32_768);
-        this.events.emit('diagnostic', text);
-      });
-      child.once('close', (exitCode, signal) => {
-        const work = this.handleClose(child, server, exitCode, signal).finally(() => {
-          if (this.closePromise === work) this.closePromise = undefined;
-        });
-        this.closePromise = work;
-      });
-      child.once('error', (error) => {
-        this.events.emit('diagnostic', error.message);
+        if (!this.isCurrentGeneration(child!, client!, server!.id)) return;
+        const safeError = new Error(this.redactDiagnostic(error.message, child));
+        this.events.emit('protocolError', safeError);
+        void this.failProtocol(safeError, child!, client!, server!.id).catch(
+          (cause: unknown) => {
+            this.lifecycleFailure =
+              cause instanceof Error ? cause : new Error(String(cause));
+          }
+        );
       });
 
       await client.request('initialize', {
@@ -379,129 +502,286 @@ export class CodexAppServerSupervisor {
           optOutNotificationMethods: [...CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS]
         }
       });
-      this.assertStartupAllowed();
+      this.assertStartupActive();
       await client.notify('initialized', {});
-      this.assertStartupAllowed();
+      this.assertStartupActive();
 
       const ready = await this.store.updateAgentServer(server.id, {
         status: 'READY',
         initializedAt: new Date().toISOString(),
         lastHealthAt: new Date().toISOString()
       });
-      this.assertStartupAllowed();
+      this.assertStartupActive();
       this.server = ready;
       this.events.emit('ready', ready);
       return client;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.finalizeFailedStart(server.id, message);
-      this.closeClient(message);
-      const child = this.child;
-      if (child && child.exitCode === null && child.signalCode === null) {
-        await terminatePortableProcessTree(child, 'SIGTERM');
-        if (!(await waitForClose(child, 1_000))) {
-          await terminatePortableProcessTree(child, 'SIGKILL');
-          await waitForClose(child, 2_000);
+    } catch (cause) {
+      const message = this.redactDiagnostic(errorMessage(cause), child);
+      const failure = new Error(message, { cause });
+      const cleanupFailures: unknown[] = [];
+      client?.close(message);
+      if (this.client === client) this.client = undefined;
+      if (child && isPortableProcessTreeRunning(child)) {
+        try {
+          await this.ensureProcessTreeExit(
+            child,
+            this.options.shutdownGraceTimeoutMs ?? 1_000,
+            this.options.shutdownKillTimeoutMs ?? 2_000
+          );
+        } catch (cleanupCause) {
+          cleanupFailures.push(cleanupCause);
         }
       }
-      await this.closePromise;
-      await this.disposeCurrentClient();
-      if (this.child === child) this.child = undefined;
-      throw error;
+      if (child) {
+        try {
+          if (!(await this.waitForHandledClose(
+            child,
+            this.options.closeHandlingTimeoutMs ?? 3_000
+          ))) {
+            cleanupFailures.push(
+              new Error('Timed out finalizing the failed Codex App Server startup.')
+            );
+          }
+        } catch (cleanupCause) {
+          cleanupFailures.push(cleanupCause);
+        }
+      }
+      if (
+        cleanupFailures.length === 0 &&
+        this.child === child &&
+        child &&
+        !isPortableProcessTreeRunning(child)
+      ) {
+        this.child = undefined;
+      }
+      if (server) {
+        try {
+          const stored = await this.store.getAgentServer(server.id);
+          if (stored && !isTerminalServerStatus(stored.status)) {
+            const terminal = await this.store.updateAgentServer(server.id, {
+              status: this.shuttingDown ? 'EXITED' : 'FAILED',
+              exitedAt: new Date().toISOString(),
+              exitReason: this.shuttingDown ? 'Codex App Server startup was canceled.' : message
+            });
+            if (this.server?.id === server.id) this.server = terminal;
+          }
+        } catch (cleanupCause) {
+          cleanupFailures.push(cleanupCause);
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        const cleanupFailure = new AggregateError(
+          [failure, ...cleanupFailures],
+          'Codex App Server startup failed and cleanup was incomplete.'
+        );
+        this.lifecycleFailure = cleanupFailure;
+        throw cleanupFailure;
+      }
+      throw failure;
     }
   }
 
-  private assertStartupAllowed(): void {
-    if (this.shuttingDown) {
-      throw new Error('Codex App Server is shutting down.');
-    }
-  }
-
-  private async finalizeFailedStart(serverId: string, message: string): Promise<void> {
-    try {
-      const stored = await this.store.getAgentServer(serverId);
-      if (!stored || isTerminalServerStatus(stored.status)) return;
-      this.server = await this.store.updateAgentServer(serverId, {
-        status: this.shuttingDown ? 'EXITED' : 'FAILED',
-        exitedAt: new Date().toISOString(),
-        exitReason: message
-      });
-    } catch {
-      // Process close may have finalized the same server record concurrently.
-    }
-  }
-
-  private async failProtocol(error: Error): Promise<void> {
+  private async failProtocol(
+    error: Error,
+    child: ChildProcessWithoutNullStreams,
+    client: CodexRpcClient,
+    serverId: string
+  ): Promise<void> {
     // Once an intentional shutdown owns the lifecycle, EOF or a final partial
     // frame must not race the close handler and reclassify that exit as a
     // protocol failure.
-    if (this.shuttingDown) return;
-    if (this.server) {
-      const stored = await this.store.getAgentServer(this.server.id);
-      if (stored) {
-        this.server = stored;
+    if (this.shuttingDown || !this.isCurrentGeneration(child, client, serverId)) return;
+    const safeMessage = this.redactDiagnostic(error.message, child);
+    client.close(`Protocol error: ${safeMessage}`);
+    const termination =
+      isPortableProcessTreeRunning(child)
+        ? this.ensureProcessTreeExit(
+            child,
+            this.options.shutdownGraceTimeoutMs ?? 1_000,
+            this.options.shutdownKillTimeoutMs ?? 2_000
+          )
+        : Promise.resolve();
+    const failures: unknown[] = [];
+    try {
+      const stored = await this.store.getAgentServer(serverId);
+      if (stored && !isTerminalServerStatus(stored.status)) {
+        const failed = await this.store.updateAgentServer(serverId, {
+          status: 'FAILED',
+          exitReason: `Protocol error: ${safeMessage}`
+        });
+        if (this.server?.id === serverId) this.server = failed;
       }
+    } catch (cause) {
+      failures.push(cause);
     }
-    if (this.server && !isTerminalServerStatus(this.server.status)) {
-      this.server = await this.store.updateAgentServer(this.server.id, {
-        status: 'FAILED',
-        exitReason: `Protocol error: ${error.message}`
-      });
+    try {
+      await termination;
+    } catch (cause) {
+      failures.push(cause);
     }
-    this.closeClient(`Protocol error: ${error.message}`);
-    if (this.child) {
-      await terminatePortableProcessTree(this.child, 'SIGTERM');
+    if (failures.length > 0) {
+      const failure = new AggregateError(
+        failures,
+        `Codex App Server protocol-failure cleanup was incomplete: ${safeMessage}`
+      );
+      this.lifecycleFailure = failure;
+      throw failure;
     }
+  }
+
+  private ensureProcessTreeExit(
+    child: ChildProcessWithoutNullStreams,
+    gracefulTimeoutMs: number,
+    killTimeoutMs: number
+  ): Promise<void> {
+    const existing = this.processTreeTerminations.get(child);
+    if (existing) return existing;
+    const termination = terminateAndConfirm(child, gracefulTimeoutMs, killTimeoutMs);
+    this.processTreeTerminations.set(child, termination);
+    return termination;
+  }
+
+  private async waitForHandledClose(
+    child: ChildProcessWithoutNullStreams,
+    timeoutMs: number
+  ): Promise<boolean> {
+    const handledClose = this.closeHandlings.get(child);
+    return handledClose ? waitForPromise(handledClose, timeoutMs) : true;
   }
 
   private async handleClose(
     child: ChildProcessWithoutNullStreams,
+    client: CodexRpcClient | undefined,
     server: AgentServerInstance,
     exitCode: number | null,
     signal: NodeJS.Signals | null
   ): Promise<void> {
-    const unexpected = !this.shuttingDown;
-    this.closeClient(
+    this.flushDiagnosticBuffer(child);
+    const wasCurrent = this.child === child && this.server?.id === server.id;
+    const unexpected = wasCurrent && !this.shuttingDown;
+    let inboundDrainFailure: unknown;
+    try {
+      await client?.drainInbound();
+    } catch (cause) {
+      inboundDrainFailure = cause;
+      this.lifecycleFailure =
+        cause instanceof Error ? cause : new Error(String(cause));
+    }
+    client?.close(
       unexpected ? 'Codex App Server exited unexpectedly.' : 'Codex App Server stopped.'
     );
-    await this.disposeCurrentClient();
-    if (this.child === child) this.child = undefined;
-
-    const terminalStatus = unexpected && exitCode !== 0 ? 'FAILED' : 'EXITED';
+    let processTreeFailure: unknown;
+    if (isPortableProcessTreeRunning(child)) {
+      try {
+        await this.ensureProcessTreeExit(
+          child,
+          this.options.shutdownGraceTimeoutMs ?? 1_000,
+          this.options.shutdownKillTimeoutMs ?? 2_000
+        );
+      } catch (cause) {
+        processTreeFailure = cause;
+        this.lifecycleFailure = cause instanceof Error ? cause : new Error(String(cause));
+      }
+    }
+    const processTreeExited = !isPortableProcessTreeRunning(child);
+    const terminalStatus = !processTreeExited
+      ? 'LOST'
+      : unexpected && exitCode !== 0
+        ? 'FAILED'
+        : 'EXITED';
+    let emittedServer = server;
+    let storageFailure: unknown;
     try {
-      const stored = await this.store.updateAgentServer(server.id, {
-        status: terminalStatus,
-        exitedAt: new Date().toISOString(),
-        exitCode,
-        signal,
-        exitReason: this.diagnosticTail.trim() || undefined
-      });
-      this.server = stored;
-      this.events.emit('exit', stored, unexpected);
-    } catch {
-      // A protocol failure may have already finalized the same server record.
-      this.events.emit('exit', server, unexpected);
+      const current = await this.store.getAgentServer(server.id);
+      const stored = current && !isTerminalServerStatus(current.status)
+        ? await this.store.updateAgentServer(server.id, {
+            status: terminalStatus,
+            exitedAt: new Date().toISOString(),
+            exitCode,
+            signal,
+            exitReason:
+              this.redactedDiagnosticTail(child) ||
+              this.terminationReasons.get(child) ||
+              undefined
+          })
+        : current ?? server;
+      emittedServer = stored;
+    } catch (cause) {
+      storageFailure = cause;
+      this.lifecycleFailure = cause instanceof Error ? cause : new Error(String(cause));
+    } finally {
+      if (this.client === client) this.client = undefined;
+      if (this.child === child && processTreeExited) this.child = undefined;
+      if (wasCurrent && this.server?.id === server.id) this.server = emittedServer;
+    }
+    if (wasCurrent) {
+      this.events.emit('exit', emittedServer, unexpected, processTreeExited);
+    }
+    const failures: unknown[] = [];
+    if (inboundDrainFailure !== undefined) failures.push(inboundDrainFailure);
+    if (processTreeFailure !== undefined) failures.push(processTreeFailure);
+    if (storageFailure !== undefined) failures.push(storageFailure);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Codex App Server exit cleanup was incomplete.');
     }
   }
 
-  private hasLiveChild(): boolean {
-    return Boolean(
-      this.child && this.child.exitCode === null && this.child.signalCode === null
+  private assertStartupActive(): void {
+    if (this.shuttingDown) throw new Error('Codex App Server startup was canceled.');
+  }
+
+  private isCurrentGeneration(
+    child: ChildProcessWithoutNullStreams,
+    client: CodexRpcClient,
+    serverId: string
+  ): boolean {
+    return this.child === child && this.client === client && this.server?.id === serverId;
+  }
+
+  private appendDiagnostic(child: ChildProcessWithoutNullStreams, chunk: Buffer): void {
+    const text = chunk.toString('utf8');
+    this.diagnosticTails.set(
+      child,
+      boundedTail(`${this.diagnosticTails.get(child) ?? ''}${text}`, 32_768)
     );
+    const combined = boundedTail(
+      `${this.diagnosticLineBuffers.get(child) ?? ''}${text}`,
+      32_768
+    );
+    const lines = combined.split(/(?<=\n)/u);
+    const remainder = lines.at(-1)?.endsWith('\n') ? '' : lines.pop() ?? '';
+    this.diagnosticLineBuffers.set(child, remainder);
+    if (this.child !== child) return;
+    for (const line of lines) {
+      const diagnostic = this.redactDiagnostic(line, child);
+      if (diagnostic) this.events.emit('diagnostic', diagnostic);
+    }
   }
 
-  private closeClient(reason: string): void {
-    const client = this.client;
-    if (!client) return;
-    client.close(reason);
+  private flushDiagnosticBuffer(child: ChildProcessWithoutNullStreams): void {
+    const remainder = this.diagnosticLineBuffers.get(child) ?? '';
+    this.diagnosticLineBuffers.delete(child);
+    if (remainder && this.child === child) {
+      this.events.emit('diagnostic', this.redactDiagnostic(remainder, child));
+    }
   }
 
-  private async disposeCurrentClient(): Promise<void> {
-    const client = this.client;
-    if (!client) return;
-    await client.drain();
-    client.events.removeAllListeners();
-    if (this.client === client) this.client = undefined;
+  private redactedDiagnosticTail(child: ChildProcessWithoutNullStreams): string {
+    return this.redactDiagnostic(this.diagnosticTails.get(child) ?? '', child).trim();
+  }
+
+  private redactDiagnostic(
+    value: string,
+    _child?: ChildProcessWithoutNullStreams
+  ): string {
+    let redacted = redactCredentialText(value);
+    for (const sensitive of codexSensitiveEnvironmentValues(
+      this.options.environment ?? process.env
+    )) {
+      redacted = redacted.split(sensitive).join(REDACTED_CREDENTIAL);
+    }
+    return redacted;
   }
 }
 
@@ -510,7 +790,8 @@ function isTerminalServerStatus(status: AgentServerInstance['status']): boolean 
 }
 
 function codexRuntimeResolutionDiagnostics(
-  runtime: ResolvedCodexRuntime
+  runtime: ResolvedCodexRuntime,
+  redact: (value: string) => string = (value) => value
 ): AgentRuntimeResolutionDiagnostics {
   return {
     selectedExecutable: runtime.executable,
@@ -527,42 +808,74 @@ function codexRuntimeResolutionDiagnostics(
       launchArgv: probe.launch ? [...probe.launch.argv] : undefined,
       launchForm: probe.launch?.form,
       missingCapabilities: probe.missingMethods ? [...probe.missingMethods] : undefined,
-      detail: probe.detail
+      detail: probe.detail ? redact(probe.detail) : probe.detail
     }))
   };
 }
 
-function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onSpawn = () => {
-      child.off('error', onError);
-      resolve();
-    };
-    const onError = (error: Error) => {
-      child.off('spawn', onSpawn);
-      reject(error);
-    };
-    child.once('spawn', onSpawn);
-    child.once('error', onError);
+function redactCodexArgv(argv: readonly string[]): string[] {
+  return argv.map((argument, index) => {
+    const previous = argv[index - 1];
+    if (previous && /^(?:--?|\/)(?:api[-_]?key|auth[-_]?token|token|password|secret)$/iu.test(previous)) {
+      return REDACTED_CREDENTIAL;
+    }
+    return redactCredentialText(argument);
   });
 }
 
-function waitForClose(
+export function codexSensitiveEnvironmentValues(
+  environment: NodeJS.ProcessEnv
+): string[] {
+  return Object.entries(environment)
+    .filter(([key, value]) => Boolean(value) && isSensitiveCredentialFieldName(key))
+    .map(([, value]) => value!)
+    .sort((left, right) => right.length - left.length);
+}
+
+function boundedTail(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value, 'utf8');
+  return buffer.byteLength <= maxBytes
+    ? value
+    : buffer.subarray(buffer.byteLength - maxBytes).toString('utf8');
+}
+
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+async function terminateAndConfirm(
   child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
-): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
+  gracefulTimeoutMs: number,
+  killTimeoutMs: number
+): Promise<void> {
+  if (!isPortableProcessTreeRunning(child)) return;
+  await terminatePortableProcessTree(child, 'SIGTERM');
+  if (await waitForPortableProcessTreeExit(child, gracefulTimeoutMs)) return;
+  await terminatePortableProcessTree(child, 'SIGKILL');
+  if (!(await waitForPortableProcessTreeExit(child, killTimeoutMs))) {
+    throw new Error(`Codex App Server process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`);
   }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
+}
+
+function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
+  return new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+}
+
+function waitForPromise(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    void promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      (cause) => {
+        clearTimeout(timer);
+        reject(cause);
+      }
+    );
   });
 }

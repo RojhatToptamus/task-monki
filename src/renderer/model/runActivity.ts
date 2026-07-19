@@ -75,7 +75,6 @@ export function buildRunActivityProjection(input: {
   run: Pick<RunRecord, 'id' | 'status' | 'startedAt' | 'lastEventAt'>;
   items: AgentItemRecord[];
   interactions?: InteractionRequestRecord[];
-  includeWaiting?: boolean;
   groupContext?: boolean;
 }): RunActivityProjection {
   const runItems = input.items.filter((item) => item.runId === input.run.id);
@@ -90,11 +89,7 @@ export function buildRunActivityProjection(input: {
     ...activityRowFromInteraction(interaction),
     order: order++
   }));
-  const waiting = input.includeWaiting === false
-    ? undefined
-    : waitingActivityRow(input.run, requestRows);
-  const candidates = waiting ? [...itemRows, ...requestRows, { ...waiting, order: order++ }] : [...itemRows, ...requestRows];
-  const rows = [...candidates]
+  const rows = [...itemRows, ...requestRows]
     .sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
     .map(stripCandidateOrder);
   const groupedRows = input.groupContext === false ? rows : groupContextRows(rows);
@@ -208,17 +203,36 @@ function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
         })
       ];
     case 'WEB_SEARCH':
-      return [
-        rowFromItem(item, {
-          category: 'web',
-          label: 'Web',
-          detail: compactValue(stringValue(payload.query) ?? 'search', 72),
-          tone: activityToneForStatus(activityStatusForItem(item.status), false),
-          status: activityStatusForItem(item.status),
-          at,
-          suffix: `web:${normalizeKey(stringValue(payload.query) ?? '')}`
-        })
-      ];
+      {
+        const detail = providerToolDetail(payload, 'request');
+        return [
+          rowFromItem(item, {
+            category: 'web',
+            label: 'Web',
+            detail,
+            tone: activityToneForStatus(activityStatusForItem(item.status), false),
+            status: activityStatusForItem(item.status),
+            at,
+            suffix: `web:${normalizeKey(detail)}`
+          })
+        ];
+      }
+    case 'OTHER':
+      if (payload.kind === 'search') {
+        const detail = providerToolDetail(payload, 'project');
+        return [
+          rowFromItem(item, {
+            category: 'search',
+            label: 'Search',
+            detail,
+            tone: activityToneForStatus(activityStatusForItem(item.status), false),
+            status: activityStatusForItem(item.status),
+            at,
+            suffix: `search:${normalizeKey(detail)}`
+          })
+        ];
+      }
+      return [];
     case 'CONTEXT_COMPACTION':
       return [
         rowFromItem(item, {
@@ -264,7 +278,6 @@ function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
     case 'PLAN':
     case 'REASONING_SUMMARY':
     case 'USER_MESSAGE':
-    case 'OTHER':
     default:
       return [];
   }
@@ -481,46 +494,6 @@ function activityRowFromInteraction(interaction: InteractionRequestRecord): RunA
   };
 }
 
-function waitingActivityRow(
-  run: Pick<RunRecord, 'id' | 'status' | 'startedAt' | 'lastEventAt'>,
-  requestRows: ActivityCandidate[]
-): RunActivityLeaf | undefined {
-  const at = run.lastEventAt ?? run.startedAt;
-  if (run.status === 'AWAITING_APPROVAL') {
-    if (requestRows.some((row) => row.category === 'permission' && row.status === 'active')) {
-      return undefined;
-    }
-    return {
-      key: `run-waiting:${run.id}:permission`,
-      category: 'permission',
-      label: 'Waiting',
-      detail: 'for approval',
-      tone: 'action',
-      status: 'active',
-      at,
-      sourceItemIds: [],
-      sourceInteractionIds: []
-    };
-  }
-  if (run.status === 'AWAITING_USER_INPUT') {
-    if (requestRows.some((row) => row.category === 'question' && row.status === 'active')) {
-      return undefined;
-    }
-    return {
-      key: `run-waiting:${run.id}:question`,
-      category: 'question',
-      label: 'Waiting',
-      detail: 'for user input',
-      tone: 'action',
-      status: 'active',
-      at,
-      sourceItemIds: [],
-      sourceInteractionIds: []
-    };
-  }
-  return undefined;
-}
-
 function rowFromItem(
   item: AgentItemRecord,
   input: Omit<RunActivityLeaf, 'key' | 'sourceItemIds' | 'sourceInteractionIds'> & {
@@ -718,6 +691,21 @@ function searchActivityDetail(
     return `${compactQuery} · ${compactPath}`;
   }
   return compactQuery ?? compactPath ?? 'project';
+}
+
+function providerToolDetail(
+  payload: Record<string, unknown>,
+  fallback: string
+): string {
+  const rawInput = objectPayload(payload.rawInput);
+  return compactValue(
+    stringValue(rawInput.query) ??
+      stringValue(rawInput.url) ??
+      stringValue(rawInput.path) ??
+      stringValue(payload.title) ??
+      fallback,
+    72
+  );
 }
 
 function compactToolName(payload: Record<string, unknown>): string | undefined {

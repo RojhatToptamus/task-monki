@@ -1,6 +1,6 @@
 import type {
-  CodexReviewFinding,
-  CodexReviewGateStatus,
+  AgentReviewFinding,
+  AgentReviewGateStatus,
   MergeStatus,
   Task,
   VerifiedChecksEvidence,
@@ -9,8 +9,10 @@ import type {
 import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
+  getImplementationRetryReason,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import { isImplementationOutcomeBlocked } from '../model/nextAction';
 import {
   canCreateDeliveryCommit,
   formatShortId
@@ -47,6 +49,43 @@ export interface TaskCardVM {
   archived: boolean;
   hasDecision: boolean;
   evidence: CardEvidenceItem[];
+}
+
+export interface RunFailureBannerViewModel {
+  status: 'FAILED' | 'LOST' | 'RECOVERY_REQUIRED' | 'NEEDS_RETRY';
+  title: string;
+  detail: string;
+}
+
+export function describeRunFailureBanner(
+  task: Task
+): RunFailureBannerViewModel | undefined {
+  if (isImplementationOutcomeBlocked(task)) {
+    return {
+      status: 'NEEDS_RETRY',
+      title: 'Implementation needs another pass',
+      detail:
+        getImplementationRetryReason(task) ??
+        'Retry or continue this implementation before review.'
+    };
+  }
+  switch (task.projection.agentRun) {
+    case 'FAILED':
+      return {
+        status: 'FAILED',
+        title: 'The agent run failed',
+        detail: `${task.projection.summary} Retry in this session or continue from the current worktree.`
+      };
+    case 'LOST':
+    case 'RECOVERY_REQUIRED':
+      return {
+        status: task.projection.agentRun,
+        title: 'Task Monki cannot prove the final provider state',
+        detail: task.projection.summary
+      };
+    default:
+      return undefined;
+  }
 }
 
 export interface TaskCardOptions {
@@ -112,7 +151,11 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   }
 
   const attention = describeTaskAttention(task);
-  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+  if (
+    attention &&
+    (reviewAttentionShouldWin(task.projection.agentRun) ||
+      isImplementationOutcomeBlocked(task))
+  ) {
     return {
       label: attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
@@ -181,7 +224,11 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
   }
 
   const attention = describeTaskAttention(task);
-  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+  if (
+    attention &&
+    (reviewAttentionShouldWin(task.projection.agentRun) ||
+      isImplementationOutcomeBlocked(task))
+  ) {
     return {
       label: attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
@@ -209,12 +256,12 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
 }
 
-export function taskReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
-  return task.projection.codexReview ?? { status: 'NOT_RUN' };
+export function taskReviewGate(task: Task): NonNullable<Task['projection']['agentReview']> {
+  return task.projection.agentReview ?? { status: 'NOT_RUN' };
 }
 
 export function canRequestReviewChanges(
-  review: NonNullable<Task['projection']['codexReview']>,
+  review: NonNullable<Task['projection']['agentReview']>,
   effectiveStatus = review.status,
   hasReviewOutput = Boolean(review.result)
 ): boolean {
@@ -229,7 +276,7 @@ export function canRequestReviewChanges(
 
 export function getFinishEvidenceState(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = taskReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -259,7 +306,7 @@ export function getFinishEvidenceState(
 
 export function finishRequirementsForTask(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = taskReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -280,7 +327,7 @@ export function finishRequirementsForTask(
 
 export function finishActionsForTask(input: {
   task: Task;
-  reviewStatus: CodexReviewGateStatus;
+  reviewStatus: AgentReviewGateStatus;
   finishEvidence: FinishEvidenceState;
   actionBusy?: boolean;
   actionsPaused?: boolean;
@@ -356,7 +403,7 @@ function isFixingReviewFeedback(task: Task): boolean {
 }
 
 function reviewFinishWarning(
-  status: CodexReviewGateStatus
+  status: AgentReviewGateStatus
 ): FinishEvidenceWarning | undefined {
   if (status === 'PASSED') {
     return undefined;
@@ -469,9 +516,13 @@ function verificationFinishBlocker(
 }
 
 function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
-  return ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'RECOVERY_REQUIRED', 'LOST'].includes(
-    agentRun
-  );
+  return [
+    'AWAITING_APPROVAL',
+    'AWAITING_USER_INPUT',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'LOST'
+  ].includes(agentRun);
 }
 
 export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
@@ -486,7 +537,7 @@ export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
 }
 
 const FINDING_SEVERITY_LABELS: Array<{
-  severity: CodexReviewFinding['severity'];
+  severity: AgentReviewFinding['severity'];
   singular: string;
 }> = [
   { severity: 'BLOCKER', singular: 'blocker' },
@@ -611,7 +662,7 @@ export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
   return false;
 }
 
-function reviewRequirement(status: CodexReviewGateStatus): FinishRequirement {
+function reviewRequirement(status: AgentReviewGateStatus): FinishRequirement {
   switch (status) {
     case 'PASSED':
       return { label: 'Review', detail: 'passed', tone: 'success', unresolved: false };

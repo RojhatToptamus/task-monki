@@ -189,7 +189,7 @@ describe('review activity model', () => {
         itemFixture({
           runId: reviewRun.id,
           payload: {
-            text: '```json\n{"schemaVersion":"codex-review/v1","verdict":"NEEDS_CHANGES","findings":[]}\n```'
+            text: '```json\n{"schemaVersion":"agent-review/v1","verdict":"NEEDS_CHANGES","findings":[]}\n```'
           },
           providerCompletedAt: '2026-07-07T10:06:00.000Z'
         })
@@ -198,7 +198,7 @@ describe('review activity model', () => {
 
     expect(view).toEqual({ label: 'Preparing review findings.' });
     expect(JSON.stringify(view)).not.toContain('schemaVersion');
-    expect(JSON.stringify(view)).not.toContain('codex-review/v1');
+    expect(JSON.stringify(view)).not.toContain('agent-review/v1');
   });
 
   it('returns no activity outside a running review', () => {

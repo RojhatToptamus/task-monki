@@ -637,6 +637,7 @@ describe('run progress model', () => {
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
@@ -664,7 +665,7 @@ function planFixture(
     iterationId: 'iteration-1',
     runId: 'run-1',
     sessionId: 'session-1',
-    provider: 'codex',
+    runtimeId: 'codex',
     revision: 1,
     explanation: 'Plan',
     steps: [{ step: 'Implement', status: 'IN_PROGRESS' }],
