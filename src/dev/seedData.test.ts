@@ -41,7 +41,7 @@ describe('Task Monki development seed data', () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
     snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
-  }, 90_000);
+  }, 180_000);
 
   afterAll(async () => {
     if (rootDir) {

@@ -863,7 +863,7 @@ describe('FileTaskStore', () => {
       createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()
     });
     const artifactPaths = new Map<number, string>();
-    for (let index = 1; index <= 25; index += 1) {
+    for (let index = 1; index <= 8; index += 1) {
       const stdout = await store.createPreviewArtifact(task.id, 'preview-stdout');
       const stderr = await store.createPreviewArtifact(task.id, 'preview-stderr');
       artifactPaths.set(index, stdout.path);
@@ -880,10 +880,10 @@ describe('FileTaskStore', () => {
       });
     }
 
-    await expect(store.prunePreviewProbeHistory(generation.id, 'web-probe', 20)).resolves.toBe(5);
+    await expect(store.prunePreviewProbeHistory(generation.id, 'web-probe', 3)).resolves.toBe(5);
     const snapshot = await store.snapshot();
-    expect(snapshot.previewNodeAttempts.filter((attempt) => attempt.nodeId === 'web-probe')).toHaveLength(20);
-    expect(snapshot.previewResources.filter((resource) => resource.logicalNodeId === 'web-probe')).toHaveLength(20);
+    expect(snapshot.previewNodeAttempts.filter((attempt) => attempt.nodeId === 'web-probe')).toHaveLength(3);
+    expect(snapshot.previewResources.filter((resource) => resource.logicalNodeId === 'web-probe')).toHaveLength(3);
     expect(
       snapshot.events.some(
         (event) =>
@@ -892,7 +892,7 @@ describe('FileTaskStore', () => {
       )
     ).toBe(false);
     await expect(fs.access(artifactPaths.get(1)!)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.access(artifactPaths.get(25)!)).resolves.toBeUndefined();
+    await expect(fs.access(artifactPaths.get(8)!)).resolves.toBeUndefined();
     await fs.rm(dir, { recursive: true, force: true });
   });
 

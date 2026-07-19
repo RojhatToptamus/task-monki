@@ -6,6 +6,7 @@ import type { PreviewExecutionBlocker } from '../../../shared/preview';
 import {
   isOwnedByCurrentUser,
   posixModeMatches,
+  readPrivateFile,
   syncDirectoryIfSupported,
   writePrivateFileAtomically
 } from '../../filesystem/secureFilesystem';
@@ -326,30 +327,9 @@ async function readIndexFile(filePath: string): Promise<IndexReadResult> {
 }
 
 async function readProtectedFile(filePath: string, maximumBytes: number): Promise<Buffer> {
-  const handle = await fs.open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-  const allocation = Buffer.alloc(maximumBytes + 1);
-  let offset = 0;
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size > maximumBytes ||
-      !posixModeMatches(stat, 0o600) ||
-      !isOwnedByCurrentUser(stat)
-    ) {
-      throw new Error('Unsafe private vault file.');
-    }
-    while (offset < allocation.length) {
-      const { bytesRead } = await handle.read(allocation, offset, allocation.length - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    if (offset > maximumBytes) throw new Error('Private vault file is too large.');
-    return Buffer.from(allocation.subarray(0, offset));
-  } finally {
-    allocation.fill(0);
-    await handle.close();
-  }
+  return readPrivateFile(filePath, maximumBytes, {
+    permissionPolicy: 'REQUIRE'
+  });
 }
 
 function validateVaultIndex(value: unknown): VaultIndex {

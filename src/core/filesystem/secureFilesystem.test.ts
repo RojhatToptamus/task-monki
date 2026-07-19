@@ -116,6 +116,20 @@ describe('secure filesystem platform boundaries', () => {
   });
 
   it.runIf(process.platform !== 'win32')(
+    'can require an existing private mode without repairing it',
+    async () => {
+      const directory = await temporaryDirectory();
+      const filePath = path.join(directory, 'private.txt');
+      await fs.writeFile(filePath, 'private', { mode: 0o644 });
+
+      await expect(
+        readPrivateFile(filePath, 64, { permissionPolicy: 'REQUIRE' })
+      ).rejects.toBeTruthy();
+      expect((await fs.stat(filePath)).mode & 0o777).toBe(0o644);
+    }
+  );
+
+  it(
     'rejects symlinked private files and directories without changing their targets',
     async () => {
       const directory = await temporaryDirectory();
@@ -131,7 +145,11 @@ describe('secure filesystem platform boundaries', () => {
       const outsideDirectory = path.join(directory, 'outside-directory');
       const directoryLink = path.join(directory, 'linked-directory');
       await fs.mkdir(outsideDirectory, { mode: 0o700 });
-      await fs.symlink(outsideDirectory, directoryLink);
+      await fs.symlink(
+        outsideDirectory,
+        directoryLink,
+        process.platform === 'win32' ? 'junction' : 'dir'
+      );
       await expect(ensurePrivateDirectory(directoryLink)).rejects.toBeTruthy();
     }
   );

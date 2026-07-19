@@ -96,10 +96,10 @@ export async function startCodexEphemeralReadOnlyRun(
     cwd: input.cwd,
     stdin: input.instruction
   });
-  return superviseResult(process, input.timeoutMs);
+  return superviseCodexEphemeralProcess(process, input.timeoutMs);
 }
 
-function superviseResult(
+export function superviseCodexEphemeralProcess(
   process: SupervisedProcess,
   timeoutMs: number
 ): CodexEphemeralReadOnlyRun {

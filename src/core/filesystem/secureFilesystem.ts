@@ -67,6 +67,14 @@ export async function syncDirectoryIfSupported(directory: string): Promise<void>
 
 export async function ensurePrivateDirectory(directory: string): Promise<void> {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const pathStat = await fs.lstat(directory);
+  if (
+    pathStat.isSymbolicLink() ||
+    !pathStat.isDirectory() ||
+    !isOwnedByCurrentUser(pathStat)
+  ) {
+    throw new Error('Private directory failed its integrity check.');
+  }
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(
@@ -76,7 +84,11 @@ export async function ensurePrivateDirectory(directory: string): Promise<void> {
         (fsConstants.O_NOFOLLOW ?? 0)
     );
     const stat = await handle.stat();
-    if (!stat.isDirectory() || !isOwnedByCurrentUser(stat)) {
+    if (
+      !stat.isDirectory() ||
+      !isOwnedByCurrentUser(stat) ||
+      !samePathFileIdentity(pathStat, stat)
+    ) {
       throw new Error('Private directory failed its integrity check.');
     }
     await enforcePosixMode(handle, 0o700);
@@ -90,10 +102,16 @@ export async function ensurePrivateDirectory(directory: string): Promise<void> {
 
 export async function readPrivateFile(
   filePath: string,
-  maxBytes: number
+  maxBytes: number,
+  options: { permissionPolicy?: 'ENFORCE' | 'REQUIRE' } = {}
 ): Promise<Buffer> {
   assertReadLimit(maxBytes);
-  const { handle, stat } = await openPrivateFile(filePath, fsConstants.O_RDONLY);
+  const { handle, stat } = await openPrivateFile(
+    filePath,
+    fsConstants.O_RDONLY,
+    undefined,
+    options.permissionPolicy
+  );
   try {
     if (stat.size > maxBytes) {
       throw new Error('Private file exceeds its size limit.');
@@ -208,11 +226,14 @@ export async function writePrivateFileAtomically(
 async function openPrivateFile(
   filePath: string,
   flags: number,
-  mode?: number
+  mode?: number,
+  permissionPolicy: 'ENFORCE' | 'REQUIRE' = 'ENFORCE'
 ): Promise<{
   handle: Awaited<ReturnType<typeof fs.open>>;
   stat: Stats;
 }> {
+  const pathStatBefore = await lstatIfExists(filePath);
+  if (pathStatBefore) assertPrivatePathStat(pathStatBefore);
   const handle = await fs.open(
     filePath,
     flags |
@@ -222,18 +243,43 @@ async function openPrivateFile(
   );
   try {
     const before = await handle.stat();
-    if (!before.isFile() || !isOwnedByCurrentUser(before)) {
-      throw new Error('Private file failed its integrity check.');
+    if (permissionPolicy === 'REQUIRE') {
+      assertPrivateFileStat(before);
+    } else {
+      if (!before.isFile() || !isOwnedByCurrentUser(before)) {
+        throw new Error('Private file failed its integrity check.');
+      }
+      await enforcePosixMode(handle, 0o600);
     }
-    await enforcePosixMode(handle, 0o600);
     const stat = await handle.stat();
     assertPrivateFileStat(stat);
-    if (!sameFileIdentity(before, stat)) {
+    const pathStatAfter = await fs.lstat(filePath);
+    assertPrivatePathStat(pathStatAfter);
+    if (
+      !sameFileIdentity(before, stat) ||
+      !samePathFileIdentity(pathStatAfter, stat) ||
+      (pathStatBefore !== undefined && !samePathFileIdentity(pathStatBefore, stat))
+    ) {
       throw new Error('Private file changed during initialization.');
     }
     return { handle, stat };
   } catch (error) {
     await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+function assertPrivatePathStat(stat: Stats): void {
+  if (stat.isSymbolicLink() || !stat.isFile() || !isOwnedByCurrentUser(stat)) {
+    throw new Error('Private file failed its path integrity check.');
+  }
+}
+
+async function lstatIfExists(filePath: string): Promise<Stats | undefined> {
+  try {
+    return await fs.lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;
   }
 }
@@ -296,6 +342,20 @@ function sameFileIdentity(
   return (
     left.dev === right.dev &&
     (left.ino === 0 || right.ino === 0 || left.ino === right.ino)
+  );
+}
+
+function samePathFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint }
+): boolean {
+  const leftInodeKnown = left.ino !== 0 && left.ino !== BigInt(0);
+  const rightInodeKnown = right.ino !== 0 && right.ino !== BigInt(0);
+  return (
+    leftInodeKnown &&
+    rightInodeKnown &&
+    left.dev === right.dev &&
+    left.ino === right.ino
   );
 }
 
