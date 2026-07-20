@@ -63,6 +63,25 @@ capabilities, so those operations are never assumed to be Codex-only and an
 unsupported provider is never offered for them. Reasoning choices come from the
 selected model's native catalog.
 
+## Discourse
+
+Discourse is a global technical conversation workspace beside task workflow.
+It supports human-only notes, one-agent Direct replies, independent two- or
+three-agent Panels, and a bounded Team sequence in which Lead answers, Skeptic
+and Verifier review exact claims, and Lead may append one attributable
+correction. It never creates a hidden task or treats an agent response as Git,
+test, GitHub, workflow, or acceptance evidence.
+
+Task and repository context is explicit per message or explicitly pinned.
+Agent turns use immutable context snapshots and a read-only, offline execution
+scope. Runtime/model identity is frozen in participant revisions, so a reply is
+never silently rerouted to the current default runtime. Only runtimes with an
+adapter-attested scoped Discourse boundary are offered; unsupported runtimes
+stay visible as unavailable with their reason rather than falling back.
+
+See `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md` for response policies,
+waiting, review/correction, stale context, cancellation, recovery, and limits.
+
 Provider catalogs keep their native scope. Cursor model discovery begins only
 after the user selects Cursor and its current ACP process has no cached catalog.
 Loading, failure, and retry remain inside the selector. The adapter reuses the

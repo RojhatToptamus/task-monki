@@ -4,7 +4,9 @@ import {
   focusOwningMenu,
   handleMenuBlur,
   handleMenuKeyDown,
+  isMenuPageTabStop,
   menuNavigationIndex,
+  menuTabTarget,
   menuTriggerFocusTarget
 } from './menuKeyboard';
 
@@ -29,7 +31,26 @@ describe('menu keyboard navigation', () => {
     expect(menuNavigationIndex('Enter', 0, 3)).toBeUndefined();
   });
 
-  it('skips native and aria-disabled items, prefers the selection, and falls back to the menu', () => {
+  it('finds the adjacent page tab stop in either direction', () => {
+    const before = {} as HTMLElement;
+    const trigger = {} as HTMLElement;
+    const after = {} as HTMLElement;
+    const tabStops = [before, trigger, after];
+
+    expect(menuTabTarget(trigger, false, tabStops)).toBe(after);
+    expect(menuTabTarget(trigger, true, tabStops)).toBe(before);
+    expect(menuTabTarget({} as HTMLElement, false, tabStops)).toBeUndefined();
+  });
+
+  it('excludes open-menu descendants from page tab traversal', () => {
+    const pageButton = fakePageTabStop(false);
+    const menuButton = fakePageTabStop(true);
+
+    expect(isMenuPageTabStop(pageButton)).toBe(true);
+    expect(isMenuPageTabStop(menuButton)).toBe(false);
+  });
+
+  it('skips native disabled items while keeping aria-disabled reasons navigable', () => {
     const nativeDisabled = fakeMenuItem({ disabled: true, checked: true });
     const ariaDisabled = fakeMenuItem({ ariaDisabled: true });
     const selected = fakeMenuItem({ checked: true });
@@ -38,15 +59,17 @@ describe('menu keyboard navigation', () => {
 
     focusMenuItem(menu.item, 'selected');
     expect(selected.focus).toHaveBeenCalledOnce();
+    expect(selected.focus).toHaveBeenCalledWith({ preventScroll: true });
     expect(nativeDisabled.focus).not.toHaveBeenCalled();
     expect(ariaDisabled.focus).not.toHaveBeenCalled();
 
     const disabledOnlyMenu = fakeMenu([nativeDisabled.item, ariaDisabled.item]);
     focusMenuItem(disabledOnlyMenu.item);
-    expect(disabledOnlyMenu.focus).toHaveBeenCalledOnce();
+    expect(ariaDisabled.focus).toHaveBeenCalledOnce();
+    expect(disabledOnlyMenu.focus).not.toHaveBeenCalled();
   });
 
-  it('restores the trigger when Escape or Tab closes the menu', () => {
+  it('restores the trigger for Escape', () => {
     const order: string[] = [];
     const returnFocus = {
       focus: vi.fn(() => order.push('focus'))
@@ -58,13 +81,7 @@ describe('menu keyboard navigation', () => {
     expect(escape.preventDefault).toHaveBeenCalledOnce();
     expect(escape.stopPropagation).toHaveBeenCalledOnce();
     expect(order).toEqual(['close', 'focus']);
-
-    order.length = 0;
-    onClose.mockClear();
-    const tab = fakeKeyboardEvent('Tab');
-    handleMenuKeyDown(tab.event, { onClose, returnFocus });
-    expect(tab.preventDefault).toHaveBeenCalledOnce();
-    expect(order).toEqual(['close', 'focus']);
+    expect(returnFocus.focus).toHaveBeenCalledWith({ preventScroll: true });
   });
 
   it('moves action focus to the owning menu before items become disabled', () => {
@@ -142,4 +159,16 @@ function fakeKeyboardEvent(key: string) {
     stopPropagation
   } as unknown as Parameters<typeof handleMenuKeyDown>[0];
   return { event, preventDefault, stopPropagation };
+}
+
+function fakePageTabStop(inMenu: boolean): HTMLElement {
+  return {
+    tabIndex: 0,
+    closest(selector: string) {
+      return inMenu && selector.includes('[role="menu"]') ? {} : null;
+    },
+    getClientRects() {
+      return [{}];
+    }
+  } as unknown as HTMLElement;
 }

@@ -156,6 +156,23 @@ methods. One unavailable runtime degrades only its catalog row. Duplicate
 runtime IDs, unqualified model IDs, cross-runtime models, and duplicate model
 IDs are configuration errors.
 
+### Scoped Discourse turns
+
+Discourse uses an additive `AgentScopedRuntimeAdapter` capability rather than
+calling a provider-shaped service directly. A scoped adapter builds an attested
+execution context, starts or interrupts an owner-neutral session/run, and emits
+events correlated by Task Monki run ID. `AgentScopedTurnRouter` selects the
+binding by the immutable session `runtimeId`; it has no default or cross-runtime
+fallback.
+
+This boundary is intentionally stricter than normal task execution. A runtime
+is eligible only when it can attest exact read roots, read-only filesystem
+access, disabled network/external tools, and no approval exceptions. Codex
+currently satisfies that contract. OpenCode and registered ACP runtimes keep
+their normal task support but are unavailable for Discourse until their own
+adapters can attest an equivalent boundary. Provider-neutral orchestration does
+not mean pretending unequal security capabilities are equivalent.
+
 ## Typed readiness
 
 Runtime availability is a staged contract, not a boolean inferred from a

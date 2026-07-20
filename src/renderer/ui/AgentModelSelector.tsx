@@ -25,6 +25,11 @@ interface AgentModelSelectorProps {
   models: AgentModel[];
   runtimes: AgentRuntimeState[];
   disabled?: boolean;
+  compact?: boolean;
+  fallbackSummary?: string;
+  selectionUnavailable?: boolean;
+  showSelectionError?: boolean;
+  selectionUnavailableMessage?: string;
   access?: ReactNode;
   onDiscoverModels?(runtimeId: string): Promise<void>;
   onDiscoveryStatusChange?(status: ModelDiscoveryStatus): void;
@@ -51,6 +56,11 @@ export function AgentModelSelector({
   models,
   runtimes,
   disabled = false,
+  compact = false,
+  fallbackSummary,
+  selectionUnavailable = false,
+  showSelectionError = true,
+  selectionUnavailableMessage = 'Choose an available provider and model.',
   access,
   onDiscoverModels,
   onDiscoveryStatusChange,
@@ -61,9 +71,11 @@ export function AgentModelSelector({
   const [discovery, setDiscovery] = useState<DiscoveryState>();
   const [menuGeometry, setMenuGeometry] = useState<{
     maxHeight: number;
+    maxWidth?: number;
     placement: 'bottom' | 'top';
   }>();
   const popupId = useId();
+  const selectionErrorId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -129,20 +141,20 @@ export function AgentModelSelector({
       const trigger = triggerRef.current;
       if (!trigger) return;
       const triggerRect = trigger.getBoundingClientRect();
-      const scrollBoundary = trigger.closest('.slideover__body');
-      const boundaryRect = scrollBoundary?.getBoundingClientRect();
-      const boundaryTop = Math.max(8, boundaryRect?.top ?? 8);
-      const boundaryBottom = Math.min(
-        window.innerHeight - 8,
-        boundaryRect?.bottom ?? window.innerHeight - 8
+      const scrollBoundary = trigger.closest(
+        '[role="dialog"].tm-discourse-agent-config--expanded, .slideover__body'
       );
-      const spaceAbove = triggerRect.top - boundaryTop - 6;
-      const spaceBelow = boundaryBottom - triggerRect.bottom - 6;
-      const placement = spaceBelow >= spaceAbove ? 'bottom' : 'top';
-      setMenuGeometry({
-        placement,
-        maxHeight: Math.max(96, Math.min(320, placement === 'bottom' ? spaceBelow : spaceAbove))
-      });
+      const boundaryRect = scrollBoundary?.getBoundingClientRect();
+      setMenuGeometry(agentModelMenuGeometry({
+        trigger: triggerRect,
+        boundary: boundaryRect ?? {
+          top: 8,
+          right: window.innerWidth - 8,
+          bottom: window.innerHeight - 8,
+          left: 8
+        },
+        constrainWidth: compact && Boolean(boundaryRect)
+      }));
     };
 
     updateMenuGeometry();
@@ -152,7 +164,7 @@ export function AgentModelSelector({
       window.removeEventListener('resize', updateMenuGeometry);
       document.removeEventListener('scroll', updateMenuGeometry, true);
     };
-  }, [open]);
+  }, [compact, open]);
 
   const clearDiscovery = () => {
     discoveryRevisionRef.current += 1;
@@ -205,12 +217,12 @@ export function AgentModelSelector({
 
   const triggerSummary = selectedRuntime
     ? `${selectedRuntime.preflight.runtime.displayName}${
-        selectedModel ? ` · ${selectedModel.displayName}` : ''
+        selectedModel ? ` · ${selectedModel.displayName}` : fallbackSummary ? ` · ${fallbackSummary}` : ''
       }`
-    : 'No agent available';
+    : fallbackSummary ?? 'No agent available';
 
   return (
-    <div className="tm-agent-console" ref={rootRef}>
+    <div className={`tm-agent-console ${compact ? 'tm-agent-console--compact' : ''}`} ref={rootRef}>
       <div className="tm-agent-console__row tm-agent-console__row--agent">
         <span className="tm-agent-console__label">Agent</span>
         <button
@@ -218,7 +230,8 @@ export function AgentModelSelector({
           type="button"
           className={`tm-agent-console__trigger ${
             (discovery?.runtimeId === runtimeId && discovery.status === 'failed') ||
-            selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED'
+            selectedRuntime?.preflight.readiness.checks.modelCatalog === 'FAILED' ||
+            selectionUnavailable
               ? 'tm-agent-console__trigger--error'
               : ''
           }`}
@@ -227,6 +240,9 @@ export function AgentModelSelector({
           aria-expanded={open}
           aria-controls={popupId}
           aria-busy={discovery?.runtimeId === runtimeId && discovery.status === 'loading'}
+          aria-invalid={selectionUnavailable || undefined}
+          aria-describedby={selectionUnavailable && showSelectionError ? selectionErrorId : undefined}
+          title={triggerSummary}
           disabled={disabled || runtimes.length === 0}
           onClick={() => setOpen((current) => !current)}
           onKeyDown={(event) => {
@@ -251,7 +267,10 @@ export function AgentModelSelector({
           className={`tm-agent-console__menu ${
             menuGeometry?.placement === 'top' ? 'tm-agent-console__menu--top' : ''
           }`}
-          style={menuGeometry ? { maxHeight: menuGeometry.maxHeight } : undefined}
+          style={menuGeometry ? {
+            maxHeight: menuGeometry.maxHeight,
+            ...(menuGeometry.maxWidth ? { maxWidth: menuGeometry.maxWidth } : {})
+          } : undefined}
           role="menu"
           aria-label={`${label} agent and model`}
           hidden={!open}
@@ -304,7 +323,7 @@ export function AgentModelSelector({
                     >
                       <span>{model.displayName}</span>
                       <span className="tm-agent-console__option-meta">
-                        {model.modelProvider ?? ''}
+                        {model.isDefault ? 'Default' : ''}
                       </span>
                       <span className="tm-agent-console__check" aria-hidden="true">
                         {selected ? <CheckIcon /> : null}
@@ -313,19 +332,23 @@ export function AgentModelSelector({
                   );
                 })}
                 {candidateModels.length === 0 && !needsDiscovery ? (
-                  <button
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={candidateRuntimeId === runtimeId}
-                    className="tm-agent-console__option"
-                    onClick={() => void choose(runtime)}
-                  >
-                    <span>Provider default</span>
-                    <span className="tm-agent-console__option-meta">No catalog available</span>
-                    <span className="tm-agent-console__check" aria-hidden="true">
-                      {candidateRuntimeId === runtimeId ? <CheckIcon /> : null}
-                    </span>
-                  </button>
+                  compact ? (
+                    <div className="tm-agent-console__empty">No models available.</div>
+                  ) : (
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={candidateRuntimeId === runtimeId}
+                      className="tm-agent-console__option"
+                      onClick={() => void choose(runtime)}
+                    >
+                      <span>Provider default</span>
+                      <span className="tm-agent-console__option-meta">No catalog available</span>
+                      <span className="tm-agent-console__check" aria-hidden="true">
+                        {candidateRuntimeId === runtimeId ? <CheckIcon /> : null}
+                      </span>
+                    </button>
+                  )
                 ) : null}
                 {needsDiscovery ? (
                   runtimeDiscovery?.status === 'loading' ? (
@@ -354,7 +377,9 @@ export function AgentModelSelector({
                           ? 'Retry model discovery'
                           : 'Load models'}
                       </span>
-                      {runtimeDiscovery?.error ? <small>{runtimeDiscovery.error}</small> : null}
+                      {runtimeDiscovery?.error ? (
+                        <small>Could not load models. Check the connection and try again.</small>
+                      ) : null}
                     </button>
                   )
                 ) : null}
@@ -367,6 +392,16 @@ export function AgentModelSelector({
         </div>
       </div>
 
+      {selectionUnavailable && showSelectionError ? (
+        <small
+          id={selectionErrorId}
+          className="tm-agent-console__selection-error"
+          role="status"
+        >
+          {selectionUnavailableMessage}
+        </small>
+      ) : null}
+
       {onReasoningEffortChange && efforts.length > 0 ? (
         <div className="tm-agent-console__row">
           <span className="tm-agent-console__label">Reasoning</span>
@@ -376,11 +411,12 @@ export function AgentModelSelector({
                 type="button"
                 className={reasoningEffort === '' ? 'is-selected' : ''}
                 aria-pressed={reasoningEffort === ''}
+                aria-label="Default reasoning"
                 disabled={disabled}
                 onClick={() => onReasoningEffortChange('')}
               >
                 <span />
-                <small>Default</small>
+                <small>{compact ? 'Auto' : 'Default'}</small>
               </button>
             ) : null}
             {efforts.map((effort) => (
@@ -388,12 +424,13 @@ export function AgentModelSelector({
                 type="button"
                 className={effort === reasoningEffort ? 'is-selected' : ''}
                 aria-pressed={effort === reasoningEffort}
+                aria-label={`${formatReasoningEffort(effort)} reasoning`}
                 disabled={disabled}
                 key={effort}
                 onClick={() => onReasoningEffortChange(effort)}
               >
                 <span />
-                <small>{formatReasoningEffort(effort)}</small>
+                <small>{compactReasoningEffort(effort, compact)}</small>
               </button>
             ))}
           </div>
@@ -403,6 +440,36 @@ export function AgentModelSelector({
       {access}
     </div>
   );
+}
+
+function compactReasoningEffort(effort: string, compact: boolean): string {
+  const label = formatReasoningEffort(effort);
+  return compact && label === 'Medium' ? 'Med' : label;
+}
+
+export function agentModelMenuGeometry(input: {
+  trigger: Pick<DOMRect, 'top' | 'right' | 'bottom'>;
+  boundary: Pick<DOMRect, 'top' | 'right' | 'bottom' | 'left'>;
+  constrainWidth: boolean;
+}): { maxHeight: number; maxWidth?: number; placement: 'bottom' | 'top' } {
+  const boundaryTop = Math.max(8, input.boundary.top);
+  const boundaryBottom = input.boundary.bottom;
+  const spaceAbove = Math.max(0, input.trigger.top - boundaryTop - 6);
+  const spaceBelow = Math.max(0, boundaryBottom - input.trigger.bottom - 6);
+  const placement = spaceBelow >= spaceAbove ? 'bottom' : 'top';
+  const availableHeight = placement === 'bottom' ? spaceBelow : spaceAbove;
+  return {
+    placement,
+    maxHeight: Math.max(48, Math.min(320, availableHeight)),
+    ...(input.constrainWidth
+      ? {
+          maxWidth: Math.max(
+            160,
+            Math.min(input.boundary.right - input.boundary.left - 24, input.trigger.right - input.boundary.left)
+          )
+        }
+      : {})
+  };
 }
 
 export function AgentModelSetting({

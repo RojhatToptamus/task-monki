@@ -48,7 +48,7 @@ describe('createBrowserTaskManagerApi updates', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'projection.updated',
-      taskId: '__browser_poll__'
+      scope: { kind: 'APP' }
     });
 
     unsubscribe();
@@ -64,6 +64,7 @@ describe('createBrowserTaskManagerApi updates', () => {
     const unsubscribe = api.onUpdate((event) => events.push(event));
     const event: AppUpdateEvent = {
       type: 'run.output',
+      scope: { kind: 'TASK', taskId: 'task-1' },
       taskId: 'task-1',
       payload: { stream: 'stdout' },
       at: '2026-06-29T00:00:00.000Z'
@@ -329,5 +330,102 @@ describe('createBrowserTaskManagerApi preview contract', () => {
       generationId: 'generation-1',
       routeId: 'app'
     });
+  });
+});
+
+describe('createBrowserTaskManagerApi discourse', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps pagination in query parameters and context authority in opaque ids', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true, json: async () => ({ conversations: [], messages: [] }) } as Response;
+    }));
+    const api = createBrowserTaskManagerApi('');
+
+    await api.listDiscourseConversations({ status: 'OPEN', cursor: 'cursor-1', limit: 40 });
+    await api.listDiscourseMessages({
+      conversationId: 'conversation-1',
+      beforeCursor: 'cursor-2',
+      limit: 25
+    });
+    await api.getDiscourseMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'client message/1'
+    });
+    await api.previewDiscourseContext({
+      conversationId: 'conversation-1',
+      messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
+    });
+    await api.sendDiscourseMessage({
+      conversationId: 'conversation-1',
+      body: 'Review this.',
+      context: [],
+      clientMessageId: 'message-1',
+      policy: 'TEAM',
+      agents: [
+        { agentProfileId: 'builtin.lead' },
+        { agentProfileId: 'builtin.skeptic' },
+        { agentProfileId: 'builtin.verifier' }
+      ],
+      previewFingerprint: 'preview-1'
+    });
+    await api.resumeDiscourseAcceptedSend({
+      conversationId: 'conversation-1',
+      acceptedSendId: 'accepted-send-1'
+    });
+    await api.cancelDiscourseAcceptedSend({
+      conversationId: 'conversation-1',
+      acceptedSendId: 'accepted-send-2',
+      expectedConversationRevision: 3,
+      clientOperationId: 'cancel-accepted-1'
+    });
+    await api.stopDiscourseWave({
+      conversationId: 'conversation-1',
+      waveId: 'wave-1',
+      clientOperationId: 'stop-1',
+      reason: 'User stopped.'
+    });
+    await api.confirmDiscourseWaveContext({
+      conversationId: 'conversation-1',
+      waveId: 'wave-1',
+      previewFingerprint: 'preview-2',
+      expectedWaveRevision: 1,
+      clientOperationId: 'confirm-1'
+    });
+
+    expect(calls[0]?.url).toBe('/api/discourse/conversations?status=OPEN&cursor=cursor-1&limit=40');
+    expect(calls[1]?.url).toBe('/api/discourse/messages?conversationId=conversation-1&beforeCursor=cursor-2&limit=25');
+    expect(calls[2]?.url).toBe(
+      '/api/discourse/messages/by-client-id?conversationId=conversation-1&clientMessageId=client+message%2F1'
+    );
+    expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({
+      conversationId: 'conversation-1',
+      messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
+    });
+    expect(String(calls[3]?.init?.body)).not.toContain('/Users/');
+    expect(calls.slice(4).map((call) => call.url)).toEqual([
+      '/api/discourse/messages/send',
+      '/api/discourse/messages/resume',
+      '/api/discourse/messages/cancel-response',
+      '/api/discourse/waves/stop',
+      '/api/discourse/waves/confirm-context'
+    ]);
+  });
+
+  it('accepts an explicit null when no durable client message exists', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => null
+    }) as Response));
+    const api = createBrowserTaskManagerApi('');
+
+    await expect(api.getDiscourseMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'message-missing'
+    })).resolves.toBeNull();
   });
 });

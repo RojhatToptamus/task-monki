@@ -38,6 +38,18 @@ runtimes use stable ACP plus explicitly captured extensions.
 | Cursor Agent ACP | `cursor-agent-acp`; automatic discovery uses `cursor-agent acp`, while `agent acp` is explicit-configuration only and still requires a Cursor-specific contract probe | Registered ACP compatibility | ACP streaming, tool and diff updates, plans, exact provider permission choices, cancellation, Cursor-owned rules, lazy parameterized model discovery, and advertised native model/configuration selectors | Task Monki never executes a generic PATH `agent` during discovery. An explicit alias is compatibility-checked but its provenance remains the user's responsibility. Selecting Cursor explicitly starts its on-demand ACP process and, when no valid process-scoped catalog is cached, calls the captured `cursor/list_available_models` extension before any session is created. Auto is the exact `default` value; per-model thought-level choices drive reasoning selection. The catalog is not polled or restored from task sessions and is invalidated with the owning process/configuration or an observed auth failure. New sessions still revalidate model and reasoning before prompting. Ask for approval, Auto-accept edits, and Full access answer exact provider requests without changing Cursor's native agent mode. No mode automatically selects `allow_always`; an explicit remembered choice preserves the provider ID and label and remains provider-owned. Optional resume/close and native controls depend on negotiated or session-advertised capabilities. The common ACP feature limits and unconfined process boundary apply. |
 | Claude Agent ACP bridge | `claude-agent-acp`; the separate `claude-agent-acp` bridge executable | Registered ACP compatibility bridge | The bridge retains Claude Agent SDK tool behavior, ACP streaming, tool/diff updates, plans, permissions, cancellation, and advertised Claude modes/configuration/model selectors | This is not a direct native integration with the `claude` CLI. The bridge executable, ACP initialization, authentication, and provider session creation must all succeed. Optional behavior is negotiated; the common ACP feature limits and full-access process boundary apply. |
 
+## Discourse scoped-execution matrix
+
+| Runtime family | Discourse | Reason |
+| --- | --- | --- |
+| Codex App Server | Supported | The adapter attests the exact read roots and active read-only permission profile, with network, apps/MCP, dynamic tools, and approval exceptions disabled. |
+| OpenCode server | Unavailable | Native permission rules do not attest OS/process confinement or a disabled-network boundary for the credential-bearing server. |
+| Registered ACP runtimes | Unavailable | The provider process owns filesystem/network execution and current ACP negotiation cannot attest Task Monki's isolated read-only/offline scope. |
+
+Unavailable means fail-closed for Discourse only. It does not disable the
+runtime's documented task execution path, and Task Monki never substitutes a
+different runtime for an immutable participant revision.
+
 ## ACP compatibility boundary
 
 All registered ACP profiles share these implemented rules:

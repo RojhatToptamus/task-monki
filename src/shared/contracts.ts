@@ -63,7 +63,9 @@ import type {
 } from './attachments';
 
 export * from './agent';
+export * from './agentRuntime';
 export * from './attachments';
+export * from './discourse';
 export * from './preview';
 
 export const TASK_STORE_SCHEMA_VERSION = 19 as const;
@@ -1107,6 +1109,11 @@ export interface RefreshGitHubRequest {
   taskId: string;
 }
 
+export type AppEventScope =
+  | { kind: 'APP' }
+  | { kind: 'TASK'; taskId: string }
+  | { kind: 'DISCOURSE'; conversationId: string; waveId?: string; jobId?: string };
+
 export interface AppUpdateEvent {
   type:
     | 'task.updated'
@@ -1130,7 +1137,14 @@ export interface AppUpdateEvent {
     | 'preview.updated'
     | 'preview.recipe-generation.updated'
     | 'preview.log.updated'
-    | 'task.deleted';
+    | 'task.deleted'
+    | 'discourse.summary.updated'
+    | 'discourse.message.appended'
+    | 'discourse.wave.updated'
+    | 'discourse.job.updated'
+    | 'discourse.delta';
+  scope: AppEventScope;
+  /** Compatibility routing key; discourse events use `discourse:<conversationId>`. */
   taskId: string;
   iterationId?: string;
   runId?: string;
@@ -1139,6 +1153,10 @@ export interface AppUpdateEvent {
   payload: unknown;
   at: string;
 }
+
+export type LegacyTaskAppUpdateEvent = Omit<AppUpdateEvent, 'scope' | 'taskId'> & {
+  taskId: string;
+};
 
 export interface TaskManagerApi {
   chooseRepositoryFolder(): Promise<string | undefined>;
@@ -1168,6 +1186,69 @@ export interface TaskManagerApi {
     input: UpdateAgentNativeSessionRequest
   ): Promise<UpdateAgentNativeSessionResult>;
   listTasks(): Promise<TaskSnapshot>;
+  listDiscourseConversations(
+    input?: import('./discourse').ListDiscourseConversationsRequest
+  ): Promise<import('./discourse').DiscourseConversationPage>;
+  getDiscourseConversation(
+    conversationId: string
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
+  listDiscourseMessages(
+    input: import('./discourse').ListDiscourseMessagesRequest
+  ): Promise<import('./discourse').DiscourseMessagePage>;
+  getDiscourseMessageByClientId(
+    input: import('./discourse').GetDiscourseMessageByClientIdRequest
+  ): Promise<import('./discourse').DiscourseMessageRecord | null>;
+  getDiscourseMentionCatalog(): Promise<import('./discourse').DiscourseMentionCatalogSnapshot>;
+  createDiscourseConversation(
+    input: import('./discourse').CreateDiscourseConversationRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  appendHumanDiscourseMessage(
+    input: import('./discourse').AppendHumanDiscourseMessageRequest
+  ): Promise<import('./discourse').DiscourseMessageRecord>;
+  sendDiscourseMessage(
+    input: import('./discourse').SendDiscourseMessageRequest
+  ): Promise<import('./discourse').SendDiscourseMessageResult>;
+  resumeDiscourseAcceptedSend(
+    input: import('./discourse').ResumeDiscourseAcceptedSendRequest
+  ): Promise<import('./discourse').SendDiscourseMessageResult>;
+  cancelDiscourseAcceptedSend(
+    input: import('./discourse').CancelDiscourseAcceptedSendRequest
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
+  tombstoneDiscourseMessage(
+    input: import('./discourse').TombstoneDiscourseMessageRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setPinnedDiscourseContext(
+    input: import('./discourse').SetPinnedDiscourseContextRequest
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
+  previewDiscourseContext(
+    input: import('./discourse').PreviewDiscourseContextRequest
+  ): Promise<import('./discourse').DiscourseContextPreview>;
+  saveDiscourseDraft(
+    input: import('./discourse').SaveDiscourseDraftRequest
+  ): Promise<import('./discourse').DiscourseDraftRecord>;
+  getDiscourseDraft(
+    draftId: string
+  ): Promise<import('./discourse').DiscourseDraftRecord | undefined>;
+  listDiscourseDrafts(): Promise<import('./discourse').DiscourseDraftRecord[]>;
+  deleteDiscourseDraft(input: import('./discourse').DeleteDiscourseDraftRequest): Promise<void>;
+  renameDiscourseConversation(
+    input: import('./discourse').RenameDiscourseConversationRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setDiscourseConversationRead(
+    input: import('./discourse').SetDiscourseConversationReadRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  setDiscourseConversationArchived(
+    input: import('./discourse').SetDiscourseConversationArchivedRequest
+  ): Promise<import('./discourse').DiscourseConversationRecord>;
+  deleteDiscourseConversation(
+    input: import('./discourse').DeleteDiscourseConversationRequest
+  ): Promise<void>;
+  stopDiscourseWave(
+    input: import('./discourse').StopDiscourseWaveRequest
+  ): Promise<import('./discourse').DiscourseResponseWaveRecord>;
+  confirmDiscourseWaveContext(
+    input: import('./discourse').ConfirmDiscourseWaveContextRequest
+  ): Promise<import('./discourse').DiscourseResponseWaveRecord>;
   stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
   discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;

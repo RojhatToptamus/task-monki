@@ -461,6 +461,7 @@ describe('development HTTP server', () => {
   it('uses SSE as a compact invalidation signal instead of copying provider output', () => {
     const frame = createDevEventStreamFrame({
       type: 'run.output',
+      scope: { kind: 'TASK', taskId: 'task-1' },
       taskId: 'task-1',
       runId: 'run-1',
       payload: { source: 'agent', text: 'x'.repeat(1024 * 1024) },
@@ -476,6 +477,7 @@ describe('development HTTP server', () => {
   it('preserves the preview generation identity in compact invalidation frames', () => {
     const frame = createDevEventStreamFrame({
       type: 'preview.updated',
+      scope: { kind: 'TASK', taskId: 'task-1' },
       taskId: 'task-1',
       previewGenerationId: 'generation-1',
       payload: null,

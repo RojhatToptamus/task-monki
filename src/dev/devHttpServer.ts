@@ -345,6 +345,82 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/discourse/conversations') {
+        const status = url.searchParams.get('status');
+        if (status !== null && status !== 'OPEN' && status !== 'ARCHIVED') {
+          throw new DevApiHttpError(
+            400,
+            'INVALID_REQUEST',
+            'The discourse conversation status is invalid.',
+            false
+          );
+        }
+        sendJson(response, requestId, 200, await options.service.listDiscourseConversations({
+          status: status ?? undefined,
+          cursor: url.searchParams.get('cursor') ?? undefined,
+          limit: optionalPositiveIntegerQueryParameter(url, 'limit')
+        }));
+        return;
+      }
+
+      const discourseConversationRoute = /^\/api\/discourse\/conversations\/([^/]+)$/u.exec(
+        url.pathname
+      );
+      if (request.method === 'GET' && discourseConversationRoute) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseConversation(
+            decodeURIComponent(discourseConversationRoute[1]!)
+          )
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/messages') {
+        sendJson(response, requestId, 200, await options.service.listDiscourseMessages({
+          conversationId: requiredQueryParameter(url, 'conversationId'),
+          beforeCursor: url.searchParams.get('beforeCursor') ?? undefined,
+          limit: optionalPositiveIntegerQueryParameter(url, 'limit')
+        }));
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/messages/by-client-id') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseMessageByClientId({
+            conversationId: requiredQueryParameter(url, 'conversationId'),
+            clientMessageId: requiredQueryParameter(url, 'clientMessageId')
+          })
+        );
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/mentions') {
+        sendJson(response, requestId, 200, await options.service.getDiscourseMentionCatalog());
+        return;
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/discourse/drafts') {
+        sendJson(response, requestId, 200, await options.service.listDiscourseDrafts());
+        return;
+      }
+
+      const discourseDraftRoute = /^\/api\/discourse\/drafts\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === 'GET' && discourseDraftRoute) {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseDraft(decodeURIComponent(discourseDraftRoute[1]!))
+        );
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/attachments/stage-batch') {
         const payload = await readBoundedJson(request, ATTACHMENT_BATCH_MAX_JSON_BYTES);
         const attachments = decodeAttachmentBatch(payload);
@@ -489,6 +565,56 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           200,
           await options.service.createTask((await readJson()) as never)
         );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createDiscourseConversation((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/messages') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.appendHumanDiscourseMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      const discoursePostRoutes: Record<string, (body: never) => Promise<unknown>> = {
+        '/api/discourse/messages/send': (body) => options.service.sendDiscourseMessage(body),
+        '/api/discourse/messages/resume': (body) =>
+          options.service.resumeDiscourseAcceptedSend(body),
+        '/api/discourse/messages/cancel-response': (body) =>
+          options.service.cancelDiscourseAcceptedSend(body),
+        '/api/discourse/messages/tombstone': (body) =>
+          options.service.tombstoneDiscourseMessage(body),
+        '/api/discourse/context/pin': (body) => options.service.setPinnedDiscourseContext(body),
+        '/api/discourse/context/preview': (body) => options.service.previewDiscourseContext(body),
+        '/api/discourse/drafts': (body) => options.service.saveDiscourseDraft(body),
+        '/api/discourse/drafts/delete': (body) => options.service.deleteDiscourseDraft(body),
+        '/api/discourse/conversations/rename': (body) =>
+          options.service.renameDiscourseConversation(body),
+        '/api/discourse/conversations/read': (body) =>
+          options.service.setDiscourseConversationRead(body),
+        '/api/discourse/conversations/archive': (body) =>
+          options.service.setDiscourseConversationArchived(body),
+        '/api/discourse/conversations/delete': (body) =>
+          options.service.deleteDiscourseConversation(body),
+        '/api/discourse/waves/stop': (body) => options.service.stopDiscourseWave(body),
+        '/api/discourse/waves/confirm-context': (body) =>
+          options.service.confirmDiscourseWaveContext(body)
+      };
+      const discoursePostRoute = discoursePostRoutes[url.pathname];
+      if (request.method === 'POST' && discoursePostRoute) {
+        sendJson(response, requestId, 200, await discoursePostRoute((await readJson()) as never));
         return;
       }
 
@@ -871,6 +997,7 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
 export function createDevEventStreamFrame(event: AppUpdateEvent): string {
   const signal: AppUpdateEvent = {
     type: event.type,
+    scope: event.scope,
     taskId: event.taskId,
     iterationId: event.iterationId,
     runId: event.runId,
@@ -989,6 +1116,29 @@ function requiredQueryParameter(url: URL, name: string): string {
     );
   }
   return value;
+}
+
+function optionalPositiveIntegerQueryParameter(url: URL, name: string): number | undefined {
+  const value = url.searchParams.get(name);
+  if (value === null) return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new DevApiHttpError(
+      400,
+      'INVALID_REQUEST',
+      `The ${name} query parameter must be a positive integer.`,
+      false
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new DevApiHttpError(
+      400,
+      'INVALID_REQUEST',
+      `The ${name} query parameter is too large.`,
+      false
+    );
+  }
+  return parsed;
 }
 
 function toSafeHttpError(error: unknown): DevApiHttpError | undefined {

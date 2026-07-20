@@ -92,7 +92,7 @@ function readValue(args: string[], index: number, flag: string): string {
 }
 
 function readScenarioSet(value: string): DevSeedScenarioSet {
-  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview'].includes(value)) {
+  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview', 'discourse'].includes(value)) {
     return value as DevSeedScenarioSet;
   }
   throw new Error(`Unknown scenario set: ${value}`);
@@ -109,7 +109,7 @@ Options:
   --worktree-root <path>     Generated worktree root.
   --preview-root <path>      Generated preview runtime root.
   --app-settings-path <path> App settings JSON path.
-  --scenario-set <set>       all, board, agent, review, delivery, completion, workflow, preview.
+  --scenario-set <set>       all, board, agent, review, delivery, completion, workflow, preview, discourse.
 `);
 }
 

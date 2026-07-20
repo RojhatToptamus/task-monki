@@ -13,6 +13,8 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import type {
@@ -61,6 +63,27 @@ import type {
   UpdateBoardRequest,
   ValidatePreviewRecipeDraftRequest
 } from '../shared/contracts';
+import type {
+  AppendHumanDiscourseMessageRequest,
+  CancelDiscourseAcceptedSendRequest,
+  ConfirmDiscourseWaveContextRequest,
+  CreateDiscourseConversationRequest,
+  DeleteDiscourseConversationRequest,
+  DeleteDiscourseDraftRequest,
+  GetDiscourseMessageByClientIdRequest,
+  ListDiscourseConversationsRequest,
+  ListDiscourseMessagesRequest,
+  PreviewDiscourseContextRequest,
+  RenameDiscourseConversationRequest,
+  ResumeDiscourseAcceptedSendRequest,
+  SaveDiscourseDraftRequest,
+  SendDiscourseMessageRequest,
+  SetDiscourseConversationArchivedRequest,
+  SetDiscourseConversationReadRequest,
+  SetPinnedDiscourseContextRequest,
+  StopDiscourseWaveRequest,
+  TombstoneDiscourseMessageRequest
+} from '../shared/discourse';
 import {
   ATTACHMENT_MAX_CLIPBOARD_IMAGE_PIXELS,
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -383,6 +406,102 @@ function installIpcHandlers(): void {
   });
 
   handleTrustedIpc(
+    'discourse:conversations:list',
+    async (_, input: ListDiscourseConversationsRequest = {}) =>
+      service.listDiscourseConversations(input)
+  );
+  handleTrustedIpc('discourse:conversation:get', async (_, conversationId: string) =>
+    service.getDiscourseConversation(conversationId)
+  );
+  handleTrustedIpc('discourse:messages:list', async (_, input: ListDiscourseMessagesRequest) =>
+    service.listDiscourseMessages(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:get-by-client-id',
+    async (_, input: GetDiscourseMessageByClientIdRequest) =>
+      service.getDiscourseMessageByClientId(input)
+  );
+  handleTrustedIpc('discourse:mentions:get', () => service.getDiscourseMentionCatalog());
+  handleTrustedIpc(
+    'discourse:conversation:create',
+    async (_, input: CreateDiscourseConversationRequest) =>
+      service.createDiscourseConversation(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:append',
+    async (_, input: AppendHumanDiscourseMessageRequest) =>
+      service.appendHumanDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:send',
+    async (_, input: SendDiscourseMessageRequest) => service.sendDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:resume',
+    async (_, input: ResumeDiscourseAcceptedSendRequest) =>
+      service.resumeDiscourseAcceptedSend(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:cancel-response',
+    async (_, input: CancelDiscourseAcceptedSendRequest) =>
+      service.cancelDiscourseAcceptedSend(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:tombstone',
+    async (_, input: TombstoneDiscourseMessageRequest) =>
+      service.tombstoneDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:context:pin',
+    async (_, input: SetPinnedDiscourseContextRequest) =>
+      service.setPinnedDiscourseContext(input)
+  );
+  handleTrustedIpc(
+    'discourse:context:preview',
+    async (_, input: PreviewDiscourseContextRequest) =>
+      service.previewDiscourseContext(input)
+  );
+  handleTrustedIpc('discourse:draft:save', async (_, input: SaveDiscourseDraftRequest) =>
+    service.saveDiscourseDraft(input)
+  );
+  handleTrustedIpc('discourse:draft:get', async (_, draftId: string) =>
+    service.getDiscourseDraft(draftId)
+  );
+  handleTrustedIpc('discourse:drafts:list', () => service.listDiscourseDrafts());
+  handleTrustedIpc('discourse:draft:delete', async (_, input: DeleteDiscourseDraftRequest) =>
+    service.deleteDiscourseDraft(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:rename',
+    async (_, input: RenameDiscourseConversationRequest) =>
+      service.renameDiscourseConversation(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:read',
+    async (_, input: SetDiscourseConversationReadRequest) =>
+      service.setDiscourseConversationRead(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:archive',
+    async (_, input: SetDiscourseConversationArchivedRequest) =>
+      service.setDiscourseConversationArchived(input)
+  );
+  handleTrustedIpc(
+    'discourse:conversation:delete',
+    async (_, input: DeleteDiscourseConversationRequest) =>
+      service.deleteDiscourseConversation(input)
+  );
+  handleTrustedIpc(
+    'discourse:wave:stop',
+    async (_, input: StopDiscourseWaveRequest) => service.stopDiscourseWave(input)
+  );
+  handleTrustedIpc(
+    'discourse:wave:confirm-context',
+    async (_, input: ConfirmDiscourseWaveContextRequest) =>
+      service.confirmDiscourseWaveContext(input)
+  );
+
+  handleTrustedIpc(
     'attachment:stage-batch',
     async (_, input: StageTaskAttachmentBatchRequest) => {
       const byteCount = assertAttachmentIpcBatch(input);
@@ -413,6 +532,7 @@ function installIpcHandlers(): void {
     const task = await service.createTask(input);
     broadcast({
       type: 'task.updated',
+      scope: { kind: 'TASK', taskId: task.id },
       taskId: task.id,
       payload: task,
       at: new Date().toISOString()
@@ -744,7 +864,12 @@ void app.whenReady().then(async () => {
         encrypt: async (value) => safeStorage.encryptString(value.toString('utf8')),
         decrypt: async (value) => Buffer.from(safeStorage.decryptString(value), 'utf8')
       },
-      previewOpenHost: createElectronPreviewUrlHost()
+      previewOpenHost: createElectronPreviewUrlHost(),
+      agentRuntimeStore: new FileAgentRuntimeStore(
+        path.join(userDataDir, 'agent-runtime-store')
+      ),
+      discourseStore: new FileDiscourseStore(path.join(userDataDir, 'discourse-store')),
+      discourseWorkspaceRoot: path.join(userDataDir, 'discourse-workspaces')
     }
   );
   serviceCreated = true;

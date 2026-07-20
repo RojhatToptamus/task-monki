@@ -6,11 +6,13 @@ import type { RunRecord } from '../../../shared/contracts';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
+import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
 import { AppEventBus } from '../../runner/AppEventBus';
 import {
   ArtifactAppendAmbiguousError,
   FileTaskStore
 } from '../../storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
 import {
@@ -25,6 +27,376 @@ import {
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
 describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
+  it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
+    const executable = await writeFakeCodexExecutable(dir, 'scoped');
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    await runtime.init();
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      scopedRuntimeStore: runtime
+    });
+    let resolveTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const observedEvents: string[] = [];
+    const unsubscribe = adapter.onScopedTurnEvent((event) => {
+      observedEvents.push(event.type);
+      if (event.type === 'TERMINAL') resolveTerminal();
+    });
+    try {
+      await adapter.initialize();
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        stableParticipantId: 'participant-1'
+      };
+      const sessionId = 'scoped-session-1';
+      const executionContext = await adapter.buildScopedExecutionContext({
+        sessionId,
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'scoped-context-1'
+      });
+      const session = await runtime.createSession({
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-13T00:00:00.000Z'
+        }),
+        executionContext,
+        clientOperationId: 'create-scoped-session',
+        runtimeId: 'codex',
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: executionContext.modelSettings
+      });
+      const run = await runtime.createRun({
+        id: 'scoped-run-1',
+        owner,
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-1',
+          jobId: 'job-1',
+          contextSnapshotId: 'context-1',
+          attemptId: 'attempt-1'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: 'generation-1',
+        clientOperationId: 'create-scoped-run',
+        requestedSettings: executionContext.modelSettings,
+        promptArtifactId: 'scoped-prompt-1',
+        outputArtifactId: 'scoped-output-1',
+        diagnosticArtifactId: 'scoped-diagnostic-1'
+      });
+      await Promise.all([
+        runtime.createArtifact({
+          id: run.promptArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'PROMPT',
+          clientOperationId: 'create-scoped-prompt',
+          content: 'Question the proposed architecture.'
+        }),
+        runtime.createArtifact({
+          id: run.outputArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'OUTPUT',
+          clientOperationId: 'create-scoped-output',
+          content: ''
+        }),
+        runtime.createArtifact({
+          id: run.diagnosticArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'DIAGNOSTIC',
+          clientOperationId: 'create-scoped-diagnostic',
+          content: ''
+        })
+      ]);
+      const starting = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        { status: 'STARTING', delivery: 'SENDING', startedAt: '2026-07-13T00:00:01.000Z' },
+        'scoped-start-intent'
+      );
+      const started = await adapter.startScopedTurn({
+        session,
+        run: starting,
+        executionContext,
+        prompt: 'Question the proposed architecture.'
+      });
+      const afterResponse = await runtime.getRun(run.id);
+      if (afterResponse?.status === 'STARTING') {
+        await runtime.updateRun(
+          run.id,
+          afterResponse.recordRevision,
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'RUNNING',
+            delivery: 'ACKNOWLEDGED'
+          },
+          'scoped-start-ack'
+        );
+      }
+      await terminal;
+
+      await expect(runtime.getRun(run.id)).resolves.toMatchObject({
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        providerTurnId: 'turn-1'
+      });
+      await expect(runtime.readArtifact(run.outputArtifactId)).resolves.toBe(
+        'Fake task completed.'
+      );
+      expect(observedEvents).toContain('DELTA');
+      expect(observedEvents.at(-1)).toBe('TERMINAL');
+      const taskSnapshot = await store.snapshot();
+      expect(taskSnapshot.tasks).toEqual([]);
+      expect(taskSnapshot.runs).toEqual([]);
+      expect(taskSnapshot.agentSessions).toEqual([]);
+    } finally {
+      unsubscribe();
+      await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it.each([
+    {
+      name: 'requires recovery when an acknowledged scoped interrupt never becomes terminal',
+      mode: 'scoped-interrupt-no-terminal',
+      terminalStatus: 'RECOVERY_REQUIRED'
+    },
+    {
+      name: 'persists a scoped interruption that races with the acknowledgement checkpoint',
+      mode: 'scoped-interrupt-terminal-race',
+      terminalStatus: 'INTERRUPTED'
+    }
+  ] as const)('$name', async ({ mode, terminalStatus }) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-interrupt-'));
+    const executable = await writeFakeCodexExecutable(dir, mode);
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    await runtime.init();
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      interruptCompletionTimeoutMs: 25,
+      restartDelaysMs: [],
+      scopedRuntimeStore: runtime
+    });
+    try {
+      await adapter.initialize();
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-interrupt',
+        stableParticipantId: 'participant-interrupt'
+      };
+      const sessionId = 'scoped-session-interrupt';
+      const executionContext = await adapter.buildScopedExecutionContext({
+        sessionId,
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'scoped-interrupt-context'
+      });
+      let session = await runtime.createSession({
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-13T00:00:00.000Z'
+        }),
+        executionContext,
+        clientOperationId: 'create-scoped-interrupt-session',
+        runtimeId: 'codex',
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: executionContext.modelSettings
+      });
+      let run = await runtime.createRun({
+        id: 'scoped-run-interrupt',
+        owner,
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-interrupt',
+          jobId: 'job-interrupt',
+          contextSnapshotId: 'context-interrupt',
+          attemptId: 'attempt-interrupt'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: 'generation-interrupt',
+        clientOperationId: 'create-scoped-interrupt-run',
+        requestedSettings: executionContext.modelSettings,
+        promptArtifactId: 'scoped-interrupt-prompt',
+        outputArtifactId: 'scoped-interrupt-output',
+        diagnosticArtifactId: 'scoped-interrupt-diagnostic'
+      });
+      await Promise.all([
+        runtime.createArtifact({
+          id: run.promptArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'PROMPT',
+          clientOperationId: 'create-scoped-interrupt-prompt',
+          content: 'Keep this response active until it is interrupted.'
+        }),
+        runtime.createArtifact({
+          id: run.outputArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'OUTPUT',
+          clientOperationId: 'create-scoped-interrupt-output',
+          content: ''
+        }),
+        runtime.createArtifact({
+          id: run.diagnosticArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'DIAGNOSTIC',
+          clientOperationId: 'create-scoped-interrupt-diagnostic',
+          content: ''
+        })
+      ]);
+      run = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: '2026-07-13T00:00:01.000Z'
+        },
+        'scoped-interrupt-start-intent'
+      );
+      const started = await adapter.startScopedTurn({
+        session,
+        run,
+        executionContext,
+        prompt: 'Keep this response active until it is interrupted.'
+      });
+      session = (await runtime.getSession(session.id))!;
+      session = await runtime.updateSession(
+        session.id,
+        session.recordRevision,
+        {
+          providerSessionId: started.providerSessionId,
+          ...(started.providerSessionTreeId
+            ? { providerSessionTreeId: started.providerSessionTreeId }
+            : {}),
+          status: 'ACTIVE',
+          materialized: true
+        },
+        'scoped-interrupt-session-ack'
+      );
+      run = (await runtime.getRun(run.id))!;
+      run = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          serverInstanceId: started.serverInstanceId,
+          providerTurnId: started.providerTurnId,
+          status: 'INTERRUPTING',
+          delivery: 'ACKNOWLEDGED',
+          interruptDelivery: 'SENDING',
+          stopRequestedAt: '2026-07-13T00:00:02.000Z'
+        },
+        'scoped-interrupt-stop-intent'
+      );
+
+      await adapter.interruptScopedTurn({ session, run });
+      run = (await runtime.getRun(run.id))!;
+      if (run.interruptDelivery === 'SENDING') {
+        await runtime.updateRun(
+          run.id,
+          run.recordRevision,
+          { interruptDelivery: 'ACKNOWLEDGED' },
+          'scoped-interrupt-ack'
+        );
+      }
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        run = (await runtime.getRun(run.id))!;
+        if (run.status === terminalStatus) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await expect(runtime.getRun(run.id)).resolves.toMatchObject(
+        terminalStatus === 'RECOVERY_REQUIRED'
+          ? {
+              status: 'RECOVERY_REQUIRED',
+              delivery: 'ACKNOWLEDGED',
+              interruptDelivery: 'AMBIGUOUS',
+              recoveryState: 'REQUIRES_USER_ACTION',
+              terminalReason: expect.stringContaining('did not confirm a terminal turn')
+            }
+          : {
+              status: 'INTERRUPTED',
+              delivery: 'TERMINAL',
+              interruptDelivery: 'TERMINAL',
+              recoveryState: 'NONE',
+              providerTerminalSource: 'TURN_COMPLETED_NOTIFICATION'
+            }
+      );
+    } finally {
+      await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
   it('can initialize again after a confirmed idle shutdown', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-reenable-'));
     const executable = await writeFakeCodexExecutable(dir);
@@ -3836,6 +4208,9 @@ async function writeFakeCodexExecutable(
 function fakeCodexScript(
   mode:
     | 'normal'
+    | 'scoped'
+    | 'scoped-interrupt-no-terminal'
+    | 'scoped-interrupt-terminal-race'
     | 'credential-telemetry'
     | 'empty-models'
     | 'ack-only'
@@ -3975,7 +4350,10 @@ const threadResponse = (request = {}) => {
   instructionSources: [],
   approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
   approvalsReviewer: request.approvalsReviewer ?? 'user',
-  sandbox: {
+  sandbox: mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' ? {
+    type: 'readOnly',
+    networkAccess: false
+  } : {
     type: 'workspaceWrite',
     writableRoots: [process.cwd()],
     networkAccess: false,
@@ -4343,6 +4721,8 @@ rl.on('line', (line) => {
             approvalsReviewer: message.params.approvalsReviewer ?? 'user',
             sandboxPolicy: mode === 'unsafe-live-settings'
               ? { type: 'dangerFullAccess' }
+              : mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race'
+                ? { type: 'readOnly', networkAccess: false }
               : message.params.sandboxPolicy ?? {
                   type: 'workspaceWrite',
                   writableRoots: [process.cwd()],
@@ -4396,7 +4776,7 @@ rl.on('line', (line) => {
           } });
           return;
         }
-        if (interruptMode) {
+        if (interruptMode || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race') {
           return;
         }
         if (mode === 'subagent') {
@@ -4737,6 +5117,12 @@ rl.on('line', (line) => {
         }
       }
       send({ id: message.id, result: {} });
+      if (mode === 'scoped-interrupt-terminal-race') {
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: turn('interrupted')
+        } });
+      }
       break;
     default:
       send({ id: message.id, error: { code: -32601, message: 'unsupported' } });

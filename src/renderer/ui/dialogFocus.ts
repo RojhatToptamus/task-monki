@@ -111,6 +111,7 @@ export function useDialogFocusBoundary({
   trapFocus = true,
   onClose,
   returnFocus,
+  active = true,
   shouldReturnFocus
 }: {
   dialogRef: RefObject<HTMLElement | null>;
@@ -120,6 +121,7 @@ export function useDialogFocusBoundary({
   trapFocus?: boolean;
   onClose(): void;
   returnFocus?: HTMLElement | null;
+  active?: boolean;
   shouldReturnFocus?(): boolean;
 }): void {
   const busyRef = useRef(busy);
@@ -134,6 +136,9 @@ export function useDialogFocusBoundary({
   shouldReturnFocusRef.current = shouldReturnFocus;
 
   useEffect(() => {
+    if (!active) return;
+    returnFocusRef.current = returnFocus ??
+      (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null));
     const frame = window.requestAnimationFrame(() => {
       focusInitialDialogTarget(dialogRef.current, initialFocusRef?.current);
     });
@@ -165,10 +170,17 @@ export function useDialogFocusBoundary({
         });
       });
     };
-  }, [dialogRef, fallbackReturnFocusRef, initialFocusRef, trapFocus]);
+  }, [
+    active,
+    dialogRef,
+    fallbackReturnFocusRef,
+    initialFocusRef,
+    returnFocus,
+    trapFocus
+  ]);
 
   useEffect(() => {
-    if (!busy) {
+    if (!active || !busy) {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
@@ -185,7 +197,7 @@ export function useDialogFocusBoundary({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [busy, dialogRef]);
+  }, [active, busy, dialogRef]);
 }
 
 export function dialogFocusableElements(dialog: HTMLElement): HTMLElement[] {

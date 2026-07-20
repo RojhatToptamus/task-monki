@@ -11,6 +11,8 @@ import { TaskManagerService } from '../core/app/TaskManagerService';
 import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import type { Task, TaskSnapshot } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import {
@@ -83,6 +85,9 @@ describe('Task Monki development seed data', () => {
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
       TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
+      TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
+      TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
+      TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: manifest.discourseWorkspaceRoot,
       TASK_MANAGER_PREVIEW_RECONCILE: '0',
       TASK_MANAGER_DETERMINISTIC_SEED: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
@@ -100,6 +105,13 @@ describe('Task Monki development seed data', () => {
     );
 
     for (const scenario of manifest.scenarios) {
+      if (scenario.group === 'discourse') {
+        expect(scenario.conversationId).toBeTruthy();
+        const aggregate = await new FileDiscourseStore(manifest.discourseDir)
+          .getConversation(scenario.conversationId!);
+        expect(aggregate.conversation.title).toContain(`[seed:${scenario.slug}]`);
+        continue;
+      }
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
@@ -119,6 +131,45 @@ describe('Task Monki development seed data', () => {
     expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
       taskForScenario(manifest, snapshot, 'board-backlog').id
     ]);
+  });
+
+  it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {
+    const store = new FileDiscourseStore(manifest.discourseDir);
+    const discourse = async (slug: string) => {
+      const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug)!;
+      return store.getConversation(scenario.conversationId!);
+    };
+
+    await expect(discourse('discourse-team-running')).resolves.toMatchObject({
+      waves: [{ policy: 'TEAM', status: 'RUNNING' }],
+      jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
+    });
+    await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
+      waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
+    });
+    const silent = await discourse('discourse-review-silent');
+    expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
+      { result: { outcome: 'NO_CONCERN_FOUND' } },
+      { result: { outcome: 'NO_CONCERN_FOUND' } }
+    ]);
+    const corrected = await discourse('discourse-author-correction');
+    expect(corrected.concerns).toMatchObject([{
+      resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
+    }]);
+    await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
+      waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
+    });
+    await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
+      waves: [{
+        status: 'PLANNED',
+        dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
+      }],
+      jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
+    });
+    await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
+      waves: [{ status: 'RECOVERY_REQUIRED' }],
+      jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
+    });
   });
 
   it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
@@ -390,6 +441,9 @@ describe('Task Monki development seed data', () => {
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
       agentRuntimeAdapters: [adapter],
+      agentRuntimeStore: new FileAgentRuntimeStore(manifest.agentRuntimeDir),
+      discourseStore: new FileDiscourseStore(manifest.discourseDir),
+      discourseWorkspaceRoot: manifest.discourseWorkspaceRoot,
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
       codexPath: path.join(rootDir, 'missing-codex')

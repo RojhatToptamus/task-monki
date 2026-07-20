@@ -1,9 +1,13 @@
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
   assertCodexPermissionProfileEvidence,
+  assertCodexReadOnlyScopeEvidence,
   codexPermissionProfileConfig,
-  codexPermissionProfileId
+  codexPermissionProfileId,
+  codexReadOnlyScopeProfile
 } from './CodexPermissionProfile';
 
 describe('Codex permission profile', () => {
@@ -227,6 +231,81 @@ describe('Codex permission profile', () => {
       ).toThrow('outside the task worktree');
     }
   );
+});
+
+describe('Codex Discourse read-only permission scope', () => {
+  it('hashes an order-independent bounded multi-root scope', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-scope-'));
+    const firstPath = path.join(root, 'first');
+    const secondPath = path.join(root, 'second');
+    await Promise.all([fs.mkdir(firstPath), fs.mkdir(secondPath)]);
+    const [first, second] = await Promise.all([fs.realpath(firstPath), fs.realpath(secondPath)]);
+
+    const profile = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: first, readOnlyRoots: [second, first] },
+      reasoningEffort: 'high'
+    });
+    const reordered = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: first, readOnlyRoots: [first, second] },
+      reasoningEffort: 'high'
+    });
+
+    expect(reordered).toEqual(profile);
+    expect(profile.scopeHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(profile.config).toMatchObject({
+      default_permissions: profile.profileId,
+      permissions: {
+        [profile.profileId]: {
+          filesystem: { ':minimal': 'read', [first]: 'read', [second]: 'read' },
+          network: { enabled: false }
+        }
+      },
+      features: { apps: false, multi_agent: false, multi_agent_v2: false, memories: false },
+      web_search: 'disabled'
+    });
+  });
+
+  it('rejects broad and overlapping roots and requires exact runtime evidence', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-scope-'));
+    const primaryPath = path.join(root, 'primary');
+    const nestedPath = path.join(primaryPath, 'nested');
+    await fs.mkdir(nestedPath, { recursive: true });
+    const primary = await fs.realpath(primaryPath);
+    const nested = await fs.realpath(nestedPath);
+    await expect(codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: primary, readOnlyRoots: [path.parse(primary).root] }
+    })).rejects.toThrow('filesystem root or home');
+    await expect(codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: primary, readOnlyRoots: [nested] }
+    })).rejects.toThrow('must not overlap');
+
+    const profile = await codexReadOnlyScopeProfile({
+      sessionId: 'session-discourse',
+      scope: { primaryCwd: primary, readOnlyRoots: [] }
+    });
+    const evidence = {
+      activePermissionProfile: { id: profile.profileId, extends: null },
+      runtimeWorkspaceRoots: [primary],
+      cwd: primary,
+      sandbox: { type: 'readOnly', networkAccess: false },
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user'
+    };
+    expect(() => assertCodexReadOnlyScopeEvidence({
+      profileId: profile.profileId,
+      primaryCwd: primary,
+      response: evidence
+    })).not.toThrow();
+    expect(() => assertCodexReadOnlyScopeEvidence({
+      profileId: profile.profileId,
+      primaryCwd: primary,
+      response: { ...evidence, sandbox: { type: 'workspaceWrite', networkAccess: false } }
+    })).toThrow('offline read-only');
+  });
 });
 
 function nativeAbsolute(...segments: string[]): string {

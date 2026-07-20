@@ -70,6 +70,18 @@ import type {
   ReadTaskAttachmentRequest,
   StageTaskAttachmentBatchRequest,
 } from '../../shared/attachments';
+import type {
+  DiscourseConversationAggregateRecord,
+  DiscourseConversationPage,
+  DiscourseConversationRecord,
+  DiscourseContextPreview,
+  DiscourseDraftRecord,
+  DiscourseMentionCatalogSnapshot,
+  DiscourseMessagePage,
+  DiscourseMessageRecord,
+  DiscourseResponseWaveRecord,
+  SendDiscourseMessageResult
+} from '../../shared/discourse';
 
 const apiBase = '';
 const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
@@ -108,6 +120,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   const emitSyntheticUpdate = () => {
     const event: AppUpdateEvent = {
       type: 'projection.updated',
+      scope: { kind: 'APP' },
       taskId: '__browser_poll__',
       payload: { source: 'fallback-poll' },
       at: new Date().toISOString()
@@ -203,6 +216,90 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
       post(baseUrl, '/api/agent/session/native', input),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
+    listDiscourseConversations: (input = {}) => {
+      const query = new URLSearchParams();
+      if (input.status) query.set('status', input.status);
+      if (input.cursor) query.set('cursor', input.cursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return get<DiscourseConversationPage>(
+        baseUrl,
+        `/api/discourse/conversations${suffix}`
+      );
+    },
+    getDiscourseConversation: (conversationId) =>
+      get<DiscourseConversationAggregateRecord>(
+        baseUrl,
+        `/api/discourse/conversations/${encodeURIComponent(conversationId)}`
+      ),
+    listDiscourseMessages: (input) => {
+      const query = new URLSearchParams({ conversationId: input.conversationId });
+      if (input.beforeCursor) query.set('beforeCursor', input.beforeCursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      return get<DiscourseMessagePage>(
+        baseUrl,
+        `/api/discourse/messages?${query.toString()}`
+      );
+    },
+    getDiscourseMessageByClientId: (input) => {
+      const query = new URLSearchParams({
+        conversationId: input.conversationId,
+        clientMessageId: input.clientMessageId
+      });
+      return get<DiscourseMessageRecord | null>(
+        baseUrl,
+        `/api/discourse/messages/by-client-id?${query.toString()}`
+      );
+    },
+    getDiscourseMentionCatalog: () =>
+      get<DiscourseMentionCatalogSnapshot>(baseUrl, '/api/discourse/mentions'),
+    createDiscourseConversation: (input) =>
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations', input),
+    appendHumanDiscourseMessage: (input) =>
+      post<DiscourseMessageRecord>(baseUrl, '/api/discourse/messages', input),
+    sendDiscourseMessage: (input) =>
+      post<SendDiscourseMessageResult>(baseUrl, '/api/discourse/messages/send', input),
+    resumeDiscourseAcceptedSend: (input) =>
+      post<SendDiscourseMessageResult>(baseUrl, '/api/discourse/messages/resume', input),
+    cancelDiscourseAcceptedSend: (input) =>
+      post<DiscourseConversationAggregateRecord>(
+        baseUrl,
+        '/api/discourse/messages/cancel-response',
+        input
+      ),
+    tombstoneDiscourseMessage: (input) =>
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/messages/tombstone', input),
+    setPinnedDiscourseContext: (input) =>
+      post<DiscourseConversationAggregateRecord>(baseUrl, '/api/discourse/context/pin', input),
+    previewDiscourseContext: (input) =>
+      post<DiscourseContextPreview>(baseUrl, '/api/discourse/context/preview', input),
+    saveDiscourseDraft: (input) =>
+      post<DiscourseDraftRecord>(baseUrl, '/api/discourse/drafts', input),
+    getDiscourseDraft: (draftId) =>
+      get<DiscourseDraftRecord | undefined>(
+        baseUrl,
+        `/api/discourse/drafts/${encodeURIComponent(draftId)}`
+      ),
+    listDiscourseDrafts: () =>
+      get<DiscourseDraftRecord[]>(baseUrl, '/api/discourse/drafts'),
+    deleteDiscourseDraft: (input) =>
+      post<void>(baseUrl, '/api/discourse/drafts/delete', input),
+    renameDiscourseConversation: (input) =>
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/rename', input),
+    setDiscourseConversationRead: (input) =>
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/read', input),
+    setDiscourseConversationArchived: (input) =>
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/archive', input),
+    deleteDiscourseConversation: (input) =>
+      post<void>(baseUrl, '/api/discourse/conversations/delete', input),
+    stopDiscourseWave: (input) =>
+      post<DiscourseResponseWaveRecord>(baseUrl, '/api/discourse/waves/stop', input),
+    confirmDiscourseWaveContext: (input) =>
+      post<DiscourseResponseWaveRecord>(
+        baseUrl,
+        '/api/discourse/waves/confirm-context',
+        input
+      ),
     stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
       post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {
         attachments: input.attachments.map((attachment) => ({

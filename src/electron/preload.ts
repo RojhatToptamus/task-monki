@@ -50,6 +50,27 @@ import {
   type ReadTaskAttachmentRequest,
   type StageTaskAttachmentBatchRequest,
 } from '../shared/attachments';
+import type {
+  AppendHumanDiscourseMessageRequest,
+  CancelDiscourseAcceptedSendRequest,
+  ConfirmDiscourseWaveContextRequest,
+  CreateDiscourseConversationRequest,
+  DeleteDiscourseConversationRequest,
+  DeleteDiscourseDraftRequest,
+  GetDiscourseMessageByClientIdRequest,
+  ListDiscourseConversationsRequest,
+  ListDiscourseMessagesRequest,
+  PreviewDiscourseContextRequest,
+  RenameDiscourseConversationRequest,
+  ResumeDiscourseAcceptedSendRequest,
+  SaveDiscourseDraftRequest,
+  SendDiscourseMessageRequest,
+  SetDiscourseConversationArchivedRequest,
+  SetDiscourseConversationReadRequest,
+  SetPinnedDiscourseContextRequest,
+  StopDiscourseWaveRequest,
+  TombstoneDiscourseMessageRequest
+} from '../shared/discourse';
 import {
   AttachmentIpcOperationGate,
   assertAttachmentIpcBatch,
@@ -100,6 +121,50 @@ const api: TaskManagerApi = {
   updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
     ipcRenderer.invoke('agent:updateNativeSession', input),
   listTasks: () => ipcRenderer.invoke('task:list'),
+  listDiscourseConversations: (input?: ListDiscourseConversationsRequest) =>
+    ipcRenderer.invoke('discourse:conversations:list', input),
+  getDiscourseConversation: (conversationId: string) =>
+    ipcRenderer.invoke('discourse:conversation:get', conversationId),
+  listDiscourseMessages: (input: ListDiscourseMessagesRequest) =>
+    ipcRenderer.invoke('discourse:messages:list', input),
+  getDiscourseMessageByClientId: (input: GetDiscourseMessageByClientIdRequest) =>
+    ipcRenderer.invoke('discourse:message:get-by-client-id', input),
+  getDiscourseMentionCatalog: () => ipcRenderer.invoke('discourse:mentions:get'),
+  createDiscourseConversation: (input: CreateDiscourseConversationRequest) =>
+    ipcRenderer.invoke('discourse:conversation:create', input),
+  appendHumanDiscourseMessage: (input: AppendHumanDiscourseMessageRequest) =>
+    ipcRenderer.invoke('discourse:message:append', input),
+  sendDiscourseMessage: (input: SendDiscourseMessageRequest) =>
+    ipcRenderer.invoke('discourse:message:send', input),
+  resumeDiscourseAcceptedSend: (input: ResumeDiscourseAcceptedSendRequest) =>
+    ipcRenderer.invoke('discourse:message:resume', input),
+  cancelDiscourseAcceptedSend: (input: CancelDiscourseAcceptedSendRequest) =>
+    ipcRenderer.invoke('discourse:message:cancel-response', input),
+  tombstoneDiscourseMessage: (input: TombstoneDiscourseMessageRequest) =>
+    ipcRenderer.invoke('discourse:message:tombstone', input),
+  setPinnedDiscourseContext: (input: SetPinnedDiscourseContextRequest) =>
+    ipcRenderer.invoke('discourse:context:pin', input),
+  previewDiscourseContext: (input: PreviewDiscourseContextRequest) =>
+    ipcRenderer.invoke('discourse:context:preview', input),
+  saveDiscourseDraft: (input: SaveDiscourseDraftRequest) =>
+    ipcRenderer.invoke('discourse:draft:save', input),
+  getDiscourseDraft: (draftId: string) =>
+    ipcRenderer.invoke('discourse:draft:get', draftId),
+  listDiscourseDrafts: () => ipcRenderer.invoke('discourse:drafts:list'),
+  deleteDiscourseDraft: (input: DeleteDiscourseDraftRequest) =>
+    ipcRenderer.invoke('discourse:draft:delete', input),
+  renameDiscourseConversation: (input: RenameDiscourseConversationRequest) =>
+    ipcRenderer.invoke('discourse:conversation:rename', input),
+  setDiscourseConversationRead: (input: SetDiscourseConversationReadRequest) =>
+    ipcRenderer.invoke('discourse:conversation:read', input),
+  setDiscourseConversationArchived: (input: SetDiscourseConversationArchivedRequest) =>
+    ipcRenderer.invoke('discourse:conversation:archive', input),
+  deleteDiscourseConversation: (input: DeleteDiscourseConversationRequest) =>
+    ipcRenderer.invoke('discourse:conversation:delete', input),
+  stopDiscourseWave: (input: StopDiscourseWaveRequest) =>
+    ipcRenderer.invoke('discourse:wave:stop', input),
+  confirmDiscourseWaveContext: (input: ConfirmDiscourseWaveContextRequest) =>
+    ipcRenderer.invoke('discourse:wave:confirm-context', input),
   stageTaskAttachmentBatch: async (input: StageTaskAttachmentBatchRequest) => {
     const byteCount = assertAttachmentIpcBatch(input);
     return attachmentIpcClientGate.run(byteCount, () =>

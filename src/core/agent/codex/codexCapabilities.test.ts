@@ -24,12 +24,17 @@ describe('codexCapabilities', () => {
     const policy = codexCapabilities().executionPolicy;
 
     expect(policy.defaultPresetId).toBe('restricted');
-    expect(policy.presets[0]).toMatchObject({
+    expect(policy.presets.find((preset) => preset.id === 'restricted')).toMatchObject({
       id: 'restricted',
       label: 'Restricted',
       sandbox: 'WORKSPACE_WRITE',
       approvalPolicy: 'never',
       approvalsReviewer: 'user',
+      networkAccess: 'DISABLED'
+    });
+    expect(policy.presets.find((preset) => preset.id === 'isolated-read-only')).toMatchObject({
+      sandbox: 'READ_ONLY',
+      approvalPolicy: 'never',
       networkAccess: 'DISABLED'
     });
   });

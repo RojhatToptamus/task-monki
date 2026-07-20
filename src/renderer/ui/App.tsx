@@ -41,6 +41,7 @@ import {
 } from '../../shared/contracts';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import { taskManagerApi } from '../api/taskManagerClient';
+import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   selectActiveRun,
   selectCurrentWorktree,
@@ -80,6 +81,8 @@ import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ImpactList } from './ImpactList';
+import { DiscourseWorkspace } from './DiscourseWorkspace';
+import { DiscourseNavIcon } from './DiscourseIcons';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 
 const emptySnapshot: TaskSnapshot = {
@@ -158,6 +161,7 @@ interface AppNotification {
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
+type AppView = NavView | 'discourse';
 
 function resolveWindowChromePlatform() {
   return window.taskManagerShell?.windowChromePlatform ?? 'other';
@@ -181,7 +185,8 @@ export function App() {
   const [isAddingRepository, setIsAddingRepository] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
-  const [view, setView] = useState<NavView>('board');
+  const [view, setView] = useState<AppView>('board');
+  const [discourseAttentionCount, setDiscourseAttentionCount] = useState(0);
   const [selectedBoardId, setSelectedBoardId] = useState<string | undefined>();
   const [boardEditor, setBoardEditor] = useState<Board | 'new' | undefined>();
   const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
@@ -462,6 +467,14 @@ export function App() {
       reportActionError(caught, 'Failed to refresh agent runtimes.');
     }
   }, [reportActionError]);
+  const refreshDiscourseAttention = useCallback(async () => {
+    const conversations = await listDiscourseConversationSnapshot(taskManagerApi);
+    setDiscourseAttentionCount(
+      conversations.filter(
+        (conversation) => conversation.needsAttention || conversation.unreadCount > 0
+      ).length
+    );
+  }, []);
   const discoverAgentRuntimeModels = useCallback(async (runtimeId: string) => {
     const runtime = await taskManagerApi.discoverAgentRuntimeModels(runtimeId);
     setRuntimeCatalog((current) => {
@@ -537,7 +550,8 @@ export function App() {
           taskManagerApi.getAgentRuntimeCatalog(),
           taskManagerApi.getAppSettings(),
           taskManagerApi.getExternalToolStatus(),
-          refresh()
+          refresh(),
+          refreshDiscourseAttention()
         ]);
         if (!canceled) {
           setRuntimeCatalog(catalog);
@@ -559,7 +573,7 @@ export function App() {
     return () => {
       canceled = true;
     };
-  }, [refresh]);
+  }, [refresh, refreshDiscourseAttention]);
 
   useEffect(() => {
     const snapshotRefresh = createUpdateRefreshScheduler({
@@ -576,7 +590,17 @@ export function App() {
       setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
       clearTimer: (handle) => window.clearTimeout(handle as number)
     });
+    const discourseAttentionRefresh = createUpdateRefreshScheduler({
+      delayMs: 100,
+      refresh: refreshDiscourseAttention,
+      setTimer: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      clearTimer: (handle) => window.clearTimeout(handle as number)
+    });
     const unsubscribe = taskManagerApi.onUpdate((event) => {
+      if (event.scope.kind === 'DISCOURSE') {
+        discourseAttentionRefresh.request();
+        return;
+      }
       if (event.type === 'runtime.updated') {
         runtimeCatalogRefresh.request();
       }
@@ -596,8 +620,9 @@ export function App() {
       unsubscribe();
       snapshotRefresh.dispose();
       runtimeCatalogRefresh.dispose();
+      discourseAttentionRefresh.dispose();
     };
-  }, [refresh]);
+  }, [refresh, refreshDiscourseAttention]);
 
   const theme = appSettings.theme;
   const isSidebarCollapsed = appSettings.sidebarCollapsed;
@@ -1643,7 +1668,7 @@ export function App() {
     }
   };
 
-  const showView = (next: NavView) => {
+  const showView = (next: AppView) => {
     setView(next);
     setSelectedBoardId(undefined);
     setIsDetailOpen(false);
@@ -1801,6 +1826,16 @@ export function App() {
                 active={!showDetail && view === 'board' && !selectedBoardId}
                 collapsed={isSidebarCollapsed}
                 onClick={() => showView('board')}
+              />
+              <NavItem
+                label="Discourse"
+                icon={<DiscourseNavIcon />}
+                count={discourseAttentionCount}
+                countNoun="conversation"
+                urgent={discourseAttentionCount > 0}
+                active={!showDetail && view === 'discourse'}
+                collapsed={isSidebarCollapsed}
+                onClick={() => showView('discourse')}
               />
             </div>
             <div className="tm-nav__section">
@@ -1987,6 +2022,8 @@ export function App() {
             onRequestDelete={requestDeleteTask}
             onModalOpenChange={setIsTaskDetailModalOpen}
           />
+        ) : view === 'discourse' ? (
+          <DiscourseWorkspace onNotify={notify} onError={reportActionError} />
         ) : (
           <MainColumn
             view={view}
@@ -2582,6 +2619,7 @@ export function NavItem({
   label,
   icon,
   count,
+  countNoun = 'task',
   urgent,
   active,
   collapsed,
@@ -2590,14 +2628,17 @@ export function NavItem({
   label: string;
   icon: ReactNode;
   count?: number;
+  countNoun?: string;
   urgent?: boolean;
   active: boolean;
   collapsed?: boolean;
   onClick(): void;
 }) {
   const descriptionId = useId();
-  const taskDescription =
-    count != null && count > 0 ? `${count} task${count === 1 ? '' : 's'}` : undefined;
+  const countDescription =
+    count != null && count > 0
+      ? `${count} ${countNoun}${count === 1 ? '' : 's'}`
+      : undefined;
   return (
     <button
       type="button"
@@ -2605,7 +2646,7 @@ export function NavItem({
       onClick={onClick}
       data-tip={collapsed ? label : undefined}
       aria-label={label}
-      aria-describedby={taskDescription ? descriptionId : undefined}
+      aria-describedby={countDescription ? descriptionId : undefined}
     >
       {icon}
       <span className="tm-nav__label">{label}</span>
@@ -2617,9 +2658,9 @@ export function NavItem({
           {count}
         </span>
       ) : null}
-      {taskDescription ? (
+      {countDescription ? (
         <span id={descriptionId} className="tm-visually-hidden">
-          {taskDescription}
+          {countDescription}
         </span>
       ) : null}
     </button>

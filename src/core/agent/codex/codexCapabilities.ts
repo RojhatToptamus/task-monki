@@ -25,6 +25,15 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         'Codex enforces managed filesystem/process boundaries and supports native or Task Monki-reviewed approvals.',
       presets: [
         {
+          id: 'isolated-read-only',
+          label: 'Isolated read-only',
+          detail: 'Explicitly attested read roots; network and approval exceptions disabled.',
+          sandbox: 'READ_ONLY',
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          networkAccess: 'DISABLED'
+        },
+        {
           id: 'restricted',
           label: 'Restricted',
           detail: 'Worktree only; network disabled; no exceptions.',
@@ -91,6 +100,9 @@ export function codexCapabilities(): AgentRuntimeCapabilities {
         'Codex attests the active permission profile, exact workspace roots, and disabled network/tool boundary.'
       ),
       'task-monki.prompt-refinement': stable('Uses a read-only ephemeral Codex execution.'),
+      'task-monki.discourse': stable(
+        'Runs attributable Discourse turns inside an attested read-only, offline permission scope.'
+      ),
       'codex.review.start': stable('Native review/start with inline or detached delivery.'),
       'codex.thread.goal': stable('Native persisted thread goal operations.'),
       'codex.permission.attestation': stable('Active permission profiles and workspace roots are attested by the runtime.'),
