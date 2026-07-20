@@ -183,7 +183,7 @@ describe('discourse mention composer model', () => {
     expect(selected.tokens[0]?.labelSnapshot).toBe('Safe Label');
   });
 
-  it('ranks deterministically in Agents, Tasks, Repositories group order', () => {
+  it('ranks deterministically with repositories ahead of task-heavy context', () => {
     const candidates: DiscourseMentionCandidate[] = [
       { kind: 'REPOSITORY', id: 'repo-1', label: 'Verifier tools', description: '', searchAliases: ['/repo/verifier'], available: true },
       { kind: 'TASK', id: 'task-1', label: 'Verify checkout', description: '', searchAliases: ['TM-1'], available: true },
@@ -193,14 +193,14 @@ describe('discourse mention composer model', () => {
     expect(rankDiscourseMentionCandidates(candidates, 'ver').map((item) => item.id)).toEqual([
       'builtin.verifier',
       'builtin.skeptic',
-      'task-1',
-      'repo-1'
+      'repo-1',
+      'task-1'
     ]);
     expect(rankDiscourseMentionCandidates(candidates, '').map((item) => item.id)).toEqual([
       'builtin.verifier',
       'builtin.skeptic',
-      'task-1',
-      'repo-1'
+      'repo-1',
+      'task-1'
     ]);
   });
 
@@ -213,6 +213,34 @@ describe('discourse mention composer model', () => {
       'task-a',
       'task-b'
     ]);
+  });
+
+  it('reserves results for every matching kind in a task-heavy workspace', () => {
+    const tasks: DiscourseMentionCandidate[] = Array.from({ length: 90 }, (_, index) => ({
+      kind: 'TASK',
+      id: `task-${index}`,
+      label: `Repository task ${index}`,
+      description: '',
+      searchAliases: ['repository'],
+      available: true
+    }));
+    const candidates: DiscourseMentionCandidate[] = [
+      agent,
+      ...tasks,
+      {
+        kind: 'REPOSITORY',
+        id: 'repository-1',
+        label: 'Task Monki repository',
+        description: '',
+        searchAliases: ['repository'],
+        available: true
+      }
+    ];
+
+    const results = rankDiscourseMentionCandidates(candidates, 'repository');
+    expect(results).toHaveLength(60);
+    expect(results[0]).toMatchObject({ kind: 'REPOSITORY', id: 'repository-1' });
+    expect(results.some((candidate) => candidate.kind === 'AGENT')).toBe(false);
   });
 
   it('keeps unavailable results visible but refuses selection', () => {

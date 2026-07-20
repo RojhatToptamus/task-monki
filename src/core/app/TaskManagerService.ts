@@ -102,6 +102,7 @@ import type {
   DeleteDiscourseDraftRequest,
   ListDiscourseConversationsRequest,
   ListDiscourseMessagesRequest,
+  GetDiscourseMessageByClientIdRequest,
   PreviewDiscourseContextRequest,
   RenameDiscourseConversationRequest,
   SaveDiscourseDraftRequest,
@@ -939,6 +940,10 @@ export class TaskManagerService {
     return this.requireDiscourseService().listMessages(input);
   }
 
+  getDiscourseMessageByClientId(input: GetDiscourseMessageByClientIdRequest) {
+    return this.requireDiscourseService().getMessageByClientId(input);
+  }
+
   getDiscourseMentionCatalog() {
     return this.requireDiscourseService().getMentionCatalog();
   }
@@ -953,6 +958,14 @@ export class TaskManagerService {
 
   sendDiscourseMessage(input: SendDiscourseMessageRequest) {
     return this.requireDiscourseService().sendMessage(input);
+  }
+
+  resumeDiscourseAcceptedSend(input: import('../../shared/discourse').ResumeDiscourseAcceptedSendRequest) {
+    return this.requireDiscourseService().resumeAcceptedSend(input);
+  }
+
+  cancelDiscourseAcceptedSend(input: import('../../shared/discourse').CancelDiscourseAcceptedSendRequest) {
+    return this.requireDiscourseService().cancelAcceptedSend(input);
   }
 
   tombstoneDiscourseMessage(input: TombstoneDiscourseMessageRequest) {

@@ -23,10 +23,14 @@ import {
   type ContextSnapshotRecord,
   type DiscourseParticipantRecord,
   type DiscourseParticipantRevisionRecord,
-  type DiscourseConcernRecord
+  type DiscourseConcernRecord,
+  type DiscourseAgentSelectionInput,
+  type DiscourseAcceptedSendRecord,
+  type AgentAssignmentSnapshot
 } from '../../shared/discourse';
 import type {
   AppendHumanDiscourseMessageInput,
+  AcceptAgentDiscourseSendInput,
   AppendAgentDiscourseMessageInput,
   CreateDiscourseWaveInput,
   CreateDiscourseConversationInput,
@@ -67,6 +71,9 @@ interface DiscourseCreateOperation {
   operationId: string;
   requestFingerprint: string;
   conversationId: string;
+  /** Missing on schema-v1 records written before semantic create fingerprints. */
+  fingerprintVersion?: 1 | 2;
+  semanticRequestFingerprint?: string;
 }
 
 interface DiscourseIndexFile {
@@ -170,19 +177,25 @@ export class FileDiscourseStore implements DiscourseStore {
       validateTitle(input.title);
       validateOperationId(input.clientOperationId);
       assertParticipantSeed(input);
-      const fingerprint = hashRequest({
-        id: input.id ?? null,
-        title: input.title.trim(),
-        defaultPolicy: input.defaultPolicy,
-        participants: input.participants,
-        participantRevisions: input.participantRevisions
-      });
+      if (!/^[a-f0-9]{64}$/u.test(input.requestFingerprint)) {
+        throw new Error('Discourse conversation request fingerprint is invalid.');
+      }
+      const fingerprint = input.requestFingerprint;
+      const semanticRequestFingerprint = createConversationSemanticFingerprint(input);
       const prior = this.index.createOperations.find(
         (operation) => operation.operationId === input.clientOperationId
       );
       if (prior) {
         if (prior.requestFingerprint !== fingerprint) {
-          throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
+          const loaded = await this.loadConversation(prior.conversationId);
+          const createOperation = loaded.createOperation;
+          if (
+            createOperation?.fingerprintVersion !== 1 ||
+            createOperation.semanticRequestFingerprint !== semanticRequestFingerprint
+          ) {
+            throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
+          }
+          return loaded.aggregate.conversation;
         }
         return (await this.loadConversation(prior.conversationId)).aggregate.conversation;
       }
@@ -226,7 +239,8 @@ export class FileDiscourseStore implements DiscourseStore {
         payload: toJsonValue({
           conversation,
           participants,
-          participantRevisions
+          participantRevisions,
+          createFingerprintVersion: 2
         })
       });
       const loaded = applyEvent(emptyLoaded(conversation), event);
@@ -240,7 +254,9 @@ export class FileDiscourseStore implements DiscourseStore {
           {
             operationId: input.clientOperationId,
             requestFingerprint: fingerprint,
-            conversationId: id
+            conversationId: id,
+            fingerprintVersion: 2,
+            semanticRequestFingerprint
           }
         ]
       };
@@ -253,6 +269,27 @@ export class FileDiscourseStore implements DiscourseStore {
       }
       return clone(conversation);
     });
+  }
+
+  async findCreatedConversation(input: {
+    clientOperationId: string;
+    requestFingerprint: string;
+  }): Promise<DiscourseConversationRecord | undefined> {
+    await this.init();
+    validateOperationId(input.clientOperationId);
+    if (!/^[a-f0-9]{64}$/u.test(input.requestFingerprint)) {
+      throw new Error('Discourse conversation request fingerprint is invalid.');
+    }
+    const prior = this.index.createOperations.find(
+      (operation) => operation.operationId === input.clientOperationId
+    );
+    if (!prior) return undefined;
+    if (prior.requestFingerprint !== input.requestFingerprint) {
+      const loaded = await this.loadConversation(prior.conversationId);
+      if (loaded.createOperation?.fingerprintVersion === 1) return undefined;
+      throw new Error('REQUEST_CONFLICT: conversation create operation changed.');
+    }
+    return (await this.loadConversation(prior.conversationId)).aggregate.conversation;
   }
 
   async getConversation(conversationId: string): Promise<DiscourseConversationAggregateRecord> {
@@ -350,6 +387,294 @@ export class FileDiscourseStore implements DiscourseStore {
       return this.publishConversationEvent(handle, loaded, event, () =>
         clone(applyEvent(loaded, event).aggregate)
       );
+    });
+  }
+
+  configureParticipants(input: {
+    conversationId: string;
+    participants: DiscourseParticipantRecord[];
+    participantRevisions: DiscourseParticipantRevisionRecord[];
+    expectedRevision: number;
+    clientOperationId: string;
+  }): Promise<DiscourseConversationAggregateRecord> {
+    return this.withConversation(input.conversationId, async (handle, loaded) => {
+      validateOperationId(input.clientOperationId);
+      const fingerprint = hashRequest(input);
+      const operationId = `participant-configuration:${input.clientOperationId}`;
+      const replay = await findConversationEvent(handle.log, operationId, fingerprint);
+      if (replay) return clone(loaded.aggregate);
+      if (loaded.aggregate.conversation.status !== 'OPEN') {
+        throw new Error('Archived discourse conversations cannot change agent configuration.');
+      }
+      if (loaded.aggregate.conversation.recordRevision !== input.expectedRevision) {
+        throw new Error('Discourse conversation changed before participant configuration update.');
+      }
+      const newParticipantIds = validateParticipantConfigurationBatch(
+        loaded,
+        input.conversationId,
+        input.participants,
+        input.participantRevisions,
+        false
+      );
+      const conversation: DiscourseConversationRecord = {
+        ...loaded.aggregate.conversation,
+        participantIds: [
+          ...loaded.aggregate.conversation.participantIds,
+          ...newParticipantIds
+        ],
+        recordRevision: loaded.aggregate.conversation.recordRevision + 1,
+        updatedAt: requireTimestamp(this.now())
+      };
+      const event = await handle.log.append({
+        kind: 'PARTICIPANTS_CONFIGURED',
+        operationId,
+        requestFingerprint: fingerprint,
+        payload: toJsonValue({
+          conversation,
+          participants: input.participants,
+          participantRevisions: input.participantRevisions
+        })
+      });
+      if (event.sequence <= loaded.aggregate.latestEventSequence) {
+        return clone(loaded.aggregate);
+      }
+      return this.publishConversationEvent(handle, loaded, event, () =>
+        clone(applyEvent(loaded, event).aggregate)
+      );
+    });
+  }
+
+  acceptAgentSend(input: AcceptAgentDiscourseSendInput): Promise<{
+    message: DiscourseMessageRecord;
+    acceptedSend: DiscourseAcceptedSendRecord;
+    aggregate: DiscourseConversationAggregateRecord;
+  }> {
+    return this.withConversation(input.conversationId, async (handle, loaded) => {
+      validateOperationId(input.clientMessageId);
+      const operationId = `agent-send:${input.clientMessageId}`;
+      if (!/^[a-f0-9]{64}$/u.test(input.requestFingerprint)) {
+        throw new Error('Discourse send request fingerprint is invalid.');
+      }
+      if (
+        !['DIRECT', 'PANEL', 'TEAM'].includes(input.policy) ||
+        !/^[a-f0-9]{64}$/u.test(input.previewFingerprint)
+      ) {
+        throw new Error('Discourse accepted send policy or context preview is invalid.');
+      }
+      const replay = await findConversationEvent(
+        handle.log,
+        operationId,
+        input.requestFingerprint
+      );
+      if (replay) {
+        return {
+          message: requireEventMessage(replay),
+          acceptedSend: requireEventAcceptedSend(replay),
+          aggregate: clone(loaded.aggregate)
+        };
+      }
+      if (loaded.aggregate.conversation.status !== 'OPEN') {
+        throw new Error('Archived discourse conversations cannot accept messages.');
+      }
+      if (loaded.aggregate.conversation.recordRevision !== input.expectedRevision) {
+        throw new Error('Discourse conversation changed before agent send acceptance.');
+      }
+      const waveTriggerIds = new Set(
+        loaded.aggregate.waves.map((wave) => wave.triggerMessageId)
+      );
+      const pendingAcceptedCount = loaded.aggregate.acceptedSends.filter(
+        (accepted) =>
+          accepted.status === 'PENDING' && !waveTriggerIds.has(accepted.triggerMessageId)
+      ).length;
+      const activeWaveCount = loaded.aggregate.waves.filter(
+        (wave) => wave.status !== 'SETTLED'
+      ).length;
+      if (pendingAcceptedCount + activeWaveCount >= 8) {
+        throw new Error('Discourse conversation has reached its queued-response safety limit.');
+      }
+      validateMessageBody(input.body);
+      const sourceMessageIds = uniqueIds(input.sourceMessageIds ?? []);
+      if (
+        input.priorVisibleMessageIds.length > DISCOURSE_LIMITS.maxRecentTranscriptMessages - 1 ||
+        new Set(input.priorVisibleMessageIds).size !== input.priorVisibleMessageIds.length
+      ) {
+        throw new Error('Discourse accepted send transcript window is invalid.');
+      }
+      assertMessageReferencesExist(
+        loaded,
+        input.priorVisibleMessageIds,
+        'accepted send visible message'
+      );
+      const context = normalizeResolvedContext(input.context ?? []);
+      const newParticipantIds = validateParticipantConfigurationBatch(
+        loaded,
+        input.conversationId,
+        input.participants,
+        input.participantRevisions,
+        true
+      );
+      const projectedRevisions = [
+        ...loaded.aggregate.participantRevisions,
+        ...input.participantRevisions
+      ];
+      if (
+        input.assignments.length === 0 ||
+        input.assignments.some((assignment) => {
+          const revision = projectedRevisions.find(
+            (candidate) => candidate.id === assignment.participantRevisionId
+          );
+          return !revision || !assignmentMatchesParticipantRevision(assignment, revision);
+        })
+      ) {
+        throw new Error('Discourse accepted send assignments are invalid.');
+      }
+      const messageId = this.createId();
+      const now = requireTimestamp(this.now());
+      const contextUpdate = buildMessageContextUpdate({
+        loaded,
+        messageId,
+        context,
+        createId: this.createId,
+        now
+      });
+      const message: DiscourseMessageRecord = {
+        id: messageId,
+        conversationId: input.conversationId,
+        ordinal: loaded.aggregate.conversation.latestOrdinal + 1,
+        author: { kind: 'USER' },
+        body: input.body,
+        status: 'VISIBLE',
+        ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        ...(input.supersedesMessageId
+          ? { supersedesMessageId: input.supersedesMessageId }
+          : {}),
+        sourceMessageIds,
+        ...(contextUpdate.revision ? { contextRevisionId: contextUpdate.revision.id } : {}),
+        clientMessageId: input.clientMessageId,
+        requestFingerprint: input.requestFingerprint,
+        createdAt: now
+      };
+      assertMessageAgainstHeaders(loaded, message);
+      if (input.supersedesMessageId) {
+        const superseded = loaded.messageHeaders.get(input.supersedesMessageId);
+        if (!superseded || superseded.status !== 'VISIBLE') {
+          throw new Error('Only a visible discourse message can be corrected.');
+        }
+      }
+      const acceptedSend: DiscourseAcceptedSendRecord = {
+        id: this.createId(),
+        conversationId: input.conversationId,
+        triggerMessageId: message.id,
+        clientMessageId: input.clientMessageId,
+        policy: input.policy,
+        assignments: input.assignments,
+        visibleMessageIds: [...input.priorVisibleMessageIds, message.id],
+        previewFingerprint: input.previewFingerprint,
+        requestFingerprint: input.requestFingerprint,
+        status: 'PENDING',
+        recordRevision: 1,
+        createdAt: now
+      };
+      const conversation: DiscourseConversationRecord = {
+        ...loaded.aggregate.conversation,
+        participantIds: [
+          ...loaded.aggregate.conversation.participantIds,
+          ...newParticipantIds
+        ],
+        latestOrdinal: message.ordinal,
+        readOrdinal: message.ordinal,
+        recordRevision: loaded.aggregate.conversation.recordRevision + 1,
+        updatedAt: now
+      };
+      const event = await handle.log.append({
+        kind: 'AGENT_SEND_ACCEPTED',
+        operationId,
+        requestFingerprint: input.requestFingerprint,
+        payload: toJsonValue({
+          message,
+          acceptedSend,
+          conversation,
+          participants: input.participants,
+          participantRevisions: input.participantRevisions,
+          contextLinks: contextUpdate.links,
+          contextRevision: contextUpdate.revision ?? null,
+          supersededMessageId: input.supersedesMessageId ?? null
+        })
+      });
+      if (event.sequence <= loaded.aggregate.latestEventSequence) {
+        return {
+          message: requireEventMessage(event),
+          acceptedSend: requireEventAcceptedSend(event),
+          aggregate: clone(loaded.aggregate)
+        };
+      }
+      return this.publishConversationEvent(handle, loaded, event, () => {
+        if (!handle.loaded) {
+          throw new Error('Discourse accepted send publication was not projected.');
+        }
+        return {
+          message: requireEventMessage(event),
+          acceptedSend: requireEventAcceptedSend(event),
+          aggregate: clone(handle.loaded.aggregate)
+        };
+      });
+    });
+  }
+
+  cancelAcceptedSend(input: {
+    conversationId: string;
+    acceptedSendId: string;
+    expectedConversationRevision: number;
+    clientOperationId: string;
+  }): Promise<DiscourseConversationAggregateRecord> {
+    return this.withConversation(input.conversationId, async (handle, loaded) => {
+      requireSafeId(input.acceptedSendId, 'accepted send id');
+      validateOperationId(input.clientOperationId);
+      const operationId = `accepted-send-cancel:${input.clientOperationId}`;
+      const fingerprint = hashRequest(input);
+      const replay = await findConversationEvent(handle.log, operationId, fingerprint);
+      if (replay) return clone(loaded.aggregate);
+      if (loaded.aggregate.conversation.recordRevision !== input.expectedConversationRevision) {
+        throw new Error('Discourse conversation changed before response cancellation.');
+      }
+      const accepted = loaded.aggregate.acceptedSends.find(
+        (candidate) => candidate.id === input.acceptedSendId
+      );
+      if (!accepted || accepted.status !== 'PENDING') {
+        throw new Error('The interrupted agent response is no longer pending.');
+      }
+      if (loaded.aggregate.waves.some(
+        (wave) => wave.triggerMessageId === accepted.triggerMessageId
+      )) {
+        throw new Error('This agent response has already been planned. Stop its response instead.');
+      }
+      const now = requireTimestamp(this.now());
+      const canceled: DiscourseAcceptedSendRecord = {
+        ...accepted,
+        status: 'CANCELED',
+        recordRevision: accepted.recordRevision + 1,
+        canceledAt: now
+      };
+      const conversation: DiscourseConversationRecord = {
+        ...loaded.aggregate.conversation,
+        recordRevision: loaded.aggregate.conversation.recordRevision + 1,
+        updatedAt: now
+      };
+      const event = await handle.log.append({
+        kind: 'ACCEPTED_SEND_CANCELED',
+        operationId,
+        requestFingerprint: fingerprint,
+        payload: toJsonValue({ acceptedSend: canceled, conversation })
+      });
+      if (event.sequence <= loaded.aggregate.latestEventSequence) {
+        return clone(loaded.aggregate);
+      }
+      return this.publishConversationEvent(handle, loaded, event, () => {
+        if (!handle.loaded) {
+          throw new Error('Discourse response cancellation was not projected.');
+        }
+        return clone(handle.loaded.aggregate);
+      });
     });
   }
 
@@ -543,6 +868,16 @@ export class FileDiscourseStore implements DiscourseStore {
       if (header.status === 'TOMBSTONE') {
         throw new Error('The discourse message is already deleted.');
       }
+      if (loaded.aggregate.acceptedSends.some(
+        (accepted) =>
+          accepted.triggerMessageId === input.messageId &&
+          accepted.status === 'PENDING' &&
+          !loaded.aggregate.waves.some(
+            (wave) => wave.triggerMessageId === accepted.triggerMessageId
+          )
+      )) {
+        throw new Error('Cancel the interrupted agent response before deleting its message.');
+      }
       const conversation: DiscourseConversationRecord = {
         ...loaded.aggregate.conversation,
         recordRevision: loaded.aggregate.conversation.recordRevision + 1,
@@ -588,7 +923,9 @@ export class FileDiscourseStore implements DiscourseStore {
       });
       if (page.events.length === 0) break;
       const selected = page.events.flatMap((event) =>
-        event.kind === 'MESSAGE_APPENDED' || event.kind === 'AGENT_MESSAGE_APPENDED'
+        event.kind === 'MESSAGE_APPENDED' ||
+        event.kind === 'AGENT_MESSAGE_APPENDED' ||
+        event.kind === 'AGENT_SEND_ACCEPTED'
           ? [applyMessagePresentationState(requireEventMessage(event), loaded)]
           : []
       );
@@ -602,6 +939,35 @@ export class FileDiscourseStore implements DiscourseStore {
       before = earliestSequence;
     }
     return { messages: clone(messages), ...(previousCursor ? { previousCursor } : {}) };
+  }
+
+  async getMessageByClientId(input: {
+    conversationId: string;
+    clientMessageId: string;
+  }): Promise<DiscourseMessageRecord | undefined> {
+    await this.init();
+    requireSafeId(input.conversationId, 'conversation id');
+    validateOperationId(input.clientMessageId);
+    assertConversationNotDeleted(this.index, input.conversationId);
+    if (!this.index.summaries.some((summary) => summary.id === input.conversationId)) {
+      throw new Error(`Discourse conversation not found: ${input.conversationId}`);
+    }
+    const handle = this.getHandle(input.conversationId);
+    const loaded = await this.loadConversation(input.conversationId);
+    const [humanEvent, acceptedAgentEvent] = await Promise.all([
+      handle.log.getByOperationId(`message:${input.clientMessageId}`),
+      handle.log.getByOperationId(`agent-send:${input.clientMessageId}`)
+    ]);
+    if (humanEvent && acceptedAgentEvent) {
+      throw new Error('Discourse client message identity is contradictory.');
+    }
+    const event = humanEvent ?? acceptedAgentEvent;
+    if (!event) return undefined;
+    const message = requireEventMessage(event);
+    if (message.clientMessageId !== input.clientMessageId) {
+      throw new Error('Discourse client message identity is invalid.');
+    }
+    return clone(applyMessagePresentationState(message, loaded));
   }
 
   renameConversation(input: {
@@ -711,6 +1077,12 @@ export class FileDiscourseStore implements DiscourseStore {
         const replay = await findConversationEvent(handle.log, operationId, fingerprint);
         if (replay) return requireEventConversation(replay);
         throw new Error('Discourse conversation changed before archive update.');
+      }
+      if (
+        input.archived &&
+        hasPendingAcceptedSend(loaded.aggregate)
+      ) {
+        throw new Error('Cancel the interrupted agent response before archiving this conversation.');
       }
       const now = requireTimestamp(this.now());
       const conversation: DiscourseConversationRecord = {
@@ -871,6 +1243,8 @@ export class FileDiscourseStore implements DiscourseStore {
     replyToMessageId?: string;
     policy: DiscourseDraftRecord['policy'];
     recipientParticipantIds: string[];
+    agentSelections?: DiscourseAgentSelectionInput[];
+    pendingClientMessageId?: string;
     tokens: DiscourseDraftTokenInput[];
   }): Promise<DiscourseDraftRecord> {
     return this.enqueueGlobal(async () => {
@@ -900,6 +1274,10 @@ export class FileDiscourseStore implements DiscourseStore {
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
         policy: input.policy,
         recipientParticipantIds: uniqueIds(input.recipientParticipantIds),
+        agentSelections: normalizeDraftAgentSelections(input.agentSelections ?? []),
+        ...(input.pendingClientMessageId
+          ? { pendingClientMessageId: input.pendingClientMessageId }
+          : {}),
         tokens: normalizeDraftTokens(input.tokens),
         updatedAt: requireTimestamp(this.now())
       };
@@ -1426,7 +1804,13 @@ export class FileDiscourseStore implements DiscourseStore {
     ) {
       throw new Error('Discourse draft file failed its integrity check.');
     }
-    const draft = record.draft as unknown as DiscourseDraftRecord;
+    const storedDraft = record.draft as unknown as DiscourseDraftRecord;
+    const draft: DiscourseDraftRecord = {
+      ...storedDraft,
+      agentSelections: Array.isArray(storedDraft.agentSelections)
+        ? storedDraft.agentSelections
+        : []
+    };
     validateDraftRecord(draft, draftId);
     return draft;
   }
@@ -1559,6 +1943,7 @@ function emptyLoaded(conversation: DiscourseConversationRecord): LoadedConversat
       conversation,
       participants: [],
       participantRevisions: [],
+      acceptedSends: [],
       contextLinks: [],
       contextRevisions: [],
       contextSnapshots: [],
@@ -1589,57 +1974,62 @@ function applyEvent(
         throw new Error('Discourse conversation creation must be the first event.');
       }
       next.aggregate.conversation = conversation;
-      next.aggregate.participants = requireArray(payload.participants, 'participants') as never;
-      next.aggregate.participantRevisions = requireArray(
+      const participants = requireArray(payload.participants, 'participants') as unknown as
+        DiscourseParticipantRecord[];
+      const participantRevisions = requireArray(
         payload.participantRevisions,
         'participant revisions'
-      ) as never;
+      ) as unknown as DiscourseParticipantRevisionRecord[];
+      next.aggregate.participants = participants;
+      next.aggregate.participantRevisions = participantRevisions;
+      const fingerprintVersion = payload.createFingerprintVersion === 2 ? 2 : 1;
       next.createOperation = {
         operationId: event.operationId,
         requestFingerprint: event.requestFingerprint,
-        conversationId: conversation.id
+        conversationId: conversation.id,
+        fingerprintVersion,
+        semanticRequestFingerprint: createConversationSemanticFingerprint({
+          title: conversation.title,
+          defaultPolicy: conversation.defaultPolicy,
+          participants,
+          participantRevisions
+        })
       };
       break;
     }
     case 'CONVERSATION_UPDATED':
       next.aggregate.conversation = requireConversation(payload.conversation);
       break;
+    case 'AGENT_SEND_ACCEPTED': {
+      const participants = requireArray(
+        payload.participants,
+        'participants'
+      ) as unknown as DiscourseParticipantRecord[];
+      const participantRevisions = requireArray(
+        payload.participantRevisions,
+        'participant revisions'
+      ) as unknown as DiscourseParticipantRevisionRecord[];
+      for (const participant of participants) {
+        const index = next.aggregate.participants.findIndex(
+          (candidate) => candidate.id === participant.id
+        );
+        if (index >= 0) next.aggregate.participants[index] = participant;
+        else next.aggregate.participants.push(participant);
+      }
+      next.aggregate.participantRevisions.push(...participantRevisions);
+      next.aggregate.acceptedSends.push(requireAcceptedSend(payload.acceptedSend));
+      applyMessageEventPayload(next, payload);
+      break;
+    }
+    case 'ACCEPTED_SEND_CANCELED': {
+      const accepted = requireAcceptedSend(payload.acceptedSend);
+      replaceRecord(next.aggregate.acceptedSends, accepted, 'accepted send');
+      next.aggregate.conversation = requireConversation(payload.conversation);
+      break;
+    }
     case 'MESSAGE_APPENDED':
     case 'AGENT_MESSAGE_APPENDED': {
-      const message = requireMessage(payload.message);
-      const conversation = requireConversation(payload.conversation);
-      if (message.conversationId !== next.aggregate.conversation.id) {
-        throw new Error('Discourse message event crosses conversation ownership.');
-      }
-      if (next.messageHeaders.has(message.id)) {
-        throw new Error('Discourse message ids must be unique within a conversation.');
-      }
-      assertMessageAgainstHeaders(next, message);
-      next.messageHeaders.set(message.id, {
-        id: message.id,
-        conversationId: message.conversationId,
-        ordinal: message.ordinal,
-        author: message.author,
-        status: message.status,
-        ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
-        ...(message.waveId ? { waveId: message.waveId } : {}),
-        ...(message.jobId ? { jobId: message.jobId } : {})
-      });
-      const contextLinks = payload.contextLinks === undefined
-        ? []
-        : requireArray(payload.contextLinks, 'context links') as unknown as ConversationContextLinkRecord[];
-      const contextRevision = payload.contextRevision && typeof payload.contextRevision === 'object'
-        ? payload.contextRevision as unknown as ConversationContextRevisionRecord
-        : undefined;
-      if (contextLinks.length > 0) next.aggregate.contextLinks.push(...contextLinks);
-      if (contextRevision) next.aggregate.contextRevisions.push(contextRevision);
-      if (typeof payload.supersededMessageId === 'string') {
-        const superseded = next.messageHeaders.get(payload.supersededMessageId);
-        if (!superseded) throw new Error('Discourse correction targets an unknown message.');
-        superseded.status = 'SUPERSEDED';
-      }
-      next.aggregate.conversation = conversation;
-      next.lastMessageAt = message.createdAt;
+      applyMessageEventPayload(next, payload);
       break;
     }
     case 'MESSAGE_TOMBSTONED': {
@@ -1668,6 +2058,26 @@ function applyEvent(
         'participant revisions'
       ) as unknown as DiscourseParticipantRevisionRecord[];
       next.aggregate.participants.push(...participants);
+      next.aggregate.participantRevisions.push(...participantRevisions);
+      next.aggregate.conversation = requireConversation(payload.conversation);
+      break;
+    }
+    case 'PARTICIPANTS_CONFIGURED': {
+      const participants = requireArray(
+        payload.participants,
+        'participants'
+      ) as unknown as DiscourseParticipantRecord[];
+      const participantRevisions = requireArray(
+        payload.participantRevisions,
+        'participant revisions'
+      ) as unknown as DiscourseParticipantRevisionRecord[];
+      for (const participant of participants) {
+        const index = next.aggregate.participants.findIndex(
+          (candidate) => candidate.id === participant.id
+        );
+        if (index >= 0) next.aggregate.participants[index] = participant;
+        else next.aggregate.participants.push(participant);
+      }
       next.aggregate.participantRevisions.push(...participantRevisions);
       next.aggregate.conversation = requireConversation(payload.conversation);
       break;
@@ -1735,6 +2145,49 @@ function applyEvent(
   return next;
 }
 
+function applyMessageEventPayload(
+  loaded: LoadedConversation,
+  payload: Record<string, DiscourseJsonValue>
+): void {
+  const message = requireMessage(payload.message);
+  const conversation = requireConversation(payload.conversation);
+  if (message.conversationId !== loaded.aggregate.conversation.id) {
+    throw new Error('Discourse message event crosses conversation ownership.');
+  }
+  if (loaded.messageHeaders.has(message.id)) {
+    throw new Error('Discourse message ids must be unique within a conversation.');
+  }
+  assertMessageAgainstHeaders(loaded, message);
+  loaded.messageHeaders.set(message.id, {
+    id: message.id,
+    conversationId: message.conversationId,
+    ordinal: message.ordinal,
+    author: message.author,
+    status: message.status,
+    ...(message.replyToMessageId ? { replyToMessageId: message.replyToMessageId } : {}),
+    ...(message.waveId ? { waveId: message.waveId } : {}),
+    ...(message.jobId ? { jobId: message.jobId } : {})
+  });
+  const contextLinks = payload.contextLinks === undefined
+    ? []
+    : requireArray(
+        payload.contextLinks,
+        'context links'
+      ) as unknown as ConversationContextLinkRecord[];
+  const contextRevision = payload.contextRevision && typeof payload.contextRevision === 'object'
+    ? payload.contextRevision as unknown as ConversationContextRevisionRecord
+    : undefined;
+  if (contextLinks.length > 0) loaded.aggregate.contextLinks.push(...contextLinks);
+  if (contextRevision) loaded.aggregate.contextRevisions.push(contextRevision);
+  if (typeof payload.supersededMessageId === 'string') {
+    const superseded = loaded.messageHeaders.get(payload.supersededMessageId);
+    if (!superseded) throw new Error('Discourse correction targets an unknown message.');
+    superseded.status = 'SUPERSEDED';
+  }
+  loaded.aggregate.conversation = conversation;
+  loaded.lastMessageAt = message.createdAt;
+}
+
 function validateLoaded(loaded: LoadedConversation): void {
   const conversation = loaded.aggregate.conversation;
   requireSafeId(conversation.id, 'conversation id');
@@ -1795,10 +2248,27 @@ function validateLoaded(loaded: LoadedConversation): void {
     requireTimestamp(participant.createdAt);
     requireTimestamp(revision.createdAt);
   }
+  const enabledProfileIds = loaded.aggregate.participants
+    .filter((participant) => participant.enabled)
+    .map((participant) => participant.agentProfileId);
+  if (new Set(enabledProfileIds).size !== enabledProfileIds.length) {
+    throw new Error('Discourse enabled participant profiles must be unique.');
+  }
   if (loaded.messageHeaders.size !== conversation.latestOrdinal) {
     throw new Error('Discourse conversation latest ordinal does not match its messages.');
   }
   assertUniqueRecordIds(loaded.aggregate.waves, 'wave');
+  assertUniqueRecordIds(loaded.aggregate.acceptedSends, 'accepted send');
+  for (const accepted of loaded.aggregate.acceptedSends) {
+    requireAcceptedSend(accepted);
+    if (
+      accepted.conversationId !== conversation.id ||
+      !loaded.messageHeaders.has(accepted.triggerMessageId) ||
+      accepted.visibleMessageIds.some((messageId) => !loaded.messageHeaders.has(messageId))
+    ) {
+      throw new Error('Discourse accepted send binding is invalid.');
+    }
+  }
   assertUniqueRecordIds(loaded.aggregate.jobs, 'job');
   assertUniqueRecordIds(loaded.aggregate.contextLinks, 'context link');
   assertUniqueRecordIds(loaded.aggregate.contextRevisions, 'context revision');
@@ -2064,6 +2534,8 @@ function validateDraftInput(input: {
   body: string;
   replyToMessageId?: string;
   recipientParticipantIds: string[];
+  agentSelections?: DiscourseAgentSelectionInput[];
+  pendingClientMessageId?: string;
   tokens: DiscourseDraftTokenInput[];
 }): void {
   if (Buffer.byteLength(input.body, 'utf8') > DISCOURSE_LIMITS.maxHumanMessageBytes) {
@@ -2071,7 +2543,45 @@ function validateDraftInput(input: {
   }
   if (input.replyToMessageId) requireSafeId(input.replyToMessageId, 'reply message id');
   input.recipientParticipantIds.forEach((id) => requireSafeId(id, 'draft recipient id'));
+  if (input.pendingClientMessageId) validateOperationId(input.pendingClientMessageId);
+  normalizeDraftAgentSelections(input.agentSelections ?? []);
   normalizeDraftTokens(input.tokens);
+}
+
+function normalizeDraftAgentSelections(
+  selections: readonly DiscourseAgentSelectionInput[]
+): DiscourseAgentSelectionInput[] {
+  if (selections.length > DISCOURSE_LIMITS.maxTeamParticipants) {
+    throw new Error('Discourse draft has too many agent configurations.');
+  }
+  const seen = new Set<string>();
+  return selections.map((selection) => {
+    if (
+      !['builtin.lead', 'builtin.skeptic', 'builtin.verifier'].includes(
+        selection.agentProfileId
+      ) ||
+      seen.has(selection.agentProfileId)
+    ) {
+      throw new Error('Discourse draft agent configuration is invalid.');
+    }
+    seen.add(selection.agentProfileId);
+    if (Boolean(selection.runtimeId) !== Boolean(selection.modelId)) {
+      throw new Error('Discourse draft agent configuration is incomplete.');
+    }
+    for (const [label, value, limit] of [
+      ['runtime id', selection.runtimeId, 128],
+      ['model id', selection.modelId, 256],
+      ['reasoning effort', selection.reasoningEffort, 64]
+    ] as const) {
+      if (
+        value !== undefined &&
+        (!value.trim() || value.length > limit || /[\u0000-\u001f\u007f]/u.test(value))
+      ) {
+        throw new Error(`Discourse draft agent ${label} is invalid.`);
+      }
+    }
+    return { ...selection };
+  });
 }
 
 function validateDraftRecord(draft: DiscourseDraftRecord, expectedId: string): void {
@@ -2113,6 +2623,13 @@ function summaryFromLoaded(loaded: LoadedConversation): DiscourseConversationSum
   const conversation = loaded.aggregate.conversation;
   const lastMessageAt = loaded.lastMessageAt;
   const activeWaves = loaded.aggregate.waves.filter((wave) => wave.status !== 'SETTLED');
+  const waveTriggerIds = new Set(
+    loaded.aggregate.waves.map((wave) => wave.triggerMessageId)
+  );
+  const acceptedWithoutWave = loaded.aggregate.acceptedSends.some(
+    (accepted) =>
+      accepted.status === 'PENDING' && !waveTriggerIds.has(accepted.triggerMessageId)
+  );
   const latestWave = loaded.aggregate.waves.at(-1);
   return {
     id: conversation.id,
@@ -2124,6 +2641,7 @@ function summaryFromLoaded(loaded: LoadedConversation): DiscourseConversationSum
     readOrdinal: conversation.readOrdinal,
     unreadCount: Math.max(0, conversation.latestOrdinal - conversation.readOrdinal),
     needsAttention:
+      acceptedWithoutWave ||
       activeWaves.some((wave) => wave.status === 'RECOVERY_REQUIRED') ||
       activeWaves.some((wave) => wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED') ||
       loaded.aggregate.jobs.some((job) => job.status === 'RECOVERY_REQUIRED') ||
@@ -2137,6 +2655,18 @@ function summaryFromLoaded(loaded: LoadedConversation): DiscourseConversationSum
     ...(lastMessageAt ? { lastMessageAt } : {}),
     ...(conversation.archivedAt ? { archivedAt: conversation.archivedAt } : {})
   };
+}
+
+function hasPendingAcceptedSend(
+  aggregate: DiscourseConversationAggregateRecord
+): boolean {
+  const waveTriggerIds = new Set(
+    aggregate.waves.map((wave) => wave.triggerMessageId)
+  );
+  return aggregate.acceptedSends.some(
+    (accepted) =>
+      accepted.status === 'PENDING' && !waveTriggerIds.has(accepted.triggerMessageId)
+  );
 }
 
 function assertParticipantSeed(input: CreateDiscourseConversationInput): void {
@@ -2172,23 +2702,102 @@ function assertParticipantSeed(input: CreateDiscourseConversationInput): void {
     }
   }
   for (const revision of input.participantRevisions) {
-    requireSafeId(revision.id, 'participant revision id');
-    requireSafeId(revision.stableParticipantId, 'participant id');
+    assertParticipantRevisionRecord(revision);
     if (
-      !participantIds.has(revision.stableParticipantId) ||
-      !revision.displayNameSnapshot.trim() ||
-      !revision.runtimeId.trim() ||
-      !revision.model.trim() ||
-      !/^[a-f0-9]{64}$/u.test(revision.roleContractHash) ||
-      !Number.isSafeInteger(revision.revision) ||
-      revision.revision < 1 ||
-      !Number.isSafeInteger(revision.profileRevision) ||
-      revision.profileRevision < 1
+      !participantIds.has(revision.stableParticipantId)
     ) {
       throw new Error('Discourse participant revision seed is invalid.');
     }
-    requireTimestamp(revision.createdAt);
   }
+}
+
+function assertParticipantRevisionRecord(
+  revision: DiscourseParticipantRevisionRecord
+): void {
+  requireSafeId(revision.id, 'participant revision id');
+  requireSafeId(revision.stableParticipantId, 'participant id');
+  if (
+    !revision.displayNameSnapshot.trim() ||
+    !revision.runtimeId.trim() ||
+    !revision.model.trim() ||
+    !revision.modelProvider.trim() ||
+    !/^[a-f0-9]{64}$/u.test(revision.roleContractHash) ||
+    !Number.isSafeInteger(revision.revision) ||
+    revision.revision < 1 ||
+    !Number.isSafeInteger(revision.profileRevision) ||
+    revision.profileRevision < 1
+  ) {
+    throw new Error('Discourse participant revision is invalid.');
+  }
+  requireTimestamp(revision.createdAt);
+}
+
+function validateParticipantConfigurationBatch(
+  loaded: LoadedConversation,
+  conversationId: string,
+  participants: readonly DiscourseParticipantRecord[],
+  participantRevisions: readonly DiscourseParticipantRevisionRecord[],
+  allowEmpty: boolean
+): string[] {
+  if (
+    (!allowEmpty && participants.length === 0) ||
+    participants.length !== participantRevisions.length
+  ) {
+    throw new Error('Discourse participant configuration requires matching records.');
+  }
+  const changedParticipantIds = new Set<string>();
+  const changedProfileIds = new Set<string>();
+  const revisionIds = new Set(
+    loaded.aggregate.participantRevisions.map((revision) => revision.id)
+  );
+  for (const [index, participant] of participants.entries()) {
+    const revision = participantRevisions[index]!;
+    const existing = loaded.aggregate.participants.find(
+      (candidate) => candidate.id === participant.id
+    );
+    const currentRevision = existing
+      ? loaded.aggregate.participantRevisions.find(
+          (candidate) => candidate.id === existing.currentRevisionId
+        )
+      : undefined;
+    const commonInvalid =
+      changedParticipantIds.has(participant.id) ||
+      changedProfileIds.has(participant.agentProfileId) ||
+      revisionIds.has(revision.id) ||
+      participant.conversationId !== conversationId ||
+      revision.conversationId !== conversationId ||
+      revision.stableParticipantId !== participant.id ||
+      revision.agentProfileId !== participant.agentProfileId ||
+      participant.currentRevisionId !== revision.id ||
+      !participant.enabled;
+    const existingInvalid = existing && (
+      !currentRevision ||
+      !existing.enabled ||
+      participant.agentProfileId !== existing.agentProfileId ||
+      participant.createdAt !== existing.createdAt ||
+      participant.recordRevision !== existing.recordRevision + 1 ||
+      revision.revision !== currentRevision.revision + 1
+    );
+    const newInvalid = !existing && (
+      participant.recordRevision !== 1 ||
+      revision.revision !== 1 ||
+      loaded.aggregate.participants.some(
+        (candidate) => candidate.agentProfileId === participant.agentProfileId && candidate.enabled
+      )
+    );
+    if (commonInvalid || existingInvalid || newInvalid) {
+      throw new Error('Discourse participant configuration revision is invalid.');
+    }
+    assertParticipantRevisionRecord(revision);
+    changedParticipantIds.add(participant.id);
+    changedProfileIds.add(participant.agentProfileId);
+    revisionIds.add(revision.id);
+  }
+  return participants
+    .filter((participant) => !loaded.aggregate.participants.some(
+      (existing) => existing.id === participant.id
+    ))
+    .map((participant) => participant.id);
 }
 
 function requireEventConversation(event: DiscourseLogEvent): DiscourseConversationRecord {
@@ -2197,6 +2806,59 @@ function requireEventConversation(event: DiscourseLogEvent): DiscourseConversati
 
 function requireEventMessage(event: DiscourseLogEvent): DiscourseMessageRecord {
   return requireMessage(requireRecord(event.payload, 'event payload').message);
+}
+
+function requireEventAcceptedSend(event: DiscourseLogEvent): DiscourseAcceptedSendRecord {
+  return requireAcceptedSend(requireRecord(event.payload, 'event payload').acceptedSend);
+}
+
+function requireAcceptedSend(value: unknown): DiscourseAcceptedSendRecord {
+  const record = requireRecord(value, 'accepted send') as unknown as DiscourseAcceptedSendRecord;
+  requireSafeId(record.id, 'accepted send id');
+  requireSafeId(record.conversationId, 'conversation id');
+  requireSafeId(record.triggerMessageId, 'accepted send message id');
+  validateOperationId(record.clientMessageId);
+  if (
+    !['DIRECT', 'PANEL', 'TEAM'].includes(record.policy) ||
+    !Array.isArray(record.assignments) ||
+    record.assignments.length < 1 ||
+    record.assignments.length > DISCOURSE_LIMITS.maxTeamParticipants ||
+    !Array.isArray(record.visibleMessageIds) ||
+    record.visibleMessageIds.length < 1 ||
+    record.visibleMessageIds.length > DISCOURSE_LIMITS.maxRecentTranscriptMessages ||
+    new Set(record.visibleMessageIds).size !== record.visibleMessageIds.length ||
+    !record.visibleMessageIds.includes(record.triggerMessageId) ||
+    !/^[a-f0-9]{64}$/u.test(record.previewFingerprint) ||
+    !/^[a-f0-9]{64}$/u.test(record.requestFingerprint) ||
+    !['PENDING', 'CANCELED'].includes(record.status) ||
+    !Number.isSafeInteger(record.recordRevision) ||
+    record.recordRevision < 1 ||
+    (record.status === 'CANCELED') !== Boolean(record.canceledAt)
+  ) {
+    throw new Error('Discourse accepted send is invalid.');
+  }
+  record.visibleMessageIds.forEach((id) => requireSafeId(id, 'visible message id'));
+  requireTimestamp(record.createdAt);
+  if (record.canceledAt) requireTimestamp(record.canceledAt);
+  return record;
+}
+
+function assignmentMatchesParticipantRevision(
+  assignment: AgentAssignmentSnapshot,
+  revision: DiscourseParticipantRevisionRecord
+): boolean {
+  return assignment.stableParticipantId === revision.stableParticipantId &&
+    assignment.agentProfileId === revision.agentProfileId &&
+    assignment.profileRevision === revision.profileRevision &&
+    assignment.displayNameSnapshot === revision.displayNameSnapshot &&
+    assignment.runtimeId === revision.runtimeId &&
+    assignment.model === revision.model &&
+    assignment.modelProvider === revision.modelProvider &&
+    assignment.reasoningEffort === revision.reasoningEffort &&
+    assignment.serviceTier === revision.serviceTier &&
+    assignment.configuredRole === revision.configuredRole &&
+    assignment.roleContractVersion === revision.roleContractVersion &&
+    assignment.roleContractHash === revision.roleContractHash;
 }
 
 function requireEventContextRevision(
@@ -2304,6 +2966,22 @@ function assertWavePlan(
   }
   if (!/^[a-f0-9]{64}$/u.test(wave.requestFingerprint)) {
     throw new Error('Discourse wave plan requires a SHA-256 request fingerprint.');
+  }
+  const acceptedSend = loaded.aggregate.acceptedSends.find(
+    (candidate) => candidate.triggerMessageId === wave.triggerMessageId
+  );
+  if (
+    acceptedSend &&
+    (
+      acceptedSend.status !== 'PENDING' ||
+      wave.clientOperationId !== `${acceptedSend.clientMessageId}:wave` ||
+      wave.requestFingerprint !== acceptedSend.requestFingerprint ||
+      wave.policy !== acceptedSend.policy ||
+      stableStringify(wave.assignments) !== stableStringify(acceptedSend.assignments) ||
+      wave.dispatchGate.previewFingerprint !== acceptedSend.previewFingerprint
+    )
+  ) {
+    throw new Error('Discourse wave plan does not match its accepted send intent.');
   }
   if (wave.recordRevision !== 1 || wave.status !== 'PLANNED') {
     throw new Error('A new discourse wave must start as revision-one PLANNED state.');
@@ -2849,6 +3527,39 @@ function hashRequest(value: unknown): string {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
 }
 
+function createConversationSemanticFingerprint(input: Pick<
+  CreateDiscourseConversationInput,
+  'title' | 'defaultPolicy' | 'participants' | 'participantRevisions'
+>): string {
+  const revisions = new Map(
+    input.participantRevisions.map((revision) => [revision.id, revision])
+  );
+  return hashRequest({
+    title: input.title.trim(),
+    defaultPolicy: input.defaultPolicy,
+    participants: input.participants.map((participant) => {
+      const revision = revisions.get(participant.currentRevisionId);
+      if (!revision) {
+        throw new Error('Discourse participant seed is missing its immutable revision.');
+      }
+      return {
+        agentProfileId: participant.agentProfileId,
+        enabled: participant.enabled,
+        profileRevision: revision.profileRevision,
+        displayNameSnapshot: revision.displayNameSnapshot,
+        runtimeId: revision.runtimeId,
+        model: revision.model,
+        modelProvider: revision.modelProvider,
+        reasoningEffort: revision.reasoningEffort,
+        serviceTier: revision.serviceTier,
+        configuredRole: revision.configuredRole,
+        roleContractVersion: revision.roleContractVersion,
+        roleContractHash: revision.roleContractHash
+      };
+    })
+  });
+}
+
 function checksum(value: unknown): string {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
 }
@@ -2913,9 +3624,19 @@ function dedupeCreateOperations(
     ) {
       throw new Error('Discourse create-operation index is contradictory.');
     }
-    byId.set(operation.operationId, operation);
+    byId.set(
+      operation.operationId,
+      existing && createOperationInformationRank(existing) > createOperationInformationRank(operation)
+        ? existing
+        : operation
+    );
   }
   return [...byId.values()];
+}
+
+function createOperationInformationRank(operation: DiscourseCreateOperation): number {
+  return (operation.fingerprintVersion ?? 1) * 2 +
+    (operation.semanticRequestFingerprint ? 1 : 0);
 }
 
 function dedupeTombstones(

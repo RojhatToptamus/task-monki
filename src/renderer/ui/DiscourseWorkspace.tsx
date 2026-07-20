@@ -14,6 +14,8 @@ import type {
   DiscourseContextPreview,
   DiscourseDraftRecord,
   DiscourseDefaultPolicy,
+  DiscourseAgentSelectionInput,
+  BuiltInAgentProfileId,
   DiscourseWavePolicy,
   DiscourseMessageRecord,
   DiscourseMentionCatalogSnapshot
@@ -22,18 +24,29 @@ import { taskManagerApi } from '../api/taskManagerClient';
 import { listDiscourseConversationSnapshot } from '../api/discoursePaging';
 import {
   composerTokensFromDraft,
+  canDeleteAbandonedDiscourseShell,
+  currentDiscourseParticipantRevisions,
   currentPinnedContext,
+  defaultDiscourseAgentSelection,
   discourseConcernResolutionLabel,
+  discourseClientMessageWasPersisted,
+  discourseDraftsAlreadySent,
+  discourseAcceptedSendForClientMessage,
   discourseJobStatusLabel,
   discourseMentionCandidates,
   discourseReviewResultLabel,
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail,
   draftTokensFromComposer,
+  discourseAgentSelectionFromCurrentRevision,
+  discoursePendingSendFingerprint,
+  eligibleDiscourseRuntimeCatalog,
   findReplyTarget,
+  interruptedDiscourseAcceptedSends,
   isNearScrollBottom,
   messageAuthorLabel,
   messageContext,
+  recoverPendingDiscourseCreateForReplacement,
   shouldShowNewResponses,
   visibleDiscourseResponseWavePlacements,
   visibleConversationSummaries
@@ -43,6 +56,7 @@ import { createDiscourseComposerMentionState } from '../model/discourseMentions'
 import { DiscourseDraftAutosaveCoordinator } from '../model/discourseDraftAutosave';
 import { DiscourseMarkdown } from './DiscourseMarkdown';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
+import { AgentModelSelector } from './AgentModelSelector';
 
 interface DiscourseWorkspaceProps {
   onNotify(message: string, tone?: 'info' | 'success' | 'error'): void;
@@ -51,6 +65,30 @@ interface DiscourseWorkspaceProps {
 
 type ConfirmAction = 'delete-conversation' | undefined;
 
+interface DraftPersistenceInput {
+  scope: ReturnType<DiscourseDraftAutosaveCoordinator['currentScope']>;
+  conversationId?: string;
+  snapshot: DiscourseComposerMentionState;
+  policy: DiscourseDefaultPolicy;
+  selections: DiscourseAgentSelectionInput[];
+  replyToMessageId?: string;
+  pendingClientMessageId?: string;
+  required?: boolean;
+  quiet?: boolean;
+}
+
+interface PendingNewConversation {
+  conversationId?: string;
+  createFingerprint: string;
+  clientOperationId: string;
+  supersededConversationIds?: string[];
+  createRequest: {
+    title: string;
+    defaultPolicy: DiscourseDefaultPolicy;
+    agents: DiscourseAgentSelectionInput[];
+  };
+}
+
 export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProps) {
   const [conversations, setConversations] = useState<DiscourseConversationSummary[]>([]);
   const [aggregate, setAggregate] = useState<DiscourseConversationAggregateRecord>();
@@ -58,23 +96,33 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [previousCursor, setPreviousCursor] = useState<string>();
   const [catalog, setCatalog] = useState<DiscourseMentionCatalogSnapshot>();
   const [drafts, setDrafts] = useState<DiscourseDraftRecord[]>([]);
+  const [durablySentDraftIds, setDurablySentDraftIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const [selectedConversationId, setSelectedConversationId] = useState<string>();
   const [newConversation, setNewConversation] = useState(false);
   const [railQuery, setRailQuery] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [loadingConversation, setLoadingConversation] = useState(false);
+  const [workspaceLoadFailed, setWorkspaceLoadFailed] = useState(false);
+  const [conversationLoadState, setConversationLoadState] = useState<
+    { status: 'idle' | 'loading' | 'ready' | 'error'; detail?: string }
+  >({ status: 'idle' });
   const [sending, setSending] = useState(false);
   const [composerVersion, setComposerVersion] = useState(0);
   const [composer, setComposer] = useState<DiscourseComposerMentionState>(() =>
     createDiscourseComposerMentionState()
   );
+  const [agentSelectionOverrides, setAgentSelectionOverrides] = useState<
+    Partial<Record<BuiltInAgentProfileId, DiscourseAgentSelectionInput>>
+  >({});
   const [responsePolicy, setResponsePolicy] = useState<DiscourseDefaultPolicy>('NONE');
   const [replyTargetId, setReplyTargetId] = useState<string>();
   const [correctionTargetId, setCorrectionTargetId] = useState<string>();
   const [selectedSourceMessageIds, setSelectedSourceMessageIds] = useState<string[]>([]);
   const [preview, setPreview] = useState<DiscourseContextPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [acceptedSendActionId, setAcceptedSendActionId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(() =>
     window.matchMedia('(min-width: 1181px)').matches
   );
@@ -85,11 +133,34 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [streamDrafts, setStreamDrafts] = useState<Record<string, string>>({});
   const transcriptRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<DiscourseMessageRecord[]>([]);
+  const draftsRef = useRef<DiscourseDraftRecord[]>([]);
   const draftAutosaveRef = useRef<DiscourseDraftAutosaveCoordinator | undefined>(undefined);
   draftAutosaveRef.current ??= new DiscourseDraftAutosaveCoordinator();
   const draftAutosave = draftAutosaveRef.current;
   const conversationLoadGeneration = useRef(0);
+  const blockingConversationLoadRef = useRef(false);
+  const workspaceLoadGeneration = useRef(0);
+  const navigationGenerationRef = useRef(0);
   const selectedConversationIdRef = useRef<string | undefined>(undefined);
+  const pendingNewConversationRef = useRef<PendingNewConversation | undefined>(undefined);
+  const supersededConversationCleanupIdsRef = useRef<string[]>([]);
+  const pendingConversationCleanupRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSendIdentityRef = useRef<{
+    fingerprint: string;
+    clientMessageId: string;
+  } | undefined>(undefined);
+  const draftSaveTimerRef = useRef<number | undefined>(undefined);
+  const latestDraftPersistenceRef = useRef<DraftPersistenceInput | undefined>(undefined);
+  const persistDraftRef = useRef<
+    ((input: DraftPersistenceInput) => Promise<void>) | undefined
+  >(undefined);
+  const eventRefreshTimerRef = useRef<number | undefined>(undefined);
+  const eventRefreshConversationIdsRef = useRef(new Set<string>());
+
+  const reportDiscourseError = useCallback((error: unknown, safeMessage: string) => {
+    console.error(safeMessage, error);
+    onError(undefined, safeMessage);
+  }, [onError]);
 
   const refreshSummaries = useCallback(async () => {
     const next = await listDiscourseConversationSnapshot(taskManagerApi);
@@ -99,13 +170,21 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const refreshDrafts = useCallback(async () => {
     const next = await taskManagerApi.listDiscourseDrafts();
+    draftsRef.current = next;
     setDrafts(next);
     return next;
   }, []);
 
-  const loadConversation = useCallback(async (conversationId: string, preserveScroll = false) => {
+  const loadConversation = useCallback(async (
+    conversationId: string,
+    preserveScroll = false,
+    mode: 'blocking' | 'background' = 'blocking'
+  ) => {
     const loadGeneration = ++conversationLoadGeneration.current;
-    setLoadingConversation(true);
+    if (mode === 'blocking') {
+      blockingConversationLoadRef.current = true;
+      setConversationLoadState({ status: 'loading' });
+    }
     const container = transcriptRef.current;
     const wasNearBottom = container
       ? isNearScrollBottom(container)
@@ -116,8 +195,68 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         taskManagerApi.getDiscourseConversation(conversationId),
         taskManagerApi.listDiscourseMessages({ conversationId, limit: 100 })
       ]);
+      const conversationDrafts = draftsRef.current.filter(
+        (draft) =>
+          draft.conversationId === conversationId &&
+          draft.pendingClientMessageId !== undefined
+      );
+      const lookupClientIds = new Set(
+        conversationDrafts.flatMap((draft) =>
+          draft.pendingClientMessageId ? [draft.pendingClientMessageId] : []
+        )
+      );
+      const pendingClientMessageId = pendingSendIdentityRef.current?.clientMessageId;
+      if (
+        pendingClientMessageId &&
+        !discourseClientMessageWasPersisted(nextAggregate, page.messages, pendingClientMessageId)
+      ) {
+        lookupClientIds.add(pendingClientMessageId);
+      }
+      const durableClientMessageIds = new Set(
+        (await Promise.all(
+          [...lookupClientIds].map((clientMessageId) =>
+            taskManagerApi.getDiscourseMessageByClientId({
+              conversationId,
+              clientMessageId
+            })
+          )
+        )).flatMap((message) => message?.clientMessageId ? [message.clientMessageId] : [])
+      );
       if (loadGeneration !== conversationLoadGeneration.current) return;
+      setDurablySentDraftIds((current) => {
+        const next = new Set(current);
+        for (const draft of conversationDrafts) next.delete(draft.id);
+        for (const draft of conversationDrafts) {
+          if (
+            draft.pendingClientMessageId &&
+            durableClientMessageIds.has(draft.pendingClientMessageId)
+          ) {
+            next.add(draft.id);
+          }
+        }
+        return next;
+      });
       setAggregate(nextAggregate);
+      if (
+        pendingNewConversationRef.current?.conversationId === conversationId &&
+        nextAggregate.conversation.latestOrdinal > 0
+      ) {
+        pendingNewConversationRef.current = undefined;
+      }
+      if (
+        pendingClientMessageId &&
+        (
+          discourseClientMessageWasPersisted(
+            nextAggregate,
+            page.messages,
+            pendingClientMessageId
+          ) || durableClientMessageIds.has(pendingClientMessageId)
+        ) &&
+        pendingSendIdentityRef.current?.clientMessageId === pendingClientMessageId
+      ) {
+        pendingSendIdentityRef.current = undefined;
+      }
+      setConversationLoadState({ status: 'ready' });
       const activeJobIds = new Set(
         nextAggregate.jobs
           .filter((job) => !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status))
@@ -158,92 +297,143 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         requestAnimationFrame(() => scrollTranscriptToBottom(transcriptRef.current));
       }
     } catch (error) {
-      if (loadGeneration === conversationLoadGeneration.current) throw error;
+      if (loadGeneration === conversationLoadGeneration.current && mode === 'blocking') {
+        setConversationLoadState({
+          status: 'error',
+          detail: 'The latest conversation state could not be loaded.'
+        });
+      }
+      throw error;
     } finally {
-      if (loadGeneration === conversationLoadGeneration.current) {
-        setLoadingConversation(false);
+      if (loadGeneration === conversationLoadGeneration.current && mode === 'blocking') {
+        blockingConversationLoadRef.current = false;
       }
     }
   }, []);
 
-  useEffect(() => {
-    let canceled = false;
-    void Promise.all([
-      refreshSummaries(),
-      taskManagerApi.getDiscourseMentionCatalog(),
-      refreshDrafts()
-    ]).then(([summaries, nextCatalog]) => {
-      if (canceled) return;
+  const loadWorkspace = useCallback(async () => {
+    const generation = ++workspaceLoadGeneration.current;
+    setLoading(true);
+    setWorkspaceLoadFailed(false);
+    try {
+      const [summaries, nextCatalog] = await Promise.all([
+        refreshSummaries(),
+        taskManagerApi.getDiscourseMentionCatalog(),
+        refreshDrafts()
+      ]);
+      if (generation !== workspaceLoadGeneration.current) return;
       setCatalog(nextCatalog);
       if (summaries.length > 0) {
         const first = summaries.find((conversation) => conversation.status === 'OPEN') ?? summaries[0];
         selectedConversationIdRef.current = first?.id;
         setSelectedConversationId(first?.id);
+        setNewConversation(false);
       } else {
+        selectedConversationIdRef.current = undefined;
+        setSelectedConversationId(undefined);
         setNewConversation(true);
       }
-    }).catch((error) => {
-      if (!canceled) onError(error, 'Could not load Discourse.');
-    }).finally(() => {
-      if (!canceled) setLoading(false);
-    });
+    } catch (error) {
+      if (generation === workspaceLoadGeneration.current) {
+        setWorkspaceLoadFailed(true);
+        reportDiscourseError(error, 'Could not load Discourse.');
+      }
+    } finally {
+      if (generation === workspaceLoadGeneration.current) setLoading(false);
+    }
+  }, [refreshDrafts, refreshSummaries, reportDiscourseError]);
+
+  useEffect(() => {
+    void loadWorkspace();
     return () => {
-      canceled = true;
+      workspaceLoadGeneration.current += 1;
     };
-  }, [onError, refreshDrafts, refreshSummaries]);
+  }, [loadWorkspace]);
 
   useEffect(() => {
     if (!selectedConversationId) {
       conversationLoadGeneration.current += 1;
-      setLoadingConversation(false);
       setAggregate(undefined);
       setMessages([]);
       messagesRef.current = [];
       setPreviousCursor(undefined);
       setSelectedSourceMessageIds([]);
+      setConversationLoadState({ status: 'idle' });
       return;
     }
     void loadConversation(selectedConversationId).catch((error) =>
-      onError(error, 'Could not load the conversation.')
+      reportDiscourseError(error, 'Could not load the conversation.')
     );
     return () => {
       conversationLoadGeneration.current += 1;
     };
-  }, [loadConversation, onError, selectedConversationId]);
+  }, [loadConversation, reportDiscourseError, selectedConversationId]);
 
-  useEffect(() => taskManagerApi.onUpdate((event) => {
-    if (event.type === 'runtime.updated') {
-      void taskManagerApi.getDiscourseMentionCatalog()
-        .then(setCatalog)
-        .catch((error) => onError(error, 'Could not refresh agent availability.'));
-      return;
-    }
-    if (event.scope.kind !== 'DISCOURSE') return;
-    if (event.type === 'discourse.delta') {
-      const payload = event.payload as {
-        jobId?: string;
-        publication?: { kind?: string; text?: string };
-      };
-      if (payload.jobId && typeof payload.publication?.text === 'string') {
-        setStreamDrafts((current) => ({
-          ...current,
-          [payload.jobId!]: payload.publication!.kind === 'SNAPSHOT'
-            ? payload.publication!.text!
-            : `${current[payload.jobId!] ?? ''}${payload.publication!.text!}`
-        }));
+  useEffect(() => {
+    const unsubscribe = taskManagerApi.onUpdate((event) => {
+      if (event.type === 'runtime.updated') {
+        void taskManagerApi.getDiscourseMentionCatalog()
+          .then(setCatalog)
+          .catch((error) => reportDiscourseError(
+            error,
+            'Could not refresh agent availability.'
+          ));
+        return;
       }
-      return;
-    }
-    void refreshSummaries().catch((error) =>
-      onError(error, 'Could not refresh Discourse conversations.')
-    );
-    const activeConversationId = selectedConversationIdRef.current;
-    if (event.scope.conversationId === activeConversationId) {
-      void loadConversation(activeConversationId, true).catch((error) =>
-        onError(error, 'Could not refresh the conversation.')
-      );
-    }
-  }), [loadConversation, onError, refreshSummaries]);
+      if (event.scope.kind !== 'DISCOURSE') return;
+      if (event.type === 'discourse.delta') {
+        const payload = event.payload as {
+          jobId?: string;
+          publication?: { kind?: string; text?: string };
+        };
+        if (payload.jobId && typeof payload.publication?.text === 'string') {
+          setStreamDrafts((current) => ({
+            ...current,
+            [payload.jobId!]: payload.publication!.kind === 'SNAPSHOT'
+              ? payload.publication!.text!
+              : `${current[payload.jobId!] ?? ''}${payload.publication!.text!}`
+          }));
+        }
+        return;
+      }
+      if (event.scope.conversationId) {
+        eventRefreshConversationIdsRef.current.add(event.scope.conversationId);
+      }
+      if (eventRefreshTimerRef.current !== undefined) {
+        window.clearTimeout(eventRefreshTimerRef.current);
+      }
+      const flushEventRefresh = () => {
+        eventRefreshTimerRef.current = undefined;
+        const activeConversationId = selectedConversationIdRef.current;
+        const shouldRefreshActive = Boolean(
+          activeConversationId &&
+          eventRefreshConversationIdsRef.current.has(activeConversationId)
+        );
+        if (shouldRefreshActive && blockingConversationLoadRef.current) {
+          eventRefreshTimerRef.current = window.setTimeout(flushEventRefresh, 75);
+          return;
+        }
+        eventRefreshConversationIdsRef.current.clear();
+        void refreshSummaries().catch((error) =>
+          reportDiscourseError(error, 'Could not refresh Discourse conversations.')
+        );
+        if (activeConversationId && shouldRefreshActive) {
+          void loadConversation(activeConversationId, true, 'background').catch((error) =>
+            reportDiscourseError(error, 'Could not refresh the conversation.')
+          );
+        }
+      };
+      eventRefreshTimerRef.current = window.setTimeout(flushEventRefresh, 75);
+    });
+    return () => {
+      unsubscribe();
+      if (eventRefreshTimerRef.current !== undefined) {
+        window.clearTimeout(eventRefreshTimerRef.current);
+        eventRefreshTimerRef.current = undefined;
+      }
+      eventRefreshConversationIdsRef.current.clear();
+    };
+  }, [loadConversation, refreshSummaries, reportDiscourseError]);
 
   useEffect(() => {
     const compactLayout = window.matchMedia('(max-width: 1180px)');
@@ -261,6 +451,22 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     if (newConversation) return drafts.find((draft) => !draft.conversationId);
     return undefined;
   }, [drafts, newConversation, selectedConversationId]);
+  const alreadySentDrafts = useMemo(
+    () => {
+      const visibleSentIds = new Set(
+        aggregate
+          ? discourseDraftsAlreadySent(aggregate, messages, drafts).map((draft) => draft.id)
+          : []
+      );
+      return drafts.filter(
+        (draft) => visibleSentIds.has(draft.id) || durablySentDraftIds.has(draft.id)
+      );
+    },
+    [aggregate, drafts, durablySentDraftIds, messages]
+  );
+  const activeDraftAlreadySent = Boolean(
+    activeDraft && alreadySentDrafts.some((draft) => draft.id === activeDraft.id)
+  );
 
   useEffect(() => {
     draftAutosave.activate(selectedConversationId, activeDraft);
@@ -275,6 +481,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       conversations.find((conversation) => conversation.id === selectedConversationId)?.defaultPolicy ??
       'NONE';
     setResponsePolicy(defaultPolicy);
+    setAgentSelectionOverrides(Object.fromEntries(
+      (activeDraft?.agentSelections ?? []).map((selection) => [
+        selection.agentProfileId,
+        selection
+      ])
+    ));
     setComposer(next);
     setComposerVersion((value) => value + 1);
   // Draft content is restored when navigation changes. Saving the first
@@ -283,41 +495,151 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   }, [newConversation, selectedConversationId]);
 
   useEffect(() => {
+    if (alreadySentDrafts.length === 0) return;
+    const acceptedDraftIds = new Set(alreadySentDrafts.map((draft) => draft.id));
+    setDrafts((current) => {
+      const next = current.filter((draft) => !acceptedDraftIds.has(draft.id));
+      draftsRef.current = next;
+      return next;
+    });
+    for (const draft of alreadySentDrafts) {
+      void taskManagerApi.deleteDiscourseDraft({
+        draftId: draft.id,
+        expectedRevision: draft.recordRevision
+      }).catch((error) => {
+        console.error('Could not remove a draft whose message was already accepted.', error);
+      });
+    }
+    if (activeDraft && acceptedDraftIds.has(activeDraft.id)) {
+      const scope = draftAutosave.currentScope();
+      if (scope) draftAutosave.clear(scope);
+      if (draftSaveTimerRef.current !== undefined) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = undefined;
+      }
+      setReplyTargetId(undefined);
+      setCorrectionTargetId(undefined);
+      setSelectedSourceMessageIds([]);
+      setComposer(createDiscourseComposerMentionState());
+      setAgentSelectionOverrides({});
+      setComposerVersion((value) => value + 1);
+      onNotify('Recovered the conversation without resending its saved message.', 'info');
+    }
+  }, [activeDraft, alreadySentDrafts, draftAutosave, onNotify]);
+
+  const selectedAgentProfileIds = composer.tokens
+    .filter((token) => token.kind === 'AGENT')
+    .map((token) => token.entityId)
+    .filter(isBuiltInAgentProfileId);
+  const activeAgentProfileIds: BuiltInAgentProfileId[] = responsePolicy === 'TEAM'
+    ? ['builtin.lead', 'builtin.skeptic', 'builtin.verifier']
+    : responsePolicy === 'NONE'
+      ? []
+      : selectedAgentProfileIds;
+  const activeAgentSelections = activeAgentProfileIds.map((agentProfileId) =>
+    agentSelectionOverrides[agentProfileId] ??
+    (catalog
+      ? discourseAgentSelectionFromCurrentRevision(aggregate, catalog, agentProfileId) ??
+        defaultDiscourseAgentSelection(catalog, agentProfileId)
+      : { agentProfileId })
+  );
+  const draftAgentSelections = activeAgentSelections.map((selection) =>
+    selection.runtimeId && selection.modelId
+      ? selection
+      : { agentProfileId: selection.agentProfileId }
+  );
+
+  const persistDraft = useCallback((input: DraftPersistenceInput) => {
+    if (!input.scope) {
+      return input.required
+        ? Promise.reject(new Error('The message draft is not ready to send.'))
+        : Promise.resolve();
+    }
+    return draftAutosave.enqueue(input.scope, async (existing) => {
+      if (
+        !input.snapshot.text &&
+        input.snapshot.tokens.length === 0 &&
+        !input.replyToMessageId &&
+        input.policy === 'NONE' &&
+        input.selections.length === 0 &&
+        !existing
+      ) return;
+      const conversationId =
+        input.conversationId ?? input.scope?.conversationId ?? existing?.conversationId;
+      return taskManagerApi.saveDiscourseDraft({
+        ...(existing ? { draftId: existing.id, expectedRevision: existing.recordRevision } : {}),
+        ...(conversationId ? { conversationId } : {}),
+        body: input.snapshot.text,
+        ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        policy: input.policy,
+        recipientParticipantIds: [],
+        agentSelections: input.selections,
+        ...(input.pendingClientMessageId
+          ? { pendingClientMessageId: input.pendingClientMessageId }
+          : {}),
+        tokens: draftTokensFromComposer(input.snapshot.tokens)
+      });
+    }).then(({ saved }) => {
+      if (!saved || input.quiet) return;
+      setDrafts((current) => {
+        const next = [saved, ...current.filter((draft) => draft.id !== saved.id)];
+        draftsRef.current = next;
+        return next;
+      });
+    }).catch((error) => {
+      if (input.required) throw error;
+      if (!input.quiet) reportDiscourseError(error, 'Could not save the discourse draft.');
+    });
+  }, [draftAutosave, reportDiscourseError]);
+
+  persistDraftRef.current = persistDraft;
+  latestDraftPersistenceRef.current =
+    selectedConversationId || newConversation
+      ? {
+          scope: draftAutosave.currentScope(),
+          snapshot: composer,
+          policy: responsePolicy,
+          selections: draftAgentSelections,
+          ...(pendingSendIdentityRef.current
+            ? { pendingClientMessageId: pendingSendIdentityRef.current.clientMessageId }
+            : {}),
+          ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+        }
+      : undefined;
+
+  useEffect(() => () => {
+    if (draftSaveTimerRef.current !== undefined) {
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = undefined;
+    }
+    const latest = latestDraftPersistenceRef.current;
+    if (latest) void persistDraftRef.current?.({ ...latest, quiet: true });
+  }, []);
+
+  useEffect(() => {
     if (!selectedConversationId && !newConversation) return;
     const scope = draftAutosave.currentScope();
     if (!scope) return;
     const timer = window.setTimeout(() => {
+      if (draftSaveTimerRef.current === timer) draftSaveTimerRef.current = undefined;
       const snapshot = composer;
-      void draftAutosave
-        .enqueue(scope, async (existing) => {
-          if (
-            !snapshot.text &&
-            snapshot.tokens.length === 0 &&
-            !replyTargetId &&
-            !existing
-          ) return;
-          const saved = await taskManagerApi.saveDiscourseDraft({
-            ...(existing ? { draftId: existing.id, expectedRevision: existing.recordRevision } : {}),
-            ...(scope.conversationId ? { conversationId: scope.conversationId } : {}),
-            body: snapshot.text,
-            ...(replyTargetId ? { replyToMessageId: replyTargetId } : {}),
-            policy: responsePolicy,
-            recipientParticipantIds: [],
-            tokens: draftTokensFromComposer(snapshot.tokens)
-          });
-          return saved;
-        })
-        .then(({ saved }) => {
-          if (!saved) return;
-          setDrafts((current) => [
-            saved,
-            ...current.filter((draft) => draft.id !== saved.id)
-          ]);
-        })
-        .catch((error) => onError(error, 'Could not save the discourse draft.'));
+      void persistDraft({
+        scope,
+        snapshot,
+        policy: responsePolicy,
+        selections: draftAgentSelections,
+        ...(pendingSendIdentityRef.current
+          ? { pendingClientMessageId: pendingSendIdentityRef.current.clientMessageId }
+          : {}),
+        ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+      });
     }, 500);
-    return () => window.clearTimeout(timer);
-  }, [composer, draftAutosave, newConversation, onError, replyTargetId, responsePolicy, selectedConversationId]);
+    draftSaveTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (draftSaveTimerRef.current === timer) draftSaveTimerRef.current = undefined;
+    };
+  }, [agentSelectionOverrides, aggregate, catalog, composer, draftAutosave, newConversation, persistDraft, replyTargetId, responsePolicy, selectedConversationId]);
 
   const candidates = useMemo(
     () => catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens) : [],
@@ -326,6 +648,21 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const selectedSummary = conversations.find(
     (conversation) => conversation.id === selectedConversationId
   );
+  const conversationPending = Boolean(
+    selectedConversationId && !aggregate && conversationLoadState.status === 'loading'
+  );
+  const conversationLoadFailed = Boolean(
+    selectedConversationId && !aggregate && conversationLoadState.status === 'error'
+  );
+  const conversationRefreshFailed = Boolean(
+    selectedConversationId && aggregate && conversationLoadState.status === 'error'
+  );
+  const conversationRefreshing = Boolean(
+    selectedConversationId && aggregate && conversationLoadState.status === 'loading'
+  );
+  const conversationUnavailable =
+    conversationPending || conversationLoadFailed || conversationRefreshFailed ||
+    conversationRefreshing;
   const replyTarget = replyTargetId
     ? messages.find((message) => message.id === replyTargetId)
     : undefined;
@@ -336,11 +673,14 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const responseWavePlacements = aggregate
     ? visibleDiscourseResponseWavePlacements(aggregate, messages)
     : [];
+  const interruptedAcceptedSends = useMemo(
+    () => interruptedDiscourseAcceptedSends(aggregate),
+    [aggregate]
+  );
+  const responseDecisionPending = interruptedAcceptedSends.length > 0;
+  const composerUnavailable =
+    conversationUnavailable || responseDecisionPending || activeDraftAlreadySent;
   const contextTokens = composer.tokens.filter((token) => token.kind !== 'AGENT');
-  const selectedAgentProfileIds = composer.tokens
-    .filter((token) => token.kind === 'AGENT')
-    .map((token) => token.entityId)
-    .filter(isBuiltInAgentProfileId);
   const availableAgentProfileIds = new Set(
     catalog?.agents
       .filter((entry) => entry.availability === 'AVAILABLE')
@@ -351,10 +691,23 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const selectedAgentsReady = selectedAgentProfileIds.every((profileId) =>
     availableAgentProfileIds.has(profileId)
   );
+  const eligibleRuntimeCatalog = catalog
+    ? eligibleDiscourseRuntimeCatalog(catalog)
+    : undefined;
+  const configuredAgentsReady = activeAgentSelections.every((selection) =>
+    Boolean(
+      selection.runtimeId &&
+      selection.modelId &&
+      eligibleRuntimeCatalog?.models.some(
+        (model) =>
+          model.runtimeId === selection.runtimeId && model.id === selection.modelId
+      )
+    )
+  );
   const responseReady = responsePolicy === 'NONE' || (responsePolicy === 'TEAM' && teamReady) ||
     (responsePolicy === 'DIRECT' && selectedAgentProfileIds.length === 1) ||
     (responsePolicy === 'PANEL' && selectedAgentProfileIds.length >= 2 && selectedAgentProfileIds.length <= 3);
-  const safeResponseReady = responseReady && selectedAgentsReady;
+  const safeResponseReady = responseReady && selectedAgentsReady && configuredAgentsReady;
 
   const updateComposer = (next: DiscourseComposerMentionState) => {
     setComposer(next);
@@ -375,6 +728,18 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     };
     setComposer(next);
     setComposerVersion((value) => value + 1);
+  };
+
+  const updateAgentSelection = (selection: DiscourseAgentSelectionInput) => {
+    setAgentSelectionOverrides((current) => ({
+      ...current,
+      [selection.agentProfileId]: selection
+    }));
+  };
+
+  const discoverAgentModels = async (runtimeId: string) => {
+    await taskManagerApi.discoverAgentRuntimeModels(runtimeId);
+    setCatalog(await taskManagerApi.getDiscourseMentionCatalog());
   };
 
   const prepareAgentFollowUp = (
@@ -452,16 +817,177 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     setComposerVersion((value) => value + 1);
   };
 
+  const flushCurrentDraft = (
+    pendingClientMessageId?: string,
+    conversationId?: string,
+    required = false
+  ) => {
+    if (draftSaveTimerRef.current !== undefined) {
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = undefined;
+    }
+    return persistDraft({
+      scope: draftAutosave.currentScope(),
+      ...(conversationId ? { conversationId } : {}),
+      snapshot: composer,
+      policy: responsePolicy,
+      selections: draftAgentSelections,
+      ...(pendingClientMessageId ? { pendingClientMessageId } : {}),
+      ...(required ? { required: true } : {}),
+      ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+    });
+  };
+
+  const cleanupSupersededConversations = async (conversationIds: readonly string[]) => {
+    const candidates = [...new Set([
+      ...supersededConversationCleanupIdsRef.current,
+      ...conversationIds
+    ])];
+    supersededConversationCleanupIdsRef.current = candidates;
+    if (candidates.length === 0) return;
+    let summaries: DiscourseConversationSummary[];
+    let savedDrafts: DiscourseDraftRecord[];
+    try {
+      [summaries, savedDrafts] = await Promise.all([
+        refreshSummaries(),
+        taskManagerApi.listDiscourseDrafts()
+      ]);
+    } catch (error) {
+      console.error('Could not inspect superseded Discourse conversations.', error);
+      return;
+    }
+    const remaining: string[] = [];
+    for (const conversationId of candidates) {
+      if (!summaries.some((summary) => summary.id === conversationId)) continue;
+      try {
+        const supersededAggregate = await taskManagerApi.getDiscourseConversation(
+          conversationId
+        );
+        if (!canDeleteAbandonedDiscourseShell({
+          conversationId,
+          latestOrdinal: supersededAggregate.conversation.latestOrdinal,
+          drafts: savedDrafts
+        })) continue;
+        await taskManagerApi.deleteDiscourseConversation({
+          conversationId,
+          expectedRevision: supersededAggregate.conversation.recordRevision,
+          clientOperationId: crypto.randomUUID()
+        });
+      } catch (error) {
+        remaining.push(conversationId);
+        console.error('Could not clean up a superseded Discourse conversation.', error);
+      }
+    }
+    supersededConversationCleanupIdsRef.current = remaining;
+    await refreshSummaries().catch(() => undefined);
+  };
+
+  const abandonPendingNewConversation = async (draftFlush: Promise<void>) => {
+    const pending = pendingNewConversationRef.current;
+    if (!pending) return;
+    pendingSendIdentityRef.current = undefined;
+    try {
+      await draftFlush;
+    } catch (error) {
+      if (pendingNewConversationRef.current === pending) {
+        pendingNewConversationRef.current = undefined;
+      }
+      await refreshSummaries().catch(() => undefined);
+      reportDiscourseError(
+        error,
+        'The draft could not be saved, so its conversation was kept.'
+      );
+      return;
+    }
+    let conversationId = pending.conversationId;
+    if (!conversationId) {
+      try {
+        const recovered = await taskManagerApi.createDiscourseConversation({
+          ...pending.createRequest,
+          clientOperationId: pending.clientOperationId
+        });
+        conversationId = recovered.id;
+      } catch (error) {
+        reportDiscourseError(
+          error,
+          'Could not reconcile the empty conversation before leaving it.'
+        );
+        return;
+      }
+    }
+    if (pendingNewConversationRef.current === pending) {
+      pendingNewConversationRef.current = undefined;
+    }
+    await cleanupSupersededConversations(pending.supersededConversationIds ?? []);
+    try {
+      const [pendingAggregate, savedDrafts] = await Promise.all([
+        taskManagerApi.getDiscourseConversation(conversationId),
+        taskManagerApi.listDiscourseDrafts()
+      ]);
+      if (!canDeleteAbandonedDiscourseShell({
+        conversationId,
+        latestOrdinal: pendingAggregate.conversation.latestOrdinal,
+        drafts: savedDrafts
+      })) {
+        await refreshSummaries();
+        return;
+      }
+      await taskManagerApi.deleteDiscourseConversation({
+        conversationId,
+        expectedRevision: pendingAggregate.conversation.recordRevision,
+        clientOperationId: crypto.randomUUID()
+      });
+      await refreshSummaries();
+    } catch (error) {
+      reportDiscourseError(error, 'Could not clean up the empty conversation.');
+    }
+  };
+
   const selectConversation = (conversationId: string) => {
+    if (sending) return;
+    const pendingShell = pendingNewConversationRef.current?.conversationId;
+    const draftFlush = flushCurrentDraft(
+      pendingSendIdentityRef.current?.clientMessageId,
+      pendingShell,
+      Boolean(pendingShell)
+    );
+    pendingConversationCleanupRef.current = pendingConversationCleanupRef.current.then(() =>
+      pendingNewConversationRef.current
+        ? abandonPendingNewConversation(draftFlush)
+        : cleanupSupersededConversations([])
+    );
+    void pendingConversationCleanupRef.current;
+    pendingSendIdentityRef.current = undefined;
+    navigationGenerationRef.current += 1;
     conversationLoadGeneration.current += 1;
     selectedConversationIdRef.current = conversationId;
     setNewConversation(false);
     setSelectedConversationId(conversationId);
+    setAggregate(undefined);
+    setMessages([]);
+    messagesRef.current = [];
+    setPreviousCursor(undefined);
+    setConversationLoadState({ status: 'loading' });
     setPreview(undefined);
     setNewResponses(false);
   };
 
   const startNewConversation = () => {
+    if (sending) return;
+    const pendingShell = pendingNewConversationRef.current?.conversationId;
+    const draftFlush = flushCurrentDraft(
+      pendingSendIdentityRef.current?.clientMessageId,
+      pendingShell,
+      Boolean(pendingShell)
+    );
+    pendingConversationCleanupRef.current = pendingConversationCleanupRef.current.then(() =>
+      pendingNewConversationRef.current
+        ? abandonPendingNewConversation(draftFlush)
+        : cleanupSupersededConversations([])
+    );
+    void pendingConversationCleanupRef.current;
+    pendingSendIdentityRef.current = undefined;
+    navigationGenerationRef.current += 1;
     conversationLoadGeneration.current += 1;
     selectedConversationIdRef.current = undefined;
     setSelectedConversationId(undefined);
@@ -475,67 +1001,164 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const send = async (state = composer) => {
     const body = state.text.trim();
     if (!body || sending) return;
+    const sendGeneration = navigationGenerationRef.current;
     const draftScope = draftAutosave.currentScope();
-    const explicitlySelectedAgents = state.tokens
-      .filter((token) => token.kind === 'AGENT')
-      .map((token) => token.entityId)
-      .filter(isBuiltInAgentProfileId);
-    const agentProfileIds = responsePolicy === 'TEAM'
-      ? ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'] as const
-      : responsePolicy === 'NONE'
-        ? []
-        : explicitlySelectedAgents;
-    if (responsePolicy === 'TEAM' && !teamReady) {
+    const sentPolicy = responsePolicy;
+    const sentSelections = activeAgentSelections.map((selection) => ({ ...selection }));
+    const sentReplyTargetId = replyTargetId;
+    const sentCorrectionTargetId = correctionTargetId;
+    const sentSourceMessageIds = [...selectedSourceMessageIds];
+    const agentProfileIds = sentSelections.map((selection) => selection.agentProfileId);
+    if (sentPolicy === 'TEAM' && !teamReady) {
       onNotify('Team responses require all three agents to be available.', 'info');
       return;
     }
-    if (responsePolicy === 'DIRECT' && agentProfileIds.length !== 1) {
+    if (sentPolicy === 'DIRECT' && agentProfileIds.length !== 1) {
       onNotify('Choose one agent for a Direct response.', 'info');
       return;
     }
-    if (responsePolicy === 'PANEL' && (agentProfileIds.length < 2 || agentProfileIds.length > 3)) {
+    if (sentPolicy === 'PANEL' && (agentProfileIds.length < 2 || agentProfileIds.length > 3)) {
       onNotify('Choose two or three agents for a Panel response.', 'info');
       return;
     }
+    if (!configuredAgentsReady) {
+      onNotify('Choose an available provider and model for each responding agent.', 'info');
+      return;
+    }
+    const messageContext = state.tokens.flatMap((token) =>
+      token.kind === 'AGENT'
+        ? []
+        : [{ entityKind: token.kind, entityId: token.entityId }]
+    );
+    const sendFingerprint = discoursePendingSendFingerprint({
+      body,
+      ...(sentReplyTargetId ? { replyToMessageId: sentReplyTargetId } : {}),
+      ...(sentCorrectionTargetId ? { supersedesMessageId: sentCorrectionTargetId } : {}),
+      sourceMessageIds: sentSourceMessageIds,
+      context: messageContext,
+      policy: sentPolicy,
+      agents: sentSelections
+    });
+    if (pendingSendIdentityRef.current?.fingerprint !== sendFingerprint) {
+      pendingSendIdentityRef.current = {
+        fingerprint: sendFingerprint,
+        clientMessageId: crypto.randomUUID()
+      };
+    }
+    const sendIdentity = pendingSendIdentityRef.current;
+    if (!sendIdentity) return;
+    let conversationId = selectedConversationId;
+    let deliveryAttempted = false;
+    let supersededConversationIds: string[] = [];
     setSending(true);
-    const sentPolicy = responsePolicy;
     try {
-      let conversationId = selectedConversationId;
+      await pendingConversationCleanupRef.current;
+      await cleanupSupersededConversations([]);
+      const title = deriveConversationTitle(body);
+      const createFingerprint = pendingConversationFingerprint(
+        title,
+        sentPolicy,
+        sentSelections
+      );
+      let pending = pendingNewConversationRef.current;
+      supersededConversationIds = [...(pending?.supersededConversationIds ?? [])];
+      if (!conversationId && pending && pending.createFingerprint !== createFingerprint) {
+        if (!pending.conversationId) {
+          supersededConversationIds = await recoverPendingDiscourseCreateForReplacement({
+            pending,
+            replay: (request) => taskManagerApi.createDiscourseConversation(request)
+          });
+          pendingNewConversationRef.current = undefined;
+          pending = undefined;
+        } else {
+          const pendingAggregate = await taskManagerApi.getDiscourseConversation(
+            pending.conversationId
+          );
+          if (pendingAggregate.conversation.latestOrdinal === 0) {
+            supersededConversationIds = [...new Set([
+              ...supersededConversationIds,
+              pending.conversationId
+            ])];
+            if (pendingNewConversationRef.current?.conversationId === pending.conversationId) {
+              pendingNewConversationRef.current = undefined;
+            }
+            pending = undefined;
+          } else {
+            conversationId = pending.conversationId;
+          }
+        }
+      }
+      conversationId ??= pending?.conversationId;
       if (!conversationId) {
+        const clientOperationId = pending?.clientOperationId ?? crypto.randomUUID();
+        const createRequest = {
+          title,
+          defaultPolicy: sentPolicy,
+          agents: sentSelections
+        };
+        pendingNewConversationRef.current = {
+          createFingerprint,
+          clientOperationId,
+          createRequest,
+          ...(supersededConversationIds.length > 0
+            ? { supersededConversationIds }
+            : {})
+        };
         const created = await taskManagerApi.createDiscourseConversation({
-          title: deriveConversationTitle(body),
-          defaultPolicy: responsePolicy,
-          participantProfileIds: [...agentProfileIds],
-          clientOperationId: crypto.randomUUID()
+          ...createRequest,
+          clientOperationId
         });
         conversationId = created.id;
-        selectedConversationIdRef.current = created.id;
-        setSelectedConversationId(created.id);
-        setNewConversation(false);
+        pendingNewConversationRef.current = {
+          conversationId: created.id,
+          createFingerprint,
+          clientOperationId,
+          createRequest,
+          ...(supersededConversationIds.length > 0
+            ? { supersededConversationIds }
+            : {})
+        };
+        void refreshSummaries().catch((error) =>
+          reportDiscourseError(error, 'Could not refresh Discourse conversations.')
+        );
       }
-      const messageContext = state.tokens.flatMap((token) =>
-        token.kind === 'AGENT'
-          ? []
-          : [{ entityKind: token.kind, entityId: token.entityId }]
+      await flushCurrentDraft(
+        sendIdentity.clientMessageId,
+        conversationId,
+        true
       );
-      const contextPreview = responsePolicy !== 'NONE'
+      await cleanupSupersededConversations(supersededConversationIds);
+      const currentPending = pendingNewConversationRef.current;
+      if (
+        currentPending?.conversationId === conversationId &&
+        currentPending.supersededConversationIds
+      ) {
+        pendingNewConversationRef.current = {
+          conversationId: currentPending.conversationId,
+          createFingerprint: currentPending.createFingerprint,
+          clientOperationId: currentPending.clientOperationId,
+          createRequest: currentPending.createRequest
+        };
+      }
+      const contextPreview = sentPolicy !== 'NONE'
         ? await taskManagerApi.previewDiscourseContext({
             conversationId,
             messageContext
           })
         : undefined;
+      deliveryAttempted = true;
       await taskManagerApi.sendDiscourseMessage({
         conversationId,
         body,
-        ...(replyTargetId ? { replyToMessageId: replyTargetId } : {}),
-        ...(correctionTargetId ? { supersedesMessageId: correctionTargetId } : {}),
-        ...(selectedSourceMessageIds.length > 0
-          ? { sourceMessageIds: selectedSourceMessageIds }
+        ...(sentReplyTargetId ? { replyToMessageId: sentReplyTargetId } : {}),
+        ...(sentCorrectionTargetId ? { supersedesMessageId: sentCorrectionTargetId } : {}),
+        ...(sentSourceMessageIds.length > 0
+          ? { sourceMessageIds: sentSourceMessageIds }
           : {}),
         context: messageContext,
-        clientMessageId: crypto.randomUUID(),
-        policy: responsePolicy,
-        agentProfileIds: [...agentProfileIds],
+        clientMessageId: sendIdentity.clientMessageId,
+        policy: sentPolicy,
+        agents: sentSelections,
         ...(contextPreview ? { previewFingerprint: contextPreview.fingerprint } : {})
       });
       const savedDraft = draftScope ? draftAutosave.draftFor(draftScope) : undefined;
@@ -546,19 +1169,149 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         }).catch(() => undefined);
       }
       if (draftScope) draftAutosave.clear(draftScope);
-      setDrafts((current) => current.filter((draft) => draft.id !== savedDraft?.id));
-      setReplyTargetId(undefined);
-      setCorrectionTargetId(undefined);
-      setSelectedSourceMessageIds([]);
-      setComposer(createDiscourseComposerMentionState());
-      setComposerVersion((value) => value + 1);
-      await Promise.all([refreshSummaries(), loadConversation(conversationId)]);
-      setResponsePolicy(sentPolicy);
-      onNotify(responsePolicy === 'NONE' ? 'Message added.' : 'Response queued.', 'success');
+      if (pendingNewConversationRef.current?.conversationId === conversationId) {
+        pendingNewConversationRef.current = undefined;
+      }
+      if (pendingSendIdentityRef.current?.clientMessageId === sendIdentity.clientMessageId) {
+        pendingSendIdentityRef.current = undefined;
+      }
+      const isCurrent = sendGeneration === navigationGenerationRef.current;
+      if (isCurrent) {
+        const wasNewConversation = !selectedConversationId;
+        setDrafts((current) => {
+          const next = current.filter((draft) => draft.id !== savedDraft?.id);
+          draftsRef.current = next;
+          return next;
+        });
+        setReplyTargetId(undefined);
+        setCorrectionTargetId(undefined);
+        setSelectedSourceMessageIds([]);
+        setComposer(createDiscourseComposerMentionState());
+        setAgentSelectionOverrides({});
+        setComposerVersion((value) => value + 1);
+        setResponsePolicy(sentPolicy);
+        if (wasNewConversation) {
+          selectedConversationIdRef.current = conversationId;
+          setSelectedConversationId(conversationId);
+          setNewConversation(false);
+        }
+        onNotify(sentPolicy === 'NONE' ? 'Message added.' : 'Response queued.', 'success');
+        const refreshResults = await Promise.allSettled([
+          refreshSummaries(),
+          wasNewConversation
+            ? Promise.resolve()
+            : loadConversation(conversationId)
+        ]);
+        const refreshFailure = refreshResults.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected'
+        );
+        if (refreshFailure) {
+          reportDiscourseError(
+            refreshFailure.reason,
+            'The message was sent, but the conversation could not fully refresh.'
+          );
+        }
+      } else {
+        void refreshSummaries().catch((error) =>
+          reportDiscourseError(error, 'Could not refresh Discourse conversations.')
+        );
+      }
     } catch (error) {
-      onError(error, 'Could not send the message.');
+      if (conversationId && deliveryAttempted) {
+        try {
+          const recovered = await taskManagerApi.getDiscourseConversation(conversationId);
+          const accepted = discourseAcceptedSendForClientMessage(
+            recovered,
+            sendIdentity.clientMessageId
+          );
+          const recoveredMessages = accepted
+            ? []
+            : (await taskManagerApi.listDiscourseMessages({
+                conversationId,
+                limit: 100
+              })).messages;
+          if (discourseClientMessageWasPersisted(
+            recovered,
+            recoveredMessages,
+            sendIdentity.clientMessageId
+          )) {
+            console.error('Discourse delivery failed after the message was persisted.', error);
+            const savedDraft = draftScope ? draftAutosave.draftFor(draftScope) : undefined;
+            if (savedDraft) {
+              await taskManagerApi.deleteDiscourseDraft({
+                draftId: savedDraft.id,
+                expectedRevision: savedDraft.recordRevision
+              }).catch(() => undefined);
+            }
+            if (draftScope) draftAutosave.clear(draftScope);
+            if (pendingNewConversationRef.current?.conversationId === conversationId) {
+              pendingNewConversationRef.current = undefined;
+            }
+            if (pendingSendIdentityRef.current?.clientMessageId === sendIdentity.clientMessageId) {
+              pendingSendIdentityRef.current = undefined;
+            }
+            if (sendGeneration === navigationGenerationRef.current) {
+              setDrafts((current) => {
+                const next = current.filter((draft) => draft.id !== savedDraft?.id);
+                draftsRef.current = next;
+                return next;
+              });
+              setReplyTargetId(undefined);
+              setCorrectionTargetId(undefined);
+              setSelectedSourceMessageIds([]);
+              setComposer(createDiscourseComposerMentionState());
+              setAgentSelectionOverrides({});
+              setComposerVersion((value) => value + 1);
+              setResponsePolicy(sentPolicy);
+              selectedConversationIdRef.current = conversationId;
+              setSelectedConversationId(conversationId);
+              setNewConversation(false);
+              setAggregate(recovered);
+              const refreshResults = await Promise.allSettled([
+                refreshSummaries(),
+                loadConversation(conversationId, true)
+              ]);
+              const refreshFailure = refreshResults.find(
+                (result): result is PromiseRejectedResult => result.status === 'rejected'
+              );
+              if (refreshFailure) {
+                reportDiscourseError(
+                  refreshFailure.reason,
+                  'Your message was saved, but the conversation could not fully refresh.'
+                );
+              }
+              if (!accepted) {
+                onNotify('Message added.', 'success');
+              } else {
+                const responseWasPlanned = recovered.waves.some(
+                  (wave) => wave.triggerMessageId === accepted.triggerMessageId
+                );
+                onNotify(
+                  responseWasPlanned
+                    ? 'Message saved and response queued.'
+                    : 'Message saved. Choose Resume or Cancel for the interrupted response.',
+                  responseWasPlanned ? 'success' : 'info'
+                );
+              }
+            }
+            return;
+          }
+        } catch (recoveryError) {
+          console.error('Could not reconcile the Discourse send after failure.', recoveryError);
+          if (sendGeneration === navigationGenerationRef.current) {
+            selectedConversationIdRef.current = conversationId;
+            setSelectedConversationId(conversationId);
+            setNewConversation(false);
+            setConversationLoadState({
+              status: 'error',
+              detail: 'Task Monki could not verify the latest conversation state.'
+            });
+          }
+        }
+      }
+      reportDiscourseError(error, 'Could not send the message.');
     } finally {
-      setSending(false);
+      if (sendGeneration === navigationGenerationRef.current) setSending(false);
     }
   };
 
@@ -582,7 +1335,55 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         container.scrollTop += container.scrollHeight - beforeHeight;
       });
     } catch (error) {
-      onError(error, 'Could not load older messages.');
+      reportDiscourseError(error, 'Could not load older messages.');
+    }
+  };
+
+  const resumeAcceptedSend = async (acceptedSendId: string) => {
+    if (!aggregate || acceptedSendActionId) return;
+    setAcceptedSendActionId(acceptedSendId);
+    try {
+      await taskManagerApi.resumeDiscourseAcceptedSend({
+        conversationId: aggregate.conversation.id,
+        acceptedSendId
+      });
+      onNotify('Agent response resumed.', 'success');
+      const results = await Promise.allSettled([
+        refreshSummaries(),
+        loadConversation(aggregate.conversation.id, true)
+      ]);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected'
+      );
+      if (failure) {
+        reportDiscourseError(failure.reason, 'The response resumed, but the conversation could not fully refresh.');
+      }
+    } catch (error) {
+      reportDiscourseError(error, 'Could not resume the agent response.');
+    } finally {
+      setAcceptedSendActionId(undefined);
+    }
+  };
+
+  const cancelAcceptedSend = async (acceptedSendId: string) => {
+    if (!aggregate || acceptedSendActionId) return;
+    setAcceptedSendActionId(acceptedSendId);
+    try {
+      const next = await taskManagerApi.cancelDiscourseAcceptedSend({
+        conversationId: aggregate.conversation.id,
+        acceptedSendId,
+        expectedConversationRevision: aggregate.conversation.recordRevision,
+        clientOperationId: crypto.randomUUID()
+      });
+      setAggregate(next);
+      await refreshSummaries().catch((error) =>
+        reportDiscourseError(error, 'The response was canceled, but the conversation list could not refresh.')
+      );
+      onNotify('Agent response canceled. Your message remains in the conversation.', 'info');
+    } catch (error) {
+      reportDiscourseError(error, 'Could not cancel the interrupted agent response.');
+    } finally {
+      setAcceptedSendActionId(undefined);
     }
   };
 
@@ -597,7 +1398,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         }))
       }));
     } catch (error) {
-      onError(error, 'Could not resolve the context preview.');
+      reportDiscourseError(error, 'Could not resolve the context preview.');
     } finally {
       setPreviewLoading(false);
     }
@@ -622,7 +1423,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setAggregate(next);
       onNotify('Context pinned for future responses.', 'success');
     } catch (error) {
-      onError(error, 'Could not pin context.');
+      reportDiscourseError(error, 'Could not pin context.');
     }
   };
 
@@ -642,7 +1443,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       });
       setAggregate(next);
     } catch (error) {
-      onError(error, 'Could not remove pinned context.');
+      reportDiscourseError(error, 'Could not remove pinned context.');
     }
   };
 
@@ -659,7 +1460,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setRenameOpen(false);
       await refreshSummaries();
     } catch (error) {
-      onError(error, 'Could not rename the conversation.');
+      reportDiscourseError(error, 'Could not rename the conversation.');
     }
   };
 
@@ -676,7 +1477,10 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       await refreshSummaries();
       onNotify(archived ? 'Conversation archived.' : 'Conversation restored.', 'success');
     } catch (error) {
-      onError(error, archived ? 'Could not archive the conversation.' : 'Could not restore the conversation.');
+      reportDiscourseError(
+        error,
+        archived ? 'Could not archive the conversation.' : 'Could not restore the conversation.'
+      );
     }
   };
 
@@ -695,7 +1499,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       else startNewConversation();
       onNotify('Conversation deleted.', 'success');
     } catch (error) {
-      onError(error, 'Could not delete the conversation.');
+      reportDiscourseError(error, 'Could not delete the conversation.');
     }
   };
 
@@ -711,7 +1515,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setAggregate((current) => current ? { ...current, conversation } : current);
       await loadConversation(aggregate.conversation.id, true);
     } catch (error) {
-      onError(error, 'Could not delete the message.');
+      reportDiscourseError(error, 'Could not delete the message.');
     }
   };
 
@@ -727,7 +1531,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       await loadConversation(aggregate.conversation.id, true);
       onNotify('Stopping the response.', 'info');
     } catch (error) {
-      onError(error, 'Could not stop the response.');
+      reportDiscourseError(error, 'Could not stop the response.');
     }
   };
 
@@ -746,7 +1550,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       await loadConversation(aggregate.conversation.id, true);
       onNotify('Response queued with the updated context.', 'success');
     } catch (error) {
-      onError(error, 'Could not confirm the updated context.');
+      reportDiscourseError(error, 'Could not confirm the updated context.');
     }
   };
 
@@ -793,13 +1597,28 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const displayedConversations = visibleConversationSummaries(
     conversations.filter((conversation) =>
-      showArchived ? conversation.status === 'ARCHIVED' : conversation.status === 'OPEN'
+      (showArchived ? conversation.status === 'ARCHIVED' : conversation.status === 'OPEN') &&
+      conversation.id !== pendingNewConversationRef.current?.conversationId
     ),
     railQuery
   );
 
   if (loading) {
     return <div className="tm-discourse tm-discourse--loading" aria-busy="true">Loading Discourse…</div>;
+  }
+
+  if (workspaceLoadFailed) {
+    return (
+      <div className="tm-discourse tm-discourse--loading" role="alert">
+        <div className="tm-discourse-workspace-error">
+          <strong>Discourse could not be loaded</strong>
+          <span>Conversations, agents, and drafts are unavailable until the connection recovers.</span>
+          <button type="button" className="tm-btn tm-btn--soft" onClick={() => void loadWorkspace()}>
+            Try again
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -810,7 +1629,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             <h1>Discourse</h1>
             <p>Technical conversations across tasks and repositories</p>
           </div>
-          <button type="button" className="tm-discourse-new" onClick={startNewConversation}>
+          <button
+            type="button"
+            className="tm-discourse-new"
+            disabled={sending}
+            onClick={startNewConversation}
+          >
             <PlusIcon />
             <span>New</span>
           </button>
@@ -851,6 +1675,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             <button
               type="button"
               key={conversation.id}
+              disabled={sending}
               className={`tm-discourse-thread ${
                 conversation.id === selectedConversationId ? 'tm-discourse-thread--active' : ''
               }`}
@@ -906,7 +1731,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                   setRenameOpen(true);
                 }}
               >
-                {aggregate?.conversation.title ?? 'New conversation'}
+                {aggregate?.conversation.title ?? selectedSummary?.title ?? 'New conversation'}
               </button>
             )}
             <div className="tm-discourse-header__meta">
@@ -948,13 +1773,82 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             if (isNearScrollBottom(event.currentTarget)) setNewResponses(false);
           }}
         >
+          {conversationRefreshFailed || conversationRefreshing ? (
+            <div
+              className={`tm-discourse-status-banner ${
+                conversationRefreshFailed ? 'tm-discourse-status-banner--error' : ''
+              }`}
+              role={conversationRefreshFailed ? 'alert' : 'status'}
+            >
+              <span>
+                <strong>
+                  {conversationRefreshing ? 'Refreshing conversation…' : 'Conversation refresh paused'}
+                </strong>
+                {conversationRefreshing
+                  ? 'Actions will be available when the latest state arrives.'
+                  : conversationLoadState.detail ?? 'The latest conversation state could not be loaded.'}
+              </span>
+              {conversationRefreshFailed ? (
+                <button
+                  type="button"
+                  onClick={() => selectedConversationId && void loadConversation(selectedConversationId, true)
+                    .catch((error) => reportDiscourseError(error, 'Could not refresh the conversation.'))}
+                >
+                  Try again
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {interruptedAcceptedSends.length > 0 ? (
+            <div className="tm-discourse-status-banner" role="status">
+              <span>
+                <strong>Agent response setup was interrupted</strong>
+                Your message and agent choices are saved. Resume safely or cancel the response.
+              </span>
+              <div className="tm-discourse-status-banner__actions">
+                <button
+                  type="button"
+                  disabled={Boolean(acceptedSendActionId)}
+                  onClick={() => void resumeAcceptedSend(interruptedAcceptedSends[0]!.id)}
+                >
+                  {acceptedSendActionId === interruptedAcceptedSends[0]!.id ? 'Working…' : 'Resume'}
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(acceptedSendActionId)}
+                  onClick={() => void cancelAcceptedSend(interruptedAcceptedSends[0]!.id)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
           {previousCursor ? (
             <button type="button" className="tm-discourse-load-older" onClick={() => void loadOlder()}>
               Load earlier messages
             </button>
           ) : null}
-          {loadingConversation ? <div className="tm-discourse-transcript__loading">Updating…</div> : null}
-          {messages.length === 0 ? (
+          {conversationLoadFailed ? (
+            <div className="tm-discourse-empty" role="alert">
+              <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
+              <h2>Conversation unavailable</h2>
+              <p>{conversationLoadState.detail ?? 'The conversation could not be loaded.'}</p>
+              <button
+                type="button"
+                className="tm-btn tm-btn--soft"
+                onClick={() => selectedConversationId && void loadConversation(selectedConversationId)
+                  .catch((error) => reportDiscourseError(error, 'Could not load the conversation.'))}
+              >
+                Try again
+              </button>
+            </div>
+          ) : conversationPending ? (
+            <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
+              <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
+              <h2>Loading conversation…</h2>
+              <p>Restoring messages, participants, and their saved agent configurations.</p>
+            </div>
+          ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
               <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
               <h2>{newConversation ? 'Start a technical conversation' : 'Nothing has been said yet'}</h2>
@@ -1043,15 +1937,33 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             <ComposerTarget label="Correcting your earlier message" message={correctionTarget} onRemove={() => setCorrectionTargetId(undefined)} />
           ) : null}
           <div className="tm-discourse-composer">
+            {activeAgentProfileIds.length > 0 && catalog ? (
+              <DiscourseAgentConfigurationBar
+                aggregate={aggregate}
+                catalog={catalog}
+                disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                selections={activeAgentSelections}
+                onDiscoverModels={discoverAgentModels}
+                onSelectionChange={updateAgentSelection}
+              />
+            ) : null}
             <DiscourseMentionInput
               key={`${selectedConversationId ?? 'new'}:${composerVersion}`}
               candidates={candidates}
               initialText={composer.text}
               initialTokens={composer.tokens}
               autoFocus={messages.length === 0}
-              disabled={sending || aggregate?.conversation.status === 'ARCHIVED'}
+              disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
               label="Message"
-              placeholder={aggregate?.conversation.status === 'ARCHIVED' ? 'Restore this conversation to add a message' : 'Write a message… Type @ for agents, tasks, or repositories'}
+              placeholder={conversationUnavailable
+                ? conversationPending ? 'Loading conversation…' : 'Conversation unavailable'
+                : activeDraftAlreadySent
+                  ? 'Finishing message recovery…'
+                  : responseDecisionPending
+                  ? 'Resume or cancel the interrupted response first'
+                : aggregate?.conversation.status === 'ARCHIVED'
+                  ? 'Restore this conversation to add a message'
+                  : 'Write a message… Type @ for agents, tasks, or repositories'}
               onChange={updateComposer}
               onSubmit={(state) => void send(state)}
             />
@@ -1081,7 +1993,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                     <span className="sr-only">Response policy</span>
                     <select
                       value={responsePolicy}
-                      disabled={sending || aggregate?.conversation.status === 'ARCHIVED'}
+                      disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                       onChange={(event) => changeResponsePolicy(event.target.value as DiscourseDefaultPolicy)}
                     >
                       <option value="NONE">No agents</option>
@@ -1097,7 +2009,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 <button
                   type="button"
                   className="tm-discourse-preview-button"
-                  disabled={previewLoading}
+                  disabled={previewLoading || composerUnavailable}
                   onClick={() => void showPreview()}
                 >
                   {previewLoading ? 'Resolving…' : 'What agents will see'}
@@ -1105,8 +2017,10 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 <button
                   type="button"
                   className="tm-discourse-send"
-                  disabled={!composer.text.trim() || !safeResponseReady || sending || aggregate?.conversation.status === 'ARCHIVED'}
-                  title={!safeResponseReady ? responsePolicyRequirement(responsePolicy, teamReady) : undefined}
+                  disabled={!composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                  title={!safeResponseReady
+                    ? responsePolicyRequirement(responsePolicy, teamReady, configuredAgentsReady)
+                    : undefined}
                   onClick={() => void send()}
                 >
                   {sending ? 'Sending…' : 'Send'}
@@ -1148,14 +2062,26 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             </div>
           </InspectorSection>
           <InspectorSection title="Participants" count={aggregate?.participants.length ?? 0}>
-            {aggregate?.participantRevisions.length ? (
+            {currentDiscourseParticipantRevisions(aggregate).length ? (
               <ul className="tm-discourse-participants">
-                {aggregate.participantRevisions.map((participant) => (
-                  <li key={participant.id}>
-                    <span>{participant.displayNameSnapshot.slice(0, 1)}</span>
-                    <div><strong>{participant.displayNameSnapshot}</strong><small>{capitalize(participant.configuredRole)} · {participant.model}</small></div>
-                  </li>
-                ))}
+                {currentDiscourseParticipantRevisions(aggregate).map((participant) => {
+                  const runtime = catalog?.runtimeCatalog.runtimes.find(
+                    (candidate) => candidate.preflight.runtime.id === participant.runtimeId
+                  );
+                  return (
+                    <li key={participant.id}>
+                      <span>{participant.displayNameSnapshot.slice(0, 1)}</span>
+                      <div>
+                        <strong>{participant.displayNameSnapshot}</strong>
+                        <small>
+                          {capitalize(participant.configuredRole)} ·{' '}
+                          {runtime?.preflight.runtime.displayName ?? 'Unavailable provider'} ·{' '}
+                          {participant.model}
+                        </small>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             ) : <p className="tm-discourse-inspector__empty">No agents are bound to this human-only conversation.</p>}
           </InspectorSection>
@@ -1434,6 +2360,101 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
   );
 }
 
+function DiscourseAgentConfigurationBar({
+  aggregate,
+  catalog,
+  disabled,
+  selections,
+  onDiscoverModels,
+  onSelectionChange
+}: {
+  aggregate?: DiscourseConversationAggregateRecord;
+  catalog: DiscourseMentionCatalogSnapshot;
+  disabled: boolean;
+  selections: DiscourseAgentSelectionInput[];
+  onDiscoverModels(runtimeId: string): Promise<void>;
+  onSelectionChange(selection: DiscourseAgentSelectionInput): void;
+}) {
+  const eligible = eligibleDiscourseRuntimeCatalog(catalog);
+  return (
+    <section className="tm-discourse-agent-config" aria-label="Agents for next response">
+      <header>
+        <span>Agents for next response</span>
+        <small>Saved to this conversation when sent</small>
+      </header>
+      <div className="tm-discourse-agent-config__list">
+        {selections.map((selection) => {
+          const entry = catalog.agents.find(
+            (candidate) => candidate.profile.id === selection.agentProfileId
+          );
+          if (!entry) return null;
+          const currentRevision = currentDiscourseParticipantRevisions(aggregate).find(
+            (revision) => revision.agentProfileId === selection.agentProfileId
+          );
+          const selectedModel = eligible.models.find(
+            (model) =>
+              model.runtimeId === selection.runtimeId && model.id === selection.modelId
+          );
+          const fallbackSummary = selection.runtimeId
+            ? currentRevision?.runtimeId === selection.runtimeId
+              ? currentRevision.model
+              : 'Choose a model'
+            : 'Choose provider and model';
+          return (
+            <div className="tm-discourse-agent-config__agent" key={selection.agentProfileId}>
+              <span className="tm-discourse-agent-config__avatar" aria-hidden="true">
+                {entry.profile.displayName.slice(0, 1)}
+              </span>
+              <div className="tm-discourse-agent-config__identity">
+                <strong>{entry.profile.displayName}</strong>
+                <small>{capitalize(entry.profile.roleTemplate)}</small>
+              </div>
+              <AgentModelSelector
+                compact
+                label={`${entry.profile.displayName} provider and model`}
+                runtimeId={selection.runtimeId ?? ''}
+                modelId={selection.modelId ?? ''}
+                reasoningEffort={selection.reasoningEffort}
+                models={eligible.models}
+                runtimes={eligible.runtimes}
+                disabled={disabled}
+                fallbackSummary={fallbackSummary}
+                selectionUnavailable={!selectedModel}
+                onDiscoverModels={onDiscoverModels}
+                onSelectionChange={(runtimeId, modelId) => {
+                  const model = eligible.models.find(
+                    (candidate) =>
+                      candidate.runtimeId === runtimeId && candidate.id === modelId
+                  );
+                  const reasoningEffort =
+                    selection.runtimeId === runtimeId && selection.modelId === modelId
+                      ? selection.reasoningEffort
+                      : model?.defaultReasoningEffort;
+                  onSelectionChange({
+                    agentProfileId: selection.agentProfileId,
+                    ...(runtimeId ? { runtimeId } : {}),
+                    ...(modelId ? { modelId } : {}),
+                    ...(reasoningEffort
+                      ? { reasoningEffort }
+                      : {})
+                  });
+                }}
+                onReasoningEffortChange={(reasoningEffort) => {
+                  const { reasoningEffort: _current, ...base } = selection;
+                  onSelectionChange({
+                    ...base,
+                    ...(reasoningEffort ? { reasoningEffort } : {})
+                  });
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function ContextPreview({ preview, onClose }: { preview: DiscourseContextPreview; onClose(): void }) {
   return (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="discourse-preview-title">
@@ -1511,6 +2532,25 @@ function deriveConversationTitle(body: string): string {
   return first.length <= 72 ? first : `${first.slice(0, 69).trimEnd()}…`;
 }
 
+function pendingConversationFingerprint(
+  title: string,
+  policy: DiscourseDefaultPolicy,
+  selections: DiscourseAgentSelectionInput[]
+): string {
+  return JSON.stringify({
+    title,
+    policy,
+    agents: [...selections]
+      .sort((left, right) => left.agentProfileId.localeCompare(right.agentProfileId))
+      .map((selection) => ({
+        agentProfileId: selection.agentProfileId,
+        runtimeId: selection.runtimeId ?? '',
+        modelId: selection.modelId ?? '',
+        reasoningEffort: selection.reasoningEffort ?? ''
+      }))
+  });
+}
+
 function compactText(value: string, limit: number): string {
   const compact = value.replace(/\s+/gu, ' ').trim();
   return compact.length <= limit ? compact : `${compact.slice(0, limit - 1).trimEnd()}…`;
@@ -1568,7 +2608,14 @@ function responsePolicyDetail(
   }
 }
 
-function responsePolicyRequirement(policy: DiscourseDefaultPolicy, teamReady: boolean): string {
+function responsePolicyRequirement(
+  policy: DiscourseDefaultPolicy,
+  teamReady: boolean,
+  configuredAgentsReady: boolean
+): string {
+  if (policy !== 'NONE' && !configuredAgentsReady) {
+    return 'Choose an available provider and model for each responding agent.';
+  }
   return policy === 'DIRECT'
     ? 'Choose one agent with @.'
     : policy === 'PANEL'

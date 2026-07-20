@@ -387,6 +387,19 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/discourse/messages/by-client-id') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getDiscourseMessageByClientId({
+            conversationId: requiredQueryParameter(url, 'conversationId'),
+            clientMessageId: requiredQueryParameter(url, 'clientMessageId')
+          })
+        );
+        return;
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/discourse/mentions') {
         sendJson(response, requestId, 200, await options.service.getDiscourseMentionCatalog());
         return;
@@ -577,6 +590,10 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
 
       const discoursePostRoutes: Record<string, (body: never) => Promise<unknown>> = {
         '/api/discourse/messages/send': (body) => options.service.sendDiscourseMessage(body),
+        '/api/discourse/messages/resume': (body) =>
+          options.service.resumeDiscourseAcceptedSend(body),
+        '/api/discourse/messages/cancel-response': (body) =>
+          options.service.cancelDiscourseAcceptedSend(body),
         '/api/discourse/messages/tombstone': (body) =>
           options.service.tombstoneDiscourseMessage(body),
         '/api/discourse/context/pin': (body) => options.service.setPinnedDiscourseContext(body),

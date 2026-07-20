@@ -226,6 +226,7 @@ function aggregateFor(job: DiscourseAgentJobRecord): DiscourseConversationAggreg
     },
     participants: [],
     participantRevisions: [],
+    acceptedSends: [],
     contextLinks: [],
     contextRevisions: [],
     contextSnapshots: [],

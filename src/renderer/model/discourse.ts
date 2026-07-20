@@ -5,13 +5,18 @@ import type {
   DiscourseConversationAggregateRecord,
   DiscourseConversationSummary,
   DiscourseCorrectionOutcome,
+  DiscourseDefaultPolicy,
+  DiscourseDraftRecord,
   DiscourseDraftToken,
   DiscourseDraftTokenInput,
+  DiscourseAgentSelectionInput,
+  DiscourseContextSelection,
   DiscourseJobStatus,
   DiscourseMentionCatalogSnapshot,
   DiscourseMessageRecord,
   DiscourseResponseWaveRecord
 } from '../../shared/discourse';
+import type { AgentRuntimeCatalog } from '../../shared/agent';
 import type {
   DiscourseComposerToken,
   DiscourseMentionCandidate
@@ -60,6 +65,224 @@ export function discourseMentionCandidates(
       recentOrdinal: recentOrder.get(`REPOSITORY:${repository.id}`)
     }))
   ];
+}
+
+export function eligibleDiscourseRuntimeCatalog(
+  catalog: DiscourseMentionCatalogSnapshot
+): AgentRuntimeCatalog {
+  const runtimes = catalog.runtimeCatalog.runtimes.filter((runtime) => {
+    const discourse = runtime.preflight.capabilities.extensions['task-monki.discourse'];
+    return runtime.preflight.readiness.canStart &&
+      discourse?.maturity === 'stable' &&
+      runtime.preflight.capabilities.executionPolicy.presets.some(
+        (preset) =>
+          preset.sandbox === 'READ_ONLY' &&
+          preset.networkAccess === 'DISABLED' &&
+          preset.approvalPolicy.toLowerCase() === 'never'
+      );
+  });
+  const runtimeIds = new Set(
+    runtimes.map((runtime) => runtime.preflight.runtime.id)
+  );
+  return {
+    ...catalog.runtimeCatalog,
+    runtimes,
+    models: catalog.runtimeCatalog.models.filter((model) => runtimeIds.has(model.runtimeId))
+  };
+}
+
+export function defaultDiscourseAgentSelection(
+  catalog: DiscourseMentionCatalogSnapshot,
+  agentProfileId: DiscourseAgentSelectionInput['agentProfileId']
+): DiscourseAgentSelectionInput {
+  const resolved = catalog.agents.find(
+    (entry) => entry.profile.id === agentProfileId
+  )?.resolvedSettings;
+  return {
+    agentProfileId,
+    ...(resolved
+      ? {
+          runtimeId: resolved.runtimeId,
+          modelId: resolved.modelId,
+          ...(resolved.reasoningEffort
+            ? { reasoningEffort: resolved.reasoningEffort }
+            : {})
+        }
+      : {})
+  };
+}
+
+export function discourseAgentSelectionFromCurrentRevision(
+  aggregate: DiscourseConversationAggregateRecord | undefined,
+  catalog: DiscourseMentionCatalogSnapshot,
+  agentProfileId: DiscourseAgentSelectionInput['agentProfileId']
+): DiscourseAgentSelectionInput | undefined {
+  const participant = aggregate?.participants.find(
+    (candidate) => candidate.enabled && candidate.agentProfileId === agentProfileId
+  );
+  const revision = participant
+    ? aggregate?.participantRevisions.find(
+        (candidate) => candidate.id === participant.currentRevisionId
+      )
+    : undefined;
+  if (!revision) return undefined;
+  const model = catalog.runtimeCatalog.models.find(
+    (candidate) =>
+      candidate.runtimeId === revision.runtimeId &&
+      candidate.model === revision.model &&
+      (candidate.modelProvider ?? candidate.runtimeId) === revision.modelProvider
+  );
+  return {
+    agentProfileId,
+    runtimeId: revision.runtimeId,
+    ...(model ? { modelId: model.id } : {}),
+    ...(revision.reasoningEffort
+      ? { reasoningEffort: revision.reasoningEffort }
+      : {})
+  };
+}
+
+export function currentDiscourseParticipantRevisions(
+  aggregate: DiscourseConversationAggregateRecord | undefined
+) {
+  if (!aggregate) return [];
+  return aggregate.participants
+    .filter((participant) => participant.enabled)
+    .flatMap((participant) => {
+      const revision = aggregate.participantRevisions.find(
+        (candidate) => candidate.id === participant.currentRevisionId
+      );
+      return revision ? [revision] : [];
+    });
+}
+
+export function interruptedDiscourseAcceptedSends(
+  aggregate: DiscourseConversationAggregateRecord | undefined
+) {
+  if (!aggregate) return [];
+  const plannedMessageIds = new Set(
+    aggregate.waves.map((wave) => wave.triggerMessageId)
+  );
+  return aggregate.acceptedSends.filter(
+    (accepted) =>
+      accepted.status === 'PENDING' &&
+      !plannedMessageIds.has(accepted.triggerMessageId)
+  );
+}
+
+export function discourseAcceptedSendForClientMessage(
+  aggregate: DiscourseConversationAggregateRecord,
+  clientMessageId: string
+) {
+  return aggregate.acceptedSends.find(
+    (accepted) => accepted.clientMessageId === clientMessageId
+  );
+}
+
+export function discourseClientMessageWasPersisted(
+  aggregate: DiscourseConversationAggregateRecord,
+  messages: readonly DiscourseMessageRecord[],
+  clientMessageId: string
+): boolean {
+  return aggregate.acceptedSends.some(
+    (accepted) => accepted.clientMessageId === clientMessageId
+  ) || messages.some(
+    (message) =>
+      message.author.kind === 'USER' &&
+      message.clientMessageId === clientMessageId
+  );
+}
+
+export function discourseDraftsAlreadySent(
+  aggregate: DiscourseConversationAggregateRecord,
+  messages: readonly DiscourseMessageRecord[],
+  drafts: readonly DiscourseDraftRecord[]
+): DiscourseDraftRecord[] {
+  return drafts.filter(
+    (draft) =>
+      draft.pendingClientMessageId !== undefined &&
+      discourseClientMessageWasPersisted(
+        aggregate,
+        messages,
+        draft.pendingClientMessageId
+      )
+  );
+}
+
+/**
+ * An empty first-send shell is disposable only while no durable draft still
+ * points at it. Keeping that ownership check in the renderer model prevents a
+ * navigation cleanup from making a successfully checkpointed message
+ * unreachable.
+ */
+export function canDeleteAbandonedDiscourseShell(input: {
+  conversationId: string;
+  latestOrdinal: number;
+  drafts: readonly DiscourseDraftRecord[];
+}): boolean {
+  return input.latestOrdinal === 0 && !input.drafts.some(
+    (draft) => draft.conversationId === input.conversationId
+  );
+}
+
+/**
+ * A replacement must replay an unresolved create operation before moving on.
+ * That turns a lost create response into a known shell ID which remains owned
+ * until the replacement draft is durable and cleanup succeeds.
+ */
+export async function recoverPendingDiscourseCreateForReplacement(input: {
+  pending: {
+    clientOperationId: string;
+    supersededConversationIds?: readonly string[];
+    createRequest: {
+      title: string;
+      defaultPolicy: DiscourseDefaultPolicy;
+      agents: readonly DiscourseAgentSelectionInput[];
+    };
+  };
+  replay(request: {
+    title: string;
+    defaultPolicy: DiscourseDefaultPolicy;
+    agents: DiscourseAgentSelectionInput[];
+    clientOperationId: string;
+  }): Promise<{ id: string }>;
+}): Promise<string[]> {
+  const recovered = await input.replay({
+    title: input.pending.createRequest.title,
+    defaultPolicy: input.pending.createRequest.defaultPolicy,
+    agents: input.pending.createRequest.agents.map((agent) => ({ ...agent })),
+    clientOperationId: input.pending.clientOperationId
+  });
+  return [...new Set([
+    ...(input.pending.supersededConversationIds ?? []),
+    recovered.id
+  ])];
+}
+
+/** Stable UI retry identity; unchanged failed sends reuse one durable client message id. */
+export function discoursePendingSendFingerprint(input: {
+  body: string;
+  replyToMessageId?: string;
+  supersedesMessageId?: string;
+  sourceMessageIds: readonly string[];
+  context: readonly DiscourseContextSelection[];
+  policy: DiscourseDefaultPolicy;
+  agents: readonly DiscourseAgentSelectionInput[];
+}): string {
+  return JSON.stringify({
+    body: input.body,
+    replyToMessageId: input.replyToMessageId ?? null,
+    supersedesMessageId: input.supersedesMessageId ?? null,
+    sourceMessageIds: input.sourceMessageIds,
+    context: input.context,
+    policy: input.policy,
+    agents: input.agents.map((selection) => ({
+      agentProfileId: selection.agentProfileId,
+      runtimeId: selection.runtimeId ?? null,
+      modelId: selection.modelId ?? null,
+      reasoningEffort: selection.reasoningEffort ?? null
+    }))
+  });
 }
 
 export function currentPinnedContext(

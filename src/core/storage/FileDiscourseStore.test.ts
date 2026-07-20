@@ -42,6 +42,162 @@ describe('FileDiscourseStore', () => {
     });
   });
 
+  it('replays a pre-semantic-fingerprint create by durable participant semantics', async () => {
+    const fixture = await storeFixture();
+    const originalSeed = participantSeed('conversation-legacy');
+    await fixture.store.createConversation({
+      id: 'conversation-legacy',
+      title: 'Architecture review',
+      defaultPolicy: 'TEAM',
+      participants: [originalSeed.participant],
+      participantRevisions: [originalSeed.revision],
+      requestFingerprint: 'a'.repeat(64),
+      clientOperationId: 'legacy-create-operation'
+    });
+    await fixture.store.close();
+
+    const conversationDir = path.join(
+      fixture.root,
+      'conversations',
+      'conversation-legacy'
+    );
+    const eventPath = path.join(conversationDir, 'events-000001.jsonl');
+    const storedEvent = JSON.parse(await fs.readFile(eventPath, 'utf8')) as {
+      payload: Record<string, DiscourseJsonValue>;
+    };
+    delete storedEvent.payload.createFingerprintVersion;
+    await fs.writeFile(
+      eventPath,
+      encodeDiscourseLogEvent(createDiscourseLogEvent({
+        formatVersion: 1,
+        sequence: 1,
+        kind: 'CONVERSATION_CREATED',
+        operationId: 'legacy-create-operation',
+        requestFingerprint: 'c'.repeat(64),
+        payload: storedEvent.payload
+      })),
+      { mode: 0o600 }
+    );
+    await Promise.all([
+      fs.rm(path.join(fixture.root, 'index.json'), { force: true }),
+      fs.rm(path.join(conversationDir, 'metadata.json'), { force: true }),
+      fs.rm(path.join(conversationDir, 'manifest.json'), { force: true }),
+      fs.rm(path.join(conversationDir, 'events-000001.index.json'), { force: true })
+    ]);
+
+    const restarted = new FileDiscourseStore(fixture.root);
+    await expect(restarted.findCreatedConversation({
+      clientOperationId: 'legacy-create-operation',
+      requestFingerprint: 'd'.repeat(64)
+    })).resolves.toBeUndefined();
+    const retrySeed = participantSeed('');
+    retrySeed.participant.id = 'retry-participant';
+    retrySeed.participant.currentRevisionId = 'retry-revision';
+    retrySeed.revision.id = 'retry-revision';
+    retrySeed.revision.stableParticipantId = 'retry-participant';
+    const retry = {
+      title: 'Architecture review',
+      defaultPolicy: 'TEAM' as const,
+      participants: [retrySeed.participant],
+      participantRevisions: [retrySeed.revision],
+      requestFingerprint: 'd'.repeat(64),
+      clientOperationId: 'legacy-create-operation'
+    };
+    await expect(restarted.createConversation(retry)).resolves.toMatchObject({
+      id: 'conversation-legacy'
+    });
+    await expect(restarted.createConversation({
+      ...retry,
+      participantRevisions: [{ ...retrySeed.revision, model: 'changed-model' }]
+    })).rejects.toThrow('REQUEST_CONFLICT');
+  });
+
+  it('appends participant configuration revisions without rewriting attributable history', async () => {
+    const fixture = await storeFixture();
+    const conversation = await createConversation(fixture.store, 'conversation-1', 'create-1');
+    const aggregate = await fixture.store.getConversation(conversation.id);
+    const participant = aggregate.participants[0]!;
+    const currentRevision = aggregate.participantRevisions[0]!;
+    const input = {
+      conversationId: conversation.id,
+      participants: [{
+        ...participant,
+        currentRevisionId: 'participant-revision-2',
+        recordRevision: participant.recordRevision + 1
+      }],
+      participantRevisions: [{
+        ...currentRevision,
+        id: 'participant-revision-2',
+        model: 'gpt-next',
+        revision: currentRevision.revision + 1,
+        createdAt: '2026-07-13T00:05:00.000Z'
+      }],
+      expectedRevision: conversation.recordRevision,
+      clientOperationId: 'configure-1'
+    };
+
+    const revised = await fixture.store.configureParticipants(input);
+    expect(revised.participants[0]).toMatchObject({
+      id: participant.id,
+      currentRevisionId: 'participant-revision-2',
+      recordRevision: 2
+    });
+    expect(revised.participantRevisions.map((revision) => revision.model)).toEqual([
+      'gpt-test',
+      'gpt-next'
+    ]);
+    await expect(fixture.store.configureParticipants(input)).resolves.toEqual(revised);
+
+    const restarted = await new FileDiscourseStore(fixture.root).getConversation(conversation.id);
+    expect(restarted.participantRevisions.map((revision) => revision.id)).toEqual([
+      'participant-revision-1',
+      'participant-revision-2'
+    ]);
+  });
+
+  it('rejects one configuration batch that would create duplicate enabled agent profiles', async () => {
+    const fixture = await storeFixture();
+    const conversation = await createConversation(fixture.store, 'conversation-1', 'create-1');
+    const makeBinding = (suffix: string) => ({
+      participant: {
+        id: `skeptic-participant-${suffix}`,
+        conversationId: conversation.id,
+        agentProfileId: 'builtin.skeptic' as const,
+        currentRevisionId: `skeptic-revision-${suffix}`,
+        enabled: true,
+        recordRevision: 1,
+        createdAt: '2026-07-13T00:05:00.000Z'
+      },
+      revision: {
+        id: `skeptic-revision-${suffix}`,
+        conversationId: conversation.id,
+        stableParticipantId: `skeptic-participant-${suffix}`,
+        agentProfileId: 'builtin.skeptic' as const,
+        profileRevision: 1,
+        displayNameSnapshot: 'Skeptic',
+        runtimeId: 'codex',
+        model: 'gpt-test',
+        modelProvider: 'openai',
+        configuredRole: 'SKEPTIC' as const,
+        roleContractVersion: 1,
+        roleContractHash: 'a'.repeat(64),
+        revision: 1,
+        createdAt: '2026-07-13T00:05:00.000Z'
+      }
+    });
+    const first = makeBinding('one');
+    const second = makeBinding('two');
+
+    await expect(fixture.store.configureParticipants({
+      conversationId: conversation.id,
+      participants: [first.participant, second.participant],
+      participantRevisions: [first.revision, second.revision],
+      expectedRevision: conversation.recordRevision,
+      clientOperationId: 'duplicate-profile-batch'
+    })).rejects.toThrow('participant configuration revision is invalid');
+    expect((await fixture.store.getConversation(conversation.id)).participants).toHaveLength(1);
+  });
+
   it('serializes concurrent appends, pages backward, and retries a lost response exactly', async () => {
     const fixture = await storeFixture();
     await createConversation(fixture.store, 'conversation-1', 'create-1');
@@ -248,6 +404,13 @@ describe('FileDiscourseStore', () => {
       body: 'ask the lead',
       policy: 'DIRECT',
       recipientParticipantIds: [],
+      agentSelections: [{
+        agentProfileId: 'builtin.lead',
+        runtimeId: 'codex',
+        modelId: 'codex:gpt-test',
+        reasoningEffort: 'medium'
+      }],
+      pendingClientMessageId: 'pending-agent-send-1',
       tokens: [{
         kind: 'AGENT',
         entityId: 'builtin.lead',
@@ -258,6 +421,13 @@ describe('FileDiscourseStore', () => {
       id: expect.stringMatching(/^[a-f0-9]{64}$/u),
       entityId: 'builtin.lead'
     })]);
+    expect(agentDraft.agentSelections).toEqual([{
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'codex',
+      modelId: 'codex:gpt-test',
+      reasoningEffort: 'medium'
+    }]);
+    expect(agentDraft.pendingClientMessageId).toBe('pending-agent-send-1');
     await fixture.store.deleteDraft({
       draftId: agentDraft.id,
       expectedRevision: agentDraft.recordRevision
@@ -271,6 +441,21 @@ describe('FileDiscourseStore', () => {
       recipientParticipantIds: [],
       tokens: draft.tokens
     });
+    await createConversation(fixture.store, 'conversation-2', 'create-2');
+    const rebound = await fixture.store.saveDraft({
+      draftId: updated.id,
+      conversationId: 'conversation-2',
+      expectedRevision: updated.recordRevision,
+      body: updated.body,
+      policy: updated.policy,
+      recipientParticipantIds: updated.recipientParticipantIds,
+      tokens: updated.tokens
+    });
+    expect(rebound).toMatchObject({
+      id: draft.id,
+      conversationId: 'conversation-2',
+      recordRevision: updated.recordRevision + 1
+    });
     await expect(fixture.store.saveDraft({
       draftId: draft.id,
       conversationId: 'conversation-1',
@@ -282,10 +467,45 @@ describe('FileDiscourseStore', () => {
     })).rejects.toThrow('draft changed');
 
     const restarted = new FileDiscourseStore(fixture.root);
-    expect(await restarted.listDrafts()).toEqual([updated]);
-    await restarted.deleteDraft({ draftId: updated.id, expectedRevision: updated.recordRevision });
-    expect(await restarted.getDraft(updated.id)).toBeUndefined();
+    expect(await restarted.listDrafts()).toEqual([rebound]);
+    await restarted.deleteDraft({ draftId: rebound.id, expectedRevision: rebound.recordRevision });
+    expect(await restarted.getDraft(rebound.id)).toBeUndefined();
   });
+
+  it('finds a human message by client identity beyond the newest transcript page', async () => {
+    const fixture = await storeFixture();
+    await createConversation(fixture.store, 'conversation-1', 'create-1');
+    const original = await fixture.store.appendHumanMessage({
+      conversationId: 'conversation-1',
+      body: 'Original message with a retained draft checkpoint.',
+      context: [],
+      clientMessageId: 'message-original'
+    });
+    await Promise.all(Array.from({ length: 100 }, (_, index) =>
+      fixture.store.appendHumanMessage({
+        conversationId: 'conversation-1',
+        body: `Later message ${index + 1}.`,
+        context: [],
+        clientMessageId: `message-later-${index + 1}`
+      })
+    ));
+    const newest = await fixture.store.listMessages({
+      conversationId: 'conversation-1',
+      limit: 100
+    });
+    expect(newest.messages).toHaveLength(100);
+    expect(newest.messages.some((message) => message.id === original.id)).toBe(false);
+
+    const restarted = new FileDiscourseStore(fixture.root);
+    expect(await restarted.getMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'message-original'
+    })).toEqual(original);
+    expect(await restarted.getMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'message-missing'
+    })).toBeUndefined();
+  }, 20_000);
 
   it('uses optimistic and idempotent conversation metadata updates', async () => {
     const fixture = await storeFixture();
@@ -850,6 +1070,7 @@ async function createConversation(
     defaultPolicy: 'TEAM',
     participants: [participant.participant],
     participantRevisions: [participant.revision],
+    requestFingerprint: 'f'.repeat(64),
     clientOperationId
   });
 }

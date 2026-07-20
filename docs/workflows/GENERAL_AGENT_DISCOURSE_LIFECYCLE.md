@@ -42,6 +42,13 @@ The global `@` picker resolves three entity kinds:
 - tasks: Task Monki-owned task context;
 - repositories: registry-owned repository context.
 
+Matching results are bounded without letting a large task list consume every
+slot: each matching kind receives a reserved share before unused capacity is
+filled. Repositories are presented before task results so a large task list
+cannot push repository context below the practical keyboard/viewport boundary.
+The first available result is the active combobox option, so pointer, Arrow-key,
+Enter, and Tab selection all commit the same structured token.
+
 The active board repository is never attached implicitly. A mention applies to
 one message. Pinning copies a task or repository reference into a new durable
 conversation context revision for later messages. Historical messages keep
@@ -101,6 +108,43 @@ Choosing a policy explicitly remains stable while the user selects recipients.
 Choosing Team or No agents removes stale agent-recipient mentions. Task and
 repository mentions remain intact.
 
+Each responding agent has a conversation-scoped provider/model control in the
+composer. A new selection starts from the first Discourse-safe app/provider
+default; an existing participant starts from its current durable revision.
+Direct and Panel expose the explicitly mentioned recipients, while Team exposes
+the canonical three-agent roster. Drafts persist the selected runtime-qualified
+model and reasoning level. Pending draft work is flushed before navigation, and
+an empty conversation created during a failed first send remains owned by the
+composer instead of appearing as a selectable rail item. If the unsent title,
+policy, or agent selection changes, the renderer first creates the replacement
+and rebinds the durable draft, then deletes only the superseded owned empty
+shell. Superseded shell identities remain in the idempotent create retry state
+until replacement creation, draft rebinding, and cleanup all succeed, including
+after an ambiguous create response. If the user edits again before that response
+is recovered, the exact earlier create request is replayed first so its shell
+identity joins the cleanup set. Navigation cleans up only a draftless empty shell; a successfully
+checkpointed draft keeps its shell and makes it available in the conversation
+rail. It never deletes a conversation that has acquired a message.
+
+The renderer sends only a runtime ID, runtime-qualified model ID, and optional
+reasoning choice. Core resolves the live model-provider and service-tier values,
+revalidates the read-only/offline capability, and rejects incomplete, removed,
+or unsupported selections. A changed selection appends a participant revision
+and advances only that stable participant's `currentRevisionId`. Earlier
+revisions and job assignments remain immutable and attributable; the new
+revision applies to future work without rewriting conversation history.
+The human message, message-context revision, all changed/new participants, their
+immutable revisions, the exact assignments, and an accepted response intent are
+committed in one event after durable validation. Archived, invalid, or
+conflicting retries cannot leave a partial message or roster/model update
+behind. The accepted intent and eventual wave store the same semantic send
+fingerprint; an identical lost-response retry can recover without depending on
+changed provider availability, while a changed retry is rejected before any
+mutation. Conversation-create fingerprints carry an explicit semantic version.
+Pre-version records are recognized from their durable initial participant
+configuration, so an exact retry across an app upgrade is accepted while a
+changed provider/model request still conflicts.
+
 Before an agent-directed send is persisted, every selected participant is
 revalidated against live runtime availability, a scoped-runtime binding, and
 the exact model, model-provider, reasoning, and service-tier settings in its
@@ -111,7 +155,39 @@ its revision.
 
 ## Wave ordering and waiting
 
-A message and its response wave are written idempotently before provider work.
+A message and its accepted response intent are written atomically and
+idempotently before fallible context/runtime preparation. Wave planning consumes
+that immutable intent. If preparation stops before the wave is durable, startup
+or the explicit **Resume** action can continue it by accepted-intent ID without
+duplicating the message or rewriting the participant configuration. **Cancel**
+settles the intent while preserving the user message; its message cannot be
+deleted and its conversation cannot be archived until that choice is made. The
+conversation summary surfaces the gap as needing attention, while a transient
+recovery failure cannot prevent the application from starting. Pending intents
+and active waves share the same bounded eight-response queue.
+
+If planning fails after acceptance, the renderer reconciles by the durable
+client-message ID, adopts the conversation immediately, clears the already-sent
+draft, and presents Resume/Cancel instead of reporting the message as unsent.
+The same client-message ID is stored with the conversation-scoped draft before
+every delivery, and a required checkpoint failure aborts the send. Restart
+reconciliation matches both accepted agent sends and durable human-only
+messages, removing the sent draft instead of restoring it as a second sendable
+message. Human-only recovery uses the conversation event log's indexed client
+message identity rather than only the newest transcript page, so an older sent
+message cannot restore a stale draft. An interrupted response blocks new composer work until the user resumes
+or cancels it. Renderer reconciliation begins only after the delivery API is
+actually invoked. Failures while checkpointing a draft or previewing context
+leave the current composer in place and are never presented as ambiguous
+delivery.
+Routine provider events are coalesced into quiet background refreshes; only an
+initial load or an explicit stale/error recovery blocks composer actions.
+
+Acceptance also freezes the exact bounded visible-message ID window. Recovery
+resolves that window in its stored order instead of rereading the latest
+transcript, so an earlier interrupted response never receives prompts that were
+added later.
+
 Within one conversation, a later response wave may be durably queued while an
 earlier wave is active, but it is not dispatched until the earlier wave settles.
 This preserves conversational order. At most eight non-settled waves can exist
@@ -211,6 +287,12 @@ as available only when its adapter supplies an exact scoped binding that can:
 - start and interrupt a turn owned by a Discourse session/run;
 - correlate deltas, terminal output, and recovery-required events back to that
   exact run.
+
+The conversation selector receives the attested Discourse runtime catalog, not
+the general task-runtime list. It may offer only runtimes that are ready and
+advertise a stable Discourse capability with the required read-only/offline
+execution preset. Core repeats the same validation at send time; hiding an
+unsafe option in the renderer is never the security boundary.
 
 Codex currently implements this binding with an attested App Server permission
 profile. OpenCode and the registered ACP runtimes remain available for their

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type {
   AgentExecutionSettings,
@@ -670,7 +671,10 @@ async function seedDiscourseScenario(input: {
     defaultPolicy: seededPolicy,
     participants: bindings.map((binding) => binding.participant),
     participantRevisions: bindings.map((binding) => binding.revision),
-    clientOperationId: `create-${definition.slug}`
+    clientOperationId: `create-${definition.slug}`,
+    requestFingerprint: createHash('sha256')
+      .update(`discourse-seed:${definition.slug}`)
+      .digest('hex')
   });
   if (definition.slug === 'discourse-empty') return conversation.id;
 

@@ -253,11 +253,42 @@ export function rankDiscourseMentionCandidates(
     throw new Error('Mention result limit is invalid.');
   }
   const normalizedQuery = normalizeSearchText(query);
-  return candidates
+  const ranked = candidates
     .flatMap((candidate) => {
       const score = mentionMatchScore(candidate, normalizedQuery);
       return score === undefined ? [] : [{ candidate, score }];
     })
+    .sort((left, right) => {
+      const group = mentionKindOrder(left.candidate.kind) - mentionKindOrder(right.candidate.kind);
+      if (group !== 0) return group;
+      if (left.score !== right.score) return left.score - right.score;
+      const recent = (right.candidate.recentOrdinal ?? -1) - (left.candidate.recentOrdinal ?? -1);
+      if (recent !== 0) return recent;
+      return compareCodeUnits(left.candidate.label, right.candidate.label) ||
+        compareCodeUnits(left.candidate.id, right.candidate.id);
+    });
+  const minimumPerKind = Math.min(10, Math.max(1, Math.floor(limit / 3)));
+  const selected = new Set<string>();
+  const result: typeof ranked = [];
+  for (const kind of ['AGENT', 'TASK', 'REPOSITORY'] as const) {
+    if (result.length >= limit) break;
+    for (const match of ranked.filter((entry) => entry.candidate.kind === kind)) {
+      if (result.length >= limit) break;
+      if (result.filter((entry) => entry.candidate.kind === kind).length >= minimumPerKind) {
+        break;
+      }
+      selected.add(`${match.candidate.kind}:${match.candidate.id}`);
+      result.push(match);
+    }
+  }
+  for (const match of ranked) {
+    if (result.length >= limit) break;
+    const key = `${match.candidate.kind}:${match.candidate.id}`;
+    if (selected.has(key)) continue;
+    selected.add(key);
+    result.push(match);
+  }
+  return result
     .sort((left, right) => {
       const group = mentionKindOrder(left.candidate.kind) - mentionKindOrder(right.candidate.kind);
       if (group !== 0) return group;
@@ -354,7 +385,7 @@ function clampCursor(value: number, length: number): number {
 }
 
 function mentionKindOrder(kind: DiscourseMentionKind): number {
-  return kind === 'AGENT' ? 0 : kind === 'TASK' ? 1 : 2;
+  return kind === 'AGENT' ? 0 : kind === 'REPOSITORY' ? 1 : 2;
 }
 
 function compareCodeUnits(left: string, right: string): number {

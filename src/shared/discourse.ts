@@ -82,8 +82,10 @@ export interface AgentProfileCatalogEntry {
   profile: AgentProfileRecord;
   availability: 'AVAILABLE' | 'UNAVAILABLE';
   unavailableReason?: string;
+  configurationRequired?: boolean;
   resolvedSettings?: {
     runtimeId: string;
+    modelId: string;
     model: string;
     modelProvider: string;
     reasoningEffort?: string;
@@ -142,6 +144,24 @@ export interface AgentAssignmentSnapshot {
   roleContractHash: string;
   assignmentRole: DiscourseAssignmentRole;
   required: boolean;
+}
+
+/** Durable handoff between accepted user input and fallible context/runtime preparation. */
+export interface DiscourseAcceptedSendRecord {
+  id: string;
+  conversationId: string;
+  triggerMessageId: string;
+  clientMessageId: string;
+  policy: Exclude<DiscourseDefaultPolicy, 'NONE'>;
+  assignments: AgentAssignmentSnapshot[];
+  /** Exact bounded conversation window visible to every initial response job. */
+  visibleMessageIds: string[];
+  previewFingerprint: string;
+  requestFingerprint: string;
+  status: 'PENDING' | 'CANCELED';
+  recordRevision: number;
+  createdAt: string;
+  canceledAt?: string;
 }
 
 export type DiscourseAssignmentRole =
@@ -540,6 +560,9 @@ export interface DiscourseDraftRecord {
   replyToMessageId?: string;
   policy: DiscourseDefaultPolicy;
   recipientParticipantIds: string[];
+  agentSelections?: DiscourseAgentSelectionInput[];
+  /** Durable identity of an agent send that may already have been accepted. */
+  pendingClientMessageId?: string;
   tokens: DiscourseDraftToken[];
   updatedAt: string;
 }
@@ -577,9 +600,18 @@ export interface DiscourseMentionRepositoryEntry {
 /** Bounded, renderer-safe discovery catalog. Paths are display-only, never authority. */
 export interface DiscourseMentionCatalogSnapshot {
   agents: AgentProfileCatalogEntry[];
+  runtimeCatalog: import('./agent').AgentRuntimeCatalog;
   tasks: DiscourseMentionTaskEntry[];
   repositories: DiscourseMentionRepositoryEntry[];
   refreshedAt: string;
+}
+
+/** Renderer-selected identity; core resolves provider/service details from the live catalog. */
+export interface DiscourseAgentSelectionInput {
+  agentProfileId: BuiltInAgentProfileId;
+  runtimeId?: import('./agent').AgentRuntimeId;
+  modelId?: string;
+  reasoningEffort?: string;
 }
 
 export interface DiscourseContextPreviewReference
@@ -613,7 +645,7 @@ export interface DiscourseContextPreview {
 export interface CreateDiscourseConversationRequest {
   title: string;
   defaultPolicy: DiscourseDefaultPolicy;
-  participantProfileIds: BuiltInAgentProfileId[];
+  agents: DiscourseAgentSelectionInput[];
   clientOperationId: string;
 }
 
@@ -630,7 +662,7 @@ export interface AppendHumanDiscourseMessageRequest {
 export interface SendDiscourseMessageRequest
   extends AppendHumanDiscourseMessageRequest {
   policy: DiscourseDefaultPolicy;
-  agentProfileIds: BuiltInAgentProfileId[];
+  agents: DiscourseAgentSelectionInput[];
   previewFingerprint?: string;
 }
 
@@ -638,6 +670,18 @@ export interface SendDiscourseMessageResult {
   message: DiscourseMessageRecord;
   wave?: DiscourseResponseWaveRecord;
   jobs: DiscourseAgentJobRecord[];
+}
+
+export interface ResumeDiscourseAcceptedSendRequest {
+  conversationId: string;
+  acceptedSendId: string;
+}
+
+export interface CancelDiscourseAcceptedSendRequest {
+  conversationId: string;
+  acceptedSendId: string;
+  expectedConversationRevision: number;
+  clientOperationId: string;
 }
 
 export interface ConfirmDiscourseWaveContextRequest {
@@ -670,6 +714,8 @@ export interface SaveDiscourseDraftRequest {
   replyToMessageId?: string;
   policy: DiscourseDefaultPolicy;
   recipientParticipantIds: string[];
+  agentSelections?: DiscourseAgentSelectionInput[];
+  pendingClientMessageId?: string;
   tokens: DiscourseDraftTokenInput[];
 }
 
@@ -722,6 +768,11 @@ export interface ListDiscourseMessagesRequest {
   conversationId: string;
   beforeCursor?: string;
   limit?: number;
+}
+
+export interface GetDiscourseMessageByClientIdRequest {
+  conversationId: string;
+  clientMessageId: string;
 }
 
 export interface PreviewDiscourseContextRequest {
@@ -791,6 +842,7 @@ export interface DiscourseConversationAggregateRecord {
   conversation: DiscourseConversationRecord;
   participants: DiscourseParticipantRecord[];
   participantRevisions: DiscourseParticipantRevisionRecord[];
+  acceptedSends: DiscourseAcceptedSendRecord[];
   contextLinks: ConversationContextLinkRecord[];
   contextRevisions: ConversationContextRevisionRecord[];
   contextSnapshots: ContextSnapshotRecord[];

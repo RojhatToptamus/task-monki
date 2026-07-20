@@ -41,10 +41,12 @@ describe('DiscourseMentionInput accessibility prototype', () => {
     expect(html).toContain('aria-multiline="true"');
     expect(html).toContain('aria-autocomplete="list"');
     expect(html).toContain('aria-expanded="true"');
+    expect(html).toMatch(/aria-activedescendant="discourse-option-[^"]+-builtin-verifier"/u);
     expect(html).toContain('role="listbox"');
     expect(html).toContain('role="group" aria-label="Agents"');
     expect(html).toContain('role="group" aria-label="Tasks"');
     expect(html).toContain('role="group" aria-label="Repositories"');
+    expect(html).toContain('role="option" aria-selected="true"');
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain('role="status"');
   });

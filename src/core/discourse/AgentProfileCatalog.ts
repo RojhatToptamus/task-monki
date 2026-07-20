@@ -6,7 +6,8 @@ import type {
 import type {
   AgentProfileCatalogEntry,
   AgentProfileCatalogSnapshot,
-  AgentProfileRecord
+  AgentProfileRecord,
+  DiscourseAgentSelectionInput
 } from '../../shared/discourse';
 
 const BUILT_IN_PROFILES: readonly AgentProfileRecord[] = [
@@ -56,24 +57,45 @@ export class AgentProfileCatalog {
     catalog: AgentRuntimeCatalog,
     settings: AgentProfileCatalogSettings = {}
   ): AgentProfileCatalogSnapshot {
-    const runtimeId = settings.defaultRuntimeId ?? catalog.defaultRuntimeId;
-    const runtime = catalog.runtimes.find(
-      (candidate) => candidate.preflight.runtime.id === runtimeId
+    const eligibleRuntime = orderedRuntimes(catalog, settings.defaultRuntimeId).find(
+      (runtime) => !discourseRuntimeUnavailableReason(runtime)
     );
-    const resolved = runtime
-      ? resolveCatalogSettings(runtime, settings)
-      : undefined;
-    const unavailableReason = runtimeUnavailableReason(runtime, resolved);
+    let resolved: AgentProfileCatalogEntry['resolvedSettings'];
+    if (eligibleRuntime) {
+      try {
+        resolved = resolveCatalogSettings(catalog, {}, settings);
+      } catch {
+        resolved = undefined;
+      }
+    }
+    const unavailableReason = eligibleRuntime
+      ? undefined
+      : discourseRuntimeUnavailableReason(
+          catalog.runtimes.find(
+            (runtime) => runtime.preflight.runtime.id === settings.defaultRuntimeId
+          ) ?? catalog.runtimes[0]
+        ) ?? 'No agent can confirm the read-only, offline access required by Discourse.';
     return {
       profiles: BUILT_IN_PROFILES.map((profile): AgentProfileCatalogEntry => ({
         profile: { ...profile },
         availability: unavailableReason ? 'UNAVAILABLE' : 'AVAILABLE',
         ...(unavailableReason
           ? { unavailableReason }
-          : { resolvedSettings: { ...resolved! } })
+          : resolved
+            ? { resolvedSettings: { ...resolved } }
+            : { configurationRequired: true })
       })),
       refreshedAt: catalog.refreshedAt
     };
+  }
+
+  resolveSelection(
+    catalog: AgentRuntimeCatalog,
+    selection: DiscourseAgentSelectionInput,
+    settings: AgentProfileCatalogSettings = {}
+  ): NonNullable<AgentProfileCatalogEntry['resolvedSettings']> {
+    this.require(selection.agentProfileId);
+    return resolveCatalogSettings(catalog, selection, settings);
   }
 
   require(profileId: string): AgentProfileRecord {
@@ -111,33 +133,82 @@ const ROLE_CONTRACTS: Readonly<Record<string, Readonly<Record<number, string>>>>
 };
 
 function resolveCatalogSettings(
-  runtime: AgentRuntimeState,
+  catalog: AgentRuntimeCatalog,
+  selection: Pick<
+    DiscourseAgentSelectionInput,
+    'runtimeId' | 'modelId' | 'reasoningEffort'
+  >,
   settings: AgentProfileCatalogSettings
-): AgentProfileCatalogEntry['resolvedSettings'] | undefined {
-  const models = runtime.models.filter(
-    (model) =>
-      model.runtimeId === runtime.preflight.runtime.id &&
-      (settings.defaultModelProvider === undefined ||
-        model.modelProvider === settings.defaultModelProvider)
-  );
-  const explicitlySelected = settings.defaultModel
-    ? models.find(
-        (model) =>
-          model.id === settings.defaultModel || model.model === settings.defaultModel
+): NonNullable<AgentProfileCatalogEntry['resolvedSettings']> {
+  if (Boolean(selection.runtimeId) !== Boolean(selection.modelId)) {
+    throw new Error('A Discourse agent selection requires both an agent provider and model.');
+  }
+  const explicitlySelectedRuntime = selection.runtimeId
+    ? catalog.runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === selection.runtimeId
       )
     : undefined;
-  const visible = models.filter((model) => !model.hidden);
-  const selected =
-    explicitlySelected ?? visible.find((model) => model.isDefault) ?? visible[0];
-  if (!selected) return undefined;
+  if (selection.runtimeId && !explicitlySelectedRuntime) {
+    throw new Error('The selected Discourse agent provider is no longer available.');
+  }
+  const runtimes = explicitlySelectedRuntime
+    ? [explicitlySelectedRuntime]
+    : orderedRuntimes(catalog, settings.defaultRuntimeId);
+  let selectedRuntime: AgentRuntimeState | undefined;
+  let selected: AgentModel | undefined;
+  for (const runtime of runtimes) {
+    const unavailable = discourseRuntimeUnavailableReason(runtime);
+    if (unavailable) {
+      if (selection.runtimeId) throw new Error(unavailable);
+      continue;
+    }
+    const models = runtime.models.filter(
+      (model) => model.runtimeId === runtime.preflight.runtime.id
+    );
+    if (selection.modelId) {
+      selected = models.find((model) => model.id === selection.modelId);
+      if (!selected) {
+        throw new Error('The selected Discourse model is no longer available.');
+      }
+    } else {
+      const preferred = settings.defaultModel
+        ? models.find(
+            (model) =>
+              (settings.defaultModelProvider === undefined ||
+                model.modelProvider === settings.defaultModelProvider) &&
+              (model.id === settings.defaultModel || model.model === settings.defaultModel)
+          )
+        : undefined;
+      const visible = models.filter((model) => !model.hidden);
+      selected = preferred ?? visible.find((model) => model.isDefault) ?? visible[0];
+    }
+    if (selected) {
+      selectedRuntime = runtime;
+      break;
+    }
+    if (selection.runtimeId) break;
+  }
+  if (!selectedRuntime || !selected) {
+    throw new Error('No compatible Discourse model is available. Load models or choose another agent provider.');
+  }
 
-  const preferredEffort = settings.defaultReasoningEffort;
+  const preferredEffort = selection.reasoningEffort ?? settings.defaultReasoningEffort;
+  if (
+    selection.reasoningEffort &&
+    selection.reasoningEffort !== selected.defaultReasoningEffort &&
+    !selected.supportedReasoningEfforts.includes(selection.reasoningEffort)
+  ) {
+    throw new Error(
+      `${selection.reasoningEffort} reasoning is not supported by ${selected.displayName}.`
+    );
+  }
   const reasoningEffort =
     preferredEffort && selected.supportedReasoningEfforts.includes(preferredEffort)
       ? preferredEffort
       : selected.defaultReasoningEffort ?? selected.supportedReasoningEfforts[0];
   return {
-    runtimeId: selected.runtimeId,
+    runtimeId: selectedRuntime.preflight.runtime.id,
+    modelId: selected.id,
     model: selected.model,
     modelProvider: selected.modelProvider ?? selected.runtimeId,
     ...(reasoningEffort ? { reasoningEffort } : {}),
@@ -145,9 +216,8 @@ function resolveCatalogSettings(
   };
 }
 
-function runtimeUnavailableReason(
-  runtime: AgentRuntimeState | undefined,
-  settings: AgentProfileCatalogEntry['resolvedSettings'] | undefined
+export function discourseRuntimeUnavailableReason(
+  runtime: AgentRuntimeState | undefined
 ): string | undefined {
   if (!runtime) return 'The selected agent connection is not configured.';
   if (!runtime.preflight.readiness.canStart) {
@@ -166,8 +236,24 @@ function runtimeUnavailableReason(
   if (!readOnlyPreset) {
     return 'This agent cannot confirm the read-only, offline access required by Discourse.';
   }
-  if (!settings) return 'No compatible model is available. Check the selected agent in Settings.';
   return undefined;
+}
+
+function orderedRuntimes(
+  catalog: AgentRuntimeCatalog,
+  preferredRuntimeId?: string
+): AgentRuntimeState[] {
+  const ids = [preferredRuntimeId, catalog.defaultRuntimeId].filter(
+    (id, index, values): id is string => Boolean(id) && values.indexOf(id) === index
+  );
+  return [
+    ...ids.flatMap((id) =>
+      catalog.runtimes.filter((runtime) => runtime.preflight.runtime.id === id)
+    ),
+    ...catalog.runtimes.filter(
+      (runtime) => !ids.includes(runtime.preflight.runtime.id)
+    )
+  ];
 }
 
 export function discourseModelMatches(

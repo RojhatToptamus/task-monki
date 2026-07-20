@@ -848,7 +848,8 @@ async function coordinatorFixture() {
     defaultPolicy: 'DIRECT',
     participants: [participant.participant],
     participantRevisions: [participant.revision],
-    clientOperationId: 'create-conversation'
+    clientOperationId: 'create-conversation',
+    requestFingerprint: 'b'.repeat(64)
   });
   const trigger = await discourse.appendHumanMessage({
     conversationId: conversation.id,

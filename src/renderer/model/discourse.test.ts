@@ -3,21 +3,38 @@ import type {
   DiscourseAgentJobRecord,
   DiscourseConcernRecord,
   DiscourseConversationAggregateRecord,
+  DiscourseDraftRecord,
   DiscourseMessageRecord,
   DiscourseMentionCatalogSnapshot,
   DiscourseResponseWaveRecord
 } from '../../shared/discourse';
+import { createRuntimeReadiness } from '../../core/agent/AgentRuntimeReadiness';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../../core/agent/codex/codexCapabilities';
 import {
   composerTokensFromDraft,
+  canDeleteAbandonedDiscourseShell,
   currentPinnedContext,
+  currentDiscourseParticipantRevisions,
+  defaultDiscourseAgentSelection,
+  discourseAcceptedSendForClientMessage,
+  discourseAgentSelectionFromCurrentRevision,
   discourseConcernResolutionLabel,
+  discourseClientMessageWasPersisted,
+  discourseDraftsAlreadySent,
   discourseJobStatusLabel,
   discourseMentionCandidates,
+  discoursePendingSendFingerprint,
   discourseReviewResultLabel,
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail,
   draftTokensFromComposer,
+  eligibleDiscourseRuntimeCatalog,
   isNearScrollBottom,
+  interruptedDiscourseAcceptedSends,
+  recoverPendingDiscourseCreateForReplacement,
   shouldShowNewResponses,
   visibleDiscourseResponseWaves,
   visibleDiscourseResponseWavePlacements,
@@ -25,6 +42,91 @@ import {
 } from './discourse';
 
 describe('discourse renderer model', () => {
+  it('recovers an ambiguously created replacement before a second edit moves on', async () => {
+    const requests: unknown[] = [];
+    const superseded = await recoverPendingDiscourseCreateForReplacement({
+      pending: {
+        clientOperationId: 'create-b',
+        supersededConversationIds: ['conversation-a'],
+        createRequest: {
+          title: 'Replacement B',
+          defaultPolicy: 'DIRECT',
+          agents: [{ agentProfileId: 'builtin.lead', runtimeId: 'codex', modelId: 'model-b' }]
+        }
+      },
+      replay: async (request) => {
+        requests.push(request);
+        return { id: 'conversation-b' };
+      }
+    });
+
+    expect(requests).toEqual([{
+      title: 'Replacement B',
+      defaultPolicy: 'DIRECT',
+      agents: [{ agentProfileId: 'builtin.lead', runtimeId: 'codex', modelId: 'model-b' }],
+      clientOperationId: 'create-b'
+    }]);
+    expect(superseded).toEqual(['conversation-a', 'conversation-b']);
+  });
+
+  it('deletes only draftless abandoned first-send conversation shells', () => {
+    expect(canDeleteAbandonedDiscourseShell({
+      conversationId: 'conversation-1',
+      latestOrdinal: 0,
+      drafts: []
+    })).toBe(true);
+    expect(canDeleteAbandonedDiscourseShell({
+      conversationId: 'conversation-1',
+      latestOrdinal: 0,
+      drafts: [{ conversationId: 'conversation-1' }] as DiscourseDraftRecord[]
+    })).toBe(false);
+    expect(canDeleteAbandonedDiscourseShell({
+      conversationId: 'conversation-1',
+      latestOrdinal: 1,
+      drafts: []
+    })).toBe(false);
+  });
+
+  it('finds interrupted accepted sends in one pass across a bounded large history', () => {
+    const acceptedSends = Array.from({ length: 5_001 }, (_, index) => ({
+      id: `accepted-${index}`,
+      clientMessageId: `client-message-${index}`,
+      triggerMessageId: `message-${index}`,
+      status: 'PENDING' as const
+    }));
+    const aggregate = {
+      acceptedSends,
+      waves: Array.from({ length: 5_000 }, (_, index) => ({
+        triggerMessageId: `message-${index}`
+      }))
+    } as DiscourseConversationAggregateRecord;
+
+    expect(interruptedDiscourseAcceptedSends(aggregate)).toEqual([
+      acceptedSends[5_000]
+    ]);
+    expect(discourseAcceptedSendForClientMessage(
+      aggregate,
+      'client-message-5000'
+    )).toBe(acceptedSends[5_000]);
+    const persistedHumanMessage = {
+      author: { kind: 'USER' },
+      clientMessageId: 'human-message-1'
+    } as DiscourseMessageRecord;
+    expect(discourseClientMessageWasPersisted(
+      aggregate,
+      [persistedHumanMessage],
+      'human-message-1'
+    )).toBe(true);
+    expect(discourseDraftsAlreadySent(aggregate, [persistedHumanMessage], [
+      { id: 'accepted-draft', pendingClientMessageId: 'client-message-5000' },
+      { id: 'human-draft', pendingClientMessageId: 'human-message-1' },
+      { id: 'ordinary-draft' }
+    ] as never)).toEqual([
+      expect.objectContaining({ id: 'accepted-draft' }),
+      expect.objectContaining({ id: 'human-draft' })
+    ]);
+  });
+
   it('maps the global catalog into disambiguated typed picker candidates', () => {
     const candidates = discourseMentionCandidates(catalog(), [{
       id: 'recent-repository',
@@ -58,6 +160,77 @@ describe('discourse renderer model', () => {
         labelSnapshot: 'Readable label only'
       }
     ]);
+  });
+
+  it('derives editable selections from only the current participant revision', () => {
+    const aggregate = {
+      participants: [{
+        id: 'participant-1',
+        agentProfileId: 'builtin.lead',
+        currentRevisionId: 'revision-2',
+        enabled: true
+      }],
+      participantRevisions: [
+        {
+          id: 'revision-1',
+          agentProfileId: 'builtin.lead',
+          runtimeId: 'codex',
+          model: 'gpt-old',
+          modelProvider: 'openai'
+        },
+        {
+          id: 'revision-2',
+          agentProfileId: 'builtin.lead',
+          runtimeId: 'codex',
+          model: 'gpt-test',
+          modelProvider: 'openai',
+          reasoningEffort: 'medium'
+        }
+      ]
+    } as unknown as DiscourseConversationAggregateRecord;
+    const snapshot = catalog();
+
+    expect(currentDiscourseParticipantRevisions(aggregate).map(({ id }) => id)).toEqual([
+      'revision-2'
+    ]);
+    expect(discourseAgentSelectionFromCurrentRevision(
+      aggregate,
+      snapshot,
+      'builtin.lead'
+    )).toEqual({
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'codex',
+      modelId: 'codex:gpt-test',
+      reasoningEffort: 'medium'
+    });
+    expect(defaultDiscourseAgentSelection(snapshot, 'builtin.lead')).toMatchObject({
+      modelId: 'codex:gpt-test'
+    });
+    expect(eligibleDiscourseRuntimeCatalog(snapshot).runtimes.map(
+      (runtime) => runtime.preflight.runtime.id
+    )).toEqual(['codex']);
+  });
+
+  it('keeps an unchanged failed send on one retry identity and detects configuration changes', () => {
+    const input = {
+      body: 'Review the migration.',
+      sourceMessageIds: ['message-1'],
+      context: [{ entityKind: 'REPOSITORY' as const, entityId: 'repository-1' }],
+      policy: 'DIRECT' as const,
+      agents: [{
+        agentProfileId: 'builtin.lead' as const,
+        runtimeId: 'codex',
+        modelId: 'codex:gpt-test',
+        reasoningEffort: 'medium'
+      }]
+    };
+    const first = discoursePendingSendFingerprint(input);
+
+    expect(discoursePendingSendFingerprint({ ...input })).toBe(first);
+    expect(discoursePendingSendFingerprint({
+      ...input,
+      agents: [{ ...input.agents[0]!, modelId: 'codex:gpt-next' }]
+    })).not.toBe(first);
   });
 
   it('selects only the latest pinned revision and filters conversation titles', () => {
@@ -246,6 +419,19 @@ function discourseConcern(
 }
 
 function catalog(): DiscourseMentionCatalogSnapshot {
+  const models: DiscourseMentionCatalogSnapshot['runtimeCatalog']['models'] = [{
+    id: 'codex:gpt-test',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
+    model: 'gpt-test',
+    displayName: 'GPT Test',
+    hidden: false,
+    supportedReasoningEfforts: ['medium'],
+    defaultReasoningEffort: 'medium',
+    serviceTiers: [],
+    inputModalities: ['text'],
+    isDefault: true
+  }];
   return {
     agents: [{
       profile: {
@@ -260,10 +446,25 @@ function catalog(): DiscourseMentionCatalogSnapshot {
       availability: 'AVAILABLE',
       resolvedSettings: {
         runtimeId: 'codex',
+        modelId: 'codex:gpt-test',
         model: 'gpt-test',
         modelProvider: 'openai'
       }
     }],
+    runtimeCatalog: {
+      defaultRuntimeId: 'codex',
+      models,
+      runtimes: [{
+        preflight: {
+          runtime: CODEX_RUNTIME_DESCRIPTOR,
+          readiness: createRuntimeReadiness('READY', 'Codex is ready.'),
+          capabilities: codexCapabilities()
+        },
+        models,
+        refreshedAt: '2026-07-13T00:00:00.000Z'
+      }],
+      refreshedAt: '2026-07-13T00:00:00.000Z'
+    },
     tasks: [{
       id: 'task-1',
       title: 'Context refactor',

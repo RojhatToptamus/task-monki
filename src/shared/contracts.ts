@@ -1195,6 +1195,9 @@ export interface TaskManagerApi {
   listDiscourseMessages(
     input: import('./discourse').ListDiscourseMessagesRequest
   ): Promise<import('./discourse').DiscourseMessagePage>;
+  getDiscourseMessageByClientId(
+    input: import('./discourse').GetDiscourseMessageByClientIdRequest
+  ): Promise<import('./discourse').DiscourseMessageRecord | null>;
   getDiscourseMentionCatalog(): Promise<import('./discourse').DiscourseMentionCatalogSnapshot>;
   createDiscourseConversation(
     input: import('./discourse').CreateDiscourseConversationRequest
@@ -1205,6 +1208,12 @@ export interface TaskManagerApi {
   sendDiscourseMessage(
     input: import('./discourse').SendDiscourseMessageRequest
   ): Promise<import('./discourse').SendDiscourseMessageResult>;
+  resumeDiscourseAcceptedSend(
+    input: import('./discourse').ResumeDiscourseAcceptedSendRequest
+  ): Promise<import('./discourse').SendDiscourseMessageResult>;
+  cancelDiscourseAcceptedSend(
+    input: import('./discourse').CancelDiscourseAcceptedSendRequest
+  ): Promise<import('./discourse').DiscourseConversationAggregateRecord>;
   tombstoneDiscourseMessage(
     input: import('./discourse').TombstoneDiscourseMessageRequest
   ): Promise<import('./discourse').DiscourseConversationRecord>;

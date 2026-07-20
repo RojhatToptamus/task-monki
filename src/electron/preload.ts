@@ -52,14 +52,17 @@ import {
 } from '../shared/attachments';
 import type {
   AppendHumanDiscourseMessageRequest,
+  CancelDiscourseAcceptedSendRequest,
   ConfirmDiscourseWaveContextRequest,
   CreateDiscourseConversationRequest,
   DeleteDiscourseConversationRequest,
   DeleteDiscourseDraftRequest,
+  GetDiscourseMessageByClientIdRequest,
   ListDiscourseConversationsRequest,
   ListDiscourseMessagesRequest,
   PreviewDiscourseContextRequest,
   RenameDiscourseConversationRequest,
+  ResumeDiscourseAcceptedSendRequest,
   SaveDiscourseDraftRequest,
   SendDiscourseMessageRequest,
   SetDiscourseConversationArchivedRequest,
@@ -124,6 +127,8 @@ const api: TaskManagerApi = {
     ipcRenderer.invoke('discourse:conversation:get', conversationId),
   listDiscourseMessages: (input: ListDiscourseMessagesRequest) =>
     ipcRenderer.invoke('discourse:messages:list', input),
+  getDiscourseMessageByClientId: (input: GetDiscourseMessageByClientIdRequest) =>
+    ipcRenderer.invoke('discourse:message:get-by-client-id', input),
   getDiscourseMentionCatalog: () => ipcRenderer.invoke('discourse:mentions:get'),
   createDiscourseConversation: (input: CreateDiscourseConversationRequest) =>
     ipcRenderer.invoke('discourse:conversation:create', input),
@@ -131,6 +136,10 @@ const api: TaskManagerApi = {
     ipcRenderer.invoke('discourse:message:append', input),
   sendDiscourseMessage: (input: SendDiscourseMessageRequest) =>
     ipcRenderer.invoke('discourse:message:send', input),
+  resumeDiscourseAcceptedSend: (input: ResumeDiscourseAcceptedSendRequest) =>
+    ipcRenderer.invoke('discourse:message:resume', input),
+  cancelDiscourseAcceptedSend: (input: CancelDiscourseAcceptedSendRequest) =>
+    ipcRenderer.invoke('discourse:message:cancel-response', input),
   tombstoneDiscourseMessage: (input: TombstoneDiscourseMessageRequest) =>
     ipcRenderer.invoke('discourse:message:tombstone', input),
   setPinnedDiscourseContext: (input: SetPinnedDiscourseContextRequest) =>

@@ -65,14 +65,17 @@ import type {
 } from '../shared/contracts';
 import type {
   AppendHumanDiscourseMessageRequest,
+  CancelDiscourseAcceptedSendRequest,
   ConfirmDiscourseWaveContextRequest,
   CreateDiscourseConversationRequest,
   DeleteDiscourseConversationRequest,
   DeleteDiscourseDraftRequest,
+  GetDiscourseMessageByClientIdRequest,
   ListDiscourseConversationsRequest,
   ListDiscourseMessagesRequest,
   PreviewDiscourseContextRequest,
   RenameDiscourseConversationRequest,
+  ResumeDiscourseAcceptedSendRequest,
   SaveDiscourseDraftRequest,
   SendDiscourseMessageRequest,
   SetDiscourseConversationArchivedRequest,
@@ -413,6 +416,11 @@ function installIpcHandlers(): void {
   handleTrustedIpc('discourse:messages:list', async (_, input: ListDiscourseMessagesRequest) =>
     service.listDiscourseMessages(input)
   );
+  handleTrustedIpc(
+    'discourse:message:get-by-client-id',
+    async (_, input: GetDiscourseMessageByClientIdRequest) =>
+      service.getDiscourseMessageByClientId(input)
+  );
   handleTrustedIpc('discourse:mentions:get', () => service.getDiscourseMentionCatalog());
   handleTrustedIpc(
     'discourse:conversation:create',
@@ -427,6 +435,16 @@ function installIpcHandlers(): void {
   handleTrustedIpc(
     'discourse:message:send',
     async (_, input: SendDiscourseMessageRequest) => service.sendDiscourseMessage(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:resume',
+    async (_, input: ResumeDiscourseAcceptedSendRequest) =>
+      service.resumeDiscourseAcceptedSend(input)
+  );
+  handleTrustedIpc(
+    'discourse:message:cancel-response',
+    async (_, input: CancelDiscourseAcceptedSendRequest) =>
+      service.cancelDiscourseAcceptedSend(input)
   );
   handleTrustedIpc(
     'discourse:message:tombstone',

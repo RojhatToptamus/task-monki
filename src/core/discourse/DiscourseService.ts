@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from 'node:crypto';
 import type { AgentRuntimeCatalog, TaskManagerAppSettings } from '../../shared/agent';
+import { DISCOURSE_LIMITS } from '../../shared/discourse';
 import type {
   AppendHumanDiscourseMessageRequest,
   AgentAssignmentSnapshot,
@@ -18,8 +19,12 @@ import type {
   DiscourseDraftRecord,
   DiscourseMentionCatalogSnapshot,
   DiscourseMessagePage,
+  GetDiscourseMessageByClientIdRequest,
   DiscourseMessageRecord,
   DiscourseAgentJobRecord,
+  DiscourseAgentSelectionInput,
+  DiscourseAcceptedSendRecord,
+  DiscourseParticipantRecord,
   DiscourseParticipantRevisionRecord,
   DiscourseResponseWaveRecord,
   ListDiscourseConversationsRequest,
@@ -27,6 +32,8 @@ import type {
   PreviewDiscourseContextRequest,
   RenameDiscourseConversationRequest,
   SaveDiscourseDraftRequest,
+  ResumeDiscourseAcceptedSendRequest,
+  CancelDiscourseAcceptedSendRequest,
   SendDiscourseMessageRequest,
   SendDiscourseMessageResult,
   SetDiscourseConversationArchivedRequest,
@@ -38,7 +45,11 @@ import type {
 } from '../../shared/discourse';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { AgentScopedTurnProvider } from '../agent/AgentScopedTurnProvider';
-import { AgentProfileCatalog, discourseModelMatches } from './AgentProfileCatalog';
+import {
+  AgentProfileCatalog,
+  discourseModelMatches,
+  discourseRuntimeUnavailableReason
+} from './AgentProfileCatalog';
 import type { DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
 import type { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
@@ -93,6 +104,12 @@ export class DiscourseService {
     return this.store.listMessages(input);
   }
 
+  async getMessageByClientId(
+    input: GetDiscourseMessageByClientIdRequest
+  ): Promise<DiscourseMessageRecord | null> {
+    return (await this.store.getMessageByClientId(input)) ?? null;
+  }
+
   async getMentionCatalog(): Promise<DiscourseMentionCatalogSnapshot> {
     const [runtimeCatalog, settings, contextCatalog] = await Promise.all([
       this.options.getRuntimeCatalog(),
@@ -107,6 +124,7 @@ export class DiscourseService {
     }).profiles;
     return {
       agents,
+      runtimeCatalog,
       tasks: contextCatalog.tasks,
       repositories: contextCatalog.repositories,
       refreshedAt: this.now()
@@ -116,24 +134,36 @@ export class DiscourseService {
   async createConversation(
     input: CreateDiscourseConversationRequest
   ): Promise<DiscourseConversationRecord> {
-    const profileIds = validateRoster(input.defaultPolicy, input.participantProfileIds);
+    const selections = validateAgentSelections(input.defaultPolicy, input.agents);
+    const requestFingerprint = discourseCreateRequestFingerprint(input, selections);
+    const replay = await this.store.findCreatedConversation({
+      clientOperationId: input.clientOperationId,
+      requestFingerprint
+    });
+    if (replay) return replay;
     const [runtimeCatalog, settings] = await Promise.all([
       this.options.getRuntimeCatalog(),
       this.options.getAppSettings()
     ]);
-    const catalog = this.profiles.list(runtimeCatalog, {
+    const profileCatalog = this.profiles.list(runtimeCatalog, {
       defaultRuntimeId: settings.defaultRuntimeId,
       defaultModel: settings.defaultModel,
       defaultModelProvider: settings.defaultModelProvider,
       defaultReasoningEffort: settings.defaultReasoningEffort
     });
     const now = this.now();
-    const participants = profileIds.map((profileId) => {
-      const entry = catalog.profiles.find((candidate) => candidate.profile.id === profileId);
+    const participants = selections.map((selection) => {
+      const profileId = selection.agentProfileId;
+      const entry = profileCatalog.profiles.find((candidate) => candidate.profile.id === profileId);
       if (!entry) throw new Error(`Unknown discourse agent profile: ${profileId}`);
+      const resolved = this.profiles.resolveSelection(runtimeCatalog, selection, {
+        defaultRuntimeId: settings.defaultRuntimeId,
+        defaultModel: settings.defaultModel,
+        defaultModelProvider: settings.defaultModelProvider,
+        defaultReasoningEffort: settings.defaultReasoningEffort
+      });
       const participantId = this.createId();
       const revisionId = this.createId();
-      const resolved = entry.resolvedSettings;
       return {
         participant: {
           id: participantId,
@@ -151,11 +181,11 @@ export class DiscourseService {
           agentProfileId: profileId,
           profileRevision: entry.profile.revision,
           displayNameSnapshot: entry.profile.displayName,
-          runtimeId: resolved?.runtimeId ?? settings.defaultRuntimeId,
-          model: resolved?.model ?? 'unavailable',
-          modelProvider: resolved?.modelProvider ?? 'openai',
-          ...(resolved?.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
-          ...(resolved?.serviceTier ? { serviceTier: resolved.serviceTier } : {}),
+          runtimeId: resolved.runtimeId,
+          model: resolved.model,
+          modelProvider: resolved.modelProvider,
+          ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
+          ...(resolved.serviceTier ? { serviceTier: resolved.serviceTier } : {}),
           configuredRole: entry.profile.roleTemplate,
           roleContractVersion: entry.profile.roleContractVersion,
           roleContractHash: sha256(this.profiles.roleContract(profileId)),
@@ -169,6 +199,7 @@ export class DiscourseService {
       defaultPolicy: input.defaultPolicy,
       participants: participants.map(({ participant }) => participant),
       participantRevisions: participants.map(({ revision }) => revision),
+      requestFingerprint,
       clientOperationId: input.clientOperationId
     });
     this.emit('discourse.summary.updated', conversation.id, conversation);
@@ -207,7 +238,7 @@ export class DiscourseService {
     input: SendDiscourseMessageRequest
   ): Promise<SendDiscourseMessageResult> {
     if (input.policy === 'NONE') {
-      if (input.agentProfileIds.length !== 0) {
+      if (input.agents.length !== 0) {
         throw new Error('A human-only discourse message cannot select agent recipients.');
       }
       return {
@@ -215,54 +246,126 @@ export class DiscourseService {
         jobs: []
       };
     }
-    const runtime = this.options.runtime;
-    if (!runtime) throw new Error('Discourse agent execution is not configured.');
-    const profileIds = validateRoster(input.policy, input.agentProfileIds);
+    const selections = validateAgentSelections(input.policy, input.agents);
+    const profileIds = selections.map((selection) => selection.agentProfileId);
     if (!input.previewFingerprint) {
       throw new Error('An agent discourse response requires a current context preview.');
     }
     let aggregate = await this.store.getConversation(input.conversationId);
+    const waveOperationId = `${input.clientMessageId}:wave`;
+    const requestFingerprint = discourseSendRequestFingerprint(input, selections);
+    const existingWave = aggregate.waves.find(
+      (candidate) => candidate.clientOperationId === waveOperationId
+    );
+    if (existingWave) {
+      if (existingWave.requestFingerprint !== requestFingerprint) {
+        throw new Error('REQUEST_CONFLICT: discourse send operation changed.');
+      }
+      const message = await this.findMessage(existingWave.triggerMessageId, input.conversationId);
+      const runtime = this.options.runtime;
+      if (runtime) {
+        await runtime.coordinator.recoverConversation(input.conversationId);
+        await this.activateNextWave(
+          input.conversationId,
+          `${existingWave.clientOperationId}:retry-recovery`
+        );
+        aggregate = await this.store.getConversation(input.conversationId);
+      }
+      const recoveredWave = requireWave(aggregate.waves, existingWave.id);
+      return {
+        message,
+        wave: recoveredWave,
+        jobs: aggregate.jobs.filter((job) => job.waveId === recoveredWave.id)
+      };
+    }
+    const acceptedReplay = aggregate.acceptedSends.find(
+      (candidate) => candidate.clientMessageId === input.clientMessageId
+    );
+    if (acceptedReplay) {
+      if (acceptedReplay.requestFingerprint !== requestFingerprint) {
+        throw new Error('REQUEST_CONFLICT: discourse send operation changed.');
+      }
+      if (acceptedReplay.status === 'CANCELED') {
+        throw new Error('This interrupted agent response was canceled. Send a new message instead.');
+      }
+      const message = await this.findMessage(
+        acceptedReplay.triggerMessageId,
+        input.conversationId
+      );
+      return this.planAcceptedSend(aggregate, message, acceptedReplay);
+    }
+    if (!this.options.runtime) throw new Error('Discourse agent execution is not configured.');
     const [runtimeCatalog, settings] = await Promise.all([
       this.options.getRuntimeCatalog(),
       this.options.getAppSettings()
     ]);
-    const catalog = this.profiles.list(runtimeCatalog, {
+    const catalogSettings = {
       defaultRuntimeId: settings.defaultRuntimeId,
       defaultModel: settings.defaultModel,
       defaultModelProvider: settings.defaultModelProvider,
       defaultReasoningEffort: settings.defaultReasoningEffort
-    });
+    };
+    const profileCatalog = this.profiles.list(runtimeCatalog, catalogSettings);
     const entries = new Map<BuiltInAgentProfileId, AgentProfileCatalogEntry>();
-    for (const profileId of profileIds) {
-      const entry = catalog.profiles.find((candidate) => candidate.profile.id === profileId);
-      if (!entry || entry.availability !== 'AVAILABLE' || !entry.resolvedSettings) {
+    const resolvedSelections = new Map<
+      BuiltInAgentProfileId,
+      NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
+    >();
+    for (const selection of selections) {
+      const profileId = selection.agentProfileId;
+      const entry = profileCatalog.profiles.find((candidate) => candidate.profile.id === profileId);
+      if (!entry || entry.availability !== 'AVAILABLE') {
         throw new Error(entry?.unavailableReason ?? `Agent profile is unavailable: ${profileId}`);
       }
       entries.set(profileId, entry);
       const existing = aggregate.participants.find(
         (participant) => participant.agentProfileId === profileId && participant.enabled
       );
+      let currentRevision: DiscourseParticipantRevisionRecord | undefined;
       if (existing) {
-        const revision = aggregate.participantRevisions.find(
+        currentRevision = aggregate.participantRevisions.find(
           (candidate) => candidate.id === existing.currentRevisionId
         );
-        if (!revision) {
+        if (!currentRevision) {
           throw new Error(`Discourse participant revision is missing: ${profileId}`);
         }
-        assertParticipantRevisionAvailable(entry, revision, runtimeCatalog);
+      }
+      let resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>;
+      if (currentRevision && !selection.runtimeId && !selection.modelId) {
+        assertParticipantRevisionAvailable(entry, currentRevision, runtimeCatalog);
+        resolved = resolvedSettingsFromRevision(currentRevision, runtimeCatalog);
+      } else {
+        resolved = this.profiles.resolveSelection(runtimeCatalog, selection, catalogSettings);
+        if (currentRevision) {
+          resolved = preserveCurrentImplicitSettings(
+            currentRevision,
+            selection,
+            resolved,
+            runtimeCatalog
+          );
+        }
+      }
+      resolvedSelections.set(profileId, resolved);
+      if (currentRevision && participantSettingsMatch(currentRevision, resolved)) {
+        assertParticipantRevisionAvailable(entry, currentRevision, runtimeCatalog);
       }
     }
-    for (const profileId of profileIds) {
-      await this.ensureParticipant(
-        aggregate,
-        profileId,
-        entries.get(profileId)!,
-        `${input.clientMessageId}:participant:${profileId}`
-      );
-      aggregate = await this.store.getConversation(input.conversationId);
-    }
     const context = await this.context.resolveSelections(input.context ?? []);
-    const message = await this.store.appendHumanMessage({
+    const priorTranscript = (
+      await this.store.listMessages({
+        conversationId: input.conversationId,
+        limit: DISCOURSE_LIMITS.maxRecentTranscriptMessages - 1
+      })
+    ).messages;
+    const configuration = this.buildParticipantConfiguration(
+      aggregate,
+      profileIds,
+      entries,
+      resolvedSelections
+    );
+    const projectedAggregate = projectParticipantConfiguration(aggregate, configuration);
+    const assignments = assignmentsFromRoster(projectedAggregate, input.policy, profileIds);
+    const accepted = await this.store.acceptAgentSend({
       conversationId: input.conversationId,
       body: input.body,
       ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
@@ -271,26 +374,31 @@ export class DiscourseService {
         : {}),
       ...(input.sourceMessageIds ? { sourceMessageIds: input.sourceMessageIds } : {}),
       context: context.map((reference) => reference.snapshot),
-      clientMessageId: input.clientMessageId
+      clientMessageId: input.clientMessageId,
+      participants: configuration.participants,
+      participantRevisions: configuration.participantRevisions,
+      expectedRevision: aggregate.conversation.recordRevision,
+      policy: input.policy,
+      assignments,
+      priorVisibleMessageIds: priorTranscript.map((candidate) => candidate.id),
+      previewFingerprint: input.previewFingerprint,
+      requestFingerprint
     });
-    aggregate = await this.store.getConversation(input.conversationId);
-    const existingWave = aggregate.waves.find(
-      (candidate) => candidate.clientOperationId === `${input.clientMessageId}:wave`
+    return this.planAcceptedSend(
+      accepted.aggregate,
+      accepted.message,
+      accepted.acceptedSend
     );
-    if (existingWave) {
-      await runtime.coordinator.recoverConversation(input.conversationId);
-      await this.activateNextWave(
-        input.conversationId,
-        `${existingWave.clientOperationId}:retry-recovery`
-      );
-      aggregate = await this.store.getConversation(input.conversationId);
-      const recoveredWave = requireWave(aggregate.waves, existingWave.id);
-      return {
-        message,
-        wave: recoveredWave,
-        jobs: aggregate.jobs.filter((job) => job.waveId === recoveredWave.id)
-      };
-    }
+  }
+
+  private async planAcceptedSend(
+    aggregate: DiscourseConversationAggregateRecord,
+    message: DiscourseMessageRecord,
+    accepted: DiscourseAcceptedSendRecord
+  ): Promise<SendDiscourseMessageResult> {
+    const runtime = this.options.runtime;
+    if (!runtime) throw new Error('Discourse agent execution is not configured.');
+    const waveOperationId = `${accepted.clientMessageId}:wave`;
     if (!message.contextRevisionId) {
       throw new Error('Discourse message context revision is missing.');
     }
@@ -298,24 +406,16 @@ export class DiscourseService {
       (revision) => revision.id === message.contextRevisionId
     );
     if (!contextRevision) throw new Error('Discourse message context could not be loaded.');
-    const assignments = assignmentsFromRoster(aggregate, input.policy, profileIds);
+    const assignments = accepted.assignments;
     const hasEarlierActiveWave = aggregate.waves.some((wave) => wave.status !== 'SETTLED');
     const now = this.now();
     const waveId = this.createId();
     const snapshotId = this.createId();
-    const waveOperationId = `${input.clientMessageId}:wave`;
-    const requestFingerprint = sha256(JSON.stringify({
-      conversationId: input.conversationId,
-      messageId: message.id,
-      policy: input.policy,
-      profileIds,
-      previewFingerprint: input.previewFingerprint
-    }));
     const wave = {
       id: waveId,
-      conversationId: input.conversationId,
+      conversationId: accepted.conversationId,
       triggerMessageId: message.id,
-      policy: input.policy,
+      policy: accepted.policy,
       policyVersion: 1,
       assignments,
       sourceMessageIds: [message.id],
@@ -326,34 +426,35 @@ export class DiscourseService {
       status: 'PLANNED' as const,
       phase: 'ANSWER' as const,
       clientOperationId: waveOperationId,
-      requestFingerprint,
+      requestFingerprint: accepted.requestFingerprint,
       dispatchGate: {
         status: 'READY' as const,
-        previewFingerprint: input.previewFingerprint,
+        previewFingerprint: accepted.previewFingerprint,
         confirmedAtRevision: aggregate.conversation.recordRevision
       },
       createdAt: now
     };
-    const transcript = (
-      await this.store.listMessages({
-        conversationId: input.conversationId,
-        limit: 80
-      })
-    ).messages;
-    const answerAssignments = input.policy === 'TEAM'
+    if (accepted.status !== 'PENDING') {
+      throw new Error('This interrupted agent response is no longer pending.');
+    }
+    const transcript = await this.findMessages(
+      accepted.visibleMessageIds,
+      accepted.conversationId
+    );
+    const answerAssignments = accepted.policy === 'TEAM'
       ? assignments.filter((assignment) => assignment.assignmentRole === 'PRIMARY')
       : assignments;
     const jobs = answerAssignments.map((assignment): DiscourseAgentJobRecord => {
       const jobId = this.createId();
       return {
         id: jobId,
-        conversationId: input.conversationId,
+        conversationId: accepted.conversationId,
         waveId,
         assignment,
         role: 'ANSWER',
         phase: 1,
         targetMessageIds: [message.id],
-        visibleMessageIds: transcript.map((candidate) => candidate.id),
+        visibleMessageIds: [...accepted.visibleMessageIds],
         contextSnapshotId: snapshotId,
         attemptId: this.createId(),
         generationKey: sha256(`${waveId}:${jobId}:1:${snapshotId}`),
@@ -366,7 +467,7 @@ export class DiscourseService {
     const firstJob = jobs[0]!;
     const firstPrepareOperationId = `${waveOperationId}:prepare:${firstJob.id}`;
     const prepared = await runtime.contextSnapshots.prepare({
-      conversationId: input.conversationId,
+      conversationId: accepted.conversationId,
       waveId,
       snapshotId,
       contextRevision,
@@ -385,40 +486,40 @@ export class DiscourseService {
         messages: transcript
       })
     });
-    const plannedWave = prepared.preview.fingerprint === input.previewFingerprint
+    const plannedWave = prepared.preview.fingerprint === accepted.previewFingerprint
       ? wave
       : {
           ...wave,
           dispatchGate: {
             status: 'RECONFIRMATION_REQUIRED' as const,
-            previewFingerprint: input.previewFingerprint,
+            previewFingerprint: accepted.previewFingerprint,
             currentFingerprint: prepared.preview.fingerprint,
             mismatchReason: 'Selected context changed after the preview.'
           }
         };
     await this.store.createWave({
-      conversationId: input.conversationId,
+      conversationId: accepted.conversationId,
       expectedConversationRevision: aggregate.conversation.recordRevision,
       wave: plannedWave,
       jobs,
       contextSnapshot: prepared.snapshot,
       clientOperationId: waveOperationId
     });
-    this.emit('discourse.message.appended', input.conversationId, message);
-    this.emit('discourse.wave.updated', input.conversationId, plannedWave);
+    this.emit('discourse.message.appended', accepted.conversationId, message);
+    this.emit('discourse.wave.updated', accepted.conversationId, plannedWave);
     if (prepared.snapshot.status === 'BLOCKED') {
       const settled = await this.settleBlockedContextWave(
-        input.conversationId,
+        accepted.conversationId,
         plannedWave,
         jobs,
         prepared.snapshot,
         waveOperationId
       );
-      const failed = (await this.store.getConversation(input.conversationId)).jobs.filter(
+      const failed = (await this.store.getConversation(accepted.conversationId)).jobs.filter(
         (job) => job.waveId === plannedWave.id
       );
-      failed.forEach((job) => this.emit('discourse.job.updated', input.conversationId, job));
-      this.emit('discourse.wave.updated', input.conversationId, settled);
+      failed.forEach((job) => this.emit('discourse.job.updated', accepted.conversationId, job));
+      this.emit('discourse.wave.updated', accepted.conversationId, settled);
       return { message, wave: settled, jobs: failed };
     }
     if (
@@ -426,7 +527,7 @@ export class DiscourseService {
       plannedWave.dispatchGate.status === 'READY' &&
       prepared.executionContext
     ) {
-      const plannedAggregate = await this.store.getConversation(input.conversationId);
+      const plannedAggregate = await this.store.getConversation(accepted.conversationId);
       let preparedJobCount = 0;
       for (const job of jobs) {
         const prepareOperationId = `${waveOperationId}:prepare:${job.id}`;
@@ -438,7 +539,7 @@ export class DiscourseService {
         });
         if (bounded.error) {
           await this.markQueuedJobsPromptBlocked(
-            input.conversationId,
+            accepted.conversationId,
             [job],
             bounded.error,
             `${waveOperationId}:prompt-budget`
@@ -454,7 +555,7 @@ export class DiscourseService {
               clientOperationId: prepareOperationId
             });
         const runtimeJob = await runtime.coordinator.prepareJob({
-          conversationId: input.conversationId,
+          conversationId: accepted.conversationId,
           waveId,
           jobId: job.id,
           executionContext,
@@ -462,15 +563,15 @@ export class DiscourseService {
           clientOperationId: prepareOperationId
         });
         preparedJobCount += 1;
-        this.emit('discourse.job.updated', input.conversationId, runtimeJob.job);
+        this.emit('discourse.job.updated', accepted.conversationId, runtimeJob.job);
       }
       if (preparedJobCount > 0) runtime.notifySchedulerWorkAvailable();
       await runtime.coordinator.reconcileWave(
-        input.conversationId,
+        accepted.conversationId,
         waveId,
         `${waveOperationId}:prompt-budget`
       );
-      const queuedAggregate = await this.store.getConversation(input.conversationId);
+      const queuedAggregate = await this.store.getConversation(accepted.conversationId);
       return {
         message,
         wave: queuedAggregate.waves.find((candidate) => candidate.id === waveId)!,
@@ -478,6 +579,60 @@ export class DiscourseService {
       };
     }
     return { message, wave: plannedWave, jobs };
+  }
+
+  resumeAcceptedSend(
+    input: ResumeDiscourseAcceptedSendRequest
+  ): Promise<SendDiscourseMessageResult> {
+    return this.withConversationMutation(input.conversationId, async () => {
+      let aggregate = await this.store.getConversation(input.conversationId);
+      const accepted = aggregate.acceptedSends.find(
+        (candidate) => candidate.id === input.acceptedSendId
+      );
+      if (!accepted || accepted.status !== 'PENDING') {
+        throw new Error('The interrupted agent response is no longer pending.');
+      }
+      const existingWave = aggregate.waves.find(
+        (wave) => wave.triggerMessageId === accepted.triggerMessageId
+      );
+      const message = await this.findMessage(
+        accepted.triggerMessageId,
+        input.conversationId
+      );
+      if (existingWave) {
+        const runtime = this.options.runtime;
+        if (runtime) {
+          await runtime.coordinator.recoverConversation(input.conversationId);
+          await this.activateNextWave(
+            input.conversationId,
+            `${existingWave.clientOperationId}:explicit-resume`
+          );
+          aggregate = await this.store.getConversation(input.conversationId);
+        }
+        const wave = requireWave(aggregate.waves, existingWave.id);
+        return {
+          message,
+          wave,
+          jobs: aggregate.jobs.filter((job) => job.waveId === wave.id)
+        };
+      }
+      return this.planAcceptedSend(aggregate, message, accepted);
+    });
+  }
+
+  cancelAcceptedSend(
+    input: CancelDiscourseAcceptedSendRequest
+  ): Promise<DiscourseConversationAggregateRecord> {
+    return this.withConversationMutation(input.conversationId, async () => {
+      const aggregate = await this.store.cancelAcceptedSend({
+        conversationId: input.conversationId,
+        acceptedSendId: input.acceptedSendId,
+        expectedConversationRevision: input.expectedConversationRevision,
+        clientOperationId: input.clientOperationId
+      });
+      this.emit('discourse.summary.updated', input.conversationId, aggregate.conversation);
+      return aggregate;
+    });
   }
 
   advanceWave(
@@ -494,10 +649,31 @@ export class DiscourseService {
   async recoverConversation(conversationId: string): Promise<DiscourseResponseWaveRecord | undefined> {
     const runtime = this.options.runtime;
     if (!runtime) return undefined;
-    await runtime.coordinator.recoverConversation(conversationId);
-    return this.withConversationMutation(conversationId, () =>
-      this.activateNextWave(conversationId, `service-recovery:${conversationId}`)
-    );
+    return this.withConversationMutation(conversationId, async () => {
+      let aggregate = await this.store.getConversation(conversationId);
+      const waveTriggerIds = new Set(
+        aggregate.waves.map((wave) => wave.triggerMessageId)
+      );
+      for (const accepted of aggregate.acceptedSends) {
+        if (accepted.status !== 'PENDING' || waveTriggerIds.has(accepted.triggerMessageId)) {
+          continue;
+        }
+        const message = await this.findMessage(accepted.triggerMessageId, conversationId);
+        try {
+          await this.planAcceptedSend(aggregate, message, accepted);
+        } catch {
+          // The accepted user message and response intent remain durable. A
+          // later explicit retry or startup pass can resume planning without
+          // duplicating the message; one transient context/runtime failure
+          // must not prevent the rest of Task Monki from starting.
+          continue;
+        }
+        aggregate = await this.store.getConversation(conversationId);
+        waveTriggerIds.add(accepted.triggerMessageId);
+      }
+      await runtime.coordinator.recoverConversation(conversationId);
+      return this.activateNextWave(conversationId, `service-recovery:${conversationId}`);
+    });
   }
 
   confirmWaveContext(
@@ -1158,63 +1334,128 @@ export class DiscourseService {
     return settled;
   }
 
-  private async ensureParticipant(
+  private buildParticipantConfiguration(
     aggregate: DiscourseConversationAggregateRecord,
-    profileId: BuiltInAgentProfileId,
-    entry: AgentProfileCatalogEntry,
-    clientOperationId: string
-  ) {
-    const existing = aggregate.participants.find(
-      (participant) => participant.agentProfileId === profileId && participant.enabled
-    );
-    if (existing) return existing;
-    if (entry.profile.id !== profileId || !entry.resolvedSettings) {
-      throw new Error(`Agent profile is unavailable: ${profileId}`);
+    profileIds: readonly BuiltInAgentProfileId[],
+    entries: ReadonlyMap<BuiltInAgentProfileId, AgentProfileCatalogEntry>,
+    resolvedSelections: ReadonlyMap<
+      BuiltInAgentProfileId,
+      NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
+    >
+  ): {
+    participants: DiscourseParticipantRecord[];
+    participantRevisions: DiscourseParticipantRevisionRecord[];
+  } {
+    const participants: DiscourseParticipantRecord[] = [];
+    const participantRevisions: DiscourseParticipantRevisionRecord[] = [];
+    for (const profileId of profileIds) {
+      const entry = entries.get(profileId);
+      const resolved = resolvedSelections.get(profileId);
+      if (!entry || entry.profile.id !== profileId || !resolved) {
+        throw new Error(`Agent profile is unavailable: ${profileId}`);
+      }
+      const existing = aggregate.participants.find(
+        (participant) => participant.agentProfileId === profileId && participant.enabled
+      );
+      if (existing) {
+        const currentRevision = aggregate.participantRevisions.find(
+          (revision) => revision.id === existing.currentRevisionId
+        );
+        if (!currentRevision) {
+          throw new Error(`Discourse participant revision is missing: ${profileId}`);
+        }
+        if (participantSettingsMatch(currentRevision, resolved)) continue;
+        const revisionId = this.createId();
+        participants.push({
+          ...existing,
+          currentRevisionId: revisionId,
+          recordRevision: existing.recordRevision + 1
+        });
+        participantRevisions.push(participantRevisionFromSettings({
+          id: revisionId,
+          conversationId: aggregate.conversation.id,
+          participantId: existing.id,
+          profileId,
+          entry,
+          resolved,
+          revision: currentRevision.revision + 1,
+          createdAt: this.now(),
+          roleContractHash: sha256(this.profiles.roleContract(profileId))
+        }));
+        continue;
+      }
+      const now = this.now();
+      const participantId = this.createId();
+      const revisionId = this.createId();
+      participants.push({
+        id: participantId,
+        conversationId: aggregate.conversation.id,
+        agentProfileId: profileId,
+        currentRevisionId: revisionId,
+        enabled: true,
+        recordRevision: 1,
+        createdAt: now
+      });
+      participantRevisions.push(participantRevisionFromSettings({
+        id: revisionId,
+        conversationId: aggregate.conversation.id,
+        participantId,
+        profileId,
+        entry,
+        resolved,
+        revision: 1,
+        createdAt: now,
+        roleContractHash: sha256(this.profiles.roleContract(profileId))
+      }));
     }
-    const now = this.now();
-    const participantId = this.createId();
-    const revisionId = this.createId();
-    const participant = {
-      id: participantId,
-      conversationId: aggregate.conversation.id,
-      agentProfileId: profileId,
-      currentRevisionId: revisionId,
-      enabled: true,
-      recordRevision: 1,
-      createdAt: now
-    };
-    const revision = {
-      id: revisionId,
-      conversationId: aggregate.conversation.id,
-      stableParticipantId: participantId,
-      agentProfileId: profileId,
-      profileRevision: entry.profile.revision,
-      displayNameSnapshot: entry.profile.displayName,
-      runtimeId: entry.resolvedSettings.runtimeId,
-      model: entry.resolvedSettings.model,
-      modelProvider: entry.resolvedSettings.modelProvider,
-      ...(entry.resolvedSettings.reasoningEffort
-        ? { reasoningEffort: entry.resolvedSettings.reasoningEffort }
-        : {}),
-      ...(entry.resolvedSettings.serviceTier
-        ? { serviceTier: entry.resolvedSettings.serviceTier }
-        : {}),
-      configuredRole: entry.profile.roleTemplate,
-      roleContractVersion: entry.profile.roleContractVersion,
-      roleContractHash: sha256(this.profiles.roleContract(profileId)),
-      revision: 1,
-      createdAt: now
-    };
-    const updated = await this.store.addParticipants({
-      conversationId: aggregate.conversation.id,
-      participants: [participant],
-      participantRevisions: [revision],
-      expectedRevision: aggregate.conversation.recordRevision,
-      clientOperationId
+    return { participants, participantRevisions };
+  }
+
+  private async findMessages(
+    messageIds: readonly string[],
+    conversationId: string
+  ): Promise<DiscourseMessageRecord[]> {
+    const wanted = new Set(messageIds);
+    const found = new Map<string, DiscourseMessageRecord>();
+    let beforeCursor: string | undefined;
+    do {
+      const page = await this.store.listMessages({
+        conversationId,
+        ...(beforeCursor ? { beforeCursor } : {}),
+        limit: 100
+      });
+      for (const message of page.messages) {
+        if (wanted.has(message.id)) found.set(message.id, message);
+      }
+      if (found.size === wanted.size) break;
+      beforeCursor = page.previousCursor;
+    } while (beforeCursor);
+    const ordered = messageIds.flatMap((messageId) => {
+      const message = found.get(messageId);
+      return message ? [message] : [];
     });
-    const stored = updated.participants.find((candidate) => candidate.id === participantId);
-    if (!stored) throw new Error('Discourse participant update was not persisted.');
-    return stored;
+    if (ordered.length !== messageIds.length) {
+      throw new Error('The durable Discourse transcript window could not be recovered.');
+    }
+    return ordered;
+  }
+
+  private async findMessage(
+    messageId: string,
+    conversationId: string
+  ): Promise<DiscourseMessageRecord> {
+    let beforeCursor: string | undefined;
+    do {
+      const page = await this.store.listMessages({
+        conversationId,
+        ...(beforeCursor ? { beforeCursor } : {}),
+        limit: 100
+      });
+      const message = page.messages.find((candidate) => candidate.id === messageId);
+      if (message) return message;
+      beforeCursor = page.previousCursor;
+    } while (beforeCursor);
+    throw new Error('The durable Discourse send message could not be recovered.');
   }
 
   async tombstoneMessage(
@@ -1396,20 +1637,30 @@ function assertParticipantRevisionAvailable(
   runtimeCatalog: AgentRuntimeCatalog
 ): void {
   const displayName = entry.profile.displayName;
+  const runtime = runtimeCatalog.runtimes.find(
+    (candidate) => candidate.preflight.runtime.id === revision.runtimeId
+  );
+  const runtimeUnavailable = discourseRuntimeUnavailableReason(runtime);
+  if (runtimeUnavailable) {
+    throw new Error(
+      `${displayName} cannot respond through its saved provider. ${runtimeUnavailable} ` +
+      'Choose another provider and model for this conversation.'
+    );
+  }
   const model = runtimeCatalog.models.find((candidate) =>
-    discourseModelMatches(candidate, revision)
+    candidate.runtimeId === revision.runtimeId && discourseModelMatches(candidate, revision)
   );
   if (!model) {
     throw new Error(
       `${displayName} cannot respond because its saved model (${revision.model}) is unavailable. ` +
-      'Refresh agent models or start a new conversation.'
+      'Refresh agent models or choose another model for this conversation.'
     );
   }
   const modelProvider = model.modelProvider ?? model.runtimeId;
   if (revision.modelProvider !== modelProvider) {
     throw new Error(
       `${displayName} cannot respond because its saved model provider is no longer valid. ` +
-      'Start a new conversation with current agent settings.'
+      'Choose another model for this conversation.'
     );
   }
   if (
@@ -1419,7 +1670,7 @@ function assertParticipantRevisionAvailable(
   ) {
     throw new Error(
       `${displayName} cannot respond because ${revision.reasoningEffort} reasoning is no longer ` +
-      `supported by ${revision.model}. Start a new conversation with current agent settings.`
+      `supported by ${revision.model}. Choose another reasoning level.`
     );
   }
   if (
@@ -1429,21 +1680,21 @@ function assertParticipantRevisionAvailable(
   ) {
     throw new Error(
       `${displayName} cannot respond because its saved service tier is no longer supported. ` +
-      'Start a new conversation with current agent settings.'
+      'Choose another model for this conversation.'
     );
   }
 }
 
-function validateRoster(
+function validateAgentSelections(
   policy: DiscourseDefaultPolicy,
-  input: readonly BuiltInAgentProfileId[]
-): BuiltInAgentProfileId[] {
-  const ids = [...new Set(input)];
+  input: readonly DiscourseAgentSelectionInput[]
+): DiscourseAgentSelectionInput[] {
+  const ids = [...new Set(input.map((selection) => selection.agentProfileId))];
   if (ids.length !== input.length || ids.some((id) => !['builtin.lead', 'builtin.skeptic', 'builtin.verifier'].includes(id))) {
     throw new Error('Discourse participant roster is invalid.');
   }
   const valid =
-    policy === 'NONE' ||
+    (policy === 'NONE' && ids.length === 0) ||
     (policy === 'DIRECT' && ids.length === 1) ||
     (policy === 'PANEL' && ids.length >= 2 && ids.length <= 3) ||
     (policy === 'TEAM' && ids.length === 3);
@@ -1457,9 +1708,163 @@ function validateRoster(
     if (team.some((id) => !ids.includes(id))) {
       throw new Error('A Team response requires Lead, Skeptic, and Verifier.');
     }
-    return team;
+    return team.map((profileId) => input.find(
+      (selection) => selection.agentProfileId === profileId
+    )!);
   }
-  return ids;
+  return [...input];
+}
+
+function discourseSendRequestFingerprint(
+  input: SendDiscourseMessageRequest,
+  selections: readonly DiscourseAgentSelectionInput[]
+): string {
+  return sha256(JSON.stringify({
+    conversationId: input.conversationId,
+    body: input.body,
+    replyToMessageId: input.replyToMessageId ?? null,
+    supersedesMessageId: input.supersedesMessageId ?? null,
+    sourceMessageIds: input.sourceMessageIds ?? [],
+    context: input.context ?? [],
+    policy: input.policy,
+    agents: selections.map((selection) => ({
+      agentProfileId: selection.agentProfileId,
+      runtimeId: selection.runtimeId ?? null,
+      modelId: selection.modelId ?? null,
+      reasoningEffort: selection.reasoningEffort ?? null
+    })),
+    previewFingerprint: input.previewFingerprint ?? null
+  }));
+}
+
+function discourseCreateRequestFingerprint(
+  input: CreateDiscourseConversationRequest,
+  selections: readonly DiscourseAgentSelectionInput[]
+): string {
+  return sha256(JSON.stringify({
+    title: input.title.trim(),
+    defaultPolicy: input.defaultPolicy,
+    agents: selections.map((selection) => ({
+      agentProfileId: selection.agentProfileId,
+      runtimeId: selection.runtimeId ?? null,
+      modelId: selection.modelId ?? null,
+      reasoningEffort: selection.reasoningEffort ?? null
+    }))
+  }));
+}
+
+function participantSettingsMatch(
+  revision: DiscourseParticipantRevisionRecord,
+  settings: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>
+): boolean {
+  return revision.runtimeId === settings.runtimeId &&
+    revision.model === settings.model &&
+    revision.modelProvider === settings.modelProvider &&
+    revision.reasoningEffort === settings.reasoningEffort &&
+    revision.serviceTier === settings.serviceTier;
+}
+
+function projectParticipantConfiguration(
+  aggregate: DiscourseConversationAggregateRecord,
+  configuration: {
+    participants: readonly DiscourseParticipantRecord[];
+    participantRevisions: readonly DiscourseParticipantRevisionRecord[];
+  }
+): DiscourseConversationAggregateRecord {
+  const replacements = new Map(
+    configuration.participants.map((participant) => [participant.id, participant])
+  );
+  const existingIds = new Set(aggregate.participants.map((participant) => participant.id));
+  return {
+    ...aggregate,
+    participants: [
+      ...aggregate.participants.map(
+        (participant) => replacements.get(participant.id) ?? participant
+      ),
+      ...configuration.participants.filter((participant) => !existingIds.has(participant.id))
+    ],
+    participantRevisions: [
+      ...aggregate.participantRevisions,
+      ...configuration.participantRevisions
+    ]
+  };
+}
+
+function resolvedSettingsFromRevision(
+  revision: DiscourseParticipantRevisionRecord,
+  runtimeCatalog: AgentRuntimeCatalog
+): NonNullable<AgentProfileCatalogEntry['resolvedSettings']> {
+  const model = runtimeCatalog.models.find((candidate) =>
+    discourseModelMatches(candidate, revision)
+  );
+  if (!model) {
+    throw new Error(`The saved Discourse model (${revision.model}) is unavailable.`);
+  }
+  return {
+    runtimeId: revision.runtimeId,
+    modelId: model.id,
+    model: revision.model,
+    modelProvider: revision.modelProvider,
+    ...(revision.reasoningEffort
+      ? { reasoningEffort: revision.reasoningEffort }
+      : {}),
+    ...(revision.serviceTier ? { serviceTier: revision.serviceTier } : {})
+  };
+}
+
+function preserveCurrentImplicitSettings(
+  revision: DiscourseParticipantRevisionRecord,
+  selection: DiscourseAgentSelectionInput,
+  resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>,
+  runtimeCatalog: AgentRuntimeCatalog
+): NonNullable<AgentProfileCatalogEntry['resolvedSettings']> {
+  const selectedModel = runtimeCatalog.models.find(
+    (model) => model.runtimeId === selection.runtimeId && model.id === selection.modelId
+  );
+  if (!selectedModel || !discourseModelMatches(selectedModel, revision)) return resolved;
+  const next = { ...resolved };
+  delete next.serviceTier;
+  if (revision.serviceTier) next.serviceTier = revision.serviceTier;
+  if (!selection.reasoningEffort) {
+    delete next.reasoningEffort;
+    if (revision.reasoningEffort) next.reasoningEffort = revision.reasoningEffort;
+  }
+  return next;
+}
+
+function participantRevisionFromSettings(input: {
+  id: string;
+  conversationId: string;
+  participantId: string;
+  profileId: BuiltInAgentProfileId;
+  entry: AgentProfileCatalogEntry;
+  resolved: NonNullable<AgentProfileCatalogEntry['resolvedSettings']>;
+  revision: number;
+  createdAt: string;
+  roleContractHash: string;
+}): DiscourseParticipantRevisionRecord {
+  return {
+    id: input.id,
+    conversationId: input.conversationId,
+    stableParticipantId: input.participantId,
+    agentProfileId: input.profileId,
+    profileRevision: input.entry.profile.revision,
+    displayNameSnapshot: input.entry.profile.displayName,
+    runtimeId: input.resolved.runtimeId,
+    model: input.resolved.model,
+    modelProvider: input.resolved.modelProvider,
+    ...(input.resolved.reasoningEffort
+      ? { reasoningEffort: input.resolved.reasoningEffort }
+      : {}),
+    ...(input.resolved.serviceTier
+      ? { serviceTier: input.resolved.serviceTier }
+      : {}),
+    configuredRole: input.entry.profile.roleTemplate,
+    roleContractVersion: input.entry.profile.roleContractVersion,
+    roleContractHash: input.roleContractHash,
+    revision: input.revision,
+    createdAt: input.createdAt
+  };
 }
 
 function assignmentsFromRoster(

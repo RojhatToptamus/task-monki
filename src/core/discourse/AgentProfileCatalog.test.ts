@@ -28,18 +28,21 @@ describe('AgentProfileCatalog', () => {
     expect(snapshot.profiles.map((entry) => entry.resolvedSettings)).toEqual([
       {
         runtimeId: 'codex',
+        modelId: 'codex:gpt-primary',
         model: 'gpt-primary',
         modelProvider: 'openai',
         reasoningEffort: 'high'
       },
       {
         runtimeId: 'codex',
+        modelId: 'codex:gpt-primary',
         model: 'gpt-primary',
         modelProvider: 'openai',
         reasoningEffort: 'high'
       },
       {
         runtimeId: 'codex',
+        modelId: 'codex:gpt-primary',
         model: 'gpt-primary',
         modelProvider: 'openai',
         reasoningEffort: 'high'
@@ -56,6 +59,7 @@ describe('AgentProfileCatalog', () => {
 
     expect(snapshot.profiles[0]?.resolvedSettings).toEqual({
       runtimeId: 'codex',
+      modelId: 'codex:gpt-primary',
       model: 'gpt-primary',
       modelProvider: 'openai',
       reasoningEffort: 'medium'
@@ -76,9 +80,34 @@ describe('AgentProfileCatalog', () => {
     ).toBe('hidden-saved');
   });
 
-  it('keeps roles visible but explains runtimes without a safe discourse boundary', () => {
+  it('never reroutes an explicit missing provider through another runtime with the same model id', () => {
+    const catalog = runtimeCatalog();
+    const profiles = new AgentProfileCatalog();
+
+    expect(() => profiles.resolveSelection(catalog, {
+      agentProfileId: 'builtin.lead',
+      runtimeId: 'removed-runtime',
+      modelId: 'codex:gpt-primary'
+    })).toThrow('selected Discourse agent provider is no longer available');
+  });
+
+  it('falls back to a Discourse-safe runtime when the app default cannot attest the boundary', () => {
     const catalog = runtimeCatalog();
     catalog.defaultRuntimeId = 'opencode';
+
+    expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
+      availability: 'AVAILABLE',
+      resolvedSettings: { runtimeId: 'codex', modelId: 'codex:gpt-primary' }
+    });
+  });
+
+  it('keeps roles visible but explains when no runtime has a safe discourse boundary', () => {
+    const catalog = runtimeCatalog();
+    catalog.defaultRuntimeId = 'opencode';
+    catalog.runtimes = catalog.runtimes.filter(
+      (runtime) => runtime.preflight.runtime.id === 'opencode'
+    );
+    catalog.models = [];
 
     expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
       availability: 'UNAVAILABLE',

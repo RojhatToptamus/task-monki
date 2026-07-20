@@ -12,6 +12,16 @@ import { FileAgentRuntimeStore } from '../storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../storage/FileDiscourseStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import type {
+  BuiltInAgentProfileId,
+  DiscourseAgentSelectionInput
+} from '../../shared/discourse';
+
+function selections(
+  ...agentProfileIds: BuiltInAgentProfileId[]
+): DiscourseAgentSelectionInput[] {
+  return agentProfileIds.map((agentProfileId) => ({ agentProfileId }));
+}
 
 describe('TaskManagerService discourse runtime composition', () => {
   it('requires the runtime and discourse stores as one capability boundary', async () => {
@@ -106,7 +116,7 @@ describe('TaskManagerService discourse runtime composition', () => {
     const conversation = await service.createDiscourseConversation({
       title: 'Panel dispatch',
       defaultPolicy: 'PANEL',
-      participantProfileIds: ['builtin.lead', 'builtin.skeptic'],
+      agents: selections('builtin.lead', 'builtin.skeptic'),
       clientOperationId: 'create-panel'
     });
     const preview = await service.previewDiscourseContext({
@@ -119,7 +129,7 @@ describe('TaskManagerService discourse runtime composition', () => {
       context: [],
       clientMessageId: 'panel-message',
       policy: 'PANEL',
-      agentProfileIds: ['builtin.lead', 'builtin.skeptic'],
+      agents: selections('builtin.lead', 'builtin.skeptic'),
       previewFingerprint: preview.fingerprint
     });
 

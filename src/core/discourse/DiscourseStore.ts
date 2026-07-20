@@ -16,7 +16,10 @@ import type {
   DiscourseContextSelectionSnapshot,
   ConversationContextRevisionRecord,
   ContextSnapshotRecord,
-  DiscourseConcernRecord
+  DiscourseConcernRecord,
+  DiscourseAgentSelectionInput,
+  DiscourseAcceptedSendRecord,
+  AgentAssignmentSnapshot
 } from '../../shared/discourse';
 
 export interface CreateDiscourseConversationInput {
@@ -25,6 +28,7 @@ export interface CreateDiscourseConversationInput {
   defaultPolicy: DiscourseDefaultPolicy;
   participants: DiscourseParticipantRecord[];
   participantRevisions: DiscourseParticipantRevisionRecord[];
+  requestFingerprint: string;
   clientOperationId: string;
 }
 
@@ -36,6 +40,17 @@ export interface AppendHumanDiscourseMessageInput {
   sourceMessageIds?: string[];
   context?: DiscourseContextSelectionSnapshot[];
   clientMessageId: string;
+}
+
+export interface AcceptAgentDiscourseSendInput extends AppendHumanDiscourseMessageInput {
+  participants: DiscourseParticipantRecord[];
+  participantRevisions: DiscourseParticipantRevisionRecord[];
+  expectedRevision: number;
+  policy: Exclude<DiscourseDefaultPolicy, 'NONE'>;
+  assignments: AgentAssignmentSnapshot[];
+  priorVisibleMessageIds: string[];
+  previewFingerprint: string;
+  requestFingerprint: string;
 }
 
 export interface AppendAgentDiscourseMessageInput {
@@ -69,6 +84,10 @@ export interface DiscourseStore {
   createConversation(
     input: CreateDiscourseConversationInput
   ): Promise<DiscourseConversationRecord>;
+  findCreatedConversation(input: {
+    clientOperationId: string;
+    requestFingerprint: string;
+  }): Promise<DiscourseConversationRecord | undefined>;
   getConversation(conversationId: string): Promise<DiscourseConversationAggregateRecord>;
   listConversations(input?: {
     status?: 'OPEN' | 'ARCHIVED';
@@ -80,6 +99,24 @@ export interface DiscourseStore {
     participants: DiscourseParticipantRecord[];
     participantRevisions: DiscourseParticipantRevisionRecord[];
     expectedRevision: number;
+    clientOperationId: string;
+  }): Promise<DiscourseConversationAggregateRecord>;
+  configureParticipants(input: {
+    conversationId: string;
+    participants: DiscourseParticipantRecord[];
+    participantRevisions: DiscourseParticipantRevisionRecord[];
+    expectedRevision: number;
+    clientOperationId: string;
+  }): Promise<DiscourseConversationAggregateRecord>;
+  acceptAgentSend(input: AcceptAgentDiscourseSendInput): Promise<{
+    message: DiscourseMessageRecord;
+    acceptedSend: DiscourseAcceptedSendRecord;
+    aggregate: DiscourseConversationAggregateRecord;
+  }>;
+  cancelAcceptedSend(input: {
+    conversationId: string;
+    acceptedSendId: string;
+    expectedConversationRevision: number;
     clientOperationId: string;
   }): Promise<DiscourseConversationAggregateRecord>;
   appendHumanMessage(
@@ -99,6 +136,10 @@ export interface DiscourseStore {
     beforeCursor?: string;
     limit?: number;
   }): Promise<DiscourseMessagePage>;
+  getMessageByClientId(input: {
+    conversationId: string;
+    clientMessageId: string;
+  }): Promise<DiscourseMessageRecord | undefined>;
   renameConversation(input: {
     conversationId: string;
     title: string;
@@ -139,6 +180,7 @@ export interface DiscourseStore {
     replyToMessageId?: string;
     policy: DiscourseDefaultPolicy;
     recipientParticipantIds: string[];
+    agentSelections?: DiscourseAgentSelectionInput[];
     tokens: DiscourseDraftTokenInput[];
   }): Promise<DiscourseDraftRecord>;
   getDraft(draftId: string): Promise<DiscourseDraftRecord | undefined>;

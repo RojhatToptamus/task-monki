@@ -241,6 +241,16 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
         `/api/discourse/messages?${query.toString()}`
       );
     },
+    getDiscourseMessageByClientId: (input) => {
+      const query = new URLSearchParams({
+        conversationId: input.conversationId,
+        clientMessageId: input.clientMessageId
+      });
+      return get<DiscourseMessageRecord | null>(
+        baseUrl,
+        `/api/discourse/messages/by-client-id?${query.toString()}`
+      );
+    },
     getDiscourseMentionCatalog: () =>
       get<DiscourseMentionCatalogSnapshot>(baseUrl, '/api/discourse/mentions'),
     createDiscourseConversation: (input) =>
@@ -249,6 +259,14 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<DiscourseMessageRecord>(baseUrl, '/api/discourse/messages', input),
     sendDiscourseMessage: (input) =>
       post<SendDiscourseMessageResult>(baseUrl, '/api/discourse/messages/send', input),
+    resumeDiscourseAcceptedSend: (input) =>
+      post<SendDiscourseMessageResult>(baseUrl, '/api/discourse/messages/resume', input),
+    cancelDiscourseAcceptedSend: (input) =>
+      post<DiscourseConversationAggregateRecord>(
+        baseUrl,
+        '/api/discourse/messages/cancel-response',
+        input
+      ),
     tombstoneDiscourseMessage: (input) =>
       post<DiscourseConversationRecord>(baseUrl, '/api/discourse/messages/tombstone', input),
     setPinnedDiscourseContext: (input) =>

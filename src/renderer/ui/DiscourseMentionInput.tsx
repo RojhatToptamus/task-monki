@@ -81,7 +81,7 @@ export function DiscourseMentionInput({
     .filter((candidate) => candidate.available)
     .map((candidate) => candidate.id);
   const effectiveActiveId =
-    activeId && availableOptionIds.includes(activeId) ? activeId : undefined;
+    activeId && availableOptionIds.includes(activeId) ? activeId : availableOptionIds[0];
 
   const commit = (next: DiscourseComposerMentionState) => {
     setState(next);
@@ -265,7 +265,7 @@ export function DiscourseMentionInput({
         hidden={!open}
         onMouseDown={preserveTextareaFocus}
       >
-        {(['AGENT', 'TASK', 'REPOSITORY'] as const).map((kind) => {
+        {(['AGENT', 'REPOSITORY', 'TASK'] as const).map((kind) => {
           const group = results.filter((candidate) => candidate.kind === kind);
           if (group.length === 0) return null;
           return (

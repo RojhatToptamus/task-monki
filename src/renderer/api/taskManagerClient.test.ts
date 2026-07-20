@@ -352,6 +352,10 @@ describe('createBrowserTaskManagerApi discourse', () => {
       beforeCursor: 'cursor-2',
       limit: 25
     });
+    await api.getDiscourseMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'client message/1'
+    });
     await api.previewDiscourseContext({
       conversationId: 'conversation-1',
       messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
@@ -362,8 +366,22 @@ describe('createBrowserTaskManagerApi discourse', () => {
       context: [],
       clientMessageId: 'message-1',
       policy: 'TEAM',
-      agentProfileIds: ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'],
+      agents: [
+        { agentProfileId: 'builtin.lead' },
+        { agentProfileId: 'builtin.skeptic' },
+        { agentProfileId: 'builtin.verifier' }
+      ],
       previewFingerprint: 'preview-1'
+    });
+    await api.resumeDiscourseAcceptedSend({
+      conversationId: 'conversation-1',
+      acceptedSendId: 'accepted-send-1'
+    });
+    await api.cancelDiscourseAcceptedSend({
+      conversationId: 'conversation-1',
+      acceptedSendId: 'accepted-send-2',
+      expectedConversationRevision: 3,
+      clientOperationId: 'cancel-accepted-1'
     });
     await api.stopDiscourseWave({
       conversationId: 'conversation-1',
@@ -381,15 +399,33 @@ describe('createBrowserTaskManagerApi discourse', () => {
 
     expect(calls[0]?.url).toBe('/api/discourse/conversations?status=OPEN&cursor=cursor-1&limit=40');
     expect(calls[1]?.url).toBe('/api/discourse/messages?conversationId=conversation-1&beforeCursor=cursor-2&limit=25');
-    expect(JSON.parse(String(calls[2]?.init?.body))).toEqual({
+    expect(calls[2]?.url).toBe(
+      '/api/discourse/messages/by-client-id?conversationId=conversation-1&clientMessageId=client+message%2F1'
+    );
+    expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({
       conversationId: 'conversation-1',
       messageContext: [{ entityKind: 'REPOSITORY', entityId: 'repository-1' }]
     });
-    expect(String(calls[2]?.init?.body)).not.toContain('/Users/');
-    expect(calls.slice(3).map((call) => call.url)).toEqual([
+    expect(String(calls[3]?.init?.body)).not.toContain('/Users/');
+    expect(calls.slice(4).map((call) => call.url)).toEqual([
       '/api/discourse/messages/send',
+      '/api/discourse/messages/resume',
+      '/api/discourse/messages/cancel-response',
       '/api/discourse/waves/stop',
       '/api/discourse/waves/confirm-context'
     ]);
+  });
+
+  it('accepts an explicit null when no durable client message exists', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => null
+    }) as Response));
+    const api = createBrowserTaskManagerApi('');
+
+    await expect(api.getDiscourseMessageByClientId({
+      conversationId: 'conversation-1',
+      clientMessageId: 'message-missing'
+    })).resolves.toBeNull();
   });
 });
