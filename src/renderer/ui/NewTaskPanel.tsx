@@ -58,6 +58,11 @@ import {
 } from './AgentModelSelector';
 import { useTaskAttachments } from './useTaskAttachments';
 
+export interface NewTaskTextDraft {
+  title: string;
+  prompt: string;
+}
+
 interface NewTaskPanelProps {
   repositoryId: string;
   repositories: Repository[];
@@ -73,6 +78,8 @@ interface NewTaskPanelProps {
   onDiscardAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
+  initialTextDraft?: NewTaskTextDraft;
+  onTextDraftChange?(draft: NewTaskTextDraft): void;
   returnFocusRef?: RefObject<HTMLElement | null>;
   fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onResize?(): void;
@@ -94,13 +101,15 @@ export function NewTaskPanel({
   onDiscardAttachmentDraft,
   onReadClipboardImage,
   onDiscoverAgentRuntimeModels,
+  initialTextDraft,
+  onTextDraftChange,
   returnFocusRef,
   fallbackReturnFocusRef,
   onResize,
   onClose
 }: NewTaskPanelProps) {
-  const [title, setTitle] = useState('');
-  const [prompt, setPrompt] = useState('');
+  const [title, setTitle] = useState(initialTextDraft?.title ?? '');
+  const [prompt, setPrompt] = useState(initialTextDraft?.prompt ?? '');
   const [runtimeId, setRuntimeId] = useState(
     defaultAgentSettings?.runtimeId ??
       runtimes.find((runtime) => runtime.preflight.readiness.canStart)?.preflight.runtime.id ??
@@ -144,6 +153,7 @@ export function NewTaskPanel({
     undefined
   );
   const taskCreationTokenRef = useRef<string | undefined>(undefined);
+  const returnFocusAfterCloseRef = useRef(true);
   // Refinement remains a reversible proposal instead of overwriting user input.
   const [proposal, setProposal] = useState<{ prompt: string; titleSuggestion: string }>();
   const [restorable, setRestorable] = useState<string>();
@@ -239,6 +249,16 @@ export function NewTaskPanel({
     (repository) => repository.id === selectedRepositoryId
   );
   const composerLocked = Boolean(disabled) || isSubmitting || creationOutcomeUnknown;
+
+  const updateTitle = (value: string) => {
+    setTitle(value);
+    onTextDraftChange?.({ title: value, prompt });
+  };
+
+  const updatePrompt = (value: string) => {
+    setPrompt(value);
+    onTextDraftChange?.({ title, prompt: value });
+  };
   const attachments = useTaskAttachments({
     enabled: effectiveAttachmentsEnabled,
     blocked: composerLocked || fullAccessSelected,
@@ -308,8 +328,10 @@ export function NewTaskPanel({
     initialFocusRef: titleInputRef,
     fallbackReturnFocusRef,
     busy: isSubmitting,
+    trapFocus: false,
     onClose: closePanel,
-    returnFocus: returnFocusRef?.current
+    returnFocus: returnFocusRef?.current,
+    shouldReturnFocus: () => returnFocusAfterCloseRef.current
   });
 
   const resizePanel = useCallback(
@@ -380,6 +402,7 @@ export function NewTaskPanel({
         setIsSubmitting(false);
       }
       if (created) {
+        returnFocusAfterCloseRef.current = false;
         closePanel();
       }
     }
@@ -414,8 +437,10 @@ export function NewTaskPanel({
       return;
     }
     setRestorable(prompt); // keep the pre-refine prompt retrievable
+    const nextTitle = title || proposal.titleSuggestion;
     setPrompt(proposal.prompt);
-    setTitle((current) => current || proposal.titleSuggestion);
+    setTitle(nextTitle);
+    onTextDraftChange?.({ title: nextTitle, prompt: proposal.prompt });
     setProposal(undefined);
   };
 
@@ -425,7 +450,7 @@ export function NewTaskPanel({
     if (restorable === undefined) {
       return;
     }
-    setPrompt(restorable);
+    updatePrompt(restorable);
     setRestorable(undefined);
   };
 
@@ -476,8 +501,6 @@ export function NewTaskPanel({
             event.currentTarget.requestSubmit();
           }
         }}
-        role="dialog"
-        aria-modal="false"
         aria-label="New task"
         tabIndex={-1}
       >
@@ -579,7 +602,7 @@ export function NewTaskPanel({
               <input
                 ref={titleInputRef}
                 value={title}
-                onChange={(event) => setTitle(event.target.value)}
+                onChange={(event) => updateTitle(event.target.value)}
                 placeholder="Short imperative summary"
                 disabled={composerLocked}
               />
@@ -637,7 +660,7 @@ export function NewTaskPanel({
                 <textarea
                   id="task-description"
                   value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
+                  onChange={(event) => updatePrompt(event.target.value)}
                   onPaste={pasteAttachments}
                   placeholder={
                     'Describe the implementation request, constraints, and expected verification.'

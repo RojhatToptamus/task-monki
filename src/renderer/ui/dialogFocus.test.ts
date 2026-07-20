@@ -70,6 +70,18 @@ describe('dialog focus boundary', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('allows Tab to leave a non-modal parallel panel', () => {
+    const event = fakeKeyboardEvent('Tab');
+    handleDialogKeyDown(event.event, {
+      dialog: fakeDialog([fakeFocusable()]),
+      busy: false,
+      trapFocus: false,
+      onClose: vi.fn()
+    });
+
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
   it('restores the invoker when possible and otherwise uses the stable fallback', () => {
     const primary = { isConnected: true } as HTMLElement;
     const disconnectedPrimary = { isConnected: false } as HTMLElement;

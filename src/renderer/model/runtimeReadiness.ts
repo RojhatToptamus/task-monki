@@ -37,6 +37,7 @@ export function runtimeReadinessView(
   }
 
   const { readiness } = runtime.preflight;
+  const label = readiness.status === 'DISABLED' ? 'Unavailable' : readiness.summary;
   const tone: RuntimeReadinessTone =
     readiness.status === 'READY'
       ? 'ok'
@@ -47,12 +48,12 @@ export function runtimeReadinessView(
           : 'error';
   return {
     canStart: readiness.canStart,
-    label: readiness.summary,
+    label,
     detail: readiness.detail,
     tone,
     optionSuffix: readiness.status === 'READY'
       ? ''
-      : ` (${readiness.summary.toLocaleLowerCase()})`,
+      : ` (${label.toLocaleLowerCase()})`,
     nextAction: readiness.nextAction?.label,
     diagnostics: readiness.diagnostics,
     warnings: readiness.diagnostics.filter(

@@ -72,8 +72,33 @@ describe('TaskCard', () => {
     );
 
     expect(boardHtml).toContain('<h3 class="tm-card__title">Heading context</h3>');
+    expect(boardHtml).toContain('data-task-id="task-heading" tabindex="0"');
     expect(gridHtml).toContain('<h2 class="tm-card__title">Heading context</h2>');
     expect(boardHtml).not.toContain('tm-card__top');
+  });
+
+  it('allows a board lane to make non-active cards arrow-reachable without tab stops', () => {
+    const vm: TaskCardVM = {
+      id: 'task-roving',
+      title: 'Roving card',
+      repositoryId: 'repository-a',
+      stateLabel: 'Ready',
+      stateTone: 'neutral',
+      showState: false,
+      archived: false,
+      evidence: []
+    };
+    const html = renderToStaticMarkup(
+      <TaskCard
+        vm={vm}
+        tabIndex={-1}
+        onSelect={() => {}}
+        onArchive={() => {}}
+        onRequestDelete={() => {}}
+      />
+    );
+
+    expect(html).toContain('data-task-id="task-roving" tabindex="-1"');
   });
 });
 

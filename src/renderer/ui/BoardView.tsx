@@ -73,6 +73,11 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
     };
   }
 
+  const deliveryAttention = describeDeliveryAttention(task);
+  if (deliveryAttention) {
+    return deliveryAttention;
+  }
+
   if (task.projection.health === 'ERROR') {
     return {
       label: 'Error',
@@ -81,17 +86,65 @@ export function describeTaskAttention(task: Task): AttentionDescriptor | undefin
     };
   }
 
-  if (task.projection.ciChecks === 'FAILING' || task.projection.reviews === 'CHANGES_REQUESTED') {
+  return undefined;
+}
+
+function describeDeliveryAttention(task: Task): AttentionDescriptor | undefined {
+  const projection = task.projection;
+  if (
+    task.completionPolicy === 'MANUAL' &&
+    projection.merge === 'MERGED' &&
+    task.workflowPhase !== 'DONE'
+  ) {
     return {
-      label: 'Delivery blocked',
-      detail:
-        task.projection.ciChecks === 'FAILING'
-          ? 'Remote checks are failing.'
-          : 'Review changes were requested.',
+      label: 'Waiting for Mark done',
+      detail: 'The pull request is merged; this task requires manual completion.',
+      tone: 'info'
+    };
+  }
+  if (
+    projection.githubPullRequest === 'CLOSED_UNMERGED' ||
+    projection.merge === 'CLOSED_UNMERGED'
+  ) {
+    return {
+      label: 'PR closed without merge',
+      detail: 'The pull request was closed without merging.',
+      tone: 'error'
+    };
+  }
+  if (projection.ciChecks === 'FAILING' || projection.ciChecks === 'BLOCKED') {
+    return {
+      label: 'Checks failed',
+      detail: 'GitHub checks need attention.',
+      tone: 'error'
+    };
+  }
+  if (projection.reviews === 'CHANGES_REQUESTED') {
+    return {
+      label: 'Changes requested',
+      detail: 'GitHub review requested changes.',
       tone: 'warning'
     };
   }
-
+  if (projection.merge === 'BLOCKED') {
+    return {
+      label: 'Merge blocked',
+      detail: 'The pull request is not currently mergeable.',
+      tone: 'error'
+    };
+  }
+  const hasDeliveryEvidence =
+    projection.githubPullRequest !== 'NOT_CREATED' ||
+    projection.ciChecks !== 'NOT_APPLICABLE' ||
+    projection.reviews !== 'NOT_APPLICABLE' ||
+    projection.merge !== 'NOT_APPLICABLE';
+  if (projection.health === 'ERROR' && hasDeliveryEvidence) {
+    return {
+      label: 'Delivery needs attention',
+      detail: 'Open the task to review the current GitHub evidence.',
+      tone: 'error'
+    };
+  }
   return undefined;
 }
 

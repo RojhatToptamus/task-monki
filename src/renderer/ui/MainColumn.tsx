@@ -1,4 +1,9 @@
-import { useState, type ReactNode } from 'react';
+import {
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode
+} from 'react';
 import type {
   AgentInteractionDecision,
   Board,
@@ -17,6 +22,7 @@ import {
   type UpdateAppSettingsRequest
 } from '../../shared/contracts';
 import { resolveReasoningEffort, selectModel } from '../model/agentExecutionSettings';
+import { resolveBoardNavigationTarget } from '../model/boardKeyboardNavigation';
 import { shouldShowTaskRepository } from '../model/boards';
 import { inboxInteractionDecisions } from '../model/inboxDecisions';
 import { shouldShowExecutablePathControls } from '../model/executableSettings';
@@ -73,7 +79,7 @@ interface MainColumnProps {
   addingRepository: boolean;
   onAddRepository(): Promise<boolean>;
   onFinishSetup(): Promise<void>;
-  onSelect(taskId: string): void;
+  onSelect(taskId: string, trigger?: HTMLElement): void;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -674,17 +680,55 @@ function BoardKanban({
   tasks: Task[];
   repositories: Repository[];
   showRepository: boolean;
-  onSelect(id: string): void;
+  onSelect(id: string, trigger?: HTMLElement): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
+  const [activeTaskByColumn, setActiveTaskByColumn] = useState<Record<string, string>>(
+    {}
+  );
+  const taskButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const repositoriesById = new Map(
     repositories.map((repository) => [repository.id, repository])
   );
+  const cardsByColumn = BOARD_COLUMNS.map((column) => columnTasks(tasks, column));
+
+  const moveFocus = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    columnIndex: number,
+    taskIndex: number
+  ) => {
+    const target = resolveBoardNavigationTarget(
+      cardsByColumn.map((cards) => cards.map((task) => task.id)),
+      columnIndex,
+      taskIndex,
+      event.key
+    );
+    if (!target) {
+      return;
+    }
+    event.preventDefault();
+    const targetColumn = BOARD_COLUMNS[target.columnIndex];
+    const targetTask = cardsByColumn[target.columnIndex]?.[target.taskIndex];
+    if (!targetColumn || !targetTask) {
+      return;
+    }
+    setActiveTaskByColumn((current) => ({
+      ...current,
+      [targetColumn.key]: targetTask.id
+    }));
+    window.requestAnimationFrame(() => taskButtonRefs.current.get(targetTask.id)?.focus());
+  };
+
   return (
     <div className="tm-board">
-      {BOARD_COLUMNS.map((column) => {
-        const cards = columnTasks(tasks, column);
+      {BOARD_COLUMNS.map((column, columnIndex) => {
+        const cards = cardsByColumn[columnIndex] ?? [];
+        const activeTaskId = cards.some(
+          (task) => task.id === activeTaskByColumn[column.key]
+        )
+          ? activeTaskByColumn[column.key]
+          : cards[0]?.id;
         return (
           <section className="tm-col" key={column.key}>
             <div className="tm-col__head">
@@ -693,7 +737,7 @@ function BoardKanban({
               <span className="tm-col__count">{cards.length}</span>
             </div>
             <div className="tm-col__cards">
-              {cards.map((task) => (
+              {cards.map((task, taskIndex) => (
                 <TaskCard
                   key={task.id}
                   vm={buildTaskCardVM(task, {
@@ -705,6 +749,21 @@ function BoardKanban({
                     )
                   })}
                   headingLevel={3}
+                  tabIndex={task.id === activeTaskId ? 0 : -1}
+                  buttonRef={(button) => {
+                    if (button) {
+                      taskButtonRefs.current.set(task.id, button);
+                    } else {
+                      taskButtonRefs.current.delete(task.id);
+                    }
+                  }}
+                  onFocus={() =>
+                    setActiveTaskByColumn((current) => ({
+                      ...current,
+                      [column.key]: task.id
+                    }))
+                  }
+                  onKeyDown={(event) => moveFocus(event, columnIndex, taskIndex)}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onRequestDelete={onRequestDelete}
@@ -729,7 +788,7 @@ function CardGrid({
   tasks: Task[];
   repositories: Repository[];
   view: NavView;
-  onSelect(id: string): void;
+  onSelect(id: string, trigger?: HTMLElement): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
@@ -771,13 +830,21 @@ function CardGrid({
 export function TaskCard({
   vm,
   headingLevel = 3,
+  tabIndex = 0,
+  buttonRef,
+  onFocus,
+  onKeyDown,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   vm: TaskCardVM;
   headingLevel?: 2 | 3;
-  onSelect(id: string): void;
+  tabIndex?: number;
+  buttonRef?(button: HTMLButtonElement | null): void;
+  onFocus?(): void;
+  onKeyDown?(event: ReactKeyboardEvent<HTMLButtonElement>): void;
+  onSelect(id: string, trigger?: HTMLElement): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
@@ -787,10 +854,15 @@ export function TaskCard({
       {/* Full-card click target sits behind the content so the kebab can be a
           real sibling next to the title (a button can't nest inside a button). */}
       <button
+        ref={buttonRef}
         type="button"
         className="tm-card__hit"
         aria-label={`Open ${vm.title}`}
-        onClick={() => onSelect(vm.id)}
+        data-task-id={vm.id}
+        tabIndex={tabIndex}
+        onFocus={onFocus}
+        onKeyDown={onKeyDown}
+        onClick={(event) => onSelect(vm.id, event.currentTarget)}
       />
       <div className="tm-card__body">
         {vm.meta || vm.showState ? (
@@ -863,7 +935,7 @@ function Inbox({
   tasks: Task[];
   repositories: Repository[];
   interactionRequests: InteractionRequestRecord[];
-  onSelect(id: string): void;
+  onSelect(id: string, trigger?: HTMLElement): void;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -914,7 +986,7 @@ export function InboxDecisionCard({
   repositoryName: string;
   showRepository: boolean;
   interaction?: InteractionRequestRecord;
-  onSelect(id: string): void;
+  onSelect(id: string, trigger?: HTMLElement): void;
   onRespondToInteraction(
     interaction: InteractionRequestRecord,
     decision: AgentInteractionDecision
@@ -984,7 +1056,8 @@ export function InboxDecisionCard({
           type="button"
           className={openIsPrimary ? 'tm-decision__open primary-button' : 'tm-decision__open'}
           aria-label={`Open task: ${task.title}`}
-          onClick={() => onSelect(task.id)}
+          data-task-id={task.id}
+          onClick={(event) => onSelect(task.id, event.currentTarget)}
         >
           Open task
         </button>

@@ -14,7 +14,7 @@
   --text: #1a1c20;
   --text-soft: #3a3d43;
   --muted: #6c6f76;
-  --faint: #a4a7ad;
+  --faint: #70737a;
   --accent: #26292f;
   --accent-hover: color-mix(in srgb, var(--accent) 86%, #fff);
   --on-accent: #ffffff;
@@ -57,7 +57,7 @@
   --text: #e9eaed;
   --text-soft: #b8bbc1;
   --muted: #92969e;
-  --faint: #62656c;
+  --faint: #858991;
   --accent: #ebedf0;
   --accent-hover: color-mix(in srgb, var(--accent) 86%, #000);
   --on-accent: #1a1c20;
@@ -246,6 +246,12 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+/* Press feedback is immediate and geometry-stable across the existing control
+   families. The filter preserves every component's established fill. */
+:where(button, [role='button']):not(:disabled):active {
+  filter: brightness(0.88);
 }
 
 .tm-visually-hidden {
@@ -7526,41 +7532,6 @@ summary:focus:not(:focus-visible) {
   color: var(--error);
 }
 
-/* ---- Pill / chip helpers (match artifact chip()) ---- */
-
-/* ---- Buttons (match artifact btn()/headBtn()) ---- */
-
-.tm-btn {
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.tm-btn--primary {
-  height: 32px;
-  padding: 0 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-}
-
-.tm-btn--soft {
-  background: var(--surface2);
-  border: 1px solid var(--border-strong);
-  color: var(--text);
-}
-
-.tm-btn--ghost {
-  color: var(--muted);
-}
-
-.tm-btn--danger {
-  background: var(--error-soft);
-  border: 1px solid var(--error-line);
-  color: var(--error-ink);
-}
-
 .tm-headbtn {
   height: 34px;
   padding: 0 14px;
@@ -9032,6 +9003,10 @@ summary:focus:not(:focus-visible) {
   overflow-wrap: anywhere;
 }
 
+.tm-detail__title:focus {
+  outline: none;
+}
+
 /* The kebab is always visible on the detail page; it reuses the shared
    trigger style unchanged so it matches the board card exactly. */
 .tm-detail__taskmenu {
@@ -9370,6 +9345,7 @@ summary:focus:not(:focus-visible) {
 
 /* generic panel card */
 .tm-panel {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 13px;
   background: var(--surface);
@@ -14483,6 +14459,71 @@ summary:focus:not(:focus-visible) {
   .tm-diffline--addition,
   .tm-diffline--deletion {
     grid-template-columns: 38px max-content;
+  }
+}
+
+@media (max-width: 520px) {
+  .tm-runheader {
+    display: grid;
+    grid-template-columns: 9px minmax(0, 1fr) auto auto;
+    align-items: center;
+  }
+
+  .tm-runheader__spacer {
+    display: none;
+  }
+
+  .tm-runheader__scope,
+  .tm-runheader__trailing {
+    grid-column: 2 / -1;
+    overflow: visible;
+    white-space: normal;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  .tm-plan__step {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .tm-plan__marker,
+  .tm-plan__step-caption {
+    flex-basis: calc(100% - 26px);
+    margin-left: 26px;
+  }
+
+  .tm-change-summary__head {
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .tm-change-summary__head > .outline-button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .tm-modal__scrim,
+  .tm-reviewdrawer__scrim {
+    background: color-mix(in srgb, var(--bg) 88%, var(--text));
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .app-shell {
+    --hair: #c2c4c8;
+    --border: #96999f;
+    --border-strong: #62656c;
+    --faint: var(--muted);
+  }
+
+  .app-shell[data-theme='dark'] {
+    --hair: #565960;
+    --border: #70747c;
+    --border-strong: #a4a8b0;
   }
 }
 

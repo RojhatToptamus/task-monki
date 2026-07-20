@@ -15,6 +15,7 @@ import {
   selectExecutableDisplayStatus
 } from '../model/executableSettings';
 import { runtimeReadinessView } from '../model/runtimeReadiness';
+import { AccessibleTab } from './AccessibleTabs';
 import { AgentModelSetting } from './AgentModelSelector';
 import type { ThemePreference } from './theme';
 
@@ -51,17 +52,20 @@ export function SettingsView(props: SettingsViewProps) {
   return (
     <div className="tm-settings">
       <div className="tm-settings__inner">
-        <nav className="tm-settings__nav tm-tabs" aria-label="Settings sections">
+        <nav
+          className="tm-settings__nav tm-tabs"
+          aria-label="Settings sections"
+          role="tablist"
+        >
           {SETTINGS_SECTIONS.map((item) => (
-            <button
+            <AccessibleTab
               key={item.id}
-              type="button"
-              className={`tm-tab ${section === item.id ? 'tm-tab--active' : ''}`}
-              aria-current={section === item.id ? 'page' : undefined}
-              onClick={() => setSection(item.id)}
-            >
-              {item.label}
-            </button>
+              id={`settings-tab-${item.id}`}
+              panelId={`settings-panel-${item.id}`}
+              label={item.label}
+              selected={section === item.id}
+              onSelect={() => setSection(item.id)}
+            />
           ))}
         </nav>
 
@@ -114,6 +118,7 @@ function AgentSettings({
 
   return (
     <SettingsPane
+      id="agents"
       title="Agents"
       detail="Choose which coding agents Task Monki can use."
       action={
@@ -290,6 +295,7 @@ function ModelSettings({
 
   return (
     <SettingsPane
+      id="models"
       title="Models"
       detail="Defaults for implementation, prompt refinement, and review."
     >
@@ -479,6 +485,7 @@ function ToolSettings({
 
   return (
     <SettingsPane
+      id="tools"
       title="Tools"
       detail="Repository delivery and Codex integrations."
       action={
@@ -560,7 +567,11 @@ function ToolSettings({
 
 function AppearanceSettings({ theme, onSetTheme, appSettings, onSetAppSettings }: SettingsViewProps) {
   return (
-    <SettingsPane title="Appearance" detail="Visual preferences for this device.">
+    <SettingsPane
+      id="appearance"
+      title="Appearance"
+      detail="Visual preferences for this device."
+    >
       <div className="tm-settings__list">
         <div className="tm-settings__row">
           <span className="tm-settings__k">Theme</span>
@@ -589,21 +600,28 @@ function AppearanceSettings({ theme, onSetTheme, appSettings, onSetAppSettings }
 }
 
 function SettingsPane({
+  id,
   title,
   detail,
   action,
   children
 }: {
+  id: SettingsSection;
   title: string;
   detail: string;
   action?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <section className="tm-settings__pane" aria-labelledby={`settings-${title.toLowerCase()}`}>
+    <section
+      id={`settings-panel-${id}`}
+      className="tm-settings__pane"
+      role="tabpanel"
+      aria-labelledby={`settings-tab-${id}`}
+    >
       <header className="tm-settings__pane-head">
         <div>
-          <h2 id={`settings-${title.toLowerCase()}`}>{title}</h2>
+          <h2>{title}</h2>
           <p>{detail}</p>
         </div>
         {action}

@@ -4,6 +4,22 @@ import type { RunRecord } from '../../shared/contracts';
 import { AgentControlPanel } from './AgentControlPanel';
 
 describe('AgentControlPanel', () => {
+  it('keeps steering in the Agent card while the progress header owns Stop', () => {
+    const html = renderToStaticMarkup(
+      <AgentControlPanel
+        run={runFixture({ status: 'RUNNING', endedAt: undefined })}
+        interactions={[]}
+        onSteer={async () => {}}
+        onInterrupt={async () => {}}
+        onContinue={async () => {}}
+        onRetry={async () => {}}
+      />
+    );
+
+    expect(html).toContain('Add instruction');
+    expect(html).not.toContain('Stop run');
+  });
+
   it('makes retry the primary recovery action after an implementation failure', () => {
     const html = renderToStaticMarkup(
       <AgentControlPanel

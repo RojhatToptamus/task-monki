@@ -17,14 +17,14 @@ interface CompletedChangeSummaryPanelProps {
   run?: RunRecord;
   gitSnapshots: GitSnapshotRecord[];
   artifacts: ArtifactRecord[];
-  onReviewChanges(snapshotId: string): void;
+  onViewDiff(snapshotId: string): void;
 }
 
 export function CompletedChangeSummaryPanel({
   run,
   gitSnapshots,
   artifacts,
-  onReviewChanges
+  onViewDiff
 }: CompletedChangeSummaryPanelProps) {
   const snapshot = useMemo(
     () => selectCompletedRunChangeSnapshot(run, gitSnapshots),
@@ -75,17 +75,17 @@ export function CompletedChangeSummaryPanel({
   return (
     <CompletedChangeSummaryCard
       summary={summary}
-      onReviewChanges={() => onReviewChanges(snapshot.id)}
+      onViewDiff={() => onViewDiff(snapshot.id)}
     />
   );
 }
 
 export function CompletedChangeSummaryCard({
   summary,
-  onReviewChanges
+  onViewDiff
 }: {
   summary: CompletedChangeSummary;
-  onReviewChanges(): void;
+  onViewDiff(): void;
 }) {
   return (
     <section className="tm-change-summary" aria-label="Completed change summary">
@@ -97,8 +97,8 @@ export function CompletedChangeSummaryCard({
           <h3>{summary.title}</h3>
           <DiffStat additions={summary.additions} deletions={summary.deletions} />
         </div>
-        <button type="button" className="outline-button" onClick={onReviewChanges}>
-          Review changes
+        <button type="button" className="outline-button" onClick={onViewDiff}>
+          View diff
         </button>
       </div>
       <div className="tm-change-summary__files">

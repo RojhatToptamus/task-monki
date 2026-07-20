@@ -48,6 +48,7 @@ export function ReviewPanel({
   const currentDiff = describeGitSnapshot(gitSnapshot);
   const reviewedDiff = reviewPending ? currentDiff : describeReviewedDiff(reviewGate, gitSnapshot);
   const reviewIsRunning = effectiveStatus === 'RUNNING';
+  const body = reviewBody(reviewGate, reviewRun);
   const stopReviewDisabledTitle = (): string | undefined => {
     if (actionBusy) {
       return 'Review action is in progress.';
@@ -105,7 +106,7 @@ export function ReviewPanel({
           </div>
         ) : (
           <div className="tm-reviewcard__summary">
-            <p>{reviewBody(reviewGate, reviewRun)}</p>
+            {body ? <p>{body}</p> : null}
             {effectiveStatus === 'NOT_RUN' ? (
               <div className="tm-reviewcard__meta">
                 <span>Will review</span>
@@ -245,7 +246,7 @@ function reviewGateUi(status: AgentReviewGateProjection['status']): {
 function reviewBody(
   reviewGate: AgentReviewGateProjection,
   reviewRun?: RunRecord
-): string {
+): string | undefined {
   if (reviewRun?.terminalReason) {
     return reviewRun.terminalReason;
   }
@@ -257,7 +258,7 @@ function reviewBody(
   }
   switch (reviewGate.status) {
     case 'NOT_RUN':
-      return 'Run a review before marking done or shipping this diff.';
+      return undefined;
     case 'PASSED':
       return 'No blocking issues were reported for the reviewed diff.';
     case 'NEEDS_CHANGES':

@@ -132,6 +132,7 @@ import {
   formatAgentPermissionMode
 } from '../model/agentPermissions';
 import { ActionButtonTitle } from './ActionButtonTitle';
+import { AccessibleTab } from './AccessibleTabs';
 import {
   ReviewPanel,
   type ReviewActionPauseReason
@@ -145,6 +146,7 @@ import type { PreviewExecutionReadiness } from '../../shared/preview';
 import type { PreviewTaskRouteOption } from '../model/previewBindings';
 
 interface TaskDetailProps {
+  headingRef?: RefObject<HTMLHeadingElement | null>;
   error?: string;
   task?: Task;
   repository?: Repository;
@@ -895,7 +897,9 @@ export function TaskDetail(props: TaskDetailProps) {
         <div className="tm-detail__row">
           <div className="tm-detail__heading">
             <div className="tm-detail__titlerow">
-              <h1 className="tm-detail__title">{task.title}</h1>
+              <h1 ref={props.headingRef} className="tm-detail__title" tabIndex={-1}>
+                {task.title}
+              </h1>
               <TaskActionsMenu
                 taskId={task.id}
                 title={task.title}
@@ -970,29 +974,53 @@ export function TaskDetail(props: TaskDetailProps) {
             placement="task"
           />
         ) : null}
-        <div className="tm-tabs">
-          <TabButton label="Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
-          <TabButton label="Preview" active={tab === 'preview'} onClick={() => setTab('preview')} />
-          <TabButton
+        <div className="tm-tabs" role="tablist" aria-label="Task sections">
+          <AccessibleTab
+            id="task-detail-tab-overview"
+            panelId="task-detail-panel"
+            label="Overview"
+            selected={tab === 'overview'}
+            onSelect={() => setTab('overview')}
+          />
+          <AccessibleTab
+            id="task-detail-tab-preview"
+            panelId="task-detail-panel"
+            label="Preview"
+            selected={tab === 'preview'}
+            onSelect={() => setTab('preview')}
+          />
+          <AccessibleTab
+            id="task-detail-tab-evidence"
+            panelId="task-detail-panel"
             label="Evidence"
-            active={tab === 'evidence'}
-            onClick={() => {
+            selected={tab === 'evidence'}
+            onSelect={() => {
               setEvidenceGitSnapshotId(undefined);
               setTab('evidence');
             }}
           />
-          <TabButton
+          <AccessibleTab
+            id="task-detail-tab-debug"
+            panelId="task-detail-panel"
             label="Debug"
-            active={tab === 'debug'}
-            onClick={() => setTab('debug')}
+            selected={tab === 'debug'}
+            onSelect={() => setTab('debug')}
             badge={props.runs.length ? String(props.runs.length) : undefined}
+            badgeAccessibleLabel={
+              props.runs.length
+                ? `${props.runs.length} ${props.runs.length === 1 ? 'run' : 'runs'}`
+                : undefined
+            }
           />
         </div>
       </div>
 
       <div
+        id="task-detail-panel"
         className="tm-detail__body"
         ref={bodyRef}
+        role="tabpanel"
+        aria-labelledby={`task-detail-tab-${tab}`}
         inert={taskDetailModalOpen ? true : undefined}
         aria-hidden={taskDetailModalOpen ? true : undefined}
       >
@@ -1038,7 +1066,7 @@ export function TaskDetail(props: TaskDetailProps) {
                           run={progressRun}
                           gitSnapshots={gitSnapshots}
                           artifacts={props.artifacts}
-                          onReviewChanges={(snapshotId) => {
+                          onViewDiff={(snapshotId) => {
                             setEvidenceGitSnapshotId(snapshotId);
                             setTab('evidence');
                           }}
@@ -1362,25 +1390,6 @@ function CreateDraftPrModal({
         </div>
       </form>
     </div>
-  );
-}
-
-function TabButton({
-  label,
-  active,
-  onClick,
-  badge
-}: {
-  label: string;
-  active: boolean;
-  onClick(): void;
-  badge?: string;
-}) {
-  return (
-    <button type="button" className={`tm-tab ${active ? 'tm-tab--active' : ''}`} onClick={onClick}>
-      {label}
-      {badge ? <span className="tm-tab__badge">{badge}</span> : null}
-    </button>
   );
 }
 

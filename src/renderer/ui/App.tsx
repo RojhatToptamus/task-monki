@@ -75,13 +75,14 @@ import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
 import { computeNavCounts, type NavView } from './taskView';
-import { NewTaskPanel } from './NewTaskPanel';
+import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
 import { RepositoryPicker } from './RepositoryPicker';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ImpactList } from './ImpactList';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
+import { taskNavigationReturnTarget } from './taskNavigationFocus';
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -193,6 +194,10 @@ export function App() {
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
+  const [newTaskTextDraft, setNewTaskTextDraft] = useState<NewTaskTextDraft>({
+    title: '',
+    prompt: ''
+  });
   const [deleteCandidateId, setDeleteCandidateId] = useState<string | undefined>();
   const [repositoryDisconnect, setRepositoryDisconnect] = useState<{
     repository: Repository;
@@ -208,6 +213,9 @@ export function App() {
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
+  const taskDetailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const taskNavigationReturnFocusRef = useRef<HTMLElement | null>(null);
+  const taskNavigationReturnIdRef = useRef<string | undefined>(undefined);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const canvasPanFrameRef = useRef<number | undefined>(undefined);
   const canvasResizeFrameRef = useRef<number | undefined>(undefined);
@@ -928,8 +936,11 @@ export function App() {
   const createTask = async (input: CreateTaskRequest) => {
     try {
       const created = await taskManagerApi.createTask(input);
+      taskNavigationReturnFocusRef.current = newTaskButtonRef.current;
+      taskNavigationReturnIdRef.current = created.id;
       setSelectedTaskId(created.id);
       setIsDetailOpen(true);
+      setNewTaskTextDraft({ title: '', prompt: '' });
       notify('Task created.', 'success');
       await refresh();
     } catch (caught) {
@@ -1626,7 +1637,10 @@ export function App() {
     }
   }, [activeRepositoryId, appSettings.defaultRuntimeId, notify, reportActionError]);
 
-  const selectTask = (taskId: string) => {
+  const selectTask = (taskId: string, trigger?: HTMLElement) => {
+    taskNavigationReturnFocusRef.current =
+      trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    taskNavigationReturnIdRef.current = taskId;
     setSelectedTaskId(taskId);
     setLastTaskId(taskId);
     setIsDetailOpen(true);
@@ -1635,6 +1649,14 @@ export function App() {
   // Back: from an open task to the view it was opened from.
   const goBack = () => {
     setIsDetailOpen(false);
+    window.requestAnimationFrame(() => {
+      taskNavigationReturnTarget(
+        taskNavigationReturnFocusRef.current,
+        taskNavigationReturnIdRef.current,
+        document.querySelectorAll<HTMLElement>('[data-task-id]'),
+        appRootRef.current
+      )?.focus({ preventScroll: true });
+    });
   };
 
   // Forward: re-open the last task that was viewed.
@@ -1663,6 +1685,16 @@ export function App() {
   const navCounts = computeNavCounts(snapshot.tasks);
 
   const showDetail = isDetailOpen && Boolean(selectedTask);
+
+  useEffect(() => {
+    if (!showDetail) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      taskDetailHeadingRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selectedTask?.id, showDetail]);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
   const appOwnedModalOpen = Boolean(deleteCandidate || repositoryDisconnect || boardEditor);
@@ -1906,6 +1938,7 @@ export function App() {
 
         {showDetail ? (
           <TaskDetail
+            headingRef={taskDetailHeadingRef}
             error={error}
             task={selectedTask}
             repository={snapshot.repositories.find(
@@ -2040,6 +2073,8 @@ export function App() {
               onDiscardAttachmentDraft={taskManagerApi.discardTaskAttachmentDraft}
               onReadClipboardImage={taskManagerApi.readClipboardImage}
               onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+              initialTextDraft={newTaskTextDraft}
+              onTextDraftChange={setNewTaskTextDraft}
               returnFocusRef={newTaskButtonRef}
               fallbackReturnFocusRef={appRootRef}
               onResize={keepNewTaskPanelInView}

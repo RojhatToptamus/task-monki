@@ -19,6 +19,8 @@ describe('InteractionPanel', () => {
     expect(html).toContain('Deny');
     expect(html).toContain('Allow once');
     expect(html).toContain('Allow for session');
+    expect(html).toMatch(/class="primary-button"[^>]*>Allow once<\/button>/);
+    expect(html).toMatch(/class="outline-button"[^>]*>Allow for session<\/button>/);
     expect(html).not.toContain('Stop current turn');
   });
 
