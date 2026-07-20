@@ -178,7 +178,7 @@ async function main() {
     await setTaskDescription(page, ROUGH_PROMPT);
     await capture(page, "14-new-task-filled");
     await clickByText(page, "Refine");
-    await waitForText(page, "Refining...");
+    await waitForText(page, "Refining");
     await capture(page, "15-new-task-refining");
     await waitForText(page, "Implement review follow-up delivery guards");
     await waitForPredicate(
@@ -227,7 +227,8 @@ async function main() {
     await capture(page, "20-review-ready-overview");
 
     await clickByText(page, "Run Codex review");
-    await waitForText(page, "Reviewing the current diff");
+    await waitForText(page, "Reviewing");
+    await waitForText(page, "Current activity");
     await waitForPredicate(
       page,
       () => !document.querySelector(".tm-notifier__item"),
@@ -256,7 +257,7 @@ async function main() {
       () => !document.querySelector(".tm-reviewdrawer"),
     );
     await waitForText(page, "Follow-up run started.");
-    await waitForText(page, "Follow-up work is running");
+    await waitForText(page, "The agent is working");
     await capture(page, "25-followup-running-overview");
     await waitForPredicate(
       page,
@@ -441,7 +442,7 @@ async function clickReviewFinding(page, findingTitle) {
   const clicked = await page.evaluate((expectedTitle) => {
     const normalize = (value) => value.replace(/\s+/g, " ").trim();
     const findings = Array.from(
-      document.querySelectorAll(".tm-reviewdrawer__finding"),
+      document.querySelectorAll(".tm-reviewdrawer .tm-finding--select"),
     );
     const target = findings.find((finding) =>
       normalize(finding.textContent ?? "").includes(expectedTitle),
@@ -450,7 +451,12 @@ async function clickReviewFinding(page, findingTitle) {
       return false;
     }
     target.scrollIntoView({ block: "center", inline: "center" });
-    target.click();
+    const checkbox = target.querySelector('input[type="checkbox"]');
+    if (checkbox instanceof HTMLElement) {
+      checkbox.click();
+    } else {
+      target.click();
+    }
     return true;
   }, findingTitle);
   if (!clicked) {
@@ -462,7 +468,7 @@ async function clickReviewFinding(page, findingTitle) {
 async function setTaskTitle(page, value) {
   const updated = await page.evaluate((nextValue) => {
     const input = document.querySelector(
-      '.slideover input[placeholder="Add settings validation"]',
+      '.slideover input[placeholder="Short imperative summary"]',
     );
     if (!(input instanceof HTMLInputElement)) {
       return false;
