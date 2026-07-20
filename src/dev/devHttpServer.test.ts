@@ -1,9 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  RepositoryRequestError,
-  type TaskManagerService
-} from '../core/app/TaskManagerService';
+import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppEventBus } from '../core/runner/AppEventBus';
 import { AttachmentStoreError } from '../core/storage/AttachmentFileStore';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
@@ -37,26 +34,24 @@ describe('development HTTP server', () => {
   it('requires proxy authentication and emits no permissive CORS headers', async () => {
     const running = await startServer();
 
-    const unauthenticated = await fetch(`${running.baseUrl}/api/repositories`);
+    const unauthenticated = await fetch(`${running.baseUrl}/api/settings`);
     expect(unauthenticated.status).toBe(401);
     await expect(unauthenticated.json()).resolves.toMatchObject({
       error: { code: 'UNAUTHORIZED', retryable: false }
     });
 
-    const authenticated = await fetch(`${running.baseUrl}/api/repositories`, {
+    const authenticated = await fetch(`${running.baseUrl}/api/settings`, {
       headers: running.headers
     });
     expect(authenticated.status).toBe(200);
     expect(authenticated.headers.get('access-control-allow-origin')).toBeNull();
     expect(authenticated.headers.get('cache-control')).toBe('no-store');
-    await expect(authenticated.json()).resolves.toMatchObject({
-      selectedRepositoryId: 'repository-trusted'
-    });
+    await expect(authenticated.json()).resolves.toEqual({});
   });
 
   it('returns a retryable 503 during the listen-to-token startup window', async () => {
     const running = await startServer({}, undefined, undefined, '');
-    const response = await fetch(`${running.baseUrl}/api/repositories`, {
+    const response = await fetch(`${running.baseUrl}/api/settings`, {
       headers: running.headers
     });
     expect(response.status).toBe(503);
@@ -68,7 +63,7 @@ describe('development HTTP server', () => {
   it('rejects hostile origins and cross-site browser requests even with the proxy token', async () => {
     const running = await startServer();
 
-    const hostileOrigin = await fetch(`${running.baseUrl}/api/repositories`, {
+    const hostileOrigin = await fetch(`${running.baseUrl}/api/settings`, {
       headers: { ...running.headers, origin: 'https://evil.test' }
     });
     expect(hostileOrigin.status).toBe(403);
@@ -76,7 +71,7 @@ describe('development HTTP server', () => {
       error: { code: 'INVALID_ORIGIN' }
     });
 
-    const crossSite = await fetch(`${running.baseUrl}/api/repositories`, {
+    const crossSite = await fetch(`${running.baseUrl}/api/settings`, {
       headers: { ...running.headers, 'sec-fetch-site': 'cross-site' }
     });
     expect(crossSite.status).toBe(403);
@@ -127,83 +122,79 @@ describe('development HTTP server', () => {
     expect(updateAppSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('routes discourse send, stop, and context confirmation through the same private boundary', async () => {
-    const sendDiscourseMessage = vi.fn(async (input: unknown) => ({ input }));
-    const stopDiscourseWave = vi.fn(async (input: unknown) => ({ input }));
-    const confirmDiscourseWaveContext = vi.fn(async (input: unknown) => ({ input }));
-    const running = await startServer({
-      sendDiscourseMessage,
-      stopDiscourseWave,
-      confirmDiscourseWaveContext
-    });
-    const post = (pathname: string, body: unknown) => fetch(`${running.baseUrl}${pathname}`, {
+  it('routes only typed revisioned session controls through the authenticated API', async () => {
+    const updateAgentNativeSession = vi.fn(async (input: unknown) => ({
+      ...(input as Record<string, unknown>),
+      native: { modes: { currentModeId: 'plan' } },
+      controls: { localSessionId: 'session-1', revision: 'revision-2', controls: [] }
+    }));
+    const running = await startServer({ updateAgentNativeSession });
+    const request = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'grok-acp',
+      controlId: 'mode',
+      value: 'plan',
+      revision: 'revision-1'
+    };
+
+    const response = await fetch(`${running.baseUrl}/api/agent/session/native`, {
       method: 'POST',
       headers: { ...running.headers, 'content-type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(request)
     });
-    const send = { conversationId: 'conversation-1', policy: 'TEAM' };
-    const stop = { conversationId: 'conversation-1', waveId: 'wave-1' };
-    const confirm = { conversationId: 'conversation-1', waveId: 'wave-1', previewFingerprint: 'preview-2' };
 
-    expect((await post('/api/discourse/messages/send', send)).status).toBe(201);
-    expect((await post('/api/discourse/waves/stop', stop)).status).toBe(200);
-    expect((await post('/api/discourse/waves/confirm-context', confirm)).status).toBe(200);
-    expect(sendDiscourseMessage).toHaveBeenCalledWith(send);
-    expect(stopDiscourseWave).toHaveBeenCalledWith(stop);
-    expect(confirmDiscourseWaveContext).toHaveBeenCalledWith(confirm);
+    expect(response.status).toBe(200);
+    expect(updateAgentNativeSession).toHaveBeenCalledWith(request);
+    await expect(response.json()).resolves.toMatchObject({
+      runtimeId: 'grok-acp',
+      native: { modes: { currentModeId: 'plan' } }
+    });
   });
 
-  it('keeps repository paths host-owned and returns safe repository errors', async () => {
-    const addRepositoryFromTrustedPath = vi.fn(async () => ({
-      revision: 2,
-      defaultRepositoryId: 'repository-default',
-      selectedRepositoryId: 'repository-added',
-      repositories: [],
-      taskAssociations: []
-    }));
-    const running = await startServer(
-      {
-        addRepositoryFromTrustedPath,
-        selectRepository: vi.fn(async () => {
-          throw new RepositoryRequestError(
-            'REPOSITORY_UNAVAILABLE',
-            409,
-            'The repository is unavailable or its identity has changed.'
-          );
-        })
-      },
-      undefined,
-      undefined,
-      'private-test-token',
-      { chooseRepositoryFolder: async () => '/trusted/from-native-picker' }
-    );
+  it('routes explicit runtime model discovery without coupling it to catalog reads', async () => {
+    const catalog = {
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
+    };
+    const getAgentRuntimeCatalog = vi.fn(async () => catalog);
+    const discoverAgentRuntimeModels = vi.fn(async () => catalog);
+    const running = await startServer({
+      getAgentRuntimeCatalog,
+      discoverAgentRuntimeModels
+    });
 
-    const added = await fetch(`${running.baseUrl}/api/repositories/add`, {
+    const passive = await fetch(`${running.baseUrl}/api/agent/runtimes`, {
+      headers: running.headers
+    });
+    expect(passive.status).toBe(200);
+    expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
+
+    const explicit = await fetch(`${running.baseUrl}/api/agent/runtimes/discover`, {
       method: 'POST',
       headers: { ...running.headers, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        clientMutationId: 'add-repository-0001',
-        repositoryPath: '/forged/from-renderer'
-      })
+      body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
     });
-    expect(added.status).toBe(200);
-    expect(addRepositoryFromTrustedPath).toHaveBeenCalledWith(
-      '/trusted/from-native-picker',
-      expect.objectContaining({ clientMutationId: 'add-repository-0001' })
-    );
+    expect(explicit.status).toBe(200);
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledOnce();
+    expect(discoverAgentRuntimeModels).toHaveBeenCalledWith('cursor-agent-acp');
+  });
 
-    const unavailable = await fetch(`${running.baseUrl}/api/repositories/select`, {
+  it('keeps current preview endpoints behind the hardened boundary', async () => {
+    const startPreview = vi.fn(async (input: unknown) => ({ id: 'generation-1', input }));
+    const running = await startServer({ startPreview });
+
+    const response = await fetch(`${running.baseUrl}/api/preview/start`, {
       method: 'POST',
       headers: { ...running.headers, 'content-type': 'application/json' },
-      body: JSON.stringify({ repositoryId: 'repository-missing' })
+      body: JSON.stringify({ taskId: 'task-1' })
     });
-    expect(unavailable.status).toBe(409);
-    await expect(unavailable.json()).resolves.toMatchObject({
-      error: {
-        code: 'REPOSITORY_UNAVAILABLE',
-        message: 'The repository is unavailable or its identity has changed.'
-      }
-    });
+
+    expect(response.status).toBe(200);
+    expect(startPreview).toHaveBeenCalledWith({ taskId: 'task-1' });
+    await expect(response.json()).resolves.toMatchObject({ id: 'generation-1' });
   });
 
   it('accepts one bounded attachment batch and preserves no source path', async () => {
@@ -321,7 +312,7 @@ describe('development HTTP server', () => {
       body: JSON.stringify({
         title: 'Changed task',
         prompt: 'Changed request.',
-        repositoryPath: '/trusted/repository',
+        repositoryId: 'repository-1',
         creationToken: 'task-create-http-conflict-0001'
       })
     });
@@ -388,7 +379,7 @@ describe('development HTTP server', () => {
     const logger = { error: vi.fn() };
     const running = await startServer(
       {
-        getRepositoryCatalog: vi.fn(() => {
+        addRepository: vi.fn(() => {
           throw new Error('Failed at /Users/private/secret.txt');
         })
       },
@@ -397,7 +388,9 @@ describe('development HTTP server', () => {
     );
 
     const response = await fetch(`${running.baseUrl}/api/repositories`, {
-      headers: running.headers
+      method: 'POST',
+      headers: { ...running.headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/private/secret' })
     });
     expect(response.status).toBe(500);
     const body = (await response.json()) as {
@@ -480,6 +473,20 @@ describe('development HTTP server', () => {
     expect(frame).toContain('"payload":null');
     expect(frame).not.toContain('xxx');
   });
+
+  it('preserves the preview generation identity in compact invalidation frames', () => {
+    const frame = createDevEventStreamFrame({
+      type: 'preview.updated',
+      scope: { kind: 'TASK', taskId: 'task-1' },
+      taskId: 'task-1',
+      previewGenerationId: 'generation-1',
+      payload: null,
+      at: '2026-07-10T00:00:00.000Z'
+    });
+
+    expect(Buffer.byteLength(frame)).toBeLessThan(512);
+    expect(frame).toContain('"previewGenerationId":"generation-1"');
+  });
 });
 
 type ServerLimitOptions = Pick<
@@ -488,9 +495,7 @@ type ServerLimitOptions = Pick<
   | 'maxEventStreamBufferBytes'
   | 'maxAttachmentOperations'
   | 'maxAttachmentInFlightBytes'
-> & {
-  chooseRepositoryFolder?: () => Promise<string | undefined>;
-};
+>;
 
 async function startServer(
   overrides: Record<string, unknown> = {},
@@ -502,13 +507,7 @@ async function startServer(
   const events = new AppEventBus();
   const service = {
     events,
-    getRepositoryCatalog: vi.fn(async () => ({
-      revision: 1,
-      defaultRepositoryId: 'repository-trusted',
-      selectedRepositoryId: 'repository-trusted',
-      repositories: [],
-      taskAssociations: []
-    })),
+    addRepository: vi.fn(async () => ({ id: 'repository-1' })),
     getAppSettings: vi.fn(async () => ({})),
     updateAppSettings: vi.fn(async (input: unknown) => input),
     ...overrides
@@ -518,17 +517,13 @@ async function startServer(
     expectedHost: '',
     expectedOrigin: devRendererOrigin(5173)
   };
-  const {
-    chooseRepositoryFolder = async () => undefined,
-    ...serverLimits
-  } = eventStreamOptions;
   const devServer = createDevHttpServer({
     service,
     security,
-    chooseRepositoryFolder,
+    chooseRepositoryFolder: async () => undefined,
     maxJsonBodyBytes,
     logger,
-    ...serverLimits
+    ...eventStreamOptions
   });
   await new Promise<void>((resolve, reject) => {
     devServer.server.once('error', reject);

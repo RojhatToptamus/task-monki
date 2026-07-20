@@ -3,11 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ContextSnapshotRecord } from '../../shared/discourse';
-import type {
-  InspectedRepository,
-  RepositoryPathInspector
-} from '../repository/RepositoryRegistry';
-import { FileRepositoryRegistry } from '../storage/FileRepositoryRegistry';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { git } from '../git/gitCli';
 import { DiscourseContextResolver } from './DiscourseContextResolver';
@@ -19,27 +14,27 @@ describe('DiscourseContextResolver', () => {
     const task = await fixture.tasks.createTask({
       title: 'Context resolver',
       prompt: 'Keep paths out of renderer authority.',
-      repositoryPath: fixture.repositoryPath
+      repositoryId: fixture.repository.id
     });
     const catalog = await fixture.resolver.catalogEntries();
     expect(catalog.tasks).toEqual([
-      expect.objectContaining({ id: task.id, repositoryId: 'repository-1' })
+      expect.objectContaining({ id: task.id, repositoryId: fixture.repository.id })
     ]);
     expect(catalog.repositories).toEqual([
-      expect.objectContaining({ id: 'repository-1', accessMode: 'FILESYSTEM_READ' })
+      expect.objectContaining({ id: fixture.repository.id, accessMode: 'FILESYSTEM_READ' })
     ]);
 
     const preview = await fixture.resolver.preview({
       pinned: [],
       messageContext: [
         { entityKind: 'TASK', entityId: task.id },
-        { entityKind: 'REPOSITORY', entityId: 'repository-1' },
-        { entityKind: 'REPOSITORY', entityId: 'repository-1' }
+        { entityKind: 'REPOSITORY', entityId: fixture.repository.id },
+        { entityKind: 'REPOSITORY', entityId: fixture.repository.id }
       ]
     });
     expect(preview.references).toHaveLength(2);
     expect(preview.filesystemRootCount).toBe(1);
-    expect(preview.deduplicatedRepositoryIds).toEqual(['repository-1']);
+    expect(preview.deduplicatedRepositoryIds).toEqual([fixture.repository.id]);
     expect(preview.policy).toEqual({
       filesystem: 'READ_ONLY',
       writes: false,
@@ -66,11 +61,11 @@ describe('DiscourseContextResolver', () => {
     const task = await fixture.tasks.createTask({
       title: 'Fresh context',
       prompt: 'Detect edits between Team phases.',
-      repositoryPath: fixture.repositoryPath
+      repositoryId: fixture.repository.id
     });
     const selections = [
       { entityKind: 'TASK' as const, entityId: task.id },
-      { entityKind: 'REPOSITORY' as const, entityId: 'repository-1' }
+      { entityKind: 'REPOSITORY' as const, entityId: fixture.repository.id }
     ];
 
     const before = await fixture.resolver.resolveSelections(selections);
@@ -153,39 +148,20 @@ async function contextFixture() {
     '-m',
     'Initial fixture'
   ]);
-  const inspector = new StaticInspector(repositoryPath);
-  const repositories = new FileRepositoryRegistry(
-    path.join(root, 'registry'),
-    inspector,
-    { createId: () => 'repository-1' }
-  );
-  await repositories.reconcile([
-    { path: repositoryPath, source: 'DEFAULT', isDefault: true }
-  ]);
   const tasks = new FileTaskStore(path.join(root, 'tasks'));
-  await tasks.init();
+  const repository = await tasks.addRepository({
+    path: repositoryPath,
+    root: repositoryPath,
+    status: 'VALID',
+    headSha: await git(repositoryPath, ['rev-parse', 'HEAD']),
+    branch: 'main',
+    remotes: [],
+    checkedAt: new Date().toISOString()
+  });
   return {
     repositoryPath,
+    repository,
     tasks,
-    resolver: new DiscourseContextResolver(tasks, repositories)
+    resolver: new DiscourseContextResolver(tasks)
   };
-}
-
-class StaticInspector implements RepositoryPathInspector {
-  constructor(private readonly repositoryPath: string) {}
-
-  inspect(candidatePath: string): Promise<InspectedRepository> {
-    if (path.resolve(candidatePath) !== path.resolve(this.repositoryPath)) {
-      return Promise.reject(new Error('Unexpected repository path.'));
-    }
-    return Promise.resolve({
-      canonicalRealPath: this.repositoryPath,
-      displayName: 'repository',
-      identity: {
-        objectFormat: 'sha1',
-        anchorCommits: ['anchor-1'],
-        remoteFingerprints: []
-      }
-    });
-  }
 }

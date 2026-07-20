@@ -2,8 +2,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import fs from 'node:fs/promises';
-import { DISCOURSE_LIMITS } from '../../../shared/discourse';
 import type { AgentExecutionSettings } from '../../../shared/contracts';
+import { DISCOURSE_LIMITS } from '../../../shared/discourse';
 import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 
 const PROFILE_PREFIX = 'task_monki_';
@@ -21,10 +21,6 @@ export interface CodexPermissionProfileEvidence {
 export interface CodexReadOnlyExecutionScope {
   primaryCwd: string;
   readOnlyRoots: readonly string[];
-  verifiedReadOnlyFiles?: readonly {
-    canonicalPath: string;
-    contentSha256: string;
-  }[];
 }
 
 export interface CodexReadOnlyScopeProfile {
@@ -33,18 +29,20 @@ export interface CodexReadOnlyScopeProfile {
   config: Record<string, JsonValue>;
 }
 
-export function codexPermissionProfileId(sessionId: string): string {
+export function codexPermissionProfileId(
+  sessionId: string,
+  sandbox: AgentExecutionSettings['sandbox']
+): string {
   if (!SAFE_SESSION_ID.test(sessionId)) {
     throw new Error('Cannot create a Codex permission profile for an invalid session id.');
+  }
+  if (sandbox === 'DANGER_FULL_ACCESS') {
+    return ':danger-full-access';
   }
   return `${PROFILE_PREFIX}${sessionId}`;
 }
 
-/**
- * Builds the complete, order-independent permission scope used by discourse
- * jobs. Callers must pass canonical repository roots and verified managed
- * files; broad roots and overlapping roots fail closed.
- */
+/** Builds a bounded, order-independent, offline read-only scope for Discourse. */
 export async function codexReadOnlyScopeProfile(input: {
   sessionId: string;
   scope: CodexReadOnlyExecutionScope;
@@ -53,10 +51,7 @@ export async function codexReadOnlyScopeProfile(input: {
   if (!SAFE_SESSION_ID.test(input.sessionId)) {
     throw new Error('Cannot create a Codex permission profile for an invalid session id.');
   }
-  const primaryCwd = await requireCanonicalDirectory(
-    input.scope.primaryCwd,
-    'primary workspace'
-  );
+  const primaryCwd = await requireCanonicalDirectory(input.scope.primaryCwd, 'primary workspace');
   const roots = uniqueSorted([
     primaryCwd,
     ...(await Promise.all(
@@ -69,36 +64,9 @@ export async function codexReadOnlyScopeProfile(input: {
     throw new Error('Codex read-only scope exceeds the filesystem-root safety limit.');
   }
   assertNonOverlappingRoots(roots);
-  if ((input.scope.verifiedReadOnlyFiles?.length ?? 0) > 10) {
-    throw new Error('Codex read-only scope exceeds the managed-file safety limit.');
-  }
-  const verifiedFiles = await Promise.all((input.scope.verifiedReadOnlyFiles ?? []).map(async (file) => {
-    if (!/^[a-f0-9]{64}$/u.test(file.contentSha256)) {
-      throw new Error('Codex managed read-only files require a verified SHA-256 digest.');
-    }
-    const canonicalPath = await requireCanonicalRegularFile(
-      file.canonicalPath,
-      'read-only file'
-    );
-    const actualHash = crypto
-      .createHash('sha256')
-      .update(await fs.readFile(canonicalPath))
-      .digest('hex');
-    if (actualHash !== file.contentSha256) {
-      throw new Error('Codex managed read-only file content changed after verification.');
-    }
-    return {
-      canonicalPath,
-      contentSha256: file.contentSha256
-    };
-  }));
-  const files = [...verifiedFiles].sort((left, right) =>
-    compareCodeUnits(left.canonicalPath, right.canonicalPath)
-  );
   const filesystemEntries = [
     { path: ':minimal', access: 'read' as const },
-    ...roots.map((candidate) => ({ path: candidate, access: 'read' as const })),
-    ...files.map((file) => ({ path: file.canonicalPath, access: 'read' as const }))
+    ...roots.map((candidate) => ({ path: candidate, access: 'read' as const }))
   ];
   const encodedPathBytes = filesystemEntries.reduce(
     (total, entry) => total + Buffer.byteLength(entry.path, 'utf8'),
@@ -117,19 +85,20 @@ export async function codexReadOnlyScopeProfile(input: {
     formatVersion: 1,
     primaryCwd,
     filesystemEntries,
-    managedFileDigests: files,
     network: { enabled: false },
     features,
     webSearch: 'disabled',
     approvalPolicy: 'never',
     approvalsReviewer: 'user'
   };
-  const scopeHash = crypto.createHash('sha256').update(JSON.stringify(scopeDescriptor)).digest('hex');
+  const scopeHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(scopeDescriptor))
+    .digest('hex');
   const sessionHash = crypto.createHash('sha256').update(input.sessionId).digest('hex').slice(0, 12);
   const profileId = `${PROFILE_PREFIX}${sessionHash}_${scopeHash.slice(0, 24)}`;
   const filesystem: Record<string, 'read'> = { ':minimal': 'read' };
   for (const candidate of roots) filesystem[candidate] = 'read';
-  for (const file of files) filesystem[file.canonicalPath] = 'read';
   return {
     profileId,
     scopeHash,
@@ -151,8 +120,8 @@ export async function codexReadOnlyScopeProfile(input: {
 }
 
 /**
- * Builds a complete, collision-resistant profile in the thread-local config
- * layer. Restricted profiles deny every path that is not listed here.
+ * Builds a complete, collision-resistant restricted profile, or selects
+ * Codex's documented unrestricted built-in for Full access.
  */
 export function codexPermissionProfileConfig(input: {
   sessionId: string;
@@ -183,20 +152,25 @@ export function codexPermissionProfileConfig(input: {
     filesystem[attachmentPath] = 'read';
   }
 
-  const profileId = codexPermissionProfileId(input.sessionId);
+  const profileId = codexPermissionProfileId(input.sessionId, input.settings.sandbox);
   return {
     ...(input.settings.reasoningEffort
       ? { model_reasoning_effort: input.settings.reasoningEffort }
       : {}),
     default_permissions: profileId,
-    permissions: {
-      [profileId]: {
-        filesystem,
-        network: {
-          enabled: attachmentPaths.length === 0 && input.settings.networkAccess === true
-        }
-      }
-    },
+    ...(input.settings.sandbox === 'DANGER_FULL_ACCESS'
+      ? {}
+      : {
+          permissions: {
+            [profileId]: {
+              filesystem,
+              network: {
+                enabled:
+                  attachmentPaths.length === 0 && input.settings.networkAccess === true
+              }
+            }
+          }
+        }),
     features: {
       multi_agent: false,
       multi_agent_v2: false,
@@ -205,23 +179,19 @@ export function codexPermissionProfileConfig(input: {
   };
 }
 
-export function codexPermissionProfileHash(
-  config: Record<string, JsonValue>
-): string {
-  return crypto
-    .createHash('sha256')
-    .update(stableJson(config))
-    .digest('hex');
+export function codexPermissionProfileHash(config: Record<string, JsonValue>): string {
+  return crypto.createHash('sha256').update(stableJson(config)).digest('hex');
 }
 
 export function assertCodexPermissionProfileEvidence(input: {
   sessionId: string;
+  sandbox: AgentExecutionSettings['sandbox'];
   worktreePath: string;
   response: CodexPermissionProfileEvidence;
 }): void {
-  const expectedProfileId = codexPermissionProfileId(input.sessionId);
+  const expectedProfileId = codexPermissionProfileId(input.sessionId, input.sandbox);
   const active = input.response.activePermissionProfile;
-  if (!active || active.id !== expectedProfileId || active.extends !== null) {
+  if (!active || active.id !== expectedProfileId || active.extends != null) {
     throw new Error('Codex did not attest the Task Monki permission profile.');
   }
 
@@ -230,10 +200,28 @@ export function assertCodexPermissionProfileEvidence(input: {
   }
   const expectedWorktree = path.resolve(input.worktreePath);
   const roots = input.response.runtimeWorkspaceRoots.map((root) =>
-    typeof root === 'string' && path.isAbsolute(root) ? path.resolve(root) : ''
+    typeof root === 'string' ? path.resolve(root) : ''
   );
   if (roots.length !== 1 || !isSamePath(roots[0] ?? '', expectedWorktree)) {
     throw new Error('Codex reported unexpected runtime workspace roots.');
+  }
+}
+
+export function assertCodexActivePermissionProfile(
+  sessionId: string,
+  sandbox: AgentExecutionSettings['sandbox'],
+  active: CodexPermissionProfileEvidence['activePermissionProfile']
+): void {
+  const expectedProfileId = codexPermissionProfileId(sessionId, sandbox);
+  assertCodexActivePermissionProfileId(expectedProfileId, active);
+}
+
+export function assertCodexActivePermissionProfileId(
+  expectedProfileId: string,
+  active: CodexPermissionProfileEvidence['activePermissionProfile']
+): void {
+  if (!active || active.id !== expectedProfileId || active.extends != null) {
+    throw new Error('Codex changed or removed the Task Monki permission profile.');
   }
 }
 
@@ -246,7 +234,7 @@ export function assertCodexReadOnlyScopeEvidence(input: {
     throw new Error('Codex primary workspace evidence must be absolute.');
   }
   const active = input.response.activePermissionProfile;
-  if (!active || active.id !== input.profileId || active.extends !== null) {
+  if (!active || active.id !== input.profileId || active.extends != null) {
     throw new Error('Codex did not attest the exact Task Monki read-only permission scope.');
   }
   if (!Array.isArray(input.response.runtimeWorkspaceRoots)) {
@@ -255,10 +243,7 @@ export function assertCodexReadOnlyScopeEvidence(input: {
   const roots = input.response.runtimeWorkspaceRoots.map((candidate) =>
     typeof candidate === 'string' && path.isAbsolute(candidate) ? path.resolve(candidate) : ''
   );
-  if (
-    roots.length !== 1 ||
-    !isSamePath(roots[0] ?? '', path.resolve(input.primaryCwd))
-  ) {
+  if (roots.length !== 1 || !isSamePath(roots[0] ?? '', path.resolve(input.primaryCwd))) {
     throw new Error('Codex reported unexpected runtime workspace roots.');
   }
   if (
@@ -284,23 +269,6 @@ export function assertCodexReadOnlyScopeEvidence(input: {
   }
   if (input.response.approvalsReviewer !== 'user') {
     throw new Error('Codex did not attest the required approval reviewer.');
-  }
-}
-
-export function assertCodexActivePermissionProfile(
-  sessionId: string,
-  active: CodexPermissionProfileEvidence['activePermissionProfile']
-): void {
-  const expectedProfileId = codexPermissionProfileId(sessionId);
-  assertCodexActivePermissionProfileId(expectedProfileId, active);
-}
-
-export function assertCodexActivePermissionProfileId(
-  expectedProfileId: string,
-  active: CodexPermissionProfileEvidence['activePermissionProfile']
-): void {
-  if (!active || active.id !== expectedProfileId || active.extends !== null) {
-    throw new Error('Codex changed or removed the Task Monki permission profile.');
   }
 }
 
@@ -336,29 +304,13 @@ async function requireCanonicalDirectory(candidate: string, label: string): Prom
   return canonical;
 }
 
-async function requireCanonicalRegularFile(candidate: string, label: string): Promise<string> {
-  const resolved = requireNarrowAbsolute(candidate, label);
-  const canonical = await fs.realpath(resolved).catch(() => {
-    throw new Error(`Codex ${label} must be an existing canonical regular file.`);
-  });
-  const stat = await fs.lstat(resolved);
-  if (stat.isSymbolicLink() || !stat.isFile() || !isSamePath(resolved, canonical)) {
-    throw new Error(`Codex ${label} must be an existing canonical regular file.`);
-  }
-  return canonical;
-}
-
 function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function stableJson(value: JsonValue): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(',')}]`;
-  }
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   return `{${Object.keys(value)
     .sort(compareCodeUnits)
     .map((key) => `${JSON.stringify(key)}:${stableJson(value[key]!)}`)

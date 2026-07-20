@@ -89,6 +89,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   draftAutosaveRef.current ??= new DiscourseDraftAutosaveCoordinator();
   const draftAutosave = draftAutosaveRef.current;
   const conversationLoadGeneration = useRef(0);
+  const selectedConversationIdRef = useRef<string | undefined>(undefined);
 
   const refreshSummaries = useCallback(async () => {
     const next = await listDiscourseConversationSnapshot(taskManagerApi);
@@ -176,6 +177,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setCatalog(nextCatalog);
       if (summaries.length > 0) {
         const first = summaries.find((conversation) => conversation.status === 'OPEN') ?? summaries[0];
+        selectedConversationIdRef.current = first?.id;
         setSelectedConversationId(first?.id);
       } else {
         setNewConversation(true);
@@ -210,6 +212,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   }, [loadConversation, onError, selectedConversationId]);
 
   useEffect(() => taskManagerApi.onUpdate((event) => {
+    if (event.type === 'runtime.updated') {
+      void taskManagerApi.getDiscourseMentionCatalog()
+        .then(setCatalog)
+        .catch((error) => onError(error, 'Could not refresh agent availability.'));
+      return;
+    }
     if (event.scope.kind !== 'DISCOURSE') return;
     if (event.type === 'discourse.delta') {
       const payload = event.payload as {
@@ -229,12 +237,13 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     void refreshSummaries().catch((error) =>
       onError(error, 'Could not refresh Discourse conversations.')
     );
-    if (event.scope.conversationId === selectedConversationId) {
-      void loadConversation(selectedConversationId, true).catch((error) =>
+    const activeConversationId = selectedConversationIdRef.current;
+    if (event.scope.conversationId === activeConversationId) {
+      void loadConversation(activeConversationId, true).catch((error) =>
         onError(error, 'Could not refresh the conversation.')
       );
     }
-  }), [loadConversation, onError, refreshSummaries, selectedConversationId]);
+  }), [loadConversation, onError, refreshSummaries]);
 
   useEffect(() => {
     const compactLayout = window.matchMedia('(max-width: 1180px)');
@@ -332,9 +341,20 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     .filter((token) => token.kind === 'AGENT')
     .map((token) => token.entityId)
     .filter(isBuiltInAgentProfileId);
-  const responseReady = responsePolicy === 'NONE' || responsePolicy === 'TEAM' ||
+  const availableAgentProfileIds = new Set(
+    catalog?.agents
+      .filter((entry) => entry.availability === 'AVAILABLE')
+      .map((entry) => entry.profile.id) ?? []
+  );
+  const teamReady = (['builtin.lead', 'builtin.skeptic', 'builtin.verifier'] as const)
+    .every((profileId) => availableAgentProfileIds.has(profileId));
+  const selectedAgentsReady = selectedAgentProfileIds.every((profileId) =>
+    availableAgentProfileIds.has(profileId)
+  );
+  const responseReady = responsePolicy === 'NONE' || (responsePolicy === 'TEAM' && teamReady) ||
     (responsePolicy === 'DIRECT' && selectedAgentProfileIds.length === 1) ||
     (responsePolicy === 'PANEL' && selectedAgentProfileIds.length >= 2 && selectedAgentProfileIds.length <= 3);
+  const safeResponseReady = responseReady && selectedAgentsReady;
 
   const updateComposer = (next: DiscourseComposerMentionState) => {
     setComposer(next);
@@ -434,6 +454,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const selectConversation = (conversationId: string) => {
     conversationLoadGeneration.current += 1;
+    selectedConversationIdRef.current = conversationId;
     setNewConversation(false);
     setSelectedConversationId(conversationId);
     setPreview(undefined);
@@ -442,6 +463,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const startNewConversation = () => {
     conversationLoadGeneration.current += 1;
+    selectedConversationIdRef.current = undefined;
     setSelectedConversationId(undefined);
     setNewConversation(true);
     setAggregate(undefined);
@@ -463,6 +485,10 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       : responsePolicy === 'NONE'
         ? []
         : explicitlySelectedAgents;
+    if (responsePolicy === 'TEAM' && !teamReady) {
+      onNotify('Team responses require all three agents to be available.', 'info');
+      return;
+    }
     if (responsePolicy === 'DIRECT' && agentProfileIds.length !== 1) {
       onNotify('Choose one agent for a Direct response.', 'info');
       return;
@@ -472,6 +498,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       return;
     }
     setSending(true);
+    const sentPolicy = responsePolicy;
     try {
       let conversationId = selectedConversationId;
       if (!conversationId) {
@@ -482,6 +509,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           clientOperationId: crypto.randomUUID()
         });
         conversationId = created.id;
+        selectedConversationIdRef.current = created.id;
         setSelectedConversationId(created.id);
         setNewConversation(false);
       }
@@ -525,6 +553,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setComposer(createDiscourseComposerMentionState());
       setComposerVersion((value) => value + 1);
       await Promise.all([refreshSummaries(), loadConversation(conversationId)]);
+      setResponsePolicy(sentPolicy);
       onNotify(responsePolicy === 'NONE' ? 'Message added.' : 'Response queued.', 'success');
     } catch (error) {
       onError(error, 'Could not send the message.');
@@ -1058,10 +1087,10 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                       <option value="NONE">No agents</option>
                       <option value="DIRECT">Direct</option>
                       <option value="PANEL">Panel</option>
-                      <option value="TEAM">Team</option>
+                      <option value="TEAM" disabled={!teamReady}>Team</option>
                     </select>
                   </label>
-                  <small>{responsePolicyDetail(responsePolicy, selectedAgentProfileIds.length)}</small>
+                  <small>{responsePolicyDetail(responsePolicy, selectedAgentProfileIds.length, teamReady)}</small>
                 </span>
               </div>
               <div className="tm-discourse-composer__buttons">
@@ -1076,8 +1105,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 <button
                   type="button"
                   className="tm-discourse-send"
-                  disabled={!composer.text.trim() || !responseReady || sending || aggregate?.conversation.status === 'ARCHIVED'}
-                  title={!responseReady ? responsePolicyRequirement(responsePolicy) : undefined}
+                  disabled={!composer.text.trim() || !safeResponseReady || sending || aggregate?.conversation.status === 'ARCHIVED'}
+                  title={!safeResponseReady ? responsePolicyRequirement(responsePolicy, teamReady) : undefined}
                   onClick={() => void send()}
                 >
                   {sending ? 'Sending…' : 'Send'}
@@ -1274,8 +1303,14 @@ function DiscourseResponseGroup({
                     ? <small>{discourseConcernResolutionLabel(concern)}</small>
                     : null}
               </summary>
-              <p>{concern.reason}</p>
-              <small>{concern.suggestedResolution}</small>
+              <div className="tm-discourse-response__concern-meta">
+                <span>{capitalize(concern.category)}</span>
+                <span>{capitalize(concern.evidenceStatus.replaceAll('_', ' '))}</span>
+                <span>{capitalize(concern.confidence)} confidence</span>
+              </div>
+              <p><strong>Why it matters</strong>{concern.reason}</p>
+              <p><strong>Evidence</strong>{concern.evidence}</p>
+              <p><strong>Suggested resolution</strong>{concern.suggestedResolution}</p>
             </details>
           ))}
         </div>
@@ -1514,7 +1549,11 @@ function responsePolicyLabel(policy: DiscourseDefaultPolicy | DiscourseWavePolic
   }
 }
 
-function responsePolicyDetail(policy: DiscourseDefaultPolicy, selectedAgents: number): string {
+function responsePolicyDetail(
+  policy: DiscourseDefaultPolicy,
+  selectedAgents: number,
+  teamReady: boolean
+): string {
   switch (policy) {
     case 'NONE': return 'Human note · 0 agent turns';
     case 'DIRECT': return selectedAgents === 1
@@ -1523,16 +1562,20 @@ function responsePolicyDetail(policy: DiscourseDefaultPolicy, selectedAgents: nu
     case 'PANEL': return selectedAgents >= 2 && selectedAgents <= 3
       ? `${selectedAgents} independent agents · ${selectedAgents} turns`
       : 'Choose two or three agents with @';
-    case 'TEAM': return 'Lead + 2 reviews + optional correction · up to 4 turns';
+    case 'TEAM': return teamReady
+      ? 'Lead + 2 reviews + optional correction · up to 4 turns'
+      : 'Team needs all three agents available';
   }
 }
 
-function responsePolicyRequirement(policy: DiscourseDefaultPolicy): string {
+function responsePolicyRequirement(policy: DiscourseDefaultPolicy, teamReady: boolean): string {
   return policy === 'DIRECT'
     ? 'Choose one agent with @.'
     : policy === 'PANEL'
       ? 'Choose two or three agents with @.'
-      : '';
+      : policy === 'TEAM' && !teamReady
+        ? 'Team responses require all three agents to be available.'
+        : '';
 }
 
 function responsePolicyDescription(policy: DiscourseDefaultPolicy): string {

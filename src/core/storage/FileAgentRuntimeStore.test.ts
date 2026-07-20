@@ -21,7 +21,7 @@ describe('FileAgentRuntimeStore', () => {
   it('owns App Server lifecycle and bounded protocol evidence outside task storage', async () => {
     const fixture = await storeFixture();
     const server = await fixture.store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: '/usr/local/bin/codex',
@@ -133,7 +133,7 @@ describe('FileAgentRuntimeStore', () => {
     const firstSession = await fixture.store.createSession(sessionRequest);
     expect(await fixture.store.createSession(sessionRequest)).toEqual(firstSession);
     await expect(
-      fixture.store.createSession({ ...sessionRequest, provider: 'another-provider' })
+      fixture.store.createSession({ ...sessionRequest, runtimeId: 'another-runtime' })
     ).rejects.toThrow('does not match its access epoch');
 
     const request = runInput('run-1', firstSession, taskScope, 'run-operation');
@@ -778,14 +778,14 @@ function sessionInput(
       owner,
       sessionId: id,
       epoch: 1,
-      providerId: 'codex',
+      runtimeId: 'codex',
       model: 'gpt-test',
       executionContext: context,
       createdAt: '2026-07-13T00:00:00.000Z'
     }),
     executionContext: context,
     clientOperationId,
-    provider: 'codex',
+    runtimeId: 'codex',
     role: 'PRIMARY',
     relationshipState: 'ROOT',
     status: 'NOT_MATERIALIZED',

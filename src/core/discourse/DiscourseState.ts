@@ -489,6 +489,13 @@ export function assertDiscourseMessageAppend(input: {
     if (target.author.kind !== message.author.kind) {
       throw new Error('A discourse correction cannot change the author kind.');
     }
+    if (
+      target.author.kind === 'AGENT' &&
+      message.author.kind === 'AGENT' &&
+      target.author.stableParticipantId !== message.author.stableParticipantId
+    ) {
+      throw new Error('A discourse correction cannot change the agent identity.');
+    }
   }
 }
 

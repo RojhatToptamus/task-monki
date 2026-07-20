@@ -35,7 +35,12 @@ describe('discourse renderer model', () => {
     expect(candidates).toMatchObject([
       { kind: 'AGENT', id: 'builtin.lead', description: 'Lead · gpt-test' },
       { kind: 'TASK', id: 'task-1', description: '#task-1 · task-monki · in progress' },
-      { kind: 'REPOSITORY', id: 'repository-1', recentOrdinal: 1 }
+      {
+        kind: 'REPOSITORY',
+        id: 'repository-1',
+        description: '…/src/task-monki · 1 task · read-only files',
+        recentOrdinal: 1
+      }
     ]);
   });
 
@@ -122,11 +127,12 @@ describe('discourse renderer model', () => {
     expect(visibleDiscourseResponseWaves({ waves: [failed, complete] }).map(({ id }) => id))
       .toEqual(['failed-1']);
     expect([
+      discourseJobStatusLabel('QUEUED'),
       discourseJobStatusLabel('COMPLETED'),
       discourseJobStatusLabel('FAILED'),
       discourseJobStatusLabel('CANCELED'),
       discourseJobStatusLabel('CONTEXT_STALE')
-    ]).toEqual(['Completed', 'Failed', 'Canceled', 'Context changed']);
+    ]).toEqual(['Waiting to start', 'Completed', 'Failed', 'Canceled', 'Context changed']);
   });
 
   it('shows explicit review failure, cancellation, and stale-context receipts', () => {
@@ -148,6 +154,26 @@ describe('discourse renderer model', () => {
       .toBe("Verifier's review was canceled.");
     expect(discourseTerminalJobDetail([agentJob('CONTEXT_STALE', 'ANSWER')]))
       .toBe("Verifier's response used changed context and was not accepted.");
+  });
+
+  it('keeps provider diagnostics out of the normal conversation receipt', () => {
+    const failed = {
+      ...agentJob('FAILED', 'ANSWER'),
+      error: {
+        code: 'PROVIDER_UNAVAILABLE',
+        message: 'Model provider codex not found: upstream-internal-id',
+        detail: '{"rawProviderResponse":{"secret":"internal"}}',
+        category: 'PROVIDER',
+        retryable: true
+      }
+    } as DiscourseAgentJobRecord;
+
+    const detail = discourseTerminalJobDetail([failed]);
+    expect(detail).toBe(
+      'The selected agent is unavailable. Check its connection in Settings, then try again.'
+    );
+    expect(detail).not.toContain('codex');
+    expect(detail).not.toContain('rawProviderResponse');
   });
 
   it.each([
@@ -226,14 +252,17 @@ function catalog(): DiscourseMentionCatalogSnapshot {
         id: 'builtin.lead',
         displayName: 'Lead',
         roleTemplate: 'LEAD',
-        providerId: 'codex',
         defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT',
         defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT',
         roleContractVersion: 1,
         revision: 1
       },
       availability: 'AVAILABLE',
-      resolvedSettings: { model: 'gpt-test', modelProvider: 'openai' }
+      resolvedSettings: {
+        runtimeId: 'codex',
+        model: 'gpt-test',
+        modelProvider: 'openai'
+      }
     }],
     tasks: [{
       id: 'task-1',

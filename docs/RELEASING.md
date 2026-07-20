@@ -68,6 +68,11 @@ CPU architecture:
 npm run verify:packaged-runtime
 ```
 
+The packaged-runtime check also inspects `app.asar`: the Electron main entry
+point must be present, while `dist-tools`, `dist-electron/dev`, and `src/dev`
+must be absent. Development seed, API, and provider-smoke programs compile to
+the ignored `dist-tools/` tree and are never part of a production package.
+
 This runs Electron in its supported Node mode and checks the reported Electron
 version, operating system, and architecture. The release workflow runs the
 same smoke test on native macOS, Windows, and Linux runners after packaging and
@@ -122,10 +127,11 @@ Smoke test only against a throwaway local Git repository:
 
 1. Launch the unpacked app.
 2. Confirm the renderer loads.
-3. Open Settings and confirm Git and Codex CLI report available tool status.
-4. Confirm Auto-detect shows resolved paths and live versions.
+3. Open Settings and confirm Git and at least one configured agent runtime are ready.
+4. Confirm the runtime catalog shows unavailable runtimes independently, with
+   resolved versions or actionable probe failures where supported.
 5. Confirm a custom invalid GitHub CLI path reports `gh` as unavailable without
-   blocking Git or Codex, then reset it to Auto-detect.
+   blocking Git or agent runtimes, then reset it to Auto-detect.
 6. Add the throwaway repository.
 7. Validate the repository.
 8. Create a smoke task and prepare a worktree.

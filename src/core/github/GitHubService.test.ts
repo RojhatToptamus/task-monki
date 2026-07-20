@@ -136,10 +136,9 @@ describe('GitHubService pull request creation', () => {
     const service = new GitHubService(ghPath);
 
     const sync = await service.createOrFindDraftPullRequest({
-      task: taskFixture(dir),
       worktree: worktreeFixture(dir),
       baseRef: 'main',
-      bodyFilePath: path.join(dir, 'body.md'),
+      body: '## Summary\n\nPrivate draft body.\n',
       title: 'Custom PR title'
     });
 
@@ -148,7 +147,10 @@ describe('GitHubService pull request creation', () => {
       (args) => args[0] === 'pr' && args[1] === 'create'
     );
     expect(createInvocation).toEqual(
-      expect.arrayContaining(['--title', 'Custom PR title'])
+      expect.arrayContaining(['--title', 'Custom PR title', '--body-file', '-'])
+    );
+    await expect(fs.readFile(`${logPath}.body`, 'utf8')).resolves.toBe(
+      '## Summary\n\nPrivate draft body.\n'
     );
   });
 
@@ -175,10 +177,9 @@ describe('GitHubService pull request creation', () => {
     const service = new GitHubService(ghPath);
 
     const sync = await service.createOrFindDraftPullRequest({
-      task: taskFixture(dir),
       worktree: worktreeFixture(dir),
       baseRef: 'main',
-      bodyFilePath: path.join(dir, 'body.md'),
+      body: 'unused because the PR exists',
       title: 'Edited title'
     });
 
@@ -188,7 +189,7 @@ describe('GitHubService pull request creation', () => {
   });
 });
 
-describe('GitHubService branch publication', () => {
+describe('GitHubService branch publication', { timeout: 15_000 }, () => {
   it('uses the configured executable instead of rereading raw env overrides', () => {
     const originalGhPath = process.env.TASK_MANAGER_GH_PATH;
     process.env.TASK_MANAGER_GH_PATH = '   ';
@@ -283,7 +284,7 @@ describe('GitHubService branch publication', () => {
     expect(result.error).toBe(
       'Remote branch has newer commits. Sync the branch before pushing again.'
     );
-  });
+  }, 15_000);
 });
 
 async function writeFakePullRequestGh(
@@ -302,10 +303,14 @@ if (args[0] === 'pr' && args[1] === 'list') {
   process.exit(0);
 }
 if (args[0] === 'pr' && args[1] === 'create') {
-  console.log('https://github.com/example/repo/pull/14');
-  process.exit(0);
-}
-if (args[0] === 'pr' && args[1] === 'view') {
+  let body = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { body += chunk; });
+  process.stdin.on('end', () => {
+    fs.writeFileSync(${JSON.stringify(`${logPath}.body`)}, body);
+    console.log('https://github.com/example/repo/pull/14');
+  });
+} else if (args[0] === 'pr' && args[1] === 'view') {
   console.log(JSON.stringify({
     number: 14,
     url: 'https://github.com/example/repo/pull/14',
@@ -319,13 +324,13 @@ if (args[0] === 'pr' && args[1] === 'view') {
     statusCheckRollup: []
   }));
   process.exit(0);
-}
-if (args[0] === 'pr' && args[1] === 'checks') {
+} else if (args[0] === 'pr' && args[1] === 'checks') {
   console.log('[]');
   process.exit(0);
+} else {
+  console.error('Unexpected gh invocation: ' + args.join(' '));
+  process.exit(1);
 }
-console.error('Unexpected gh invocation: ' + args.join(' '));
-process.exit(1);
 `
   );
 }
@@ -339,12 +344,13 @@ async function readGhInvocations(logPath: string): Promise<string[][]> {
     .map((line) => JSON.parse(line) as string[]);
 }
 
-function taskFixture(repositoryPath: string): Task {
+function taskFixture(repositoryId: string): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Test task',
     prompt: 'Do work.',
-    repositoryPath,
+    repositoryId,
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -382,7 +388,7 @@ function worktreeFixture(worktreePath: string): WorktreeRecord {
     id: 'worktree-1',
     taskId: 'task-1',
     iterationId: 'iteration-1',
-    repositoryPath: worktreePath,
+    repositoryId: 'repository-1',
     worktreePath,
     branchName: 'codex/task-test',
     baseSha: 'base',

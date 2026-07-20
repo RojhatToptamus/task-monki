@@ -12,6 +12,7 @@ import type {
   TaskSnapshot,
   WorktreeRecord
 } from '../../shared/contracts';
+import { getImplementationRetryReason } from '../../shared/contracts';
 
 export function selectTaskRuns(snapshot: TaskSnapshot, taskId: string): RunRecord[] {
   return snapshot.runs
@@ -112,7 +113,11 @@ export function canPrepareWorktree(task: Task): boolean {
 }
 
 export function canCreateDeliveryCommit(task: Task): boolean {
-  return task.projection.worktree === 'PRESENT' && task.projection.git === 'DIRTY';
+  return (
+    task.projection.worktree === 'PRESENT' &&
+    task.projection.git === 'DIRTY' &&
+    !getImplementationRetryReason(task)
+  );
 }
 
 export function canCancelRun(run: RunRecord | undefined): boolean {

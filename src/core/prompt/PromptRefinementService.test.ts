@@ -4,7 +4,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   buildRefinementCommand,
-  PromptRefinementService
+  PromptRefinementService,
+  PromptRefinementTerminationUnconfirmedError
 } from './PromptRefinementService';
 
 describe('PromptRefinementService', () => {
@@ -71,6 +72,25 @@ describe('PromptRefinementService', () => {
     expect(refined.prompt).toContain('Run relevant repository scripts named above');
   });
 
+  it('does not launch another refinement after process termination becomes unconfirmed', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-prompt-'));
+    let launches = 0;
+    const service = new PromptRefinementService(async () => {
+      launches += 1;
+      throw new PromptRefinementTerminationUnconfirmedError(
+        new Error('simulated process-tree failure')
+      );
+    });
+
+    expect((await service.refine(dir, 'first refinement')).source).toBe(
+      'deterministic-fallback'
+    );
+    expect((await service.refine(dir, 'second refinement')).source).toBe(
+      'deterministic-fallback'
+    );
+    expect(launches).toBe(1);
+  });
+
   it('configures the default refinement model with low reasoning and read-only repository access', () => {
     const command = buildRefinementCommand('/tmp/example repo');
 
@@ -82,6 +102,7 @@ describe('PromptRefinementService', () => {
         'exec',
         '--json',
         '--ephemeral',
+        '--skip-git-repo-check',
         '--sandbox',
         'read-only',
         '--cd',

@@ -16,21 +16,21 @@ export function createAgentSessionAccessEpoch(input: {
   owner: AgentOwnerScope;
   sessionId: string;
   epoch: number;
-  providerId: string;
+  runtimeId: string;
   model: string;
   executionContext: AgentExecutionContext;
   createdAt?: string;
 }): AgentSessionAccessEpoch {
   assertAgentOwnerScope(input.owner);
   assertBoundedIdentifier(input.sessionId, 'session id');
-  assertBoundedIdentifier(input.providerId, 'provider id');
+  assertBoundedIdentifier(input.runtimeId, 'runtime id');
   assertBoundedIdentifier(input.model, 'model');
   if (!Number.isSafeInteger(input.epoch) || input.epoch < 1) {
     throw new Error('Agent session access epoch must be a positive integer.');
   }
   const descriptor = normalizedExecutionDescriptor({
     owner: input.owner,
-    providerId: input.providerId,
+    runtimeId: input.runtimeId,
     model: input.model,
     executionContext: input.executionContext
   });
@@ -43,7 +43,7 @@ export function createAgentSessionAccessEpoch(input: {
       .update(stableStringify(descriptor))
       .digest('hex'),
     primaryCwd: descriptor.primaryCwd,
-    providerId: input.providerId,
+    runtimeId: input.runtimeId,
     model: input.model,
     createdAt: requireTimestamp(input.createdAt ?? new Date().toISOString())
   };
@@ -92,7 +92,7 @@ export function assertAccessEpochMatches(input: {
     input.epoch.epoch < 1 ||
     !SHA256.test(input.epoch.executionProfileHash) ||
     !path.isAbsolute(input.epoch.primaryCwd) ||
-    !input.epoch.providerId ||
+    !input.epoch.runtimeId ||
     !input.epoch.model
   ) {
     throw new Error('Agent session access epoch does not match its session owner.');
@@ -107,7 +107,7 @@ export function assertDiscourseExecutionContext(context: AgentExecutionContext):
       conversationId: 'validation-conversation',
       stableParticipantId: 'validation-participant'
     },
-    providerId: 'validation-provider',
+    runtimeId: 'validation-runtime',
     model: 'validation-model',
     executionContext: context
   });
@@ -133,7 +133,7 @@ export function assertDiscourseExecutionContext(context: AgentExecutionContext):
 
 function normalizedExecutionDescriptor(input: {
   owner: AgentOwnerScope;
-  providerId: string;
+  runtimeId: string;
   model: string;
   executionContext: AgentExecutionContext;
 }) {
@@ -219,7 +219,7 @@ function normalizedExecutionDescriptor(input: {
     formatVersion: 1,
     attestation: context.attestation,
     owner: input.owner,
-    providerId: input.providerId,
+    runtimeId: input.runtimeId,
     model: input.model,
     primaryCwd: path.resolve(context.primaryCwd),
     readRoots,

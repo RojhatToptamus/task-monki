@@ -43,7 +43,8 @@ export function assembleDiscoursePrompt(
     (message) => visibleOrdinals.has(message.ordinal) || visibleMessageIds.has(message.id)
   );
   const roleContract = new AgentProfileCatalog().roleContract(
-    input.job.assignment.agentProfileId
+    input.job.assignment.agentProfileId,
+    input.job.assignment.roleContractVersion
   );
   const wave = input.aggregate.waves.find((candidate) => candidate.id === input.job.waveId);
   const targetIds = new Set(input.job.targetMessageIds);

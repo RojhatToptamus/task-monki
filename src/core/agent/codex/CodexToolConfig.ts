@@ -4,6 +4,7 @@ import {
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import { execFilePortable } from '../../process/portableChildProcess';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
 interface CodexMcpServerListEntry {
@@ -46,21 +47,6 @@ export function assertCodexAttachmentExternalToolsDisabled(
   ) {
     throw new Error(
       'Attachments require Codex web search, MCP servers, and apps to be disabled.'
-    );
-  }
-}
-
-export function assertCodexDiscourseExternalToolsDisabled(
-  settings: CodexExternalToolSettings | undefined
-): void {
-  const normalized = normalizeCodexExternalToolSettings(settings);
-  if (
-    normalized.webSearchMode !== 'disabled' ||
-    normalized.mcpServers !== 'disabled' ||
-    normalized.apps !== 'disabled'
-  ) {
-    throw new Error(
-      'Agent discourse requires Codex web search, MCP servers, and apps to be disabled.'
     );
   }
 }
@@ -132,7 +118,10 @@ export async function listDisabledCodexMcpServerConfigOverrides(
 ): Promise<string[]> {
   const { stdout } = await execFilePortable(executable, ['mcp', 'list', '--json'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: CODEX_MCP_LIST_TIMEOUT_MS,
     maxBuffer: 1024 * 1024
   });

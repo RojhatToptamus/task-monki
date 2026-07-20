@@ -1,5 +1,8 @@
 import type {
+  AcceptPreviewRecipeDraftRequest,
   AppUpdateEvent,
+  Board,
+  ApprovePreviewPlanRequest,
   CancelRunRequest,
   ContinueRunRequest,
   BranchPublicationRecord,
@@ -8,23 +11,42 @@ import type {
   CreatePullRequestRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DiscardPreviewRecipeDraftRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
   ExecuteOpenTargetActionRequest,
   GitSnapshotRecord,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   GitHubPreflightRequest,
   GitHubRepositoryRecord,
   InspectOpenTargetRequest,
   OpenTargetActionResult,
   OpenTargetInspection,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
   ReadArtifactRequest,
+  Repository,
+  RepositoryImpact,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
   RunRecord,
   StartRunRequest,
+  StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
   Task,
   TaskManagerApi,
   TaskSnapshot,
   TransitionTaskRequest,
+  StopPreviewRequest,
   WorktreeRecord,
   RefreshEvidenceRequest,
   RefreshGitHubRequest,
@@ -37,7 +59,9 @@ import type {
   StartReviewRequest,
   SteerRunRequest,
   TestExternalToolRequest,
-  UpdateAppSettingsRequest
+  UpdateAgentNativeSessionRequest,
+  UpdateAppSettingsRequest,
+  ValidatePreviewRecipeDraftRequest
 } from '../../shared/contracts';
 import type {
   AttachmentContent,
@@ -46,6 +70,18 @@ import type {
   ReadTaskAttachmentRequest,
   StageTaskAttachmentBatchRequest,
 } from '../../shared/attachments';
+import type {
+  DiscourseConversationAggregateRecord,
+  DiscourseConversationPage,
+  DiscourseConversationRecord,
+  DiscourseContextPreview,
+  DiscourseDraftRecord,
+  DiscourseMentionCatalogSnapshot,
+  DiscourseMessagePage,
+  DiscourseMessageRecord,
+  DiscourseResponseWaveRecord,
+  SendDiscourseMessageResult
+} from '../../shared/discourse';
 
 const apiBase = '';
 const FALLBACK_UPDATE_POLL_INTERVAL_MS = 2_000;
@@ -85,6 +121,7 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
     const event: AppUpdateEvent = {
       type: 'projection.updated',
       scope: { kind: 'APP' },
+      taskId: '__browser_poll__',
       payload: { source: 'fallback-poll' },
       at: new Date().toISOString()
     };
@@ -132,11 +169,37 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
   };
 
   return {
-    getRepositoryCatalog: () => get(baseUrl, '/api/repositories'),
-    selectRepository: (input) => post(baseUrl, '/api/repositories/select', input),
-    addRepository: (input) => post(baseUrl, '/api/repositories/add', input),
-    removeRepository: (input) => post(baseUrl, '/api/repositories/remove', input),
-    relinkRepository: (input) => post(baseUrl, '/api/repositories/relink', input),
+    chooseRepositoryFolder: async () => {
+      const selectedPath = await post<string | null>(baseUrl, '/api/repository/chooseFolder', {});
+      return selectedPath ?? undefined;
+    },
+    addRepository: (path) =>
+      post<Repository>(baseUrl, '/api/repositories', { path }),
+    getRepositoryImpact: (repositoryId) =>
+      get<RepositoryImpact>(baseUrl, `/api/repositories/${encodeURIComponent(repositoryId)}/impact`),
+    disconnectRepository: (input) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(input.repositoryId)}/disconnect`,
+        input
+      ),
+    reconnectRepository: (input) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(input.repositoryId)}/reconnect`,
+        input
+      ),
+    refreshRepository: (repositoryId) =>
+      post<Repository>(
+        baseUrl,
+        `/api/repositories/${encodeURIComponent(repositoryId)}/refresh`,
+        {}
+      ),
+    createBoard: (input) => post<Board>(baseUrl, '/api/boards', input),
+    updateBoard: (input) =>
+      post<Board>(baseUrl, `/api/boards/${encodeURIComponent(input.boardId)}`, input),
+    deleteBoard: (boardId) =>
+      post<void>(baseUrl, `/api/boards/${encodeURIComponent(boardId)}/delete`, {}),
     getAppSettings: () => get(baseUrl, '/api/settings'),
     updateAppSettings: (input: UpdateAppSettingsRequest) =>
       post(baseUrl, '/api/settings', input),
@@ -147,45 +210,78 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<OpenTargetInspection>(baseUrl, '/api/open-target/inspect', input),
     executeOpenTargetAction: (input: ExecuteOpenTargetActionRequest) =>
       post<OpenTargetActionResult>(baseUrl, '/api/open-target/execute', input),
-    getAgentProviderState: () => get(baseUrl, '/api/agent/provider'),
+  getAgentRuntimeCatalog: () => get(baseUrl, '/api/agent/runtimes'),
+    discoverAgentRuntimeModels: (runtimeId) =>
+      post(baseUrl, '/api/agent/runtimes/discover', { runtimeId }),
+    updateAgentNativeSession: (input: UpdateAgentNativeSessionRequest) =>
+      post(baseUrl, '/api/agent/session/native', input),
     listTasks: () => get<TaskSnapshot>(baseUrl, '/api/tasks'),
-    listDiscourseConversations: (input = {}) =>
-      get(baseUrl, `/api/discourse/conversations${queryString(input)}`),
+    listDiscourseConversations: (input = {}) => {
+      const query = new URLSearchParams();
+      if (input.status) query.set('status', input.status);
+      if (input.cursor) query.set('cursor', input.cursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      const suffix = query.size > 0 ? `?${query.toString()}` : '';
+      return get<DiscourseConversationPage>(
+        baseUrl,
+        `/api/discourse/conversations${suffix}`
+      );
+    },
     getDiscourseConversation: (conversationId) =>
-      get(baseUrl, `/api/discourse/conversation${queryString({ conversationId })}`),
-    listDiscourseMessages: (input) =>
-      get(baseUrl, `/api/discourse/messages${queryString(input)}`),
-    getDiscourseMentionCatalog: () => get(baseUrl, '/api/discourse/catalog'),
+      get<DiscourseConversationAggregateRecord>(
+        baseUrl,
+        `/api/discourse/conversations/${encodeURIComponent(conversationId)}`
+      ),
+    listDiscourseMessages: (input) => {
+      const query = new URLSearchParams({ conversationId: input.conversationId });
+      if (input.beforeCursor) query.set('beforeCursor', input.beforeCursor);
+      if (input.limit !== undefined) query.set('limit', String(input.limit));
+      return get<DiscourseMessagePage>(
+        baseUrl,
+        `/api/discourse/messages?${query.toString()}`
+      );
+    },
+    getDiscourseMentionCatalog: () =>
+      get<DiscourseMentionCatalogSnapshot>(baseUrl, '/api/discourse/mentions'),
     createDiscourseConversation: (input) =>
-      post(baseUrl, '/api/discourse/conversations', input),
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations', input),
     appendHumanDiscourseMessage: (input) =>
-      post(baseUrl, '/api/discourse/messages', input),
+      post<DiscourseMessageRecord>(baseUrl, '/api/discourse/messages', input),
     sendDiscourseMessage: (input) =>
-      post(baseUrl, '/api/discourse/messages/send', input),
+      post<SendDiscourseMessageResult>(baseUrl, '/api/discourse/messages/send', input),
     tombstoneDiscourseMessage: (input) =>
-      post(baseUrl, '/api/discourse/messages/tombstone', input),
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/messages/tombstone', input),
     setPinnedDiscourseContext: (input) =>
-      post(baseUrl, '/api/discourse/context/pinned', input),
+      post<DiscourseConversationAggregateRecord>(baseUrl, '/api/discourse/context/pin', input),
     previewDiscourseContext: (input) =>
-      post(baseUrl, '/api/discourse/context/preview', input),
-    saveDiscourseDraft: (input) => post(baseUrl, '/api/discourse/drafts', input),
+      post<DiscourseContextPreview>(baseUrl, '/api/discourse/context/preview', input),
+    saveDiscourseDraft: (input) =>
+      post<DiscourseDraftRecord>(baseUrl, '/api/discourse/drafts', input),
     getDiscourseDraft: (draftId) =>
-      get(baseUrl, `/api/discourse/draft${queryString({ draftId })}`),
-    listDiscourseDrafts: () => get(baseUrl, '/api/discourse/drafts'),
+      get<DiscourseDraftRecord | undefined>(
+        baseUrl,
+        `/api/discourse/drafts/${encodeURIComponent(draftId)}`
+      ),
+    listDiscourseDrafts: () =>
+      get<DiscourseDraftRecord[]>(baseUrl, '/api/discourse/drafts'),
     deleteDiscourseDraft: (input) =>
       post<void>(baseUrl, '/api/discourse/drafts/delete', input),
     renameDiscourseConversation: (input) =>
-      post(baseUrl, '/api/discourse/conversations/rename', input),
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/rename', input),
     setDiscourseConversationRead: (input) =>
-      post(baseUrl, '/api/discourse/conversations/read', input),
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/read', input),
     setDiscourseConversationArchived: (input) =>
-      post(baseUrl, '/api/discourse/conversations/archive', input),
+      post<DiscourseConversationRecord>(baseUrl, '/api/discourse/conversations/archive', input),
     deleteDiscourseConversation: (input) =>
       post<void>(baseUrl, '/api/discourse/conversations/delete', input),
     stopDiscourseWave: (input) =>
-      post(baseUrl, '/api/discourse/waves/stop', input),
+      post<DiscourseResponseWaveRecord>(baseUrl, '/api/discourse/waves/stop', input),
     confirmDiscourseWaveContext: (input) =>
-      post(baseUrl, '/api/discourse/waves/confirm-context', input),
+      post<DiscourseResponseWaveRecord>(
+        baseUrl,
+        '/api/discourse/waves/confirm-context',
+        input
+      ),
     stageTaskAttachmentBatch: (input: StageTaskAttachmentBatchRequest) =>
       post<AttachmentDraftSnapshot>(baseUrl, '/api/attachments/stage-batch', {
         attachments: input.attachments.map((attachment) => ({
@@ -230,6 +326,36 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       post<PullRequestSnapshotRecord>(baseUrl, '/api/github/pr/create', input),
     refreshGitHub: (input: RefreshGitHubRequest) =>
       post<PullRequestSnapshotRecord | undefined>(baseUrl, '/api/github/refresh', input),
+    resolvePreview: (input: ResolvePreviewRequest) =>
+      post<ResolvePreviewResult>(baseUrl, '/api/preview/resolve', input),
+    getPreviewRecipeGeneration: (input: GetPreviewRecipeGenerationRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/get', input),
+    generatePreviewRecipe: (input: GeneratePreviewRecipeRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/generate', input),
+    validatePreviewRecipeDraft: (input: ValidatePreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/validate', input),
+    acceptPreviewRecipeDraft: (input: AcceptPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/accept', input),
+    discardPreviewRecipeDraft: (input: DiscardPreviewRecipeDraftRequest) =>
+      post(baseUrl, '/api/preview/recipe-generation/discard', input),
+    approvePreviewPlan: (input: ApprovePreviewPlanRequest) =>
+      post<PreviewApprovalRecord>(baseUrl, '/api/preview/approve', input),
+    startPreview: (input: StartPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/start', input),
+    stopPreview: (input: StopPreviewRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/stop', input),
+    openPreview: (input: OpenPreviewRequest) =>
+      post<OpenPreviewResult>(baseUrl, '/api/preview/open', input),
+    readPreviewLog: (input: ReadPreviewLogRequest) =>
+      post<ReadPreviewLogResult>(baseUrl, '/api/preview/log/read', input),
+    resetPreviewData: (input: ResetPreviewDataRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/reset-data', input),
+    retryPreviewSetup: (input: RetryPreviewSetupRequest) =>
+      post<PreviewGenerationRecord>(baseUrl, '/api/preview/retry-setup', input),
+    setPreviewLocalAttachmentBinding: (input: SetPreviewLocalAttachmentBindingRequest) =>
+      post(baseUrl, '/api/preview/binding/set', input),
+    deletePreviewLocalAttachmentBinding: (input: DeletePreviewLocalAttachmentBindingRequest) =>
+      post<void>(baseUrl, '/api/preview/binding/delete', input),
     transitionTask: (input: TransitionTaskRequest) =>
       post<Task>(baseUrl, '/api/tasks/transition', input),
     deleteTask: (input: DeleteTaskRequest) =>
@@ -250,17 +376,6 @@ export function createBrowserTaskManagerApi(baseUrl: string): TaskManagerApi {
       };
     }
   };
-}
-
-function queryString(input: object): string {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-    if (value !== undefined && value !== null && value !== '') {
-      query.set(key, String(value));
-    }
-  }
-  const encoded = query.toString();
-  return encoded ? `?${encoded}` : '';
 }
 
 function arrayBufferToBase64(bytes: ArrayBuffer): string {
@@ -333,9 +448,9 @@ async function post<T>(baseUrl: string, path: string, body: unknown): Promise<T>
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  let body: T | { error?: string } | StructuredApiError | undefined;
+  let body: T | StructuredApiError | undefined;
   try {
-    body = (await response.json()) as T | { error?: string } | StructuredApiError;
+    body = (await response.json()) as T | StructuredApiError;
   } catch {
     if (!response.ok) {
       throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
@@ -353,17 +468,7 @@ async function readResponse<T>(response: Response): Promise<T> {
         structured.requestId
       );
     }
-    const legacyMessage =
-      typeof body === 'object' &&
-      body !== null &&
-      'error' in body &&
-      typeof body.error === 'string'
-        ? body.error
-        : undefined;
-    throw new TaskManagerApiError(
-      legacyMessage ?? `HTTP ${response.status}`,
-      response.status
-    );
+    throw new TaskManagerApiError(`HTTP ${response.status}`, response.status);
   }
   return body as T;
 }

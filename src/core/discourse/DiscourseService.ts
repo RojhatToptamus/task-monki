@@ -1,5 +1,5 @@
 import crypto, { randomUUID } from 'node:crypto';
-import type { AgentProviderState, TaskManagerAppSettings } from '../../shared/agent';
+import type { AgentRuntimeCatalog, TaskManagerAppSettings } from '../../shared/agent';
 import type {
   AppendHumanDiscourseMessageRequest,
   AgentAssignmentSnapshot,
@@ -38,7 +38,7 @@ import type {
 } from '../../shared/discourse';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { AgentScopedTurnProvider } from '../agent/AgentScopedTurnProvider';
-import { AgentProfileCatalog } from './AgentProfileCatalog';
+import { AgentProfileCatalog, discourseModelMatches } from './AgentProfileCatalog';
 import type { DiscourseContextSnapshotService } from './DiscourseContextSnapshotService';
 import type { DiscourseContextResolver } from './DiscourseContextResolver';
 import {
@@ -52,7 +52,7 @@ import {
 import type { DiscourseStore } from './DiscourseStore';
 
 export interface DiscourseServiceOptions {
-  getProviderState(): Promise<AgentProviderState> | AgentProviderState;
+  getRuntimeCatalog(): Promise<AgentRuntimeCatalog> | AgentRuntimeCatalog;
   getAppSettings(): Promise<TaskManagerAppSettings> | TaskManagerAppSettings;
   now?: () => string;
   createId?: () => string;
@@ -94,13 +94,15 @@ export class DiscourseService {
   }
 
   async getMentionCatalog(): Promise<DiscourseMentionCatalogSnapshot> {
-    const [providerState, settings, contextCatalog] = await Promise.all([
-      this.options.getProviderState(),
+    const [runtimeCatalog, settings, contextCatalog] = await Promise.all([
+      this.options.getRuntimeCatalog(),
       this.options.getAppSettings(),
       this.context.catalogEntries()
     ]);
-    const agents = this.profiles.list(providerState, {
+    const agents = this.profiles.list(runtimeCatalog, {
+      defaultRuntimeId: settings.defaultRuntimeId,
       defaultModel: settings.defaultModel,
+      defaultModelProvider: settings.defaultModelProvider,
       defaultReasoningEffort: settings.defaultReasoningEffort
     }).profiles;
     return {
@@ -115,12 +117,14 @@ export class DiscourseService {
     input: CreateDiscourseConversationRequest
   ): Promise<DiscourseConversationRecord> {
     const profileIds = validateRoster(input.defaultPolicy, input.participantProfileIds);
-    const [providerState, settings] = await Promise.all([
-      this.options.getProviderState(),
+    const [runtimeCatalog, settings] = await Promise.all([
+      this.options.getRuntimeCatalog(),
       this.options.getAppSettings()
     ]);
-    const catalog = this.profiles.list(providerState, {
+    const catalog = this.profiles.list(runtimeCatalog, {
+      defaultRuntimeId: settings.defaultRuntimeId,
       defaultModel: settings.defaultModel,
+      defaultModelProvider: settings.defaultModelProvider,
       defaultReasoningEffort: settings.defaultReasoningEffort
     });
     const now = this.now();
@@ -147,7 +151,7 @@ export class DiscourseService {
           agentProfileId: profileId,
           profileRevision: entry.profile.revision,
           displayNameSnapshot: entry.profile.displayName,
-          providerId: entry.profile.providerId,
+          runtimeId: resolved?.runtimeId ?? settings.defaultRuntimeId,
           model: resolved?.model ?? 'unavailable',
           modelProvider: resolved?.modelProvider ?? 'openai',
           ...(resolved?.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
@@ -218,12 +222,14 @@ export class DiscourseService {
       throw new Error('An agent discourse response requires a current context preview.');
     }
     let aggregate = await this.store.getConversation(input.conversationId);
-    const [providerState, settings] = await Promise.all([
-      this.options.getProviderState(),
+    const [runtimeCatalog, settings] = await Promise.all([
+      this.options.getRuntimeCatalog(),
       this.options.getAppSettings()
     ]);
-    const catalog = this.profiles.list(providerState, {
+    const catalog = this.profiles.list(runtimeCatalog, {
+      defaultRuntimeId: settings.defaultRuntimeId,
       defaultModel: settings.defaultModel,
+      defaultModelProvider: settings.defaultModelProvider,
       defaultReasoningEffort: settings.defaultReasoningEffort
     });
     const entries = new Map<BuiltInAgentProfileId, AgentProfileCatalogEntry>();
@@ -243,7 +249,7 @@ export class DiscourseService {
         if (!revision) {
           throw new Error(`Discourse participant revision is missing: ${profileId}`);
         }
-        assertParticipantRevisionAvailable(entry, revision, providerState);
+        assertParticipantRevisionAvailable(entry, revision, runtimeCatalog);
       }
     }
     for (const profileId of profileIds) {
@@ -1184,7 +1190,7 @@ export class DiscourseService {
       agentProfileId: profileId,
       profileRevision: entry.profile.revision,
       displayNameSnapshot: entry.profile.displayName,
-      providerId: entry.profile.providerId,
+      runtimeId: entry.resolvedSettings.runtimeId,
       model: entry.resolvedSettings.model,
       modelProvider: entry.resolvedSettings.modelProvider,
       ...(entry.resolvedSettings.reasoningEffort
@@ -1354,6 +1360,7 @@ export class DiscourseService {
     this.events.emit({
       type,
       scope: { kind: 'DISCOURSE', conversationId },
+      taskId: `discourse:${conversationId}`,
       payload,
       at: this.now()
     });
@@ -1370,7 +1377,7 @@ function assignmentFromRevision(
     agentProfileId: revision.agentProfileId,
     profileRevision: revision.profileRevision,
     displayNameSnapshot: revision.displayNameSnapshot,
-    providerId: revision.providerId,
+    runtimeId: revision.runtimeId,
     model: revision.model,
     modelProvider: revision.modelProvider,
     ...(revision.reasoningEffort ? { reasoningEffort: revision.reasoningEffort } : {}),
@@ -1386,21 +1393,19 @@ function assignmentFromRevision(
 function assertParticipantRevisionAvailable(
   entry: AgentProfileCatalogEntry,
   revision: DiscourseParticipantRevisionRecord,
-  providerState: AgentProviderState
+  runtimeCatalog: AgentRuntimeCatalog
 ): void {
   const displayName = entry.profile.displayName;
-  const model = providerState.models.find(
-    (candidate) =>
-      candidate.provider === revision.providerId &&
-      candidate.model === revision.model
+  const model = runtimeCatalog.models.find((candidate) =>
+    discourseModelMatches(candidate, revision)
   );
   if (!model) {
     throw new Error(
       `${displayName} cannot respond because its saved model (${revision.model}) is unavailable. ` +
-      'Refresh Codex models or start a new conversation.'
+      'Refresh agent models or start a new conversation.'
     );
   }
-  const modelProvider = model.provider === 'codex' ? 'openai' : model.provider;
+  const modelProvider = model.modelProvider ?? model.runtimeId;
   if (revision.modelProvider !== modelProvider) {
     throw new Error(
       `${displayName} cannot respond because its saved model provider is no longer valid. ` +

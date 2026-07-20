@@ -72,7 +72,6 @@ export interface AgentProfileRecord {
   id: BuiltInAgentProfileId;
   displayName: string;
   roleTemplate: DiscourseParticipantRole;
-  providerId: string;
   defaultModelPolicy: 'APP_DEFAULT_OR_PROVIDER_DEFAULT';
   defaultReasoningPolicy: 'APP_DEFAULT_OR_MODEL_DEFAULT';
   roleContractVersion: number;
@@ -84,6 +83,7 @@ export interface AgentProfileCatalogEntry {
   availability: 'AVAILABLE' | 'UNAVAILABLE';
   unavailableReason?: string;
   resolvedSettings?: {
+    runtimeId: string;
     model: string;
     modelProvider: string;
     reasoningEffort?: string;
@@ -113,7 +113,7 @@ export interface DiscourseParticipantRevisionRecord {
   agentProfileId: string;
   profileRevision: number;
   displayNameSnapshot: string;
-  providerId: string;
+  runtimeId: string;
   model: string;
   modelProvider: string;
   reasoningEffort?: string;
@@ -132,7 +132,7 @@ export interface AgentAssignmentSnapshot {
   agentProfileId: string;
   profileRevision: number;
   displayNameSnapshot: string;
-  providerId: string;
+  runtimeId: string;
   model: string;
   modelProvider: string;
   reasoningEffort?: string;
@@ -511,7 +511,7 @@ export interface DiscourseSummaryRecord {
   coveredOrdinalStart: number;
   coveredOrdinalEnd: number;
   sourceChecksum: string;
-  providerId: string;
+  runtimeId: string;
   model: string;
   promptVersion: number;
   body: string;

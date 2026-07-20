@@ -69,7 +69,7 @@ describe('AgentRuntimeOwnership', () => {
         owner: taskOwner,
         sessionId: 'session-1',
         epoch: 1,
-        providerId: 'codex',
+        runtimeId: 'codex',
         model: 'another-model',
         executionContext: executionContext(),
         createdAt: '2026-07-13T00:00:00.000Z'
@@ -130,7 +130,7 @@ function epoch(context: AgentExecutionContext) {
     owner: taskOwner,
     sessionId: 'session-1',
     epoch: 1,
-    providerId: 'codex',
+    runtimeId: 'codex',
     model: 'gpt-test',
     executionContext: context,
     createdAt: '2026-07-13T00:00:00.000Z'

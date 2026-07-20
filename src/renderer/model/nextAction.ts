@@ -1,13 +1,22 @@
-import type { CodexReviewGateStatus, Task } from '../../shared/contracts';
+import type {
+  AgentRunStatus,
+  AgentReviewGateStatus,
+  RunRecord,
+  Task
+} from '../../shared/contracts';
+import {
+  getImplementationRetryReason,
+  isImplementationRunMode
+} from '../../shared/contracts';
 import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
 
 /**
- * The single "what should I do next?" answer for a task's Overview. The audit
- * (§04) found this scattered across the header, two card footers, and the rail;
- * this selector centralizes it so one rail panel can render a status sentence
- * plus exactly one recommended (filled) action, with escape hatches demoted to
- * quiet buttons. It decides *which* action leads and *what to say* — the UI owns
- * the click handlers and disabled reasons.
+ * The single "what should I do next?" answer for a task. The audit (§04) found
+ * this scattered across the header, card footers, and Overview rail; this
+ * selector centralizes it so one surface can render a status sentence plus
+ * exactly one recommended action, with escape hatches demoted to quiet buttons.
+ * It decides *which* action leads and *what to say* — the UI owns click handlers
+ * and disabled reasons.
  */
 
 export type NextActionId =
@@ -27,7 +36,7 @@ export interface NextActionChoice {
 export interface NextActionModel {
   /** One sentence answering "where is this task and what's the ask?". */
   sentence: string;
-  /** The recommended action — the page's only filled button (undefined while busy/idle). */
+  /** The recommended action (undefined while busy or idle). */
   primary?: NextActionChoice;
   /** Escape hatches — quiet buttons offered alongside the primary. */
   secondaries: NextActionChoice[];
@@ -35,7 +44,7 @@ export interface NextActionModel {
 
 export interface NextActionInput {
   task: Task;
-  reviewStatus: CodexReviewGateStatus;
+  reviewStatus: AgentReviewGateStatus;
   finishEvidence: FinishEvidenceState;
   requirements: FinishRequirement[];
   /** A completed non-review run exists to review / attach findings to. */
@@ -48,6 +57,17 @@ export interface NextActionInput {
   awaitingMoveToReview: boolean;
   /** An implementation/review run is currently in flight. */
   runInFlight: boolean;
+  /** Current implementation-side run status, used to keep recovery ahead of review. */
+  implementationRunStatus?: AgentRunStatus;
+  /** Provider completed, but Task Monki blocked review after independent evidence checks. */
+  implementationRetryRequired?: boolean;
+}
+
+export function shouldShowOverviewNextAction(
+  reviewPhaseVisible: boolean,
+  awaitingMoveToReview: boolean
+): boolean {
+  return reviewPhaseVisible && !awaitingMoveToReview;
 }
 
 const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };
@@ -69,7 +89,58 @@ function firstUnresolved(requirements: FinishRequirement[]): string | undefined 
 }
 
 function countActionableFindings(task: Task): number {
-  return task.projection.codexReview?.result?.findings?.length ?? 0;
+  return task.projection.agentReview?.result?.findings?.length ?? 0;
+}
+
+export function isActiveNonReviewRun(
+  run: Pick<RunRecord, 'mode' | 'status'>
+): boolean {
+  return (
+    run.mode !== 'REVIEW' &&
+    [
+      'QUEUED',
+      'STARTING',
+      'RUNNING',
+      'AWAITING_APPROVAL',
+      'AWAITING_USER_INPUT',
+      'INTERRUPTING'
+    ].includes(run.status)
+  );
+}
+
+export function isCompletedCurrentImplementationRun(
+  task: Pick<Task, 'currentRunId'>,
+  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
+): boolean {
+  return Boolean(
+    run &&
+      run.id === task.currentRunId &&
+      run.status === 'COMPLETED' &&
+      isImplementationRunMode(run.mode)
+  );
+}
+
+export function findCompletedCurrentImplementationRun(
+  task: Pick<Task, 'currentRunId'>,
+  runs: readonly RunRecord[]
+): RunRecord | undefined {
+  return runs.find((run) => isCompletedCurrentImplementationRun(task, run));
+}
+
+export function isImplementationRetryRequired(
+  task: Pick<Task, 'currentRunId' | 'workflowPhase' | 'projection'>,
+  run: Pick<RunRecord, 'id' | 'mode' | 'status'> | undefined
+): boolean {
+  return (
+    isCompletedCurrentImplementationRun(task, run) &&
+    isImplementationOutcomeBlocked(task)
+  );
+}
+
+export function isImplementationOutcomeBlocked(
+  task: Pick<Task, 'currentRunId' | 'projection'>
+): boolean {
+  return Boolean(getImplementationRetryReason(task));
 }
 
 export function selectNextAction(input: NextActionInput): NextActionModel {
@@ -82,7 +153,9 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     reviewHasActionableFindings,
     canCommit,
     awaitingMoveToReview,
-    runInFlight
+    runInFlight,
+    implementationRunStatus,
+    implementationRetryRequired
   } = input;
 
   if (task.workflowPhase === 'DONE') {
@@ -97,6 +170,24 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
         reviewStatus === 'RUNNING'
           ? 'Reviewing the current diff.'
           : 'The agent is working — follow progress above.',
+      secondaries: []
+    };
+  }
+
+  if (
+    implementationRetryRequired ||
+    (implementationRunStatus &&
+      ['FAILED', 'INTERRUPTED', 'RECOVERY_REQUIRED', 'LOST'].includes(
+        implementationRunStatus
+      ))
+  ) {
+    return {
+      sentence:
+        implementationRetryRequired
+          ? 'The implementation needs another pass — retry or continue before starting review.'
+          : implementationRunStatus === 'FAILED'
+            ? 'The run failed — retry in this session or continue from the current worktree.'
+            : 'The run did not complete — retry or continue before starting review.',
       secondaries: []
     };
   }
@@ -120,6 +211,13 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
       };
     case 'NEEDS_CHANGES':
     case 'INCONCLUSIVE': {
+      if (!hasReviewSource) {
+        return {
+          sentence:
+            'The previous review is historical — complete the current implementation before reviewing again.',
+          secondaries: []
+        };
+      }
       const count = countActionableFindings(task);
       const sentence =
         count > 0
@@ -134,6 +232,13 @@ export function selectNextAction(input: NextActionInput): NextActionModel {
     case 'FAILED':
     case 'CANCELED':
     case 'STALE': {
+      if (!hasReviewSource) {
+        return {
+          sentence:
+            'The previous review is historical — complete the current implementation before reviewing again.',
+          secondaries: []
+        };
+      }
       const staleNote =
         reviewStatus === 'STALE'
           ? 'The diff changed since the last review — re-run it before finishing cleanly.'

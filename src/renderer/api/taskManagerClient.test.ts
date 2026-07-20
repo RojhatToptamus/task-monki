@@ -165,21 +165,96 @@ describe('createBrowserTaskManagerApi settings', () => {
       requestId: 'request-1'
     });
   });
+
+  it('does not reinterpret obsolete flat error responses', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: false,
+          status: 400,
+          json: async () => ({ error: 'obsolete response' })
+        }) as Response
+      )
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(api.getAppSettings()).rejects.toMatchObject({
+      message: 'HTTP 400',
+      status: 400
+    });
+  });
 });
 
-describe('createBrowserTaskManagerApi repository catalog', () => {
+describe('createBrowserTaskManagerApi provider-native session configuration', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it('uses opaque ids and never submits repository paths', async () => {
+  it('uses the narrow typed native-session endpoint', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const result = {
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      runtimeId: 'grok-acp',
+      native: { modes: { currentModeId: 'plan' } },
+      controls: {
+        localSessionId: 'session-1',
+        providerSessionId: 'provider-session-1',
+        revision: 'revision-2',
+        controls: []
+      }
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        return { ok: true, json: async () => result } as Response;
+      })
+    );
+
+    const api = createBrowserTaskManagerApi('');
+    await expect(
+      api.updateAgentNativeSession({
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        runtimeId: 'grok-acp',
+        controlId: 'mode',
+        value: 'plan',
+        revision: 'revision-1'
+      })
+    ).resolves.toEqual(result);
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/session/native',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            taskId: 'task-1',
+            sessionId: 'session-1',
+            runtimeId: 'grok-acp',
+            controlId: 'mode',
+            value: 'plan',
+            revision: 'revision-1'
+          })
+        })
+      }
+    ]);
+  });
+});
+
+describe('createBrowserTaskManagerApi runtime model discovery', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uses a dedicated explicit-discovery endpoint', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const catalog = {
-      revision: 1,
-      defaultRepositoryId: 'repository-1',
-      selectedRepositoryId: 'repository-1',
-      repositories: [],
-      taskAssociations: []
+      runtimes: [],
+      models: [],
+      defaultRuntimeId: 'cursor-agent-acp',
+      refreshedAt: '2026-07-18T00:00:00.000Z'
     };
     vi.stubGlobal(
       'fetch',
@@ -188,32 +263,72 @@ describe('createBrowserTaskManagerApi repository catalog', () => {
         return { ok: true, json: async () => catalog } as Response;
       })
     );
-    const api = createBrowserTaskManagerApi('');
 
-    await api.getRepositoryCatalog();
-    await api.selectRepository({ repositoryId: 'repository-1' });
-    await api.addRepository({ clientMutationId: 'add-repository-0001' });
-    await api.removeRepository({
-      repositoryId: 'repository-1',
-      clientMutationId: 'remove-repository-01'
+    const api = createBrowserTaskManagerApi('');
+    await expect(api.discoverAgentRuntimeModels('cursor-agent-acp')).resolves.toEqual(
+      catalog
+    );
+    expect(calls).toEqual([
+      {
+        url: '/api/agent/runtimes/discover',
+        init: expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ runtimeId: 'cursor-agent-acp' })
+        })
+      }
+    ]);
+  });
+});
+
+describe('createBrowserTaskManagerApi preview contract', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('supports the renderer development server same-origin API proxy', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }) as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createBrowserTaskManagerApi('').resolvePreview({ taskId: 'task-1' });
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/preview/resolve', expect.any(Object));
+  });
+
+  it('uses typed preview operation endpoints rather than accepting an arbitrary URL', async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+        return { ok: true, json: async () => ({}) } as Response;
+      })
+    );
+    const api = createBrowserTaskManagerApi('http://127.0.0.1:3099');
+    await api.resolvePreview({ taskId: 'task-1' });
+    await api.approvePreviewPlan({ taskId: 'task-1', planId: 'plan-1', executionDigest: 'digest' });
+    await api.startPreview({ taskId: 'task-1' });
+    await api.openPreview({ taskId: 'task-1', generationId: 'generation-1', routeId: 'app' });
+    await api.stopPreview({ taskId: 'task-1', generationId: 'generation-1' });
+    await api.readPreviewLog({ taskId: 'task-1', artifactId: 'artifact-1', offset: 0, maxBytes: 65_536 });
+    await api.resetPreviewData({
+      taskId: 'task-1', generationId: 'generation-1', resourceId: 'database', scenarioId: 'full'
     });
-    await api.relinkRepository({
-      repositoryId: 'repository-1',
-      clientMutationId: 'relink-repository-01'
+    await api.retryPreviewSetup({
+      taskId: 'task-1', generationId: 'generation-1', scenarioId: 'full'
     });
 
     expect(calls.map((call) => call.url)).toEqual([
-      '/api/repositories',
-      '/api/repositories/select',
-      '/api/repositories/add',
-      '/api/repositories/remove',
-      '/api/repositories/relink'
+      'http://127.0.0.1:3099/api/preview/resolve',
+      'http://127.0.0.1:3099/api/preview/approve',
+      'http://127.0.0.1:3099/api/preview/start',
+      'http://127.0.0.1:3099/api/preview/open',
+      'http://127.0.0.1:3099/api/preview/stop',
+      'http://127.0.0.1:3099/api/preview/log/read',
+      'http://127.0.0.1:3099/api/preview/reset-data',
+      'http://127.0.0.1:3099/api/preview/retry-setup'
     ]);
-    expect(calls.slice(1).map((call) => String(call.init?.body))).not.toEqual(
-      expect.arrayContaining([expect.stringContaining('/Users/')])
-    );
-    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({
-      repositoryId: 'repository-1'
+    expect(calls[3]?.body).toEqual({
+      taskId: 'task-1',
+      generationId: 'generation-1',
+      routeId: 'app'
     });
   });
 });

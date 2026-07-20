@@ -16,6 +16,7 @@ import type {
   DiscourseComposerToken,
   DiscourseMentionCandidate
 } from './discourseMentions';
+import { repositoryDisplayPath } from './repositories';
 
 export function discourseMentionCandidates(
   catalog: DiscourseMentionCatalogSnapshot,
@@ -30,9 +31,13 @@ export function discourseMentionCandidates(
       id: entry.profile.id,
       label: entry.profile.displayName,
       description: entry.availability === 'AVAILABLE'
-        ? `${roleLabel(entry.profile.roleTemplate)} · ${entry.resolvedSettings?.model ?? entry.profile.providerId}`
+        ? `${roleLabel(entry.profile.roleTemplate)} · ${entry.resolvedSettings?.model ?? 'No model'}`
         : entry.unavailableReason ?? 'Agent unavailable',
-      searchAliases: [entry.profile.roleTemplate, entry.profile.providerId, entry.resolvedSettings?.model ?? ''],
+      searchAliases: [
+        entry.profile.roleTemplate,
+        entry.resolvedSettings?.runtimeId ?? '',
+        entry.resolvedSettings?.model ?? ''
+      ],
       available: entry.availability === 'AVAILABLE',
       recentOrdinal: recentOrder.get(`AGENT:${entry.profile.id}`)
     })),
@@ -49,7 +54,7 @@ export function discourseMentionCandidates(
       kind: 'REPOSITORY',
       id: repository.id,
       label: repository.displayName,
-      description: `${repository.displayPath} · ${repository.taskCount} task${repository.taskCount === 1 ? '' : 's'} · ${accessLabel(repository.accessMode)}`,
+      description: `${repositoryDisplayPath(repository.displayPath)} · ${repository.taskCount} task${repository.taskCount === 1 ? '' : 's'} · ${accessLabel(repository.accessMode)}`,
       searchAliases: [repository.id, repository.displayPath],
       available: repository.availability === 'AVAILABLE',
       recentOrdinal: recentOrder.get(`REPOSITORY:${repository.id}`)
@@ -184,7 +189,7 @@ export function visibleDiscourseResponseWavePlacements(
 
 export function discourseJobStatusLabel(status: DiscourseJobStatus): string {
   switch (status) {
-    case 'QUEUED': return 'Waiting for runtime';
+    case 'QUEUED': return 'Waiting to start';
     case 'RESOLVING_CONTEXT': return 'Preparing context';
     case 'STARTING': return 'Starting response';
     case 'RUNNING': return 'Responding';
@@ -295,8 +300,10 @@ export function discourseTeamCompletionSummary(input: {
 export function discourseTerminalJobDetail(
   jobs: readonly DiscourseAgentJobRecord[]
 ): string | undefined {
-  const failedWithError = jobs.find((job) => job.error)?.error;
-  if (failedWithError) return failedWithError.message;
+  const failedWithError = jobs.find((job) => job.error);
+  if (failedWithError?.error) {
+    return discourseErrorDetail(failedWithError);
+  }
   const terminal = jobs.find((job) =>
     job.status === 'FAILED' || job.status === 'CANCELED' || job.status === 'CONTEXT_STALE'
   );
@@ -311,6 +318,39 @@ export function discourseTerminalJobDetail(
     case 'CANCELED': return `${terminal.assignment.displayNameSnapshot}'s ${work} was canceled.`;
     case 'CONTEXT_STALE': return `${terminal.assignment.displayNameSnapshot}'s ${work} used changed context and was not accepted.`;
     default: return undefined;
+  }
+}
+
+/**
+ * Stored errors keep exact runtime diagnostics for recovery and debugging, but
+ * the normal conversation UI must not expose provider implementation details.
+ * Translate the durable code into stable, actionable product language here.
+ */
+function discourseErrorDetail(job: DiscourseAgentJobRecord): string {
+  switch (job.error!.code) {
+    case 'CONTEXT_UNAVAILABLE':
+      return 'The selected context could not be prepared for this response.';
+    case 'CONTEXT_UNSAFE':
+      return 'The selected context did not pass the read-only safety checks.';
+    case 'CONTEXT_TOO_LARGE':
+      return 'The selected context is too large for this response.';
+    case 'CONTEXT_CHANGED':
+      return 'The selected context changed before this response could be accepted.';
+    case 'PERMISSION_ATTESTATION_FAILED':
+      return 'The selected agent could not confirm the required read-only access policy.';
+    case 'PROVIDER_UNAVAILABLE':
+      return 'The selected agent is unavailable. Check its connection in Settings, then try again.';
+    case 'PROVIDER_INTERACTION_UNSUPPORTED':
+      return 'This response needed an interaction that Discourse does not allow.';
+    case 'DELIVERY_NOT_CONFIRMED':
+    case 'DELIVERY_AMBIGUOUS':
+      return 'Task Monki could not confirm whether this response reached the agent. Stop it before trying again.';
+    case 'INVALID_RESULT':
+      return 'The agent returned a response that could not be used. Try again.';
+    case 'OUTPUT_MISSING':
+      return 'The agent finished without a usable response. Try again.';
+    case 'INTERNAL_FAILURE':
+      return 'Task Monki could not complete this response. Try again.';
   }
 }
 

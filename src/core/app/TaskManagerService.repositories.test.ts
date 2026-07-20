@@ -1,250 +1,131 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { git } from '../git/gitCli';
-import { NodeRepositoryInspector } from '../repository/NodeRepositoryInspector';
-import {
-  AppSettingsStore,
-  MemoryAppSettingsStore,
-  type AppSettingsStorage,
-  type RepositorySettingsMigration
-} from '../settings/AppSettingsStore';
-import type { TaskManagerAppSettings, UpdateAppSettingsRequest } from '../../shared/contracts';
-import { FileRepositoryRegistry } from '../storage/FileRepositoryRegistry';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
 
-describe('TaskManagerService repository catalog', () => {
-  it('migrates default, legacy, and task paths registry-first and preserves a pre-v4 backup', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-repository-migration-'));
-    const defaultPath = await createRepository(root, 'default');
-    const legacyPath = await createRepository(root, 'legacy');
-    const taskPath = await createRepository(root, 'task');
-    const store = new FileTaskStore(path.join(root, 'task-store'));
-    await store.init();
-    const task = await store.createTask({
-      title: 'Existing task',
-      prompt: 'Keep its repository association.',
-      repositoryPath: taskPath
-    });
-    const settingsPath = path.join(root, 'app-settings.json');
-    const legacyRaw = JSON.stringify({
-      schemaVersion: 3,
-      firstLaunchSetupCompleted: true,
-      repositories: {
-        knownPaths: [legacyPath],
-        selectedPath: legacyPath
-      }
-    });
-    await fs.writeFile(settingsPath, legacyRaw, 'utf8');
-    const service = createService(root, defaultPath, store, settingsPath);
+const exec = promisify(execFile);
 
-    await service.init();
-    try {
-      const catalog = await service.getRepositoryCatalog();
-      const settings = await service.getAppSettings();
-      const selected = catalog.repositories.find(
-        (repository) => repository.id === catalog.selectedRepositoryId
-      );
+describe('TaskManagerService repository lifecycle', () => {
+  it('disconnects without deleting task, worktree, or repository evidence', async () => {
+    const harness = await createHarness('disconnect');
+    const repository = await harness.service.addRepository(harness.repositoryPath);
+    const task = await harness.service.createTask({
+      title: 'Preserve repository work',
+      prompt: 'Create an isolated worktree.',
+      repositoryId: repository.id
+    });
+    const worktree = await harness.service.prepareWorktree({ taskId: task.id });
 
-      expect(catalog.repositories).toHaveLength(3);
-      expect(selected?.displayName).toBe('legacy');
-      expect(catalog.repositories.find((repository) => repository.isDefault)?.displayName).toBe(
-        'default'
-      );
-      expect(catalog.taskAssociations).toContainEqual({
-        taskId: task.id,
-        repositoryId: expect.any(String)
-      });
-      expect(settings.repositories.selectedRepositoryId).toBe(catalog.selectedRepositoryId);
-      await expect(fs.readFile(`${settingsPath}.pre-v4-backup`, 'utf8')).resolves.toBe(
-        legacyRaw
-      );
-      await expect(fs.readFile(settingsPath, 'utf8')).resolves.not.toContain('knownPaths');
-    } finally {
-      await service.shutdown();
-    }
+    await expect(harness.service.getRepositoryImpact(repository.id)).resolves.toMatchObject({
+      taskCount: 1,
+      worktreeCount: 1,
+      activeRunCount: 0
+    });
+    await expect(
+      harness.service.disconnectRepository({ repositoryId: repository.id, confirmed: false })
+    ).rejects.toThrow('explicit confirmation');
+
+    const disconnected = await harness.service.disconnectRepository({
+      repositoryId: repository.id,
+      confirmed: true
+    });
+    const snapshot = await harness.store.snapshot();
+    expect(disconnected.status).toBe('DISCONNECTED');
+    expect(snapshot.tasks.find((candidate) => candidate.id === task.id)?.repositoryId).toBe(
+      repository.id
+    );
+    expect(snapshot.worktrees.find((candidate) => candidate.id === worktree.id)).toBeDefined();
+    await expect(fs.access(worktree.worktreePath)).resolves.toBeUndefined();
   }, 20_000);
 
-  it('keeps paths behind trusted host methods and repairs selection after removal', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-repository-api-'));
-    const defaultPath = await createRepository(root, 'default');
-    const secondaryPath = await createRepository(root, 'secondary');
-    const store = new FileTaskStore(path.join(root, 'task-store'));
-    const settingsPath = path.join(root, 'app-settings.json');
-    const service = createService(root, defaultPath, store, settingsPath);
+  it('marks a moved checkout missing and reconnects the same ID at its new path', async () => {
+    const harness = await createHarness('reconnect');
+    const repository = await harness.service.addRepository(harness.repositoryPath);
+    const task = await harness.service.createTask({
+      title: 'Follow moved checkout',
+      prompt: 'Keep repository identity stable.',
+      repositoryId: repository.id
+    });
+    const movedPath = path.join(harness.rootDir, 'repository-moved');
+    await fs.rename(harness.repositoryPath, movedPath);
 
-    await service.init();
-    try {
-      const initial = await service.getRepositoryCatalog();
-      const defaultId = initial.defaultRepositoryId!;
-      await expect(
-        service.createTask({
-          title: 'Forged',
-          prompt: 'Must not accept a renderer path.',
-          repositoryPath: defaultPath
-        } as never)
-      ).rejects.toThrow('valid repository id');
-      await expect(
-        service.selectRepository({ repositoryId: 'forged-repository' })
-      ).rejects.toThrow(/unavailable|Unknown repository/);
-      await expect(
-        service.updateAppSettings({
-          repositories: { selectedRepositoryId: defaultId }
-        } as never)
-      ).rejects.toThrow('repository catalog API');
+    const missing = await harness.service.refreshRepository(repository.id);
+    expect(missing.status).toBe('MISSING');
+    const reconnected = await harness.service.reconnectRepository({
+      repositoryId: repository.id,
+      path: movedPath
+    });
+    expect(reconnected).toMatchObject({
+      id: repository.id,
+      path: await fs.realpath(movedPath),
+      status: 'AVAILABLE'
+    });
+    expect((await harness.store.getTask(task.id))?.repositoryId).toBe(repository.id);
 
-      const added = await service.addRepositoryFromTrustedPath(secondaryPath, {
-        clientMutationId: 'add-secondary-0001'
-      });
-      const secondary = added.repositories.find(
-        (repository) => repository.displayName === 'secondary'
-      )!;
-      expect(added.selectedRepositoryId).toBe(secondary.id);
-
-      const duplicate = await service.addRepositoryFromTrustedPath(secondaryPath, {
-        clientMutationId: 'add-secondary-0002'
-      });
-      expect(duplicate.repositories).toHaveLength(2);
-      expect(duplicate.selectedRepositoryId).toBe(secondary.id);
-
-      const movedPath = path.join(root, 'secondary-moved');
-      await fs.rename(secondaryPath, movedPath);
-      const relinked = await service.relinkRepositoryFromTrustedPath(movedPath, {
-        repositoryId: secondary.id,
-        clientMutationId: 'relink-secondary-01'
-      });
-      expect(relinked.repositories.find((repository) => repository.id === secondary.id)).toMatchObject({
-        displayName: 'secondary-moved',
-        availability: 'AVAILABLE'
-      });
-
-      const created = await service.createTask({
-        title: 'Core resolved task',
-        prompt: 'Resolve the opaque id before storage.',
-        repositoryId: defaultId
-      });
-      expect(created.repositoryPath).toBe(await fs.realpath(defaultPath));
-      await expect(
-        service.removeRepository({
-          repositoryId: defaultId,
-          clientMutationId: 'remove-default-0001'
-        })
-      ).rejects.toThrow('default repository cannot be removed');
-
-      const repaired = await service.removeRepository({
-        repositoryId: secondary.id,
-        clientMutationId: 'remove-secondary-01'
-      });
-      expect(repaired.selectedRepositoryId).toBe(defaultId);
-      await expect(service.getAppSettings()).resolves.toMatchObject({
-        repositories: { selectedRepositoryId: defaultId }
-      });
-    } finally {
-      await service.shutdown();
-    }
+    const worktree = await harness.service.prepareWorktree({ taskId: task.id });
+    expect(worktree.repositoryId).toBe(repository.id);
+    expect(worktree.status).toBe('PRESENT');
   }, 20_000);
 
-  it('retries registry-first add and remove sagas after selection persistence fails', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-repository-saga-'));
-    const defaultPath = await createRepository(root, 'default');
-    const secondaryPath = await createRepository(root, 'secondary');
-    const store = new FileTaskStore(path.join(root, 'task-store'));
-    const settings = new FailOnceSelectionSettings();
-    const service = new TaskManagerService(store, defaultPath, undefined, {
-      appSettingsStore: settings,
-      repositoryRegistry: new FileRepositoryRegistry(
-        path.join(root, 'repository-registry'),
-        new NodeRepositoryInspector()
-      ),
-      agentProviderStartupDisabledReason: 'Repository saga test does not run Codex.'
+  it('blocks disconnect while a repository task has an active run', async () => {
+    const harness = await createHarness('active-run');
+    const repository = await harness.service.addRepository(harness.repositoryPath);
+    const task = await harness.service.createTask({
+      title: 'Active repository run',
+      prompt: 'Do not disconnect this repository yet.',
+      repositoryId: repository.id
+    });
+    const { iteration, worktree } = await harness.store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/active-repository-run',
+      worktreePath: path.join(harness.rootDir, 'pending-worktree'),
+      baseSha: 'base'
+    });
+    const session = await harness.store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex'
+    });
+    await harness.store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
     });
 
-    await service.init();
-    try {
-      settings.failNextSelection = true;
-      await expect(
-        service.addRepositoryFromTrustedPath(secondaryPath, {
-          clientMutationId: 'add-secondary-fail1'
-        })
-      ).rejects.toThrow('injected selection persistence failure');
-
-      const recoveredAdd = await service.addRepositoryFromTrustedPath(secondaryPath, {
-        clientMutationId: 'add-secondary-retry'
-      });
-      expect(recoveredAdd.repositories).toHaveLength(2);
-      const secondaryId = recoveredAdd.selectedRepositoryId!;
-
-      settings.failNextSelection = true;
-      await expect(
-        service.removeRepository({
-          repositoryId: secondaryId,
-          clientMutationId: 'remove-secondary-fail'
-        })
-      ).rejects.toThrow('injected selection persistence failure');
-
-      const recoveredRemove = await service.removeRepository({
-        repositoryId: secondaryId,
-        clientMutationId: 'remove-secondary-retry'
-      });
-      expect(recoveredRemove.repositories).toHaveLength(1);
-      expect(recoveredRemove.selectedRepositoryId).toBe(recoveredRemove.defaultRepositoryId);
-    } finally {
-      await service.shutdown();
-    }
-  }, 20_000);
+    const impact = await harness.service.getRepositoryImpact(repository.id);
+    expect(impact.activeRunCount).toBe(1);
+    expect(impact.blockingReason).toContain('active repository runs');
+    await expect(
+      harness.service.disconnectRepository({ repositoryId: repository.id, confirmed: true })
+    ).rejects.toThrow('active repository runs');
+    expect((await harness.store.getRepository(repository.id))?.status).toBe('AVAILABLE');
+  });
 });
 
-class FailOnceSelectionSettings implements AppSettingsStorage {
-  readonly delegate = new MemoryAppSettingsStore();
-  failNextSelection = false;
-
-  initializeRepositories(_migrate: RepositorySettingsMigration): Promise<void> {
-    return Promise.resolve();
-  }
-
-  get(): Promise<TaskManagerAppSettings> {
-    return this.delegate.get();
-  }
-
-  update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
-    return this.delegate.update(input);
-  }
-
-  setSelectedRepositoryId(repositoryId: string | null): Promise<TaskManagerAppSettings> {
-    if (this.failNextSelection) {
-      this.failNextSelection = false;
-      return Promise.reject(new Error('injected selection persistence failure'));
-    }
-    return this.delegate.setSelectedRepositoryId(repositoryId);
-  }
-}
-
-function createService(
-  root: string,
-  defaultPath: string,
-  store: FileTaskStore,
-  settingsPath: string
-): TaskManagerService {
-  return new TaskManagerService(store, defaultPath, undefined, {
-    appSettingsStore: new AppSettingsStore(settingsPath),
-    repositoryRegistry: new FileRepositoryRegistry(
-      path.join(root, 'repository-registry'),
-      new NodeRepositoryInspector()
-    ),
-    agentProviderStartupDisabledReason: 'Repository catalog test does not run Codex.'
-  });
-}
-
-async function createRepository(root: string, name: string): Promise<string> {
-  const repositoryPath = path.join(root, name);
-  await fs.mkdir(repositoryPath, { recursive: true });
+async function createHarness(name: string) {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-repository-${name}-`));
+  const repositoryPath = path.join(rootDir, 'repository');
+  await fs.mkdir(repositoryPath);
   await git(repositoryPath, ['init']);
-  await git(repositoryPath, ['config', 'user.email', 'task-monki-test@example.invalid']);
-  await git(repositoryPath, ['config', 'user.name', 'Task Monki Test']);
-  await fs.writeFile(path.join(repositoryPath, 'README.md'), `${name}\n`, 'utf8');
+  await git(repositoryPath, ['config', 'user.email', 'task-monki@example.invalid']);
+  await git(repositoryPath, ['config', 'user.name', 'Task Monki']);
+  await fs.writeFile(path.join(repositoryPath, 'README.md'), '# Repository\n');
   await git(repositoryPath, ['add', 'README.md']);
   await git(repositoryPath, ['commit', '-m', 'Initial commit']);
-  return repositoryPath;
+  const store = new FileTaskStore(path.join(rootDir, 'store'));
+  const service = new TaskManagerService(store, repositoryPath, undefined, {
+    worktreeRoot: path.join(rootDir, 'worktrees'),
+    codexPath: 'codex-not-used'
+  });
+  return { rootDir, repositoryPath, store, service };
+}
+
+async function git(cwd: string, argv: string[]): Promise<void> {
+  await exec('git', argv, { cwd });
 }

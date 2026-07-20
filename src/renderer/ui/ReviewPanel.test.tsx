@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type {
-  CodexReviewGateProjection,
+  AgentReviewGateProjection,
   GitSnapshotRecord,
   RunRecord
 } from '../../shared/contracts';
@@ -31,6 +31,7 @@ describe('ReviewPanel', () => {
     expect(html).toContain('Current activity');
     expect(html).toContain('Reading src/renderer/ui/TaskDetail.tsx.');
     expect(html).toContain('Stop');
+    expect(html).not.toContain('tm-reviewcard__activity-dot');
   });
 
   it('renders stale review output as context without duplicating the next action', () => {
@@ -43,7 +44,7 @@ describe('ReviewPanel', () => {
           reviewedDirtyFingerprint: 'fingerprint-old',
           summary: 'Previous review found a blocker.',
           result: {
-            schemaVersion: 'codex-review/v1',
+            schemaVersion: 'agent-review/v1',
             verdict: 'NEEDS_CHANGES',
             summary: 'Previous review found a blocker.',
             findings: [
@@ -70,10 +71,33 @@ describe('ReviewPanel', () => {
     expect(html).toContain('feedface');
     expect(html).toContain('Request can hang');
     expect(html).not.toContain('Run review again');
+    expect(html).toContain('Blocker');
+    expect(html).not.toContain('Major');
+    expect(html).not.toContain('Minor');
+    expect(html).not.toContain('Nit');
+    expect(html).not.toContain('tm-reviewfindings__count--empty');
+  });
+
+  it('keeps the pending review scope without a nested neutral box or empty result row', () => {
+    const html = renderToStaticMarkup(
+      <ReviewPanel
+        reviewGate={{ status: 'NOT_RUN' }}
+        gitSnapshot={gitSnapshotFixture()}
+        actionBusy={false}
+        reviewPending={false}
+        onStopReview={() => {}}
+      />
+    );
+
+    expect(html).toContain('Will review');
+    expect(html).toContain('abc12345 · 3 files · dirty');
+    expect(html).not.toContain('tm-reviewcard__meta--box');
+    expect(html).not.toContain('Last result');
+    expect(html).not.toContain('>none<');
   });
 });
 
-function reviewGateFixture(): CodexReviewGateProjection {
+function reviewGateFixture(): AgentReviewGateProjection {
   return {
     status: 'PASSED',
     runId: 'review-run',
@@ -112,6 +136,7 @@ function gitSnapshotFixture(): GitSnapshotRecord {
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',

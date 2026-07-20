@@ -13,6 +13,7 @@ import { humanizeEnum } from './display';
 
 interface AgentControlPanelProps {
   run?: RunRecord;
+  requiresRecovery?: boolean;
   interactions: InteractionRequestRecord[];
   onSteer(runId: string, instruction: string): Promise<void>;
   onInterrupt(runId: string): Promise<void>;
@@ -26,6 +27,7 @@ interface AgentControlPanelProps {
 
 export function AgentControlPanel({
   run,
+  requiresRecovery = false,
   interactions,
   onSteer,
   onInterrupt,
@@ -42,7 +44,7 @@ export function AgentControlPanel({
 
   const isRunning = run.status === 'RUNNING';
   const { canFollowUp, canContinue, canRetry, continuationLabel, continuationKind } =
-    getPostRunActionState(run);
+    getPostRunActionState(run, requiresRecovery);
   const composerCopy = mode ? getAgentComposerCopy(mode, continuationKind) : undefined;
   const staleInteractions = interactions.filter((interaction) =>
     ['STALE', 'ABORTED_SERVER_LOST'].includes(interaction.status)
@@ -103,7 +105,7 @@ export function AgentControlPanel({
 
       {recoveryVisible ? (
         <div className="recovery-banner" role="status">
-          <strong>Recovery requires review</strong>
+          <strong>Recovery requires action</strong>
           <span>
             {run.terminalReason ??
               'The prior runtime could not prove the final turn state. Git evidence was refreshed independently.'}
@@ -196,10 +198,20 @@ export function AgentControlPanel({
         {canContinue ? (
           <div className="agent-controls__group agent-controls__group--recovery">
             <div className="agent-controls__group-copy">
-              <strong>Unfinished work</strong>
-              <span>Continues from the current worktree state.</span>
+              <strong>{run.status === 'FAILED' ? 'Run failed' : 'Unfinished work'}</strong>
+              <span>Retry in this session or continue from the current worktree state.</span>
             </div>
             <div className="agent-controls__button-row">
+              {canRetry ? (
+                <button
+                  type="button"
+                  className={actionButtonClass('primary-button', mode === 'RETRY_SAME')}
+                  aria-pressed={mode === 'RETRY_SAME'}
+                  onClick={() => setMode('RETRY_SAME')}
+                >
+                  Retry in session
+                </button>
+              ) : null}
               <button
                 type="button"
                 className={actionButtonClass('outline-button', mode === 'CONTINUE')}
@@ -209,24 +221,14 @@ export function AgentControlPanel({
                 {continuationLabel}
               </button>
               {canRetry ? (
-                <>
-                  <button
-                    type="button"
-                    className={actionButtonClass('outline-button', mode === 'RETRY_SAME')}
-                    aria-pressed={mode === 'RETRY_SAME'}
-                    onClick={() => setMode('RETRY_SAME')}
-                  >
-                    Retry in session
-                  </button>
-                  <button
-                    type="button"
-                    className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
-                    aria-pressed={mode === 'RETRY_FORK'}
-                    onClick={() => setMode('RETRY_FORK')}
-                  >
-                    Fork alternative
-                  </button>
-                </>
+                <button
+                  type="button"
+                  className={actionButtonClass('outline-button', mode === 'RETRY_FORK')}
+                  aria-pressed={mode === 'RETRY_FORK'}
+                  onClick={() => setMode('RETRY_FORK')}
+                >
+                  Fork alternative
+                </button>
               ) : null}
             </div>
           </div>

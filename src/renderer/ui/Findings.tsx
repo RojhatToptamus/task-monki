@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { CodexReviewFinding } from '../../shared/contracts';
+import type { AgentReviewFinding } from '../../shared/contracts';
 import type { Tone } from './taskView';
 
 /**
@@ -8,7 +8,7 @@ import type { Tone } from './taskView';
  * severity always looks and sorts the same (audit §06 FindingRow).
  */
 export const FINDING_LEVELS: Array<{
-  severity: CodexReviewFinding['severity'];
+  severity: AgentReviewFinding['severity'];
   label: string;
   tone: Tone;
   rank: number;
@@ -19,7 +19,7 @@ export const FINDING_LEVELS: Array<{
   { severity: 'NIT', label: 'Nit', tone: 'neutral', rank: 3 }
 ];
 
-export function findingLevel(severity: CodexReviewFinding['severity']) {
+export function findingLevel(severity: AgentReviewFinding['severity']) {
   return (
     FINDING_LEVELS.find((candidate) => candidate.severity === severity) ??
     FINDING_LEVELS[FINDING_LEVELS.length - 1]
@@ -27,7 +27,7 @@ export function findingLevel(severity: CodexReviewFinding['severity']) {
 }
 
 /** A short "file:line" reference for a finding, falling back to its location. */
-export function shortFindingRef(finding: CodexReviewFinding): string {
+export function shortFindingRef(finding: AgentReviewFinding): string {
   if (!finding.path) {
     return formatFindingLocation(finding);
   }
@@ -35,7 +35,7 @@ export function shortFindingRef(finding: CodexReviewFinding): string {
   return finding.line ? `${filename}:${finding.line}` : filename;
 }
 
-export function formatFindingLocation(finding: CodexReviewFinding): string {
+export function formatFindingLocation(finding: AgentReviewFinding): string {
   if (!finding.path) {
     return 'location not specified';
   }

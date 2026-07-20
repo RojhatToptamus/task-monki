@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { realpathSync } from 'node:fs';
+import { isAgentProviderPermissionAction } from '../../shared/contracts';
 import type {
   AgentCommandApprovalDecision,
   AgentCommandApprovalRequest,
@@ -20,9 +21,7 @@ import type {
   InteractionRequestType,
   RunRecord
 } from '../../shared/contracts';
-import {
-  isRedactedExternalPathReference
-} from './AgentPermissionRedaction';
+import { isRedactedExternalPathReference } from './AgentPermissionRedaction';
 
 export interface AgentInteractionPolicy {
   allowedActions: AgentInteractionAction[];
@@ -76,7 +75,7 @@ export function buildInteractionPolicy(input: {
       return {
         allowedActions: ['ANSWER'],
         warnings: [
-          'User-input requests are experimental in the current Codex protocol.'
+          'User-input requests are runtime-controlled and may interrupt an active agent turn.'
         ]
       };
     }
@@ -149,7 +148,10 @@ export function validateInteractionDecision(
 export function interactionTerminalStatus(
   decision: AgentInteractionDecision
 ): InteractionRequestRecord['status'] {
-  if (decision.action === 'DECLINE') {
+  if (
+    decision.action === 'DECLINE' ||
+    decision.action === 'DECLINE_FOR_SESSION'
+  ) {
     return 'DECLINED';
   }
   if (decision.action === 'CANCEL') {
@@ -164,6 +166,12 @@ function commandPolicy(
   run: RunRecord
 ): AgentInteractionPolicy {
   const warnings: string[] = [];
+  if (
+    !request.command?.trim() &&
+    (!request.commandActions || request.commandActions.length === 0)
+  ) {
+    warnings.push('Task Monki could not verify the requested command.');
+  }
   if (request.cwd && !isAllowedWorkspacePath(session.worktreePath, request.cwd)) {
     warnings.push('The command working directory is outside the task worktree.');
   }
@@ -257,6 +265,36 @@ function validateCommandDecision(
   request: AgentCommandApprovalRequest,
   decision: AgentCommandApprovalDecision
 ): void {
+  const providerOptionId =
+    'providerOptionId' in decision ? decision.providerOptionId : undefined;
+  if (request.providerOptions !== undefined) {
+    if (decision.action === 'CANCEL') {
+      if (providerOptionId !== undefined) {
+        throw new Error('Cancellation cannot select a provider permission option.');
+      }
+    } else if (!isAgentProviderPermissionAction(decision.action)) {
+      throw new Error(
+        'A provider permission request accepts only an exact provider option or cancellation.'
+      );
+    } else {
+      if (!providerOptionId) {
+        throw new Error('A provider permission decision requires its exact option ID.');
+      }
+      const option = request.providerOptions.find(
+        (candidate) => candidate.id === providerOptionId
+      );
+      if (!option) {
+        throw new Error('The selected provider permission option is not part of this request.');
+      }
+      if (option.action !== decision.action) {
+        throw new Error(
+          'The selected provider permission option does not match the requested decision.'
+        );
+      }
+    }
+  } else if (providerOptionId !== undefined) {
+    throw new Error('This command approval request has no provider permission options.');
+  }
   if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {
     if (!deepEqual(decision.amendment, request.proposedExecPolicyAmendment)) {
       throw new Error('The execution-policy amendment does not match the provider proposal.');

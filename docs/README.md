@@ -1,6 +1,6 @@
 # Task Monki Documentation
 
-Date: 2026-07-13
+Date: 2026-07-14
 
 This folder is the operating context for Task Monki development. It should help
 humans and AI agents understand what is current without reading stale planning
@@ -18,7 +18,7 @@ behavior and architecture, not private roadmap sequencing.
 2. `docs/workflows/PR_STATUS_CARD_FLOW.md`
    - Current PR Status card behavior, GitHub evidence model, action pauses,
      render matrix, and merge/check completion coupling.
-3. `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
+3. `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`
    - Authoritative review workflow lifecycle. Read before touching review,
      follow-up, stale-review, or interrupt behavior.
 4. `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`
@@ -27,17 +27,32 @@ behavior and architecture, not private roadmap sequencing.
 5. `docs/DEV_SEEDING.md`
    - Deterministic local seed data for UI and workflow testing.
 6. `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`
-   - Global human/agent conversation authority, Direct/Panel/Team response
-     policies, context freshness, review/correction, waiting, and recovery.
+   - Global technical conversations, Direct/Panel/Team policy, scoped runtime
+     execution, context freshness, review/correction, cancellation, and recovery.
+7. `docs/PROVIDER_SMOKE_TESTING.md`
+   - Live provider/model verification through TaskManagerService in a clean,
+     remote-free throwaway Git repository.
 
 ### Architecture
 
-1. `docs/APP_SERVER_ARCHITECTURE.md`
+1. `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
+   - Current multi-runtime registry, durable identity, routing, capability,
+     security, recovery, and extension boundaries.
+2. `docs/architecture/PROVIDER_RUNTIME_COMPATIBILITY.md`
+   - Current support tiers, native and ACP runtime matrix, readiness
+     conditions, provider-specific limits, and execution security boundaries.
+3. `docs/architecture/PREVIEW_ARCHITECTURE.md`
+   - Canonical Preview authority, lifecycle, native/Compose runtime, security,
+     ownership, storage, shutdown, and recovery architecture.
+4. `docs/architecture/PREVIEW_RECIPE_GENERATION.md`
+   - Agent-assisted Preview recipe authoring, sanitized repository evidence,
+     structured drafts, review UX, validation, and exact acceptance boundary.
+5. `docs/APP_SERVER_ARCHITECTURE.md`
    - Current Codex App Server integration architecture and responsibility
      boundaries.
-2. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
+6. `docs/architecture/CODEX_PROTOCOL_AND_COUPLING_NOTES.md`
    - Protocol compatibility, generated bindings, and provider-coupling rules.
-3. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
+7. `docs/architecture/ATTACHMENT_LIFECYCLE.md`
    - Current restricted attachment formats (and explicitly unsupported generic
      files/PDFs), composer normalization, durable storage and retry rules,
      Codex delivery, HTTP/Electron trust boundaries, resource limits,
@@ -45,10 +60,13 @@ behavior and architecture, not private roadmap sequencing.
 
 ### User And Maintainer Docs
 
-1. `docs/INSTALL.md`
+1. `docs/PREVIEW_GUIDE.md`
+   - Public Preview workflow, UI actions, recipe reference, native and Compose
+     examples, private inputs, attachments, data effects, and troubleshooting.
+2. `docs/INSTALL.md`
    - User-facing install, prerequisite, unsigned-build, and manual update
      instructions.
-2. `docs/RELEASING.md`
+3. `docs/RELEASING.md`
    - Maintainer workflow for unsigned GitHub Releases.
 
 ### Interface Design
@@ -88,11 +106,11 @@ of:
 
 - Task Monki is authoritative for tasks, workflow phase, worktrees, Git state,
   GitHub delivery, and acceptance.
-- Codex is authoritative only for its own server, thread, turn, item, approval,
-  plan, model, settings, and usage events.
+- Each runtime is authoritative only for its own process, session, turn, item,
+  approval, plan, model, settings, and usage events.
 - Provider reports are useful context, not verified evidence.
 - Git and GitHub evidence must be observed independently by Task Monki.
-- A Codex review is a check inside the Review phase; requested changes are
+- An agent review is a check inside the Review phase; requested changes are
   implementation work and belong in In Progress while they run.
 
 ## Useful commands

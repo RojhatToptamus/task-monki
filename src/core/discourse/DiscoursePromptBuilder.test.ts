@@ -96,6 +96,57 @@ describe('DiscoursePromptBuilder', () => {
       Buffer.byteLength(assembly.prompt, 'utf8')
     );
   });
+
+  it('gives independent Panel profiles complementary versioned decision lenses', () => {
+    const leadAssignment = assignmentFor(
+      'builtin.lead',
+      'lead-1',
+      'Lead',
+      'PANELIST',
+      3
+    );
+    const skepticAssignment = assignmentFor(
+      'builtin.skeptic',
+      'skeptic-1',
+      'Skeptic',
+      'PANELIST',
+      3
+    );
+    const leadJob = jobFor(leadAssignment, 'ANSWER', [], ['trigger']);
+    const skepticJob = jobFor(skepticAssignment, 'ANSWER', [], ['trigger']);
+    const trigger = messageFor(
+      'trigger',
+      1,
+      'Should an ambiguous side effect be retried?',
+      { kind: 'USER' }
+    );
+    const leadAggregate = aggregateFor(leadJob);
+    const skepticAggregate = aggregateFor(skepticJob);
+    leadAggregate.waves[0]!.policy = 'PANEL';
+    skepticAggregate.waves[0]!.policy = 'PANEL';
+
+    const leadPrompt = buildDiscoursePrompt({
+      aggregate: leadAggregate,
+      job: leadJob,
+      snapshot: snapshotFor([1]),
+      messages: [trigger]
+    });
+    const skepticPrompt = buildDiscoursePrompt({
+      aggregate: skepticAggregate,
+      job: skepticJob,
+      snapshot: snapshotFor([1]),
+      messages: [trigger]
+    });
+
+    expect(leadPrompt).toContain('Should an ambiguous side effect be retried?');
+    expect(skepticPrompt).toContain('Should an ambiguous side effect be retried?');
+    expect(leadPrompt).toContain('Make and bound an actionable choice');
+    expect(leadPrompt).toContain('emphasize the operating path');
+    expect(leadPrompt).not.toContain('strongest credible counter-position');
+    expect(skepticPrompt).toContain('strongest credible counter-position');
+    expect(skepticPrompt).toContain('decision-changing caveat');
+    expect(skepticPrompt).not.toContain('emphasize the operating path');
+  });
 });
 
 function totalBudgetBytes(
@@ -114,7 +165,8 @@ function assignmentFor(
   agentProfileId: AgentAssignmentSnapshot['agentProfileId'],
   stableParticipantId: string,
   displayNameSnapshot: string,
-  assignmentRole: AgentAssignmentSnapshot['assignmentRole']
+  assignmentRole: AgentAssignmentSnapshot['assignmentRole'],
+  roleContractVersion = 1
 ): AgentAssignmentSnapshot {
   return {
     stableParticipantId,
@@ -122,11 +174,11 @@ function assignmentFor(
     agentProfileId,
     profileRevision: 1,
     displayNameSnapshot,
-    providerId: 'codex',
+    runtimeId: 'codex',
     model: 'gpt-test',
     modelProvider: 'openai',
     configuredRole: agentProfileId === 'builtin.lead' ? 'LEAD' : 'SKEPTIC',
-    roleContractVersion: 1,
+    roleContractVersion,
     roleContractHash: 'a'.repeat(64),
     assignmentRole,
     required: true

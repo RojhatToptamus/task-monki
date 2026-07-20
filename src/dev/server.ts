@@ -1,11 +1,9 @@
 import path from 'node:path';
 import { TaskManagerService } from '../core/app/TaskManagerService';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
+import { FileTaskStore } from '../core/storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
-import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
-import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
 import {
   createDevApiTokenLease,
   DEFAULT_DEV_API_PORT,
@@ -17,6 +15,7 @@ import {
 } from './devApiSecurity';
 import { createDevHttpServer, type DevHttpServer } from './devHttpServer';
 import { DevProcessLifecycle } from './devProcessLifecycle';
+import { deterministicDevSeedProviderDisabledReason } from './devSeedEnvironment';
 import { chooseRepositoryFolder } from './folderPicker';
 
 const port = parseDevPort(
@@ -35,7 +34,17 @@ const storeDir =
   process.env.TASK_MANAGER_STORE_DIR ?? path.join(defaultDevDataDir, 'dev-store');
 const appSettingsPath =
   process.env.TASK_MANAGER_APP_SETTINGS_PATH ?? path.join(storeDir, 'app-settings.json');
-const inertSeedMode = process.env.TASK_MANAGER_DEV_SEED_MODE === '1';
+const previewRoot =
+  process.env.TASK_MANAGER_PREVIEW_ROOT ?? path.join(storeDir, 'preview-runtime');
+const agentRuntimeDir =
+  process.env.TASK_MANAGER_AGENT_RUNTIME_DIR ?? path.join(storeDir, 'agent-runtime');
+const discourseDir =
+  process.env.TASK_MANAGER_DISCOURSE_DIR ?? path.join(storeDir, 'discourse');
+const discourseWorkspaceRoot =
+  process.env.TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT ??
+  path.join(storeDir, 'discourse-workspaces');
+const agentProviderStartupDisabledReason =
+  deterministicDevSeedProviderDisabledReason(process.env);
 const taskStore = new FileTaskStore(storeDir);
 
 const service = new TaskManagerService(
@@ -44,19 +53,8 @@ const service = new TaskManagerService(
   undefined,
   {
     appSettingsStore: new AppSettingsStore(appSettingsPath),
-    repositoryRegistry: new FileRepositoryRegistry(
-      process.env.TASK_MANAGER_REPOSITORY_REGISTRY_DIR ??
-        path.join(storeDir, 'repository-registry'),
-      new NodeRepositoryInspector()
-    ),
-    agentRuntimeStore: new FileAgentRuntimeStore(
-      process.env.TASK_MANAGER_AGENT_RUNTIME_DIR ??
-        path.join(storeDir, 'agent-runtime')
-    ),
-    discourseStore: new FileDiscourseStore(
-      process.env.TASK_MANAGER_DISCOURSE_DIR ?? path.join(storeDir, 'discourse')
-    ),
-    discourseWorkspaceRoot: path.join(storeDir, 'discourse-workspaces'),
+    previewEnabled: true,
+    previewReconcile: process.env.TASK_MANAGER_PREVIEW_RECONCILE !== '0',
     // A same-user provider process can read ordinary filesystem secrets. Keep
     // the browser-only HTTP development surface unreachable from agent commands
     // by requiring non-escalatable, network-disabled turns. Startup also makes
@@ -64,9 +62,19 @@ const service = new TaskManagerService(
     // external tools are forced off with fail-closed MCP discovery. Packaged
     // Electron uses guarded IPC and does not enable this restriction.
     allowAgentNetworkAccess: false,
-    agentProviderStartupDisabledReason: inertSeedMode
-      ? 'Codex is disabled while deterministic development seed scenarios are loaded. Regenerate or use a normal development store to run agent work.'
-      : undefined
+    agentProviderStartupDisabledReason,
+    agentRuntimeStore: new FileAgentRuntimeStore(
+      agentRuntimeDir
+    ),
+    discourseStore: new FileDiscourseStore(
+      discourseDir
+    ),
+    discourseWorkspaceRoot,
+    previewRoot,
+    previewLauncherPath: path.join(
+      process.cwd(),
+      'src/core/preview/runtime/native-preview-launcher.mjs'
+    )
   }
 );
 const security = {
@@ -103,6 +111,9 @@ async function start(): Promise<void> {
   console.log(`Renderer origin: ${security.expectedOrigin}`);
   console.log(`Store: ${storeDir}`);
   console.log(`Default repository: ${defaultRepositoryPath}`);
+  if (agentProviderStartupDisabledReason) {
+    console.log(`Agent provider: ${agentProviderStartupDisabledReason}`);
+  }
 }
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -116,8 +127,8 @@ async function cleanupResources(): Promise<void> {
   const activeTokenLease = tokenLease;
   devServer = undefined;
   tokenLease = undefined;
-
   const cleanupErrors: unknown[] = [];
+  const serviceCleanup = attemptCleanup(() => service.shutdown(), cleanupErrors);
 
   await attemptCleanup(() => activeTokenLease?.dispose(), cleanupErrors);
   if (activeServer) {
@@ -125,7 +136,7 @@ async function cleanupResources(): Promise<void> {
     await attemptCleanup(() => closeServer(activeServer.server), cleanupErrors);
     await attemptCleanup(() => activeServer.dispose(), cleanupErrors);
   }
-  await attemptCleanup(() => service.shutdown(), cleanupErrors);
+  await serviceCleanup;
 
   if (cleanupErrors.length > 0) {
     throw cleanupErrors[0];

@@ -171,6 +171,33 @@ describe('task activity model', () => {
     expect(overview.items.map((item) => item.title)).toEqual(['Implementation completed']);
   });
 
+  it('shows the Task Monki retry outcome after provider completion', () => {
+    const view = buildOverviewTaskActivityViewModel({
+      task: taskFixture(),
+      events: [
+        event('AGENT_RUN_COMPLETED', {}),
+        event('IMPLEMENTATION_OUTCOME_BLOCKED', {
+          reason: 'A provider execution request was declined and this run produced no Git change.'
+        })
+      ],
+      limit: 10
+    });
+
+    expect(view.items.map((item) => item.title)).toEqual([
+      'Implementation completed',
+      'Implementation needs another pass'
+    ]);
+    expect(view.items[1].evidence).toMatchObject({
+      summary: 'Retry or continue before this task can advance.',
+      rows: [
+        {
+          label: 'Reason',
+          value: expect.stringMatching(/declined.*no Git change/i)
+        }
+      ]
+    });
+  });
+
   it('shows exact failed check evidence and the decision it blocks', () => {
     const view = buildOverviewTaskActivityViewModel({
       task: taskFixture(),
@@ -268,9 +295,9 @@ describe('task activity model', () => {
         event(
           'AGENT_RUN_COMPLETED',
           {
-            codexReviewStatus: 'NEEDS_CHANGES',
-            codexReviewResult: {
-              schemaVersion: 'codex-review/v1',
+            agentReviewStatus: 'NEEDS_CHANGES',
+            agentReviewResult: {
+              schemaVersion: 'agent-review/v1',
               verdict: 'NEEDS_CHANGES',
               summary: 'Needs one fix.',
               findings: [{ id: 'finding-1' }]
@@ -298,7 +325,7 @@ describe('task activity model', () => {
     const task = taskFixture({
       projection: {
         ...createInitialProjection(timeAt(0)),
-        codexReview: {
+        agentReview: {
           status: 'STALE',
           runId: 'review-run',
           reviewedHeadSha: 'abc123456789',
@@ -314,9 +341,9 @@ describe('task activity model', () => {
         event(
           'AGENT_RUN_COMPLETED',
           {
-            codexReviewStatus: 'PASSED',
-            codexReviewResult: {
-              schemaVersion: 'codex-review/v1',
+            agentReviewStatus: 'PASSED',
+            agentReviewResult: {
+              schemaVersion: 'agent-review/v1',
               verdict: 'PASSED',
               summary: 'No issues.',
               findings: []
@@ -540,9 +567,10 @@ function event(
 function taskFixture(input: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Add task activity',
     prompt: 'Build a useful overview history.',
-    repositoryPath: '/repo',
+    repositoryId: '/repo',
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -563,6 +591,7 @@ function run(input: {
 }): RunRecord {
   return {
     id: input.id,
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',

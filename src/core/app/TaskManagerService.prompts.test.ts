@@ -64,7 +64,9 @@ describe('TaskManagerService prompt composition', () => {
     expect(prompt).toContain(
       'Previous provider final summary excerpt (context only, not verified evidence)'
     );
-    expect(prompt).toContain('Continue from the current local state.');
+    expect(
+      prompt.endsWith('Additional user instruction:\nContinue from the current local state.')
+    ).toBe(true);
     await expect(scenario.store.getRun(run.id)).resolves.toMatchObject({
       status: 'INTERRUPTED',
       recoveryState: 'NONE',

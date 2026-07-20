@@ -22,6 +22,7 @@ const DEFAULT_MODEL_CONTEXT_TOKENS = 128_000;
 
 export interface DiscourseReadOnlyExecutionScopeInput {
   sessionId: string;
+  runtimeId: string;
   primaryCwd: string;
   readRoots: AgentAttestedReadRoot[];
   modelSettings: AgentExecutionSettings;
@@ -123,6 +124,7 @@ export class DiscourseContextSnapshotService {
       ? undefined
       : await this.buildExecutionContext({
           sessionId: input.sessionId,
+          runtimeId: input.assignment.runtimeId,
           ...scope,
           clientOperationId: input.clientOperationId
         });
@@ -265,6 +267,7 @@ export class DiscourseContextSnapshotService {
     const scope = await this.executionScope(filesystemRoots, input.assignment);
     const executionContext = await this.buildExecutionContext({
       sessionId: input.sessionId,
+      runtimeId: input.assignment.runtimeId,
       ...scope,
       clientOperationId: input.clientOperationId
     });
@@ -310,22 +313,34 @@ export class DiscourseContextSnapshotService {
     return {
       primaryCwd,
       readRoots,
-      modelSettings: {
-        model: assignment.model,
-        modelProvider: assignment.modelProvider,
-        ...(assignment.reasoningEffort
-          ? { reasoningEffort: assignment.reasoningEffort }
-          : {}),
-        ...(assignment.serviceTier
-          ? { serviceTier: assignment.serviceTier }
-          : {}),
-        sandbox: 'READ_ONLY',
-        networkAccess: false,
-        approvalPolicy: 'NEVER',
-        approvalsReviewer: 'user'
-      }
+      modelSettings: discourseExecutionSettings(assignment)
     };
   }
+}
+
+export function discourseExecutionSettings(
+  assignment: AgentAssignmentSnapshot
+): AgentExecutionSettings {
+  return {
+    model: assignment.model,
+    // Runtime catalogs use the runtime id as the durable identity when a
+    // model does not expose a provider dimension. Passing that fallback back
+    // to the runtime would incorrectly turn `codex` into an explicit App
+    // Server provider name.
+    ...(assignment.modelProvider !== assignment.runtimeId
+      ? { modelProvider: assignment.modelProvider }
+      : {}),
+    ...(assignment.reasoningEffort
+      ? { reasoningEffort: assignment.reasoningEffort }
+      : {}),
+    ...(assignment.serviceTier
+      ? { serviceTier: assignment.serviceTier }
+      : {}),
+    sandbox: 'READ_ONLY',
+    networkAccess: false,
+    approvalPolicy: 'NEVER',
+    approvalsReviewer: 'user'
+  };
 }
 
 function preferredRootByRepository(

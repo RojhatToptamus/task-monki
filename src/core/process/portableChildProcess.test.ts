@@ -1,9 +1,16 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
-import { execFilePortable, prepareProcessCommand, spawnPortable } from './portableChildProcess';
+import {
+  execFilePortable,
+  isPortableProcessTreeRunning,
+  prepareProcessCommand,
+  spawnPortable,
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
+} from './portableChildProcess';
 
 describe('prepareProcessCommand', () => {
   it('keeps normal Unix commands unchanged', () => {
@@ -94,6 +101,124 @@ describe('prepareProcessCommand', () => {
       ).argv.at(-1)
     ).toContain('^^^"space^^^ arg^^^" ^^^"a^^^&b^^^"');
   });
+
+  it('closes stdin for complete noninteractive exec commands', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki exec eof '));
+    const executable = await writeNodeExecutable(
+      directory,
+      'wait-for-eof',
+      [
+        "process.stdin.on('data', () => undefined);",
+        "process.stdin.on('end', () => process.stdout.write('stdin-closed\\n'));",
+        'process.stdin.resume();'
+      ].join('\n')
+    );
+
+    const { stdout } = await execFilePortable(executable, [], {
+      cwd: directory,
+      env: process.env,
+      timeout: 2_000,
+      maxBuffer: 1024 * 1024
+    });
+
+    expect(stdout.trim()).toBe('stdin-closed');
+  });
+
+  it('delivers exact stdin before closing complete commands', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task monki exec stdin '));
+    const executable = await writeNodeExecutable(
+      directory,
+      'read-stdin',
+      [
+        "let input = '';",
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (chunk) => { input += chunk; });",
+        "process.stdin.on('end', () => process.stdout.write(input));"
+      ].join('\n')
+    );
+
+    const { stdout } = await execFilePortable(
+      executable,
+      [],
+      {
+        cwd: directory,
+        env: process.env,
+        timeout: 2_000,
+        maxBuffer: 1024 * 1024
+      },
+      'private body\n'
+    );
+
+    expect(stdout).toBe('private body\n');
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'owns and terminates descendants after a detached leader exits',
+    async () => {
+      const child = spawnPortable(
+        process.execPath,
+        [
+          '-e',
+          [
+            "const { spawn } = require('node:child_process');",
+            "spawn(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: 'ignore' });",
+            "setTimeout(() => process.exit(0), 20);"
+          ].join('\n')
+        ],
+        {
+          stdio: ['ignore', 'ignore', 'ignore'],
+          detached: true
+        }
+      );
+
+      await waitForChildClose(child);
+      expect(isPortableProcessTreeRunning(child)).toBe(true);
+
+      await terminatePortableProcessTree(child, 'SIGTERM');
+      expect(await waitForPortableProcessTreeExit(child, 2_000)).toBe(true);
+    }
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'falls back to the owned leader when process-group signaling is denied',
+    async () => {
+      const child = spawnPortable(
+        process.execPath,
+        ['-e', 'setInterval(() => undefined, 1000)'],
+        {
+          stdio: ['ignore', 'ignore', 'ignore'],
+          detached: true
+        }
+      );
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      const originalKill = process.kill.bind(process);
+      const groupKill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+        if (pid === -child.pid!) {
+          throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+        }
+        return originalKill(pid, signal);
+      });
+      const leaderKill = vi.spyOn(child, 'kill');
+      let terminated = false;
+
+      try {
+        await terminatePortableProcessTree(child, 'SIGTERM');
+        terminated = true;
+      } finally {
+        groupKill.mockRestore();
+        if (!terminated && isPortableProcessTreeRunning(child)) {
+          await terminatePortableProcessTree(child, 'SIGKILL');
+        }
+      }
+
+      expect(leaderKill).toHaveBeenCalledOnce();
+      expect(leaderKill).toHaveBeenCalledWith('SIGTERM');
+      expect(await waitForPortableProcessTreeExit(child, 2_000)).toBe(true);
+    }
+  );
 
   it.runIf(process.platform === 'win32')(
     'executes generated Windows cmd launchers through execFilePortable',
@@ -206,5 +331,13 @@ async function readChildOutput(child: ReturnType<typeof spawnPortable>): Promise
       }
       reject(new Error(`Child exited with code ${code ?? 'null'}: ${stderr}`));
     });
+  });
+}
+
+function waitForChildClose(child: ReturnType<typeof spawnPortable>): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', () => resolve());
   });
 }

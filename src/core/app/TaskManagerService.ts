@@ -1,13 +1,20 @@
 import type {
+  Board,
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
   CancelRunRequest,
   ContinueRunRequest,
   CreateDeliveryCommitRequest,
+  CreateBoardRequest,
   CreateTaskRequest,
-  CreateStoredTaskRequest,
   DeleteTaskRequest,
   DeleteTaskResult,
+  DisconnectRepositoryRequest,
+  DiscardPreviewRecipeDraftRequest,
   GitSnapshotRecord,
   GitHubPreflightRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
   PrepareWorktreeRequest,
   PublishBranchRequest,
   PullRequestSnapshotRecord,
@@ -15,6 +22,9 @@ import type {
   ReadProtocolMessageRequest,
   RefinePromptRequest,
   RefinePromptResponse,
+  ReconnectRepositoryRequest,
+  Repository,
+  RepositoryImpact,
   RepositoryPreflight,
   RunRecord,
   StartRunRequest,
@@ -34,26 +44,42 @@ import type {
   AgentRunMode,
   TaskManagerAppSettings,
   UpdateAppSettingsRequest,
+  UpdateAgentNativeSessionRequest,
+  UpdateAgentNativeSessionResult,
+  UpdateBoardRequest,
   ExternalToolStatusReport,
   TestExternalToolRequest,
   ExternalToolProbeResult,
   InspectOpenTargetRequest,
+  InteractionRequestRecord,
   OpenTargetInspection,
   ExecuteOpenTargetActionRequest,
   OpenTargetActionResult,
+  ApprovePreviewPlanRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewGenerationRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  StartPreviewRequest,
+  SetPreviewLocalAttachmentBindingRequest,
+  StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest,
   AttachmentContent,
   AttachmentDraftSnapshot,
   DiscardTaskAttachmentDraftRequest,
   ReadTaskAttachmentRequest,
-  StageTaskAttachmentBatchRequest,
+  StageTaskAttachmentBatchRequest
 } from '../../shared/contracts';
-import type {
-  AddRepositoryRequest,
-  RelinkRepositoryRequest,
-  RemoveRepositoryRequest,
-  RepositoryCatalogSnapshot,
-  SelectRepositoryRequest
-} from '../../shared/repositories';
 import {
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_TOTAL_BYTES,
@@ -61,17 +87,36 @@ import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   completionPolicyRequiresPassingChecks,
   completionPolicyRequiresMerge,
+  getImplementationRetryReason,
+  isImplementationRunMode,
   normalizeAgentApprovalsReviewer,
   normalizePullRequestTitle,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import type { AgentRuntimeId } from '../../shared/agent';
+import type {
+  AppendHumanDiscourseMessageRequest,
+  ConfirmDiscourseWaveContextRequest,
+  CreateDiscourseConversationRequest,
+  DeleteDiscourseConversationRequest,
+  DeleteDiscourseDraftRequest,
+  ListDiscourseConversationsRequest,
+  ListDiscourseMessagesRequest,
+  PreviewDiscourseContextRequest,
+  RenameDiscourseConversationRequest,
+  SaveDiscourseDraftRequest,
+  SendDiscourseMessageRequest,
+  SetDiscourseConversationArchivedRequest,
+  SetDiscourseConversationReadRequest,
+  SetPinnedDiscourseContextRequest,
+  StopDiscourseWaveRequest,
+  TombstoneDiscourseMessageRequest
+} from '../../shared/discourse';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { configureGitExecutablePath, git, gitSucceeds } from '../git/gitCli';
 import { buildDiffEvidence, inspectGitSnapshot } from '../git/GitSnapshotService';
 import { GitHubService } from '../github/GitHubService';
-import { PromptRefinementService } from '../prompt/PromptRefinementService';
 import {
   buildContinuationPrompt,
   buildForkAlternativeTaskPrompt,
@@ -80,29 +125,42 @@ import {
 } from '../../shared/promptTemplates';
 import { WorktreeService } from '../worktree/WorktreeService';
 import { validateRepositoryPath } from '../repository/RepositoryPreflight';
+import { selectRepositoryImpact } from '../repository/repositoryImpact';
 import { AppEventBus } from '../runner/AppEventBus';
 import { createDomainEvent } from '../storage/domainEvent';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { AgentOrchestrator } from '../agent/AgentOrchestrator';
-import type { AgentProviderAdapter } from '../agent/AgentProviderAdapter';
-import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
-import { codexReadOnlyScopeProfile } from '../agent/codex/CodexPermissionProfile';
+import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
+import { AgentRuntimeRegistry } from '../agent/AgentRuntimeRegistry';
+import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
 import {
+  AgentScopedTurnRouter,
+  isAgentScopedRuntimeAdapter,
+  scopedRuntimeBinding,
+  type AgentScopedRuntimeBinding,
+  type AgentScopedTurnEvent
+} from '../agent/AgentScopedTurnProvider';
+import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
+import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
+import { OpenCodeAdapter } from '../agent/opencode/OpenCodeAdapter';
+import { AcpRuntimeAdapter } from '../agent/acp/AcpRuntimeAdapter';
+import { ACP_RUNTIME_PROFILES } from '../agent/acp/AcpRuntimeProfiles';
+import {
+  mergeAppSettings,
   MemoryAppSettingsStore,
   type AppSettingsStorage
 } from '../settings/AppSettingsStore';
 import { ExternalToolResolver } from '../tools/ExternalToolResolver';
 import { OpenTargetService, type OpenTargetHost } from '../open/OpenTargetService';
+import { PreviewManager, type PreviewTaskContext } from '../preview/PreviewManager';
+import { createPreviewManager } from '../preview/createPreviewManager';
+import { PreviewRecipeGenerationService } from '../preview/generation/PreviewRecipeGenerationService';
+import type { PreviewUrlHost } from '../preview/runtime/PreviewOpenService';
 import {
   assertAttachmentSandboxSupportsDelivery,
-  AgentAttachmentDeliveryError,
-  assertModelSupportsAttachments
+  type AgentTurnAttachment
 } from '../agent/AgentAttachmentDelivery';
 import { AttachmentStoreError } from '../storage/AttachmentFileStore';
-import type { RepositoryRegistry } from '../repository/RepositoryRegistry';
-import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
-import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
-import { TaskAgentRuntimeMigrator } from '../agent/TaskAgentRuntimeMigrator';
 import type { DiscourseStore } from '../discourse/DiscourseStore';
 import { DiscourseRuntimeCoordinator } from '../discourse/DiscourseRuntimeCoordinator';
 import { DiscourseContextResolver } from '../discourse/DiscourseContextResolver';
@@ -115,106 +173,123 @@ import {
   drainDiscourseDeltas,
   type DiscourseDeltaAccumulatorState
 } from '../discourse/DiscourseDeltaAccumulator';
-import { DISCOURSE_LIMITS } from '../../shared/discourse';
-import type {
-  AppendHumanDiscourseMessageRequest,
-  CreateDiscourseConversationRequest,
-  DeleteDiscourseConversationRequest,
-  DeleteDiscourseDraftRequest,
-  ListDiscourseConversationsRequest,
-  ListDiscourseMessagesRequest,
-  PreviewDiscourseContextRequest,
-  RenameDiscourseConversationRequest,
-  SaveDiscourseDraftRequest,
-  SendDiscourseMessageRequest,
-  ConfirmDiscourseWaveContextRequest,
-  SetDiscourseConversationArchivedRequest,
-  SetDiscourseConversationReadRequest,
-  SetPinnedDiscourseContextRequest,
-  StopDiscourseWaveRequest,
-  TombstoneDiscourseMessageRequest
-} from '../../shared/discourse';
+import {
+  assertBrowserDevRuntimeIsolation,
+  hasBrowserDevRuntimeIsolation
+} from '../agent/BrowserDevAgentBoundary';
 
-export type RepositoryRequestErrorCode =
-  | 'REPOSITORY_INVALID_REQUEST'
-  | 'REPOSITORY_NOT_FOUND'
-  | 'REPOSITORY_UNAVAILABLE'
-  | 'REPOSITORY_IN_USE'
-  | 'REPOSITORY_DEFAULT'
-  | 'REPOSITORY_IDENTITY_MISMATCH';
+type TaskManagerLifecycleState =
+  | 'NEW'
+  | 'INITIALIZING'
+  | 'READY'
+  | 'SHUTTING_DOWN'
+  | 'STOPPED';
 
-export class RepositoryRequestError extends Error {
-  constructor(
-    readonly code: RepositoryRequestErrorCode,
-    readonly httpStatus: 400 | 404 | 409,
-    message: string,
-    options?: { cause?: unknown }
-  ) {
-    super(message, options);
-    this.name = 'RepositoryRequestError';
-  }
+interface TaskActionWork {
+  label: string;
+  work: Promise<unknown>;
 }
 
 export class TaskManagerService {
   readonly events: AppEventBus;
   private readonly agents: AgentOrchestrator;
-  private readonly codexAdapter: CodexAppServerAdapter;
-  private readonly worktrees: WorktreeService;
-  private readonly github: GitHubService;
-  private readonly promptRefiner = new PromptRefinementService();
-  private readonly appSettingsStore: AppSettingsStorage;
-  private readonly repositoryRegistry?: RepositoryRegistry;
-  private readonly externalToolResolver: ExternalToolResolver;
-  private readonly openTargets: OpenTargetService;
-  private readonly browserDevAgentBoundary: boolean;
+  private readonly runtimeRegistry: AgentRuntimeRegistry;
   private readonly agentRuntimeStore?: AgentRuntimeStore;
   private readonly discourseStore?: DiscourseStore;
   private readonly discourseCoordinator?: DiscourseRuntimeCoordinator;
   private readonly discourseContextSnapshots?: DiscourseContextSnapshotService;
   private readonly discourse?: DiscourseService;
-  private readonly agentTurnScheduler?: AgentTurnScheduler;
-  private readonly serviceLifecycleId = randomUUID();
-  private readonly discourseDeltaAccumulators = new Map<string, DiscourseDeltaAccumulatorState>();
+  private readonly discourseScheduler?: AgentTurnScheduler;
+  private readonly scopedTurnRouter?: AgentScopedTurnRouter;
+  private readonly disposeScopedTurnEvents?: () => void;
+  private discourseSchedulerWork?: Promise<void>;
+  private readonly discourseDeltaStates = new Map<string, DiscourseDeltaAccumulatorState>();
   private readonly discourseDeltaTimers = new Map<string, NodeJS.Timeout>();
-  private readonly taskActionLocks = new Map<string, string>();
-  private readonly activeAttachmentDrafts = new Set<string>();
+  private scopedTurnEventTail: Promise<void> = Promise.resolve();
+  private readonly codexAdapter?: CodexAppServerAdapter;
+  private readonly worktrees: WorktreeService;
+  private readonly github: GitHubService;
+  private readonly appSettingsStore: AppSettingsStorage;
+  private readonly externalToolResolver: ExternalToolResolver;
+  private readonly openTargets: OpenTargetService;
+  private readonly previews: PreviewManager;
+  private readonly previewRecipeGenerator: PreviewRecipeGenerationService;
+  private readonly previewEnabled: boolean;
+  private readonly previewReconcile: boolean;
+  private readonly browserDevAgentBoundary: boolean;
+  private readonly runtimeExecutableOverrides: Readonly<Record<string, string | undefined>>;
+  private runtimeLifecycleTail: Promise<void> = Promise.resolve();
+  private readonly activeRuntimeOperations = new Set<Promise<void>>();
+  private runtimeLifecycleClosing = false;
+  private readonly postRunEvidenceTasks = new Map<string, Promise<void>>();
+  private readonly disposeAgentEventListener: () => void;
   private readonly agentProviderStartupDisabledReason?: string;
+  private readonly taskActionLocks = new Map<string, TaskActionWork>();
+  private readonly activeControlActions = new Set<Promise<unknown>>();
+  private readonly activeAttachmentDrafts = new Set<string>();
+  private lifecycleState: TaskManagerLifecycleState = 'NEW';
+  private initWork?: Promise<void>;
+  private shutdownWork?: Promise<void>;
   private appSettings: TaskManagerAppSettings = DEFAULT_TASK_MANAGER_APP_SETTINGS;
-  private codexExecutable: string | undefined;
+  private codexExecutable?: string;
 
   constructor(
     private readonly store: FileTaskStore,
-    private readonly defaultRepositoryPath: string,
+    agentCwd: string,
     events = new AppEventBus(),
     options: {
       worktreeRoot?: string;
       gitPath?: string;
       ghPath?: string;
       codexPath?: string;
+      openCodePath?: string;
+      acpExecutablePaths?: Partial<Record<string, string>>;
       agentCwd?: string;
       appSettingsStore?: AppSettingsStorage;
-      repositoryRegistry?: RepositoryRegistry;
-      agentProviderAdapter?: AgentProviderAdapter;
-      openTargetHost?: OpenTargetHost;
-      allowAgentNetworkAccess?: boolean;
-      agentProviderStartupDisabledReason?: string;
+      agentRuntimeAdapters?: readonly AgentRuntimeAdapter[];
       agentRuntimeStore?: AgentRuntimeStore;
       discourseStore?: DiscourseStore;
       discourseWorkspaceRoot?: string;
+      agentScopedRuntimeBindings?: readonly AgentScopedRuntimeBinding[];
+      defaultAgentRuntimeId?: string;
+      openTargetHost?: OpenTargetHost;
+      previewManager?: PreviewManager;
+      previewRecipeGenerator?: PreviewRecipeGenerationService;
+      previewRoot?: string;
+      previewLauncherPath?: string;
+      previewLauncherExecPath?: string;
+      previewLauncherEnv?: NodeJS.ProcessEnv;
+      previewOciExecutablePath?: string;
+      previewOciContextName?: string;
+      previewOciEnv?: NodeJS.ProcessEnv;
+      previewOpenHost?: PreviewUrlHost;
+      previewSecretProtector?: import('../preview/private/PreviewPrivateVault').PreviewSecretProtector;
+      previewEnabled?: boolean;
+      previewReconcile?: boolean;
+      allowAgentNetworkAccess?: boolean;
+      agentProviderStartupDisabledReason?: string;
     } = {}
   ) {
     if (Boolean(options.agentRuntimeStore) !== Boolean(options.discourseStore)) {
-      throw new Error(
-        'The agent runtime and discourse stores must be configured together.'
-      );
+      throw new Error('The agent runtime and discourse stores must be configured together.');
     }
-    const agentCwd = options.agentCwd ?? (defaultRepositoryPath || process.cwd());
+    agentCwd = options.agentCwd ?? (agentCwd || process.cwd());
     this.browserDevAgentBoundary = options.allowAgentNetworkAccess === false;
     this.agentProviderStartupDisabledReason =
       options.agentProviderStartupDisabledReason;
+    this.runtimeExecutableOverrides = {
+      opencode:
+        options.openCodePath ?? process.env.TASK_MONKI_OPENCODE_BIN,
+      ...Object.fromEntries(
+        ACP_RUNTIME_PROFILES.map((profile) => [
+          profile.descriptor.id,
+          options.acpExecutablePaths?.[profile.descriptor.id] ??
+            process.env[profile.executableEnvironmentKey]
+        ])
+      )
+    };
     this.events = events;
     this.appSettingsStore = options.appSettingsStore ?? new MemoryAppSettingsStore();
-    this.repositoryRegistry = options.repositoryRegistry;
     this.externalToolResolver = new ExternalToolResolver({
       cwd: agentCwd,
       overrides: {
@@ -224,139 +299,115 @@ export class TaskManagerService {
       }
     });
     this.openTargets = new OpenTargetService(options.openTargetHost);
+    this.previewEnabled = options.previewEnabled === true;
+    this.previewReconcile = options.previewReconcile !== false;
+    this.previewRecipeGenerator =
+      options.previewRecipeGenerator ?? new PreviewRecipeGenerationService();
+    this.previews =
+      options.previewManager ??
+      createPreviewManager(store, events, {
+        previewRoot:
+          options.previewRoot ??
+          process.env.TASK_MANAGER_PREVIEW_ROOT ??
+          path.join(os.tmpdir(), 'task-monki-preview-runtime'),
+        launcherPath:
+          options.previewLauncherPath ??
+          path.join(process.cwd(), 'src/core/preview/runtime/native-preview-launcher.mjs'),
+        launcherExecPath: options.previewLauncherExecPath,
+        launcherEnv: options.previewLauncherEnv,
+        ociExecutablePath:
+          options.previewOciExecutablePath ?? process.env.TASK_MANAGER_OCI_BIN,
+        ociContextName:
+          options.previewOciContextName ?? process.env.TASK_MANAGER_OCI_CONTEXT,
+        ociEnv: options.previewOciEnv,
+        openHost: options.previewOpenHost,
+        secretProtector: options.previewSecretProtector
+      });
+    const runtimeAdapters = options.agentRuntimeAdapters ??
+      createBuiltInAgentRuntimes(store, events, {
+        cwd: agentCwd,
+        codexExecutable: options.codexPath,
+        openCodeExecutable: options.openCodePath,
+        acpExecutablePaths: options.acpExecutablePaths,
+        browserDevBoundary: this.browserDevAgentBoundary,
+        codexToolSettings: this.appSettings.codexExternalTools,
+        scopedRuntimeStore: options.agentRuntimeStore
+      });
+    this.codexAdapter = runtimeAdapters.find(
+      (adapter): adapter is CodexAppServerAdapter =>
+        adapter instanceof CodexAppServerAdapter
+    );
+    this.runtimeRegistry = new AgentRuntimeRegistry(
+      runtimeAdapters,
+      options.defaultAgentRuntimeId ?? runtimeAdapters[0].descriptor.id
+    );
     this.agentRuntimeStore = options.agentRuntimeStore;
     this.discourseStore = options.discourseStore;
-    if (this.discourseStore && this.repositoryRegistry) {
-      const contextResolver = new DiscourseContextResolver(
-        this.store,
-        this.repositoryRegistry
-      );
-      this.discourseContextSnapshots = new DiscourseContextSnapshotService(
-        contextResolver,
-        new DiscourseWorkspace(
-          options.discourseWorkspaceRoot ??
-            path.join(os.tmpdir(), 'task-monki-discourse-workspaces')
-        ),
-        async (input) => {
-          const profile = await codexReadOnlyScopeProfile({
-            sessionId: input.sessionId,
-            scope: {
-              primaryCwd: input.primaryCwd,
-              readOnlyRoots: input.readRoots.map((root) => root.canonicalPath)
-            },
-            reasoningEffort: input.modelSettings.reasoningEffort
-          });
-          return {
-            attestation: { status: 'ATTESTED' },
-            primaryCwd: input.primaryCwd,
-            readRoots: input.readRoots,
-            managedAttachments: [],
-            permissionProfileHash: profile.scopeHash,
-            modelSettings: input.modelSettings,
-            externalTools: {
-              network: false,
-              webSearch: 'disabled',
-              mcpServers: false,
-              apps: false,
-              dynamicTools: false
-            },
-            clientOperationId: input.clientOperationId
-          };
-        }
-      );
-    }
+    const automaticScopedBindings = options.agentRuntimeStore
+      ? runtimeAdapters
+          .filter(isAgentScopedRuntimeAdapter)
+          .map(scopedRuntimeBinding)
+      : [];
+    const scopedBindings = [...new Map(
+      [...automaticScopedBindings, ...(options.agentScopedRuntimeBindings ?? [])]
+        .map((binding) => [binding.runtimeId, binding])
+    ).values()];
+    this.scopedTurnRouter = scopedBindings.length > 0
+      ? new AgentScopedTurnRouter(scopedBindings)
+      : undefined;
     if (this.agentRuntimeStore && this.discourseStore) {
       this.discourseCoordinator = new DiscourseRuntimeCoordinator(
         this.discourseStore,
         this.agentRuntimeStore
       );
-      this.agentTurnScheduler = new AgentTurnScheduler(this.agentRuntimeStore);
-    }
-    this.codexAdapter = new CodexAppServerAdapter(store, events, {
-      cwd: agentCwd,
-      executable: options.codexPath,
-      toolSettings: this.appSettings.codexExternalTools,
-      failClosedMcpDiscovery: this.browserDevAgentBoundary,
-      enforceBrowserDevBoundary: this.browserDevAgentBoundary,
-      ...(this.agentRuntimeStore
-        ? { providerRuntimeStore: this.agentRuntimeStore }
-        : {}),
-      ...(this.agentRuntimeStore && this.discourseCoordinator
-        ? {
-            scopedRuntimeStore: this.agentRuntimeStore,
-            onScopedTurnCompleted: async (input) => {
-              await this.ingestScopedCodexTerminal(input);
-            },
-            onScopedTurnDelta: async (input) => {
-              await this.ingestScopedCodexDelta(input);
-            }
+      this.discourseScheduler = new AgentTurnScheduler(this.agentRuntimeStore);
+      const resolver = new DiscourseContextResolver(this.store);
+      this.discourseContextSnapshots = new DiscourseContextSnapshotService(
+        resolver,
+        new DiscourseWorkspace(
+          options.discourseWorkspaceRoot ??
+            path.join(os.tmpdir(), 'task-monki-discourse-workspaces')
+        ),
+        async (input) => {
+          if (!this.scopedTurnRouter) {
+            throw new Error('No agent runtime is configured for Discourse.');
           }
-        : {})
-    });
+          return this.scopedTurnRouter.buildExecutionContext(input.runtimeId, input);
+        }
+      );
+      this.discourse = new DiscourseService(
+        this.discourseStore,
+        resolver,
+        this.events,
+        {
+          getRuntimeCatalog: () => this.getDiscourseRuntimeCatalog(),
+          getAppSettings: () => structuredClone(this.appSettings),
+          ...(this.scopedTurnRouter
+            ? {
+                runtime: {
+                  coordinator: this.discourseCoordinator,
+                  contextSnapshots: this.discourseContextSnapshots,
+                  provider: this.scopedTurnRouter,
+                  notifySchedulerWorkAvailable: () =>
+                    this.notifyDiscourseSchedulerWorkAvailable()
+                }
+              }
+            : {})
+        }
+      );
+      this.disposeScopedTurnEvents = this.scopedTurnRouter?.subscribe((event) => {
+        this.scopedTurnEventTail = this.scopedTurnEventTail
+          .then(() => this.ingestScopedTurnEvent(event))
+          .catch(() => this.recoverAfterScopedTurnIngestionFailure(event));
+      });
+    }
     this.agents = new AgentOrchestrator(
       store,
       events,
-      options.agentProviderAdapter ?? this.codexAdapter,
+      this.runtimeRegistry,
       {
         allowNetworkAccess: options.allowAgentNetworkAccess,
-        providerStartupDisabledReason: options.agentProviderStartupDisabledReason,
-        ...(this.agentRuntimeStore && this.agentTurnScheduler
-          ? {
-              runtimeStore: this.agentRuntimeStore,
-              scheduler: this.agentTurnScheduler,
-              dispatchNonTaskQueueEntry: async (entry) => {
-                if (entry.scope.kind !== 'DISCOURSE' || !this.discourseCoordinator) {
-                  throw new Error('Global scheduler routed an invalid non-task entry.');
-                }
-                const scope = entry.scope;
-                const aggregate = await this.discourseStore!.getConversation(
-                  scope.conversationId
-                );
-                const snapshot = aggregate.contextSnapshots.find(
-                  (candidate) => candidate.id === scope.contextSnapshotId
-                );
-                if (
-                  !snapshot ||
-                  (this.discourseContextSnapshots &&
-                    await this.discourseContextSnapshots.freshness(snapshot) !== 'FRESH')
-                ) {
-                  const job = await this.discourseCoordinator.rejectLeasedJobForStaleContext(
-                    entry.id,
-                    `service-stale:${entry.id}:${entry.recordRevision}`
-                  );
-                  this.events.emit({
-                    type: 'discourse.job.updated',
-                    scope: {
-                      kind: 'DISCOURSE',
-                      conversationId: scope.conversationId,
-                      waveId: scope.waveId,
-                      jobId: scope.jobId
-                    },
-                    payload: job,
-                    at: new Date().toISOString()
-                  });
-                  return;
-                }
-                const run = await this.discourseCoordinator.dispatchLeasedJob(
-                  entry.id,
-                  this.codexAdapter,
-                  `service-dispatch:${entry.id}:${entry.recordRevision}`
-                );
-                this.events.emit({
-                  type: 'discourse.job.updated',
-                  scope: {
-                    kind: 'DISCOURSE',
-                    conversationId: scope.conversationId,
-                    waveId: scope.waveId,
-                    jobId: scope.jobId
-                  },
-                  runId: run.id,
-                  payload: { status: run.status, delivery: run.delivery },
-                  at: new Date().toISOString()
-                });
-              }
-            }
-          : {})
+        providerStartupDisabledReason: options.agentProviderStartupDisabledReason
       }
     );
     this.worktrees = new WorktreeService(
@@ -365,87 +416,79 @@ export class TaskManagerService {
         path.join(os.tmpdir(), 'task-monki-worktrees')
     );
     this.github = new GitHubService(options.ghPath);
-    if (this.discourseStore && this.repositoryRegistry) {
-      const contextResolver = new DiscourseContextResolver(this.store, this.repositoryRegistry);
-      this.discourse = new DiscourseService(
-        this.discourseStore,
-        contextResolver,
-        this.events,
-        {
-          getProviderState: () => this.agents.getProviderState(),
-          getAppSettings: () => this.getAppSettings(),
-          ...(this.discourseCoordinator && this.discourseContextSnapshots
-            ? {
-                runtime: {
-                  coordinator: this.discourseCoordinator,
-                  contextSnapshots: this.discourseContextSnapshots,
-                  provider: this.codexAdapter,
-                  notifySchedulerWorkAvailable: () =>
-                    this.agents.notifySchedulerWorkAvailable()
-                }
-              }
-            : {})
-        }
-      );
-    }
-    this.events.on((event) => {
+    this.disposeAgentEventListener = this.events.on((event) => {
       if (event.type === 'run.terminal' && event.runId) {
-        void this.capturePostRunEvidence(event.runId);
+        this.trackPostRunEvidence(event.runId);
+        this.scheduleDeferredCodexRuntimeRestart(event.runId);
       }
     });
   }
 
-  async init(): Promise<void> {
-    await this.store.init();
-    await this.initializeDiscourseRuntime();
-    const initialSnapshot = await this.store.snapshot();
-    if (this.repositoryRegistry) {
-      await this.repositoryRegistry.reconcile([
-        ...(this.defaultRepositoryPath
-          ? [{ path: this.defaultRepositoryPath, source: 'DEFAULT' as const, isDefault: true }]
-          : []),
-        ...initialSnapshot.tasks.map((task) => ({
-          path: task.repositoryPath,
-          source: 'TASK' as const
-        }))
-      ]);
+  init(): Promise<void> {
+    if (this.lifecycleState === 'READY') return Promise.resolve();
+    if (this.initWork) return this.initWork;
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      return Promise.reject(new Error('Task Manager is shutting down.'));
     }
-    await this.appSettingsStore.initializeRepositories(async (legacy) => {
-      const registry = this.requireRepositoryRegistry();
-      await registry.reconcile([
-        ...legacy.knownPaths.map((candidatePath) => ({
-          path: candidatePath,
-          source: 'LEGACY_SETTINGS' as const
-        })),
-        ...(legacy.selectedPath
-          ? [{ path: legacy.selectedPath, source: 'LEGACY_SETTINGS' as const }]
-          : [])
-      ]);
-      const selected = legacy.selectedPath
-        ? await registry.resolveRecordedPath(legacy.selectedPath)
-        : undefined;
-      const state = await registry.snapshot();
-      return {
-        selectedRepositoryId:
-          selected?.repositoryId ?? state.defaultRepositoryId ??
-          state.repositories.find((record) => !record.removedAt)?.id ?? null
-      };
-    });
+    this.lifecycleState = 'INITIALIZING';
+    const work = this.withRuntimeLifecycleChange(() => this.initializeInternal())
+      .then(() => {
+        this.assertInitializing();
+        this.lifecycleState = 'READY';
+      })
+      .catch((error: unknown) => {
+        if (this.lifecycleState === 'INITIALIZING') {
+          this.lifecycleState = 'NEW';
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.initWork === work) this.initWork = undefined;
+      });
+    this.initWork = work;
+    return work;
+  }
+
+  private async initializeInternal(): Promise<void> {
+    await this.store.init();
+    this.assertInitializing();
+    await this.initializeDiscourseRuntime();
+    this.assertInitializing();
     this.appSettings = await this.loadBoundarySafeAppSettings();
-    if (this.repositoryRegistry) {
-      const catalog = await this.getRepositoryCatalog();
-      if (catalog.selectedRepositoryId !== this.appSettings.repositories.selectedRepositoryId) {
-        this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(
-          catalog.selectedRepositoryId
-        );
+    this.assertInitializing();
+    await this.assertRuntimeEnablementValid(this.appSettings);
+    await this.applyRuntimeSettings({
+      restartCodex: false,
+      updateCodex: true,
+      updateAgentRuntimeIds: this.runtimeRegistry
+        .list()
+        .map((adapter) => adapter.descriptor.id),
+      restartAgentRuntimes: false
+    });
+    this.assertInitializing();
+    if (this.previewEnabled) {
+      const gateway = await this.previews.init(this.appSettings.previewGateway.port ?? 0, {
+        reconcile: this.previewReconcile
+      });
+      this.assertInitializing();
+      if (this.appSettings.previewGateway.port !== gateway.port) {
+        this.appSettings = await this.appSettingsStore.update({
+          previewGateway: { port: gateway.port }
+        });
+        this.assertInitializing();
       }
     }
-    await this.applyRuntimeSettings({ restartCodex: false, updateCodex: true });
-    await this.agents.initialize();
-    if (this.agentProviderStartupDisabledReason) {
-      return;
-    }
+    await this.agents.initialize(
+      [this.appSettings.defaultRuntimeId],
+      new Set(this.appSettings.disabledRuntimeIds)
+    );
+    this.assertInitializing();
+    if (this.agentProviderStartupDisabledReason) return;
     const snapshot = await this.store.snapshot();
+    this.assertInitializing();
     const recoveryTaskIds = new Set(
       snapshot.runs
         .filter((run) => run.recoveryState !== 'NONE')
@@ -453,118 +496,36 @@ export class TaskManagerService {
     );
     await Promise.all(
       [...recoveryTaskIds].map((taskId) =>
-        this.refreshEvidence({ taskId }).catch(() => undefined)
+        this.refreshEvidenceInternal({ taskId }).catch(() => undefined)
       )
     );
-  }
-
-  async getRepositoryCatalog(): Promise<RepositoryCatalogSnapshot> {
-    const registry = this.requireRepositoryRegistry();
-    const [settings, snapshot] = await Promise.all([
-      this.appSettingsStore.get(),
-      this.store.snapshot()
-    ]);
-    return registry.catalog({
-      selectedRepositoryId: settings.repositories.selectedRepositoryId,
-      tasks: snapshot.tasks
+    this.assertInitializing();
+    const recovered = await this.store.snapshot();
+    const completedCurrentImplementationRuns = recovered.tasks.flatMap((task) => {
+      const run = task.currentRunId
+        ? recovered.runs.find((candidate) => candidate.id === task.currentRunId)
+        : undefined;
+      const requiresReconciliation =
+        run &&
+        (!run.afterGitSnapshotId ||
+          (['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) &&
+            !getImplementationRetryReason(task) &&
+            recovered.interactionRequests.some((interaction) =>
+              isRejectedExecutionInteraction(interaction, run.id)
+            )));
+      return run &&
+        isImplementationRunMode(run.mode) &&
+        run.status === 'COMPLETED' &&
+        requiresReconciliation
+        ? [run.id]
+        : [];
     });
-  }
-
-  async selectRepository(input: SelectRepositoryRequest): Promise<RepositoryCatalogSnapshot> {
-    const repositoryId = requireRepositoryId(input?.repositoryId);
-    await this.resolveRepository(repositoryId);
-    this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(repositoryId);
-    return this.getRepositoryCatalog();
-  }
-
-  async addRepositoryFromTrustedPath(
-    candidatePath: string,
-    input: AddRepositoryRequest
-  ): Promise<RepositoryCatalogSnapshot> {
-    requireRepositoryMutationId(input?.clientMutationId);
-    let record: Awaited<ReturnType<RepositoryRegistry['registerTrustedPath']>>;
-    try {
-      record = await this.requireRepositoryRegistry().registerTrustedPath(candidatePath);
-    } catch (error) {
-      throw new RepositoryRequestError(
-        'REPOSITORY_UNAVAILABLE',
-        409,
-        'The selected folder is not an available Git repository.',
-        { cause: error }
-      );
-    }
-    this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(record.id);
-    return this.getRepositoryCatalog();
-  }
-
-  async relinkRepositoryFromTrustedPath(
-    candidatePath: string,
-    input: RelinkRepositoryRequest
-  ): Promise<RepositoryCatalogSnapshot> {
-    requireRepositoryMutationId(input?.clientMutationId);
-    const repositoryId = requireRepositoryId(input?.repositoryId);
-    try {
-      await this.requireRepositoryRegistry().relinkTrustedPath(repositoryId, candidatePath);
-    } catch (error) {
-      throw new RepositoryRequestError(
-        'REPOSITORY_IDENTITY_MISMATCH',
-        409,
-        'The selected folder does not match this registered repository.',
-        { cause: error }
-      );
-    }
-    return this.getRepositoryCatalog();
-  }
-
-  async removeRepository(input: RemoveRepositoryRequest): Promise<RepositoryCatalogSnapshot> {
-    requireRepositoryMutationId(input?.clientMutationId);
-    const repositoryId = requireRepositoryId(input?.repositoryId);
-    const registry = this.requireRepositoryRegistry();
-    const snapshot = await this.store.snapshot();
-    const catalog = await registry.catalog({
-      selectedRepositoryId: this.appSettings.repositories.selectedRepositoryId,
-      tasks: snapshot.tasks
-    });
-    const inUse = catalog.taskAssociations.some(
-      (association) => association.repositoryId === repositoryId
+    await Promise.allSettled(
+      completedCurrentImplementationRuns.map((runId) =>
+        this.ensurePostRunEvidence(runId)
+      )
     );
-    const record = (await registry.snapshot()).repositories.find(
-      (candidate) => candidate.id === repositoryId
-    );
-    if (!record) {
-      throw new RepositoryRequestError(
-        'REPOSITORY_NOT_FOUND',
-        404,
-        'The repository is no longer registered.'
-      );
-    }
-    if (!record.removedAt) {
-      try {
-        await registry.remove(repositoryId, { inUse });
-      } catch (error) {
-        const isDefault = repositoryId === (await registry.snapshot()).defaultRepositoryId;
-        throw new RepositoryRequestError(
-          isDefault ? 'REPOSITORY_DEFAULT' : inUse ? 'REPOSITORY_IN_USE' : 'REPOSITORY_UNAVAILABLE',
-          409,
-          isDefault
-            ? 'The default repository cannot be removed.'
-            : inUse
-              ? 'Move or delete this repository’s tasks before removing it.'
-              : 'The repository could not be removed.',
-          { cause: error }
-        );
-      }
-    }
-    const repaired = await registry.catalog({
-      selectedRepositoryId: this.appSettings.repositories.selectedRepositoryId,
-      tasks: snapshot.tasks
-    });
-    if (repaired.selectedRepositoryId !== this.appSettings.repositories.selectedRepositoryId) {
-      this.appSettings = await this.appSettingsStore.setSelectedRepositoryId(
-        repaired.selectedRepositoryId
-      );
-    }
-    return this.getRepositoryCatalog();
+    this.assertInitializing();
   }
 
   async getAppSettings(): Promise<TaskManagerAppSettings> {
@@ -572,21 +533,65 @@ export class TaskManagerService {
     return structuredClone(this.appSettings);
   }
 
-  async updateAppSettings(
+  updateAppSettings(
     input: UpdateAppSettingsRequest
   ): Promise<TaskManagerAppSettings> {
-    if (input && typeof input === 'object' && 'repositories' in input) {
-      throw new RepositoryRequestError(
-        'REPOSITORY_INVALID_REQUEST',
-        400,
-        'Repository selection must use the repository catalog API and an authoritative repository id.'
-      );
+    return this.withControlAction(() => this.updateAppSettingsInternal(input));
+  }
+
+  private async updateAppSettingsInternal(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    return this.withRuntimeLifecycleChange(() =>
+      this.updateAppSettingsLocked(input)
+    );
+  }
+
+  private async updateAppSettingsLocked(
+    input: UpdateAppSettingsRequest
+  ): Promise<TaskManagerAppSettings> {
+    const current = await this.appSettingsStore.get();
+    for (const runtimeId of [
+      input.defaultRuntimeId,
+      input.promptRefinementRuntimeId,
+      input.reviewRuntimeId
+    ]) {
+      if (runtimeId) {
+        const adapter = this.runtimeRegistry.require(runtimeId);
+        if (this.browserDevAgentBoundary) {
+          assertBrowserDevRuntimeIsolation(
+            adapter.descriptor,
+            await adapter.capabilities()
+          );
+        }
+      }
+    }
+    if (input.promptRefinementRuntimeId) {
+      const adapter = this.runtimeRegistry.require(input.promptRefinementRuntimeId);
+      const capabilities = await adapter.capabilities();
+      if (capabilities.promptRefinement.maturity === 'unsupported') {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not support prompt refinement.`
+        );
+      }
+    }
+    if (input.reviewRuntimeId) {
+      const adapter = this.runtimeRegistry.require(input.reviewRuntimeId);
+      const capabilities = await adapter.capabilities();
+      const supportsReview =
+        capabilities.review.maturity !== 'unsupported' ||
+        capabilities.detachedReview.maturity === 'stable';
+      if (!supportsReview) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not support an isolated review workflow.`
+        );
+      }
     }
     if (
       this.browserDevAgentBoundary &&
       input.codexExternalTools &&
       !codexExternalToolsAreDisabled({
-        ...(await this.appSettingsStore.get()).codexExternalTools,
+        ...current.codexExternalTools,
         ...input.codexExternalTools
       })
     ) {
@@ -600,26 +605,64 @@ export class TaskManagerService {
           codexExternalTools: { ...DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS }
         }
       : input;
-    this.appSettings = await this.appSettingsStore.update(safeInput);
-    const affectsExternalTools = Boolean(input.codexExternalTools || input.externalExecutables);
+    const prospective = mergeAppSettings(current, safeInput);
+    await this.assertRuntimeEnablementValid(prospective, current);
+    const newlyDisabledRuntimeIds = prospective.disabledRuntimeIds.filter(
+      (runtimeId) => !current.disabledRuntimeIds.includes(runtimeId)
+    );
+    const newlyEnabledRuntimeIds = current.disabledRuntimeIds.filter(
+      (runtimeId) => !prospective.disabledRuntimeIds.includes(runtimeId)
+    );
+    const stoppedRuntimeIds: TaskManagerAppSettings['disabledRuntimeIds'] = [];
+    try {
+      for (const runtimeId of newlyDisabledRuntimeIds) {
+        stoppedRuntimeIds.push(runtimeId);
+        await this.runtimeRegistry.require(runtimeId).shutdown();
+      }
+      this.appSettings = await this.appSettingsStore.update(safeInput);
+    } catch (cause) {
+      const recoveryFailures = await this.runtimeRegistry.initialize(stoppedRuntimeIds);
+      if (recoveryFailures.length > 0) {
+        throw new AggregateError(
+          [cause, ...recoveryFailures.map((failure) => failure.error)],
+          'Runtime disablement failed and Task Monki could not restore every stopped provider.'
+        );
+      }
+      throw cause;
+    }
+    const affectsExternalTools = Boolean(
+      input.codexExternalTools ||
+      input.externalExecutables ||
+      input.runtimeExecutablePaths
+    );
+    const affectsRuntimeAvailability = input.disabledRuntimeIds !== undefined;
+    const updatedAgentRuntimeIds = Object.keys(input.runtimeExecutablePaths ?? {});
+    let runtimeConfigurationChanged = false;
     if (affectsExternalTools) {
       const affectsCodexRuntime = affectsCodexRuntimeSettings(input);
+      runtimeConfigurationChanged = Boolean(
+        affectsCodexRuntime || updatedAgentRuntimeIds.length > 0
+      );
+      const activeRuntimeIds = await this.activeAgentRuntimeIds();
       try {
         await this.applyRuntimeSettings({
-          restartCodex: affectsCodexRuntime && !(await this.hasActiveAgentRun()),
-          updateCodex: affectsCodexRuntime
+          restartCodex: affectsCodexRuntime && !activeRuntimeIds.has('codex'),
+          updateCodex: affectsCodexRuntime,
+          updateAgentRuntimeIds: updatedAgentRuntimeIds,
+          restartAgentRuntimes: activeRuntimeIds.size === 0
         });
       } catch {
         // The setting is still saved; provider/tool status reports the runtime failure.
       }
-      if (affectsCodexRuntime) {
-        this.events.emit({
-          type: 'provider.updated',
-          scope: { kind: 'APP' },
-          payload: await this.getAgentProviderState(),
-          at: new Date().toISOString()
-        });
-      }
+    }
+    await this.initializeEnabledRuntimes(newlyEnabledRuntimeIds);
+    if (affectsRuntimeAvailability || runtimeConfigurationChanged) {
+      this.events.emit({
+        type: 'runtime.updated',
+        taskId: 'settings',
+        payload: await this.getAgentRuntimeCatalogUnlocked(),
+        at: new Date().toISOString()
+      });
     }
     return structuredClone(this.appSettings);
   }
@@ -639,25 +682,245 @@ export class TaskManagerService {
   }
 
   async inspectOpenTarget(input: InspectOpenTargetRequest): Promise<OpenTargetInspection> {
+    this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.inspect(input, {
-      snapshot: await this.store.snapshot(),
-      resolveRepositoryPath: async (repositoryId) =>
-        (await this.resolveRepository(requireRepositoryId(repositoryId))).canonicalRealPath
+      snapshot: await this.store.snapshot()
     });
   }
 
   async executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult> {
+    return this.withControlAction(() => this.executeOpenTargetActionInternal(input));
+  }
+
+  private async executeOpenTargetActionInternal(
+    input: ExecuteOpenTargetActionRequest
+  ): Promise<OpenTargetActionResult> {
+    this.appSettings = await this.appSettingsStore.get();
     return this.openTargets.execute(input, {
-      snapshot: await this.store.snapshot(),
-      resolveRepositoryPath: async (repositoryId) =>
-        (await this.resolveRepository(requireRepositoryId(repositoryId))).canonicalRealPath
+      snapshot: await this.store.snapshot()
     });
   }
 
-  getAgentProviderState() {
-    return this.agents.getProviderState();
+  async addRepository(repositoryPath: string): Promise<Repository> {
+    const preflight = await validateRepositoryPath(repositoryPath);
+    if (preflight.status !== 'VALID') {
+      throw new Error(preflight.error ?? 'The selected folder is not a valid Git repository.');
+    }
+    const repository = await this.store.addRepository(preflight);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact> {
+    await this.requireRepository(repositoryId);
+    return selectRepositoryImpact(await this.store.snapshot(), repositoryId);
+  }
+
+  async disconnectRepository(input: DisconnectRepositoryRequest): Promise<Repository> {
+    if (!input.confirmed) {
+      throw new Error('Repository disconnect requires explicit confirmation.');
+    }
+    const impact = await this.getRepositoryImpact(input.repositoryId);
+    if (impact.blockingReason) {
+      throw new Error(impact.blockingReason);
+    }
+    const repository = await this.store.disconnectRepository(input.repositoryId);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async reconnectRepository(input: ReconnectRepositoryRequest): Promise<Repository> {
+    const existing = await this.requireRepository(input.repositoryId);
+    if (existing.status === 'AVAILABLE') {
+      throw new Error('Disconnect the repository before changing its path.');
+    }
+    const impact = selectRepositoryImpact(await this.store.snapshot(), existing.id);
+    if (impact.blockingReason) {
+      throw new Error(impact.blockingReason);
+    }
+    const preflight = await validateRepositoryPath(input.path);
+    if (preflight.status !== 'VALID') {
+      throw new Error(preflight.error ?? 'The selected folder is not a valid Git repository.');
+    }
+    const repository = await this.store.recordRepositoryPreflight(existing.id, preflight);
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async refreshRepository(repositoryId: string): Promise<Repository> {
+    const existing = await this.requireRepository(repositoryId);
+    if (existing.status === 'DISCONNECTED') {
+      throw new Error('Reconnect the repository before refreshing it.');
+    }
+    const repository = await this.store.recordRepositoryPreflight(
+      existing.id,
+      await validateRepositoryPath(existing.path)
+    );
+    this.emitRepositoryUpdate(repository);
+    return repository;
+  }
+
+  async createBoard(input: CreateBoardRequest): Promise<Board> {
+    const board = await this.store.createBoard(input);
+    this.emitBoardUpdate('board.updated', board);
+    return board;
+  }
+
+  async updateBoard(input: UpdateBoardRequest): Promise<Board> {
+    const board = await this.store.updateBoard(input);
+    this.emitBoardUpdate('board.updated', board);
+    return board;
+  }
+
+  async deleteBoard(boardId: string): Promise<void> {
+    await this.store.deleteBoard(boardId);
+    this.emitBoardUpdate('board.deleted', { id: boardId });
+  }
+
+  async getAgentRuntimeCatalog() {
+    return this.withRuntimeOperation(() => this.getAgentRuntimeCatalogUnlocked());
+  }
+
+  private getAgentRuntimeCatalogUnlocked() {
+    return this.agents.getRuntimeCatalog(new Set(this.appSettings.disabledRuntimeIds));
+  }
+
+  private async getDiscourseRuntimeCatalog() {
+    const catalog = await this.getAgentRuntimeCatalogUnlocked();
+    return {
+      ...catalog,
+      runtimes: catalog.runtimes.map((runtime) => {
+        const runtimeId = runtime.preflight.runtime.id;
+        const configured = this.scopedTurnRouter?.has(runtimeId) === true;
+        return {
+          ...runtime,
+          preflight: {
+            ...runtime.preflight,
+            capabilities: {
+              ...runtime.preflight.capabilities,
+              extensions: {
+                ...runtime.preflight.capabilities.extensions,
+                'task-monki.discourse': configured
+                  ? {
+                      maturity: 'stable' as const,
+                      detail:
+                        'A scoped runtime binding attests read-only, offline Discourse execution.'
+                    }
+                  : {
+                      maturity: 'unsupported' as const,
+                      detail: `${runtime.preflight.runtime.displayName} is not configured for scoped Discourse turns.`
+                    }
+              }
+            }
+          }
+        };
+      })
+    };
+  }
+
+  async discoverAgentRuntimeModels(runtimeId: AgentRuntimeId) {
+    return this.withRuntimeOperation(() =>
+      this.agents.discoverAgentRuntimeModels(
+        runtimeId,
+        new Set(this.appSettings.disabledRuntimeIds)
+      )
+    );
+  }
+
+  async updateAgentNativeSession(
+    input: UpdateAgentNativeSessionRequest
+  ): Promise<UpdateAgentNativeSessionResult> {
+    if (
+      !input ||
+      typeof input.taskId !== 'string' ||
+      !input.taskId ||
+      typeof input.sessionId !== 'string' ||
+      !input.sessionId ||
+      typeof input.runtimeId !== 'string' ||
+      !input.runtimeId ||
+      typeof input.controlId !== 'string' ||
+      !input.controlId ||
+      typeof input.revision !== 'string' ||
+      !input.revision ||
+      !['string', 'boolean'].includes(typeof input.value)
+    ) {
+      throw new Error(
+        'A task, session, and runtime are required for native session updates.'
+      );
+    }
+    return this.withTaskAction(input.taskId, 'Provider session update', () =>
+      this.withRuntimeOperation(async () => {
+        const session = await this.store.getAgentSession(input.sessionId);
+        if (!session || session.taskId !== input.taskId) {
+          throw new Error('Agent session ownership does not match the selected task.');
+        }
+        if (session.runtimeId !== input.runtimeId) {
+          throw new Error(
+            `Agent session ${session.id} belongs to ${session.runtimeId}, not ${input.runtimeId}.`
+          );
+        }
+        const snapshot = await this.store.snapshot();
+        if (
+          snapshot.runs.some(
+            (run) =>
+              run.sessionId === session.id &&
+              [
+                'QUEUED',
+                'STARTING',
+                'RUNNING',
+                'AWAITING_APPROVAL',
+                'AWAITING_USER_INPUT',
+                'INTERRUPTING',
+                'RECOVERY_REQUIRED'
+              ].includes(run.status)
+          )
+        ) {
+          throw new Error(
+            'Provider-native session settings cannot change during an active or recovery-required run.'
+          );
+        }
+        if (!['IDLE', 'NOT_LOADED'].includes(session.status)) {
+          throw new Error(
+            `Agent session ${session.id} is ${session.status} and cannot be configured.`
+          );
+        }
+
+        this.assertRuntimeEnabled(input.runtimeId);
+        const adapter = this.runtimeRegistry.require(input.runtimeId);
+        await this.assertAgentRuntimeAvailable();
+        await this.assertRuntimeAllowedInCurrentSurface(adapter);
+        if (!adapter.applySessionControl) {
+          throw new Error(
+            `${adapter.descriptor.displayName} does not expose typed provider session controls.`
+          );
+        }
+        if (session.status === 'NOT_LOADED') {
+          if (!session.providerSessionId) {
+            throw new Error(`Agent session ${session.id} has no provider session ID.`);
+          }
+          await adapter.attachSession({
+            localSessionId: session.id,
+            providerSessionId: session.providerSessionId
+          });
+        }
+
+        const updated = await adapter.applySessionControl({
+          localSessionId: session.id,
+          controlId: input.controlId,
+          value: input.value,
+          revision: input.revision
+        });
+        return {
+          taskId: session.taskId,
+          sessionId: session.id,
+          runtimeId: session.runtimeId,
+          native: updated.native,
+          controls: updated.controls
+        };
+      })
+    );
   }
 
   listTasks(): Promise<TaskSnapshot> {
@@ -812,74 +1075,111 @@ export class TaskManagerService {
   }
 
   async createTask(input: CreateTaskRequest): Promise<Task> {
-    const resolved = await this.resolveRepository(requireRepositoryId(input?.repositoryId));
-    const { repositoryId: _repositoryId, ...rest } = input;
-    return this.createTaskFromTrustedPath({
-      ...rest,
-      repositoryPath: resolved.canonicalRealPath
-    });
+    return this.withRuntimeOperation(() => this.createTaskLocked(input));
   }
 
-  async createTaskFromTrustedPath(input: CreateStoredTaskRequest): Promise<Task> {
-    const acknowledgedTask = await this.store.resolveTaskCreationRetry(input);
+  private async createTaskLocked(input: CreateTaskRequest): Promise<Task> {
+    if (
+      input.runtimeId &&
+      input.agentSettings?.runtimeId &&
+      input.runtimeId !== input.agentSettings.runtimeId
+    ) {
+      throw new Error('Task runtime and execution settings runtime must match.');
+    }
+    const configuredDefaultRuntime = this.runtimeRegistry.has(
+      this.appSettings.defaultRuntimeId
+    )
+      ? this.appSettings.defaultRuntimeId
+      : this.runtimeRegistry.defaultRuntimeId;
+    const runtimeId =
+      input.runtimeId ?? input.agentSettings?.runtimeId ?? configuredDefaultRuntime;
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    const requestedInput: CreateTaskRequest = {
+      ...input,
+      runtimeId,
+      agentSettings: { ...input.agentSettings, runtimeId }
+    };
+    const acknowledgedTask = await this.store.resolveTaskCreationRetry(requestedInput);
     if (acknowledgedTask) {
       return acknowledgedTask;
     }
-    if (!input.attachmentDraftId) {
-      return this.store.createTask(input);
+    this.assertRuntimeEnabled(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    if (!requestedInput.attachmentDraftId) {
+      const settings = await prepareTaskCreationSettings(
+        adapter,
+        requestedInput.agentSettings ?? { runtimeId },
+        []
+      );
+      return this.store.createTask({
+        ...requestedInput,
+        agentSettings: settings,
+        creationFingerprintInput: requestedInput
+      });
     }
-    return this.withAttachmentDraft(input.attachmentDraftId, async () => {
+    return this.withAttachmentDraft(requestedInput.attachmentDraftId, async () => {
       // The first request may complete between the initial lookup and entry to
       // this critical section. Resolve it before reading a draft that successful
       // task creation has intentionally consumed.
-      const acknowledgedInsideLock = await this.store.resolveTaskCreationRetry(input);
+      const acknowledgedInsideLock = await this.store.resolveTaskCreationRetry(requestedInput);
       if (acknowledgedInsideLock) {
         return acknowledgedInsideLock;
       }
-      const draft = await this.store.listAttachmentDraft(input.attachmentDraftId!);
-      if (input.agentSettings?.networkAccess === true) {
-        throw new Error('Network access must be disabled for tasks with attachments.');
-      }
-      if (!codexExternalToolsAreDisabled(this.appSettings.codexExternalTools)) {
-        throw new Error(
-          'Disable Codex web search, MCP servers, and apps before creating a task with attachments.'
-        );
-      }
-      assertAttachmentSandboxSupportsDelivery(
-        input.agentSettings ?? {},
+      const draft = await this.store.listAttachmentDraft(requestedInput.attachmentDraftId!);
+      const settings = await prepareTaskCreationSettings(
+        adapter,
+        requestedInput.agentSettings ?? { runtimeId },
         draft.attachments
       );
-      if (draft.attachments.some((attachment) => attachment.kind === 'image')) {
-        const provider = await this.agents.getProviderState();
-        const requestedModel = input.agentSettings?.model;
-        const model =
-          provider.models.find((candidate) => candidate.model === requestedModel) ??
-          provider.models.find((candidate) => candidate.id === requestedModel) ??
-          provider.models.find((candidate) => candidate.isDefault) ??
-          provider.models[0];
-        if (!model) {
-          throw new AgentAttachmentDeliveryError(
-            'MODEL_DOES_NOT_SUPPORT_IMAGES',
-            'Codex must report an image-capable model before this task can be created with images.'
-          );
-        }
-        assertModelSupportsAttachments(model, draft.attachments);
-      }
-      return this.store.createTask(input);
+      return this.store.createTask({
+        ...requestedInput,
+        agentSettings: settings,
+        creationFingerprintInput: requestedInput
+      });
     });
   }
 
   async refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse> {
-    await this.assertAttachmentProviderBoundaryAvailable();
-    const repository = await this.resolveRepository(requireRepositoryId(input?.repositoryId));
-    const refined = await this.promptRefiner.refine(
-      repository.canonicalRealPath,
-      input.input,
-      input.model,
-      this.codexExecutable,
-      this.appSettings.codexExternalTools,
-      this.browserDevAgentBoundary
-    );
+    return this.withRuntimeOperation(() => this.refinePromptLocked(input));
+  }
+
+  private async refinePromptLocked(
+    input: RefinePromptRequest
+  ): Promise<RefinePromptResponse> {
+    await this.assertAgentRuntimeAvailable();
+    const repository = await this.requireAvailableRepository(input.repositoryId);
+    const configuredRuntimeId =
+      this.appSettings.promptRefinementRuntimeId ??
+      this.appSettings.defaultRuntimeId;
+    const runtimeId = input.runtimeId ?? configuredRuntimeId;
+    this.assertRuntimeEnabled(runtimeId);
+    const useConfiguredModel = runtimeId === configuredRuntimeId;
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    if (!adapter.refinePrompt) {
+      throw new Error(
+        `${adapter.descriptor.displayName} does not expose native prompt refinement.`
+      );
+    }
+    const refined = await adapter.refinePrompt({
+      repositoryPath: repository.path,
+      input: input.input,
+      settings: {
+        runtimeId,
+        model:
+          input.model ??
+          (useConfiguredModel ? this.appSettings.promptRefinementModel : undefined),
+        modelProvider:
+          input.modelProvider ??
+          (useConfiguredModel
+            ? this.appSettings.promptRefinementModelProvider
+            : undefined),
+        sandbox: 'READ_ONLY',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      }
+    });
     this.events.emit({
       type: 'prompt.refined',
       taskId: 'prompt-preview',
@@ -890,10 +1190,19 @@ export class TaskManagerService {
   }
 
   async prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord> {
+    return this.withTaskAction(input.taskId, 'Worktree preparation', () =>
+      this.prepareWorktreeUnlocked(input)
+    );
+  }
+
+  private async prepareWorktreeUnlocked(
+    input: PrepareWorktreeRequest
+  ): Promise<WorktreeRecord> {
     const task = await this.requireTask(input.taskId);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
     const existing = await this.store.getCurrentWorktree(task.id);
     if (existing && existing.status !== 'ERROR' && existing.status !== 'MISSING') {
-      const verified = await this.worktrees.verify(existing);
+      const verified = await this.worktrees.verify(existing, repository.path);
       return this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
     }
 
@@ -920,9 +1229,10 @@ export class TaskManagerService {
     });
 
     try {
-      const created = await this.worktrees.create(worktree);
+      const repository = await this.requireAvailableRepository(task.repositoryId);
+      const created = await this.worktrees.create(worktree, repository.path);
       const stored = await this.store.updateWorktree(created, 'WORKTREE_CREATED');
-      await this.refreshEvidence({ taskId: task.id });
+      await this.refreshEvidenceInternal({ taskId: task.id });
       this.events.emit({
         type: 'worktree.updated',
         taskId: task.id,
@@ -945,19 +1255,35 @@ export class TaskManagerService {
   }
 
   async startRun(input: StartRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent run', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
-      const worktree = await this.prepareWorktree({ taskId: task.id });
-      return this.startPreparedRun({
-        task,
-        worktree,
-        mode: input.mode,
-        settings: input.settings
-      });
-    });
+    return this.withTaskAction(input.taskId, 'Agent run', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        let task = await this.requireTask(input.taskId);
+        const mode = input.mode ?? 'IMPLEMENTATION';
+        if (task.currentRunId) {
+          if (isImplementationRunMode(mode)) {
+            await this.awaitPostRunEvidence(task.currentRunId);
+          } else {
+            await this.ensurePostRunEvidence(task.currentRunId);
+          }
+          task = await this.requireTask(input.taskId);
+        }
+        const retryReason = getImplementationRetryReason(task);
+        if (retryReason && !isImplementationRunMode(mode)) {
+          throw new Error(retryReason);
+        }
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting agent work');
+        const worktree = await this.prepareWorktreeUnlocked({ taskId: task.id });
+        return this.startPreparedRun({
+          task,
+          worktree,
+          mode,
+          settings: input.settings
+        });
+      })
+    );
   }
 
   private async startPreparedRun(input: {
@@ -966,8 +1292,9 @@ export class TaskManagerService {
     mode?: AgentRunMode;
     settings?: AgentExecutionSettings;
   }): Promise<RunRecord> {
-    await this.assertAttachmentProviderBoundaryAvailable();
+    await this.assertAgentRuntimeAvailable();
     const { task, worktree } = input;
+    this.assertRuntimeEnabled(task.runtimeId);
     const iteration = await this.store.getCurrentIteration(task.id);
     if (!iteration) {
       throw new Error('Task iteration was not created.');
@@ -975,7 +1302,7 @@ export class TaskManagerService {
     if (iteration.id !== worktree.iterationId) {
       throw new Error('Prepared worktree does not match the current task iteration.');
     }
-    const snapshot = await this.refreshEvidence({ taskId: task.id });
+    const snapshot = await this.refreshEvidenceInternal({ taskId: task.id });
     const mode = input.mode ?? 'IMPLEMENTATION';
     const readOnlyMode = mode === 'ANALYSIS' || mode === 'REVIEW';
     const settings = mergeRunSettings({
@@ -996,105 +1323,127 @@ export class TaskManagerService {
     });
   }
 
-  cancelRun(input: CancelRunRequest): Promise<void> {
-    return this.agents.interruptRun(input.runId);
+  async cancelRun(input: CancelRunRequest): Promise<void> {
+    return this.withRuntimeOperation(async () => {
+      const run = await this.store.getRun(input.runId);
+      if (!run) return;
+      return this.withTaskAction(run.taskId, 'Agent cancellation', async () => {
+        const current = await this.store.getRun(input.runId);
+        if (!current || current.taskId !== run.taskId) return;
+        await this.agents.interruptRun(current.id);
+      });
+    });
   }
 
   async steerRun(input: SteerRunRequest): Promise<void> {
-    const run = await this.requireRunForTask(input.runId, input.taskId);
-    const snapshot = await this.store.snapshot();
-    const worktree = snapshot.worktrees.find((candidate) => candidate.id === run.worktreeId);
-    return this.agents.steerRun(
-      run.id,
-      buildSteerInstruction({
-        instruction: input.instruction,
-        worktreePath: worktree?.worktreePath
+    return this.withTaskAction(input.taskId, 'Agent steering', () =>
+      this.withRuntimeOperation(async () => {
+        const run = await this.requireRunForTask(input.runId, input.taskId);
+        const snapshot = await this.store.snapshot();
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.id === run.worktreeId
+        );
+        return this.agents.steerRun(
+          run.id,
+          buildSteerInstruction({
+            instruction: input.instruction,
+            worktreePath: worktree?.worktreePath
+          })
+        );
       })
     );
   }
 
   async continueRun(input: ContinueRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent follow-up', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
-      const { task, run, iteration, worktree } = await this.requireContinuationContext(
-        input.taskId,
-        input.runId
-      );
-      const snapshot = await this.store.snapshot();
-      assertContinuable(run);
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
-        exceptRunId: run.id
-      });
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, false);
-      const prompt = buildContinuationPrompt({
-        task,
-        run,
-        gitSnapshot,
-        instruction: input.instruction,
-        kind: 'continuation'
-      });
-      await this.agents.resolveRecoveryRunForReplacement(run.id);
-      return this.agents.startTurn({
-        task,
-        iteration,
-        worktree,
-        sessionId: run.sessionId,
-        mode: 'FOLLOW_UP',
-        prompt,
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id,
-        continuedFromRunId: run.id
-      });
-    });
+    return this.withTaskAction(input.taskId, 'Agent follow-up', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        await this.awaitPostRunEvidence(input.runId);
+        const { task, run, iteration, worktree } = await this.requireContinuationContext(
+          input.taskId,
+          input.runId
+        );
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        assertContinuable(run);
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting follow-up work', {
+          exceptRunId: run.id
+        });
+        const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+        const settings = followUpSettings(task, run, input.settings, false);
+        const prompt = buildContinuationPrompt({
+          task,
+          run,
+          gitSnapshot,
+          instruction: input.instruction,
+          kind: 'continuation'
+        });
+        await this.agents.resolveRecoveryRunForReplacement(run.id);
+        return this.agents.startTurn({
+          task,
+          iteration,
+          worktree,
+          sessionId: run.sessionId,
+          mode: 'FOLLOW_UP',
+          prompt,
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id,
+          continuedFromRunId: run.id
+        });
+      })
+    );
   }
 
   async retryRun(input: RetryRunRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Agent retry', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
-      const { task, run, iteration, worktree } = await this.requireContinuationContext(
-        input.taskId,
-        input.runId
-      );
-      const snapshot = await this.store.snapshot();
-      assertRetryable(run);
-      this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
-        exceptRunId: run.id
-      });
-      if (input.strategy === 'FORK') {
-        await this.agents.resolveRecoveryRunForReplacement(run.id);
-        return this.startForkedAlternative({
-          sourceTaskId: task.id,
-          sourceRun: run,
-          sourceWorktree: worktree,
-          instruction: input.instruction,
-          settings: input.settings
+    return this.withTaskAction(input.taskId, 'Agent retry', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        await this.awaitPostRunEvidence(input.runId);
+        const { task, run, iteration, worktree } = await this.requireContinuationContext(
+          input.taskId,
+          input.runId
+        );
+        this.assertRuntimeEnabled(task.runtimeId);
+        const snapshot = await this.store.snapshot();
+        assertRetryable(run);
+        this.assertNoActiveTaskRun(snapshot, task.id, 'retrying agent work', {
+          exceptRunId: run.id
         });
-      }
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, false);
-      const prompt = buildContinuationPrompt({
-        task,
-        run,
-        gitSnapshot,
-        instruction: input.instruction,
-        kind: 'retry'
-      });
-      await this.agents.resolveRecoveryRunForReplacement(run.id);
-      return this.agents.startTurn({
-        task,
-        iteration,
-        worktree,
-        sessionId: run.sessionId,
-        mode: 'RETRY',
-        prompt,
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id,
-        retryOfRunId: run.id
-      });
-    });
+        if (input.strategy === 'FORK') {
+          await this.agents.resolveRecoveryRunForReplacement(run.id);
+          return this.startForkedAlternative({
+            sourceTaskId: task.id,
+            sourceRun: run,
+            sourceWorktree: worktree,
+            instruction: input.instruction,
+            settings: input.settings
+          });
+        }
+        const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+        const settings = followUpSettings(task, run, input.settings, false);
+        const prompt = buildContinuationPrompt({
+          task,
+          run,
+          gitSnapshot,
+          instruction: input.instruction,
+          kind: 'retry'
+        });
+        await this.agents.resolveRecoveryRunForReplacement(run.id);
+        return this.agents.startTurn({
+          task,
+          iteration,
+          worktree,
+          sessionId: run.sessionId,
+          mode: 'RETRY',
+          prompt,
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id,
+          retryOfRunId: run.id
+        });
+      })
+    );
   }
 
   private async startForkedAlternative(input: {
@@ -1106,6 +1455,21 @@ export class TaskManagerService {
   }): Promise<RunRecord> {
     const sourceTask = await this.requireTask(input.sourceTaskId);
     const alternativeNumber = (sourceTask.forkedAlternativeTaskIds?.length ?? 0) + 1;
+    const runtimeId = input.settings?.runtimeId ?? sourceTask.runtimeId;
+    this.assertRuntimeEnabled(runtimeId);
+    const alternativeSettings: AgentExecutionSettings = {
+      ...sourceTask.agentSettings,
+      ...input.settings,
+      runtimeId
+    };
+    const adapter = this.runtimeRegistry.require(runtimeId);
+    await this.assertRuntimeAllowedInCurrentSurface(adapter);
+    const sourceAttachments = await this.store.getTaskAttachments(sourceTask.id);
+    const resolvedAlternativeSettings = await prepareTaskCreationSettings(
+      adapter,
+      alternativeSettings,
+      sourceAttachments
+    );
     const alternativeTask = await this.store.createForkedAlternativeTask({
       title: `Alternative #${alternativeNumber}: ${sourceTask.title}`,
       prompt: buildForkAlternativeTaskPrompt({
@@ -1114,8 +1478,9 @@ export class TaskManagerService {
         worktree: input.sourceWorktree,
         instruction: input.instruction
       }),
-      repositoryPath: sourceTask.repositoryPath,
-      agentSettings: sourceTask.agentSettings,
+      repositoryId: sourceTask.repositoryId,
+      runtimeId,
+      agentSettings: resolvedAlternativeSettings,
       sourceTaskId: sourceTask.id,
       sourceRunId: input.sourceRun.id
     });
@@ -1129,7 +1494,7 @@ export class TaskManagerService {
         task: alternativeTask,
         worktree: alternativeWorktree,
         mode: 'IMPLEMENTATION',
-        settings: input.settings
+        settings: resolvedAlternativeSettings
       });
     } catch (error) {
       await this.markForkedAlternativeSetupFailed(alternativeTask.id, error);
@@ -1152,21 +1517,74 @@ export class TaskManagerService {
   private async applyRuntimeSettings(input: {
     restartCodex: boolean;
     updateCodex: boolean;
+    updateAgentRuntimeIds?: readonly string[];
+    restartAgentRuntimes?: boolean;
   }): Promise<ExternalToolStatusReport> {
     const status = await this.externalToolResolver.getStatus(
       this.appSettings.externalExecutables
     );
     configureGitExecutablePath(executableForRuntime(status.tools.git));
     this.github.setExecutable(executableForRuntime(status.tools.gh));
-    if (input.updateCodex) {
-      this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
+    this.codexExecutable = explicitExecutableForCodexRuntime(status.tools.codex);
+    if (input.updateCodex && this.codexAdapter) {
       await this.codexAdapter.updateRuntimeConfig({
         executable: this.codexExecutable,
         toolSettings: this.appSettings.codexExternalTools,
-        restart: input.restartCodex
+        restart:
+          input.restartCodex &&
+          !this.appSettings.disabledRuntimeIds.includes(this.codexAdapter.descriptor.id)
       });
     }
+    if (input.updateAgentRuntimeIds) {
+      const updatedRuntimeIds = new Set(input.updateAgentRuntimeIds);
+      await Promise.all(
+        this.runtimeRegistry.list().map(async (adapter) => {
+          if (
+            !updatedRuntimeIds.has(adapter.descriptor.id) ||
+            !adapter.configureRuntime ||
+            adapter.descriptor.id === 'codex'
+          ) {
+            return;
+          }
+          if (
+            this.browserDevAgentBoundary &&
+            !hasBrowserDevRuntimeIsolation(await adapter.capabilities())
+          ) {
+            return;
+          }
+          const configured = this.appSettings.runtimeExecutablePaths[adapter.descriptor.id];
+          const startupOverride =
+            this.runtimeExecutableOverrides[adapter.descriptor.id];
+          const executable =
+            startupOverride ?? (configured === null ? undefined : configured);
+          await adapter.configureRuntime({
+            executable,
+            restart:
+              input.restartAgentRuntimes === true &&
+              !this.appSettings.disabledRuntimeIds.includes(adapter.descriptor.id)
+          });
+        })
+      );
+    }
     return status;
+  }
+
+  private async initializeEnabledRuntimes(
+    runtimeIds: readonly TaskManagerAppSettings['defaultRuntimeId'][]
+  ): Promise<void> {
+    if (runtimeIds.length === 0 || this.agentProviderStartupDisabledReason) return;
+    const eligible: TaskManagerAppSettings['disabledRuntimeIds'] = [];
+    for (const runtimeId of runtimeIds) {
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      if (
+        this.browserDevAgentBoundary &&
+        !hasBrowserDevRuntimeIsolation(await adapter.capabilities())
+      ) {
+        continue;
+      }
+      eligible.push(runtimeId);
+    }
+    await this.runtimeRegistry.initialize(eligible);
   }
 
   private async loadBoundarySafeAppSettings(): Promise<TaskManagerAppSettings> {
@@ -1182,137 +1600,283 @@ export class TaskManagerService {
     });
   }
 
-  private requireRepositoryRegistry(): RepositoryRegistry {
-    if (!this.repositoryRegistry) {
-      throw new Error('Repository registry is not configured for this Task Monki service.');
+  private async assertRuntimeEnablementValid(
+    prospective: TaskManagerAppSettings,
+    current?: TaskManagerAppSettings
+  ): Promise<void> {
+    const disabled = new Set(prospective.disabledRuntimeIds);
+    for (const runtimeId of disabled) {
+      this.runtimeRegistry.require(runtimeId);
     }
-    return this.repositoryRegistry;
+    for (const [purpose, runtimeId] of [
+      ['default task', prospective.defaultRuntimeId],
+      ['prompt refinement', prospective.promptRefinementRuntimeId],
+      ['review', prospective.reviewRuntimeId]
+    ] as const) {
+      if (!runtimeId) continue;
+      this.runtimeRegistry.require(runtimeId);
+      if (disabled.has(runtimeId)) {
+        throw new Error(
+          `${this.runtimeRegistry.require(runtimeId).descriptor.displayName} cannot be disabled while it is the ${purpose} runtime.`
+        );
+      }
+    }
+    for (const runtimeId of Object.keys(prospective.runtimeExecutablePaths)) {
+      if (runtimeId === 'codex') {
+        throw new Error('Codex does not use a provider runtime executable path.');
+      }
+      const adapter = this.runtimeRegistry.require(runtimeId);
+      if (!adapter.configureRuntime) {
+        throw new Error(
+          `${adapter.descriptor.displayName} does not use a provider runtime executable path.`
+        );
+      }
+    }
+
+    const newlyDisabled = new Set(
+      prospective.disabledRuntimeIds.filter(
+        (runtimeId) => !current?.disabledRuntimeIds.includes(runtimeId)
+      )
+    );
+    if (newlyDisabled.size === 0) return;
+    const activeRun = (await this.store.snapshot()).runs.find(
+      (run) => newlyDisabled.has(run.runtimeId) && ACTIVE_AGENT_RUN_STATUSES.has(run.status)
+    );
+    if (activeRun) {
+      const runtime = this.runtimeRegistry.require(activeRun.runtimeId).descriptor.displayName;
+      throw new Error(
+        `${runtime} cannot be disabled while run ${activeRun.id} is active or requires recovery.`
+      );
+    }
+  }
+
+  private assertRuntimeEnabled(runtimeId: TaskManagerAppSettings['defaultRuntimeId']): void {
+    if (!this.appSettings.disabledRuntimeIds.includes(runtimeId)) return;
+    const runtime = this.runtimeRegistry.require(runtimeId).descriptor.displayName;
+    throw new Error(`${runtime} is disabled. Enable it in Settings before starting agent work.`);
+  }
+
+  private async activeAgentRuntimeIds(): Promise<Set<AgentRuntimeId>> {
+    const snapshot = await this.store.snapshot();
+    return new Set(
+      snapshot.runs
+        .filter((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status))
+        .map((run) => run.runtimeId)
+    );
+  }
+
+  async startReview(input: StartReviewRequest): Promise<RunRecord> {
+    return this.withTaskAction(input.taskId, 'Agent review', () =>
+      this.withRuntimeOperation(async () => {
+        await this.assertAgentRuntimeAvailable();
+        let task = await this.requireTask(input.taskId);
+        const runId = input.runId ?? task.currentRunId;
+        if (!runId) {
+          throw new Error('Complete an agent turn before starting a detached review.');
+        }
+        await this.ensurePostRunEvidence(runId);
+        task = await this.requireTask(input.taskId);
+        const implementationRetryReason = getImplementationRetryReason(task);
+        if (implementationRetryReason) {
+          throw new Error(implementationRetryReason);
+        }
+        const snapshot = await this.store.snapshot();
+        this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
+        const run = await this.requireRunForTask(runId, task.id);
+        if (
+          [
+            'QUEUED',
+            'STARTING',
+            'RUNNING',
+            'AWAITING_APPROVAL',
+            'AWAITING_USER_INPUT',
+            'INTERRUPTING'
+          ].includes(run.status)
+        ) {
+          throw new Error('Wait for the active turn to finish before starting a review.');
+        }
+        if (
+          run.id !== task.currentRunId ||
+          !isImplementationRunMode(run.mode) ||
+          run.status !== 'COMPLETED' ||
+          task.workflowPhase !== 'REVIEW'
+        ) {
+          throw new Error(
+            'A review requires a successfully completed implementation run. Retry or continue this run first.'
+          );
+        }
+        const iteration = snapshot.iterations.find(
+          (candidate) => candidate.id === run.iterationId
+        );
+        const worktree = snapshot.worktrees.find(
+          (candidate) => candidate.id === run.worktreeId
+        );
+        if (!iteration || !worktree) {
+          throw new Error('The source run no longer has a valid task iteration.');
+        }
+        const gitSnapshot = await this.refreshEvidenceInternal({ taskId: task.id });
+        const configuredReviewRuntimeId =
+          this.appSettings.reviewRuntimeId ?? task.runtimeId;
+        const reviewRuntimeId = input.settings?.runtimeId ?? configuredReviewRuntimeId;
+        this.assertRuntimeEnabled(reviewRuntimeId);
+        this.runtimeRegistry.require(reviewRuntimeId);
+        const useConfiguredReviewModel = reviewRuntimeId === configuredReviewRuntimeId;
+        const configuredReviewSettings: AgentExecutionSettings = {
+          ...(useConfiguredReviewModel && this.appSettings.reviewModel
+            ? { model: this.appSettings.reviewModel }
+            : {}),
+          ...(useConfiguredReviewModel && this.appSettings.reviewModelProvider
+            ? { modelProvider: this.appSettings.reviewModelProvider }
+            : {}),
+          ...(useConfiguredReviewModel && this.appSettings.reviewReasoningEffort
+            ? { reasoningEffort: this.appSettings.reviewReasoningEffort }
+            : {}),
+          ...input.settings,
+          runtimeId: reviewRuntimeId
+        };
+        const settings =
+          reviewRuntimeId === run.runtimeId
+            ? followUpSettings(task, run, configuredReviewSettings, true)
+            : mergeRunSettings({
+                readOnly: true,
+                settings: [
+                  portableSecuritySettings(run.requestedSettings),
+                  configuredReviewSettings
+                ]
+              });
+        return this.agents.startReview({
+          task,
+          iteration,
+          worktree,
+          sourceRun: run,
+          target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
+          settings,
+          generationKey: gitSnapshot.dirtyFingerprint,
+          beforeGitSnapshotId: gitSnapshot.id
+        });
+      })
+    );
+  }
+
+  async syncAgentGoal(input: SyncAgentGoalRequest) {
+    return this.withRuntimeOperation(async () => {
+      await this.assertAgentRuntimeAvailable();
+      const task = await this.requireTask(input.taskId);
+      this.assertRuntimeEnabled(task.runtimeId);
+      return this.agents.syncGoal(task, input.sessionId);
+    });
+  }
+
+  respondToInteraction(input: RespondToInteractionRequest) {
+    return this.withTaskAction(input.taskId, 'Interaction response', () =>
+      this.withRuntimeOperation(() => this.agents.respondToInteraction(input))
+    );
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
+    if (this.lifecycleState === 'STOPPED') return Promise.resolve();
+    this.lifecycleState = 'SHUTTING_DOWN';
+    this.runtimeLifecycleClosing = true;
+    const pendingInitialization = this.initWork;
+    const pendingTaskActions = [...this.taskActionLocks.values()].map(
+      ({ work }) => work
+    );
+    const pendingControlActions = [...this.activeControlActions];
+    const pendingRuntimeLifecycle = this.runtimeLifecycleTail;
+    const pendingRuntimeOperations = [...this.activeRuntimeOperations];
+    const work = this.completeShutdown(
+      pendingInitialization,
+      pendingTaskActions,
+      pendingControlActions,
+      pendingRuntimeLifecycle,
+      pendingRuntimeOperations
+    )
+      .finally(() => {
+        this.lifecycleState = 'STOPPED';
+        if (this.shutdownWork === work) this.shutdownWork = undefined;
+      });
+    this.shutdownWork = work;
+    return work;
+  }
+
+  private async completeShutdown(
+    pendingInitialization: Promise<void> | undefined,
+    pendingTaskActions: Promise<unknown>[],
+    pendingControlActions: Promise<unknown>[],
+    pendingRuntimeLifecycle: Promise<void>,
+    pendingRuntimeOperations: Promise<void>[]
+  ): Promise<void> {
+    await Promise.allSettled([
+      pendingInitialization ?? Promise.resolve(),
+      ...pendingTaskActions,
+      ...pendingControlActions,
+      pendingRuntimeLifecycle,
+      ...pendingRuntimeOperations
+    ]);
+    const [runtimeResult] = await Promise.allSettled([
+      this.shutdownRuntimeOwners()
+    ]);
+    this.disposeScopedTurnEvents?.();
+    await Promise.allSettled([this.scopedTurnEventTail ?? Promise.resolve()]);
+    const [postRunEvidenceResult] = await Promise.allSettled([
+      this.drainPostRunEvidence()
+    ]);
+    for (const timer of this.discourseDeltaTimers?.values() ?? []) clearTimeout(timer);
+    this.discourseDeltaTimers?.clear();
+    this.discourseDeltaStates?.clear();
+    this.disposeAgentEventListener();
+    const [storeCloseResult] = await Promise.allSettled([
+      Promise.allSettled([
+        this.discourseScheduler?.latchShutdown(
+          `service-shutdown:${Date.now()}`
+        ),
+        this.discourseStore?.close(),
+        this.agentRuntimeStore?.close(),
+        this.store.close()
+      ]).then((results) => {
+        const failed = results.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected'
+        );
+        if (failed) throw failed.reason;
+      })
+    ]);
+    if (runtimeResult.status === 'rejected') {
+      throw runtimeResult.reason;
+    }
+    if (postRunEvidenceResult.status === 'rejected') {
+      throw postRunEvidenceResult.reason;
+    }
+    if (storeCloseResult.status === 'rejected') {
+      throw storeCloseResult.reason;
+    }
+  }
+
+  private async shutdownRuntimeOwners(): Promise<void> {
+    const [agentResult, previewResult, previewRecipeGenerationResult] = await Promise.allSettled([
+      this.agents.shutdown(),
+      this.previewEnabled === false ? Promise.resolve() : this.previews.shutdown(),
+      this.previewRecipeGenerator.shutdown()
+    ]);
+    if (agentResult.status === 'rejected') throw agentResult.reason;
+    if (previewResult.status === 'rejected') throw previewResult.reason;
+    if (previewRecipeGenerationResult.status === 'rejected') {
+      throw previewRecipeGenerationResult.reason;
+    }
   }
 
   private requireDiscourseService(): DiscourseService {
     if (!this.discourse) {
-      throw new Error('Global discourse is not configured for this Task Monki service.');
+      throw new Error('Discourse storage is not configured for this Task Monki service.');
     }
     return this.discourse;
-  }
-
-  private async resolveRepository(repositoryId: string) {
-    try {
-      return await this.requireRepositoryRegistry().resolve(repositoryId);
-    } catch (error) {
-      throw new RepositoryRequestError(
-        'REPOSITORY_UNAVAILABLE',
-        409,
-        'The repository is unavailable or its identity has changed.',
-        { cause: error }
-      );
-    }
-  }
-
-  private async hasActiveAgentRun(): Promise<boolean> {
-    const snapshot = await this.store.snapshot();
-    return snapshot.runs.some((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status));
-  }
-
-  async startReview(input: StartReviewRequest): Promise<RunRecord> {
-    return this.withTaskAction(input.taskId, 'Codex review', async () => {
-      await this.assertAttachmentProviderBoundaryAvailable();
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      this.assertNoActiveTaskRun(snapshot, task.id, 'starting a review');
-      const runId = input.runId ?? task.currentRunId;
-      if (!runId) {
-        throw new Error('Complete an agent turn before starting a detached review.');
-      }
-      const run = await this.requireRunForTask(runId, task.id);
-      if (
-        ['QUEUED', 'STARTING', 'RUNNING', 'AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'INTERRUPTING'].includes(
-          run.status
-        )
-      ) {
-        throw new Error('Wait for the active turn to finish before starting a review.');
-      }
-      const iteration = snapshot.iterations.find(
-        (candidate) => candidate.id === run.iterationId
-      );
-      const worktree = snapshot.worktrees.find(
-        (candidate) => candidate.id === run.worktreeId
-      );
-      if (!iteration || !worktree) {
-        throw new Error('The source run no longer has a valid task iteration.');
-      }
-      const gitSnapshot = await this.refreshEvidence({ taskId: task.id });
-      const settings = followUpSettings(task, run, input.settings, true);
-      return this.agents.startReview({
-        task,
-        iteration,
-        worktree,
-        sourceRun: run,
-        target: input.target ?? { type: 'UNCOMMITTED_CHANGES' },
-        settings,
-        generationKey: gitSnapshot.dirtyFingerprint,
-        beforeGitSnapshotId: gitSnapshot.id
-      });
-    });
-  }
-
-  async syncAgentGoal(input: SyncAgentGoalRequest) {
-    await this.assertAttachmentProviderBoundaryAvailable();
-    const task = await this.requireTask(input.taskId);
-    return this.agents.syncGoal(task, input.sessionId);
-  }
-
-  respondToInteraction(input: RespondToInteractionRequest) {
-    return this.agents.respondToInteraction(input);
-  }
-
-  async shutdown(): Promise<void> {
-    let firstError: unknown;
-    for (const timer of this.discourseDeltaTimers.values()) clearTimeout(timer);
-    this.discourseDeltaTimers.clear();
-    this.discourseDeltaAccumulators.clear();
-    if (this.agentTurnScheduler) {
-      try {
-        await this.agentTurnScheduler.latchShutdown(
-          `service-shutdown:${this.serviceLifecycleId}`
-        );
-      } catch (error) {
-        firstError = error;
-      }
-    }
-    try {
-      await this.agents.shutdown();
-    } catch (error) {
-      firstError ??= error;
-    }
-    for (const close of [
-      () => this.discourseStore?.close(),
-      () => this.agentRuntimeStore?.close(),
-      () => this.store.close()
-    ]) {
-      try {
-        await close();
-      } catch (error) {
-        firstError ??= error;
-      }
-    }
-    if (firstError) {
-      throw firstError;
-    }
   }
 
   private async initializeDiscourseRuntime(): Promise<void> {
     if (!this.agentRuntimeStore || !this.discourseStore || !this.discourseCoordinator) {
       return;
     }
-    await this.agentRuntimeStore.init();
-    await new TaskAgentRuntimeMigrator(
-      this.store,
-      this.agentRuntimeStore
-    ).migrateTaskStoreV11();
-    await this.repairDeletedTaskRuntime();
-    await this.discourseStore.init();
-
+    await Promise.all([this.agentRuntimeStore.init(), this.discourseStore.init()]);
     const conversationIds = new Set<string>();
     let cursor: string | undefined;
     do {
@@ -1320,249 +1884,604 @@ export class TaskManagerService {
         ...(cursor ? { cursor } : {}),
         limit: 100
       });
-      page.conversations.forEach((conversation) => {
-        conversationIds.add(conversation.id);
-      });
+      page.conversations.forEach((conversation) => conversationIds.add(conversation.id));
       cursor = page.nextCursor;
     } while (cursor);
-
-    const runtimeSnapshot = await this.agentRuntimeStore.snapshot();
-    runtimeSnapshot.runs.forEach((run) => {
-      if (run.scope.kind === 'DISCOURSE') {
-        conversationIds.add(run.scope.conversationId);
-      }
+    const runtime = await this.agentRuntimeStore.snapshot();
+    runtime.runs.forEach((run) => {
+      if (run.scope.kind === 'DISCOURSE') conversationIds.add(run.scope.conversationId);
     });
     for (const conversationId of conversationIds) {
-      if (this.discourse) {
-        await this.discourse.recoverConversation(conversationId);
-      } else {
-        await this.discourseCoordinator.recoverConversation(conversationId);
-      }
+      if (this.discourse) await this.discourse.recoverConversation(conversationId);
+      else await this.discourseCoordinator.recoverConversation(conversationId);
     }
-
-    const recoveredSnapshot = await this.agentRuntimeStore.snapshot();
+    const recovered = await this.agentRuntimeStore.snapshot();
     if (
-      recoveredSnapshot.shutdownLatched &&
-      !recoveredSnapshot.queueEntries.some((entry) => entry.status === 'LEASED')
+      recovered.shutdownLatched &&
+      !recovered.queueEntries.some((entry) => entry.status === 'LEASED')
     ) {
-      await this.agentTurnScheduler?.reopenAfterRecovery(
-        `service-startup:${this.serviceLifecycleId}`
+      await this.discourseScheduler?.reopenAfterRecovery(
+        `service-startup:${Date.now()}`
       );
     }
+    this.notifyDiscourseSchedulerWorkAvailable();
   }
 
-  private async repairDeletedTaskRuntime(): Promise<void> {
-    if (!this.agentRuntimeStore) return;
-    const [tasks, runtime] = await Promise.all([
-      this.store.snapshot(),
-      this.agentRuntimeStore.snapshot()
-    ]);
-    const taskIds = new Set(tasks.tasks.map((task) => task.id));
-    const orphanTaskIds = new Set(
-      [...runtime.sessions, ...runtime.runs]
-        .filter(
-          (record) =>
-            record.owner.kind === 'TASK' && !taskIds.has(record.owner.taskId)
-        )
-        .map((record) =>
-          record.owner.kind === 'TASK' ? record.owner.taskId : ''
-        )
-        .filter(Boolean)
-    );
-    for (const taskId of orphanTaskIds) {
-      await this.agentRuntimeStore.purgeTask(taskId);
+  private notifyDiscourseSchedulerWorkAvailable(): void {
+    if (
+      this.discourseSchedulerWork ||
+      !this.discourseScheduler ||
+      !this.discourseCoordinator ||
+      !this.scopedTurnRouter
+    ) {
+      return;
     }
+    const work = this.pumpDiscourseScheduler().finally(() => {
+      if (this.discourseSchedulerWork === work) this.discourseSchedulerWork = undefined;
+    });
+    this.discourseSchedulerWork = work;
+    void work.catch(() => undefined);
   }
 
-  private async ingestScopedCodexTerminal(input: {
-    runId: string;
-    providerTurnId: string;
-    status: 'completed' | 'interrupted' | 'failed' | 'inProgress';
-    finalMessage?: string;
-    error?: string;
-    completedAt: string;
-  }): Promise<void> {
-    if (!this.agentRuntimeStore || !this.discourseCoordinator) return;
-    try {
-      await this.flushScopedCodexDelta(input.runId);
-      this.discourseDeltaAccumulators.delete(input.runId);
-      const run = await this.agentRuntimeStore.getRun(input.runId);
-      if (!run || run.scope.kind !== 'DISCOURSE') {
-        throw new Error(`Scoped Codex terminal references an unknown discourse run: ${input.runId}`);
-      }
-      const scope = run.scope;
-      const body =
-        input.finalMessage ??
-        (await this.agentRuntimeStore.readArtifact(run.outputArtifactId));
-      const discourseAggregate = this.discourseStore
-        ? await this.discourseStore.getConversation(scope.conversationId)
-        : undefined;
-      const snapshot = discourseAggregate?.contextSnapshots.find(
-        (candidate) => candidate.id === scope.contextSnapshotId
+  private async pumpDiscourseScheduler(): Promise<void> {
+    if (
+      !this.discourseScheduler ||
+      !this.discourseCoordinator ||
+      !this.scopedTurnRouter ||
+      !this.discourseStore
+    ) return;
+    for (;;) {
+      const entries = await this.discourseScheduler.leaseAvailable(
+        `discourse-dispatch:${Date.now()}`,
+        { ownerKinds: ['DISCOURSE'] }
       );
-      const freshness = this.discourseContextSnapshots && snapshot
-        ? await this.discourseContextSnapshots.freshness(snapshot)
-        : run.contextFreshnessAtCompletion ?? 'UNKNOWN';
-      const job = discourseAggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
-      const operationId = `codex-terminal:${input.runId}:${input.providerTurnId}`;
-      if (run.status === 'COMPLETED' && body.trim()) {
-        if (!job) throw new Error(`Scoped Codex terminal references an unknown job: ${scope.jobId}`);
-        const terminalInput = {
-          runId: input.runId,
-          providerTurnId: input.providerTurnId,
-          body,
-          freshnessAtCompletion: freshness,
-          clientOperationId: operationId,
-          completedAt: input.completedAt,
-          providerTerminalSource:
-            run.providerTerminalSource ?? 'TURN_COMPLETED_NOTIFICATION'
-        };
-        const result = job.role === 'CRITIQUE'
-          ? await this.discourseCoordinator.ingestReview(terminalInput)
-          : job.role === 'CORRECT'
-            ? await this.discourseCoordinator.ingestCorrection(terminalInput)
-            : await this.discourseCoordinator.ingestContribution(terminalInput);
-        if (result.kind !== 'CONVERSATION_DELETED') {
-          await this.discourse?.advanceWave(
-            scope.conversationId,
-            scope.waveId,
-            `${operationId}:advance`
+      if (entries.length === 0) return;
+      // A Panel or Team may lease multiple jobs from one wave. Serialize only
+      // their short durable dispatch checkpoints so they cannot race the
+      // shared wave revision; provider turns remain concurrent after ack.
+      for (const entry of entries) {
+        if (entry.scope.kind !== 'DISCOURSE') continue;
+        const scope = entry.scope;
+        try {
+          const aggregate = await this.discourseStore.getConversation(
+            scope.conversationId
           );
+          const snapshot = aggregate.contextSnapshots.find(
+            (candidate) => candidate.id === scope.contextSnapshotId
+          );
+          if (
+            !snapshot ||
+            (this.discourseContextSnapshots &&
+              await this.discourseContextSnapshots.freshness(snapshot) !== 'FRESH')
+          ) {
+            await this.discourseCoordinator.rejectLeasedJobForStaleContext(
+              entry.id,
+              `discourse-stale:${entry.id}:${entry.recordRevision}`
+            );
+            continue;
+          }
+          const run = await this.discourseCoordinator.dispatchLeasedJob(
+            entry.id,
+            this.scopedTurnRouter,
+            `discourse-dispatch:${entry.id}:${entry.recordRevision}`
+          );
+          this.events.emit({
+            type: 'discourse.job.updated',
+            scope: {
+              kind: 'DISCOURSE',
+              conversationId: scope.conversationId,
+              waveId: scope.waveId,
+              jobId: scope.jobId
+            },
+            taskId: `discourse:${scope.conversationId}`,
+            runId: run.id,
+            payload: { status: run.status, delivery: run.delivery },
+            at: new Date().toISOString()
+          });
+        } catch {
+          const recovery = await this.discourseCoordinator.recoverConversation(
+            scope.conversationId
+          );
+          this.events.emit({
+            type: 'discourse.job.updated',
+            scope: {
+              kind: 'DISCOURSE',
+              conversationId: scope.conversationId,
+              waveId: scope.waveId,
+              jobId: scope.jobId
+            },
+            taskId: `discourse:${scope.conversationId}`,
+            payload: {
+              status: recovery.recoveryRequiredJobIds.includes(scope.jobId)
+                ? 'RECOVERY_REQUIRED'
+                : 'QUEUED'
+            },
+            at: new Date().toISOString()
+          });
         }
-        this.events.emit({
-          type: result.kind === 'CURATED'
-            ? 'discourse.message.appended'
-            : 'discourse.job.updated',
-          scope: {
-            kind: 'DISCOURSE',
-            conversationId: scope.conversationId,
-            waveId: scope.waveId,
-            jobId: scope.jobId
-          },
-          runId: run.id,
-          payload: result,
-          at: input.completedAt
-        });
-        return;
       }
-      await this.discourseCoordinator.ingestFailure({
-        runId: input.runId,
-        providerTurnId: input.providerTurnId,
-        clientOperationId: operationId,
-        completedAt: input.completedAt,
-        providerTerminalSource:
-          run.providerTerminalSource ?? 'TURN_COMPLETED_NOTIFICATION',
-        reason:
-          input.error ??
-          (input.status === 'completed'
-            ? 'Codex completed the scoped turn without a response.'
-              : `Codex scoped turn ended with status ${input.status}.`)
+    }
+  }
+
+  private async flushDiscourseDeltas(runId: string, observedAt: string): Promise<void> {
+    const timer = this.discourseDeltaTimers.get(runId);
+    if (timer) {
+      clearTimeout(timer);
+      this.discourseDeltaTimers.delete(runId);
+    }
+    const current = this.discourseDeltaStates.get(runId);
+    if (!current || !this.agentRuntimeStore) return;
+    const drained = drainDiscourseDeltas(current);
+    this.discourseDeltaStates.set(runId, drained.state);
+    if (!drained.publication) return;
+    const run = await this.agentRuntimeStore.getRun(runId);
+    if (!run || run.scope.kind !== 'DISCOURSE') {
+      this.discourseDeltaStates.delete(runId);
+      return;
+    }
+    this.events.emit({
+      type: 'discourse.delta',
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: run.scope.conversationId,
+        waveId: run.scope.waveId,
+        jobId: run.scope.jobId
+      },
+      taskId: `discourse:${run.scope.conversationId}`,
+      runId: run.id,
+      payload: { jobId: run.scope.jobId, publication: drained.publication },
+      at: observedAt
+    });
+  }
+
+  private async ingestScopedTurnEvent(event: AgentScopedTurnEvent): Promise<void> {
+    if (!this.agentRuntimeStore || !this.discourseCoordinator) return;
+    if (event.type === 'DELTA') {
+      const run = await this.agentRuntimeStore.getRun(event.runId);
+      if (run?.scope.kind !== 'DISCOURSE') return;
+      const current = this.discourseDeltaStates.get(run.id) ??
+        createDiscourseDeltaAccumulator(run.scope.jobId, 1);
+      const appended = appendDiscourseDelta(current, {
+        jobId: run.scope.jobId,
+        attempt: 1,
+        text: event.text
       });
-      await this.discourse?.advanceWave(
-        scope.conversationId,
-        scope.waveId,
-        `${operationId}:advance-failure`
-      );
+      this.discourseDeltaStates.set(run.id, appended.state);
+      if (appended.accepted && !this.discourseDeltaTimers.has(run.id)) {
+        const timer = setTimeout(() => {
+          this.discourseDeltaTimers.delete(run.id);
+          void this.flushDiscourseDeltas(run.id, event.observedAt).catch(() => undefined);
+        }, 75);
+        timer.unref?.();
+        this.discourseDeltaTimers.set(run.id, timer);
+      }
+      return;
+    }
+    if (event.type === 'RECOVERY_REQUIRED') {
+      const run = await this.agentRuntimeStore.getRun(event.runId);
+      if (!run || run.scope.kind !== 'DISCOURSE') return;
+      await this.discourseCoordinator.recoverConversation(run.scope.conversationId);
       this.events.emit({
         type: 'discourse.job.updated',
         scope: {
           kind: 'DISCOURSE',
-          conversationId: scope.conversationId,
-          waveId: scope.waveId,
-          jobId: scope.jobId
+          conversationId: run.scope.conversationId,
+          waveId: run.scope.waveId,
+          jobId: run.scope.jobId
         },
+        taskId: `discourse:${run.scope.conversationId}`,
         runId: run.id,
-        payload: { status: 'FAILED' },
-        at: input.completedAt
+        payload: {
+          status: 'RECOVERY_REQUIRED',
+          delivery: run.delivery,
+          reason: event.reason
+        },
+        at: event.observedAt
       });
-    } finally {
-      this.agents.notifySchedulerWorkAvailable();
+      this.discourseDeltaStates.delete(run.id);
+      return;
     }
-  }
-
-  private async ingestScopedCodexDelta(input: {
-    runId: string;
-    providerTurnId: string;
-    text: string;
-    observedAt: string;
-  }): Promise<void> {
-    if (!this.agentRuntimeStore || !this.discourseStore) return;
-    const run = await this.agentRuntimeStore.getRun(input.runId);
-    if (
-      !run ||
-      run.scope.kind !== 'DISCOURSE' ||
-      run.providerTurnId !== input.providerTurnId ||
-      run.status !== 'RUNNING'
-    ) return;
+    const run = await this.agentRuntimeStore.getRun(event.runId);
+    if (!run || run.scope.kind !== 'DISCOURSE') return;
+    await this.flushDiscourseDeltas(run.id, event.completedAt);
     const scope = run.scope;
-    const aggregate = await this.discourseStore.getConversation(scope.conversationId);
-    const wave = aggregate.waves.find((candidate) => candidate.id === scope.waveId);
-    if (!wave) return;
-    const current = this.discourseDeltaAccumulators.get(run.id) ??
-      createDiscourseDeltaAccumulator(scope.jobId, wave.attempt);
-    const appended = appendDiscourseDelta(current, {
-      jobId: scope.jobId,
-      attempt: wave.attempt,
-      text: input.text
-    });
-    if (!appended.accepted) return;
-    this.discourseDeltaAccumulators.set(run.id, appended.state);
-    if (this.discourseDeltaTimers.has(run.id)) return;
-    const timer = setTimeout(() => {
-      this.discourseDeltaTimers.delete(run.id);
-      void this.flushScopedCodexDelta(run.id, input.observedAt);
-    }, DISCOURSE_LIMITS.deltaCoalesceIntervalMs);
-    this.discourseDeltaTimers.set(run.id, timer);
-  }
-
-  private async flushScopedCodexDelta(
-    runId: string,
-    observedAt = new Date().toISOString()
-  ): Promise<void> {
-    const timer = this.discourseDeltaTimers.get(runId);
-    if (timer) clearTimeout(timer);
-    this.discourseDeltaTimers.delete(runId);
-    const current = this.discourseDeltaAccumulators.get(runId);
-    if (!current) return;
-    const drained = drainDiscourseDeltas(current);
-    if (drained.publication) {
-      const run = await this.agentRuntimeStore?.getRun(runId);
-      if (run?.scope.kind === 'DISCOURSE') {
-        this.events.emit({
-          type: 'discourse.delta',
-          scope: {
-            kind: 'DISCOURSE',
-            conversationId: run.scope.conversationId,
-            waveId: run.scope.waveId,
-            jobId: run.scope.jobId
-          },
-          runId,
-          payload: {
-            jobId: run.scope.jobId,
-            attempt: current.attempt,
-            publication: drained.publication
-          },
-          at: observedAt
-        });
-      }
-    }
-    if (drained.state.truncated) {
-      this.discourseDeltaAccumulators.delete(runId);
+    const aggregate = this.discourseStore
+      ? await this.discourseStore.getConversation(scope.conversationId)
+      : undefined;
+    const job = aggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
+    const snapshot = aggregate?.contextSnapshots.find(
+      (candidate) => candidate.id === scope.contextSnapshotId
+    );
+    const body = event.finalMessage ??
+      await this.agentRuntimeStore.readArtifact(run.outputArtifactId);
+    const freshness = snapshot && this.discourseContextSnapshots
+      ? await this.discourseContextSnapshots.freshness(snapshot)
+      : run.contextFreshnessAtCompletion ?? 'UNKNOWN';
+    const operationId = `discourse-terminal:${event.runId}:${event.providerTurnId}`;
+    if (event.status === 'completed' && body.trim() && job) {
+      const terminal = {
+        runId: event.runId,
+        providerTurnId: event.providerTurnId,
+        body,
+        freshnessAtCompletion: freshness,
+        clientOperationId: operationId,
+        completedAt: event.completedAt,
+        providerTerminalSource: run.providerTerminalSource ?? 'PROVIDER_TERMINAL_EVENT'
+      };
+      if (job.role === 'CRITIQUE') await this.discourseCoordinator.ingestReview(terminal);
+      else if (job.role === 'CORRECT') await this.discourseCoordinator.ingestCorrection(terminal);
+      else await this.discourseCoordinator.ingestContribution(terminal);
     } else {
-      this.discourseDeltaAccumulators.set(runId, drained.state);
+      await this.discourseCoordinator.ingestFailure({
+        runId: event.runId,
+        providerTurnId: event.providerTurnId,
+        clientOperationId: operationId,
+        completedAt: event.completedAt,
+        providerTerminalSource: run.providerTerminalSource ?? 'PROVIDER_TERMINAL_EVENT',
+        reason: event.error ?? `Agent Discourse turn ended with status ${event.status}.`
+      });
     }
+    await this.discourse?.advanceWave(
+      run.scope.conversationId,
+      run.scope.waveId,
+      `${operationId}:advance`
+    );
+    const settledAggregate = this.discourseStore
+      ? await this.discourseStore.getConversation(scope.conversationId)
+      : undefined;
+    const settledJob = settledAggregate?.jobs.find(
+      (candidate) => candidate.id === scope.jobId
+    );
+    this.events.emit({
+      type: 'discourse.job.updated',
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: scope.conversationId,
+        waveId: scope.waveId,
+        jobId: scope.jobId
+      },
+      taskId: `discourse:${scope.conversationId}`,
+      runId: run.id,
+      payload: settledJob
+        ? { status: settledJob.status, delivery: settledJob.delivery }
+        : { status: event.status },
+      at: event.completedAt
+    });
+    this.discourseDeltaStates.delete(run.id);
+    this.notifyDiscourseSchedulerWorkAvailable();
   }
 
-  private async assertAttachmentProviderBoundaryAvailable(): Promise<void> {
-    if (this.agentProviderStartupDisabledReason) {
-      throw new Error(this.agentProviderStartupDisabledReason);
+  private async recoverAfterScopedTurnIngestionFailure(
+    event: AgentScopedTurnEvent
+  ): Promise<void> {
+    if (!this.agentRuntimeStore || !this.discourseCoordinator) return;
+    const run = await this.agentRuntimeStore.getRun(event.runId).catch(() => undefined);
+    if (!run || run.scope.kind !== 'DISCOURSE') return;
+    await this.discourseCoordinator
+      .recoverConversation(run.scope.conversationId)
+      .catch(() => undefined);
+    this.events.emit({
+      type: 'discourse.job.updated',
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: run.scope.conversationId,
+        waveId: run.scope.waveId,
+        jobId: run.scope.jobId
+      },
+      taskId: `discourse:${run.scope.conversationId}`,
+      runId: run.id,
+      payload: {
+        status: 'RECOVERY_REQUIRED',
+        delivery: run.delivery,
+        reason: 'Agent output could not be durably incorporated. Recovery is required.'
+      },
+      at: new Date().toISOString()
+    });
+  }
+
+  async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview plan resolution', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const result = await this.previews.resolve(context, input.scenarioId);
+      this.events.emit({
+        type: 'preview.updated',
+        taskId: input.taskId,
+        iterationId: context.iteration.id,
+        worktreeId: context.worktree.id,
+        payload: result,
+        at: new Date().toISOString()
+      });
+      return result;
+    });
+  }
+
+  async getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.get(input.taskId);
+  }
+
+  async generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    this.assertAgentProviderAvailable();
+    const context = await this.withTaskAction(
+      input.taskId,
+      'Preview recipe generation preparation',
+      () => this.requirePreviewContext(input.taskId)
+    );
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.generate({
+        taskId: input.taskId,
+        worktreePath: context.worktree.worktreePath,
+        model: input.model,
+        codexExecutable: this.codexAdapter?.currentRuntimeExecutable ?? this.codexExecutable,
+        onUpdate: (state) => this.emitPreviewRecipeGenerationUpdate(context, state)
+      })
+    );
+  }
+
+  async validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation> {
+    this.assertPreviewEnabled();
+    await this.requireTask(input.taskId);
+    return this.previewRecipeGenerator.validate(input.taskId, input.draftId, input.yaml);
+  }
+
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult> {
+    this.assertPreviewEnabled();
+    return this.withTaskAction(input.taskId, 'Preview recipe acceptance', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previewRecipeGenerator.writeAcceptedRecipe({
+        taskId: input.taskId,
+        draftId: input.draftId,
+        yaml: input.yaml,
+        worktreePath: context.worktree.worktreePath
+      });
+      this.emitPreviewRecipeGenerationUpdate(
+        context,
+        this.previewRecipeGenerator.completeAcceptance(input.taskId)
+      );
+      let resolution: ResolvePreviewResult | undefined;
+      let checkError: string | undefined;
+      try {
+        resolution = await this.previews.resolve(context);
+        this.events.emit({
+          type: 'preview.updated',
+          taskId: input.taskId,
+          iterationId: context.iteration.id,
+          worktreeId: context.worktree.id,
+          payload: resolution,
+          at: new Date().toISOString()
+        });
+      } catch {
+        checkError =
+          'The recipe was saved, but Preview could not finish checking it. Use Check preview to retry.';
+      }
+      return {
+        recipePath: '.taskmonki/preview.yaml',
+        resolution,
+        checkError
+      };
+    });
+  }
+
+  async discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot> {
+    this.assertPreviewEnabled();
+    const context = await this.requirePreviewContext(input.taskId);
+    return this.withControlAction(() =>
+      this.previewRecipeGenerator.discard(input.taskId, (state) =>
+        this.emitPreviewRecipeGenerationUpdate(context, state)
+      )
+    );
+  }
+
+  private emitPreviewRecipeGenerationUpdate(
+    context: PreviewTaskContext,
+    state: PreviewRecipeGenerationSnapshot
+  ): void {
+    this.events.emit({
+      type: 'preview.recipe-generation.updated',
+      taskId: context.task.id,
+      iterationId: context.iteration.id,
+      worktreeId: context.worktree.id,
+      payload: state,
+      at: new Date().toISOString()
+    });
+  }
+
+  approvePreviewPlan(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    return this.withControlAction(() => this.approvePreviewPlanInternal(input));
+  }
+
+  setPreviewPrivateInput(input: { taskId: string; inputId: string; value: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input update', () =>
+      this.previews.setPrivateInput(input.taskId, input.inputId, input.value)
+    );
+  }
+
+  deletePreviewPrivateInput(input: { taskId: string; inputId: string }) {
+    return this.withTaskAction(input.taskId, 'Private preview input deletion', () =>
+      this.previews.deletePrivateInput(input.taskId, input.inputId)
+    );
+  }
+
+  retryPreviewPrivateVaultCleanup() {
+    return this.withControlAction(() => this.previews.retryPrivateVaultCleanup());
+  }
+
+  private async approvePreviewPlanInternal(
+    input: ApprovePreviewPlanRequest
+  ): Promise<PreviewApprovalRecord> {
+    this.assertPreviewEnabled();
+    const approval = await this.previews.approve(input);
+    this.events.emit({
+      type: 'preview.updated',
+      taskId: input.taskId,
+      payload: approval,
+      at: approval.approvedAt
+    });
+    return approval;
+  }
+
+  async startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(input);
+  }
+
+  private async startPreviewWithSetup(
+    input: StartPreviewRequest,
+    setupRetry?: RetryPreviewSetupRequest,
+    reset?: ResetPreviewDataRequest
+  ): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    if (process.platform !== 'darwin') {
+      throw new Error('Native previews are supported on macOS only.');
     }
+    return this.withTaskAction(input.taskId, reset ? 'Preview data reset' : 'Preview startup', async () => {
+      const context = await this.requirePreviewContext(input.taskId);
+      const currentSnapshot = await this.store.snapshot();
+      this.assertNoActiveTaskRun(currentSnapshot, input.taskId, 'capturing a preview');
+      const blockingGeneration = currentSnapshot.previewGenerations.find(
+        (generation) =>
+          generation.taskId === input.taskId &&
+          generation.routingState !== 'ACTIVE' &&
+          (
+            generation.state === 'CLEANUP_INCOMPLETE' ||
+            (generation.state === 'RECOVERY_REQUIRED' && !reset) ||
+            !['STOPPED', 'FAILED', 'RECOVERY_REQUIRED'].includes(generation.state)
+          )
+      );
+      if (blockingGeneration) {
+        throw new Error('Wait for the current preview replacement to finish or stop it before starting another.');
+      }
+      const gitSnapshot = await this.refreshEvidenceInternal({ taskId: input.taskId });
+      if (['CONFLICTED', 'UNAVAILABLE', 'UNKNOWN'].includes(gitSnapshot.status)) {
+        throw new Error(`Cannot capture a preview while Git status is ${gitSnapshot.status}.`);
+      }
+      if (reset) await this.previews.resetData({ ...reset, context });
+      const setupRetryResourceIds = setupRetry
+        ? await this.previews.authorizeSetupRetry({ ...setupRetry, context })
+        : undefined;
+      const prepared = await this.previews.prepare({
+        context,
+        gitSnapshot,
+        reobserveGit: () => this.refreshEvidenceInternal({ taskId: input.taskId })
+      }, input.scenarioId, setupRetryResourceIds);
+      return this.previews.execute(prepared);
+    });
+  }
+
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord> {
+    return this.withControlAction(() => this.stopPreviewInternal(input));
+  }
+
+  private async stopPreviewInternal(
+    input: StopPreviewRequest
+  ): Promise<PreviewGenerationRecord> {
+    this.assertPreviewEnabled();
+    const generation = await this.store.getPreviewGeneration(input.generationId);
+    if (!generation || generation.taskId !== input.taskId) {
+      throw new Error('Preview generation was not found for this task.');
+    }
+    const cancelingStartup =
+      generation.routingState === 'CANDIDATE' &&
+      !['FAILED', 'STOPPED', 'CLEANUP_INCOMPLETE', 'RECOVERY_REQUIRED'].includes(generation.state);
+    if (cancelingStartup) {
+      return this.previews.stop(generation.id);
+    }
+    return this.withTaskAction(input.taskId, 'Preview stop', () =>
+      this.previews.stop(generation.id)
+    );
+  }
+
+  async resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      undefined,
+      input
+    );
+  }
+
+  async retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord> {
+    return this.startPreviewWithSetup(
+      { taskId: input.taskId, scenarioId: input.scenarioId },
+      input
+    );
+  }
+
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord> {
+    return this.withTaskAction(input.taskId, 'Preview binding update', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      return this.previews.setLocalAttachmentBinding({ ...input, context });
+    });
+  }
+
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void> {
+    return this.withTaskAction(input.taskId, 'Preview binding deletion', async () => {
+      this.assertPreviewEnabled();
+      const context = await this.requirePreviewContext(input.taskId);
+      await this.previews.deleteLocalAttachmentBinding({ ...input, context });
+    });
+  }
+
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    return this.withControlAction(() => this.openPreviewInternal(input));
+  }
+
+  private openPreviewInternal(input: OpenPreviewRequest): Promise<OpenPreviewResult> {
+    this.assertPreviewEnabled();
+    return this.previews.open(input);
+  }
+
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult> {
+    this.assertPreviewEnabled();
+    return this.previews.readLog(input);
+  }
+
+  private async assertAgentRuntimeAvailable(): Promise<void> {
+    this.assertAgentProviderAvailable();
+  }
+
+  private async assertRuntimeAllowedInCurrentSurface(
+    adapter: AgentRuntimeAdapter
+  ): Promise<void> {
+    if (!this.browserDevAgentBoundary) {
+      return;
+    }
+    assertBrowserDevRuntimeIsolation(
+      adapter.descriptor,
+      await adapter.capabilities()
+    );
   }
 
   async refreshEvidence(input: RefreshEvidenceRequest): Promise<GitSnapshotRecord> {
+    this.assertAcceptingWork();
+    return this.refreshEvidenceInternal(input);
+  }
+
+  private async refreshEvidenceInternal(
+    input: RefreshEvidenceRequest
+  ): Promise<GitSnapshotRecord> {
     const task = await this.requireTask(input.taskId);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
     const worktree = await this.requireWorktree(task);
-    const verified = await this.worktrees.verify(worktree);
+    const verified = await this.worktrees.verify(worktree, repository.path);
     const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
     if (storedWorktree.status !== 'PRESENT') {
       throw new Error(`Worktree is not ready: ${storedWorktree.status}`);
@@ -1571,6 +2490,7 @@ export class TaskManagerService {
     const snapshot = await inspectGitSnapshot(storedWorktree);
     const diffEvidence = await buildDiffEvidence(storedWorktree);
     const storedSnapshot = await this.store.recordGitSnapshot(snapshot, diffEvidence);
+    await this.previews.observeGitSnapshot(storedSnapshot);
     this.events.emit({
       type: 'git.updated',
       taskId: task.id,
@@ -1591,11 +2511,12 @@ export class TaskManagerService {
   private async createDeliveryCommitUnlocked(
     input: CreateDeliveryCommitRequest
   ): Promise<GitSnapshotRecord> {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'creating a delivery commit');
     const worktree = await this.requireWorktree(task);
-    const latestGit = await this.refreshEvidence({ taskId: task.id });
+    const latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
     if (
       latestGit.status === 'CONFLICTED' ||
       latestGit.status === 'DIVERGED' ||
@@ -1625,7 +2546,7 @@ export class TaskManagerService {
         payload: { headSha, branchName: worktree.branchName }
       })
     );
-    return this.refreshEvidence({ taskId: task.id });
+    return this.refreshEvidenceInternal({ taskId: task.id });
   }
 
   async preflightGitHub(input: GitHubPreflightRequest) {
@@ -1644,7 +2565,8 @@ export class TaskManagerService {
   }
 
   private async publishBranchUnlocked(input: PublishBranchRequest) {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const snapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(snapshot, task.id, 'publishing the branch');
     const worktree = await this.requireWorktree(task);
@@ -1668,7 +2590,7 @@ export class TaskManagerService {
     if (stored.status !== 'PUSHED') {
       throw new Error(stored.error ?? 'Branch publication failed.');
     }
-    await this.refreshEvidence({ taskId: task.id });
+    await this.refreshEvidenceInternal({ taskId: task.id });
     return stored;
   }
 
@@ -1681,7 +2603,8 @@ export class TaskManagerService {
   private async createPullRequestUnlocked(
     input: CreatePullRequestRequest
   ): Promise<PullRequestSnapshotRecord> {
-    const task = await this.requireTask(input.taskId);
+    const task = await this.requireTaskWithPostRunEvidence(input.taskId);
+    this.assertImplementationOutcomeReady(task);
     const activeSnapshot = await this.store.snapshot();
     this.assertNoActiveTaskRun(activeSnapshot, task.id, 'opening a pull request');
     const worktree = await this.requireWorktree(task);
@@ -1702,21 +2625,18 @@ export class TaskManagerService {
     assertPublishReady(latestGit);
     const title = normalizePullRequestTitle(input.title, task.title);
 
-    const prBodyContent = await this.github.writePullRequestBody({
-      filePath: path.join(os.tmpdir(), `task-monki-pr-${task.id}.md`),
+    const prBodyContent = this.github.buildPullRequestBody({
       task,
       gitDiffStat: latestGit.diffStat,
       agentSummary: snapshot.runs.find((run) => run.id === task.currentRunId)?.finalMessage
     });
     const bodyArtifact = await this.store.recordPullRequestBodyArtifact(task, prBodyContent);
-    const bodyPath = await this.store.getArtifactPath(bodyArtifact.id);
 
     await this.store.recordPullRequestCreateRequested(task, worktree);
     const sync = await this.github.createOrFindDraftPullRequest({
-      task,
       worktree,
       baseRef: worktree.baseRef,
-      bodyFilePath: bodyPath,
+      body: prBodyContent,
       title
     });
     sync.pullRequest.bodyArtifactId = bodyArtifact.id;
@@ -1740,6 +2660,10 @@ export class TaskManagerService {
       }
       try {
         const sync = await this.github.viewPullRequest(worktree, latest.number ?? latest.url ?? worktree.branchName);
+        const currentTask = await this.requireTask(task.id);
+        if (currentTask.currentRunId) {
+          await this.ensurePostRunEvidence(currentTask.currentRunId);
+        }
         const stored = await this.store.recordPullRequestSync(sync);
         this.emitGitHubUpdate(task.id, worktree, stored);
         return stored;
@@ -1761,7 +2685,9 @@ export class TaskManagerService {
 
   async transitionTask(input: TransitionTaskRequest): Promise<Task> {
     return this.withTaskAction(input.taskId, 'Workflow transition', async () => {
-      const task = await this.requireTask(input.taskId);
+      const task = ['REVIEW', 'IN_REVIEW', 'DONE'].includes(input.toPhase)
+        ? await this.requireTaskWithPostRunEvidence(input.taskId)
+        : await this.requireTask(input.taskId);
       const snapshot = await this.store.snapshot();
       this.assertNoActiveTaskRun(snapshot, task.id, 'changing this task');
       const latestGit = snapshot.gitSnapshots
@@ -1776,9 +2702,13 @@ export class TaskManagerService {
       const latestMerge = snapshot.mergeSnapshots
         .filter((candidate) => candidate.taskId === task.id && candidate.iterationId === task.currentIterationId)
         .sort((a, b) => b.observedAt.localeCompare(a.observedAt))[0];
+      const currentRun = task.currentRunId
+        ? snapshot.runs.find((candidate) => candidate.id === task.currentRunId)
+        : undefined;
 
       const blockedReason = transitionBlocker(task, input.toPhase, {
         hasWorktree: Boolean(task.currentWorktreeId),
+        currentRun,
         hasGitSnapshot: Boolean(latestGit),
         gitStatus: latestGit?.status ?? task.projection.git,
         gitHeadSha: latestGit?.headSha,
@@ -1802,56 +2732,61 @@ export class TaskManagerService {
   }
 
   async deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult> {
-    return this.withTaskAction(input.taskId, 'Task deletion', async () => {
-      const task = await this.requireTask(input.taskId);
-      const snapshot = await this.store.snapshot();
-      const blockedReason = taskDeletionBlocker(task, snapshot);
-      if (blockedReason) {
-        throw new Error(blockedReason);
-      }
-
-      let removedWorktree = false;
-      if (input.removeWorktree) {
-        const worktrees = snapshot.worktrees.filter(
-          (worktree) => worktree.taskId === task.id
-        );
-        for (const worktree of worktrees) {
-          await this.worktrees.remove(worktree);
-          removedWorktree = true;
+    return this.withTaskAction(input.taskId, 'Task deletion', () =>
+      this.withRuntimeOperation(async () => {
+        const task = await this.requireTask(input.taskId);
+        const snapshot = await this.store.snapshot();
+        const blockedReason = taskDeletionBlocker(task, snapshot);
+        if (blockedReason) {
+          throw new Error(blockedReason);
         }
-      }
 
-      await this.store.deleteTask(task.id);
-      await this.agentRuntimeStore?.purgeTask(task.id);
-      const result = { taskId: task.id, removedWorktree };
-      this.events.emit({
-        type: 'task.deleted',
-        taskId: task.id,
-        payload: result,
-        at: new Date().toISOString()
-      });
-      return result;
-    });
+        // Preview cleanup is part of deletion authority. The store keeps its
+        // resource ledger intact if any process or workspace identity is ambiguous.
+        await this.previews.stopTask(task.id);
+        await this.previewRecipeGenerator.discard(task.id);
+        await this.agents.releaseTask(task.id);
+
+        let removedWorktree = false;
+        if (input.removeWorktree) {
+          const worktrees = snapshot.worktrees.filter(
+            (worktree) => worktree.taskId === task.id
+          );
+          for (const worktree of worktrees) {
+            const repository = await this.requireAvailableRepository(
+              worktree.repositoryId
+            );
+            await this.worktrees.remove(worktree, repository.path);
+            removedWorktree = true;
+          }
+        }
+
+        await this.store.deleteTask(task.id);
+        await this.previews.retireDeletedTaskPrivateInputs(task.id).catch(() => undefined);
+        const result = { taskId: task.id, removedWorktree };
+        this.events.emit({
+          type: 'task.deleted',
+          taskId: task.id,
+          payload: result,
+          at: new Date().toISOString()
+        });
+        return result;
+      })
+    );
   }
 
   readArtifact(input: ReadArtifactRequest): Promise<string> {
     return this.store.readArtifact(input.artifactId);
   }
 
-  async readProtocolMessage(input: ReadProtocolMessageRequest) {
-    if (this.agentRuntimeStore) {
-      const runtimeServer = await this.agentRuntimeStore.getAgentServer(
-        input.reference.serverInstanceId
-      );
-      if (runtimeServer) {
-        return this.agentRuntimeStore.readProtocolMessage(input.reference);
-      }
-    }
+  readProtocolMessage(input: ReadProtocolMessageRequest) {
     return this.store.readProtocolMessage(input.reference);
   }
 
   private async validateAndRecordRepository(task: Task): Promise<RepositoryPreflight> {
-    const preflight = await validateRepositoryPath(task.repositoryPath);
+    const repository = await this.requireAvailableRepository(task.repositoryId);
+    const preflight = await validateRepositoryPath(repository.path);
+    await this.store.recordRepositoryPreflight(repository.id, preflight);
     await this.store.appendEvent(
       createDomainEvent({
         type: 'REPOSITORY_PREFLIGHT_COMPLETED',
@@ -1875,35 +2810,174 @@ export class TaskManagerService {
     ) {
       return;
     }
-    try {
-      const snapshot = await this.refreshEvidence({ taskId: run.taskId });
-      await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
-      if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
-        const state = await this.store.snapshot();
-        const before = state.gitSnapshots.find(
-          (candidate) => candidate.id === run.beforeGitSnapshotId
+    const snapshot = await this.refreshEvidenceInternal({ taskId: run.taskId });
+    await this.store.updateRun(run.id, { afterGitSnapshotId: snapshot.id });
+    if (isImplementationRunMode(run.mode) && run.status === 'COMPLETED') {
+      await this.reconcileImplementationOutcome(run, snapshot);
+    }
+    if (run.mode === 'REVIEW' && run.beforeGitSnapshotId) {
+      const state = await this.store.snapshot();
+      const before = state.gitSnapshots.find(
+        (candidate) => candidate.id === run.beforeGitSnapshotId
+      );
+      if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
+        await this.store.appendEvent(
+          createDomainEvent({
+            type: 'AGENT_REVIEW_POLICY_VIOLATION',
+            taskId: run.taskId,
+            iterationId: run.iterationId,
+            runId: run.id,
+            worktreeId: run.worktreeId,
+            agentSessionId: run.sessionId,
+            source: 'git',
+            payload: {
+              beforeDirtyFingerprint: before.dirtyFingerprint,
+              afterDirtyFingerprint: snapshot.dirtyFingerprint
+            }
+          })
         );
-        if (before && before.dirtyFingerprint !== snapshot.dirtyFingerprint) {
-          await this.store.appendEvent(
-            createDomainEvent({
-              type: 'AGENT_REVIEW_POLICY_VIOLATION',
-              taskId: run.taskId,
-              iterationId: run.iterationId,
-              runId: run.id,
-              worktreeId: run.worktreeId,
-              agentSessionId: run.sessionId,
-              source: 'git',
-              payload: {
-                beforeDirtyFingerprint: before.dirtyFingerprint,
-                afterDirtyFingerprint: snapshot.dirtyFingerprint
-              }
-            })
-          );
-        }
       }
-    } catch {
-      // The terminal event already completed the run. Evidence refresh failures remain visible
-      // through explicit refresh attempts and stored runtime/provider artifacts.
+    }
+  }
+
+  private async reconcileImplementationOutcome(
+    run: RunRecord,
+    after: GitSnapshotRecord
+  ): Promise<void> {
+    const state = await this.store.snapshot();
+    const task = state.tasks.find((candidate) => candidate.id === run.taskId);
+    if (
+      task?.currentRunId !== run.id ||
+      !['IN_PROGRESS', 'REVIEW'].includes(task.workflowPhase) ||
+      getImplementationRetryReason(task)
+    ) {
+      return;
+    }
+    const rejectedExecution = state.interactionRequests.find((interaction) =>
+      isRejectedExecutionInteraction(interaction, run.id)
+    );
+    if (!rejectedExecution) {
+      return;
+    }
+    const before = state.gitSnapshots.find(
+      (candidate) => candidate.id === run.beforeGitSnapshotId
+    );
+    if (!before) {
+      throw new Error(`Run ${run.id} is missing its pre-run Git evidence.`);
+    }
+    if (
+      before.headSha !== after.headSha ||
+      before.dirtyFingerprint !== after.dirtyFingerprint
+    ) {
+      return;
+    }
+    const outcome = rejectedExecution.status === 'CANCELED' ? 'canceled' : 'declined';
+    const reason = `A provider execution request was ${outcome} and this run produced no Git change. Retry or continue before review.`;
+    await this.store.appendEvent(
+      createDomainEvent({
+        type: 'IMPLEMENTATION_OUTCOME_BLOCKED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'git',
+        payload: {
+          reason,
+          beforeGitSnapshotId: before.id,
+          afterGitSnapshotId: after.id
+        }
+      })
+    );
+  }
+
+  private scheduleDeferredCodexRuntimeRestart(runId: string): void {
+    const codex = this.codexAdapter;
+    if (!codex || this.runtimeLifecycleClosing) {
+      return;
+    }
+    void this.enqueueRuntimeLifecycle(async () => {
+      const run = await this.store.getRun(runId);
+      if (run?.runtimeId !== codex.descriptor.id) {
+        return;
+      }
+      await codex.applyPendingRuntimeConfigIfIdle();
+    }).catch(() => undefined);
+  }
+
+  private trackPostRunEvidence(runId: string): void {
+    if (this.postRunEvidenceTasks.has(runId)) {
+      return;
+    }
+    const pending = this.capturePostRunEvidence(runId);
+    this.postRunEvidenceTasks.set(runId, pending);
+    void pending
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.postRunEvidenceTasks.get(runId) === pending) {
+          this.postRunEvidenceTasks.delete(runId);
+        }
+      });
+  }
+
+  private async awaitPostRunEvidence(runId: string): Promise<void> {
+    await this.postRunEvidenceTasks.get(runId)?.catch(() => undefined);
+  }
+
+  private async ensurePostRunEvidence(runId: string): Promise<void> {
+    await this.awaitPostRunEvidence(runId);
+    const run = await this.store.getRun(runId);
+    if (!run || !isImplementationRunMode(run.mode) || run.status !== 'COMPLETED') {
+      return;
+    }
+    let completedRun = run;
+    const state = await this.store.snapshot();
+    const task = state.tasks.find((candidate) => candidate.id === completedRun.taskId);
+    if (task?.currentRunId !== completedRun.id) {
+      return;
+    }
+    const existingAfterId = completedRun.afterGitSnapshotId;
+    let after = state.gitSnapshots.find(
+      (candidate) => candidate.id === existingAfterId
+    );
+    if (!after) {
+      await this.capturePostRunEvidence(completedRun.id);
+      const capturedRun = await this.store.getRun(completedRun.id);
+      if (!capturedRun) {
+        throw new Error(`Run not found after post-run evidence capture: ${runId}.`);
+      }
+      completedRun = capturedRun;
+      const refreshed = await this.store.snapshot();
+      const capturedAfterId = completedRun.afterGitSnapshotId;
+      after = refreshed.gitSnapshots.find(
+        (candidate) => candidate.id === capturedAfterId
+      );
+    }
+    if (!after) {
+      throw new Error(`Run ${completedRun.id} is missing its post-run Git evidence.`);
+    }
+    await this.reconcileImplementationOutcome(completedRun, after);
+  }
+
+  private async requireTaskWithPostRunEvidence(taskId: string): Promise<Task> {
+    let task = await this.requireTask(taskId);
+    if (task.currentRunId) {
+      await this.ensurePostRunEvidence(task.currentRunId);
+      task = await this.requireTask(taskId);
+    }
+    return task;
+  }
+
+  private assertImplementationOutcomeReady(task: Task): void {
+    const reason = getImplementationRetryReason(task);
+    if (reason) {
+      throw new Error(reason);
+    }
+  }
+
+  private async drainPostRunEvidence(): Promise<void> {
+    while (this.postRunEvidenceTasks.size > 0) {
+      await Promise.allSettled([...this.postRunEvidenceTasks.values()]);
     }
   }
 
@@ -1913,6 +2987,22 @@ export class TaskManagerService {
       throw new Error(`Task not found: ${taskId}`);
     }
     return task;
+  }
+
+  private async requireAvailableRepository(repositoryId: string): Promise<Repository> {
+    const repository = await this.requireRepository(repositoryId);
+    if (repository.status !== 'AVAILABLE') {
+      throw new Error(`Repository ${repository.name} is ${repository.status.toLowerCase()}.`);
+    }
+    return repository;
+  }
+
+  private async requireRepository(repositoryId: string): Promise<Repository> {
+    const repository = await this.store.getRepository(repositoryId);
+    if (!repository) {
+      throw new Error(`Repository not found: ${repositoryId}`);
+    }
+    return repository;
   }
 
   private async requireRunForTask(runId: string, taskId: string): Promise<RunRecord> {
@@ -1954,6 +3044,22 @@ export class TaskManagerService {
     return worktree;
   }
 
+  private async requirePreviewContext(taskId: string) {
+    const task = await this.requireTask(taskId);
+    const worktree = await this.requireWorktree(task);
+    const repository = await this.requireAvailableRepository(worktree.repositoryId);
+    const verified = await this.worktrees.verify(worktree, repository.path);
+    const storedWorktree = await this.store.updateWorktree(verified, 'WORKTREE_VERIFIED');
+    if (storedWorktree.status !== 'PRESENT') {
+      throw new Error(`Worktree is not ready for preview: ${storedWorktree.status}.`);
+    }
+    const iteration = await this.store.getCurrentIteration(task.id);
+    if (!iteration || iteration.id !== storedWorktree.iterationId) {
+      throw new Error('Preview worktree does not match the current task iteration.');
+    }
+    return { task, iteration, worktree: storedWorktree };
+  }
+
   private emitGitHubUpdate(taskId: string, worktree: WorktreeRecord, payload: unknown): void {
     this.events.emit({
       type: 'github.updated',
@@ -1965,8 +3071,29 @@ export class TaskManagerService {
     });
   }
 
+  private emitRepositoryUpdate(repository: Repository): void {
+    this.events.emit({
+      type: 'repository.updated',
+      taskId: 'repositories',
+      payload: repository,
+      at: new Date().toISOString()
+    });
+  }
+
+  private emitBoardUpdate(
+    type: 'board.updated' | 'board.deleted',
+    payload: unknown
+  ): void {
+    this.events.emit({
+      type,
+      taskId: 'boards',
+      payload,
+      at: new Date().toISOString()
+    });
+  }
+
   private async ensureCommittedPublishableGit(task: Task): Promise<GitSnapshotRecord> {
-    const latestGit = await this.refreshEvidence({ taskId: task.id });
+    const latestGit = await this.refreshEvidenceInternal({ taskId: task.id });
     if (latestGit.status === 'DIRTY') {
       return this.createDeliveryCommitUnlocked({ taskId: task.id });
     }
@@ -1978,17 +3105,98 @@ export class TaskManagerService {
     label: string,
     action: () => Promise<T>
   ): Promise<T> {
+    this.assertAcceptingWork();
     const current = this.taskActionLocks.get(taskId);
     if (current) {
-      throw new Error(`${current} is already running for this task.`);
+      throw new Error(`${current.label} is already running for this task.`);
     }
-    this.taskActionLocks.set(taskId, label);
+    const work = Promise.resolve().then(action);
+    const entry: TaskActionWork = { label, work };
+    this.taskActionLocks.set(taskId, entry);
     try {
-      return await action();
+      return await work;
     } finally {
-      if (this.taskActionLocks.get(taskId) === label) {
+      if (this.taskActionLocks.get(taskId) === entry) {
         this.taskActionLocks.delete(taskId);
       }
+    }
+  }
+
+  private withRuntimeOperation<T>(action: () => Promise<T>): Promise<T> {
+    this.assertAcceptingWork();
+    this.assertRuntimeLifecycleOpen();
+    const operation = this.runtimeLifecycleTail.then(action);
+    const settled = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    this.activeRuntimeOperations.add(settled);
+    void settled.then(() => {
+      this.activeRuntimeOperations.delete(settled);
+    });
+    return operation;
+  }
+
+  private withRuntimeLifecycleChange<T>(action: () => Promise<T>): Promise<T> {
+    this.assertRuntimeLifecycleOpen();
+    return this.enqueueRuntimeLifecycle(action);
+  }
+
+  private assertRuntimeLifecycleOpen(): void {
+    if (this.runtimeLifecycleClosing) {
+      throw new Error('Task Monki is shutting down and cannot start provider work.');
+    }
+  }
+
+  private enqueueRuntimeLifecycle<T>(action: () => Promise<T>): Promise<T> {
+    const previousLifecycle = this.runtimeLifecycleTail;
+    const admittedOperations = [...this.activeRuntimeOperations];
+    const operation = Promise.all([
+      previousLifecycle,
+      ...admittedOperations
+    ]).then(action);
+    this.runtimeLifecycleTail = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
+  private withControlAction<T>(action: () => Promise<T>): Promise<T> {
+    this.assertAcceptingWork();
+    const work = Promise.resolve().then(action);
+    this.activeControlActions.add(work);
+    void work.then(
+      () => this.activeControlActions.delete(work),
+      () => this.activeControlActions.delete(work)
+    );
+    return work;
+  }
+
+  private assertInitializing(): void {
+    if (this.lifecycleState !== 'INITIALIZING') {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAcceptingWork(): void {
+    if (
+      this.lifecycleState === 'SHUTTING_DOWN' ||
+      this.lifecycleState === 'STOPPED'
+    ) {
+      throw new Error('Task Manager is shutting down.');
+    }
+  }
+
+  private assertAgentProviderAvailable(): void {
+    if (this.agentProviderStartupDisabledReason) {
+      throw new Error(this.agentProviderStartupDisabledReason);
+    }
+  }
+
+  private assertPreviewEnabled(): void {
+    if (!this.previewEnabled) {
+      throw new Error('Preview runtime is not configured in this Task Monki host.');
     }
   }
 
@@ -2027,7 +3235,7 @@ export class TaskManagerService {
       return;
     }
     if (activeRun.mode === 'REVIEW') {
-      throw new Error(`Wait for the Codex review to finish before ${action}.`);
+      throw new Error(`Wait for the agent review to finish before ${action}.`);
     }
     throw new Error(`Stop or let the active agent run finish before ${action}.`);
   }
@@ -2043,6 +3251,17 @@ function followUpSettings(
     readOnly,
     settings: [run.requestedSettings, task.agentSettings, overrides]
   });
+}
+
+function portableSecuritySettings(
+  settings: AgentExecutionSettings
+): AgentExecutionSettings {
+  return {
+    sandbox: settings.sandbox,
+    networkAccess: settings.networkAccess,
+    approvalPolicy: settings.approvalPolicy,
+    approvalsReviewer: settings.approvalsReviewer
+  };
 }
 
 export function mergeRunSettings(input: {
@@ -2100,6 +3319,97 @@ function executableForRuntime(result: ExternalToolProbeResult): string {
   return result.resolvedPath ?? result.executable;
 }
 
+function createBuiltInAgentRuntimes(
+  store: FileTaskStore,
+  events: AppEventBus,
+  options: {
+    cwd: string;
+    codexExecutable?: string;
+    openCodeExecutable?: string;
+    acpExecutablePaths?: Partial<Record<string, string>>;
+    browserDevBoundary: boolean;
+    codexToolSettings: TaskManagerAppSettings['codexExternalTools'];
+    scopedRuntimeStore?: AgentRuntimeStore;
+  }
+): AgentRuntimeAdapter[] {
+  const codex = new CodexAppServerAdapter(store, events, {
+    cwd: options.cwd,
+    executable: options.codexExecutable,
+    toolSettings: options.codexToolSettings,
+    failClosedMcpDiscovery: options.browserDevBoundary,
+    enforceBrowserDevBoundary: options.browserDevBoundary,
+    scopedRuntimeStore: options.scopedRuntimeStore
+  });
+  const openCode = new OpenCodeAdapter(store, events, {
+    cwd: options.cwd,
+    executable:
+      options.openCodeExecutable ?? process.env.TASK_MONKI_OPENCODE_BIN
+  });
+  const acp = ACP_RUNTIME_PROFILES.map(
+    (profile) =>
+      new AcpRuntimeAdapter(store, events, profile, {
+        cwd: options.cwd,
+        executable:
+          options.acpExecutablePaths?.[profile.descriptor.id] ??
+          process.env[profile.executableEnvironmentKey]
+      })
+  );
+  return [codex, openCode, ...acp];
+}
+
+async function prepareTaskCreationSettings(
+  adapter: AgentRuntimeAdapter,
+  requestedSettings: AgentExecutionSettings,
+  attachments: readonly Pick<AgentTurnAttachment, 'kind'>[]
+): Promise<AgentExecutionSettings> {
+  const capabilities = await adapter.capabilities();
+  const policy = capabilities.executionPolicy;
+  const preset = policy.presets.find(
+    (candidate) => candidate.id === policy.defaultPresetId
+  );
+  if (!preset) {
+    throw new Error(
+      `${adapter.descriptor.displayName} does not expose a valid default execution policy.`
+    );
+  }
+  if (
+    attachments.length > 0 &&
+    capabilities.attachmentDelivery.maturity === 'unsupported'
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} does not support managed task attachments.`
+    );
+  }
+  const explicitSettings = Object.fromEntries(
+    Object.entries(requestedSettings).filter(([, value]) => value !== undefined)
+  ) as AgentExecutionSettings;
+  const settings: AgentExecutionSettings = {
+    sandbox: preset.sandbox,
+    approvalPolicy: preset.approvalPolicy,
+    approvalsReviewer: preset.approvalsReviewer,
+    networkAccess: preset.networkAccess === 'REQUIRED',
+    ...explicitSettings,
+    runtimeId: adapter.descriptor.id
+  };
+  assertAttachmentSandboxSupportsDelivery(settings, attachments);
+  if (attachments.length === 0) {
+    // Task capture is local and must remain available while a runtime is
+    // offline. Model/catalog resolution is definitive at turn start.
+    return settings;
+  }
+  const resolved = await adapter.resolveExecution({ settings, attachments });
+  if (
+    resolved.settings.runtimeId !== adapter.descriptor.id ||
+    resolved.model.runtimeId !== adapter.descriptor.id
+  ) {
+    throw new Error(
+      `${adapter.descriptor.displayName} returned execution settings for another runtime.`
+    );
+  }
+  assertAttachmentSandboxSupportsDelivery(resolved.settings, attachments);
+  return resolved.settings;
+}
+
 function explicitExecutableForCodexRuntime(
   result: ExternalToolProbeResult
 ): string | undefined {
@@ -2136,34 +3446,6 @@ const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
   'RECOVERY_REQUIRED'
 ]);
 
-function requireRepositoryId(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !/^[A-Za-z0-9_-]{1,256}$/u.test(value)
-  ) {
-    throw new RepositoryRequestError(
-      'REPOSITORY_INVALID_REQUEST',
-      400,
-      'A valid repository id is required.'
-    );
-  }
-  return value;
-}
-
-function requireRepositoryMutationId(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !/^[A-Za-z0-9_-]{16,128}$/u.test(value)
-  ) {
-    throw new RepositoryRequestError(
-      'REPOSITORY_INVALID_REQUEST',
-      400,
-      'A valid repository mutation id is required.'
-    );
-  }
-  return value;
-}
-
 function activeTaskOperationBlocker(task: Task): string | undefined {
   if (ACTIVE_AGENT_RUN_STATUSES.has(task.projection.agentRun as RunRecord['status'])) {
     return 'Stop or let the active agent run finish before changing this task.';
@@ -2197,6 +3479,7 @@ export function transitionBlocker(
   toPhase: Task['workflowPhase'],
   evidence: {
     hasWorktree: boolean;
+    currentRun?: Pick<RunRecord, 'id' | 'mode' | 'status'>;
     hasGitSnapshot?: boolean;
     gitStatus?: Task['projection']['git'];
     gitHeadSha?: string;
@@ -2218,12 +3501,25 @@ export function transitionBlocker(
     if (!evidence.hasWorktree) {
       return 'A task worktree is required before review.';
     }
-    if (task.projection.agentRun !== 'COMPLETED') {
-      return 'The agent turn must complete before moving to review.';
+    if (
+      !evidence.currentRun ||
+      evidence.currentRun.id !== task.currentRunId ||
+      evidence.currentRun.status !== 'COMPLETED' ||
+      !isImplementationRunMode(evidence.currentRun.mode)
+    ) {
+      return 'The current implementation run must complete successfully before moving to review.';
+    }
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
     }
     return undefined;
   }
   if (toPhase === 'IN_REVIEW') {
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
+    }
     if (evidence.pullRequestStatus !== 'OPEN_DRAFT' && evidence.pullRequestStatus !== 'OPEN_READY') {
       return 'A matching open GitHub pull request is required before IN_REVIEW.';
     }
@@ -2233,6 +3529,10 @@ export function transitionBlocker(
     return undefined;
   }
   if (toPhase === 'DONE') {
+    const retryReason = getImplementationRetryReason(task);
+    if (retryReason) {
+      return retryReason;
+    }
     if (completionPolicyRequiresMerge(task.completionPolicy) && evidence.mergeStatus !== 'MERGED') {
       return 'GitHub must report the pull request merged before DONE.';
     }
@@ -2254,6 +3554,28 @@ export function transitionBlocker(
     return activeTaskOperationBlocker(task);
   }
   return undefined;
+}
+
+function isDeclinedInteractionAction(action: string | undefined): boolean {
+  return action === 'DECLINE' || action === 'DECLINE_FOR_SESSION';
+}
+
+function isRejectedExecutionInteraction(
+  interaction: Pick<
+    InteractionRequestRecord,
+    'runId' | 'type' | 'status' | 'decision'
+  >,
+  runId: string
+): boolean {
+  return (
+    interaction.runId === runId &&
+    ['COMMAND_APPROVAL', 'FILE_CHANGE_APPROVAL', 'PERMISSION_APPROVAL'].includes(
+      interaction.type
+    ) &&
+    ((interaction.status === 'DECLINED' &&
+      isDeclinedInteractionAction(interaction.decision?.action)) ||
+      (interaction.status === 'CANCELED' && interaction.decision?.action === 'CANCEL'))
+  );
 }
 
 function latestForIteration<T extends { iterationId: string }>(

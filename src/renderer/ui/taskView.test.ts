@@ -7,6 +7,7 @@ import {
   canRequestReviewChanges,
   columnTasks,
   computeNavCounts,
+  describeRunFailureBanner,
   describeTaskHeaderState,
   evidenceLineForTask,
   finishActionsForTask,
@@ -14,6 +15,8 @@ import {
   getFinishEvidenceState,
   markDoneModalCopy,
   reviewFindingCountLabel,
+  selectTaskCardRepositoryIdentity,
+  shouldShowInboxRepository,
   tasksSpanMultipleRepositories
 } from './taskView';
 
@@ -26,10 +29,11 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           agentRun: 'COMPLETED',
-          codexReview: { status: 'NOT_RUN' }
+          agentReview: { status: 'NOT_RUN' }
         },
         workflowPhase: 'REVIEW'
-      })
+      }),
+      { repositoryName: 'repo' }
     );
 
     expect(vm.stateLabel).toBe('Ready for review');
@@ -42,7 +46,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           agentRun: 'AWAITING_APPROVAL',
-          codexReview: { status: 'RUNNING' }
+          agentReview: { status: 'RUNNING' }
         },
         workflowPhase: 'REVIEW'
       })
@@ -50,7 +54,74 @@ describe('task card view model', () => {
 
     expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
-    expect(vm.hasDecision).toBe(true);
+  });
+
+  it('keeps a failed implementation in progress and does not label it ready for review', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'FAILED',
+        agentReview: { status: 'NOT_RUN' }
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+    const vm = buildTaskCardVM(task);
+    const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
+    const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
+
+    expect(vm.stateLabel).toBe('Run failed');
+    expect(vm.stateTone).toBe('error');
+    expect(computeNavCounts([task]).review).toBe(0);
+    expect(columnTasks([task], reviewColumn)).toHaveLength(0);
+    expect(columnTasks([task], progressColumn)).toHaveLength(1);
+    expect(describeRunFailureBanner(task)).toEqual({
+      status: 'FAILED',
+      title: 'The agent run failed',
+      detail: expect.stringMatching(/retry in this session or continue/i)
+    });
+  });
+
+  it('shows retry state when local evidence blocks a provider-completed implementation', () => {
+    const reason =
+      'A provider execution request was declined and this run produced no Git change.';
+    const task = createTask({
+      currentRunId: 'run-1',
+      projection: {
+        ...createInitialProjection(now),
+        requestedAction: 'FAILED',
+        agentRun: 'COMPLETED',
+        summary: 'A later Git refresh completed.',
+        implementationRetry: { runId: 'run-1', reason }
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+    const vm = buildTaskCardVM(task);
+
+    expect(vm.stateLabel).toBe('Needs retry');
+    expect(vm.stateTone).toBe('action');
+    expect(describeTaskHeaderState(task)).toEqual({ label: 'Needs retry', tone: 'action' });
+    expect(describeRunFailureBanner(task)).toEqual({
+      status: 'NEEDS_RETRY',
+      title: 'Implementation needs another pass',
+      detail: reason
+    });
+  });
+
+  it('reserves ambiguous provider-state copy for recovery and runtime loss', () => {
+    const task = createTask({
+      projection: {
+        ...createInitialProjection(now),
+        agentRun: 'RECOVERY_REQUIRED',
+        summary: 'The turn outcome is ambiguous.'
+      },
+      workflowPhase: 'IN_PROGRESS'
+    });
+
+    expect(describeRunFailureBanner(task)).toEqual({
+      status: 'RECOVERY_REQUIRED',
+      title: 'Task Monki cannot prove the final provider state',
+      detail: 'The turn outcome is ambiguous.'
+    });
   });
 
   it('keeps a running review gate in the review lane even if the phase is stale', () => {
@@ -58,11 +129,11 @@ describe('task card view model', () => {
       projection: {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
-        codexReview: { status: 'RUNNING', runId: 'review-run' }
+        agentReview: { status: 'RUNNING', runId: 'review-run' }
       },
       workflowPhase: 'IN_PROGRESS'
     });
-    const vm = buildTaskCardVM(task);
+    const vm = buildTaskCardVM(task, { repositoryName: 'repo' });
     const reviewColumn = BOARD_COLUMNS.find((column) => column.key === 'review')!;
     const progressColumn = BOARD_COLUMNS.find((column) => column.key === 'progress')!;
 
@@ -78,7 +149,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           agentRun: 'COMPLETED',
-          codexReview: { status: 'INCONCLUSIVE' }
+          agentReview: { status: 'INCONCLUSIVE' }
         },
         workflowPhase: 'REVIEW'
       })
@@ -93,7 +164,7 @@ describe('task card view model', () => {
       projection: {
         ...createInitialProjection(now),
         agentRun: 'COMPLETED',
-        codexReview: { status: 'NEEDS_CHANGES' }
+        agentReview: { status: 'NEEDS_CHANGES' }
       },
       workflowPhase: 'REVIEW'
     });
@@ -133,11 +204,11 @@ describe('task card view model', () => {
       projection: {
         ...createInitialProjection(now),
         agentRun: 'RUNNING',
-        codexReview: {
+        agentReview: {
           status: 'STALE',
           runId: 'review-run',
           result: {
-            schemaVersion: 'codex-review/v1',
+            schemaVersion: 'agent-review/v1',
             verdict: 'NEEDS_CHANGES',
             summary: 'Fix review findings.',
             findings: [
@@ -170,7 +241,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           agentRun: 'COMPLETED',
-          codexReview: { status: 'STALE', runId: 'review-run' }
+          agentReview: { status: 'STALE', runId: 'review-run' }
         },
         workflowPhase: 'REVIEW'
       })
@@ -189,7 +260,8 @@ describe('task card view model', () => {
           git: 'DIRTY'
         },
         workflowPhase: 'ARCHIVED'
-      })
+      }),
+      { repositoryName: 'repo' }
     );
 
     expect(vm.meta).toBe('repo');
@@ -200,7 +272,7 @@ describe('task card view model', () => {
 
   it('drops the repo line when cards share a single repository', () => {
     const task = createTask();
-    expect(buildTaskCardVM(task, { showRepo: true }).meta).toBe('repo');
+    expect(buildTaskCardVM(task, { showRepo: true, repositoryName: 'repo' }).meta).toBe('repo');
     expect(buildTaskCardVM(task, { showRepo: false }).meta).toBeUndefined();
   });
 
@@ -214,11 +286,11 @@ describe('task card view model', () => {
     const withFindings = createTask({
       projection: {
         ...createInitialProjection(now),
-        codexReview: {
+        agentReview: {
           status: 'NEEDS_CHANGES',
           runId: 'r',
           result: {
-            schemaVersion: 'codex-review/v1',
+            schemaVersion: 'agent-review/v1',
             verdict: 'NEEDS_CHANGES',
             summary: 'Fix these.',
             findings: [
@@ -235,12 +307,53 @@ describe('task card view model', () => {
   });
 
   it('detects when a task set spans more than one repository', () => {
-    const a = createTask({ id: 'a', repositoryPath: '/tmp/repo-a' });
-    const b = createTask({ id: 'b', repositoryPath: '/tmp/repo-a' });
-    const c = createTask({ id: 'c', repositoryPath: '/tmp/repo-b' });
+    const a = createTask({ id: 'a', repositoryId: '/tmp/repo-a' });
+    const b = createTask({ id: 'b', repositoryId: '/tmp/repo-a' });
+    const c = createTask({ id: 'c', repositoryId: '/tmp/repo-b' });
     expect(tasksSpanMultipleRepositories([a, b])).toBe(false);
     expect(tasksSpanMultipleRepositories([a, b, c])).toBe(true);
     expect(tasksSpanMultipleRepositories([])).toBe(false);
+  });
+
+  it('resolves card repository identity for global, single-repository, and missing-repository views', () => {
+    const repositoryNames = new Map([
+      ['repository-a', { name: 'repo', status: 'AVAILABLE' as const }],
+      ['repository-b', { name: 'repo-secondary', status: 'AVAILABLE' as const }],
+      ['repository-missing', { name: 'offline-repo', status: 'MISSING' as const }]
+    ]);
+
+    expect(
+      selectTaskCardRepositoryIdentity('repository-a', repositoryNames, true)
+    ).toEqual({ showRepo: true, repositoryName: 'repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-a', repositoryNames, false)
+    ).toEqual({ showRepo: false, repositoryName: 'repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-missing', repositoryNames, false)
+    ).toEqual({ showRepo: true, repositoryName: 'offline-repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-absent', repositoryNames, false)
+    ).toEqual({ showRepo: true, repositoryName: 'Missing repository' });
+  });
+
+  it('shows Inbox repository identity only when it distinguishes or identifies a missing repository', () => {
+    const a = createTask({ id: 'a', repositoryId: 'repository-a' });
+    const b = createTask({ id: 'b', repositoryId: 'repository-a' });
+    const c = createTask({ id: 'c', repositoryId: 'repository-b' });
+
+    expect(
+      shouldShowInboxRepository([a, b], [{ id: 'repository-a', status: 'AVAILABLE' }])
+    ).toBe(false);
+    expect(
+      shouldShowInboxRepository([a, c], [
+        { id: 'repository-a', status: 'AVAILABLE' },
+        { id: 'repository-b', status: 'AVAILABLE' }
+      ])
+    ).toBe(true);
+    expect(
+      shouldShowInboxRepository([a], [{ id: 'repository-a', status: 'MISSING' }])
+    ).toBe(true);
+    expect(shouldShowInboxRepository([a], [])).toBe(true);
   });
 
   it('suppresses a status pill that only restates its column', () => {
@@ -252,11 +365,14 @@ describe('task card view model', () => {
     const done = createTask({ workflowPhase: 'DONE' });
     expect(buildTaskCardVM(done, { columnKey: 'done' }).showState).toBe(false);
 
+    const inProgress = createTask({ workflowPhase: 'IN_PROGRESS' });
+    expect(buildTaskCardVM(inProgress, { columnKey: 'progress' }).showState).toBe(false);
+
     // A pill that refines the Review column is kept.
     const needsChanges = createTask({
       projection: {
         ...createInitialProjection(now),
-        codexReview: { status: 'NEEDS_CHANGES', runId: 'r' }
+        agentReview: { status: 'NEEDS_CHANGES', runId: 'r' }
       },
       workflowPhase: 'REVIEW'
     });
@@ -271,7 +387,7 @@ describe('task card view model', () => {
       explanation: 'Listener is not cleaned up.'
     };
     const result = {
-      schemaVersion: 'codex-review/v1' as const,
+      schemaVersion: 'agent-review/v1' as const,
       verdict: 'NEEDS_CHANGES' as const,
       summary: 'Fix listener cleanup.',
       findings: [finding]
@@ -306,7 +422,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'CLEAN',
-          codexReview: { status: 'PASSED' }
+          agentReview: { status: 'PASSED' }
         },
         workflowPhase: 'REVIEW'
       })
@@ -321,7 +437,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'DIRTY',
-          codexReview: { status: 'PASSED' }
+          agentReview: { status: 'PASSED' }
         },
         workflowPhase: 'REVIEW'
       }),
@@ -342,7 +458,7 @@ describe('task card view model', () => {
         projection: {
           ...createInitialProjection(now),
           git: 'DIRTY',
-          codexReview: { status: 'NEEDS_CHANGES' }
+          agentReview: { status: 'NEEDS_CHANGES' }
         },
         workflowPhase: 'REVIEW'
       }),
@@ -362,7 +478,7 @@ describe('task card view model', () => {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'DIRTY',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'REVIEW'
     });
@@ -403,7 +519,7 @@ describe('task card view model', () => {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'COMMITTED_UNPUSHED',
-        codexReview: { status: 'STALE', runId: 'review-run' }
+        agentReview: { status: 'STALE', runId: 'review-run' }
       },
       workflowPhase: 'REVIEW'
     });
@@ -434,7 +550,7 @@ describe('task card view model', () => {
         git: 'PUSHED',
         githubPullRequest: 'OPEN_READY',
         githubPullRequestNumber: 82,
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW'
     });
@@ -460,7 +576,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGEABLE',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'LOCAL_ACCEPTANCE'
@@ -497,7 +613,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGEABLE',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED'
@@ -544,7 +660,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGED',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED'
@@ -583,7 +699,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGEABLE',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED_AND_VERIFIED'
@@ -640,7 +756,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'FAILING',
         merge: 'MERGED',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED_AND_VERIFIED'
@@ -675,7 +791,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGED',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED_AND_VERIFIED'
@@ -721,7 +837,7 @@ describe('task card view model', () => {
         githubPullRequestNumber: 9,
         ciChecks: 'PASSING',
         merge: 'MERGED',
-        codexReview: { status: 'PASSED' }
+        agentReview: { status: 'PASSED' }
       },
       workflowPhase: 'IN_REVIEW',
       completionPolicy: 'MERGED_AND_VERIFIED'
@@ -753,7 +869,7 @@ describe('task card view model', () => {
         ...createInitialProjection(now),
         worktree: 'PRESENT',
         git: 'DIRTY',
-        codexReview: { status: 'RUNNING', runId: 'review-run' }
+        agentReview: { status: 'RUNNING', runId: 'review-run' }
       },
       workflowPhase: 'REVIEW'
     });
@@ -803,9 +919,10 @@ describe('task card view model', () => {
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
-    repositoryPath: '/tmp/repo',
+    repositoryId: '/tmp/repo',
     workflowPhase: 'READY',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

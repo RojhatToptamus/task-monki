@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { FileTaskStore } from '../storage/FileTaskStore';
-import type { RepositoryRegistry, ResolvedRepository } from '../repository/RepositoryRegistry';
 import {
   DISCOURSE_LIMITS,
   type ContextGenerationFingerprint,
@@ -12,8 +13,7 @@ import {
   type DiscourseMentionRepositoryEntry,
   type DiscourseMentionTaskEntry
 } from '../../shared/discourse';
-import type { Task, TaskSnapshot } from '../../shared/contracts';
-import type { RepositoryCatalogSnapshot } from '../../shared/repositories';
+import type { Repository, Task, TaskSnapshot } from '../../shared/contracts';
 import { inspectGitWorkingTreeFingerprint } from '../git/GitSnapshotService';
 
 const PREVIEW_TTL_MS = 2 * 60 * 1_000;
@@ -26,6 +26,12 @@ export interface ResolvedDiscourseContextReference {
   generation?: ContextGenerationFingerprint;
 }
 
+interface ResolvedRepository {
+  repositoryId: string;
+  record: Repository;
+  canonicalRealPath: string;
+}
+
 /**
  * Core-owned context authority. Renderer labels and paths are never accepted;
  * every selection is resolved from durable task/repository IDs on each use.
@@ -33,7 +39,6 @@ export interface ResolvedDiscourseContextReference {
 export class DiscourseContextResolver {
   constructor(
     private readonly taskStore: FileTaskStore,
-    private readonly repositories: RepositoryRegistry,
     private readonly now: () => Date = () => new Date()
   ) {}
 
@@ -42,40 +47,38 @@ export class DiscourseContextResolver {
     repositories: DiscourseMentionRepositoryEntry[];
   }> {
     const snapshot = await this.taskStore.snapshot();
-    const catalog = await this.repositories.catalog({
-      selectedRepositoryId: null,
-      tasks: snapshot.tasks
-    });
-    const repositoryById = new Map(catalog.repositories.map((repository) => [repository.id, repository]));
-    const taskRepositoryIds = new Map(
-      catalog.taskAssociations.map((association) => [association.taskId, association.repositoryId])
+    const repositoryById = new Map(
+      snapshot.repositories.map((repository) => [repository.id, repository])
     );
+    const taskCounts = new Map<string, number>();
+    for (const task of snapshot.tasks) {
+      taskCounts.set(task.repositoryId, (taskCounts.get(task.repositoryId) ?? 0) + 1);
+    }
     return {
       tasks: snapshot.tasks
         .map((task): DiscourseMentionTaskEntry => {
-          const repositoryId = taskRepositoryIds.get(task.id);
-          const repository = repositoryId ? repositoryById.get(repositoryId) : undefined;
+          const repository = repositoryById.get(task.repositoryId);
           return {
             id: task.id,
             title: task.title,
-            ...(repositoryId ? { repositoryId } : {}),
-            repositoryName: repository?.displayName ?? 'Unknown repository',
+            repositoryId: task.repositoryId,
+            repositoryName: repository?.name ?? 'Unknown repository',
             workflowPhase: task.workflowPhase,
-            availability: repository?.availability === 'AVAILABLE' ? 'AVAILABLE' : 'UNAVAILABLE',
+            availability: repository?.status === 'AVAILABLE' ? 'AVAILABLE' : 'UNAVAILABLE',
             archived: task.workflowPhase === 'ARCHIVED'
           };
         })
         .sort((left, right) => right.id.localeCompare(left.id)),
-      repositories: catalog.repositories
+      repositories: snapshot.repositories
         .map((repository): DiscourseMentionRepositoryEntry => ({
           id: repository.id,
-          displayName: repository.displayName,
-          displayPath: repository.displayPath,
-          taskCount: repository.taskCount,
-          availability: repository.availability === 'AVAILABLE' ? 'AVAILABLE' : 'UNAVAILABLE',
-          accessMode: repository.availability === 'AVAILABLE' ? 'FILESYSTEM_READ' : 'UNAVAILABLE',
-          ...(repository.unavailableReason
-            ? { unavailableReason: repository.unavailableReason }
+          displayName: repository.name,
+          displayPath: repository.path,
+          taskCount: taskCounts.get(repository.id) ?? 0,
+          availability: repository.status === 'AVAILABLE' ? 'AVAILABLE' : 'UNAVAILABLE',
+          accessMode: repository.status === 'AVAILABLE' ? 'FILESYSTEM_READ' : 'UNAVAILABLE',
+          ...(repository.error
+            ? { unavailableReason: repository.error }
             : {})
         }))
         .sort((left, right) => compareCodeUnits(left.displayName, right.displayName))
@@ -91,15 +94,10 @@ export class DiscourseContextResolver {
       );
     }
     const unique = dedupeSelections(selections);
-    const [snapshot, repositoryFile] = await Promise.all([
-      this.taskStore.snapshot(),
-      this.repositories.snapshot()
-    ]);
+    const snapshot = await this.taskStore.snapshot();
     const tasks = new Map(snapshot.tasks.map((task) => [task.id, task]));
     const repositories = new Map(
-      repositoryFile.repositories
-        .filter((repository) => !repository.removedAt)
-        .map((repository) => [repository.id, repository])
+      snapshot.repositories.map((repository) => [repository.id, repository])
     );
     const liveGitGenerations = new Map<string, Promise<string>>();
     const liveGitGeneration = (canonicalRoot: string): Promise<string> => {
@@ -119,7 +117,9 @@ export class DiscourseContextResolver {
       if (selection.entityKind === 'TASK') {
         const task = tasks.get(selection.entityId);
         if (!task) throw new Error(`Unknown discourse task context id: ${selection.entityId}`);
-        const repository = await this.repositories.resolveRecordedPath(task.repositoryPath);
+        const repository = await resolveRepository(
+          repositories.get(task.repositoryId)
+        );
         const taskContext = await this.resolveTask(
           task,
           snapshot,
@@ -136,28 +136,21 @@ export class DiscourseContextResolver {
       if (!repository) {
         throw new Error(`Unknown discourse repository context id: ${selection.entityId}`);
       }
-      let resolvedRepository: ResolvedRepository | undefined;
-      if (repository.availability === 'AVAILABLE') {
-        try {
-          resolvedRepository = await this.repositories.resolve(repository.id);
-        } catch {
-          resolvedRepository = undefined;
-        }
-      }
+      const resolvedRepository = await resolveRepository(repository);
       resolved.push({
         snapshot: {
           entityKind: 'REPOSITORY',
           entityId: repository.id,
-          labelSnapshot: repository.displayName,
+          labelSnapshot: repository.name,
           availability: resolvedRepository ? 'AVAILABLE' : 'UNAVAILABLE'
         },
         preview: {
           entityKind: 'REPOSITORY',
           entityId: repository.id,
-          labelSnapshot: repository.displayName,
+          labelSnapshot: repository.name,
           availability: resolvedRepository ? 'AVAILABLE' : 'UNAVAILABLE',
           repositoryId: repository.id,
-          repositoryName: repository.displayName,
+          repositoryName: repository.name,
           accessMode: resolvedRepository ? 'FILESYSTEM_READ' : 'UNAVAILABLE',
           exclusionReasons: resolvedRepository ? [] : ['Repository is unavailable.']
         },
@@ -278,7 +271,7 @@ export class DiscourseContextResolver {
       : undefined;
     const root = worktree?.worktreePath ?? repository?.canonicalRealPath;
     const repositoryId = repository?.repositoryId;
-    const repositoryName = repository?.record.displayName ?? 'Unknown repository';
+    const repositoryName = repository?.record.name ?? 'Unknown repository';
     const availability = root ? 'AVAILABLE' as const : 'UNAVAILABLE' as const;
     return {
       snapshot: {
@@ -345,11 +338,31 @@ function repositoryGeneration(
   const components = [
     `repository:${repository.repositoryId}`,
     `updated:${repository.record.updatedAt}`,
-    `objectFormat:${repository.record.identity.objectFormat}`,
+    `head:${repository.record.headSha ?? 'unknown'}`,
+    `status:${repository.record.status}`,
     `liveGitDirty:${liveGitGeneration}`,
-    ...repository.record.identity.anchorCommits.map((commit) => `anchor:${commit}`)
+    ...repository.record.remotes.map(
+      (remote) => `remote:${remote.name}:${remote.url}:${remote.direction}`
+    )
   ];
   return { algorithm: 'sha256', value: sha256(components.join('\n')), components };
+}
+
+async function resolveRepository(
+  repository: Repository | undefined
+): Promise<ResolvedRepository | undefined> {
+  if (!repository || repository.status !== 'AVAILABLE') return undefined;
+  try {
+    const canonicalRealPath = await fs.realpath(repository.path);
+    if (!path.isAbsolute(canonicalRealPath)) return undefined;
+    return {
+      repositoryId: repository.id,
+      record: repository,
+      canonicalRealPath: path.resolve(canonicalRealPath)
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function dedupeSelections(

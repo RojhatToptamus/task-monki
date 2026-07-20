@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentModel, AgentProviderState } from '../../shared/agent';
+import type { AgentModel, AgentRuntimeCatalog } from '../../shared/agent';
+import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
+import { codexCapabilities, CODEX_RUNTIME_DESCRIPTOR } from '../agent/codex/codexCapabilities';
+import { opencodeCapabilities, OPENCODE_RUNTIME_DESCRIPTOR } from '../agent/opencode/opencodeCapabilities';
 import { AgentProfileCatalog } from './AgentProfileCatalog';
 
 describe('AgentProfileCatalog', () => {
-  it('returns stable built-ins with distinct functional roles and shared concrete settings', () => {
-    const catalog = new AgentProfileCatalog();
-    const snapshot = catalog.list(providerState(), {
+  it('returns stable roles with one runtime-qualified model snapshot', () => {
+    const snapshot = new AgentProfileCatalog().list(runtimeCatalog(), {
+      defaultRuntimeId: 'codex',
       defaultModel: 'gpt-primary',
       defaultReasoningEffort: 'high'
     });
@@ -20,108 +23,130 @@ describe('AgentProfileCatalog', () => {
       'SKEPTIC',
       'VERIFIER'
     ]);
+    expect(snapshot.profiles.every((entry) => entry.profile.roleContractVersion === 3)).toBe(true);
     expect(snapshot.profiles.every((entry) => entry.availability === 'AVAILABLE')).toBe(true);
     expect(snapshot.profiles.map((entry) => entry.resolvedSettings)).toEqual([
-      { model: 'gpt-primary', modelProvider: 'openai', reasoningEffort: 'high' },
-      { model: 'gpt-primary', modelProvider: 'openai', reasoningEffort: 'high' },
-      { model: 'gpt-primary', modelProvider: 'openai', reasoningEffort: 'high' }
+      {
+        runtimeId: 'codex',
+        model: 'gpt-primary',
+        modelProvider: 'openai',
+        reasoningEffort: 'high'
+      },
+      {
+        runtimeId: 'codex',
+        model: 'gpt-primary',
+        modelProvider: 'openai',
+        reasoningEffort: 'high'
+      },
+      {
+        runtimeId: 'codex',
+        model: 'gpt-primary',
+        modelProvider: 'openai',
+        reasoningEffort: 'high'
+      }
     ]);
   });
 
-  it('falls back to the visible provider default and normalizes unsupported reasoning', () => {
-    const catalog = new AgentProfileCatalog();
-    const snapshot = catalog.list(providerState(), {
+  it('falls back to the visible runtime default and normalizes unsupported reasoning', () => {
+    const snapshot = new AgentProfileCatalog().list(runtimeCatalog(), {
+      defaultRuntimeId: 'codex',
       defaultModel: 'removed-model',
       defaultReasoningEffort: 'unsupported'
     });
 
     expect(snapshot.profiles[0]?.resolvedSettings).toEqual({
+      runtimeId: 'codex',
       model: 'gpt-primary',
       modelProvider: 'openai',
       reasoningEffort: 'medium'
     });
   });
 
-  it('honors an explicitly selected hidden model without choosing it as an implicit fallback', () => {
-    const state = providerState([
-      model({ model: 'hidden-saved', hidden: true, isDefault: false }),
-      model({ model: 'visible', hidden: false, isDefault: false })
+  it('honors a selected hidden model without using it as an implicit fallback', () => {
+    const catalog = runtimeCatalog([
+      model({ id: 'codex:hidden-saved', model: 'hidden-saved', hidden: true, isDefault: false }),
+      model({ id: 'codex:visible', model: 'visible', hidden: false, isDefault: false })
     ]);
-    const catalog = new AgentProfileCatalog();
+    const profiles = new AgentProfileCatalog();
 
-    expect(catalog.list(state).profiles[0]?.resolvedSettings?.model).toBe('visible');
+    expect(profiles.list(catalog).profiles[0]?.resolvedSettings?.model).toBe('visible');
     expect(
-      catalog.list(state, { defaultModel: 'hidden-saved' }).profiles[0]?.resolvedSettings?.model
+      profiles.list(catalog, { defaultModel: 'codex:hidden-saved' }).profiles[0]
+        ?.resolvedSettings?.model
     ).toBe('hidden-saved');
   });
 
-  it('keeps every profile visible but unavailable when provider preflight or models fail', () => {
-    const catalog = new AgentProfileCatalog();
-    const unavailable = providerState([]);
-    unavailable.preflight.ready = false;
-    unavailable.preflight.problems = ['Sign in to Codex.'];
+  it('keeps roles visible but explains runtimes without a safe discourse boundary', () => {
+    const catalog = runtimeCatalog();
+    catalog.defaultRuntimeId = 'opencode';
 
-    expect(catalog.list(unavailable).profiles).toHaveLength(3);
-    expect(catalog.list(unavailable).profiles[0]).toMatchObject({
+    expect(new AgentProfileCatalog().list(catalog).profiles[0]).toMatchObject({
       availability: 'UNAVAILABLE',
-      unavailableReason: 'Sign in to Codex.'
-    });
-    expect(catalog.list(providerState([])).profiles[0]).toMatchObject({
-      availability: 'UNAVAILABLE',
-      unavailableReason: 'No compatible agent model is available.'
+      unavailableReason: 'This agent cannot confirm the read-only, offline access required by Discourse.'
     });
   });
 
-  it('rejects forged profile ids before conversation construction', () => {
-    const catalog = new AgentProfileCatalog();
-    expect(() => catalog.require('builtin.admin')).toThrow('Unknown agent profile id');
-    expect(catalog.roleContract('builtin.verifier')).toContain('supplied context');
-    expect(() => catalog.roleContract('builtin.admin')).toThrow('Unknown agent profile id');
+  it('rejects forged profile ids and does not share mutable settings', () => {
+    const profiles = new AgentProfileCatalog();
+    expect(() => profiles.require('builtin.admin')).toThrow('Unknown agent profile id');
+    expect(profiles.roleContract('builtin.verifier')).toContain('supplied facts');
+    const entries = profiles.list(runtimeCatalog()).profiles;
+    entries[0]!.resolvedSettings!.model = 'mutated';
+    expect(entries[1]?.resolvedSettings?.model).toBe('gpt-primary');
   });
 
-  it('does not share mutable resolved settings between catalog entries', () => {
-    const profiles = new AgentProfileCatalog().list(providerState()).profiles;
-    profiles[0]!.resolvedSettings!.model = 'mutated';
-    expect(profiles[1]?.resolvedSettings?.model).toBe('gpt-primary');
+  it('keeps prior role contracts addressable after a contract revision', () => {
+    const profiles = new AgentProfileCatalog();
+    expect(profiles.roleContract('builtin.skeptic', 1)).toBe(
+      'Challenge material assumptions and identify specific counterexamples.'
+    );
+    expect(profiles.roleContract('builtin.skeptic', 2)).toContain('Do not echo');
+    expect(profiles.roleContract('builtin.skeptic', 3)).toContain(
+      'strongest credible counter-position'
+    );
+    expect(profiles.roleContract('builtin.lead', 3)).toContain('actionable choice');
+    expect(profiles.roleContract('builtin.verifier', 3)).toContain('evidence-audit lens');
+    expect(() => profiles.roleContract('builtin.skeptic', 99)).toThrow(
+      'Unknown role contract version'
+    );
   });
 });
 
-function providerState(models: AgentModel[] = [model()]): AgentProviderState {
+function runtimeCatalog(models: AgentModel[] = [model()]): AgentRuntimeCatalog {
+  const codex = codexCapabilities();
+  const opencode = opencodeCapabilities();
   return {
-    preflight: {
-      provider: 'codex',
-      ready: true,
-      capabilities: {
-        provider: 'codex',
-        modelCatalog: { maturity: 'stable' },
-        reasoningEffort: { maturity: 'stable' },
-        persistentSessions: { maturity: 'stable' },
-        sessionResume: { maturity: 'stable' },
-        sessionFork: { maturity: 'stable' },
-        activeTurnSteering: { maturity: 'stable' },
-        turnInterruption: { maturity: 'stable' },
-        truePause: { maturity: 'unsupported' },
-        interactiveApprovals: { maturity: 'stable' },
-        userInputRequests: { maturity: 'stable' },
-        goals: { maturity: 'stable' },
-        plans: { maturity: 'stable' },
-        review: { maturity: 'stable' },
-        subagents: { maturity: 'stable' },
-        backgroundTerminals: { maturity: 'stable' },
-        dynamicTools: { maturity: 'stable' }
-      },
-      problems: [],
-      warnings: []
-    },
+    defaultRuntimeId: 'codex',
+    refreshedAt: '2026-07-13T10:00:00.000Z',
     models,
-    refreshedAt: '2026-07-13T10:00:00.000Z'
+    runtimes: [
+      {
+        preflight: {
+          runtime: CODEX_RUNTIME_DESCRIPTOR,
+          readiness: createRuntimeReadiness('READY', 'Codex is ready.'),
+          capabilities: codex
+        },
+        models,
+        refreshedAt: '2026-07-13T10:00:00.000Z'
+      },
+      {
+        preflight: {
+          runtime: OPENCODE_RUNTIME_DESCRIPTOR,
+          readiness: createRuntimeReadiness('READY', 'OpenCode is ready.'),
+          capabilities: opencode
+        },
+        models: [],
+        refreshedAt: '2026-07-13T10:00:00.000Z'
+      }
+    ]
   };
 }
 
 function model(overrides: Partial<AgentModel> = {}): AgentModel {
   return {
-    id: 'model-primary',
-    provider: 'codex',
+    id: 'codex:gpt-primary',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
     model: 'gpt-primary',
     displayName: 'GPT Primary',
     hidden: false,

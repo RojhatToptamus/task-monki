@@ -11,4 +11,20 @@ describe('window chrome layout styles', () => {
     expect(body).toContain(`height: ${TITLEBAR_HEIGHT}px`);
     expect(body).toContain('align-items: center');
   });
+
+  it('gives the New Task canvas a full-height header and bounded content row', async () => {
+    const css = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+    const panelHeader =
+      css.match(/\.slideover__header\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? '';
+    const workspace =
+      css.match(/\.tm-canvas__workspace\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? '';
+    const workspaceContent =
+      css.match(/\.tm-canvas__content\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? '';
+
+    expect(panelHeader).toContain(`height: ${TITLEBAR_HEIGHT}px`);
+    expect(workspace).toContain('flex-direction: column');
+    expect(workspaceContent).toContain('flex: 1');
+    expect(workspaceContent).toContain('min-height: 0');
+    expect(workspaceContent).toContain('overflow: hidden');
+  });
 });

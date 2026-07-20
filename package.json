@@ -2,7 +2,7 @@
   "name": "task-monki",
   "version": "0.1.0-alpha.1",
   "private": true,
-  "description": "Experimental local task board for running Codex in isolated Git worktrees.",
+  "description": "Experimental local task board for running AI coding agents in isolated Git worktrees.",
   "author": "Task Monki contributors",
   "homepage": "https://github.com/RojhatToptamus/task-monki#readme",
   "repository": {
@@ -19,6 +19,7 @@
   "scripts": {
     "dev:renderer": "vite --host 127.0.0.1",
     "build:main": "tsc -p tsconfig.main.json && npm run build:preload",
+    "build:tools": "tsc -p tsconfig.tools.json",
     "build:preload": "node scripts/build-preload.mjs",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
@@ -26,23 +27,32 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux",
-    "dev:api": "npm run build:main && node dist-electron/dev/server.js",
-    "dev:seed": "npm run build:main && node dist-electron/dev/seed.js --reset",
+    "verify:packaged-preview": "node scripts/verify-packaged-preview-launcher.mjs",
+    "verify:packaged-preview-safe-storage": "node scripts/verify-packaged-preview-safe-storage.mjs",
+    "dev:api": "npm run build:tools && node dist-tools/dev/server.js",
+    "dev:seed": "npm run build:tools && node dist-tools/dev/seed.js --reset",
+    "smoke:providers": "npm run build:tools && node dist-tools/dev/providerSmoke.js",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "generate:codex-protocol": "node scripts/generate-codex-protocol.mjs",
     "check:codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
+    "test:preview-credential-gate": "sh scripts/preview-managed-credential-gate.sh",
     "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
     "verify:packaged-runtime": "node scripts/verify-packaged-runtime.mjs"
   },
   "dependencies": {
+    "pg": "^8.22.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "redis": "^6.1.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@types/node": "^26.0.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",

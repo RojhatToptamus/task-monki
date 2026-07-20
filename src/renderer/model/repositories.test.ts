@@ -1,171 +1,125 @@
 import { describe, expect, it } from 'vitest';
-import type { Task } from '../../shared/contracts';
-import type { RepositoryCatalogSnapshot } from '../../shared/repositories';
+import type { Repository, Task } from '../../shared/contracts';
 import {
   buildRepositoryOptions,
-  normalizeRepositoryPath,
+  filterRepositoryOptions,
   resolveRepositorySetupState,
-  resolveSelectedRepositoryId,
-  tasksForRepository
+  resolveSelectedRepositoryId
 } from './repositories';
 
 describe('repository selection model', () => {
-  it('normalizes trailing separators without losing roots', () => {
-    expect(normalizeRepositoryPath('/Users/me/app/')).toBe('/Users/me/app');
-    expect(normalizeRepositoryPath('/')).toBe('/');
-    expect(normalizeRepositoryPath('C:\\')).toBe('C:\\');
-  });
-
-  it('projects core-owned catalog entries without rebuilding path authority', () => {
-    const options = buildRepositoryOptions(catalogFixture());
+  it('builds options from durable repositories and counts tasks by ID', () => {
+    const options = buildRepositoryOptions({
+      repositories: [
+        repositoryFixture('repo-current', '/repos/current'),
+        repositoryFixture('repo-empty', '/repos/empty')
+      ],
+      tasks: [
+        taskFixture('one', 'repo-current'),
+        taskFixture('two', 'repo-current')
+      ]
+    });
 
     expect(options).toEqual([
-      {
-        id: 'repository-current',
-        name: 'current',
-        displayPath: 'repos/current',
-        taskCount: 2,
-        isDefault: true,
-        available: true
-      },
-      {
-        id: 'repository-other',
-        name: 'other',
-        displayPath: 'repos/other',
-        taskCount: 1,
-        isDefault: false,
-        available: false
-      }
+      expect.objectContaining({
+        id: 'repo-current',
+        path: '/repos/current',
+        displayPath: '/repos/current',
+        taskCount: 2
+      }),
+      expect.objectContaining({ id: 'repo-empty', taskCount: 0 })
     ]);
   });
 
-  it('filters tasks through authoritative task associations', () => {
-    const tasks = [
-      taskFixture('one', '/repos/current'),
-      taskFixture('two', '/forged/path-that-does-not-control-selection'),
-      taskFixture('three', '/repos/current')
-    ];
+  it('keeps repositories with identical folder names distinguishable', () => {
+    const options = buildRepositoryOptions({
+      repositories: [
+        repositoryFixture('repo-one', '/Users/one/work/project'),
+        repositoryFixture('repo-two', '/Volumes/two/work/project')
+      ],
+      tasks: []
+    });
 
-    expect(
-      tasksForRepository(tasks, catalogFixture(), 'repository-current').map(
-        (task) => task.id
-      )
-    ).toEqual(['one', 'three']);
-    expect(tasksForRepository(tasks, catalogFixture(), '').map((task) => task.id)).toEqual([
-      'one',
-      'two',
-      'three'
+    expect(options.map((option) => option.displayPath)).toEqual([
+      '…/one/work/project',
+      '…/two/work/project'
     ]);
   });
 
-  it('accepts only a selected id present in the catalog', () => {
-    expect(resolveSelectedRepositoryId(catalogFixture())).toBe('repository-current');
-    expect(
-      resolveSelectedRepositoryId({
-        ...catalogFixture(),
-        selectedRepositoryId: 'forged-repository'
-      })
-    ).toBe('');
+  it('filters by repository name or full path without changing the options', () => {
+    const options = buildRepositoryOptions({
+      repositories: [
+        repositoryFixture('primary', '/Users/dev/primary'),
+        repositoryFixture('secondary', '/Volumes/work/repo-secondary')
+      ],
+      tasks: []
+    });
+
+    expect(filterRepositoryOptions(options, 'SECONDARY').map((option) => option.id)).toEqual([
+      'secondary'
+    ]);
+    expect(filterRepositoryOptions(options, '/users/dev').map((option) => option.id)).toEqual([
+      'primary'
+    ]);
+    expect(filterRepositoryOptions(options, '')).toEqual(options);
   });
 
-  it('keeps setup in loading while repositories are still loading', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: true,
-        options: [],
-        activeRepositoryId: '',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('loading');
+  it('keeps a selected ID and falls back to the first available repository', () => {
+    const options = buildRepositoryOptions({
+      repositories: [
+        repositoryFixture('missing', '/repos/missing', 'MISSING'),
+        repositoryFixture('available', '/repos/current')
+      ],
+      tasks: []
+    });
+
+    expect(resolveSelectedRepositoryId(options, 'missing')).toBe('missing');
+    expect(resolveSelectedRepositoryId(options, 'unknown')).toBe('available');
   });
 
-  it('requires setup when no repository source is available', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: [],
-        activeRepositoryId: '',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('needsRepository');
-  });
-
-  it('keeps setup open when a repository exists but setup is incomplete', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: buildRepositoryOptions(catalogFixture()),
-        activeRepositoryId: 'repository-current',
-        firstLaunchSetupCompleted: false
-      })
-    ).toBe('needsReview');
-  });
-
-  it('blocks setup when the selected repository is unavailable', () => {
-    const catalog = {
-      ...catalogFixture(),
-      selectedRepositoryId: 'repository-other'
-    };
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: buildRepositoryOptions(catalog),
-        activeRepositoryId: 'repository-other',
-        firstLaunchSetupCompleted: true
-      })
-    ).toBe('repositoryUnavailable');
-  });
-
-  it('treats an active repository as complete after setup is finished', () => {
-    expect(
-      resolveRepositorySetupState({
-        loading: false,
-        options: buildRepositoryOptions(catalogFixture()),
-        activeRepositoryId: 'repository-current',
-        firstLaunchSetupCompleted: true
-      })
-    ).toBe('complete');
-  });
+  it.each([
+    [true, [], '', false, 'loading'],
+    [false, [], '', false, 'needsRepository'],
+    [false, [repositoryFixture('repo', '/repo')], 'repo', false, 'needsReview'],
+    [false, [repositoryFixture('repo', '/repo')], 'repo', true, 'complete']
+  ] as const)(
+    'resolves setup state without a second repository source',
+    (loading, repositories, activeRepositoryId, firstLaunchSetupCompleted, expected) => {
+      expect(
+        resolveRepositorySetupState({
+          loading,
+          options: buildRepositoryOptions({ repositories: [...repositories], tasks: [] }),
+          activeRepositoryId,
+          firstLaunchSetupCompleted
+        })
+      ).toBe(expected);
+    }
+  );
 });
 
-function catalogFixture(): RepositoryCatalogSnapshot {
+function repositoryFixture(
+  id: string,
+  repositoryPath: string,
+  status: Repository['status'] = 'AVAILABLE'
+): Repository {
   return {
-    revision: 3,
-    defaultRepositoryId: 'repository-current',
-    selectedRepositoryId: 'repository-current',
-    repositories: [
-      {
-        id: 'repository-current',
-        displayName: 'current',
-        displayPath: 'repos/current',
-        availability: 'AVAILABLE',
-        isDefault: true,
-        taskCount: 2
-      },
-      {
-        id: 'repository-other',
-        displayName: 'other',
-        displayPath: 'repos/other',
-        availability: 'UNAVAILABLE',
-        unavailableReason: 'MISSING',
-        isDefault: false,
-        taskCount: 1
-      }
-    ],
-    taskAssociations: [
-      { taskId: 'one', repositoryId: 'repository-current' },
-      { taskId: 'three', repositoryId: 'repository-current' },
-      { taskId: 'two', repositoryId: 'repository-other' }
-    ]
+    id,
+    name: repositoryPath.split('/').at(-1) ?? id,
+    path: repositoryPath,
+    status,
+    remotes: [],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z'
   };
 }
 
-function taskFixture(id: string, repositoryPath: string): Task {
+function taskFixture(id: string, repositoryId: string): Task {
   return {
     id,
+    runtimeId: 'codex',
     title: id,
     prompt: 'Do the work.',
-    repositoryPath,
+    repositoryId,
     workflowPhase: 'READY',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -186,7 +140,7 @@ function taskFixture(id: string, repositoryPath: string): Task {
       githubPullRequest: 'UNLINKED',
       ciChecks: 'NOT_APPLICABLE',
       reviews: 'NOT_APPLICABLE',
-      codexReview: { status: 'NOT_RUN' },
+      agentReview: { status: 'NOT_RUN' },
       merge: 'NOT_APPLICABLE',
       artifact: 'NONE',
       health: 'HEALTHY',

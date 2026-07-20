@@ -6,7 +6,7 @@ import type {
   AgentModel,
   AgentExecutionSettings,
   AgentPreflight,
-  AgentProviderCapabilities,
+  AgentRuntimeCapabilities,
   AgentSessionRecord,
   AgentSessionSnapshot
 } from '../../shared/agent';
@@ -16,18 +16,32 @@ import { FileTaskStore } from '../storage/FileTaskStore';
 import {
   AgentMutationAmbiguousError,
   AgentProviderSessionMissingError,
-  type AgentProviderAdapter,
+  type AgentRuntimeAdapter,
   type AgentReconciliationResult,
   type AgentSessionRef,
   type AgentTurn,
   type CreateAgentSession,
   type InterruptAgentTurn,
+  type ForkAgentSession,
   type StartAgentReview,
   type StartAgentTurn,
-  type SteerAgentTurn
-} from './AgentProviderAdapter';
+  type SteerAgentTurn,
+  type SyncAgentGoal,
+  type ResolveAgentExecution,
+  type ResolvedAgentExecution
+} from './AgentRuntimeAdapter';
+import { createRuntimeReadiness } from './AgentRuntimeReadiness';
 import { AgentOrchestrator } from './AgentOrchestrator';
-import { codexCapabilities } from './codex/codexCapabilities';
+import { assertModelSupportsAttachments } from './AgentAttachmentDelivery';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from './codex/codexCapabilities';
+import {
+  OPENCODE_RUNTIME_DESCRIPTOR,
+  opencodeCapabilities
+} from './opencode/opencodeCapabilities';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 
 describe('AgentOrchestrator Phase 4', () => {
   it('rejects image delivery before creating a run when the selected model is text-only', async () => {
@@ -47,7 +61,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Text-only model',
       prompt: 'Inspect the screenshot.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       attachmentDraftId: draft.id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
@@ -74,7 +88,7 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(snapshot.agentSessions).toHaveLength(0);
   });
 
-  it('normalizes legacy codex adapter provider settings before starting a turn', async () => {
+  it('uses the adapter-resolved provider identity before starting a turn', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-provider-normalize-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
@@ -83,11 +97,11 @@ describe('AgentOrchestrator Phase 4', () => {
     const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
     const task = await store.createTask({
       title: 'Normalize provider',
-      prompt: 'Start with legacy settings.',
-      repositoryPath: repositoryDir,
+      prompt: 'Start with resolved settings.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: {
         model: 'test-model',
-        modelProvider: 'codex',
+        modelProvider: 'openai',
         reasoningEffort: 'high'
       }
     });
@@ -109,7 +123,6 @@ describe('AgentOrchestrator Phase 4', () => {
 
     expect(adapter.lastStart?.settings?.modelProvider).toBe('openai');
   });
-
   it('preserves session lineage across steer, continue, and detached review', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -120,7 +133,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Phase 4',
       prompt: 'Implement continuation controls.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -184,7 +197,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Missing provider thread',
       prompt: 'Continue even when provider session storage was evicted.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -244,7 +257,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Ambiguous start',
       prompt: 'Do not duplicate this mutation.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -280,6 +293,242 @@ describe('AgentOrchestrator Phase 4', () => {
     });
   });
 
+  it('preserves recovery established by a provider before startup rejects', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-provider-start-recovery-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    adapter.recoveryThenRejectStart = true;
+    const appEvents = new AppEventBus();
+    const terminalEvents: unknown[] = [];
+    appEvents.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const orchestrator = new AgentOrchestrator(store, appEvents, adapter);
+    const task = await store.createTask({
+      title: 'Provider startup recovery',
+      prompt: 'Preserve provider recovery evidence.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/provider-start-recovery',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+
+    const getRun = store.getRun.bind(store);
+    let staleActiveRun: Awaited<ReturnType<typeof getRun>>;
+    let returnedStaleRun = false;
+    vi.spyOn(store, 'getRun').mockImplementation(async (runId) => {
+      const current = await getRun(runId);
+      if (current && current.status !== 'RECOVERY_REQUIRED' && !staleActiveRun) {
+        staleActiveRun = current;
+      }
+      if (
+        current?.status === 'RECOVERY_REQUIRED' &&
+        staleActiveRun &&
+        !returnedStaleRun
+      ) {
+        returnedStaleRun = true;
+        return staleActiveRun;
+      }
+      return current;
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('provider failed after publishing recovery');
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.runs[0]).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      recoveryState: 'REQUIRES_USER_ACTION',
+      terminalReason: 'Provider established recovery before rejecting startup.'
+    });
+    expect(
+      snapshot.events.filter((event) => event.type === 'AGENT_MUTATION_AMBIGUOUS')
+    ).toHaveLength(1);
+    expect(
+      snapshot.events.some((event) => event.type === 'AGENT_RUN_FAILED')
+    ).toBe(false);
+    expect(returnedStaleRun).toBe(true);
+    expect(terminalEvents).toEqual([]);
+
+    const recoveryRun = snapshot.runs[0]!;
+    expect(recoveryRun.finalArtifactId).toBeUndefined();
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) =>
+          artifact.runId === recoveryRun.id && artifact.kind === 'agent-final'
+      )
+    ).toEqual([]);
+
+    await orchestrator.interruptRun(recoveryRun.id);
+    const resolved = (await store.getRun(recoveryRun.id))!;
+    expect(resolved).toMatchObject({
+      status: 'INTERRUPTED',
+      recoveryState: 'NONE',
+      terminalReason: 'Recovery-required run was explicitly abandoned by the user.'
+    });
+    expect(resolved.finalArtifactId).toBeTruthy();
+    await expect(store.readArtifact(resolved.finalArtifactId!)).resolves.toContain(
+      '# Recovery run closed'
+    );
+    await expect(store.readArtifact(resolved.finalArtifactId!)).resolves.not.toContain(
+      'provider failed after publishing recovery'
+    );
+  });
+
+  it('links a winning startup failure artifact to its failed review projection', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-start-failure-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
+    const task = await store.createTask({
+      title: 'Review startup failure',
+      prompt: 'Keep failed review evidence coherent.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/review-start-failure',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+    const implementation = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal(store, implementation, 'AGENT_RUN_COMPLETED');
+    adapter.reviewStartFailure = 'provider review failed to start';
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun: (await store.getRun(implementation.id))!,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+      })
+    ).rejects.toThrow('provider review failed to start');
+
+    const snapshot = await store.snapshot();
+    const failedReview = snapshot.runs.find((run) => run.mode === 'REVIEW')!;
+    expect(failedReview).toMatchObject({
+      status: 'FAILED',
+      terminalReason: 'provider review failed to start'
+    });
+    expect(failedReview.finalArtifactId).toBeTruthy();
+    expect(snapshot.tasks[0]?.projection.agentReview).toMatchObject({
+      status: 'FAILED',
+      runId: failedReview.id,
+      finalArtifactId: failedReview.finalArtifactId,
+      summary: 'provider review failed to start'
+    });
+    const failureEvent = snapshot.events.find(
+      (event) => event.runId === failedReview.id && event.type === 'AGENT_RUN_FAILED'
+    );
+    const artifactEvent = snapshot.events.find(
+      (event) => event.runId === failedReview.id && event.type === 'ARTIFACT_CREATED'
+    );
+    expect(failureEvent?.payload).toEqual({
+      error: 'provider review failed to start'
+    });
+    expect(snapshot.events.indexOf(failureEvent!)).toBeLessThan(
+      snapshot.events.indexOf(artifactEvent!)
+    );
+    await expect(store.readArtifact(failedReview.finalArtifactId!)).resolves.toContain(
+      'provider review failed to start'
+    );
+  });
+
+  it('preserves the provider startup error when supplementary artifact creation fails', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-start-failure-artifact-')
+    );
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    adapter.startFailure = 'provider startup failed';
+    const appEvents = new AppEventBus();
+    const terminalEvents: unknown[] = [];
+    appEvents.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const orchestrator = new AgentOrchestrator(store, appEvents, adapter);
+    const task = await store.createTask({
+      title: 'Startup artifact failure',
+      prompt: 'Preserve the original provider error.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: { model: 'test-model', reasoningEffort: 'high' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/start-failure-artifact',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+    vi.spyOn(store, 'writeFinalArtifact').mockRejectedValueOnce(
+      new Error('final artifact storage unavailable')
+    );
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('provider startup failed');
+
+    const snapshot = await store.snapshot();
+    const failedRun = snapshot.runs[0]!;
+    expect(failedRun).toMatchObject({
+      status: 'FAILED',
+      terminalReason: 'provider startup failed'
+    });
+    expect(failedRun.finalArtifactId).toBeUndefined();
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === failedRun.id && artifact.kind === 'agent-final'
+      )
+    ).toEqual([]);
+    expect(terminalEvents).toEqual([
+      expect.objectContaining({
+        runId: failedRun.id,
+        payload: { status: 'failed', error: 'provider startup failed' }
+      })
+    ]);
+    await expect(store.readArtifact(failedRun.diagnosticArtifactId)).resolves.toContain(
+      'final artifact storage unavailable'
+    );
+  });
+
   it('refuses network-enabled turns when the browser development boundary disables them', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-network-boundary-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -292,7 +541,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const task = await store.createTask({
       title: 'Keep dev API isolated',
       prompt: 'Do not expose the browser development API.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', networkAccess: true }
     });
     const { iteration, worktree } = await store.createIterationAndWorktree({
@@ -364,11 +613,11 @@ describe('AgentOrchestrator Phase 4', () => {
     ).rejects.toThrow('automated approval reviewer');
     expect((await store.snapshot()).runs).toHaveLength(0);
 
-    const legacySession = await store.createAgentSession({
+    const existingSession = await store.createAgentSession({
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: {
         model: 'test-model',
         sandbox: 'WORKSPACE_WRITE',
@@ -393,7 +642,7 @@ describe('AgentOrchestrator Phase 4', () => {
         }
       })
     ).rejects.toThrow('Selected session is unsafe');
-    await store.updateAgentSession(legacySession.id, {
+    await store.updateAgentSession(existingSession.id, {
       requestedSettings: {
         model: 'test-model',
         sandbox: 'WORKSPACE_WRITE',
@@ -426,12 +675,12 @@ describe('AgentOrchestrator Phase 4', () => {
         settings: safeSettings
       })
     ).rejects.toThrow('Selected session observed settings is unsafe');
-    await store.updateAgentSession(legacySession.id, { observedSettings: safeSettings });
+    await store.updateAgentSession(existingSession.id, { observedSettings: safeSettings });
     await store.recordAgentSettingsObservation({
       taskId: task.id,
       iterationId: iteration.id,
-      sessionId: legacySession.id,
-      provider: 'codex',
+      sessionId: existingSession.id,
+      runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: { ...safeSettings, sandbox: 'DANGER_FULL_ACCESS' }
     });
@@ -448,8 +697,8 @@ describe('AgentOrchestrator Phase 4', () => {
     await store.recordAgentSettingsObservation({
       taskId: task.id,
       iterationId: iteration.id,
-      sessionId: legacySession.id,
-      provider: 'codex',
+      sessionId: existingSession.id,
+      runtimeId: 'codex',
       source: 'THREAD_SETTINGS_NOTIFICATION',
       settings: safeSettings
     });
@@ -471,6 +720,54 @@ describe('AgentOrchestrator Phase 4', () => {
         approvalsReviewer: 'user'
       }
     });
+  });
+
+  it('rejects an unattested runtime before browser development can resolve provider state', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-boundary-'));
+    const repositoryDir = path.join(dir, 'repository');
+    await fs.mkdir(repositoryDir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new Phase4Adapter(store);
+    Object.defineProperty(adapter, 'descriptor', {
+      value: OPENCODE_RUNTIME_DESCRIPTOR
+    });
+    vi.spyOn(adapter, 'capabilities').mockResolvedValue(opencodeCapabilities());
+    const resolveExecution = vi.spyOn(adapter, 'resolveExecution');
+    const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter, {
+      allowNetworkAccess: false
+    });
+    const task = await store.createTask({
+      runtimeId: 'opencode',
+      title: 'Reject unattested runtime',
+      prompt: 'Do not probe the provider.',
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
+      agentSettings: {
+        runtimeId: 'opencode',
+        sandbox: 'WORKSPACE_WRITE',
+        networkAccess: false,
+        approvalPolicy: 'never',
+        approvalsReviewer: 'user'
+      }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'task-monki/runtime-boundary',
+      worktreePath: repositoryDir,
+      baseSha: 'base'
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('browser development');
+    expect(resolveExecution).not.toHaveBeenCalled();
+    expect((await store.snapshot()).runs).toEqual([]);
   });
 
   it('rechecks provider-observed settings after creating a session and before turn/start', async () => {
@@ -509,7 +806,9 @@ describe('AgentOrchestrator Phase 4', () => {
     ).rejects.toThrow('Created session observed settings is unsafe');
 
     expect(adapter.startCount).toBe(0);
-    expect((await store.snapshot()).runs).toHaveLength(0);
+    expect((await store.snapshot()).runs).toEqual([
+      expect.objectContaining({ status: 'FAILED' })
+    ]);
   });
 
   it('rechecks recreated session observations before retrying turn/start', async () => {
@@ -586,7 +885,7 @@ describe('AgentOrchestrator Phase 4', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: safeSettings
     });
     const run = await store.createRun({
@@ -606,7 +905,7 @@ describe('AgentOrchestrator Phase 4', () => {
     });
 
     await expect(orchestrator.initialize()).rejects.toThrow(
-      'Provider recovery reported unsafe observed settings'
+      'Runtime recovery reported unsafe observed settings'
     );
 
     expect(adapter.initializeCount).toBe(1);
@@ -620,7 +919,7 @@ describe('AgentOrchestrator Phase 4', () => {
     await fs.mkdir(repositoryDir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const server = await store.createAgentServer({
-      provider: 'codex',
+      runtimeId: 'codex',
       runtimeKind: 'APP_SERVER',
       transport: 'STDIO',
       executable: 'codex',
@@ -662,7 +961,7 @@ describe('AgentOrchestrator Phase 4', () => {
       const task = await store.createTask({
         title: input.title,
         prompt: input.title,
-        repositoryPath: repositoryDir,
+        repositoryId: (await addTestRepository(store, repositoryDir)).id,
         agentSettings: input.runSettings,
         attachmentDraftId
       });
@@ -676,7 +975,7 @@ describe('AgentOrchestrator Phase 4', () => {
         task,
         iteration,
         worktree,
-        provider: 'codex',
+        runtimeId: 'codex',
         requestedSettings: input.sessionSettings ?? input.runSettings
       });
       if (input.sessionObservedSettings) {
@@ -708,7 +1007,7 @@ describe('AgentOrchestrator Phase 4', () => {
           iterationId: iteration.id,
           sessionId: session.id,
           runId: run.id,
-          provider: 'codex',
+          runtimeId: 'codex',
           source: 'THREAD_SETTINGS_NOTIFICATION',
           settings: input.latestSettingsObservation
         });
@@ -788,6 +1087,7 @@ describe('AgentOrchestrator Phase 4', () => {
       { method: 'item/commandExecution/requestApproval' }
     );
     const pendingInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
       serverInstanceId: server.id,
       providerRequestId: 71,
       taskId: pendingApprovalWithSafeSettings.task.id,
@@ -872,13 +1172,14 @@ describe('AgentOrchestrator Phase 4', () => {
     ).toHaveLength(persisted.filter((expected) => expected.unsafe).length);
     await orchestrator.shutdown();
     await electronOrchestrator.shutdown();
-  });
+  }, 20_000);
 
   it('rejects unexpected provider approval acceptance in browser-dev mode', async () => {
     const getInteractionRequest = vi.fn().mockResolvedValue({
       id: 'interaction-one',
       taskId: 'task-one',
       runId: 'run-one',
+      runtimeId: 'codex',
       type: 'COMMAND_APPROVAL'
     });
     const store = { getInteractionRequest } as unknown as FileTaskStore;
@@ -902,8 +1203,12 @@ describe('AgentOrchestrator Phase 4', () => {
   });
 });
 
-class Phase4Adapter implements AgentProviderAdapter {
+class Phase4Adapter implements AgentRuntimeAdapter {
+  readonly descriptor = CODEX_RUNTIME_DESCRIPTOR;
   ambiguousStart = false;
+  recoveryThenRejectStart = false;
+  startFailure?: string;
+  reviewStartFailure?: string;
   missingProviderSessionOnStart?: string;
   createdSessionObservedSettings?: AgentExecutionSettings;
   initializeObservedSettings?: {
@@ -936,23 +1241,22 @@ class Phase4Adapter implements AgentProviderAdapter {
 
   preflight(): Promise<AgentPreflight> {
     return Promise.resolve({
-      provider: 'codex',
-      ready: true,
-      capabilities: codexCapabilities(),
-      problems: [],
-      warnings: []
+      runtime: this.descriptor,
+      readiness: createRuntimeReadiness('READY', 'Test runtime is ready.'),
+      capabilities: phase4Capabilities(),
     });
   }
 
-  capabilities(): Promise<AgentProviderCapabilities> {
-    return Promise.resolve(codexCapabilities());
+  capabilities(): Promise<AgentRuntimeCapabilities> {
+    return Promise.resolve(phase4Capabilities());
   }
 
   listModels(): Promise<AgentModel[]> {
     return Promise.resolve([
       {
-        id: 'test-model',
-        provider: 'codex',
+        id: 'codex:openai/test-model',
+        runtimeId: 'codex',
+        modelProvider: 'openai',
         model: 'test-model',
         displayName: 'Test model',
         hidden: false,
@@ -963,6 +1267,21 @@ class Phase4Adapter implements AgentProviderAdapter {
         isDefault: true
       }
     ]);
+  }
+
+  async resolveExecution(input: ResolveAgentExecution): Promise<ResolvedAgentExecution> {
+    const model = (await this.listModels())[0]!;
+    assertModelSupportsAttachments(model, input.attachments);
+    return {
+      model,
+      settings: {
+        ...input.settings,
+        runtimeId: this.descriptor.id,
+        model: model.model,
+        modelProvider: model.modelProvider,
+        reasoningEffort: input.settings.reasoningEffort ?? model.defaultReasoningEffort
+      }
+    };
   }
 
   async createSession(input: CreateAgentSession): Promise<AgentSessionRecord> {
@@ -991,6 +1310,9 @@ class Phase4Adapter implements AgentProviderAdapter {
   async startTurn(input: StartAgentTurn): Promise<AgentTurn> {
     this.lastStart = input;
     this.startCount += 1;
+    if (this.startFailure) {
+      throw new Error(this.startFailure);
+    }
     if (
       this.missingProviderSessionOnStart &&
       input.session.providerSessionId === this.missingProviderSessionOnStart
@@ -1000,6 +1322,27 @@ class Phase4Adapter implements AgentProviderAdapter {
         'turn/start',
         `thread not found: ${input.session.providerSessionId}`
       );
+    }
+    if (this.recoveryThenRejectStart) {
+      const run = await this.store.getRun(input.localRunId);
+      if (!run) throw new Error('Run not found.');
+      await this.store.appendEvent(
+        createDomainEvent({
+          type: 'AGENT_MUTATION_AMBIGUOUS',
+          taskId: run.taskId,
+          iterationId: run.iterationId,
+          runId: run.id,
+          worktreeId: run.worktreeId,
+          agentSessionId: run.sessionId,
+          source: 'provider',
+          payload: {
+            operation: 'turn/start',
+            reason: 'Provider established recovery before rejecting startup.',
+            automaticResubmission: false
+          }
+        })
+      );
+      throw new Error('provider failed after publishing recovery');
     }
     if (this.ambiguousStart) {
       throw new AgentMutationAmbiguousError(
@@ -1025,7 +1368,18 @@ class Phase4Adapter implements AgentProviderAdapter {
     return Promise.resolve();
   }
 
+  forkSession(_input: ForkAgentSession): Promise<AgentSessionRecord> {
+    return Promise.reject(new Error('Session fork is not exercised by this fake.'));
+  }
+
+  syncGoal(_input: SyncAgentGoal): ReturnType<NonNullable<AgentRuntimeAdapter['syncGoal']>> {
+    return Promise.reject(new Error('Goal sync is not exercised by this fake.'));
+  }
+
   async startReview(input: StartAgentReview): Promise<AgentTurn> {
+    if (this.reviewStartFailure) {
+      throw new Error(this.reviewStartFailure);
+    }
     this.threadCounter += 1;
     this.turnCounter += 1;
     const providerTurnId = `review-${this.turnCounter}`;
@@ -1058,6 +1412,16 @@ class Phase4Adapter implements AgentProviderAdapter {
   }
 }
 
+function phase4Capabilities(): AgentRuntimeCapabilities {
+  return {
+    ...codexCapabilities(),
+    promptRefinement: {
+      maturity: 'unsupported',
+      detail: 'The phase-four test adapter does not implement prompt refinement.'
+    }
+  };
+}
+
 async function createPhase4TaskContext(
   store: FileTaskStore,
   dir: string,
@@ -1068,7 +1432,7 @@ async function createPhase4TaskContext(
   const task = await store.createTask({
     title: 'Browser development boundary',
     prompt: 'Keep this turn inside the restricted boundary.',
-    repositoryPath: repositoryDir,
+    repositoryId: (await addTestRepository(store, repositoryDir)).id,
     agentSettings: settings
   });
   const { iteration, worktree } = await store.createIterationAndWorktree({

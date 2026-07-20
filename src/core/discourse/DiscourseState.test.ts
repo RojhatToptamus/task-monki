@@ -586,7 +586,7 @@ function assignment(id: string, role: DiscourseJobRole): AgentAssignmentSnapshot
     agentProfileId: `profile-${id}`,
     profileRevision: 1,
     displayNameSnapshot: id,
-    providerId: 'codex',
+    runtimeId: 'codex',
     model: 'gpt-test',
     modelProvider: 'openai',
     configuredRole: role === 'CRITIQUE' ? 'VERIFIER' : 'LEAD',

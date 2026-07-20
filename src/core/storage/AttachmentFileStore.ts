@@ -23,8 +23,7 @@ import {
 import {
   AttachmentStoreError,
   attachmentIntegrityError,
-  attachmentStorageError,
-  type AttachmentStoreErrorCode
+  attachmentStorageError
 } from './AttachmentErrors';
 
 export { AttachmentStoreError, type AttachmentStoreErrorCode } from './AttachmentErrors';
@@ -50,6 +49,21 @@ export interface PreparedAttachmentDraft {
   records: TaskAttachmentRecord[];
 }
 
+export class AttachmentAdoptionAmbiguousError extends AggregateError {
+  readonly name = 'AttachmentAdoptionAmbiguousError';
+
+  constructor(
+    readonly receipt: PreparedAttachmentDraft,
+    publicationError: unknown,
+    rollbackError: unknown
+  ) {
+    super(
+      [publicationError, rollbackError],
+      'Attachment adoption failed and its durable directory ownership could not be proven.'
+    );
+  }
+}
+
 export interface AttachmentFileStoreOptions {
   storageQuotaBytes?: number;
   reserveFreeBytes?: number;
@@ -68,6 +82,7 @@ interface DraftManifest extends AttachmentDraftSnapshot {
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
+const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const MAX_DRAFT_MANIFEST_BYTES = 256 * 1024;
 const MAX_ACTIVE_DRAFTS = 32;
 const MAX_STAGED_BYTES = 100 * 1024 * 1024;
@@ -87,9 +102,11 @@ export class AttachmentFileStore {
   private initialized = false;
   private initialization?: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
+  private closing = false;
+  private closePromise?: Promise<void>;
 
   constructor(
-    private readonly baseDir: string,
+    baseDir: string,
     options: AttachmentFileStoreOptions = {}
   ) {
     this.attachmentsDir = path.join(baseDir, 'attachments');
@@ -101,7 +118,24 @@ export class AttachmentFileStore {
     this.createId = options.createId ?? randomUUID;
   }
 
-  async init(): Promise<void> {
+  init(): Promise<void> {
+    if (this.closing) return Promise.reject(attachmentStoreClosed());
+    return this.ensureInitialized();
+  }
+
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    const initialization = this.initialization;
+    const queue = this.queue;
+    this.closePromise = Promise.all([
+      initialization?.catch(() => undefined),
+      queue.catch(() => undefined)
+    ]).then(() => undefined);
+    return this.closePromise;
+  }
+
+  private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     if (!this.initialization) {
       this.initialization = this.initialize().catch((error) => {
@@ -133,16 +167,28 @@ export class AttachmentFileStore {
           if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue;
           throw error;
         }
-        const timestamp = this.timestamp();
-        const draft: DraftManifest = {
-          schemaVersion: 3,
-          id,
-          attachments: [],
-          createdAt: timestamp,
-          updatedAt: timestamp
-        };
-        await this.writeDraft(draft);
-        return publicDraft(draft);
+        try {
+          const timestamp = this.timestamp();
+          const draft: DraftManifest = {
+            schemaVersion: 3,
+            id,
+            attachments: [],
+            createdAt: timestamp,
+            updatedAt: timestamp
+          };
+          await this.writeDraft(draft);
+          return publicDraft(draft);
+        } catch (error) {
+          try {
+            await this.removeManagedDirectory(directory, true);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              'Attachment draft creation failed and its staging directory could not be removed.'
+            );
+          }
+          throw error;
+        }
       }
       throw new AttachmentStoreError('ATTACHMENT_CONFLICT', 'Could not create attachment draft.', 409);
     });
@@ -248,10 +294,24 @@ export class AttachmentFileStore {
       if (await exists(target)) {
         throw new AttachmentStoreError('ATTACHMENT_CONFLICT', 'Task attachment storage already exists.', 409);
       }
+      const receipt = { draft: publicDraft(draft), taskId, records };
       await fs.rename(this.draftDirectory(draft.id), target);
-      await syncDirectoryIfSupported(this.stagingDir);
-      await syncDirectoryIfSupported(this.tasksDir);
-      return { draft: publicDraft(draft), taskId, records };
+      try {
+        await syncDirectoryIfSupported(this.stagingDir);
+        await syncDirectoryIfSupported(this.tasksDir);
+      } catch (publicationError) {
+        try {
+          await this.rollbackDraftForTaskUnlocked(receipt);
+        } catch (rollbackError) {
+          throw new AttachmentAdoptionAmbiguousError(
+            receipt,
+            publicationError,
+            rollbackError
+          );
+        }
+        throw publicationError;
+      }
+      return receipt;
     });
   }
 
@@ -265,14 +325,7 @@ export class AttachmentFileStore {
   }
 
   rollbackDraftForTask(receipt: PreparedAttachmentDraft): Promise<void> {
-    return this.enqueue(async () => {
-      const source = this.taskDirectory(receipt.taskId);
-      const target = this.draftDirectory(receipt.draft.id);
-      if (!(await exists(source)) || await exists(target)) return;
-      await fs.rename(source, target);
-      await syncDirectoryIfSupported(this.tasksDir);
-      await syncDirectoryIfSupported(this.stagingDir);
-    });
+    return this.enqueue(() => this.rollbackDraftForTaskUnlocked(receipt));
   }
 
   copyTaskAttachments(
@@ -283,15 +336,17 @@ export class AttachmentFileStore {
     return this.enqueue(async () => {
       if (sourceRecords.length === 0) return [];
       const verified = await this.verifyTaskUnlocked(sourceTaskId, sourceRecords);
+      await this.ensureCapacity(
+        verified.reduce((total, source) => total + source.record.byteCount, 0)
+      );
       assertSafeId(targetTaskId);
       const targetDirectory = this.taskDirectory(targetTaskId);
       await fs.mkdir(targetDirectory, { mode: 0o700 });
       const records: TaskAttachmentRecord[] = [];
       try {
         for (const source of verified) {
-          const { storageKey: _legacyStorageKey, ...sourceRecord } = source.record;
           const record: TaskAttachmentRecord = {
-            ...sourceRecord,
+            ...source.record,
             id: this.uniqueId(records),
             taskId: targetTaskId,
             ordinal: records.length,
@@ -331,41 +386,6 @@ export class AttachmentFileStore {
     });
   }
 
-  migrateLegacyRecords(records: readonly TaskAttachmentRecord[]): Promise<TaskAttachmentRecord[]> {
-    return this.enqueue(async () => {
-      if (!records.some((record) => record.storageKey)) return structuredClone([...records]);
-      const migrated: TaskAttachmentRecord[] = [];
-      for (const record of records) {
-        if (!record.storageKey) {
-          migrated.push(structuredClone(record));
-          continue;
-        }
-        const legacyPath = path.resolve(this.baseDir, record.storageKey);
-        const legacyRoot = path.join(this.baseDir, 'attachment-blobs');
-        if (!isInside(legacyPath, legacyRoot)) throw attachmentIntegrityError();
-        await ensurePrivateDirectory(this.taskDirectory(record.taskId));
-        const { storageKey: _legacyStorageKey, ...next } = record;
-        const target = this.taskFile(record.taskId, next);
-        if (await exists(target)) {
-          await this.readVerified(target, next);
-        } else {
-          const bytes = await this.readVerified(legacyPath, record);
-          await writeAtomic(target, bytes, 0o400, true);
-          await this.readVerified(target, next);
-        }
-        migrated.push(next);
-      }
-      return migrated;
-    });
-  }
-
-  cleanupLegacyStorage(): Promise<void> {
-    return this.enqueue(async () => {
-      await this.removeLegacyDirectory(path.join(this.baseDir, 'attachment-blobs'));
-      await this.removeLegacyDirectory(path.join(this.baseDir, 'attachment-drafts'));
-    });
-  }
-
   reconcile(records: readonly TaskAttachmentRecord[]): Promise<AttachmentReconciliationResult> {
     return this.enqueue(async () => {
       validateGlobalTaskRecords(records);
@@ -382,9 +402,11 @@ export class AttachmentFileStore {
       for (const entry of await safeDirectoryEntries(this.tasksDir)) {
         assertSafeId(entry.name);
         if (!entry.isDirectory() || entry.isSymbolicLink()) throw attachmentIntegrityError();
+        const taskDirectory = path.join(this.tasksDir, entry.name);
+        await cleanupAtomicTemporaryFiles(taskDirectory);
         const expected = byTask.get(entry.name);
         if (!expected) {
-          await this.removeManagedDirectory(path.join(this.tasksDir, entry.name), true);
+          await this.removeManagedDirectory(taskDirectory, true);
           purgedBlobs += 1;
           continue;
         }
@@ -397,11 +419,6 @@ export class AttachmentFileStore {
       if (byTask.size > 0) throw attachmentIntegrityError();
       return { purgedBlobs, purgedDrafts };
     });
-  }
-
-  async syncTaskRecords(records: readonly TaskAttachmentRecord[]): Promise<void> {
-    await this.init();
-    validateGlobalTaskRecords(records);
   }
 
   private async initialize(): Promise<void> {
@@ -442,6 +459,28 @@ export class AttachmentFileStore {
       0o600,
       false
     );
+  }
+
+  private async rollbackDraftForTaskUnlocked(
+    receipt: PreparedAttachmentDraft
+  ): Promise<void> {
+    validateTaskAttachmentRecords(receipt.records, receipt.taskId);
+    assertSafeId(receipt.draft.id);
+    const source = this.taskDirectory(receipt.taskId);
+    const target = this.draftDirectory(receipt.draft.id);
+    const [sourceExists, targetExists] = await Promise.all([
+      exists(source),
+      exists(target)
+    ]);
+    if (!sourceExists && targetExists) {
+      await syncDirectoryIfSupported(this.tasksDir);
+      await syncDirectoryIfSupported(this.stagingDir);
+      return;
+    }
+    if (!sourceExists || targetExists) throw attachmentIntegrityError();
+    await fs.rename(source, target);
+    await syncDirectoryIfSupported(this.tasksDir);
+    await syncDirectoryIfSupported(this.stagingDir);
   }
 
   private async readVerified(filePath: string, record: Pick<TaskAttachmentRecord, 'byteCount' | 'sha256'>): Promise<Buffer> {
@@ -487,13 +526,18 @@ export class AttachmentFileStore {
   }
   private timestamp(): string { const value = this.now().toISOString(); if (!Number.isFinite(Date.parse(value))) throw attachmentStorageError(); return value; }
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.queue.catch(() => undefined).then(async () => { await this.init(); return operation(); });
+    if (this.closing) return Promise.reject(attachmentStoreClosed());
+    const run = this.queue.catch(() => undefined).then(async () => {
+      await this.ensureInitialized();
+      return operation();
+    });
     this.queue = run.catch(() => undefined);
     return run;
   }
   private async removeManagedDirectory(directory: string, allowManifest: boolean): Promise<void> {
     if (!(await exists(directory))) return;
     await assertPrivateDirectory(directory);
+    await cleanupAtomicTemporaryFiles(directory);
     for (const entry of await safeDirectoryEntries(directory)) {
       if (!entry.isFile() || entry.isSymbolicLink()) throw attachmentIntegrityError();
       const filePath = path.join(directory, entry.name);
@@ -507,16 +551,6 @@ export class AttachmentFileStore {
     }
     await fs.rmdir(directory);
     await syncDirectoryIfSupported(path.dirname(directory));
-  }
-  private async removeLegacyDirectory(directory: string): Promise<void> {
-    if (!(await exists(directory))) return;
-    const stat = await fs.lstat(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw attachmentIntegrityError();
-    for (const entry of await safeDirectoryEntries(directory)) {
-      if (!entry.isFile() || entry.isSymbolicLink()) throw attachmentIntegrityError();
-      await fs.unlink(path.join(directory, entry.name));
-    }
-    await fs.rmdir(directory);
   }
 }
 
@@ -548,7 +582,7 @@ function validateGlobalTaskRecords(records: readonly TaskAttachmentRecord[]): vo
 }
 
 function validateRecord(record: StagedAttachmentRecord | TaskAttachmentRecord): void {
-  if (!SAFE_ID.test(record.id) || !Number.isSafeInteger(record.ordinal) || record.ordinal < 0 ||
+  if ('storageKey' in record || !SAFE_ID.test(record.id) || !Number.isSafeInteger(record.ordinal) || record.ordinal < 0 ||
       !record.displayName || /[\u0000-\u001f\u007f]/u.test(record.displayName) ||
       (record.kind !== 'image' && record.kind !== 'text') || !record.mediaType ||
       !Number.isSafeInteger(record.byteCount) || record.byteCount <= 0 || !SHA256.test(record.sha256) ||
@@ -584,17 +618,68 @@ async function writeAtomic(target: string, bytes: Uint8Array, mode: number, crea
   const directory = path.dirname(target);
   await assertPrivateDirectory(directory);
   const temp = path.join(directory, `.tmp-${randomUUID()}`);
-  const handle = await fs.open(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let tempPresent = false;
+  let directoryDirty = false;
+  let published = false;
   try {
+    handle = await fs.open(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+    tempPresent = true;
+    directoryDirty = true;
     await handle.writeFile(bytes);
     await handle.sync();
     await enforcePosixMode(handle, mode);
     await handle.sync();
-  } finally { await handle.close(); }
-  try {
-    if (createOnly) await fs.link(temp, target); else await fs.rename(temp, target);
-  } finally { await fs.unlink(temp).catch(() => undefined); }
-  await syncDirectoryIfSupported(directory);
+    await handle.close();
+    handle = undefined;
+    if (createOnly) {
+      await fs.link(temp, target);
+      published = true;
+      await fs.unlink(temp);
+      tempPresent = false;
+    } else {
+      await fs.rename(temp, target);
+      published = true;
+      tempPresent = false;
+    }
+    await syncDirectoryIfSupported(directory);
+    directoryDirty = false;
+  } catch (error) {
+    // Publication is already visible and cannot be safely rolled back or
+    // reported as retryable without risking duplicate/corrupt state.
+    if (!published) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (tempPresent) {
+      await fs.unlink(temp).then(
+        () => { tempPresent = false; },
+        () => undefined
+      );
+    }
+    if (directoryDirty) {
+      await syncDirectoryIfSupported(directory).catch(() => undefined);
+    }
+  }
+}
+
+async function cleanupAtomicTemporaryFiles(directory: string): Promise<void> {
+  let removed = false;
+  for (const entry of await safeDirectoryEntries(directory)) {
+    if (!ATOMIC_TEMP_FILE.test(entry.name)) continue;
+    const tempPath = path.join(directory, entry.name);
+    const stat = await fs.lstat(tempPath);
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      !isOwnedByCurrentUser(stat) ||
+      (!posixModeMatches(stat, 0o400) && !posixModeMatches(stat, 0o600))
+    ) {
+      throw attachmentIntegrityError();
+    }
+    await fs.unlink(tempPath);
+    removed = true;
+  }
+  if (removed) await syncDirectoryIfSupported(directory);
 }
 async function readRegularFile(filePath: string, maxBytes: number, mode: number): Promise<Buffer> {
   const before = await fs.lstat(filePath);
@@ -634,8 +719,5 @@ function assertSafeId(value: string): void { if (!SAFE_ID.test(value)) throw new
 function assertClientToken(value: string): void { if (!isAttachmentClientToken(value)) throw new AttachmentStoreError('ATTACHMENT_INVALID_REQUEST', 'Attachment retry token is invalid.', 400); }
 function notFound(): AttachmentStoreError { return new AttachmentStoreError('ATTACHMENT_NOT_FOUND', 'Attachment not found.', 404); }
 function draftNotFound(): AttachmentStoreError { return new AttachmentStoreError('ATTACHMENT_DRAFT_NOT_FOUND', 'Attachment draft not found.', 404); }
-function isInside(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
+function attachmentStoreClosed(): AttachmentStoreError { return new AttachmentStoreError('ATTACHMENT_STORAGE_ERROR', 'Attachment storage is closed.', 409); }
 async function exists(filePath: string): Promise<boolean> { try { await fs.lstat(filePath); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }

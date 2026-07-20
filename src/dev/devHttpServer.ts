@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import http from 'node:http';
-import {
-  RepositoryRequestError,
-  type TaskManagerService
-} from '../core/app/TaskManagerService';
+import type { TaskManagerService } from '../core/app/TaskManagerService';
 import { TaskCreationRequestError } from '../core/storage/FileTaskStore';
-import type { AppUpdateEvent } from '../shared/contracts';
+import type {
+  AppUpdateEvent,
+  CreateBoardRequest,
+  UpdateBoardRequest
+} from '../shared/contracts';
 import {
   ATTACHMENT_MAX_COUNT,
   ATTACHMENT_MAX_IMAGE_BYTES,
@@ -251,61 +252,41 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
     const readJson = () => readBoundedJson(request, maxJsonBodyBytes);
 
     try {
-      if (request.method === 'GET' && url.pathname === '/api/repositories') {
-        sendJson(response, requestId, 200, await options.service.getRepositoryCatalog());
+      if (request.method === 'GET' && url.pathname === '/api/agent/runtimes') {
+        sendJson(response, requestId, 200, await options.service.getAgentRuntimeCatalog());
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/repositories/select') {
+      if (request.method === 'POST' && url.pathname === '/api/agent/runtimes/discover') {
+        const payload = await readJson();
+        const runtimeId =
+          payload && typeof payload === 'object'
+            ? (payload as { runtimeId?: unknown }).runtimeId
+            : undefined;
+        if (typeof runtimeId !== 'string') {
+          throw new DevApiHttpError(
+            400,
+            'INVALID_RUNTIME_ID',
+            'A runtime id is required.',
+            false
+          );
+        }
         sendJson(
           response,
           requestId,
           200,
-          await options.service.selectRepository((await readJson()) as never)
+          await options.service.discoverAgentRuntimeModels(runtimeId)
         );
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/repositories/add') {
-        const input = (await readJson()) as never;
-        const selectedPath = await options.chooseRepositoryFolder();
+      if (request.method === 'POST' && url.pathname === '/api/agent/session/native') {
         sendJson(
           response,
           requestId,
           200,
-          selectedPath
-            ? await options.service.addRepositoryFromTrustedPath(selectedPath, input)
-            : null
+          await options.service.updateAgentNativeSession((await readJson()) as never)
         );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/repositories/remove') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.removeRepository((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/repositories/relink') {
-        const input = (await readJson()) as never;
-        const selectedPath = await options.chooseRepositoryFolder();
-        sendJson(
-          response,
-          requestId,
-          200,
-          selectedPath
-            ? await options.service.relinkRepositoryFromTrustedPath(selectedPath, input)
-            : null
-        );
-        return;
-      }
-
-      if (request.method === 'GET' && url.pathname === '/api/agent/provider') {
-        sendJson(response, requestId, 200, await options.service.getAgentProviderState());
         return;
       }
 
@@ -365,142 +346,49 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
       }
 
       if (request.method === 'GET' && url.pathname === '/api/discourse/conversations') {
-        const status = url.searchParams.get('status') ?? undefined;
-        const cursor = url.searchParams.get('cursor') ?? undefined;
-        const limitValue = url.searchParams.get('limit');
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.listDiscourseConversations({
-            ...(status ? { status: status as 'OPEN' | 'ARCHIVED' } : {}),
-            ...(cursor ? { cursor } : {}),
-            ...(limitValue ? { limit: Number(limitValue) } : {})
-          })
-        );
+        const status = url.searchParams.get('status');
+        if (status !== null && status !== 'OPEN' && status !== 'ARCHIVED') {
+          throw new DevApiHttpError(
+            400,
+            'INVALID_REQUEST',
+            'The discourse conversation status is invalid.',
+            false
+          );
+        }
+        sendJson(response, requestId, 200, await options.service.listDiscourseConversations({
+          status: status ?? undefined,
+          cursor: url.searchParams.get('cursor') ?? undefined,
+          limit: optionalPositiveIntegerQueryParameter(url, 'limit')
+        }));
         return;
       }
 
-      if (request.method === 'GET' && url.pathname === '/api/discourse/conversation') {
+      const discourseConversationRoute = /^\/api\/discourse\/conversations\/([^/]+)$/u.exec(
+        url.pathname
+      );
+      if (request.method === 'GET' && discourseConversationRoute) {
         sendJson(
           response,
           requestId,
           200,
           await options.service.getDiscourseConversation(
-            requiredQueryParameter(url, 'conversationId')
+            decodeURIComponent(discourseConversationRoute[1]!)
           )
         );
         return;
       }
 
       if (request.method === 'GET' && url.pathname === '/api/discourse/messages') {
-        const beforeCursor = url.searchParams.get('beforeCursor') ?? undefined;
-        const limitValue = url.searchParams.get('limit');
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.listDiscourseMessages({
-            conversationId: requiredQueryParameter(url, 'conversationId'),
-            ...(beforeCursor ? { beforeCursor } : {}),
-            ...(limitValue ? { limit: Number(limitValue) } : {})
-          })
-        );
+        sendJson(response, requestId, 200, await options.service.listDiscourseMessages({
+          conversationId: requiredQueryParameter(url, 'conversationId'),
+          beforeCursor: url.searchParams.get('beforeCursor') ?? undefined,
+          limit: optionalPositiveIntegerQueryParameter(url, 'limit')
+        }));
         return;
       }
 
-      if (request.method === 'GET' && url.pathname === '/api/discourse/catalog') {
+      if (request.method === 'GET' && url.pathname === '/api/discourse/mentions') {
         sendJson(response, requestId, 200, await options.service.getDiscourseMentionCatalog());
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations') {
-        sendJson(
-          response,
-          requestId,
-          201,
-          await options.service.createDiscourseConversation((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/messages') {
-        sendJson(
-          response,
-          requestId,
-          201,
-          await options.service.appendHumanDiscourseMessage((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/messages/send') {
-        sendJson(
-          response,
-          requestId,
-          201,
-          await options.service.sendDiscourseMessage((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/messages/tombstone') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.tombstoneDiscourseMessage((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/context/pinned') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.setPinnedDiscourseContext((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/waves/stop') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.stopDiscourseWave((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/waves/confirm-context') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.confirmDiscourseWaveContext((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/context/preview') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.previewDiscourseContext((await readJson()) as never)
-        );
-        return;
-      }
-
-      if (request.method === 'GET' && url.pathname === '/api/discourse/draft') {
-        sendJson(
-          response,
-          requestId,
-          200,
-          await options.service.getDiscourseDraft(requiredQueryParameter(url, 'draftId'))
-        );
         return;
       }
 
@@ -509,40 +397,14 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
-      if (request.method === 'POST' && url.pathname === '/api/discourse/drafts') {
+      const discourseDraftRoute = /^\/api\/discourse\/drafts\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === 'GET' && discourseDraftRoute) {
         sendJson(
           response,
           requestId,
           200,
-          await options.service.saveDiscourseDraft((await readJson()) as never)
+          await options.service.getDiscourseDraft(decodeURIComponent(discourseDraftRoute[1]!))
         );
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/drafts/delete') {
-        await options.service.deleteDiscourseDraft((await readJson()) as never);
-        sendJson(response, requestId, 200, {});
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/rename') {
-        sendJson(response, requestId, 200, await options.service.renameDiscourseConversation((await readJson()) as never));
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/read') {
-        sendJson(response, requestId, 200, await options.service.setDiscourseConversationRead((await readJson()) as never));
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/archive') {
-        sendJson(response, requestId, 200, await options.service.setDiscourseConversationArchived((await readJson()) as never));
-        return;
-      }
-
-      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations/delete') {
-        await options.service.deleteDiscourseConversation((await readJson()) as never);
-        sendJson(response, requestId, 200, {});
         return;
       }
 
@@ -587,6 +449,102 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/repositories') {
+        const body = (await readJson()) as { path: string };
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.addRepository(body.path)
+        );
+        return;
+      }
+
+      const repositoryRoute = /^\/api\/repositories\/([^/]+)\/(impact|disconnect|reconnect|refresh)$/u.exec(
+        url.pathname
+      );
+      if (repositoryRoute) {
+        const repositoryId = decodeURIComponent(repositoryRoute[1]!);
+        const action = repositoryRoute[2];
+        if (request.method === 'GET' && action === 'impact') {
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.getRepositoryImpact(repositoryId)
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'disconnect') {
+          const body = (await readJson()) as { confirmed: boolean };
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.disconnectRepository({ repositoryId, confirmed: body.confirmed })
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'reconnect') {
+          const body = (await readJson()) as { path: string };
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.reconnectRepository({ repositoryId, path: body.path })
+          );
+          return;
+        }
+        if (request.method === 'POST' && action === 'refresh') {
+          await readJson();
+          sendJson(
+            response,
+            requestId,
+            200,
+            await options.service.refreshRepository(repositoryId)
+          );
+          return;
+        }
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/boards') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createBoard((await readJson()) as CreateBoardRequest)
+        );
+        return;
+      }
+
+      const boardRoute = /^\/api\/boards\/([^/]+)(?:\/(delete))?$/u.exec(url.pathname);
+      if (request.method === 'POST' && boardRoute) {
+        const boardId = decodeURIComponent(boardRoute[1]!);
+        if (boardRoute[2] === 'delete') {
+          await readJson();
+          await options.service.deleteBoard(boardId);
+          sendJson(response, requestId, 200, null);
+          return;
+        }
+        const input = (await readJson()) as UpdateBoardRequest;
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.updateBoard({
+            ...input,
+            boardId
+          })
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/repository/chooseFolder') {
+        await readJson();
+        sendJson(response, requestId, 200, (await options.chooseRepositoryFolder()) ?? null);
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/tasks') {
         sendJson(
           response,
@@ -594,6 +552,52 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
           200,
           await options.service.createTask((await readJson()) as never)
         );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/conversations') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.createDiscourseConversation((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/discourse/messages') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.appendHumanDiscourseMessage((await readJson()) as never)
+        );
+        return;
+      }
+
+      const discoursePostRoutes: Record<string, (body: never) => Promise<unknown>> = {
+        '/api/discourse/messages/send': (body) => options.service.sendDiscourseMessage(body),
+        '/api/discourse/messages/tombstone': (body) =>
+          options.service.tombstoneDiscourseMessage(body),
+        '/api/discourse/context/pin': (body) => options.service.setPinnedDiscourseContext(body),
+        '/api/discourse/context/preview': (body) => options.service.previewDiscourseContext(body),
+        '/api/discourse/drafts': (body) => options.service.saveDiscourseDraft(body),
+        '/api/discourse/drafts/delete': (body) => options.service.deleteDiscourseDraft(body),
+        '/api/discourse/conversations/rename': (body) =>
+          options.service.renameDiscourseConversation(body),
+        '/api/discourse/conversations/read': (body) =>
+          options.service.setDiscourseConversationRead(body),
+        '/api/discourse/conversations/archive': (body) =>
+          options.service.setDiscourseConversationArchived(body),
+        '/api/discourse/conversations/delete': (body) =>
+          options.service.deleteDiscourseConversation(body),
+        '/api/discourse/waves/stop': (body) => options.service.stopDiscourseWave(body),
+        '/api/discourse/waves/confirm-context': (body) =>
+          options.service.confirmDiscourseWaveContext(body)
+      };
+      const discoursePostRoute = discoursePostRoutes[url.pathname];
+      if (request.method === 'POST' && discoursePostRoute) {
+        sendJson(response, requestId, 200, await discoursePostRoute((await readJson()) as never));
         return;
       }
 
@@ -749,6 +753,152 @@ export function createDevHttpServer(options: DevHttpServerOptions): DevHttpServe
         return;
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/preview/resolve') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.resolvePreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/get') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.getPreviewRecipeGeneration((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/generate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.generatePreviewRecipe((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/validate') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.validatePreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/accept') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.acceptPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/recipe-generation/discard') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.discardPreviewRecipeDraft((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/approve') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.approvePreviewPlan((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/start') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.startPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/stop') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.stopPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/open') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.openPreview((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/log/read') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.readPreviewLog((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/reset-data') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.resetPreviewData((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/retry-setup') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.retryPreviewSetup((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/binding/set') {
+        sendJson(
+          response,
+          requestId,
+          200,
+          await options.service.setPreviewLocalAttachmentBinding((await readJson()) as never)
+        );
+        return;
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/preview/binding/delete') {
+        await options.service.deletePreviewLocalAttachmentBinding((await readJson()) as never);
+        sendJson(response, requestId, 200, null);
+        return;
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/tasks/transition') {
         sendJson(
           response,
@@ -831,10 +981,11 @@ export function createDevEventStreamFrame(event: AppUpdateEvent): string {
   const signal: AppUpdateEvent = {
     type: event.type,
     scope: event.scope,
-    ...(event.taskId ? { taskId: event.taskId } : {}),
+    taskId: event.taskId,
     iterationId: event.iterationId,
     runId: event.runId,
     worktreeId: event.worktreeId,
+    previewGenerationId: event.previewGenerationId,
     payload: null,
     at: event.at
   };
@@ -950,14 +1101,34 @@ function requiredQueryParameter(url: URL, name: string): string {
   return value;
 }
 
+function optionalPositiveIntegerQueryParameter(url: URL, name: string): number | undefined {
+  const value = url.searchParams.get(name);
+  if (value === null) return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new DevApiHttpError(
+      400,
+      'INVALID_REQUEST',
+      `The ${name} query parameter must be a positive integer.`,
+      false
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new DevApiHttpError(
+      400,
+      'INVALID_REQUEST',
+      `The ${name} query parameter is too large.`,
+      false
+    );
+  }
+  return parsed;
+}
+
 function toSafeHttpError(error: unknown): DevApiHttpError | undefined {
   if (error instanceof DevApiHttpError) {
     return error;
   }
   if (error instanceof TaskCreationRequestError) {
-    return new DevApiHttpError(error.httpStatus, error.code, error.message);
-  }
-  if (error instanceof RepositoryRequestError) {
     return new DevApiHttpError(error.httpStatus, error.code, error.message);
   }
   if (

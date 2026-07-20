@@ -1,22 +1,25 @@
 import type {
   InteractionRequestRecord,
-  RespondToInteractionRequest
+  RespondToInteractionRequest,
+  RunRecord
 } from '../../shared/contracts';
 import type { AppEventBus } from '../runner/AppEventBus';
 import type { FileTaskStore } from '../storage/FileTaskStore';
 import {
   validateInteractionDecision
 } from './AgentInteractionPolicy';
-import type { AgentProviderAdapter } from './AgentProviderAdapter';
-import type { AgentRuntimeStore } from './AgentRuntimeStore';
-import { recordTaskRuntimeTelemetry } from './TaskAgentRuntimeTelemetry';
+import {
+  AgentMutationAmbiguousError,
+  type AgentRuntimeAdapter
+} from './AgentRuntimeAdapter';
+import type { AgentRuntimeId } from '../../shared/agent';
+import { createDomainEvent } from '../storage/domainEvent';
 
 export class AgentInteractionService {
   constructor(
     private readonly store: FileTaskStore,
     private readonly events: AppEventBus,
-    private readonly adapter: AgentProviderAdapter,
-    private readonly runtimeStore?: AgentRuntimeStore
+    private readonly resolveRuntime: (runtimeId: AgentRuntimeId) => AgentRuntimeAdapter
   ) {}
 
   async respond(
@@ -44,9 +47,22 @@ export class AgentInteractionService {
       !session ||
       run.taskId !== interaction.taskId ||
       run.sessionId !== interaction.sessionId ||
-      run.serverInstanceId !== interaction.serverInstanceId
+      run.serverInstanceId !== interaction.serverInstanceId ||
+      run.runtimeId !== interaction.runtimeId ||
+      session.runtimeId !== interaction.runtimeId
     ) {
       throw new Error('Interaction request no longer matches its provider run.');
+    }
+
+    const expectedRunStatus =
+      interaction.type === 'USER_INPUT' ? 'AWAITING_USER_INPUT' : 'AWAITING_APPROVAL';
+    if (
+      !isNonGrantingDecision(input.decision.action) &&
+      (run.status !== expectedRunStatus || session.status !== expectedRunStatus)
+    ) {
+      throw new Error(
+        `Interaction request ${interaction.id} cannot resume run ${run.id} while its run/session awaiting state is ${run.status}/${session.status}.`
+      );
     }
 
     validateInteractionDecision(
@@ -65,34 +81,81 @@ export class AgentInteractionService {
         respondedAt: new Date().toISOString()
       }
     );
-    await this.mirror(responding);
     this.emitUpdate(responding);
 
     try {
-      await this.adapter.respondToInteraction({
+      await this.resolveRuntime(interaction.runtimeId).respondToInteraction({
         interaction: responding,
         decision: input.decision
       });
-      const latest =
-        (await this.store.getInteractionRequest(interaction.id)) ?? responding;
-      await this.mirror(latest);
-      return latest;
+      return (await this.store.getInteractionRequest(interaction.id)) ?? responding;
     } catch (error) {
       const latest = await this.store.getInteractionRequest(interaction.id);
       if (latest?.status === 'RESPONDING') {
-        const stale = await this.store.transitionInteractionRequest(
-          latest.id,
-          'RESPONDING',
-          {
-            status: 'STALE',
-            resolution: {
-              error: error instanceof Error ? error.message : String(error)
-            },
-            resolvedAt: new Date().toISOString()
+        if (error instanceof AgentMutationAmbiguousError) {
+          const reason = error.message;
+          const stale = await this.store.transitionInteractionRequest(
+            latest.id,
+            'RESPONDING',
+            {
+              status: 'STALE',
+              resolution: {
+                error: reason,
+                operation: error.operation,
+                automaticResubmission: false
+              },
+              resolvedAt: new Date().toISOString()
+            }
+          );
+          this.emitUpdate(stale);
+          const recorded = await this.store.appendRunEventIfStatus(
+            createDomainEvent({
+              type: 'AGENT_MUTATION_AMBIGUOUS',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              agentSessionId: run.sessionId,
+              serverInstanceId: run.serverInstanceId,
+              source: 'provider',
+              payload: {
+                operation: error.operation,
+                reason,
+                automaticResubmission: false
+              }
+            }),
+            ACTIVE_RUN_STATUSES
+          );
+          if (recorded) {
+            this.events.emit({
+              type: 'run.activity',
+              taskId: run.taskId,
+              iterationId: run.iterationId,
+              runId: run.id,
+              worktreeId: run.worktreeId,
+              payload: {
+                eventType: 'mutation/ambiguous',
+                operation: error.operation
+              },
+              at: new Date().toISOString()
+            });
           }
-        );
-        await this.mirror(stale);
-        this.emitUpdate(stale);
+        } else {
+          const pending = await this.store.transitionInteractionRequest(
+            latest.id,
+            'RESPONDING',
+            {
+              status: 'PENDING',
+              decision: undefined,
+              respondedAt: undefined,
+              resolution: {
+                lastResponseError:
+                  error instanceof Error ? error.message : String(error)
+              }
+            }
+          );
+          this.emitUpdate(pending);
+        }
       }
       throw error;
     }
@@ -108,13 +171,19 @@ export class AgentInteractionService {
       at: new Date().toISOString()
     });
   }
+}
 
-  private async mirror(interaction: InteractionRequestRecord): Promise<void> {
-    await recordTaskRuntimeTelemetry(
-      this.runtimeStore,
-      'INTERACTION',
-      interaction,
-      interaction.resolvedAt ?? interaction.respondedAt ?? interaction.requestedAt
-    );
-  }
+const ACTIVE_RUN_STATUSES: readonly RunRecord['status'][] = [
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'AWAITING_APPROVAL',
+  'AWAITING_USER_INPUT',
+  'INTERRUPTING'
+];
+
+function isNonGrantingDecision(
+  action: RespondToInteractionRequest['decision']['action']
+): boolean {
+  return action === 'DECLINE' || action === 'DECLINE_FOR_SESSION' || action === 'CANCEL';
 }

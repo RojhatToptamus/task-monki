@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import type { WorktreeRecord } from '../../shared/contracts';
+import type { Task, WorktreeRecord } from '../../shared/contracts';
 import { parseGitWorktreeList, WorktreeService } from './WorktreeService';
 
 const execFileAsync = promisify(execFile);
@@ -46,6 +46,21 @@ describe('parseGitWorktreeList', () => {
 });
 
 describe('WorktreeService', () => {
+  it('uses a provider-neutral branch namespace for new task worktrees', () => {
+    const service = new WorktreeService('/tmp/task-monki-worktrees');
+    const spec = service.buildSpecFromBase(
+      {
+        id: '12345678-task',
+        title: 'Implement provider routing'
+      } as Task,
+      { baseRef: 'main', baseSha: 'abc123' }
+    );
+
+    expect(spec.branchName).toBe(
+      'task-monki/task-12345678-implement-provider-routing'
+    );
+  });
+
   it('creates and verifies an isolated worktree for a task branch', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-manager-worktree-'));
     const repo = path.join(dir, 'repo');
@@ -64,7 +79,7 @@ describe('WorktreeService', () => {
       id: 'worktree-1',
       taskId: 'task-1',
       iterationId: 'iteration-1',
-      repositoryPath: repo,
+      repositoryId: 'repository-1',
       worktreePath: path.join(worktreeRoot, 'task-1'),
       branchName: 'codex/task-test',
       baseSha,
@@ -73,7 +88,7 @@ describe('WorktreeService', () => {
       updatedAt: new Date().toISOString()
     };
 
-    const created = await service.create(record);
+    const created = await service.create(record, repo);
     expect(created.status).toBe('PRESENT');
     expect(created.headSha).toBe(baseSha);
     await expect(fs.access(path.join(record.worktreePath, 'README.md'))).resolves.toBeUndefined();

@@ -42,11 +42,13 @@ export type StatusPillTone = 'neutral' | 'info' | 'action' | 'success' | 'error'
 export function Chip({
   tone,
   label,
-  compact = false
+  compact = false,
+  showDot = true
 }: {
   tone: StatusPillTone;
   label: string;
   compact?: boolean;
+  showDot?: boolean;
 }) {
   const classes = [
     'status-pill',
@@ -56,7 +58,7 @@ export function Chip({
 
   return (
     <span className={classes.join(' ')}>
-      <span className="status-pill__dot" aria-hidden="true" />
+      {showDot ? <span className="status-pill__dot" aria-hidden="true" /> : null}
       <span className="status-pill__label">{label}</span>
     </span>
   );

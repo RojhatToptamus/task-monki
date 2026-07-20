@@ -2,208 +2,663 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import type { RunRecord } from '../../../shared/contracts';
+import { addTestRepository } from '../../../testSupport/repositoryFixture';
 import { AgentOrchestrator } from '../AgentOrchestrator';
+import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
-import { AgentTurnScheduler } from '../AgentTurnScheduler';
-import { AgentMutationAmbiguousError } from '../AgentProviderAdapter';
 import { AppEventBus } from '../../runner/AppEventBus';
+import {
+  ArtifactAppendAmbiguousError,
+  FileTaskStore
+} from '../../storage/FileTaskStore';
 import { FileAgentRuntimeStore } from '../../storage/FileAgentRuntimeStore';
-import { FileTaskStore } from '../../storage/FileTaskStore';
 import { writeNodeExecutable } from '../../../testSupport/fakeExecutable';
 import { CodexAppServerAdapter } from './CodexAppServerAdapter';
-import { CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS } from './CodexAppServerSupervisor';
-import { codexReadOnlyScopeProfile } from './CodexPermissionProfile';
+import {
+  CODEX_APP_SERVER_NOTIFICATION_OPT_OUTS,
+  CodexAppServerSupervisor
+} from './CodexAppServerSupervisor';
+import {
+  CodexAmbiguousMutationError,
+  type CodexRpcClient
+} from './CodexRpcClient';
 
 const APP_SERVER_INTEGRATION_TIMEOUT_MS = 20_000;
 
-describe('CodexAppServerAdapter', () => {
-  it('runs a scoped discourse turn over real stdio without touching task projections', async () => {
+describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }, () => {
+  it('runs a scoped Discourse turn without fabricating task-owned state', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-app-server-'));
     const executable = await writeFakeCodexExecutable(dir, 'scoped');
     const workspacePath = path.join(dir, 'read-only-workspace');
     await fs.mkdir(workspacePath, { mode: 0o700 });
     const workspace = await fs.realpath(workspacePath);
-    const taskStore = new FileTaskStore(path.join(dir, 'task-store'));
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
     const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    const events = new AppEventBus();
-    let resolveTerminal!: () => void;
-    const terminal = new Promise<void>((resolve) => {
-      resolveTerminal = resolve;
-    });
-    const adapter = new CodexAppServerAdapter(taskStore, events, {
+    await runtime.init();
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      providerRuntimeStore: runtime,
-      scopedRuntimeStore: runtime,
-      onScopedTurnCompleted: async () => {
-        resolveTerminal();
-      }
+      scopedRuntimeStore: runtime
     });
-    await adapter.initialize();
-
-    const owner = {
-      kind: 'DISCOURSE' as const,
-      conversationId: 'conversation-1',
-      stableParticipantId: 'participant-1'
-    };
-    const sessionId = 'scoped-session-1';
-    const profile = await codexReadOnlyScopeProfile({
-      sessionId,
-      scope: { primaryCwd: workspace, readOnlyRoots: [workspace] },
-      reasoningEffort: 'high'
+    let resolveTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      resolveTerminal = resolve;
     });
-    const executionContext = {
-      attestation: { status: 'ATTESTED' as const },
-      primaryCwd: workspace,
-      readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' as const }],
-      managedAttachments: [],
-      permissionProfileHash: profile.scopeHash,
-      modelSettings: {
-        model: 'fake-model',
-        modelProvider: 'openai',
-        reasoningEffort: 'high',
-        sandbox: 'READ_ONLY' as const,
-        networkAccess: false,
-        approvalPolicy: 'NEVER',
-        approvalsReviewer: 'user' as const
-      },
-      externalTools: {
-        network: false,
-        webSearch: 'disabled' as const,
-        mcpServers: false,
-        apps: false,
-        dynamicTools: false
-      },
-      clientOperationId: 'scoped-execution-context-1'
-    };
-    const session = await runtime.createSession({
-      id: sessionId,
-      owner,
-      accessEpoch: createAgentSessionAccessEpoch({
-        owner,
+    const observedEvents: string[] = [];
+    const unsubscribe = adapter.onScopedTurnEvent((event) => {
+      observedEvents.push(event.type);
+      if (event.type === 'TERMINAL') resolveTerminal();
+    });
+    try {
+      await adapter.initialize();
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-1',
+        stableParticipantId: 'participant-1'
+      };
+      const sessionId = 'scoped-session-1';
+      const executionContext = await adapter.buildScopedExecutionContext({
         sessionId,
-        epoch: 1,
-        providerId: 'codex',
-        model: 'fake-model',
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'scoped-context-1'
+      });
+      const session = await runtime.createSession({
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-13T00:00:00.000Z'
+        }),
         executionContext,
-        createdAt: '2026-07-13T00:00:00.000Z'
-      }),
-      executionContext,
-      clientOperationId: 'create-scoped-session',
-      provider: 'codex',
-      role: 'PRIMARY',
-      relationshipState: 'ROOT',
-      status: 'NOT_MATERIALIZED',
-      materialized: false,
-      requestedSettings: executionContext.modelSettings
-    });
-    const run = await runtime.createRun({
-      id: 'scoped-run-1',
-      owner,
-      scope: {
-        kind: 'DISCOURSE',
-        conversationId: owner.conversationId,
-        waveId: 'wave-1',
-        jobId: 'job-1',
-        contextSnapshotId: 'context-1',
-        attemptId: 'attempt-1'
-      },
-      sessionId: session.id,
-      sessionAccessEpoch: session.accessEpoch.epoch,
-      purpose: 'DISCOURSE_ANSWER',
-      generationKey: 'generation-1',
-      clientOperationId: 'create-scoped-run',
-      requestedSettings: executionContext.modelSettings,
-      promptArtifactId: 'scoped-prompt-1',
-      outputArtifactId: 'scoped-output-1',
-      diagnosticArtifactId: 'scoped-diagnostic-1'
-    });
-    await Promise.all([
-      runtime.createArtifact({
-        id: run.promptArtifactId,
+        clientOperationId: 'create-scoped-session',
+        runtimeId: 'codex',
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: executionContext.modelSettings
+      });
+      const run = await runtime.createRun({
+        id: 'scoped-run-1',
         owner,
-        runId: run.id,
-        kind: 'PROMPT',
-        clientOperationId: 'create-scoped-prompt',
-        content: 'Question the proposed architecture.'
-      }),
-      runtime.createArtifact({
-        id: run.outputArtifactId,
-        owner,
-        runId: run.id,
-        kind: 'OUTPUT',
-        clientOperationId: 'create-scoped-output',
-        content: ''
-      }),
-      runtime.createArtifact({
-        id: run.diagnosticArtifactId,
-        owner,
-        runId: run.id,
-        kind: 'DIAGNOSTIC',
-        clientOperationId: 'create-scoped-diagnostic',
-        content: ''
-      })
-    ]);
-    const starting = await runtime.updateRun(
-      run.id,
-      run.recordRevision,
-      {
-        status: 'STARTING',
-        delivery: 'SENDING',
-        startedAt: '2026-07-13T00:00:01.000Z'
-      },
-      'scoped-start-intent'
-    );
-    const started = await adapter.startScopedTurn({
-      session,
-      run: starting,
-      executionContext,
-      prompt: 'Question the proposed architecture.'
-    });
-    const afterResponse = (await runtime.getRun(run.id))!;
-    if (afterResponse.status === 'STARTING') {
-      await runtime.updateRun(
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-1',
+          jobId: 'job-1',
+          contextSnapshotId: 'context-1',
+          attemptId: 'attempt-1'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: 'generation-1',
+        clientOperationId: 'create-scoped-run',
+        requestedSettings: executionContext.modelSettings,
+        promptArtifactId: 'scoped-prompt-1',
+        outputArtifactId: 'scoped-output-1',
+        diagnosticArtifactId: 'scoped-diagnostic-1'
+      });
+      await Promise.all([
+        runtime.createArtifact({
+          id: run.promptArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'PROMPT',
+          clientOperationId: 'create-scoped-prompt',
+          content: 'Question the proposed architecture.'
+        }),
+        runtime.createArtifact({
+          id: run.outputArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'OUTPUT',
+          clientOperationId: 'create-scoped-output',
+          content: ''
+        }),
+        runtime.createArtifact({
+          id: run.diagnosticArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'DIAGNOSTIC',
+          clientOperationId: 'create-scoped-diagnostic',
+          content: ''
+        })
+      ]);
+      const starting = await runtime.updateRun(
         run.id,
-        afterResponse.recordRevision,
+        run.recordRevision,
+        { status: 'STARTING', delivery: 'SENDING', startedAt: '2026-07-13T00:00:01.000Z' },
+        'scoped-start-intent'
+      );
+      const started = await adapter.startScopedTurn({
+        session,
+        run: starting,
+        executionContext,
+        prompt: 'Question the proposed architecture.'
+      });
+      const afterResponse = await runtime.getRun(run.id);
+      if (afterResponse?.status === 'STARTING') {
+        await runtime.updateRun(
+          run.id,
+          afterResponse.recordRevision,
+          {
+            serverInstanceId: started.serverInstanceId,
+            providerTurnId: started.providerTurnId,
+            status: 'RUNNING',
+            delivery: 'ACKNOWLEDGED'
+          },
+          'scoped-start-ack'
+        );
+      }
+      await terminal;
+
+      await expect(runtime.getRun(run.id)).resolves.toMatchObject({
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        providerTurnId: 'turn-1'
+      });
+      await expect(runtime.readArtifact(run.outputArtifactId)).resolves.toBe(
+        'Fake task completed.'
+      );
+      expect(observedEvents).toContain('DELTA');
+      expect(observedEvents.at(-1)).toBe('TERMINAL');
+      const taskSnapshot = await store.snapshot();
+      expect(taskSnapshot.tasks).toEqual([]);
+      expect(taskSnapshot.runs).toEqual([]);
+      expect(taskSnapshot.agentSessions).toEqual([]);
+    } finally {
+      unsubscribe();
+      await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it.each([
+    {
+      name: 'requires recovery when an acknowledged scoped interrupt never becomes terminal',
+      mode: 'scoped-interrupt-no-terminal',
+      terminalStatus: 'RECOVERY_REQUIRED'
+    },
+    {
+      name: 'persists a scoped interruption that races with the acknowledgement checkpoint',
+      mode: 'scoped-interrupt-terminal-race',
+      terminalStatus: 'INTERRUPTED'
+    }
+  ] as const)('$name', async ({ mode, terminalStatus }) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-scoped-interrupt-'));
+    const executable = await writeFakeCodexExecutable(dir, mode);
+    const workspacePath = path.join(dir, 'read-only-workspace');
+    await fs.mkdir(workspacePath, { mode: 0o700 });
+    const workspace = await fs.realpath(workspacePath);
+    const store = new FileTaskStore(path.join(dir, 'task-store'));
+    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
+    await runtime.init();
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      interruptCompletionTimeoutMs: 25,
+      restartDelaysMs: [],
+      scopedRuntimeStore: runtime
+    });
+    try {
+      await adapter.initialize();
+      const owner = {
+        kind: 'DISCOURSE' as const,
+        conversationId: 'conversation-interrupt',
+        stableParticipantId: 'participant-interrupt'
+      };
+      const sessionId = 'scoped-session-interrupt';
+      const executionContext = await adapter.buildScopedExecutionContext({
+        sessionId,
+        primaryCwd: workspace,
+        readRoots: [{ canonicalPath: workspace, kind: 'EMPTY_MANAGED' }],
+        modelSettings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'openai',
+          reasoningEffort: 'high',
+          sandbox: 'READ_ONLY',
+          networkAccess: false,
+          approvalPolicy: 'NEVER',
+          approvalsReviewer: 'user'
+        },
+        clientOperationId: 'scoped-interrupt-context'
+      });
+      let session = await runtime.createSession({
+        id: sessionId,
+        owner,
+        accessEpoch: createAgentSessionAccessEpoch({
+          owner,
+          sessionId,
+          epoch: 1,
+          runtimeId: 'codex',
+          model: 'fake-model',
+          executionContext,
+          createdAt: '2026-07-13T00:00:00.000Z'
+        }),
+        executionContext,
+        clientOperationId: 'create-scoped-interrupt-session',
+        runtimeId: 'codex',
+        role: 'PRIMARY',
+        relationshipState: 'ROOT',
+        status: 'NOT_MATERIALIZED',
+        materialized: false,
+        requestedSettings: executionContext.modelSettings
+      });
+      let run = await runtime.createRun({
+        id: 'scoped-run-interrupt',
+        owner,
+        scope: {
+          kind: 'DISCOURSE',
+          conversationId: owner.conversationId,
+          waveId: 'wave-interrupt',
+          jobId: 'job-interrupt',
+          contextSnapshotId: 'context-interrupt',
+          attemptId: 'attempt-interrupt'
+        },
+        sessionId: session.id,
+        sessionAccessEpoch: session.accessEpoch.epoch,
+        purpose: 'DISCOURSE_ANSWER',
+        generationKey: 'generation-interrupt',
+        clientOperationId: 'create-scoped-interrupt-run',
+        requestedSettings: executionContext.modelSettings,
+        promptArtifactId: 'scoped-interrupt-prompt',
+        outputArtifactId: 'scoped-interrupt-output',
+        diagnosticArtifactId: 'scoped-interrupt-diagnostic'
+      });
+      await Promise.all([
+        runtime.createArtifact({
+          id: run.promptArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'PROMPT',
+          clientOperationId: 'create-scoped-interrupt-prompt',
+          content: 'Keep this response active until it is interrupted.'
+        }),
+        runtime.createArtifact({
+          id: run.outputArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'OUTPUT',
+          clientOperationId: 'create-scoped-interrupt-output',
+          content: ''
+        }),
+        runtime.createArtifact({
+          id: run.diagnosticArtifactId,
+          owner,
+          runId: run.id,
+          kind: 'DIAGNOSTIC',
+          clientOperationId: 'create-scoped-interrupt-diagnostic',
+          content: ''
+        })
+      ]);
+      run = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
+        {
+          status: 'STARTING',
+          delivery: 'SENDING',
+          startedAt: '2026-07-13T00:00:01.000Z'
+        },
+        'scoped-interrupt-start-intent'
+      );
+      const started = await adapter.startScopedTurn({
+        session,
+        run,
+        executionContext,
+        prompt: 'Keep this response active until it is interrupted.'
+      });
+      session = (await runtime.getSession(session.id))!;
+      session = await runtime.updateSession(
+        session.id,
+        session.recordRevision,
+        {
+          providerSessionId: started.providerSessionId,
+          ...(started.providerSessionTreeId
+            ? { providerSessionTreeId: started.providerSessionTreeId }
+            : {}),
+          status: 'ACTIVE',
+          materialized: true
+        },
+        'scoped-interrupt-session-ack'
+      );
+      run = (await runtime.getRun(run.id))!;
+      run = await runtime.updateRun(
+        run.id,
+        run.recordRevision,
         {
           serverInstanceId: started.serverInstanceId,
           providerTurnId: started.providerTurnId,
-          status: 'RUNNING',
-          delivery: 'ACKNOWLEDGED'
+          status: 'INTERRUPTING',
+          delivery: 'ACKNOWLEDGED',
+          interruptDelivery: 'SENDING',
+          stopRequestedAt: '2026-07-13T00:00:02.000Z'
         },
-        'scoped-start-ack'
+        'scoped-interrupt-stop-intent'
       );
-    }
-    await terminal;
 
-    await expect(runtime.getRun(run.id)).resolves.toMatchObject({
-      status: 'COMPLETED',
-      delivery: 'TERMINAL',
-      providerTurnId: 'turn-1'
+      await adapter.interruptScopedTurn({ session, run });
+      run = (await runtime.getRun(run.id))!;
+      if (run.interruptDelivery === 'SENDING') {
+        await runtime.updateRun(
+          run.id,
+          run.recordRevision,
+          { interruptDelivery: 'ACKNOWLEDGED' },
+          'scoped-interrupt-ack'
+        );
+      }
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        run = (await runtime.getRun(run.id))!;
+        if (run.status === terminalStatus) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      await expect(runtime.getRun(run.id)).resolves.toMatchObject(
+        terminalStatus === 'RECOVERY_REQUIRED'
+          ? {
+              status: 'RECOVERY_REQUIRED',
+              delivery: 'ACKNOWLEDGED',
+              interruptDelivery: 'AMBIGUOUS',
+              recoveryState: 'REQUIRES_USER_ACTION',
+              terminalReason: expect.stringContaining('did not confirm a terminal turn')
+            }
+          : {
+              status: 'INTERRUPTED',
+              delivery: 'TERMINAL',
+              interruptDelivery: 'TERMINAL',
+              recoveryState: 'NONE',
+              providerTerminalSource: 'TURN_COMPLETED_NOTIFICATION'
+            }
+      );
+    } finally {
+      await adapter.shutdown();
+      await runtime.close();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('can initialize again after a confirmed idle shutdown', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-reenable-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
     });
-    expect(await runtime.readArtifact(run.outputArtifactId)).toContain(
-      'Fake task completed.'
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.listModels()).resolves.toContainEqual(
+        expect.objectContaining({ model: 'fake-model' })
+      );
+      await adapter.shutdown();
+
+      await adapter.initialize();
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: { status: 'READY', canStart: true }
+      });
+      expect(
+        (await store.snapshot()).agentServers.filter(
+          (server) => server.runtimeId === 'codex' && server.status === 'READY'
+        )
+      ).toHaveLength(1);
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('does not report ready when the live Codex model catalog is empty', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-empty-models-'));
+    const executable = await writeFakeCodexExecutable(dir, 'empty-models');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+
+    try {
+      await adapter.initialize();
+      await expect(adapter.preflight()).resolves.toMatchObject({
+        readiness: {
+          status: 'FAILED',
+          canStart: false,
+          checks: { modelCatalog: 'FAILED' },
+          diagnostics: [
+            expect.objectContaining({
+              code: 'MODEL_CATALOG_FAILED',
+              stage: 'MODEL_CATALOG'
+            })
+          ]
+        }
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('preserves an explicit Codex model provider that model/list cannot identify', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-app-server-model-provider-')
     );
-    expect(await taskStore.snapshot()).toMatchObject({
-      tasks: [],
-      runs: [],
-      agentSessions: [],
-      agentItems: [],
-      interactionRequests: []
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
     });
-    const journal = await fs.readFile(
-      (await runtime.listAgentServers())[0]!.protocolJournalPath,
-      'utf8'
+
+    try {
+      await adapter.initialize();
+      const providerDefault = await adapter.resolveExecution({
+        settings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          reasoningEffort: 'low',
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'on-request'
+        },
+        attachments: []
+      });
+      expect(providerDefault.settings.modelProvider).toBeUndefined();
+      expect(providerDefault.model).toMatchObject({
+        id: 'codex:fake-model',
+        runtimeId: 'codex',
+        model: 'fake-model'
+      });
+      expect(providerDefault.model).not.toHaveProperty('modelProvider');
+
+      const resolved = await adapter.resolveExecution({
+        settings: {
+          runtimeId: 'codex',
+          model: 'fake-model',
+          modelProvider: 'azure-openai',
+          reasoningEffort: 'high',
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'on-request'
+        },
+        attachments: []
+      });
+
+      expect(resolved.settings.modelProvider).toBe('azure-openai');
+      expect(resolved.model).toMatchObject({
+        id: 'codex:azure-openai/fake-model',
+        runtimeId: 'codex',
+        modelProvider: 'azure-openai',
+        model: 'fake-model'
+      });
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('rejects an explicit model that is absent after a forced catalog refresh', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-app-server-missing-model-')
     );
-    const outbound = readOutboundMessages(journal);
-    expect(outbound.find((message) => message.method === 'thread/start')?.params).toMatchObject({
-      cwd: workspace,
-      approvalPolicy: 'never',
-      approvalsReviewer: 'user'
+    const executable = await writeFakeCodexExecutable(dir);
+    const adapter = new CodexAppServerAdapter(
+      new FileTaskStore(path.join(dir, 'store')),
+      new AppEventBus(),
+      {
+        cwd: dir,
+        executable,
+        requestTimeoutMs: 2_000,
+        restartDelaysMs: []
+      }
+    );
+
+    try {
+      await adapter.initialize();
+      await expect(
+        adapter.resolveExecution({
+          settings: {
+            runtimeId: 'codex',
+            model: 'removed-model',
+            modelProvider: 'openai',
+            sandbox: 'WORKSPACE_WRITE',
+            networkAccess: false,
+            approvalPolicy: 'on-request'
+          },
+          attachments: []
+        })
+      ).rejects.toThrow('Codex did not report requested model removed-model.');
+    } finally {
+      await adapter.shutdown();
+    }
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('replaces a one-way supervisor for an explicit safe runtime restart', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-app-server-restart-'));
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
     });
+
+    await adapter.initialize();
+    await adapter.updateRuntimeConfig({
+      executable,
+      toolSettings: {
+        webSearchMode: 'cached',
+        mcpServers: 'all',
+        apps: 'disabled'
+      },
+      restart: true
+    });
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    expect(servers).toHaveLength(2);
+    expect(servers.map((server) => server.status).sort()).toEqual(['EXITED', 'READY']);
+    expect(
+      servers.find((server) => server.status === 'READY')?.argv
+    ).toContain('web_search="cached"');
+    await expect(adapter.listModels()).resolves.toEqual([
+      expect.objectContaining({ model: 'fake-model' })
+    ]);
     await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('uses Codex native unrestricted permissions for Full access', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-full-access-'));
+    const worktreePath = path.join(dir, 'worktree');
+    await fs.mkdir(worktreePath);
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const settings = {
+      runtimeId: 'codex' as const,
+      model: 'fake-model',
+      sandbox: 'DANGER_FULL_ACCESS' as const,
+      networkAccess: true,
+      approvalPolicy: 'never' as const
+    };
+
+    try {
+      await adapter.initialize();
+      const task = await store.createTask({
+        title: 'Full access contract',
+        prompt: 'Use the native unrestricted profile.',
+        repositoryId: (await addTestRepository(store, worktreePath)).id,
+        agentSettings: settings
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/full-access-contract',
+        worktreePath,
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'codex'
+      });
+
+      await adapter.createSession({
+        runtimeId: 'codex',
+        localSessionId: session.id,
+        taskId: task.id,
+        iterationId: iteration.id,
+        worktreeId: worktree.id,
+        worktreePath,
+        settings
+      });
+
+      const server = (await store.snapshot()).agentServers.find(
+        (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+      );
+      const outbound = readOutboundMessages(
+        await fs.readFile(server!.protocolJournalPath, 'utf8')
+      );
+      const start = outbound.find((message) => message.method === 'thread/start');
+      expect(start?.params).toMatchObject({
+        config: { default_permissions: ':danger-full-access' }
+      });
+      expect(start?.params).not.toHaveProperty('sandbox');
+      expect((start?.params as { config?: unknown }).config).not.toHaveProperty(
+        'permissions'
+      );
+    } finally {
+      await adapter.shutdown();
+    }
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('discovers models and completes a real thread/turn lifecycle over stdio', async () => {
@@ -211,28 +666,28 @@ describe('CodexAppServerAdapter', () => {
     const executable = await writeFakeCodexExecutable(dir);
 
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    const scheduler = new AgentTurnScheduler(runtime);
+    const appendArtifact = vi.spyOn(store, 'appendArtifact');
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      providerRuntimeStore: runtime,
-      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
-      runtimeStore: runtime,
-      scheduler
     });
     await orchestrator.initialize();
 
-    const provider = await orchestrator.getProviderState();
-    expect(provider.preflight.ready, JSON.stringify(provider.preflight.problems)).toBe(true);
-    expect(provider.models[0]?.model).toBe('fake-model');
-    expect(provider.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
-    const initializedServer = (await runtime.listAgentServers())[0];
+    const catalog = await orchestrator.getRuntimeCatalog();
+    const runtime = catalog.runtimes[0]!;
+    expect(
+      runtime.preflight.readiness.canStart,
+      JSON.stringify(runtime.preflight.readiness.diagnostics)
+    ).toBe(true);
+    expect(runtime.models[0]?.model).toBe('fake-model');
+    expect(runtime.models[0]?.supportedReasoningEfforts).toEqual(['low', 'high']);
+    expect(adapter.currentRuntimeExecutable).toBe(executable);
+    const initializedServer = (await store.snapshot()).agentServers[0];
     expect(initializedServer.runtimeResolution).toMatchObject({
       selectedExecutable: executable,
       selectedSource: 'config',
@@ -289,7 +744,7 @@ describe('CodexAppServerAdapter', () => {
     const task = await store.createTask({
       title: 'App Server turn',
       prompt: 'Finish the fake task.',
-      repositoryPath: repositoryDir,
+      repositoryId: (await addTestRepository(store, repositoryDir)).id,
       attachmentDraftId: draft.id,
       agentSettings: {
         model: 'fake-model',
@@ -347,6 +802,11 @@ describe('CodexAppServerAdapter', () => {
     expect(completed?.status).toBe('COMPLETED');
     expect(completed?.providerTurnId).toBe('turn-1');
     expect(completed?.finalMessage).toBe('Fake task completed.');
+    expect(appendArtifact).toHaveBeenCalledTimes(1);
+    expect(appendArtifact.mock.calls[0]?.[1]).toContain('Fake task completed.');
+    expect(await store.readArtifact(completed!.outputArtifactId)).toContain(
+      'Fake task completed.'
+    );
     expect(completed?.attachmentSubmissions).toEqual([
       expect.objectContaining({
         kind: 'image',
@@ -385,30 +845,12 @@ describe('CodexAppServerAdapter', () => {
           record.settings.approvalsReviewer === 'auto_review'
       )
     ).toBe(true);
-    expect(snapshot.agentServers).toEqual([]);
-    expect((await runtime.listAgentServers())[0]?.runtimeKind).toBe('APP_SERVER');
-    const runtimeTelemetry = await runtime.listTelemetryByOwner({
-      kind: 'TASK',
-      taskId: task.id
-    });
-    expect(new Set(runtimeTelemetry.map((record) => record.kind))).toEqual(
-      new Set(['ITEM', 'GOAL', 'PLAN', 'USAGE', 'SETTINGS'])
-    );
-    expect(runtimeTelemetry).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: 'ITEM',
-          sessionId: completed?.sessionId,
-          runId: completed?.id
-        })
-      ])
-    );
-    for (const telemetry of runtimeTelemetry) {
-      expect(telemetry.payload).not.toHaveProperty('taskId');
-      expect(telemetry.payload).not.toHaveProperty('iterationId');
-    }
+    expect(snapshot.agentServers[0]?.runtimeKind).toBe('APP_SERVER');
+    expect(
+      snapshot.agentServers.some((server) => server.runtimeKind !== 'APP_SERVER')
+    ).toBe(false);
     const finalJournal = await fs.readFile(
-      (await runtime.listAgentServers())[0]!.protocolJournalPath,
+      snapshot.agentServers[0]!.protocolJournalPath,
       'utf8'
     );
     const outbound = readOutboundMessages(finalJournal);
@@ -416,21 +858,22 @@ describe('CodexAppServerAdapter', () => {
     expect(finalJournal).not.toContain(textBytes.toString('utf8').trim());
     // The parsed raw protocol journal is the explicit debug-only exception to
     // the path-free durable-record rule because Codex receives managed paths.
-    expect(outbound.find((message) => message.method === 'thread/start')?.params)
-      .toMatchObject({
-        approvalPolicy: 'on-request',
-        approvalsReviewer: 'auto_review'
-      });
-    const turnStart = outbound.find((message) => message.method === 'turn/start');
+    const firstThreadStart = outbound.find((message) => message.method === 'thread/start');
+    expect(firstThreadStart?.params).toMatchObject({
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'auto_review',
+      modelProvider: null
+    });
+    const turnStarts = outbound.filter((message) => message.method === 'turn/start');
+    expect(turnStarts).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    const turnStart = turnStarts[0];
     expect(turnStart?.params).toMatchObject({
       approvalPolicy: 'on-request',
       approvalsReviewer: 'auto_review'
     });
     expect(turnStart?.params).not.toHaveProperty('sandboxPolicy');
-    const profileResume = outbound
-      .filter((message) => message.method === 'thread/resume')
-      .at(-1);
-    const profileConfig = (profileResume?.params as { config?: unknown } | undefined)?.config as {
+    const profileConfig = (firstThreadStart?.params as { config?: unknown } | undefined)?.config as {
       default_permissions?: string;
       permissions?: Record<string, {
         filesystem?: Record<string, string>;
@@ -463,6 +906,1155 @@ describe('CodexAppServerAdapter', () => {
     expect(manifestPaths).toContain(canonicalTextPath);
     await expect(fs.access(deliveryImagePath!)).resolves.toBeUndefined();
     await expect(fs.access(deliveryTextPath!)).resolves.toBeUndefined();
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('redacts Codex telemetry before normalized records and output artifacts are persisted', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-redaction-'));
+    const executable = await writeFakeCodexExecutable(dir, 'credential-telemetry');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      environment: {
+        ...process.env,
+        OPENAI_API_KEY: 'opaque-provider-credential-1742'
+      },
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const outputEvents: Array<{ source: string; text: string }> = [];
+    events.on((event) => {
+      if (event.type === 'run.output') {
+        outputEvents.push(event.payload as { source: string; text: string });
+      }
+    });
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal;
+
+    const snapshot = await store.snapshot();
+    const completed = snapshot.runs.find((candidate) => candidate.id === run.id)!;
+    const output = await store.readArtifact(completed.outputArtifactId);
+    const final = await store.readArtifact(completed.finalArtifactId!);
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const normalized = `${JSON.stringify(snapshot)}\n${journal}\n${output}\n${final}`;
+    expect(normalized).toContain('[REDACTED]');
+    expect(outputEvents.map((event) => event.text).join('')).toContain(
+      '[REDACTED] completed.'
+    );
+    expect(journal).not.toContain('opaque-provider-');
+    expect(journal).not.toContain('credential-1742');
+    for (const secret of [
+      'credential-error-secret',
+      'credential-item-secret',
+      'credential-message-secret',
+      'credential-output-secret',
+      'opaque-provider-credential-1742'
+    ]) {
+      expect(normalized).not.toContain(secret);
+    }
+    const sourceSession = snapshot.agentSessions.find(
+      (session) => session.id === completed.sessionId
+    );
+    const childSession = snapshot.agentSessions.find(
+      (session) => session.providerSessionId === 'credential-child'
+    );
+    const childObservation = snapshot.agentSubagentObservations.find(
+      (observation) => observation.providerChildSessionId === 'credential-child'
+    );
+    expect(sourceSession?.observedSettings?.model).toBeUndefined();
+    expect(childSession).toBeDefined();
+    expect(childSession).toMatchObject({
+      providerNickname: '[REDACTED]',
+      providerRole: '[REDACTED]',
+      agentPath: '[REDACTED]'
+    });
+    expect(childSession?.requestedSettings.model).toBeUndefined();
+    expect(childSession?.requestedSettings.reasoningEffort).toBeUndefined();
+    expect(childObservation?.requestedSettings?.model).toBeUndefined();
+    expect(childObservation?.requestedSettings?.reasoningEffort).toBeUndefined();
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('restores a failed output batch ahead of deltas appended during persistence', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-output-buffer-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const adapter = new CodexAppServerAdapter(store, new AppEventBus(), {
+      cwd: dir,
+      environment: {
+        OPENAI_API_KEY: 'opaque-provider-credential-1742'
+      },
+      restartDelaysMs: []
+    });
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      requestedSettings: task.agentSettings
+    });
+    await store.updateRun(run.id, {
+      providerTurnId: 'buffered-turn',
+      status: 'RUNNING'
+    });
+    const buffered = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      flushBufferedOutput(runId: string, releaseCredentialCarry?: boolean): Promise<void>;
+    };
+    const appendArtifact = store.appendArtifact.bind(store);
+    let releasePersistence!: () => void;
+    let markPersistenceStarted!: () => void;
+    const persistenceRelease = new Promise<void>((resolve) => {
+      releasePersistence = resolve;
+    });
+    const persistenceStarted = new Promise<void>((resolve) => {
+      markPersistenceStarted = resolve;
+    });
+    let appendAttempts = 0;
+    vi.spyOn(store, 'appendArtifact').mockImplementation(async (...args) => {
+      appendAttempts += 1;
+      if (appendAttempts === 1) {
+        markPersistenceStarted();
+        await persistenceRelease;
+        throw new Error('injected output persistence failure');
+      }
+      return appendArtifact(...args);
+    });
+
+    await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'opaque-provider-');
+    await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'credential-1742');
+    const failedFlush = buffered.flushBufferedOutput(run.id);
+    await persistenceStarted;
+    await buffered.appendTurnOutput('buffered-turn', 'agentMessage', ' after');
+    const concurrentFlush = buffered.flushBufferedOutput(run.id);
+    const concurrentFailure = expect(concurrentFlush).rejects.toThrow(
+      'injected output persistence failure'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(appendAttempts).toBe(1);
+    releasePersistence();
+    await expect(failedFlush).rejects.toThrow('injected output persistence failure');
+    await concurrentFailure;
+    await buffered.flushBufferedOutput(run.id, true);
+
+    const output = await store.readArtifact(run.outputArtifactId);
+    expect(output).toContain('[REDACTED] after');
+    expect(output).not.toContain('opaque-provider-credential-1742');
+    expect(appendAttempts).toBe(2);
+    await store.close();
+  });
+
+  it('redacts unresolved credential prefixes at source and terminal boundaries', async () => {
+    const { adapter, run, store } = await createBufferedCodexRun(
+      'task-monki-output-prefix-'
+    );
+    const buffered = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      recordLocalInterruption(run: RunRecord, reason: string): Promise<void>;
+    };
+
+    await buffered.appendTurnOutput(
+      'buffered-turn',
+      'agentMessage',
+      'opaque-provider-'
+    );
+    await buffered.appendTurnOutput(
+      'buffered-turn',
+      'reasoning',
+      'opaque-provider-'
+    );
+    await buffered.recordLocalInterruption(run, 'Provider output ended.');
+
+    const output = await store.readArtifact(run.outputArtifactId);
+    expect(output.match(/\[REDACTED\]/gu)).toHaveLength(2);
+    expect(output).not.toContain('opaque-provider-');
+    await store.close();
+  });
+
+  it('redacts a complete self-overlapping credential before selecting carry', async () => {
+    const { adapter, run, store } = await createBufferedCodexRun(
+      'task-monki-output-overlap-',
+      'aaaaaaaa'
+    );
+    const buffered = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      recordLocalInterruption(run: RunRecord, reason: string): Promise<void>;
+    };
+
+    await buffered.appendTurnOutput('buffered-turn', 'output', 'aaaaaaaa');
+    await buffered.recordLocalInterruption(run, 'Provider output ended.');
+
+    const output = await store.readArtifact(run.outputArtifactId);
+    expect(output).toContain('\n[output]\n[REDACTED]');
+    expect(output).not.toContain('\n[output]\na[REDACTED]');
+    await store.close();
+  });
+
+  it('does not retry an output append whose durable file state is ambiguous', async () => {
+    const { adapter, run, store } = await createBufferedCodexRun(
+      'task-monki-output-ambiguous-'
+    );
+    const buffered = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      flushBufferedOutput(runId: string): Promise<void>;
+      streamBuffers: Map<string, unknown>;
+    };
+    const appendArtifact = vi.spyOn(store, 'appendArtifact').mockRejectedValue(
+      new ArtifactAppendAmbiguousError(
+        run.outputArtifactId,
+        new Error('injected snapshot persistence failure'),
+        new Error('injected artifact rollback failure')
+      )
+    );
+
+    await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'safe output');
+    await expect(buffered.flushBufferedOutput(run.id)).rejects.toBeInstanceOf(
+      ArtifactAppendAmbiguousError
+    );
+    await expect(buffered.flushBufferedOutput(run.id)).resolves.toBeUndefined();
+
+    expect(appendArtifact).toHaveBeenCalledTimes(1);
+    expect(buffered.streamBuffers.has(run.id)).toBe(false);
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: { status: 'FAILED', canStart: false }
+    });
+    await store.close();
+  });
+
+  it('bounds output append retries and fences repeated persistence failure', async () => {
+    const { adapter, run, store } = await createBufferedCodexRun(
+      'task-monki-output-retries-'
+    );
+    const buffered = adapter as unknown as {
+      appendTurnOutput(turnId: string, source: string, text: string): Promise<void>;
+      flushBufferedOutput(runId: string): Promise<void>;
+      streamBuffers: Map<string, unknown>;
+    };
+    const appendArtifact = vi
+      .spyOn(store, 'appendArtifact')
+      .mockRejectedValue(new Error('injected output persistence failure'));
+
+    await buffered.appendTurnOutput('buffered-turn', 'agentMessage', 'safe output');
+    await expect(buffered.flushBufferedOutput(run.id)).rejects.toThrow(
+      'injected output persistence failure'
+    );
+    await expect(buffered.flushBufferedOutput(run.id)).rejects.toThrow(
+      'injected output persistence failure'
+    );
+    await expect(buffered.flushBufferedOutput(run.id)).resolves.toBeUndefined();
+
+    expect(appendArtifact).toHaveBeenCalledTimes(2);
+    expect(buffered.streamBuffers.has(run.id)).toBe(false);
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: { status: 'FAILED', canStart: false }
+    });
+    await store.close();
+  });
+
+  it('publishes exactly one terminal outcome when local and provider settlement race', async () => {
+    const { adapter, events, run, store } = await createBufferedCodexRun(
+      'task-monki-terminal-owner-'
+    );
+    const terminalEvents: unknown[] = [];
+    events.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const settlement = adapter as unknown as {
+      recordLocalInterruption(run: RunRecord, reason: string): Promise<void>;
+      finalizeTurn(
+        run: RunRecord,
+        turn: {
+          id: string;
+          items: never[];
+          itemsView: { type: 'complete' };
+          status: 'completed';
+          error: null;
+          startedAt: number;
+          completedAt: number;
+          durationMs: number;
+        },
+        source: 'TURN_COMPLETED_NOTIFICATION'
+      ): Promise<void>;
+    };
+
+    await Promise.all([
+      settlement.recordLocalInterruption(run, 'Local interrupt deadline elapsed.'),
+      settlement.finalizeTurn(
+        run,
+        {
+          id: 'buffered-turn',
+          items: [],
+          itemsView: { type: 'complete' },
+          status: 'completed',
+          error: null,
+          startedAt: 1,
+          completedAt: 2,
+          durationMs: 1
+        },
+        'TURN_COMPLETED_NOTIFICATION'
+      )
+    ]);
+
+    const snapshot = await store.snapshot();
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'INTERRUPTED' });
+    expect(
+      snapshot.events.filter(
+        (event) =>
+          event.runId === run.id &&
+          ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(
+            event.type
+          )
+      )
+    ).toHaveLength(1);
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
+      )
+    ).toHaveLength(1);
+    expect(terminalEvents).toHaveLength(1);
+    await store.close();
+  });
+
+  it('does not let stale reconciliation overwrite a terminal settlement', async () => {
+    const { adapter, events, run, store } = await createBufferedCodexRun(
+      'task-monki-reconciliation-owner-'
+    );
+    const terminalEvents: unknown[] = [];
+    events.on((event) => {
+      if (event.type === 'run.terminal') terminalEvents.push(event);
+    });
+    const settlement = adapter as unknown as {
+      recordLocalInterruption(run: RunRecord, reason: string): Promise<void>;
+      recordReconciliation(
+        run: RunRecord,
+        status: RunRecord['status'],
+        recoveryState: RunRecord['recoveryState'],
+        terminal: boolean
+      ): Promise<RunRecord | undefined>;
+    };
+    const writeFinalArtifact = store.writeFinalArtifact.bind(store);
+    let releaseFinalArtifact!: () => void;
+    let markFinalArtifactStarted!: () => void;
+    const finalArtifactRelease = new Promise<void>((resolve) => {
+      releaseFinalArtifact = resolve;
+    });
+    const finalArtifactStarted = new Promise<void>((resolve) => {
+      markFinalArtifactStarted = resolve;
+    });
+    vi.spyOn(store, 'writeFinalArtifact').mockImplementation(async (...args) => {
+      markFinalArtifactStarted();
+      await finalArtifactRelease;
+      return writeFinalArtifact(...args);
+    });
+
+    const interruption = settlement.recordLocalInterruption(
+      run,
+      'Local interrupt deadline elapsed.'
+    );
+    await finalArtifactStarted;
+    const staleReconciliation = settlement.recordReconciliation(
+      run,
+      'COMPLETED',
+      'RECOVERED',
+      true
+    );
+    releaseFinalArtifact();
+    await Promise.all([interruption, staleReconciliation]);
+
+    const snapshot = await store.snapshot();
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'INTERRUPTED' });
+    expect(
+      snapshot.events.filter(
+        (event) =>
+          event.runId === run.id &&
+          ['AGENT_RUN_COMPLETED', 'AGENT_RUN_FAILED', 'AGENT_RUN_INTERRUPTED'].includes(
+            event.type
+          )
+      )
+    ).toHaveLength(1);
+    expect(
+      snapshot.events.filter(
+        (event) => event.runId === run.id && event.type === 'AGENT_RUNTIME_RECONCILED'
+      )
+    ).toHaveLength(0);
+    expect(terminalEvents).toHaveLength(1);
+    await store.close();
+  });
+
+  it('reconciles a terminal notification after one materialization failure without replaying the prompt', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-terminal-materialization-recovery-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'recovery-notification-echo'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
+    const updateAgentSession = store.updateAgentSession.bind(store);
+    let rejectedTerminalEvent = false;
+    let rejectedRecoveryEcho = false;
+    vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(async (event, statuses) => {
+      if (!rejectedTerminalEvent && event.type === 'AGENT_RUN_COMPLETED') {
+        rejectedTerminalEvent = true;
+        throw new Error('injected terminal event persistence failure');
+      }
+      return appendRunEventIfStatus(event, statuses);
+    });
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, update) => {
+      if (
+        rejectedTerminalEvent &&
+        !rejectedRecoveryEcho &&
+        update.status === 'IDLE' &&
+        update.materialized === true &&
+        update.observedSettings === undefined
+      ) {
+        rejectedRecoveryEcho = true;
+        throw new Error('injected recovery notification echo persistence failure');
+      }
+      return updateAgentSession(sessionId, update);
+    });
+
+    const terminal = waitForAppEvent(events, 'run.terminal');
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await terminal;
+    const completed = await waitForRunStatus(store, run.id, 'COMPLETED');
+    await waitForSnapshot(
+      store,
+      () => rejectedRecoveryEcho,
+      'recovery notification echo failure'
+    );
+    const snapshot = await store.snapshot();
+    const server = snapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    )!;
+    const outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+
+    expect(rejectedTerminalEvent).toBe(true);
+    expect(rejectedRecoveryEcho).toBe(true);
+    expect(completed.providerTerminalSource).toBe('RECOVERY_RESUME_RESPONSE');
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
+      )
+    ).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+    expect(adapter.getProviderState().preflight).toMatchObject({
+      readiness: {
+        status: 'DEGRADED',
+        canStart: true,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_FAILED' })
+        ])
+      }
+    });
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('fences the App Server when terminal materialization cannot be reconciled durably', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-terminal-materialization-fence-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [5, 10]
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
+    vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(
+      async (event, statuses) => {
+        if (
+          event.type === 'AGENT_RUN_COMPLETED' ||
+          event.type === 'AGENT_RUNTIME_RECONCILED'
+        ) {
+          throw new Error('injected persistent AGENT_RUN_COMPLETED persistence failure');
+        }
+        return appendRunEventIfStatus(event, statuses);
+      }
+    );
+
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const fenced = await waitForSnapshot(
+      store,
+      (snapshot) =>
+        snapshot.runs.some(
+          (candidate) => candidate.id === run.id && candidate.status === 'RECOVERY_REQUIRED'
+        ) &&
+        snapshot.agentServers.some(
+          (server) => server.runtimeId === 'codex' && server.status === 'EXITED'
+        ),
+      'terminal materialization recovery fence'
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    expect(servers).toHaveLength(1);
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: {
+        status: 'FAILED',
+        canStart: false,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_FAILED' }),
+          expect.objectContaining({ code: 'EVENT_MATERIALIZATION_RECOVERY_FAILED' })
+        ])
+      }
+    });
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'RETRY',
+        prompt: 'Do not replay the prompt while terminal persistence is uncertain.',
+        settings: task.agentSettings,
+        retryOfRunId: run.id
+      })
+    ).rejects.toThrow();
+
+    const journal = await fs.readFile(
+      fenced.agentServers.find((server) => server.runtimeId === 'codex')!
+        .protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('replaces an unmaterialized empty thread after App Server restart without resuming or replaying a prompt', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-empty-thread-restart-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const firstAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    await firstAdapter.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const localSession = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    const emptySession = await firstAdapter.createSession({
+      runtimeId: 'codex',
+      localSessionId: localSession.id,
+      taskId: task.id,
+      iterationId: iteration.id,
+      worktreeId: worktree.id,
+      worktreePath: worktree.worktreePath,
+      settings: task.agentSettings,
+      attachments: []
+    });
+    expect(emptySession).toMatchObject({
+      providerSessionId: 'thread-1',
+      materialized: false
+    });
+    await firstAdapter.shutdown();
+
+    const secondAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, secondAdapter);
+    await orchestrator.initialize();
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await waitForRunStatus(store, run.id, 'COMPLETED');
+
+    const servers = (await store.snapshot()).agentServers.filter(
+      (server) => server.runtimeId === 'codex'
+    );
+    const replacement = servers.find((server) => server.status === 'READY');
+    expect(replacement).toBeDefined();
+    const journal = await fs.readFile(replacement!.protocolJournalPath, 'utf8');
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps an empty thread unmaterialized when run startup persistence fails before provider input', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-pre-submit-failure-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateRun = store.updateRun.bind(store);
+    let rejectedStartingPersistence = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (!rejectedStartingPersistence && patch.status === 'STARTING') {
+        rejectedStartingPersistence = true;
+        throw new Error('injected pre-submit run persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('injected pre-submit run persistence failure');
+
+    let snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false });
+    await expect(
+      adapter.attachSession({
+        localSessionId: failedRun.sessionId,
+        providerSessionId: snapshot.agentSessions.find(
+          (session) => session.id === failedRun.sessionId
+        )?.providerSessionId
+      })
+    ).rejects.toThrow('has no resumable rollout');
+    await expect(
+      adapter.readSession({ localSessionId: failedRun.sessionId })
+    ).resolves.toMatchObject({
+      session: { materialized: false },
+      runs: [expect.objectContaining({ id: failedRun.id, status: 'FAILED' })]
+    });
+    const server = snapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    )!;
+    let outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(0);
+
+    const retry = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'RETRY',
+      prompt: 'Retry after the local pre-submit persistence failure.',
+      settings: task.agentSettings,
+      retryOfRunId: failedRun.id
+    });
+    await waitForRunStatus(store, retry.id, 'COMPLETED');
+    snapshot = await store.snapshot();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === retry.sessionId)
+    ).toMatchObject({ materialized: true });
+    outbound = readOutboundMessages(
+      await fs.readFile(server.protocolJournalPath, 'utf8')
+    );
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('reuses an attested empty thread after a definitive first-turn rejection', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-definite-rejection-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-once'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('injected definitive turn/start rejection');
+
+    let snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(failedRun.providerTurnId).toBeUndefined();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false, providerSessionId: 'thread-1' });
+    await expect(
+      adapter.readSession({ localSessionId: failedRun.sessionId })
+    ).resolves.toMatchObject({ session: { materialized: false } });
+
+    const retry = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'RETRY',
+      prompt: 'Retry after the provider definitively rejected the first request.',
+      settings: task.agentSettings,
+      retryOfRunId: failedRun.id
+    });
+    await waitForRunStatus(store, retry.id, 'COMPLETED');
+
+    snapshot = await store.snapshot();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === retry.sessionId)
+    ).toMatchObject({ materialized: true, providerSessionId: 'thread-1' });
+    const journal = await fs.readFile(
+      snapshot.agentServers.find((server) => server.status === 'READY')!
+        .protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(2);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps the no-resend fence when turn evidence precedes a definitive error response', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-error-with-evidence-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-with-evidence'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find(
+      (candidate) => candidate.taskId === task.id
+    )!;
+    expect(recoveryRun).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      providerTurnId: 'turn-error-evidence'
+    });
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('keeps the no-resend fence when first-turn evidence fails to materialize', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-evidence-store-failure-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-rejected-with-evidence'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateRun = store.updateRun.bind(store);
+    let rejectedTurnEvidence = false;
+    vi.spyOn(store, 'updateRun').mockImplementation(async (runId, patch) => {
+      if (
+        !rejectedTurnEvidence &&
+        patch.providerTurnId === 'turn-error-evidence' &&
+        patch.status === 'RUNNING'
+      ) {
+        rejectedTurnEvidence = true;
+        throw new Error('injected turn evidence persistence failure');
+      }
+      return updateRun(runId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    const snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find(
+      (candidate) => candidate.taskId === task.id
+    )!;
+    expect(rejectedTurnEvidence).toBe(true);
+    expect(recoveryRun.status).toBe('RECOVERY_REQUIRED');
+    expect(recoveryRun.providerTurnId).toBe('turn-error-evidence');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'RETRY',
+        prompt: 'Do not resend provider input while first-turn evidence is uncertain.',
+        settings: task.agentSettings,
+        retryOfRunId: recoveryRun.id
+      })
+    ).rejects.toThrow(/active run|unresolved recovery/u);
+
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('retains the no-resend fence and binds a late turn/started after an ambiguous first turn', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-late-evidence-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'turn-start-ambiguous-late'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await adapter.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const client = (
+      adapter as unknown as { boundClient?: CodexRpcClient }
+    ).boundClient!;
+
+    const ambiguousError = await orchestrator
+      .startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error
+      );
+    expect(ambiguousError).toBeInstanceOf(AgentMutationAmbiguousError);
+
+    let snapshot = await store.snapshot();
+    const recoveryRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(recoveryRun.status).toBe('RECOVERY_REQUIRED');
+    expect(recoveryRun.providerTurnId).toBeUndefined();
+    expect(
+      snapshot.agentSessions.find((session) => session.id === recoveryRun.sessionId)
+    ).toMatchObject({ materialized: true });
+
+    const raw = await store.appendProtocolMessage(
+      client.serverInstanceId,
+      'INBOUND',
+      JSON.stringify({
+        method: 'turn/started',
+        params: { threadId: 'thread-1', turnId: 'turn-late' }
+      })
+    );
+    client.events.emit(
+      'notification',
+      {
+        method: 'turn/started',
+        params: {
+          threadId: 'thread-1',
+          turn: {
+            id: 'turn-late',
+            items: [],
+            itemsView: 'full',
+            status: 'inProgress',
+            error: null,
+            startedAt: 1,
+            completedAt: null,
+            durationMs: null
+          }
+        }
+      },
+      raw
+    );
+    await (
+      adapter as unknown as { inboundQueue: Promise<void> }
+    ).inboundQueue;
+
+    expect(await store.getRun(recoveryRun.id)).toMatchObject({
+      status: 'RUNNING',
+      recoveryState: 'NONE',
+      providerTurnId: 'turn-late',
+      serverInstanceId: client.serverInstanceId
+    });
+    snapshot = await store.snapshot();
+    const journal = await fs.readFile(
+      snapshot.agentServers.find(
+        (server) => server.id === client.serverInstanceId
+      )!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'thread/read')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('drains permission-profile drift before submitting the first turn', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-first-turn-profile-drift-')
+    );
+    const executable = await writeFakeCodexExecutable(dir);
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateAgentSession = store.updateAgentSession.bind(store);
+    let injectedDrift = false;
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(
+      async (sessionId, patch) => {
+        const stored = await updateAgentSession(sessionId, patch);
+        if (!injectedDrift && patch.materialized === true) {
+          injectedDrift = true;
+          const client = (
+            adapter as unknown as { boundClient?: CodexRpcClient }
+          ).boundClient!;
+          const raw = await store.appendProtocolMessage(
+            client.serverInstanceId,
+            'INBOUND',
+            JSON.stringify({
+              method: 'thread/settings/updated',
+              params: {
+                threadId: 'thread-1',
+                activePermissionProfile: ':workspace'
+              }
+            })
+          );
+          client.events.emit(
+            'notification',
+            {
+              method: 'thread/settings/updated',
+              params: {
+                threadId: 'thread-1',
+                threadSettings: {
+                  cwd: worktree.worktreePath,
+                  approvalPolicy: 'on-request',
+                  approvalsReviewer: 'user',
+                  sandboxPolicy: {
+                    type: 'workspaceWrite',
+                    writableRoots: [worktree.worktreePath],
+                    networkAccess: false,
+                    excludeTmpdirEnvVar: true,
+                    excludeSlashTmp: true
+                  },
+                  activePermissionProfile: { id: ':workspace', extends: null },
+                  model: 'fake-model',
+                  modelProvider: 'openai',
+                  serviceTier: null,
+                  effort: 'low',
+                  summary: null,
+                  collaborationMode: {
+                    mode: 'default',
+                    settings: {
+                      model: 'fake-model',
+                      reasoning_effort: 'low',
+                      developer_instructions: null
+                    }
+                  },
+                  personality: null
+                }
+              }
+            },
+            raw
+          );
+        }
+        return stored;
+      }
+    );
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('changed or removed the Task Monki permission profile');
+
+    const snapshot = await store.snapshot();
+    const failedRun = snapshot.runs.find((candidate) => candidate.taskId === task.id)!;
+    expect(failedRun.status).toBe('FAILED');
+    expect(
+      snapshot.agentSessions.find((session) => session.id === failedRun.sessionId)
+    ).toMatchObject({ materialized: false });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    const outbound = readOutboundMessages(journal);
+    expect(outbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(outbound.filter((message) => message.method === 'turn/start')).toHaveLength(0);
+    expect(snapshot.agentServers[0]).toMatchObject({ status: 'EXITED' });
 
     await orchestrator.shutdown();
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
@@ -513,12 +2105,22 @@ describe('CodexAppServerAdapter', () => {
 
     const snapshot = await store.snapshot();
     const run = snapshot.runs.find((candidate) => candidate.taskId === task.id);
-    expect(run?.status).toBe('RECOVERY_REQUIRED');
+    expect(run).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      providerTurnId: 'turn-1'
+    });
+    expect(
+      snapshot.agentSessions.find((session) => session.id === run?.sessionId)
+    ).toMatchObject({ materialized: true });
     const server = snapshot.agentServers[0]!;
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
-    const turnStart = readOutboundMessages(journal).find(
+    const firstOutbound = readOutboundMessages(journal);
+    const turnStart = firstOutbound.find(
       (message) => message.method === 'turn/start'
     );
+    expect(firstOutbound.filter((message) => message.method === 'thread/start')).toHaveLength(1);
+    expect(firstOutbound.filter((message) => message.method === 'thread/resume')).toHaveLength(0);
+    expect(firstOutbound.filter((message) => message.method === 'turn/start')).toHaveLength(1);
     const manifest = (
       turnStart?.params as { input?: Array<{ type?: string; text?: string }> } | undefined
     )?.input?.find((item) => item.type === 'text')?.text;
@@ -527,27 +2129,165 @@ describe('CodexAppServerAdapter', () => {
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
 
     await orchestrator.shutdown();
+
+    const replacementAdapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const replacementOrchestrator = new AgentOrchestrator(
+      store,
+      events,
+      replacementAdapter
+    );
+    await replacementOrchestrator.initialize();
+    await expect(store.getRun(run!.id)).resolves.toMatchObject({
+      status: 'COMPLETED',
+      providerTurnId: 'turn-1',
+      providerTerminalSource: 'RECOVERY_RESUME_RESPONSE'
+    });
+    const replacementSnapshot = await store.snapshot();
+    const replacementServer = replacementSnapshot.agentServers.find(
+      (candidate) => candidate.runtimeId === 'codex' && candidate.status === 'READY'
+    );
+    expect(replacementServer).toBeDefined();
+    const replacementJournal = await fs.readFile(
+      replacementServer!.protocolJournalPath,
+      'utf8'
+    );
+    const replacementOutbound = readOutboundMessages(replacementJournal);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'thread/start')
+    ).toHaveLength(0);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'thread/resume')
+    ).toHaveLength(1);
+    expect(
+      replacementOutbound.filter((message) => message.method === 'turn/start')
+    ).toHaveLength(0);
+    await replacementOrchestrator.shutdown();
     await expect(fs.access(deliveryPath!)).resolves.toBeUndefined();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('records recovery before a provider-acknowledged thread/start can be retried', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-thread-start-post-ack-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'ack-only');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const updateSession = store.updateAgentSession.bind(store);
+    let rejectedAcknowledgement = false;
+    vi.spyOn(store, 'updateAgentSession').mockImplementation(async (sessionId, patch) => {
+      if (!rejectedAcknowledgement && patch.providerSessionId === 'thread-1') {
+        rejectedAcknowledgement = true;
+        throw new Error('injected thread ownership persistence failure');
+      }
+      return updateSession(sessionId, patch);
+    });
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toMatchObject({ operation: 'thread/start' });
+
+    const snapshot = await store.snapshot();
+    const run = snapshot.runs.find((candidate) => candidate.taskId === task.id);
+    expect(run).toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    const journal = await fs.readFile(
+      snapshot.agentServers[0]!.protocolJournalPath,
+      'utf8'
+    );
+    expect(
+      readOutboundMessages(journal).filter((message) => message.method === 'thread/start')
+    ).toHaveLength(1);
+    expect(readOutboundMethods(journal)).not.toContain('turn/start');
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'FOLLOW_UP',
+        prompt: 'Do not duplicate the provider session.',
+        settings: task.agentSettings
+      })
+    ).rejects.toThrow('unresolved recovery run');
+
+    await orchestrator.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('fences App Server when thread/start returns an unattested permission profile', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-thread-start-profile-mismatch-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'profile-mismatch-create');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    await expect(
+      orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      })
+    ).rejects.toMatchObject({ operation: 'thread/start' });
+
+    const snapshot = await store.snapshot();
+    expect(snapshot.runs.find((candidate) => candidate.taskId === task.id)).toMatchObject({
+      status: 'RECOVERY_REQUIRED'
+    });
+    expect(snapshot.agentServers.at(-1)).toMatchObject({ status: 'EXITED' });
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: {
+        status: 'FAILED',
+        diagnostics: [
+          expect.objectContaining({ code: 'SECURITY_BOUNDARY_FAILED' })
+        ]
+      }
+    });
+    await expect(adapter.listModels()).rejects.toThrow('unattested permission profile');
   }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
 
   it('submits one typed approval response and waits for server resolution', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-'));
     const executable = await writeFakeCodexExecutable(dir, 'approval');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    const scheduler = new AgentTurnScheduler(runtime);
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      providerRuntimeStore: runtime,
-      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
-      runtimeStore: runtime,
-      scheduler
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -565,6 +2305,9 @@ describe('CodexAppServerAdapter', () => {
     expect(interaction.providerRequestId).toBe(41);
     expect(interaction.allowedActions).toContain('ACCEPT');
     expect((await store.getRun(run.id))?.status).toBe('AWAITING_APPROVAL');
+    expect((await store.getAgentSession(interaction.sessionId))?.status).toBe(
+      'AWAITING_APPROVAL'
+    );
 
     await expect(
       orchestrator.respondToInteraction({
@@ -604,7 +2347,7 @@ describe('CodexAppServerAdapter', () => {
         }
       })
     ).rejects.toThrow('expected PENDING');
-    const server = (await runtime.listAgentServers())[0];
+    const server = (await store.snapshot()).agentServers[0];
     const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
     const response = journal
       .trim()
@@ -613,18 +2356,475 @@ describe('CodexAppServerAdapter', () => {
       .map((entry) => JSON.parse(entry.raw) as { id?: string | number; result?: unknown })
       .find((message) => message.id === 41 && message.result);
     expect(response?.id).toBe(41);
-    const interactionTelemetry = (
-      await runtime.listTelemetryByOwner({ kind: 'TASK', taskId: task.id })
-    ).filter((record) => record.kind === 'INTERACTION');
-    expect(
-      new Set(
-        interactionTelemetry.map(
-          (record) => (record.payload as { status: string }).status
-        )
-      )
-    ).toEqual(new Set(['PENDING', 'RESPONDING', 'RESOLVED']));
 
     await orchestrator.shutdown();
+  });
+
+  it('does not offer a retry after approval-response delivery becomes ambiguous', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-ambiguous-'));
+    const executable = await writeFakeCodexExecutable(dir, 'approval');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const client = (
+      adapter as unknown as { boundClient?: CodexRpcClient }
+    ).boundClient!;
+    vi.spyOn(client, 'respond').mockRejectedValue(
+      new CodexAmbiguousMutationError(
+        'server-request/response',
+        'injected ambiguous approval delivery'
+      )
+    );
+
+    await expect(
+      orchestrator.respondToInteraction({
+        taskId: task.id,
+        runId: run.id,
+        interactionRequestId: interaction.id,
+        decision: {
+          interactionType: 'COMMAND_APPROVAL',
+          action: 'ACCEPT'
+        }
+      })
+    ).rejects.toBeInstanceOf(AgentMutationAmbiguousError);
+
+    expect(await store.getInteractionRequest(interaction.id)).toMatchObject({
+      status: 'STALE',
+      resolution: {
+        operation: 'server-request/response',
+        automaticResubmission: false
+      }
+    });
+    await orchestrator.shutdown();
+  });
+
+  it('settles active ownership when shutdown reports a failure after process exit', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-approval-shutdown-'));
+    const executable = await writeFakeCodexExecutable(dir, 'approval');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter, {});
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const supervisor = (adapter as unknown as {
+      supervisor: { shutdown(): Promise<void> };
+    }).supervisor;
+    const shutdown = supervisor.shutdown.bind(supervisor);
+    vi.spyOn(supervisor, 'shutdown').mockImplementation(async () => {
+      await shutdown();
+      throw new Error('simulated post-exit shutdown failure');
+    });
+
+    await expect(adapter.shutdown()).rejects.toThrow('simulated post-exit shutdown failure');
+
+    expect(await store.getRun(run.id)).toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    expect(await store.getInteractionRequest(interaction.id)).toMatchObject({
+      status: 'ABORTED_SERVER_LOST',
+      resolution: { reason: 'Codex App Server exited.' }
+    });
+    expect(await store.getAgentSession(interaction.sessionId)).toMatchObject({
+      status: 'NOT_LOADED'
+    });
+    expect((await store.snapshot()).agentServers).toEqual([
+      expect.objectContaining({ status: 'EXITED' })
+    ]);
+    await adapter.initialize();
+    await expect(adapter.preflight()).resolves.toMatchObject({
+      readiness: { status: 'READY', canStart: true }
+    });
+    await adapter.shutdown();
+  }, APP_SERVER_INTEGRATION_TIMEOUT_MS);
+
+  it('rebinds a recovered running turn before accepting approval on a replacement server', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-recovered-approval-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'recovery-approval');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const priorServer = await store.createAgentServer({
+      runtimeId: 'codex',
+      runtimeKind: 'APP_SERVER',
+      transport: 'STDIO',
+      executable,
+      argv: ['app-server', '--stdio']
+    });
+    await store.updateAgentServer(priorServer.id, { status: 'RUNNING', pid: 41 });
+    let session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'codex',
+      requestedSettings: task.agentSettings
+    });
+    session = await store.updateAgentSession(session.id, {
+      providerSessionId: 'thread-1',
+      providerSessionTreeId: 'session-tree-1',
+      status: 'NOT_LOADED',
+      materialized: true
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      serverInstanceId: priorServer.id,
+      requestedSettings: task.agentSettings
+    });
+    await store.updateRun(run.id, {
+      providerTurnId: 'turn-1',
+      status: 'RUNNING'
+    });
+    const priorInteractionRaw = await store.appendProtocolMessage(
+      priorServer.id,
+      'INBOUND',
+      '{"method":"item/commandExecution/requestApproval","id":41}'
+    );
+    const priorInteraction = await store.createInteractionRequest({
+      runtimeId: 'codex',
+      serverInstanceId: priorServer.id,
+      providerRequestId: 41,
+      taskId: task.id,
+      iterationId: iteration.id,
+      runId: run.id,
+      sessionId: session.id,
+      providerTurnId: 'turn-1',
+      type: 'COMMAND_APPROVAL',
+      request: { command: 'npm test', startedAtMs: Date.now() },
+      allowedActions: ['ACCEPT', 'DECLINE', 'CANCEL'],
+      policyWarnings: [],
+      requestRawMessage: priorInteractionRaw
+    });
+    await store.updateAgentServer(priorServer.id, {
+      status: 'EXITED',
+      disconnectedAt: new Date().toISOString(),
+      exitedAt: new Date().toISOString(),
+      exitReason: 'Injected prior App Server crash.'
+    });
+
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+
+    const interaction = await waitForInteraction(store, 'PENDING');
+    const recoveredRun = await store.getRun(run.id);
+    expect(await store.getInteractionRequest(priorInteraction.id)).toMatchObject({
+      status: 'ABORTED_SERVER_LOST'
+    });
+    expect(interaction.runId).toBe(run.id);
+    expect(interaction.serverInstanceId).not.toBe(priorServer.id);
+    expect(recoveredRun).toMatchObject({
+      serverInstanceId: interaction.serverInstanceId,
+      providerTurnId: 'turn-1',
+      status: 'AWAITING_APPROVAL'
+    });
+    expect((await store.getAgentSession(interaction.sessionId))?.status).toBe(
+      'AWAITING_APPROVAL'
+    );
+
+    await orchestrator.respondToInteraction({
+      taskId: task.id,
+      runId: run.id,
+      interactionRequestId: interaction.id,
+      decision: {
+        interactionType: 'COMMAND_APPROVAL',
+        action: 'ACCEPT'
+      }
+    });
+    const completed = await waitForRunStatus(store, run.id, 'COMPLETED');
+    expect(completed.serverInstanceId).toBe(interaction.serverInstanceId);
+    expect((await store.getInteractionRequest(interaction.id))?.status).toBe('RESOLVED');
+
+    await orchestrator.shutdown();
+  });
+
+  it('ignores late notifications and requests from a replaced App Server generation', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-stale-codex-generation-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'stale-generation');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [0]
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+
+    try {
+      await orchestrator.initialize();
+      const { task, iteration, worktree } = await createTaskContext(store, dir);
+      const run = await orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      });
+      const oldClient = (
+        adapter as unknown as { boundClient?: CodexRpcClient }
+      ).boundClient!;
+      const oldServerId = oldClient.serverInstanceId;
+
+      const recovered = await waitForSnapshot(
+        store,
+        (snapshot) => {
+          const current = snapshot.runs.find((candidate) => candidate.id === run.id);
+          return (
+            current?.status === 'RECOVERY_REQUIRED' &&
+            typeof current.serverInstanceId === 'string' &&
+            current.serverInstanceId !== oldServerId
+          );
+        },
+        'replacement App Server to own the recovered turn'
+      );
+      const recoveredRun = recovered.runs.find((candidate) => candidate.id === run.id)!;
+      const replacementClient = (
+        adapter as unknown as { boundClient?: CodexRpcClient }
+      ).boundClient!;
+      expect(replacementClient).not.toBe(oldClient);
+      expect(replacementClient.serverInstanceId).toBe(recoveredRun.serverInstanceId);
+
+      const staleTurnRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({ method: 'turn/completed', params: { threadId: 'thread-1' } })
+      );
+      const staleThreadRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({ method: 'thread/closed', params: { threadId: 'thread-1' } })
+      );
+      const staleRequestRaw = await store.appendProtocolMessage(
+        oldServerId,
+        'INBOUND',
+        JSON.stringify({
+          method: 'item/commandExecution/requestApproval',
+          id: 901,
+          params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'stale-command' }
+        })
+      );
+      const staleResponse = vi
+        .spyOn(oldClient, 'respondError')
+        .mockResolvedValue(undefined);
+
+      oldClient.events.emit(
+        'notification',
+        {
+          method: 'turn/completed',
+          params: {
+            threadId: 'thread-1',
+            turn: {
+              id: 'turn-1',
+              items: [],
+              itemsView: 'full',
+              status: 'completed',
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+              durationMs: 1
+            }
+          }
+        },
+        staleTurnRaw
+      );
+      oldClient.events.emit(
+        'notification',
+        { method: 'thread/closed', params: { threadId: 'thread-1' } },
+        staleThreadRaw
+      );
+      oldClient.events.emit(
+        'serverRequest',
+        {
+          method: 'item/commandExecution/requestApproval',
+          id: 901,
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'stale-command',
+            startedAtMs: Date.now(),
+            command: 'npm test',
+            cwd: worktree.worktreePath,
+            commandActions: []
+          }
+        },
+        staleRequestRaw
+      );
+      await (
+        adapter as unknown as { inboundQueue: Promise<void> }
+      ).inboundQueue;
+
+      expect(await store.getRun(run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        serverInstanceId: replacementClient.serverInstanceId
+      });
+      expect((await store.getAgentSession(run.sessionId))?.status).not.toBe('NOT_LOADED');
+      expect(staleResponse).not.toHaveBeenCalled();
+      expect(
+        (await store.snapshot()).interactionRequests.some(
+          (interaction) => interaction.providerRequestId === 901
+        )
+      ).toBe(false);
+    } finally {
+      await orchestrator.shutdown();
+    }
+  });
+
+  it('drains accepted notifications before settling runtime loss and starting a replacement', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-codex-generation-drain-')
+    );
+    const executable = await writeFakeCodexExecutable(dir, 'exit');
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    const internals = adapter as unknown as {
+      supervisor: CodexAppServerSupervisor;
+      handleNotification(
+        client: CodexRpcClient,
+        notification: { method: string },
+        raw: unknown
+      ): Promise<void>;
+    };
+    let releaseMaterialization: () => void = () => {};
+
+    try {
+      await orchestrator.initialize();
+      const { task, iteration, worktree } = await createTaskContext(store, dir);
+      const materializationRelease = new Promise<void>((resolve) => {
+        releaseMaterialization = resolve;
+      });
+      let markNotificationAccepted!: () => void;
+      const notificationAccepted = new Promise<void>((resolve) => {
+        markNotificationAccepted = resolve;
+      });
+      const originalHandleNotification = internals.handleNotification.bind(adapter);
+      let blocked = false;
+      vi.spyOn(internals, 'handleNotification').mockImplementation(
+        async (client, notification, raw) => {
+          if (!blocked && notification.method === 'item/started') {
+            blocked = true;
+            markNotificationAccepted();
+            await materializationRelease;
+          }
+          await originalHandleNotification(client, notification, raw);
+        }
+      );
+
+      const durableOrder: string[] = [];
+      const upsertAgentItem = store.upsertAgentItem.bind(store);
+      vi.spyOn(store, 'upsertAgentItem').mockImplementation(async (item) => {
+        const stored = await upsertAgentItem(item);
+        if (stored.providerItemId === 'command-1') durableOrder.push('item');
+        return stored;
+      });
+      const appendRunEventIfStatus = store.appendRunEventIfStatus.bind(store);
+      vi.spyOn(store, 'appendRunEventIfStatus').mockImplementation(
+        async (event, statuses) => {
+          const appended = await appendRunEventIfStatus(event, statuses);
+          if (appended && event.type === 'AGENT_RUNTIME_LOST') {
+            durableOrder.push('runtime-loss');
+          }
+          return appended;
+        }
+      );
+      const createAgentServer = store.createAgentServer.bind(store);
+      vi.spyOn(store, 'createAgentServer').mockImplementation(async (input) => {
+        const server = await createAgentServer(input);
+        durableOrder.push('replacement');
+        return server;
+      });
+
+      const run = await orchestrator.startTurn({
+        task,
+        iteration,
+        worktree,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt,
+        settings: task.agentSettings
+      });
+      await notificationAccepted;
+      const oldServerId = (await store.getRun(run.id))!.serverInstanceId!;
+      await waitForSnapshot(
+        store,
+        (snapshot) =>
+          snapshot.agentServers.some(
+            (server) => server.id === oldServerId && server.status === 'FAILED'
+          ),
+        'exited App Server generation'
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const startReplacement = vi.spyOn(internals.supervisor, 'start');
+      const replacement = adapter.preflight();
+
+      expect(startReplacement).not.toHaveBeenCalled();
+      expect(durableOrder).toEqual([]);
+      expect((await store.snapshot()).agentServers).toHaveLength(1);
+
+      releaseMaterialization();
+      await replacement;
+
+      expect(startReplacement).toHaveBeenCalled();
+      expect(durableOrder).toEqual(['item', 'runtime-loss', 'replacement']);
+      expect(await waitForAgentItem(store, run.id, 'command-1')).toBeDefined();
+      expect(await store.getRun(run.id)).toMatchObject({
+        status: 'RECOVERY_REQUIRED',
+        serverInstanceId: oldServerId
+      });
+      expect((await store.snapshot()).agentServers).toHaveLength(2);
+    } finally {
+      releaseMaterialization();
+      await orchestrator.shutdown();
+    }
   });
 
   it('redacts and declines redundant attachment path permission requests', async () => {
@@ -779,20 +2979,14 @@ describe('CodexAppServerAdapter', () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-subagent-'));
     const executable = await writeFakeCodexExecutable(dir, 'subagent');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const runtime = new FileAgentRuntimeStore(path.join(dir, 'runtime'));
-    const scheduler = new AgentTurnScheduler(runtime);
     const events = new AppEventBus();
     const adapter = new CodexAppServerAdapter(store, events, {
       cwd: dir,
       executable,
       requestTimeoutMs: 2_000,
       restartDelaysMs: [],
-      providerRuntimeStore: runtime,
-      scopedRuntimeStore: runtime
     });
     const orchestrator = new AgentOrchestrator(store, events, adapter, {
-      runtimeStore: runtime,
-      scheduler
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir);
@@ -814,7 +3008,8 @@ describe('CodexAppServerAdapter', () => {
       delegatedPrompt: 'Inspect the repository tests.',
       providerNickname: 'Scout',
       providerRole: 'explorer',
-      relationshipState: 'RESOLVED'
+      relationshipState: 'RESOLVED',
+      status: 'AWAITING_APPROVAL'
     });
     expect(interaction.providerTurnId).toBe('turn-child');
 
@@ -865,34 +3060,6 @@ describe('CodexAppServerAdapter', () => {
     );
     expect(snapshot.tasks[0]?.currentRunId).toBe(parentRun.id);
     expect(snapshot.tasks[0]?.projection.agentRun).toBe('COMPLETED');
-    const runtimeSnapshot = await runtime.snapshot();
-    const runtimeChildSession = runtimeSnapshot.sessions.find(
-      (session) => session.providerSessionId === 'thread-child'
-    );
-    expect(runtimeChildSession).toMatchObject({
-      role: 'SUBAGENT',
-      parentSessionId: parentRun.sessionId,
-      executionContext: {
-        attestation: {
-          status: 'INHERITED_UNATTESTED',
-          parentSessionId: parentRun.sessionId
-        }
-      }
-    });
-    expect(runtimeSnapshot.runs.find((run) => run.providerTurnId === 'turn-child'))
-      .toMatchObject({
-        purpose: 'PROVIDER_SUBAGENT',
-        parentRunId: parentRun.id,
-        status: 'COMPLETED',
-        delivery: 'TERMINAL'
-      });
-    expect(
-      new Set(
-        (await runtime.listTelemetryByOwner({ kind: 'TASK', taskId: task.id }))
-          .filter((record) => record.sessionId === runtimeChildSession?.id)
-          .map((record) => record.kind)
-      )
-    ).toEqual(new Set(['SUBAGENT', 'ITEM', 'INTERACTION']));
 
     await orchestrator.shutdown();
   });
@@ -1280,7 +3447,7 @@ describe('CodexAppServerAdapter', () => {
       task,
       iteration,
       worktree,
-      provider: 'codex',
+      runtimeId: 'codex',
       requestedSettings: safeSettings
     });
     await store.updateAgentSession(session.id, {
@@ -1607,7 +3774,7 @@ describe('CodexAppServerAdapter', () => {
 
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toContain('did not emit a terminal event');
-    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
     expect(storedTask?.projection.agentRun).toBe('COMPLETED');
     expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
       'AGENT_MUTATION_AMBIGUOUS'
@@ -1664,7 +3831,7 @@ describe('CodexAppServerAdapter', () => {
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toContain('no active turn to interrupt');
     expect(storedSession?.status).toBe('IDLE');
-    expect(storedTask?.projection.codexReview?.status).toBe('CANCELED');
+    expect(storedTask?.projection.agentReview?.status).toBe('CANCELED');
     expect(storedTask?.projection.agentRun).toBe('COMPLETED');
     expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
       'AGENT_MUTATION_AMBIGUOUS'
@@ -1706,6 +3873,7 @@ describe('CodexAppServerAdapter', () => {
 
     await orchestrator.interruptRun(run.id);
     const interrupted = await waitForRunStatus(store, run.id, 'INTERRUPTED');
+    await (adapter as unknown as { inboundQueue: Promise<void> }).inboundQueue;
 
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toBe('interrupted');
@@ -1748,13 +3916,90 @@ describe('CodexAppServerAdapter', () => {
 
     await orchestrator.interruptRun(run.id);
     const interrupted = await waitForRunStatus(store, run.id, 'INTERRUPTED');
+    await (adapter as unknown as { inboundQueue: Promise<void> }).inboundQueue;
 
     expect(interrupted.recoveryState).toBe('NONE');
     expect(interrupted.terminalReason).toContain('did not emit a terminal event');
     expect(interrupted.finalArtifactId).toBeTruthy();
-    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+    const snapshot = await store.snapshot();
+    expect(snapshot.events.map((event) => event.type)).not.toContain(
       'AGENT_MUTATION_AMBIGUOUS'
     );
+    expect(
+      snapshot.events.filter(
+        (event) => event.runId === run.id && event.type === 'AGENT_RUN_INTERRUPTED'
+      )
+    ).toHaveLength(1);
+    expect(
+      snapshot.artifacts.filter(
+        (artifact) => artifact.runId === run.id && artifact.kind === 'agent-final'
+      )
+    ).toHaveLength(1);
+    await orchestrator.shutdown();
+  });
+
+  it('requires recovery when local interruption cannot confirm process-tree termination', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-interrupt-termination-failure-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'interrupt-ambiguous-no-terminal'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: [],
+      interruptRequestTimeoutMs: 40,
+      interruptCompletionTimeoutMs: 40
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir);
+    const run = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    const supervisor = (
+      adapter as unknown as { supervisor: CodexAppServerSupervisor }
+    ).supervisor;
+    const terminate = vi
+      .spyOn(supervisor, 'terminateUnresponsive')
+      .mockRejectedValue(new Error('injected process-tree termination failure'));
+    const processTree = vi
+      .spyOn(supervisor, 'processTreeRunning', 'get')
+      .mockReturnValue(true);
+
+    await orchestrator.interruptRun(run.id);
+    const recoverySnapshot = await waitForSnapshot(
+      store,
+      (snapshot) => snapshot.runs.some(
+        (candidate) =>
+          candidate.id === run.id &&
+          candidate.status === 'RECOVERY_REQUIRED' &&
+          candidate.recoveryState === 'REQUIRES_USER_ACTION'
+      ),
+      'unconfirmed local interruption recovery'
+    );
+    const recovery = recoverySnapshot.runs.find(
+      (candidate) => candidate.id === run.id
+    )!;
+
+    expect(recovery.recoveryState).toBe('REQUIRES_USER_ACTION');
+    expect(recovery.terminalReason).toContain('termination was not fully confirmed');
+    expect((await store.snapshot()).events.map((event) => event.type)).not.toContain(
+      'AGENT_RUN_INTERRUPTED'
+    );
+
+    terminate.mockRestore();
+    processTree.mockRestore();
     await orchestrator.shutdown();
   });
 });
@@ -1779,7 +4024,7 @@ async function createTaskContext(
   const task = await store.createTask({
     title: 'Approval turn',
     prompt: 'Finish the fake task.',
-    repositoryPath: repositoryDir,
+    repositoryId: (await addTestRepository(store, repositoryDir)).id,
     attachmentDraftId,
     agentSettings: {
       model: 'fake-model',
@@ -1798,11 +4043,48 @@ async function createTaskContext(
   return { task, iteration, worktree };
 }
 
+async function createBufferedCodexRun(
+  directoryPrefix: string,
+  credential = 'opaque-provider-credential-1742'
+) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), directoryPrefix));
+  const store = new FileTaskStore(path.join(dir, 'store'));
+  const events = new AppEventBus();
+  const adapter = new CodexAppServerAdapter(store, events, {
+    cwd: dir,
+    environment: {
+      ...process.env,
+      OPENAI_API_KEY: credential
+    },
+    restartDelaysMs: []
+  });
+  const { task, iteration, worktree } = await createTaskContext(store, dir);
+  const session = await store.createAgentSession({
+    task,
+    iteration,
+    worktree,
+    runtimeId: 'codex',
+    requestedSettings: task.agentSettings
+  });
+  const created = await store.createRun({
+    task,
+    session,
+    mode: 'IMPLEMENTATION',
+    prompt: task.prompt,
+    requestedSettings: task.agentSettings
+  });
+  const run = await store.updateRun(created.id, {
+    providerTurnId: 'buffered-turn',
+    status: 'RUNNING'
+  });
+  return { adapter, events, run, store };
+}
+
 async function waitForInteraction(
   store: FileTaskStore,
   status: 'PENDING' | 'ABORTED_SERVER_LOST' | 'STALE'
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const interaction = (await store.snapshot()).interactionRequests.find(
       (candidate) => candidate.status === status
     );
@@ -1819,7 +4101,7 @@ async function waitForRunStatus(
   runId: string,
   status: 'COMPLETED' | 'FAILED' | 'INTERRUPTED'
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const run = await store.getRun(runId);
     if (run?.status === status) {
       return run;
@@ -1834,7 +4116,7 @@ async function waitForSnapshot(
   predicate: (snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>) => boolean,
   description: string
 ) {
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const snapshot = await store.snapshot();
     if (predicate(snapshot)) {
       return snapshot;
@@ -1844,29 +4126,12 @@ async function waitForSnapshot(
   throw new Error(`Timed out waiting for snapshot: ${description}.`);
 }
 
-async function waitForRunProviderTurnId(
-  store: FileTaskStore,
-  runId: string,
-  providerTurnId: string
-) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const run = await store.getRun(runId);
-    if (run?.providerTurnId === providerTurnId) {
-      return run;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(
-    `Timed out waiting for run ${runId} to use provider turn ${providerTurnId}.`
-  );
-}
-
 async function waitForAgentItem(
   store: FileTaskStore,
   runId: string,
   providerItemId: string
 ) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const item = (await store.snapshot()).agentItems.find(
       (candidate) =>
         candidate.runId === runId && candidate.providerItemId === providerItemId
@@ -1944,14 +4209,25 @@ function fakeCodexScript(
   mode:
     | 'normal'
     | 'scoped'
+    | 'scoped-interrupt-no-terminal'
+    | 'scoped-interrupt-terminal-race'
+    | 'credential-telemetry'
+    | 'empty-models'
     | 'ack-only'
+    | 'recovery-notification-echo'
+    | 'turn-start-rejected-once'
+    | 'turn-start-rejected-with-evidence'
+    | 'turn-start-ambiguous-late'
     | 'approval'
+    | 'recovery-approval'
+    | 'stale-generation'
     | 'permission'
     | 'exit'
     | 'clear'
     | 'subagent'
     | 'unsafe-review-fork'
     | 'unsafe-live-settings'
+    | 'profile-mismatch-create'
     | 'profile-drift'
     | 'unsafe-recovery-resume'
     | 'review-turn-start-mismatch'
@@ -1983,7 +4259,7 @@ const reviewMode = mode === 'review-turn-start-mismatch' || mode === 'review-int
 const reviewInterruptTimeoutMode = mode === 'review-interrupt-ambiguous-no-terminal';
 const reviewInterruptNoActiveMode = mode === 'review-interrupt-no-active';
 const interruptMode = mode === 'interrupt-ambiguous-then-terminal' || mode === 'interrupt-ambiguous-no-terminal';
-const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent';
+const approvalMode = mode === 'approval' || mode === 'permission' || mode === 'exit' || mode === 'clear' || mode === 'subagent' || mode === 'stale-generation';
 const reviewResponseTurnId = 'review-response-turn';
 const reviewActiveTurnId = 'review-active-turn';
 const turn = (status, error = null) => ({
@@ -2047,6 +4323,7 @@ const reviewThread = () => ({
 });
 let currentProfileId = ':workspace';
 let currentProfileNetworkAccess = false;
+let turnStartAttempts = 0;
 const threadResponse = (request = {}) => {
   currentProfileId = request.config?.default_permissions ?? currentProfileId;
   currentProfileNetworkAccess =
@@ -2062,14 +4339,18 @@ const threadResponse = (request = {}) => {
   serviceTier: null,
   cwd: request.cwd ?? process.cwd(),
   runtimeWorkspaceRoots: [request.cwd ?? process.cwd()],
-  activePermissionProfile: {
-    id: currentProfileId,
+    activePermissionProfile: {
+      id:
+        mode === 'profile-mismatch-create' &&
+        currentProfileId !== 'task_monki_capability_probe'
+          ? ':workspace'
+          : currentProfileId,
     extends: null
   },
   instructionSources: [],
   approvalPolicy: request.approvalPolicy ?? (approvalMode ? 'on-request' : 'never'),
   approvalsReviewer: request.approvalsReviewer ?? 'user',
-  sandbox: mode === 'scoped' ? {
+  sandbox: mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race' ? {
     type: 'readOnly',
     networkAccess: false
   } : {
@@ -2099,6 +4380,34 @@ rl.on('line', (line) => {
         item: {
           type: 'commandExecution',
           id: 'command-1',
+          command: 'npm test',
+          cwd: process.cwd(),
+          processId: null,
+          source: 'agent',
+          status: 'completed',
+          commandActions: [],
+          aggregatedOutput: 'passed',
+          exitCode: 0,
+          durationMs: 10
+        }
+      } });
+      send({ method: 'turn/completed', params: {
+        threadId: 'thread-1',
+        turn: turn('completed')
+      } });
+    }
+    if (mode === 'recovery-approval' && message.id === 71) {
+      send({ method: 'serverRequest/resolved', params: {
+        threadId: 'thread-1',
+        requestId: 71
+      } });
+      send({ method: 'item/completed', params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: Date.now(),
+        item: {
+          type: 'commandExecution',
+          id: 'recovered-command',
           command: 'npm test',
           cwd: process.cwd(),
           processId: null,
@@ -2214,7 +4523,7 @@ rl.on('line', (line) => {
       break;
     case 'model/list':
       send({ id: message.id, result: {
-        data: [{
+        data: mode === 'empty-models' ? [] : [{
           id: 'fake-model',
           model: 'fake-model',
           upgrade: null,
@@ -2243,11 +4552,57 @@ rl.on('line', (line) => {
       break;
     case 'thread/resume':
       {
-        const response = { ...threadResponse(message.params), thread: thread([turn('completed')]) };
+        const recoveringApproval =
+          mode === 'recovery-approval' && message.params.threadId === 'thread-1';
+        const recoveringTurn =
+          (recoveringApproval || mode === 'stale-generation') &&
+          message.params.threadId === 'thread-1';
+        const response = {
+          ...threadResponse(message.params),
+          thread: thread([turn(recoveringTurn ? 'inProgress' : 'completed')])
+        };
         if (mode === 'unsafe-recovery-resume') {
           response.sandbox = { type: 'dangerFullAccess' };
         }
         send({ id: message.id, result: response });
+        if (mode === 'recovery-notification-echo') {
+          send({ method: 'turn/completed', params: {
+            threadId: 'thread-1',
+            turn: turn('completed')
+          } });
+        }
+        if (recoveringApproval) {
+          setTimeout(() => {
+            send({ method: 'item/started', params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              startedAtMs: Date.now(),
+              item: {
+                type: 'commandExecution',
+                id: 'recovered-command',
+                command: 'npm test',
+                cwd: message.params.cwd,
+                processId: null,
+                source: 'agent',
+                status: 'inProgress',
+                commandActions: [],
+                aggregatedOutput: null,
+                exitCode: null,
+                durationMs: null
+              }
+            } });
+            send({ method: 'item/commandExecution/requestApproval', id: 71, params: {
+              threadId: 'thread-1',
+              turnId: 'turn-1',
+              itemId: 'recovered-command',
+              startedAtMs: Date.now(),
+              reason: 'Verify the recovered turn',
+              command: 'npm test',
+              cwd: message.params.cwd,
+              commandActions: []
+            } });
+          }, 20);
+        }
       }
       break;
     case 'thread/read':
@@ -2326,6 +4681,34 @@ rl.on('line', (line) => {
       }
       break;
     case 'turn/start':
+      turnStartAttempts += 1;
+      if (mode === 'turn-start-rejected-once' && turnStartAttempts === 1) {
+        send({ id: message.id, error: {
+          code: -32602,
+          message: 'injected definitive turn/start rejection'
+        } });
+        return;
+      }
+      if (
+        mode === 'turn-start-rejected-with-evidence' &&
+        message.params.threadId === 'thread-1'
+      ) {
+        send({ method: 'turn/started', params: {
+          threadId: 'thread-1',
+          turn: { ...turn('inProgress'), id: 'turn-error-evidence' }
+        } });
+        send({ id: message.id, error: {
+          code: -32602,
+          message: 'injected turn/start error after turn evidence'
+        } });
+        return;
+      }
+      if (
+        mode === 'turn-start-ambiguous-late' &&
+        message.params.threadId === 'thread-1'
+      ) {
+        process.exit(17);
+      }
       send({ id: message.id, result: { turn: turn('inProgress') } });
       if (mode === 'ack-only') return;
       setTimeout(() => {
@@ -2338,7 +4721,7 @@ rl.on('line', (line) => {
             approvalsReviewer: message.params.approvalsReviewer ?? 'user',
             sandboxPolicy: mode === 'unsafe-live-settings'
               ? { type: 'dangerFullAccess' }
-              : mode === 'scoped'
+              : mode === 'scoped' || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race'
                 ? { type: 'readOnly', networkAccess: false }
               : message.params.sandboxPolicy ?? {
                   type: 'workspaceWrite',
@@ -2351,7 +4734,9 @@ rl.on('line', (line) => {
               id: mode === 'profile-drift' ? ':workspace' : currentProfileId,
               extends: null
             },
-            model: message.params.model ?? 'fake-model',
+            model: mode === 'credential-telemetry'
+              ? process.env.OPENAI_API_KEY
+              : message.params.model ?? 'fake-model',
             modelProvider: 'openai',
             serviceTier: message.params.serviceTier ?? null,
             effort: message.params.effort ?? 'high',
@@ -2391,7 +4776,7 @@ rl.on('line', (line) => {
           } });
           return;
         }
-        if (interruptMode) {
+        if (interruptMode || mode === 'scoped-interrupt-no-terminal' || mode === 'scoped-interrupt-terminal-race') {
           return;
         }
         if (mode === 'subagent') {
@@ -2502,7 +4887,7 @@ rl.on('line', (line) => {
             cwd: message.params.cwd,
             commandActions: []
           } });
-          if (mode === 'exit') {
+          if (mode === 'exit' || mode === 'stale-generation') {
             setTimeout(() => process.exit(17), 50);
           } else if (mode === 'clear') {
             setTimeout(() => {
@@ -2517,6 +4902,80 @@ rl.on('line', (line) => {
             }, 20);
           }
           return;
+        }
+        if (mode === 'credential-telemetry') {
+          send({ method: 'thread/started', params: { thread: {
+            ...thread(),
+            id: 'credential-child',
+            parentThreadId: 'thread-1',
+            source: {
+              subAgent: {
+                thread_spawn: {
+                  parent_thread_id: 'thread-1',
+                  depth: 1,
+                  agent_path: 'opaque-provider-credential-1742',
+                  agent_nickname: 'opaque-provider-credential-1742',
+                  agent_role: 'opaque-provider-credential-1742'
+                }
+              }
+            },
+            agentNickname: 'opaque-provider-credential-1742',
+            agentRole: 'opaque-provider-credential-1742'
+          } } });
+          send({ method: 'model/rerouted', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            fromModel: 'fake-model',
+            toModel: process.env.OPENAI_API_KEY,
+            reason: 'highRiskCyberActivity'
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            completedAtMs: Date.now(),
+            item: {
+              type: 'collabAgentToolCall',
+              id: 'credential-spawn',
+              tool: 'spawnAgent',
+              status: 'completed',
+              senderThreadId: 'thread-1',
+              receiverThreadIds: ['credential-child'],
+              prompt: 'Inspect credentials safely.',
+              model: process.env.OPENAI_API_KEY,
+              reasoningEffort: process.env.OPENAI_API_KEY,
+              agentsStates: {
+                'credential-child': { status: 'completed', message: 'done' }
+              }
+            }
+          } });
+          send({ method: 'error', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            error: {
+              message: 'Authorization: Bearer credential-error-secret',
+              codexErrorInfo: 'other',
+              additionalDetails: 'OPENAI_API_KEY=credential-error-secret'
+            },
+            willRetry: false
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            completedAtMs: Date.now(),
+            item: {
+              type: 'commandExecution',
+              id: 'credential-command',
+              command: 'printenv',
+              cwd: process.cwd(),
+              processId: null,
+              source: 'agent',
+              status: 'completed',
+              commandActions: [],
+              aggregatedOutput: 'OPENAI_API_KEY=credential-item-secret',
+              exitCode: 0,
+              durationMs: 10
+            }
+          } });
         }
         send({ method: 'turn/plan/updated', params: {
           threadId: 'thread-1',
@@ -2587,24 +5046,43 @@ rl.on('line', (line) => {
           threadId: 'thread-1',
           turnId: 'turn-1',
           itemId: 'item-1',
-          delta: 'Fake task completed.'
+          delta: mode === 'credential-telemetry'
+            ? 'OPENAI_API_KEY=credential-output-secret opaque-provider-'
+            : 'Fake task '
         } });
-        send({ method: 'item/completed', params: {
-          threadId: 'thread-1',
-          turnId: 'turn-1',
-          completedAtMs: Date.now(),
-          item: {
-            type: 'agentMessage',
-            id: 'item-1',
-            text: 'Fake task completed.',
-            phase: null,
-            memoryCitation: null
-          }
-        } });
-        send({ method: 'turn/completed', params: {
-          threadId: 'thread-1',
-          turn: turn('completed')
-        } });
+        const finishAgentMessage = () => {
+          send({ method: 'item/agentMessage/delta', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'item-1',
+            delta: mode === 'credential-telemetry'
+              ? 'credential-1742 completed.'
+              : 'completed.'
+          } });
+          send({ method: 'item/completed', params: {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            completedAtMs: Date.now(),
+            item: {
+              type: 'agentMessage',
+              id: 'item-1',
+              text: mode === 'credential-telemetry'
+                ? 'Bearer credential-message-secret'
+                : 'Fake task completed.',
+              phase: null,
+              memoryCitation: null
+            }
+          } });
+          send({ method: 'turn/completed', params: {
+            threadId: 'thread-1',
+            turn: turn('completed')
+          } });
+        };
+        if (mode === 'credential-telemetry') {
+          setTimeout(finishAgentMessage, 120);
+        } else {
+          finishAgentMessage();
+        }
       }, 10);
       break;
     case 'turn/interrupt':
@@ -2639,6 +5117,12 @@ rl.on('line', (line) => {
         }
       }
       send({ id: message.id, result: {} });
+      if (mode === 'scoped-interrupt-terminal-race') {
+        send({ method: 'turn/completed', params: {
+          threadId: 'thread-1',
+          turn: turn('interrupted')
+        } });
+      }
       break;
     default:
       send({ id: message.id, error: { code: -32601, message: 'unsupported' } });

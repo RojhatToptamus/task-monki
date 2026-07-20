@@ -223,14 +223,14 @@ export class DiscourseRuntimeCoordinator {
         owner,
         sessionId,
         epoch: 1,
-        providerId: job.assignment.providerId,
+        runtimeId: job.assignment.runtimeId,
         model,
         executionContext: input.executionContext,
         createdAt: job.createdAt
       }),
       executionContext: input.executionContext,
       clientOperationId: `${input.clientOperationId}:session`,
-      provider: job.assignment.providerId,
+      runtimeId: job.assignment.runtimeId,
       role: 'PRIMARY',
       relationshipState: 'ROOT',
       status: 'NOT_MATERIALIZED',
@@ -1419,7 +1419,12 @@ export class DiscourseRuntimeCoordinator {
           waveId: job.waveId,
           jobId: job.id,
           contextSnapshotId: job.contextSnapshotId,
-          ...(job.targetMessageIds[0] ? { replyToMessageId: job.targetMessageIds[0] } : {}),
+          ...(job.targetMessageIds[0]
+            ? {
+                replyToMessageId: job.targetMessageIds[0],
+                supersedesMessageId: job.targetMessageIds[0]
+              }
+            : {}),
           sourceMessageIds: job.visibleMessageIds,
           freshnessAtCompletion: input.freshnessAtCompletion,
           clientOperationId: `${input.clientOperationId}:message`

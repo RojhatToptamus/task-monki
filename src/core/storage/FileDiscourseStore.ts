@@ -489,6 +489,12 @@ export class FileDiscourseStore implements DiscourseStore {
         createdAt: requireTimestamp(this.now())
       };
       assertMessageAgainstHeaders(loaded, message);
+      if (input.supersedesMessageId) {
+        const superseded = loaded.messageHeaders.get(input.supersedesMessageId);
+        if (!superseded || superseded.status !== 'VISIBLE') {
+          throw new Error('Only a visible discourse message can be corrected.');
+        }
+      }
       const conversation: DiscourseConversationRecord = {
         ...loaded.aggregate.conversation,
         latestOrdinal: message.ordinal,
@@ -499,7 +505,11 @@ export class FileDiscourseStore implements DiscourseStore {
         kind: 'AGENT_MESSAGE_APPENDED',
         operationId,
         requestFingerprint: fingerprint,
-        payload: toJsonValue({ message, conversation })
+        payload: toJsonValue({
+          message,
+          conversation,
+          supersededMessageId: input.supersedesMessageId ?? null
+        })
       });
       if (event.sequence <= loaded.aggregate.latestEventSequence) {
         return requireEventMessage(event);
@@ -1776,7 +1786,7 @@ function validateLoaded(loaded: LoadedConversation): void {
       revision.stableParticipantId !== participant.id ||
       revision.agentProfileId !== participant.agentProfileId ||
       !revision.displayNameSnapshot.trim() ||
-      !revision.providerId.trim() ||
+      !revision.runtimeId.trim() ||
       !revision.model.trim() ||
       !/^[a-f0-9]{64}$/u.test(revision.roleContractHash)
     ) {
@@ -2167,7 +2177,7 @@ function assertParticipantSeed(input: CreateDiscourseConversationInput): void {
     if (
       !participantIds.has(revision.stableParticipantId) ||
       !revision.displayNameSnapshot.trim() ||
-      !revision.providerId.trim() ||
+      !revision.runtimeId.trim() ||
       !revision.model.trim() ||
       !/^[a-f0-9]{64}$/u.test(revision.roleContractHash) ||
       !Number.isSafeInteger(revision.revision) ||
@@ -2440,7 +2450,7 @@ function assertAssignmentsReferenceParticipants(
         agentProfileId: assignment.agentProfileId,
         profileRevision: assignment.profileRevision,
         displayNameSnapshot: assignment.displayNameSnapshot,
-        providerId: assignment.providerId,
+        runtimeId: assignment.runtimeId,
         model: assignment.model,
         modelProvider: assignment.modelProvider,
         reasoningEffort: assignment.reasoningEffort,
@@ -2455,7 +2465,7 @@ function assertAssignmentsReferenceParticipants(
           agentProfileId: revision?.agentProfileId,
           profileRevision: revision?.profileRevision,
           displayNameSnapshot: revision?.displayNameSnapshot,
-          providerId: revision?.providerId,
+          runtimeId: revision?.runtimeId,
           model: revision?.model,
           modelProvider: revision?.modelProvider,
           reasoningEffort: revision?.reasoningEffort,

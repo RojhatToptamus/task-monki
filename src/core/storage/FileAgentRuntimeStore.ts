@@ -1261,7 +1261,9 @@ export class FileAgentRuntimeStore implements AgentRuntimeStore {
       this.state = emptyState();
       await this.persist(this.state);
     }
-    await this.protocolJournal.reconcile(this.state.servers.map((server) => server.id));
+    await this.protocolJournal.reconcileServers(
+      this.state.servers.map((server) => server.id)
+    );
     await this.reconcileArtifacts();
   }
 
@@ -1529,7 +1531,7 @@ function migrateRuntimeSchemaV1(value: unknown): AgentRuntimeStoreState {
       owner: session.owner,
       sessionId: session.id,
       epoch: session.accessEpoch?.epoch,
-      providerId: session.provider,
+      runtimeId: session.runtimeId,
       model: executionContext.modelSettings?.model ?? session.accessEpoch?.model,
       executionContext,
       createdAt: session.accessEpoch?.createdAt
@@ -1823,7 +1825,7 @@ function assertAgentServer(server: AgentServerInstance): void {
     if (timestamp !== undefined) requireTimestamp(timestamp);
   }
   if (
-    !server.provider ||
+    !server.runtimeId ||
     !server.runtimeKind ||
     !server.transport ||
     !SERVER_STATUSES.has(server.status) ||
@@ -1868,7 +1870,7 @@ function requireSession(state: AgentRuntimeStoreState, sessionId: string): Agent
 function assertExecutionContextMatchesEpoch(
   session: Pick<
     AgentRuntimeSessionRecord,
-    'id' | 'owner' | 'provider' | 'requestedSettings' | 'executionContext' | 'accessEpoch'
+    'id' | 'owner' | 'runtimeId' | 'requestedSettings' | 'executionContext' | 'accessEpoch'
   >
 ): void {
   const model = session.requestedSettings.model;
@@ -1877,7 +1879,7 @@ function assertExecutionContextMatchesEpoch(
     owner: session.owner,
     sessionId: session.id,
     epoch: session.accessEpoch.epoch,
-    providerId: session.provider,
+    runtimeId: session.runtimeId,
     model,
     executionContext: session.executionContext,
     createdAt: session.accessEpoch.createdAt

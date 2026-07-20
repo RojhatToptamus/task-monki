@@ -190,7 +190,7 @@ function createWorktreeRecord(dir: string, baseSha: string): WorktreeRecord {
     id: 'worktree-1',
     taskId: 'task-1',
     iterationId: 'iteration-1',
-    repositoryPath: dir,
+    repositoryId: dir,
     worktreePath: dir,
     branchName: 'main',
     baseSha,

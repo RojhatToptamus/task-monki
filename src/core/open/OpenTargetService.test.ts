@@ -1,3 +1,5 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -16,6 +18,24 @@ describe('OpenTargetService', () => {
   it('provides an icon reader in the shared Node host', () => {
     expect(createNodeOpenTargetHost().getFileIconDataUrl).toEqual(expect.any(Function));
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses descriptor copy when the selected file is replaced by a symlink',
+    async () => {
+      const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-open-copy-'));
+      const worktree = path.join(directory, 'worktree');
+      const outside = path.join(directory, 'outside.txt');
+      const selected = path.join(worktree, 'selected.txt');
+      await fs.mkdir(worktree);
+      await fs.writeFile(outside, 'outside secret', 'utf8');
+      await fs.symlink(outside, selected);
+
+      await expect(
+        createNodeOpenTargetHost().readFile(selected, worktree, 512 * 1024)
+      ).rejects.toThrow('could not be opened safely');
+      await expect(fs.readFile(outside, 'utf8')).resolves.toBe('outside secret');
+    }
+  );
 
   it('detects an editor from PATH and opens a worktree file with line and column', async () => {
     const host = new FakeOpenTargetHost({
@@ -381,7 +401,7 @@ describe('OpenTargetService', () => {
     ]);
   });
 
-  it('rejects repository ids that are not recorded by Task Monki', async () => {
+  it('rejects repository targets that are not recorded by Task Monki', async () => {
     const service = new OpenTargetService(new FakeOpenTargetHost({
       '/repo': directory(),
       '/outside': directory(),
@@ -393,12 +413,12 @@ describe('OpenTargetService', () => {
         {
           target: {
             type: 'repository',
-            repositoryId: 'forged-repository'
+            repositoryId: 'outside-repository'
           }
         },
         testContext()
       )
-    ).rejects.toThrow(/Unknown repository id/);
+    ).rejects.toThrow(/not recorded/);
   });
 
   it('copies safe UTF-8 files but blocks binary contents', async () => {
@@ -554,13 +574,7 @@ function testContext(input: { repositoryPath?: string; worktreePath?: string } =
   const repositoryPath = input.repositoryPath ?? '/repo';
   const worktreePath = input.worktreePath ?? '/worktree';
   return {
-    snapshot: testSnapshot({ repositoryPath, worktreePath }),
-    resolveRepositoryPath: async (repositoryId: string) => {
-      if (repositoryId !== 'repository-1') {
-        throw new Error(`Unknown repository id: ${repositoryId}`);
-      }
-      return repositoryPath;
-    }
+    snapshot: testSnapshot({ repositoryPath, worktreePath })
   };
 }
 
@@ -570,12 +584,25 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
   const worktree = testWorktree({ repositoryPath, worktreePath });
   return {
     schemaVersion: TASK_STORE_SCHEMA_VERSION,
+    repositories: [
+      {
+        id: 'repository-1',
+        name: 'repo',
+        path: repositoryPath,
+        status: 'AVAILABLE',
+        remotes: [],
+        createdAt: '2026-07-05T00:00:00.000Z',
+        updatedAt: '2026-07-05T00:00:00.000Z'
+      }
+    ],
+    boards: [],
     tasks: [
       {
         id: 'task-1',
+        runtimeId: 'codex',
         title: 'Task',
         prompt: 'Do it',
-        repositoryPath,
+        repositoryId: 'repository-1',
         workflowPhase: 'REVIEW',
         resolution: 'NONE',
         completionPolicy: 'LOCAL_ACCEPTANCE',
@@ -607,6 +634,16 @@ function testSnapshot(input: { repositoryPath?: string; worktreePath?: string } 
     agentSettingsObservations: [],
     agentSubagentObservations: [],
     interactionRequests: [],
+    previewPlans: [],
+    previewLocalBindings: [],
+    previewApprovals: [],
+    previewComposeProjects: [],
+    previewGenerations: [],
+    previewManagedEnvironments: [],
+    previewManagedResources: [],
+    previewGenerationAttachments: [],
+    previewNodeAttempts: [],
+    previewResources: [],
     events: [],
     artifacts: [],
     attachments: []
@@ -618,7 +655,7 @@ function testWorktree(input: { repositoryPath?: string; worktreePath?: string } 
     id: 'worktree-1',
     taskId: 'task-1',
     iterationId: 'iteration-1',
-    repositoryPath: input.repositoryPath ?? '/repo',
+    repositoryId: 'repository-1',
     worktreePath: input.worktreePath ?? '/worktree',
     branchName: 'codex/task',
     baseSha: 'abc123',

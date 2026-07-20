@@ -8,6 +8,7 @@ import type {
   ReviewRollupRecord,
   Task
 } from '../../shared/contracts';
+import { getImplementationRetryReason } from '../../shared/contracts';
 import { buildFailingChecksInvestigationPromptTemplate } from '../../shared/promptTemplates';
 
 export type PrStatusTone = 'neutral' | 'info' | 'action' | 'success' | 'error';
@@ -40,6 +41,7 @@ export interface PrStatusViewModel {
   kind: PrStatusKind;
   headline: string;
   tone: PrStatusTone;
+  overviewRelevant: boolean;
   hasPullRequest: boolean;
   prNumber?: number;
   prUrl?: string;
@@ -82,14 +84,21 @@ export interface PrCheckGroup {
   defaultOpen: boolean;
 }
 
+const NO_TASK_CHANGES_PR_REASON =
+  'Run implementation or make a task change before opening a PR.';
+
 export function buildPrStatusActionState(input: {
   view: PrStatusViewModel;
   deliveryBusy?: boolean;
   pauseReason?: PrStatusActionPauseReason;
+  implementationRetryReason?: string;
   hasInvestigationSource?: boolean;
 }): PrStatusActionState {
   const busyReason = input.deliveryBusy ? 'GitHub action is in progress.' : undefined;
-  const mutationPauseReason = busyReason ?? prStatusPauseText(input.pauseReason);
+  const mutationPauseReason =
+    busyReason ??
+    prStatusPauseText(input.pauseReason) ??
+    input.implementationRetryReason;
   const missingInvestigationSource =
     input.view.canInvestigateFailure && !input.hasInvestigationSource
       ? 'No completed run is available.'
@@ -123,6 +132,10 @@ export function buildPrStatusCreateOrPushTitle(
 ): string | undefined {
   const visibleReason = view.leadLine ?? view.freshnessLine ?? view.guidanceLine;
   return createOrPushReason === visibleReason ? undefined : createOrPushReason;
+}
+
+export function shouldShowPrStatusOnOverview(view: PrStatusViewModel): boolean {
+  return view.overviewRelevant;
 }
 
 function prStatusPauseText(reason: PrStatusActionPauseReason | undefined): string | undefined {
@@ -164,6 +177,7 @@ export function buildPrStatusViewModel(input: {
       kind: 'NO_PR',
       headline: 'No PR',
       tone: 'neutral',
+      overviewRelevant: createDraftPr.overviewRelevant,
       hasPullRequest: false,
       leadLine: createDraftPr.line,
       canCreateDraftPr: createDraftPr.showAction,
@@ -258,6 +272,7 @@ export function buildPrStatusViewModel(input: {
       kind: 'UNKNOWN',
       headline: 'Unknown',
       tone: 'neutral',
+      overviewRelevant: true,
       hasPullRequest: true,
       prNumber: pr.number,
       prUrl: pr.url,
@@ -318,10 +333,27 @@ function createDraftPrAvailability(
   task: Task,
   gitSnapshot?: GitSnapshotRecord,
   branchPublication?: BranchPublicationRecord
-): { showAction: boolean; line?: string; disabledReason?: string } {
+): {
+  showAction: boolean;
+  overviewRelevant: boolean;
+  line?: string;
+  disabledReason?: string;
+} {
+  const retryReason = getImplementationRetryReason(task);
+  if (retryReason) {
+    return {
+      showAction: true,
+      overviewRelevant: true,
+      line: retryReason,
+      disabledReason: retryReason
+    };
+  }
   if (task.projection.worktree !== 'PRESENT') {
     return {
       showAction: false,
+      overviewRelevant: ['LOCKED', 'PRUNABLE', 'MISSING', 'ERROR', 'UNKNOWN'].includes(
+        task.projection.worktree
+      ),
       line: 'A worktree is required before a draft PR can be opened.',
       disabledReason: 'A worktree is required before a draft PR can be opened.'
     };
@@ -330,6 +362,7 @@ function createDraftPrAvailability(
   if (branchPublication?.status === 'PUSHING') {
     return {
       showAction: true,
+      overviewRelevant: true,
       line: 'Branch publication is already in progress.',
       disabledReason: 'Branch publication is already in progress.'
     };
@@ -338,12 +371,14 @@ function createDraftPrAvailability(
     if (isRemoteNewerPublicationError(branchPublication.error)) {
       return {
         showAction: true,
+        overviewRelevant: true,
         line: branchPublication.error,
         disabledReason: branchPublication.error
       };
     }
     return {
       showAction: true,
+      overviewRelevant: true,
       line: `Last push failed: ${branchPublication.error}`
     };
   }
@@ -353,22 +388,25 @@ function createDraftPrAvailability(
       case 'DIRTY':
       case 'COMMITTED_UNPUSHED':
       case 'PUSHED':
-        return { showAction: true };
+        return { showAction: true, overviewRelevant: true };
       case 'CLEAN':
         return {
           showAction: true,
-          line: 'Run implementation or make a task change before opening a PR.',
-          disabledReason: 'Run implementation or make a task change before opening a PR.'
+          overviewRelevant: false,
+          line: NO_TASK_CHANGES_PR_REASON,
+          disabledReason: NO_TASK_CHANGES_PR_REASON
         };
       case 'CONFLICTED':
         return {
           showAction: true,
+          overviewRelevant: true,
           line: 'Resolve Git conflicts before opening a PR.',
           disabledReason: 'Resolve Git conflicts before opening a PR.'
         };
       case 'DIVERGED':
         return {
           showAction: true,
+          overviewRelevant: true,
           line: 'Sync the branch before opening a PR.',
           disabledReason: 'Sync the branch before opening a PR.'
         };
@@ -376,12 +414,14 @@ function createDraftPrAvailability(
       case 'UNKNOWN':
         return {
           showAction: true,
+          overviewRelevant: true,
           line: 'Git status must be available before opening a PR.',
           disabledReason: 'Git status must be available before opening a PR.'
         };
       case 'NOT_INSPECTED':
         return {
           showAction: true,
+          overviewRelevant: false,
           line: 'Refresh Git evidence before opening a PR.',
           disabledReason: 'Refresh Git evidence before opening a PR.'
         };
@@ -391,6 +431,7 @@ function createDraftPrAvailability(
   if (gitSnapshot.conflictedCount > 0 || gitSnapshot.status === 'CONFLICTED') {
     return {
       showAction: true,
+      overviewRelevant: true,
       line: 'Resolve Git conflicts before opening a PR.',
       disabledReason: 'Resolve Git conflicts before opening a PR.'
     };
@@ -398,6 +439,7 @@ function createDraftPrAvailability(
   if (gitSnapshot.status === 'DIVERGED' || gitSnapshot.behindCount > 0) {
     return {
       showAction: true,
+      overviewRelevant: true,
       line: 'Sync the branch before opening a PR.',
       disabledReason: 'Sync the branch before opening a PR.'
     };
@@ -405,6 +447,7 @@ function createDraftPrAvailability(
   if (gitSnapshot.status === 'UNAVAILABLE' || gitSnapshot.status === 'UNKNOWN') {
     return {
       showAction: true,
+      overviewRelevant: true,
       line: 'Git status must be available before opening a PR.',
       disabledReason: 'Git status must be available before opening a PR.'
     };
@@ -418,13 +461,14 @@ function createDraftPrAvailability(
   const hasCommittedTaskDiff =
     gitSnapshot.commitsAheadOfBase > 0 && gitSnapshot.committedDiffFileCount > 0;
   if (workingChangeCount > 0 || hasCommittedTaskDiff) {
-    return { showAction: true };
+    return { showAction: true, overviewRelevant: true };
   }
 
   return {
     showAction: true,
-    line: 'Run implementation or make a task change before opening a PR.',
-    disabledReason: 'Run implementation or make a task change before opening a PR.'
+    overviewRelevant: false,
+    line: NO_TASK_CHANGES_PR_REASON,
+    disabledReason: NO_TASK_CHANGES_PR_REASON
   };
 }
 

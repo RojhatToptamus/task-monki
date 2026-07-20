@@ -1,0 +1,445 @@
+import { describe, expect, it } from 'vitest';
+import {
+  decodeAcpMessage,
+  flattenSelectOptions,
+  mergeAcpToolCallUpdate,
+  parseConfigOptions,
+  parseInitializeResponse,
+  parseInitializeModelExtension,
+  parseNewSessionResponse,
+  parseParameterizedModelCatalog,
+  parsePermissionRequest,
+  parseSessionModelExtension,
+  parseSessionModelUpdateExtension,
+  parseSessionNotification
+} from './AcpProtocol';
+
+describe('ACP stable-v1 protocol codec', () => {
+  it('merges sparse permission tool calls with the prior tool state', () => {
+    const merged = mergeAcpToolCallUpdate(
+      {
+        toolCallId: 'tool-1',
+        title: '`npm test`',
+        kind: 'execute',
+        status: 'in_progress',
+        rawInput: { command: 'npm test' },
+        unrelated: 'discarded'
+      },
+      {
+        toolCallId: 'tool-1',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'Not in allowlist' } }
+        ]
+      }
+    );
+
+    expect(merged).toEqual({
+      toolCallId: 'tool-1',
+      title: '`npm test`',
+      kind: 'execute',
+      status: 'in_progress',
+      content: [
+        { type: 'content', content: { type: 'text', text: 'Not in allowlist' } }
+      ],
+      rawInput: { command: 'npm test' }
+    });
+    expect(merged).not.toHaveProperty('unrelated');
+  });
+
+  it('respects explicit null fields in sparse tool-call updates', () => {
+    expect(
+      mergeAcpToolCallUpdate(
+        { toolCallId: 'tool-1', title: 'Old title', locations: [{ path: 'old' }] },
+        { toolCallId: 'tool-1', title: null, locations: null }
+      )
+    ).toEqual({ toolCallId: 'tool-1', title: null, locations: null });
+  });
+
+  it('requires JSON-RPC 2.0 envelopes', () => {
+    expect(() => decodeAcpMessage('{"id":1,"result":{}}')).toThrow(
+      'JSON-RPC 2.0'
+    );
+    expect(
+      decodeAcpMessage('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}')
+    ).toMatchObject({ id: 1, method: 'initialize' });
+  });
+
+  it('validates known initialize capabilities without interpreting opaque metadata', () => {
+    const metadata = { providerExtension: { nested: ['opaque'] } };
+    expect(
+      parseInitializeResponse({
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, _meta: metadata },
+          sessionCapabilities: { resume: {}, _meta: metadata },
+          _meta: metadata
+        }
+      }).agentCapabilities
+    ).toMatchObject({
+      loadSession: true,
+      promptCapabilities: { image: true, _meta: metadata },
+      sessionCapabilities: { resume: {}, _meta: metadata },
+      _meta: metadata
+    });
+    expect(() =>
+      parseInitializeResponse({
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: 'yes' }
+      })
+    ).toThrow('agentCapabilities.loadSession must be a boolean');
+  });
+
+  it('preserves native grouped config selectors and metadata', () => {
+    const options = parseConfigOptions([
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'gemini-pro',
+        options: [
+          {
+            group: 'google',
+            name: 'Google',
+            options: [
+              {
+                value: 'gemini-pro',
+                name: 'Gemini Pro',
+                _meta: { context: 1000000 }
+              }
+            ]
+          }
+        ],
+        _meta: { providerOwned: true }
+      }
+    ]);
+    expect(options?.[0]).toMatchObject({
+      id: 'model',
+      category: 'model',
+      currentValue: 'gemini-pro',
+      _meta: { providerOwned: true }
+    });
+    const model = options?.[0];
+    expect(model?.type).toBe('select');
+    if (model?.type === 'select') {
+      expect(flattenSelectOptions(model)).toEqual([
+        expect.objectContaining({ value: 'gemini-pro', _meta: { context: 1000000 } })
+      ]);
+    }
+  });
+
+  it('keeps provider session-model fields outside the stable-v1 setup schema', () => {
+    const setup = parseNewSessionResponse({
+      sessionId: 'session-1',
+      models: { incompatibleVendorShape: true },
+      _meta: { providerOwned: true }
+    });
+    expect(setup).toEqual({
+      sessionId: 'session-1',
+      modes: null,
+      configOptions: null,
+      _meta: { providerOwned: true }
+    });
+    expect(setup).not.toHaveProperty('models');
+  });
+
+  it('parses Cursor parameterized models with their native config options', () => {
+    expect(
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'claude-4.6[thinking=true]',
+            name: 'Claude 4.6',
+            configOptions: [
+              {
+                id: 'thinking',
+                name: 'Thinking',
+                type: 'boolean',
+                currentValue: true
+              }
+            ]
+          },
+          { value: 'auto', name: 'Auto' }
+        ]
+      })
+    ).toEqual({
+      models: [
+        {
+          value: 'claude-4.6[thinking=true]',
+          name: 'Claude 4.6',
+          configOptions: [
+            expect.objectContaining({
+              id: 'thinking',
+              type: 'boolean',
+              currentValue: true
+            })
+          ]
+        },
+        { value: 'auto', name: 'Auto' }
+      ]
+    });
+  });
+
+  it('rejects empty, malformed, and duplicate Cursor model IDs', () => {
+    expect(() => parseParameterizedModelCatalog({ models: [] })).toThrow('no models');
+    expect(() =>
+      parseParameterizedModelCatalog({ models: [{ value: '  ', name: 'Auto' }] })
+    ).toThrow('model is invalid');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          { value: 'auto', name: 'Auto' },
+          { value: 'auto', name: 'Automatic' }
+        ]
+      })
+    ).toThrow('duplicate model IDs');
+  });
+
+  it('rejects malformed or duplicate Cursor model config options', () => {
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [{ value: 'auto', name: 'Auto', configOptions: null }]
+      })
+    ).toThrow('configOptions must be an array');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'auto',
+            name: 'Auto',
+            configOptions: [
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: 'yes' }
+            ]
+          }
+        ]
+      })
+    ).toThrow('unsupported shape');
+    expect(() =>
+      parseParameterizedModelCatalog({
+        models: [
+          {
+            value: 'auto',
+            name: 'Auto',
+            configOptions: [
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: true },
+              { id: 'mode', name: 'Mode', type: 'boolean', currentValue: false }
+            ]
+          }
+        ]
+      })
+    ).toThrow('duplicate option IDs');
+  });
+
+  it('parses the captured Grok model catalog only through the explicit extension codec', () => {
+    const models = parseSessionModelExtension(
+      {
+        sessionId: '4da7bbcf-21ef-4748-81cf-84c4960b2370',
+        models: {
+          currentModelId: 'grok-build',
+          availableModels: [
+            {
+              modelId: 'grok-composer-2.5-fast',
+              name: 'Composer 2.5',
+              description: 'Cursor latest coding model'
+            },
+            {
+              modelId: 'grok-build',
+              name: 'Grok Build',
+              description: 'Best for advanced coding tasks'
+            }
+          ]
+        },
+        _meta: { providerOwned: true }
+      },
+      'models'
+    );
+    expect(models).toMatchObject({
+      currentModelId: 'grok-build',
+      availableModels: [
+        { modelId: 'grok-composer-2.5-fast', name: 'Composer 2.5' },
+        { modelId: 'grok-build', name: 'Grok Build' }
+      ]
+    });
+  });
+
+  it('parses the captured Grok initialize catalog only through the explicit metadata extension', () => {
+    expect(
+      parseInitializeModelExtension(
+        {
+          protocolVersion: 1,
+          agentCapabilities: {},
+          _meta: {
+            modelState: {
+              currentModelId: 'grok-build',
+              availableModels: [
+                { modelId: 'grok-composer-2.5-fast', name: 'Composer 2.5' },
+                { modelId: 'grok-build', name: 'Grok Build' }
+              ]
+            }
+          }
+        },
+        'modelState'
+      )
+    ).toMatchObject({
+      currentModelId: 'grok-build',
+      availableModels: [
+        { modelId: 'grok-composer-2.5-fast' },
+        { modelId: 'grok-build' }
+      ]
+    });
+  });
+
+  it('parses Grok model updates with exact reasoning metadata', () => {
+    expect(
+      parseSessionModelUpdateExtension({
+        currentModelId: 'grok-4.5',
+        availableModels: [
+          {
+            modelId: 'grok-4.5',
+            name: 'Grok 4.5',
+            description: 'Frontier model',
+            _meta: {
+              supportsReasoningEffort: true,
+              reasoningEffort: 'low',
+              reasoningEfforts: [
+                {
+                  id: 'high',
+                  value: 'high',
+                  label: 'High Effort',
+                  description: 'Extensive reasoning',
+                  default: true
+                },
+                {
+                  id: 'low',
+                  value: 'low',
+                  label: 'Low Effort',
+                  description: 'Fast implementation',
+                  default: false
+                }
+              ]
+            }
+          }
+        ]
+      })
+    ).toMatchObject({
+      currentModelId: 'grok-4.5',
+      availableModels: [
+        {
+          modelId: 'grok-4.5',
+          reasoningEffort: 'low',
+          reasoningEfforts: [
+            { id: 'high', value: 'high', default: true },
+            { id: 'low', value: 'low', default: false }
+          ]
+        }
+      ]
+    });
+  });
+
+  it('rejects inconsistent Grok reasoning metadata', () => {
+    expect(() =>
+      parseSessionModelUpdateExtension({
+        currentModelId: 'grok-4.5',
+        availableModels: [
+          {
+            modelId: 'grok-4.5',
+            name: 'Grok 4.5',
+            _meta: {
+              supportsReasoningEffort: true,
+              reasoningEffort: 'low',
+              reasoningEfforts: [
+                {
+                  id: 'high',
+                  value: 'high',
+                  label: 'High Effort',
+                  default: true
+                }
+              ]
+            }
+          }
+        ]
+      })
+    ).toThrow('duplicate or inconsistent values');
+  });
+
+  it('rejects model state whose current ID was not advertised', () => {
+    expect(() =>
+      parseSessionModelExtension(
+        {
+          sessionId: 'session-1',
+          models: {
+            currentModelId: 'unadvertised',
+            availableModels: [{ modelId: 'grok-build', name: 'Grok Build' }]
+          }
+        },
+        'models'
+      )
+    ).toThrow('unadvertised model IDs');
+  });
+
+  it('retains opaque permission option IDs for every semantic kind', () => {
+    const permission = parsePermissionRequest({
+      sessionId: 'session-1',
+      toolCall: { toolCallId: 'tool-1', title: 'Run tests', kind: 'execute' },
+      options: [
+        { optionId: 'opaque-a', name: 'Once', kind: 'allow_once' },
+        { optionId: 'opaque-b', name: 'Always', kind: 'allow_always' },
+        { optionId: 'opaque-c', name: 'Reject', kind: 'reject_once' },
+        { optionId: 'opaque-d', name: 'Never', kind: 'reject_always' }
+      ],
+      _meta: { provider: 'native' }
+    });
+    expect(permission.options.map((option) => option.optionId)).toEqual([
+      'opaque-a',
+      'opaque-b',
+      'opaque-c',
+      'opaque-d'
+    ]);
+    expect(permission._meta).toEqual({ provider: 'native' });
+  });
+
+  it('rejects duplicate permission option IDs before they become ambiguous', () => {
+    expect(() =>
+      parsePermissionRequest({
+        sessionId: 'session-1',
+        toolCall: { toolCallId: 'tool-1', title: 'Edit file', kind: 'edit' },
+        options: [
+          { optionId: 'allow', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'allow', name: 'Allow edits this session', kind: 'allow_always' }
+        ]
+      })
+    ).toThrow('duplicate option IDs');
+  });
+
+  it.each([
+    ['title', { title: { unsafe: true } }],
+    ['kind', { kind: 'shell' }],
+    ['content', { content: { type: 'text' } }],
+    ['locations', { locations: '/tmp/file' }]
+  ])('rejects an invalid permission tool-call %s', (_field, invalidField) => {
+    expect(() =>
+      parsePermissionRequest({
+        sessionId: 'session-1',
+        toolCall: { toolCallId: 'tool-1', ...invalidField },
+        options: [{ optionId: 'allow', name: 'Allow once', kind: 'allow_once' }]
+      })
+    ).toThrow('permission tool call is invalid');
+  });
+
+  it('validates typed session updates while retaining unknown extension fields', () => {
+    const notification = parseSessionNotification({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'provider_custom_update',
+        nested: { exact: true },
+        _meta: { extension: 'x' }
+      }
+    });
+    expect(notification.update).toEqual({
+      sessionUpdate: 'provider_custom_update',
+      nested: { exact: true },
+      _meta: { extension: 'x' }
+    });
+  });
+});

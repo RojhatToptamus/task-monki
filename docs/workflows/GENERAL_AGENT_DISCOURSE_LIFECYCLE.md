@@ -1,6 +1,6 @@
 # General Agent Discourse Lifecycle
 
-Date: 2026-07-13
+Date: 2026-07-20
 
 This document is the source of truth for Task Monki's global Discourse
 workspace: human conversation, global mentions, Direct and Panel responses,
@@ -18,10 +18,10 @@ Task Monki is authoritative for:
 - queue, delivery, cancellation, recovery, and curated completion state;
 - whether an agent result is eligible to become a visible message or concern.
 
-Codex is authoritative only for its own process, thread, turn, item, model,
-settings, tool, and usage events. Provider output is untrusted telemetry until
-Task Monki validates and persists it. Discourse does not create a hidden task,
-worktree, iteration, or task workflow transition.
+Each selected agent runtime is authoritative only for its own process, session,
+turn, item, model, settings, tool, and usage events. Provider output is
+untrusted telemetry until Task Monki validates and persists it. Discourse does
+not create a hidden task, worktree, iteration, or task workflow transition.
 
 Curated conversation state lives in `FileDiscourseStore`. Owner-neutral
 provider sessions, runs, queue entries, artifacts, diagnostics, and protocol
@@ -83,6 +83,11 @@ Stored Git snapshots alone do not prove freshness between Team phases.
 - Gives every panelist the same frozen initial transcript and context snapshot.
 - Runs panelists independently. One panelist never sees another panelist's
   answer, and one failure does not erase successful answers.
+- Applies complementary versioned decision lenses: Lead owns the actionable
+  operating path, Skeptic develops the strongest counter-position or boundary
+  condition, and Verifier audits the decisive evidence boundary. Agreement is
+  allowed, but panelists must contribute distinct reasoning instead of
+  paraphrasing the likely consensus.
 
 `Team`
 
@@ -97,9 +102,12 @@ Choosing Team or No agents removes stale agent-recipient mentions. Task and
 repository mentions remain intact.
 
 Before an agent-directed send is persisted, every selected participant is
-revalidated against live provider availability and the exact model, reasoning,
-and service-tier settings in its immutable participant revision. Drift blocks
-the send; Task Monki does not silently reroute a historical participant.
+revalidated against live runtime availability, a scoped-runtime binding, and
+the exact model, model-provider, reasoning, and service-tier settings in its
+immutable participant revision. Drift blocks the send; Task Monki does not
+silently reroute a historical participant. Role contracts are versioned, and a
+historical participant continues to receive the contract version recorded in
+its revision.
 
 ## Wave ordering and waiting
 
@@ -109,12 +117,15 @@ earlier wave is active, but it is not dispatched until the earlier wave settles.
 This preserves conversational order. At most eight non-settled waves can exist
 in one conversation.
 
-All task and discourse turns share one durable scheduler. The scheduler permits
-two active turns globally, no more than two for one conversation, and one per
-provider session. Task foreground work has higher initial priority; bounded
-aging and owner fairness prevent discourse starvation. A queue lease represents
-capacity, not completion, and remains owned until authoritative terminal or
-recovery resolution.
+Discourse turns use one durable owner-neutral scheduler. It permits two active
+Discourse turns, no more than two for one conversation, and one per runtime
+session. Dispatch checkpoints for jobs in one wave are serialized so their
+shared wave revision cannot race; provider turns run concurrently after their
+starts are acknowledged. Owner fairness and bounded aging apply within this
+queue. Task implementation dispatch remains owned by `AgentOrchestrator`; the
+current release does not claim one aggregate task-plus-Discourse capacity cap.
+A queue lease represents capacity, not completion, and remains owned until
+authoritative terminal or recovery resolution.
 
 ## Team review and correction
 
@@ -141,9 +152,11 @@ gets one fresh correction session containing the original answer and only those
 eligible concern IDs. The correction must return a structured outcome:
 revised, defended, partially revised, acknowledged unresolved, or abstained.
 A non-abstaining correction appends a new attributable answer linked to the
-original Lead answer. Concern resolutions point to the correction job and, when
-present, the correction message. Historical answers and reviewer records are
-never rewritten.
+original Lead answer. The original remains in transcript order with
+`SUPERSEDED` status, while the replacement records `supersedesMessageId` so the
+UI can label the history as corrected without rewriting it. Concern resolutions
+point to the correction job and, when present, the correction message.
+Historical answers and reviewer records are never deleted.
 
 The UI always leaves a durable review receipt. A silent successful review says
 that both reviewers found no material concerns with complete access. Partial,
@@ -169,6 +182,10 @@ Stop intent is durable before provider interruption:
 - an undispatched queued wave is canceled only after its runtime run is proven
   not delivered and its queue entry is canceled;
 - an active wave persists interrupt-send state before `turn/interrupt`;
+- an acknowledged interrupt has a bounded terminal deadline; an authoritative
+  provider terminal wins a concurrent acknowledgement checkpoint, while a
+  missing terminal becomes recovery-required instead of leaving the UI in
+  Stopping indefinitely;
 - an ambiguous start or interrupt becomes recovery-required and is never
   automatically replayed.
 
@@ -180,9 +197,29 @@ silently duplicated.
 
 On restart, Task Monki repairs cross-store links, queued cancellations,
 terminal-before-curated-message crashes, lost queue linkage, and provably
-undelivered starts. The global scheduler stays latched while a leased turn still
+undelivered starts. The Discourse scheduler stays latched while a leased turn still
 needs reconciliation. No recovery path replays a provider mutation without
 proof that it was not delivered.
+
+## Runtime compatibility
+
+Discourse execution is routed by immutable `runtimeId` through
+`AgentScopedTurnRouter`. There is no default-runtime fallback. A runtime appears
+as available only when its adapter supplies an exact scoped binding that can:
+
+- build and attest the read-only, offline execution context;
+- start and interrupt a turn owned by a Discourse session/run;
+- correlate deltas, terminal output, and recovery-required events back to that
+  exact run.
+
+Codex currently implements this binding with an attested App Server permission
+profile. OpenCode and the registered ACP runtimes remain available for their
+normal task flows but are unavailable in Discourse because their current
+process boundaries cannot attest the required isolated read-only/offline scope.
+Task Monki does not weaken the policy, send through Codex as a substitute, or
+claim that executable discovery is sufficient. Adding another Discourse runtime
+requires implementing and testing the same scoped binding in that runtime's
+adapter.
 
 ## Storage, paging, and limits
 
@@ -217,7 +254,7 @@ Run `npm run dev:seed` before UI or workflow testing. The current authoritative
 discourse scenarios cover human-only messages, running Team work, partial
 Panel results, silent review success, author correction, queued follow-up,
 context reconfirmation, unavailable historical context, recovery-required
-delivery, paging, drafts, and archive.
+delivery, settled cancellation, paging, drafts, and archive.
 
 Changes to this lifecycle require focused storage/service/runtime tests plus:
 

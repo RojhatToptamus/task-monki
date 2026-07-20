@@ -4,9 +4,14 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
-  type AgentProviderState
+  type AgentRuntimeCatalog
 } from '../../shared/contracts';
 import { AppEventBus } from '../runner/AppEventBus';
+import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../agent/codex/codexCapabilities';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
 import type {
   AgentScopedTurnProvider,
@@ -33,18 +38,7 @@ describe('DiscourseService', () => {
     const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
     const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
     await Promise.all([taskStore.init(), discourseStore.init(), runtimeStore.init()]);
-    const repositories = {
-      snapshot: async () => ({ schemaVersion: 1, revision: 1, repositories: [] }),
-      catalog: async () => ({
-        revision: 1,
-        selectedRepositoryId: null,
-        defaultRepositoryId: null,
-        repositories: [],
-        taskAssociations: [],
-        refreshedAt: '2026-07-13T00:00:00.000Z'
-      })
-    };
-    const resolver = new DiscourseContextResolver(taskStore, repositories as never);
+    const resolver = new DiscourseContextResolver(taskStore);
     const snapshots = new DiscourseContextSnapshotService(
       resolver,
       new DiscourseWorkspace(path.join(root, 'workspaces')),
@@ -77,7 +71,7 @@ describe('DiscourseService', () => {
       resolver,
       new AppEventBus(),
       {
-        getProviderState: providerState,
+        getRuntimeCatalog: runtimeCatalog,
         getAppSettings: () => DEFAULT_TASK_MANAGER_APP_SETTINGS,
         now: () => '2026-07-13T00:01:00.000Z',
         runtime: {
@@ -489,21 +483,30 @@ describe('DiscourseService', () => {
   });
 
   it('revalidates provider availability for existing participants before persisting a send', async () => {
-    let currentProviderState = providerState();
-    const fixture = await serviceFixture('participant-provider-unavailable', () => currentProviderState);
+    let currentRuntimeCatalog = runtimeCatalog();
+    const fixture = await serviceFixture(
+      'participant-provider-unavailable',
+      () => currentRuntimeCatalog
+    );
     const conversation = await fixture.service.createConversation({
       title: 'Provider availability',
       defaultPolicy: 'DIRECT',
       participantProfileIds: ['builtin.lead'],
       clientOperationId: 'create-provider-availability'
     });
-    currentProviderState = {
-      ...currentProviderState,
-      preflight: {
-        ...currentProviderState.preflight,
-        ready: false,
-        problems: ['Sign in to Codex.']
-      }
+    const codex = currentRuntimeCatalog.runtimes[0]!;
+    currentRuntimeCatalog = {
+      ...currentRuntimeCatalog,
+      runtimes: [{
+        ...codex,
+        preflight: {
+          ...codex.preflight,
+          readiness: createRuntimeReadiness(
+            'AUTHENTICATION_REQUIRED',
+            'Sign in to Codex.'
+          )
+        }
+      }]
     };
     const preview = await fixture.service.previewContext({
       conversationId: conversation.id,
@@ -518,7 +521,9 @@ describe('DiscourseService', () => {
       policy: 'DIRECT',
       agentProfileIds: ['builtin.lead'],
       previewFingerprint: preview.fingerprint
-    })).rejects.toThrow('Sign in to Codex.');
+    })).rejects.toThrow(
+      'The selected agent is unavailable. Check its connection in Settings.'
+    );
 
     expect((await fixture.discourseStore.listMessages({
       conversationId: conversation.id,
@@ -528,14 +533,10 @@ describe('DiscourseService', () => {
   });
 
   it('rejects removed model, reasoning, or service-tier settings before persisting a send', async () => {
-    let currentProviderState: AgentProviderState = {
-      ...providerState(),
-      models: [{
-        ...providerState().models[0]!,
-        serviceTiers: ['fast'],
-        defaultServiceTier: 'fast'
-      }]
-    };
+    let currentProviderState: AgentRuntimeCatalog = runtimeCatalog({
+      serviceTiers: ['fast'],
+      defaultServiceTier: 'fast'
+    });
     const fixture = await serviceFixture('participant-model-unavailable', () => currentProviderState);
     const conversation = await fixture.service.createConversation({
       title: 'Immutable participant settings',
@@ -543,15 +544,11 @@ describe('DiscourseService', () => {
       participantProfileIds: ['builtin.lead'],
       clientOperationId: 'create-participant-model'
     });
-    currentProviderState = {
-      ...providerState(),
-      models: [{
-        ...providerState().models[0]!,
-        id: 'gpt-replacement',
-        model: 'gpt-replacement',
-        displayName: 'GPT Replacement'
-      }]
-    };
+    currentProviderState = runtimeCatalog({
+      id: 'gpt-replacement',
+      model: 'gpt-replacement',
+      displayName: 'GPT Replacement'
+    });
     const preview = await fixture.service.previewContext({
       conversationId: conversation.id,
       messageContext: []
@@ -575,27 +572,19 @@ describe('DiscourseService', () => {
     })).messages).toEqual([]);
     expect((await fixture.discourseStore.getConversation(conversation.id)).waves).toEqual([]);
 
-    currentProviderState = {
-      ...providerState(),
-      models: [{
-        ...providerState().models[0]!,
-        supportedReasoningEfforts: ['high'],
-        defaultReasoningEffort: 'high'
-      }]
-    };
+    currentProviderState = runtimeCatalog({
+      supportedReasoningEfforts: ['high'],
+      defaultReasoningEffort: 'high'
+    });
     await expect(fixture.service.sendMessage({
       ...request,
       clientMessageId: 'removed-reasoning-message'
     })).rejects.toThrow('medium reasoning is no longer supported by gpt-test');
 
-    currentProviderState = {
-      ...providerState(),
-      models: [{
-        ...providerState().models[0]!,
-        serviceTiers: ['slow'],
-        defaultServiceTier: 'slow'
-      }]
-    };
+    currentProviderState = runtimeCatalog({
+      serviceTiers: ['slow'],
+      defaultServiceTier: 'slow'
+    });
     await expect(fixture.service.sendMessage({
       ...request,
       clientMessageId: 'removed-service-tier-message'
@@ -784,10 +773,21 @@ describe('DiscourseService', () => {
       conversationId: conversation.id,
       limit: 100
     });
-    expect(messages.messages.map((message) => message.body)).toEqual([
-      'Is the migration reversible?',
-      'The migration is fully reversible.',
-      'The migration is one-way unless an explicit reverse migration is provided.'
+    expect(messages.messages).toMatchObject([
+      {
+        body: 'Is the migration reversible?',
+        status: 'VISIBLE'
+      },
+      {
+        body: 'The migration is fully reversible.',
+        status: 'SUPERSEDED'
+      },
+      {
+        body: 'The migration is one-way unless an explicit reverse migration is provided.',
+        status: 'VISIBLE',
+        replyToMessageId: messages.messages[1]!.id,
+        supersedesMessageId: messages.messages[1]!.id
+      }
     ]);
     expect((await fixture.runtimeStore.snapshot()).sessions).toHaveLength(4);
   }, 15_000);
@@ -795,25 +795,14 @@ describe('DiscourseService', () => {
 
 async function serviceFixture(
   label: string,
-  getProviderState: () => AgentProviderState = providerState
+  getRuntimeCatalog: () => AgentRuntimeCatalog = runtimeCatalog
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `task-monki-discourse-${label}-`));
   const taskStore = new FileTaskStore(path.join(root, 'tasks'));
   const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
   const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
   await Promise.all([taskStore.init(), discourseStore.init(), runtimeStore.init()]);
-  const repositories = {
-    snapshot: async () => ({ schemaVersion: 1, revision: 1, repositories: [] }),
-    catalog: async () => ({
-      revision: 1,
-      selectedRepositoryId: null,
-      defaultRepositoryId: null,
-      repositories: [],
-      taskAssociations: [],
-      refreshedAt: '2026-07-13T00:00:00.000Z'
-    })
-  };
-  const resolver = new DiscourseContextResolver(taskStore, repositories as never);
+  const resolver = new DiscourseContextResolver(taskStore);
   const snapshots = new DiscourseContextSnapshotService(
     resolver,
     new DiscourseWorkspace(path.join(root, 'workspaces')),
@@ -850,7 +839,7 @@ async function serviceFixture(
     resolver,
     new AppEventBus(),
     {
-      getProviderState,
+      getRuntimeCatalog,
       getAppSettings: () => DEFAULT_TASK_MANAGER_APP_SETTINGS,
       now: () => '2026-07-13T00:01:00.000Z',
       runtime: {
@@ -880,45 +869,35 @@ class SequentialScopedProvider implements AgentScopedTurnProvider {
   }
 }
 
-function providerState(): AgentProviderState {
+function runtimeCatalog(
+  modelOverrides: Partial<AgentRuntimeCatalog['models'][number]> = {}
+): AgentRuntimeCatalog {
+  const models = [{
+    id: 'codex:gpt-test',
+    runtimeId: 'codex',
+    modelProvider: 'openai',
+    model: 'gpt-test',
+    displayName: 'GPT Test',
+    hidden: false,
+    supportedReasoningEfforts: ['medium'],
+    defaultReasoningEffort: 'medium',
+    serviceTiers: [],
+    inputModalities: ['text'],
+    isDefault: true,
+    ...modelOverrides
+  }];
   return {
-    preflight: {
-      provider: 'codex',
-      ready: true,
-      capabilities: {
-        provider: 'codex',
-        modelCatalog: { maturity: 'stable' },
-        reasoningEffort: { maturity: 'stable' },
-        persistentSessions: { maturity: 'stable' },
-        sessionResume: { maturity: 'stable' },
-        sessionFork: { maturity: 'stable' },
-        activeTurnSteering: { maturity: 'stable' },
-        turnInterruption: { maturity: 'stable' },
-        truePause: { maturity: 'unsupported' },
-        interactiveApprovals: { maturity: 'stable' },
-        userInputRequests: { maturity: 'stable' },
-        goals: { maturity: 'stable' },
-        plans: { maturity: 'stable' },
-        review: { maturity: 'stable' },
-        subagents: { maturity: 'stable' },
-        backgroundTerminals: { maturity: 'stable' },
-        dynamicTools: { maturity: 'stable' }
+    defaultRuntimeId: 'codex',
+    runtimes: [{
+      preflight: {
+        runtime: CODEX_RUNTIME_DESCRIPTOR,
+        readiness: createRuntimeReadiness('READY', 'Codex is ready.'),
+        capabilities: codexCapabilities()
       },
-      problems: [],
-      warnings: []
-    },
-    models: [{
-      id: 'gpt-test',
-      provider: 'codex',
-      model: 'gpt-test',
-      displayName: 'GPT Test',
-      hidden: false,
-      supportedReasoningEfforts: ['medium'],
-      defaultReasoningEffort: 'medium',
-      serviceTiers: [],
-      inputModalities: ['text'],
-      isDefault: true
+      models,
+      refreshedAt: '2026-07-13T00:00:00.000Z'
     }],
+    models,
     refreshedAt: '2026-07-13T00:00:00.000Z'
   };
 }

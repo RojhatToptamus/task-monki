@@ -1,6 +1,6 @@
 import type {
   AgentExecutionSettings,
-  AgentProviderId,
+  AgentRuntimeId,
   AgentRecoveryState,
   AgentReviewTarget,
   AgentRunStatus,
@@ -117,7 +117,7 @@ export interface AgentSessionAccessEpoch {
   epoch: number;
   executionProfileHash: string;
   primaryCwd: string;
-  providerId: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   model: string;
   createdAt: string;
 }
@@ -129,7 +129,7 @@ export interface AgentRuntimeSessionRecord {
   executionContext: AgentExecutionContext;
   clientOperationId: string;
   requestFingerprint: string;
-  provider: AgentProviderId;
+  runtimeId: AgentRuntimeId;
   role: AgentSessionRole;
   providerSessionId?: string;
   providerSessionTreeId?: string;

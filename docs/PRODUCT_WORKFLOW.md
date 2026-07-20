@@ -1,16 +1,16 @@
 # Product Workflow
 
-Date: 2026-07-13
+Date: 2026-07-18
 
 Task Monki is a local task execution and evidence system for AI coding work. It
 is not just an AI chat UI.
 
 ## Product model
 
-1. User creates a task in the active repository with a goal, model, and
+1. User creates a task in one repository with a goal, model, and
    reasoning effort.
 2. Task Monki prepares an isolated Git worktree.
-3. An AI provider runs in that worktree.
+3. The selected coding-agent runtime runs in that worktree.
 4. Task Monki records provider activity, approvals, Git evidence, GitHub
    delivery evidence, and audit history.
 5. User reviews, requests changes, follows up, continues unfinished runs,
@@ -18,29 +18,79 @@ is not just an AI chat UI.
 
 ## Repository context
 
-The sidebar repository selector defines the active task context. It filters the
-board, counts, settings summary, and new-task defaults to the selected
-repository. Adding a repository opens the local folder picker and validates the
-selected folder before it is saved as a selectable repository.
+Each repository has a stable Task Monki ID. Tasks and worktrees reference that
+ID; the checkout path is a mutable repository attribute. Moving or reconnecting
+a checkout updates the repository record without changing task identity.
 
-Repository paths are host-owned discovery inputs, not renderer authority. The
-core keeps a durable repository registry with opaque repository IDs, canonical
-paths, identity evidence, aliases, availability, and last-seen metadata. Public
-renderer/API requests select, create, refine, open, remove, and relink by ID;
-only the trusted Electron or development host may pass a folder-picker path to
-the registry. A missing or identity-changed repository remains visible as
-unavailable until it is explicitly relinked to a matching repository.
+The sidebar repository selector sets the default for new tasks and provides
+repository lifecycle controls. It does not filter global workflow views,
+counts, or task detail. Adding a repository opens the local folder picker,
+validates the selected Git checkout, and stores a new repository record.
+Refresh can mark a checkout missing or invalid. Disconnect preserves every
+task and evidence record, while repository-dependent actions stay unavailable
+until the same repository ID is reconnected to a valid path.
 
 On first launch, when no repository has been configured, the main workflow area
 shows setup instead of an empty board. Adding a repository completes only the
 repository step. The setup surface remains open so the user can review required
 tool status and defaults, then explicitly finish setup before entering the
-board and creating tasks. Finishing setup re-checks required Git and Codex
-tool availability before the completion flag is saved; GitHub CLI remains
-optional because it only affects PR delivery.
+board and creating tasks. Finishing setup re-checks required Git and the
+selected default agent runtime before the completion flag is saved; GitHub CLI
+remains optional because it only affects PR delivery. A passively discovered
+on-demand runtime is startable but is not labeled Ready until its runtime-owned
+live check succeeds. Authentication, account incompatibility, and protocol
+failure remain distinct states with explicit next actions.
 
-New tasks inherit the active sidebar repository automatically. The creation
-flow should not ask for a repository path when a repository is already selected.
+New tasks default to the selected sidebar repository. The composer selects a
+repository by ID and never accepts a repository path as task identity.
+Capturing a text-only task is a local operation and remains available when the
+selected agent runtime is unavailable; live model resolution is deferred until
+Start. Attachment-backed creation still requires a runtime/model with an
+attested attachment boundary because Task Monki must validate modality and
+isolation before adopting the draft.
+
+## Runtime and model configuration
+
+First-launch defaults, New Task, and Settings use the same runtime/model
+selector. Implementation defaults can use every enabled runtime. Prompt
+refinement and review receive narrower runtime lists derived from their typed
+capabilities, so those operations are never assumed to be Codex-only and an
+unsupported provider is never offered for them. Reasoning choices come from the
+selected model's native catalog.
+
+## Discourse
+
+Discourse is a global technical conversation workspace beside task workflow.
+It supports human-only notes, one-agent Direct replies, independent two- or
+three-agent Panels, and a bounded Team sequence in which Lead answers, Skeptic
+and Verifier review exact claims, and Lead may append one attributable
+correction. It never creates a hidden task or treats an agent response as Git,
+test, GitHub, workflow, or acceptance evidence.
+
+Task and repository context is explicit per message or explicitly pinned.
+Agent turns use immutable context snapshots and a read-only, offline execution
+scope. Runtime/model identity is frozen in participant revisions, so a reply is
+never silently rerouted to the current default runtime. Only runtimes with an
+adapter-attested scoped Discourse boundary are offered; unsupported runtimes
+stay visible as unavailable with their reason rather than falling back.
+
+See `docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md` for response policies,
+waiting, review/correction, stale context, cancellation, recovery, and limits.
+
+Provider catalogs keep their native scope. Cursor model discovery begins only
+after the user selects Cursor and its current ACP process has no cached catalog.
+Loading, failure, and retry remain inside the selector. The adapter reuses the
+catalog for that process and invalidates it when the executable configuration,
+process identity, or observed authentication state changes.
+
+## Saved views
+
+All tasks is the global workflow view. A board is only a named saved filter over
+current tasks, using zero or more repository IDs and workflow phases. Empty
+filter lists mean all repositories or all phases. Boards never store task IDs,
+own task membership, or carry workflow state. A board color is presentation
+metadata used to distinguish saved views in navigation; it does not affect the
+filter. Editing or deleting a board does not mutate any task.
 
 The new-task attachment flow accepts a bounded set of PNG,
 JPEG, and still WebP images plus UTF-8 text, data, configuration, and source-code
@@ -49,17 +99,19 @@ task directory only when Create is pressed; Task Monki never stores their
 original paths or places them in the repository worktree. The composer uses
 Chromium's native decoder to re-encode images before submission so embedded
 metadata is not copied. PDFs, Office files, video, audio,
-archives, databases, and arbitrary binaries are not supported: the current
-Codex App Server protocol has no generic file or PDF turn input, and Task Monki
-does not yet provide a separately secured extraction pipeline.
+archives, databases, and arbitrary binaries are not supported. Codex uses
+verified local-image inputs and managed path references. OpenCode retains
+native file parts for provider-owned integrations, but Task Monki managed
+attachments are disabled because that process cannot attest attachment
+confinement. Every runtime must advertise attachment delivery before the
+composer enables it, and Task Monki does not provide a generic extraction
+pipeline.
 
-Provider delivery uses a complete thread-local Codex permission profile. It
-grants the runtime minimum, the exact worktree, and exact verified current-run
-task attachment files. Runtime probing and every session lifecycle path require
-active-profile and workspace-root evidence. Multi-agent and memories are
-disabled by the profile. Attachment runs also force network off and require
-web search, MCP servers, and apps to be disabled. Full access remains available
-for attachment-free tasks but is rejected when attachments are present.
+Provider delivery is runtime-specific and fail-closed. Codex uses a complete
+thread-local permission profile for the exact worktree and verified files.
+Attachment runs force network off, so runtimes such as OpenCode whose network
+is provider-controlled cannot accept them. Full access remains available for
+attachment-free tasks but is rejected when attachments are present.
 
 Files stay renderer-local during editing and cross the trusted boundary in one
 bounded batch. A successful task create atomically adopts that batch as one
@@ -77,38 +129,10 @@ cleanup, and privacy semantics.
 
 Task Monki attachment runs require read-only or managed workspace access.
 
-Task records remain bound to the canonical repository path resolved from their
-repository ID when they were created. The registry preserves the ID-to-path
-association and reconciles legacy task paths during startup. Runs, worktrees,
-Git evidence, GitHub delivery, and provider sessions continue to resolve through
-the task and iteration records rather than the currently selected sidebar
-repository. Switching repositories must therefore close task detail views from
-the previous repository instead of mutating those task records.
-
-## Global discourse
-
-Discourse is a general technical conversation workspace across tasks and
-repositories. It is not a task phase and does not inherit the active board
-repository. Human messages can stand alone, or one message can explicitly ask
-for a Direct, Panel, or Team response using global `@` mentions and selected
-context.
-
-Direct produces one attributable answer. Panel asks two or three selected
-agents independently from the same frozen input, preserving successful answers
-when another panelist fails. Team uses Lead, Skeptic, and Verifier: Lead answers,
-the two reviewers independently return structured review receipts, and Lead may
-make one attributable correction for eligible material concerns. A Team wave
-uses at most four agent turns.
-
-Later follow-ups are durably queued behind the current response in the same
-conversation. Context is previewed and frozen per wave; if it changes before
-dispatch, the user must Continue with the latest context or Cancel. Agent
-sessions are fresh, read-only, offline, tool-free, attachment-free, and never
-request approval. Discourse activity does not create or mutate task workflow,
-Git evidence, GitHub delivery, review-gate state, or acceptance.
-
-The complete source of truth is
-`docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md`.
+Task records remain bound to exactly one repository ID. Runs, worktrees, Git
+evidence, GitHub delivery, and provider sessions resolve through task and
+iteration records rather than the current sidebar default or a saved view.
+Switching the default repository never closes or mutates an open task.
 
 ## UI priority
 
@@ -123,6 +147,28 @@ Screens should prioritize:
 
 Provider telemetry is useful, but it should not visually dominate pending user
 decisions or verified local evidence.
+
+## Local preview
+
+Preview is independent of task workflow phase and provider-run state. The
+Overview card presents the current Preview decision and stable primary route;
+the full workspace presents capability approval, selected data scenario,
+application/setup evidence, bounded logs, routes, owned data, external
+attachments, private-input readiness, cleanup authority, and recovery actions.
+
+Native replacement preserves the current route while a candidate starts and
+makes cancellation candidate-only. Compose replacement is a serialized stable
+project update with an explicit route-downtime window after activation begins.
+**Stop Preview & Delete Data** and managed-resource Reset are intentionally
+destructive only for exact Task-Monki-owned runtime/data. Attached dependencies,
+producer tasks, external Compose objects, images, build cache, repository
+files, and user-owned secret files are never included in that authority.
+
+The [Preview Guide](PREVIEW_GUIDE.md) is the public behavior and recipe
+reference. [Preview Architecture](architecture/PREVIEW_ARCHITECTURE.md) is the
+canonical lifecycle, security, storage, ownership, shutdown, and recovery
+source. Keep product copy and action rules consistent with those documents
+rather than adding a second Preview lifecycle here.
 
 ## Activity Timeline
 
@@ -149,7 +195,7 @@ such as the exact failed GitHub check that blocks PR readiness.
 Main-history items should be consequence-bearing: terminal implementation or
 review outcomes, current active runs, Git state changes, delivery commits,
 branch publication results, first PR availability, check verdict changes,
-GitHub review decisions, merge outcomes, blocked transitions, stale Codex
+GitHub review decisions, merge outcomes, blocked transitions, stale agent
 review state, and recovery risks.
 
 No-op refreshes, repeated unchanged evidence captures, provider protocol
@@ -169,14 +215,15 @@ Debug, because delivery/review facts such as exact failed checks, stale
 evidence, blocked transitions, and merge state must be interpreted consistently
 across surfaces.
 
-## Board phases
+## Workflow phases
 
 - Backlog / Ready
   - Task exists and can be prepared or started.
 - In Progress
-  - Implementation-side work is active or being corrected.
+  - Implementation-side work is active, being corrected, or waiting for a
+    retry after an unsuccessful run.
 - Review
-  - Implementation-side work has reached a terminal state and is ready for
+  - Implementation-side work completed successfully and is ready for
     inspection, review gate, acceptance, commit, or PR creation.
 - In Review
   - A PR or external review process exists.
@@ -193,9 +240,11 @@ flowchart LR
   Ready["Ready"] --> Prepare["Prepare worktree"]
   Prepare --> Start["Start implementation"]
   Start --> Progress["In Progress"]
-  Progress --> Terminal{"Run terminal?"}
-  Terminal --> Review["Review phase"]
-  Review --> Gate["Run Codex review"]
+  Progress --> Terminal{"Run outcome?"}
+  Terminal -->|Completed| Review["Review phase"]
+  Terminal -->|Failed / interrupted / recovery| Retry["Retry or continue"]
+  Retry --> Progress
+  Review --> Gate["Run agent review"]
   Gate --> Passed["Review passed"]
   Gate --> Changes["Needs changes"]
   Changes --> FollowUp["Request changes"]
@@ -209,13 +258,13 @@ flowchart LR
 There are two separate review concepts:
 
 - Review phase
-  - Board workflow state. The work is ready to inspect or ship.
-- Codex review gate
+  - Task workflow state. The work is ready to inspect or ship.
+- Agent review gate
   - Detached AI quality check on the current diff.
 
 Rules:
 
-- Running Codex review keeps the task in Review.
+- Running agent review keeps the task in Review.
 - Requesting changes starts follow-up implementation work and moves the task to
   In Progress.
 - The previous review becomes stale as soon as implementation changes continue.
@@ -225,7 +274,7 @@ Rules:
 - After follow-up completes, the task returns to Review and needs a fresh review.
 
 The detailed source of truth is
-`docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`.
+`docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`.
 
 ## Action rules
 
@@ -245,13 +294,25 @@ In Progress:
   The detailed data flow and invariants are documented in
   `docs/workflows/AGENT_PROGRESS_OVERVIEW.md`.
 - Allow steering, approval/input responses, and interrupt controls.
+- After a failed, interrupted, lost, or recovery-required implementation run,
+  keep the task in progress and make retry the primary recovery action. Continue
+  and fork alternative remain available; do not offer agent review.
+- A provider may finish its turn after the user declines an execution request.
+  If Task Monki then observes the same Git HEAD and dirty fingerprint as before
+  that run, keep the task in progress and offer retry or continue. The provider
+  turn remains completed telemetry, but the implementation is not review-ready.
+  Persist this as a run-scoped implementation retry requirement; ordinary Git,
+  GitHub, or workflow updates do not clear it. Starting replacement
+  implementation work clears it.
 - Do not show review completion actions.
 
 Review:
 
 - Show verified evidence prominently, with PR Status as the primary delivery
   surface.
-- Allow Run Codex review when no implementation-side run is active.
+- Allow Run agent review when no implementation-side run is active.
+- Require the current implementation-side run to have completed successfully;
+  unsuccessful or older superseded runs are not valid review sources.
 - Allow Request changes only when the current review result has actionable
   current findings.
 - Allow Mark done and Commit when not paused by an active run or review.
@@ -266,11 +327,12 @@ Post-run implementation controls:
   - Normal next implementation action after a completed run when the owner wants
     another pass in the same task, worktree, branch, and provider session.
 - Continue
-  - Recovery action for failed, interrupted, lost, or recovery-required runs.
-    It resumes from the current local state in the same task/worktree.
+  - Recovery alternative for failed, interrupted, lost, or recovery-required
+    runs when the owner wants to add guidance. It resumes from the current local
+    state in the same task/worktree.
 - Retry in session
-  - Secondary action that starts a retry in the same task, worktree, branch, and
-    provider session.
+  - Primary recovery action after an unsuccessful run. It starts a retry in the
+    same task, worktree, branch, and provider session.
 - Fork alternative
   - Creates a separate task with its own worktree, branch, iteration, run, and
     fresh provider session.
@@ -333,9 +395,8 @@ history, or provider remote thread data.
     task-scoped policy transition, not a provider verdict.
   - PR evidence must not downgrade stricter or explicit policies such as
     `MERGED_AND_VERIFIED` or `MANUAL`.
-  - `LOCAL_ACCEPTANCE` remains the local-only path. If legacy or manually
-    repaired state has PR evidence while still using `LOCAL_ACCEPTANCE`, Mark
-    done records local acceptance and leaves that PR unchanged.
+  - `LOCAL_ACCEPTANCE` remains the local-only path. Mark done records local
+    acceptance and does not reinterpret any separately observed PR evidence.
   - For `MERGED` tasks, GitHub merge evidence is a hard requirement. The Finish
     panel should show a Merge requirement and keep Mark done disabled until
     merge evidence is `MERGED`.
@@ -344,7 +405,9 @@ history, or provider remote thread data.
   - Merged PR evidence may move eligible merge-policy tasks to Done
     automatically. It must not auto-complete `MANUAL` tasks or
     `MERGED_AND_VERIFIED` tasks whose GitHub checks are missing, not passing,
-    or passing for a different PR head than the merge evidence.
+    or passing for a different PR head than the merge evidence. It also must
+    not bypass implementation work, a failed or retry-required implementation,
+    or a running detached review.
 - Mark done anyway
   - Moves the task to Done in Task Monki despite missing or non-passing review,
     or Git evidence. It should be styled and confirmed as an owner
@@ -357,7 +420,7 @@ history, or provider remote thread data.
 A Task Monki delivery commit records the current task worktree into Git. It is
 delivery progress, not follow-up implementation work. If the reviewed diff was
 still current immediately before the delivery commit, the commit does not make
-the Codex review stale by itself.
+the agent review stale by itself.
 
 If a review is running or a follow-up implementation run is active, finish
 actions should be disabled with a clear reason.

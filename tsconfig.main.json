@@ -7,6 +7,6 @@
     "rootDir": "src",
     "types": ["node", "electron"]
   },
-  "include": ["src/core/**/*.ts", "src/shared/**/*.ts", "src/electron/**/*.ts", "src/dev/**/*.ts"],
+  "include": ["src/core/**/*.ts", "src/shared/**/*.ts", "src/electron/**/*.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

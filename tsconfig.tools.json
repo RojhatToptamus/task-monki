@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "outDir": "dist-tools"
+  },
+  "include": ["src/core/**/*.ts", "src/shared/**/*.ts", "src/dev/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

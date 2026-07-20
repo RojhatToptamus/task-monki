@@ -3,6 +3,13 @@ import type { RepositoryOption } from '../model/repositories';
 import { openTargetMenuPosition } from '../model/openTargetMenu';
 import { OpenTargetContextMenu } from './OpenTargetMenu';
 import type { OpenTargetRef } from '../../shared/contracts';
+import {
+  focusMenuItem,
+  handleMenuBlur,
+  handleMenuKeyDown,
+  menuTriggerFocusTarget,
+  type MenuFocusTarget
+} from './menuKeyboard';
 
 interface RepositorySwitcherProps {
   activeRepositoryId: string;
@@ -11,6 +18,9 @@ interface RepositorySwitcherProps {
   adding: boolean;
   onSelect(repositoryId: string): void;
   onAddRepository(): Promise<boolean>;
+  onRefreshRepository(repositoryId: string): Promise<void>;
+  onReconnectRepository(repositoryId: string): Promise<void>;
+  onDisconnectRepository(repositoryId: string): Promise<void>;
 }
 
 export function RepositorySwitcher({
@@ -19,7 +29,10 @@ export function RepositorySwitcher({
   collapsed,
   adding,
   onSelect,
-  onAddRepository
+  onAddRepository,
+  onRefreshRepository,
+  onReconnectRepository,
+  onDisconnectRepository
 }: RepositorySwitcherProps) {
   const [open, setOpen] = useState(false);
   const [pathMenu, setPathMenu] = useState<{
@@ -27,15 +40,20 @@ export function RepositorySwitcher({
     position: { x: number; y: number };
   }>();
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const initialFocusRef = useRef<MenuFocusTarget>('selected');
   const activeOption = options.find((option) => option.id === activeRepositoryId);
-  const triggerLabel = activeOption
-    ? `${activeOption.displayPath}${activeOption.available ? '' : ' · Unavailable'}`
-    : 'Add repository';
+  const triggerLabel = activeOption?.name ?? 'Add repository';
 
   useEffect(() => {
     if (!open) {
       return undefined;
     }
+
+    const frame = window.requestAnimationFrame(() => {
+      focusMenuItem(menuRef.current, initialFocusRef.current);
+    });
 
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -43,17 +61,11 @@ export function RepositorySwitcher({
         setOpen(false);
       }
     };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-      }
-    };
 
     document.addEventListener('pointerdown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       document.removeEventListener('pointerdown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [open]);
 
@@ -82,33 +94,62 @@ export function RepositorySwitcher({
       ref={rootRef}
     >
       <button
+        ref={triggerRef}
         type="button"
         className={`tm-nav__repo ${activeRepositoryId ? '' : 'tm-nav__repo--empty'}`}
         data-tip={collapsed ? triggerLabel : undefined}
-        aria-label="Repository menu"
+        aria-label={`New task repository: ${triggerLabel}`}
         aria-haspopup="menu"
         aria-expanded={open}
         onContextMenu={(event) => openRepositoryMenu(activeRepositoryId, event)}
-        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          const target = menuTriggerFocusTarget(event.key);
+          if (!target) {
+            return;
+          }
+          event.preventDefault();
+          initialFocusRef.current = target;
+          if (open) {
+            focusMenuItem(menuRef.current, target);
+          } else {
+            setOpen(true);
+          }
+        }}
+        onClick={() => {
+          initialFocusRef.current = 'selected';
+          setOpen((current) => !current);
+        }}
       >
         <span className="tm-nav__repo-icon" aria-hidden="true">
           <RepositoryIcon />
-          <span className="tm-nav__repo-dot" />
         </span>
         <span className="tm-nav__repo-text">
-          <span className="tm-nav__repo-label">Repository</span>
+          <span className="tm-nav__repo-label">New task repository</span>
           <span className="tm-nav__repo-name">{triggerLabel}</span>
         </span>
         <ChevronIcon open={open} />
       </button>
 
       {open ? (
-        <div className="tm-repo-menu" role="menu" aria-label="Repositories">
-          <div className="tm-repo-menu__head">
+        <div
+          ref={menuRef}
+          className="tm-repo-menu"
+          role="menu"
+          tabIndex={-1}
+          aria-label="Repositories"
+          onKeyDown={(event) =>
+            handleMenuKeyDown(event, {
+              onClose: () => setOpen(false),
+              returnFocus: triggerRef.current
+            })
+          }
+          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+        >
+          <div className="tm-repo-menu__head" role="presentation">
             <span>Repositories</span>
             <strong>{options.length}</strong>
           </div>
-          <div className="tm-repo-menu__list">
+          <div className="tm-repo-menu__list" role="group" aria-label="Repository choices">
             {options.length > 0 ? (
               options.map((option) => {
                 const active = option.id === activeRepositoryId;
@@ -116,27 +157,30 @@ export function RepositorySwitcher({
                   <button
                     type="button"
                     role="menuitemradio"
+                    tabIndex={-1}
                     aria-checked={active}
                     className={`tm-repo-menu__item ${
                       active ? 'tm-repo-menu__item--active' : ''
                     }`}
                     key={option.id}
-                    disabled={!option.available}
                     onContextMenu={(event) => openRepositoryMenu(option.id, event)}
                     onClick={() => {
                       onSelect(option.id);
                       setOpen(false);
                     }}
                   >
-                    <span className="tm-repo-menu__status" />
+                    <span
+                      className={`tm-repo-menu__status tm-repo-menu__status--${option.status.toLowerCase()}`}
+                    />
                     <span className="tm-repo-menu__text">
                       <span className="tm-repo-menu__name">{option.name}</span>
-                      <span className="tm-repo-menu__path">
-                        {option.available ? option.displayPath : `${option.displayPath} · Unavailable`}
+                      <span className="tm-repo-menu__path" title={option.path}>
+                        {option.displayPath}
                       </span>
                     </span>
                     <span className="tm-repo-menu__meta">
-                      {option.isDefault ? <span>Default</span> : null}
+                      {active ? <span>Default for new tasks</span> : null}
+                      {option.status !== 'AVAILABLE' ? <em>{option.status.toLowerCase()}</em> : null}
                       <strong>{formatTaskCount(option.taskCount)}</strong>
                     </span>
                   </button>
@@ -146,9 +190,50 @@ export function RepositorySwitcher({
               <div className="tm-repo-menu__empty">No repositories added yet.</div>
             )}
           </div>
-          <div className="tm-repo-menu__footer">
+          <div className="tm-repo-menu__footer" role="group" aria-label="Repository actions">
+            {activeOption ? (
+              <div className="tm-repo-menu__manage" role="presentation">
+                {activeOption.status !== 'DISCONNECTED' ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    onClick={() => void onRefreshRepository(activeOption.id)}
+                  >
+                    Refresh
+                  </button>
+                ) : null}
+                {activeOption.status !== 'AVAILABLE' ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    onClick={() => void onReconnectRepository(activeOption.id)}
+                  >
+                    Reconnect
+                  </button>
+                ) : null}
+                {activeOption.status !== 'DISCONNECTED' ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    tabIndex={-1}
+                    className="tm-repo-menu__disconnect"
+                    onClick={() => {
+                      setOpen(false);
+                      triggerRef.current?.focus();
+                      void onDisconnectRepository(activeOption.id);
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             <button
               type="button"
+              role="menuitem"
+              tabIndex={-1}
               className="tm-repo-menu__add"
               disabled={adding}
               onClick={() => void addRepository()}

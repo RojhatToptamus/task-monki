@@ -370,7 +370,7 @@ function ProviderLifecycleEvent({ event }: { event: DomainEvent }) {
           bytes).
         </p>
       ) : eventType === 'thread/compacted' ? (
-        <p>Codex reported automatic context compaction.</p>
+        <p>The agent runtime reported automatic context compaction.</p>
       ) : (
         <p>{stringValue(payload.message) ?? eventType}</p>
       )}
@@ -550,7 +550,7 @@ function ItemBody({
     );
   }
   if (type === 'CONTEXT_COMPACTION') {
-    return <p>Codex reported conversation context compaction.</p>;
+    return <p>The agent runtime reported conversation context compaction.</p>;
   }
   if (type === 'REVIEW') {
     return <p className="provider-message">{stringValue(payload.review) || 'Review mode event'}</p>;

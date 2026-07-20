@@ -2,14 +2,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { AgentProviderAdapter } from '../core/agent/AgentProviderAdapter';
-import { codexCapabilities } from '../core/agent/codex/codexCapabilities';
+import type { AgentRuntimeAdapter } from '../core/agent/AgentRuntimeAdapter';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../core/agent/codex/codexCapabilities';
 import { TaskManagerService } from '../core/app/TaskManagerService';
+import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
+import { FileAgentRuntimeStore } from '../core/storage/FileAgentRuntimeStore';
 import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
-import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
 import type { Task, TaskSnapshot } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import {
@@ -23,12 +26,18 @@ import {
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
 import { buildRunProgressViewModel } from '../renderer/model/runProgress';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
+import { selectBoardTasks } from '../renderer/model/boards';
+import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
   DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
   seedTaskMonkiDevelopmentData,
   type DevSeedManifest
 } from './seedData';
+import {
+  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
+  deterministicDevSeedProviderDisabledReason
+} from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -38,8 +47,8 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
-  }, 90_000);
+    snapshot = await readStoreSnapshot(manifest.storeDir);
+  }, 180_000);
 
   afterAll(async () => {
     if (rootDir) {
@@ -54,26 +63,39 @@ describe('Task Monki development seed data', () => {
 
   it('creates a current-schema deterministic scenario catalog', async () => {
     const settings = await new AppSettingsStore(manifest.appSettingsPath).get();
-    const registry = await new FileRepositoryRegistry(
-      manifest.repositoryRegistryDir,
-      new NodeRepositoryInspector()
-    ).snapshot();
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(settings.repositories.selectedRepositoryId).toBe(registry.defaultRepositoryId);
+    expect(snapshot.repositories).toHaveLength(2);
+    const primaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.repositoryPath)
+    );
+    const secondaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.secondaryRepositoryPath)
+    );
+    expect(settings.selectedRepositoryId).toBe(primaryRepository?.id);
+    expect(primaryRepository?.path).toBe(await fs.realpath(manifest.repositoryPath));
+    expect(secondaryRepository?.path).toBe(await fs.realpath(manifest.secondaryRepositoryPath));
+    expect(secondaryRepository).toMatchObject({ status: 'AVAILABLE' });
     expect(await pathExists(manifest.manifestPath)).toBe(true);
     expect(await pathExists(manifest.envFilePath)).toBe(true);
     expect(manifest.env).toMatchObject({
       TASK_MANAGER_STORE_DIR: manifest.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
-      TASK_MANAGER_REPOSITORY_REGISTRY_DIR: manifest.repositoryRegistryDir,
-      TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
-      TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
+      TASK_MANAGER_DISCOURSE_DIR: manifest.discourseDir,
+      TASK_MANAGER_AGENT_RUNTIME_DIR: manifest.agentRuntimeDir,
+      TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: manifest.discourseWorkspaceRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      TASK_MANAGER_DETERMINISTIC_SEED: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
     });
+    expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
+      DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+    );
+    expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
       DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
@@ -93,6 +115,94 @@ describe('Task Monki development seed data', () => {
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
+
+    expect(taskForScenario(manifest, snapshot, 'board-backlog').repositoryId).toBe(
+      secondaryRepository?.id
+    );
+    expect(snapshot.boards.map((board) => board.name)).toEqual([
+      'Review across repositories',
+      'Secondary repository'
+    ]);
+    expect(snapshot.boards.map((board) => board.color)).toEqual(['BLUE', 'VIOLET']);
+    const secondaryBoard = snapshot.boards.find(
+      (board) => board.name === 'Secondary repository'
+    );
+    expect(secondaryBoard?.repositoryIds).toEqual([secondaryRepository?.id]);
+    expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
+      taskForScenario(manifest, snapshot, 'board-backlog').id
+    ]);
+  });
+
+  it('materializes discourse running, partial, review, correction, queue, stale, and recovery states', async () => {
+    const store = new FileDiscourseStore(manifest.discourseDir);
+    const discourse = async (slug: string) => {
+      const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug)!;
+      return store.getConversation(scenario.conversationId!);
+    };
+
+    await expect(discourse('discourse-team-running')).resolves.toMatchObject({
+      waves: [{ policy: 'TEAM', status: 'RUNNING' }],
+      jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
+    });
+    await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
+      waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
+    });
+    const silent = await discourse('discourse-review-silent');
+    expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
+      { result: { outcome: 'NO_CONCERN_FOUND' } },
+      { result: { outcome: 'NO_CONCERN_FOUND' } }
+    ]);
+    const corrected = await discourse('discourse-author-correction');
+    expect(corrected.concerns).toMatchObject([{
+      resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
+    }]);
+    await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
+      waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
+    });
+    await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
+      waves: [{
+        status: 'PLANNED',
+        dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
+      }],
+      jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
+    });
+    await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
+      waves: [{ status: 'RECOVERY_REQUIRED' }],
+      jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
+    });
+  });
+
+  it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
+    const view = (slug: string) => {
+      const task = taskForScenario(manifest, snapshot, slug);
+      return buildPreviewViewModel({
+        task,
+        worktree: snapshot.worktrees.find((record) => record.id === task.currentWorktreeId),
+        plans: snapshot.previewPlans.filter((record) => record.taskId === task.id),
+        approvals: snapshot.previewApprovals.filter((record) => record.taskId === task.id),
+        generations: snapshot.previewGenerations.filter((record) => record.taskId === task.id),
+        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id)
+      });
+    };
+    expect(view('preview-missing-recipe').status).toBe('Not checked');
+    expect(view('preview-approval-required').status).toBe('Approval required');
+    expect(view('preview-active-approval-required').actions.map((action) => action.id)).toEqual([
+      'OPEN', 'APPROVE', 'STOP'
+    ]);
+    expect(view('preview-preparing').status).toBe('Starting');
+    expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-compose-ready')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-compose-recovery').summary).toContain('verified data volumes are preserved');
+    expect(view('preview-replacing').status).toBe('Replacing');
+    expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-replacement-failed').summary).toContain('latest replacement did not reach readiness');
+    expect(view('preview-replacement-failed').summary).not.toContain('Candidate web service exited');
+    expect(view('preview-failed').status).toBe('Failed');
+    expect(view('preview-stale').status).toContain('stale');
+    expect(view('preview-stopped').status).toBe('Stopped');
+    expect(view('preview-recovery-required').status).toBe('Recovery required');
+    expect(view('preview-cleanup-incomplete').status).toBe('Cleanup incomplete');
+    expect(JSON.stringify(snapshot)).not.toContain('intentional seeded preview failure');
   });
 
   it('drives review, interaction, PR, and completion states from records and events', () => {
@@ -128,8 +238,12 @@ describe('Task Monki development seed data', () => {
       expect.arrayContaining([
         expect.objectContaining({ category: 'read', label: 'Read' }),
         expect.objectContaining({ category: 'edit', label: 'Edited' }),
-        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' }),
-        expect.objectContaining({ category: 'permission', label: 'Waiting', detail: 'for approval' })
+        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' })
+      ])
+    );
+    expect(approvalProgress?.activityTail).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'permission', label: 'Waiting' })
       ])
     );
 
@@ -139,8 +253,8 @@ describe('Task Monki development seed data', () => {
     );
     const runningReviewActivity = buildReviewActivityViewModel({
       reviewRun: runningReviewRun,
-      reviewRunning: runningReviewTask.projection.codexReview?.status === 'RUNNING',
-      useRunActivity: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      reviewRunning: runningReviewTask.projection.agentReview?.status === 'RUNNING',
+      useRunActivity: runningReviewTask.projection.agentReview?.status === 'RUNNING',
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
@@ -217,7 +331,7 @@ describe('Task Monki development seed data', () => {
     ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
-    expect(reviewTask.projection.codexReview).toMatchObject({ status: 'NEEDS_CHANGES' });
+    expect(reviewTask.projection.agentReview).toMatchObject({ status: 'NEEDS_CHANGES' });
     expect(
       snapshot.runs.find((run) => run.taskId === reviewTask.id && run.mode === 'REVIEW')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -229,7 +343,7 @@ describe('Task Monki development seed data', () => {
 
     const staleReview = taskForScenario(manifest, snapshot, 'review-stale-after-follow-up');
     expect(staleReview.workflowPhase).toBe('REVIEW');
-    expect(staleReview.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(staleReview.projection.agentReview).toMatchObject({ status: 'STALE' });
     expect(
       snapshot.runs.find((run) => run.taskId === staleReview.id && run.mode === 'FOLLOW_UP')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -237,7 +351,7 @@ describe('Task Monki development seed data', () => {
     const activeFollowUp = taskForScenario(manifest, snapshot, 'review-follow-up-active');
     expect(activeFollowUp.workflowPhase).toBe('IN_PROGRESS');
     expect(activeFollowUp.projection.agentRun).toBe('RUNNING');
-    expect(activeFollowUp.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(activeFollowUp.projection.agentReview).toMatchObject({ status: 'STALE' });
 
     const failedChecks = prView(snapshot, taskForScenario(manifest, snapshot, 'delivery-checks-failed'));
     expect(failedChecks).toMatchObject({
@@ -312,63 +426,24 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
-  it('materializes discourse Team, Panel, queue, correction, and recovery states', async () => {
-    const store = new FileDiscourseStore(manifest.discourseDir);
-    const discourse = async (slug: string) => {
-      const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug)!;
-      return store.getConversation(scenario.conversationId!);
-    };
-
-    await expect(discourse('discourse-team-running')).resolves.toMatchObject({
-      waves: [{ policy: 'TEAM', status: 'RUNNING' }],
-      jobs: [{ role: 'ANSWER', status: 'RUNNING' }]
-    });
-    await expect(discourse('discourse-panel-partial')).resolves.toMatchObject({
-      waves: [{ policy: 'PANEL', status: 'SETTLED', outcome: 'PARTIAL' }]
-    });
-    const silent = await discourse('discourse-review-silent');
-    expect(silent.jobs.filter((job) => job.role === 'CRITIQUE')).toMatchObject([
-      { result: { outcome: 'NO_CONCERN_FOUND' } },
-      { result: { outcome: 'NO_CONCERN_FOUND' } }
-    ]);
-    const corrected = await discourse('discourse-author-correction');
-    expect(corrected.concerns).toMatchObject([{
-      resolution: { outcome: 'REVISED', correctionMessageId: expect.any(String) }
-    }]);
-    await expect(discourse('discourse-followup-queued')).resolves.toMatchObject({
-      waves: [{ status: 'RUNNING' }, { status: 'PLANNED' }]
-    });
-    await expect(discourse('discourse-recovery-required')).resolves.toMatchObject({
-      waves: [{ status: 'RECOVERY_REQUIRED' }],
-      jobs: [{ status: 'RECOVERY_REQUIRED', delivery: 'AMBIGUOUS' }]
-    });
-    await expect(discourse('discourse-context-stale')).resolves.toMatchObject({
-      waves: [{
-        status: 'PLANNED',
-        dispatchGate: { status: 'RECONFIRMATION_REQUIRED' }
-      }],
-      jobs: [{ status: 'QUEUED', delivery: 'NOT_SENT' }]
-    });
-  });
-
   it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
     const store = new FileTaskStore(manifest.storeDir);
     const before = await store.snapshot();
     const initialize = vi.fn(async () => undefined);
     const adapter = {
+      descriptor: CODEX_RUNTIME_DESCRIPTOR,
       initialize,
       capabilities: vi.fn(async () => codexCapabilities()),
       shutdown: vi.fn(async () => undefined)
-    } as unknown as AgentProviderAdapter;
+    } as unknown as AgentRuntimeAdapter;
     const disabledReason =
       'Codex is disabled while deterministic development seed scenarios are loaded.';
     const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
       appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
-      repositoryRegistry: new FileRepositoryRegistry(
-        manifest.repositoryRegistryDir,
-        new NodeRepositoryInspector()
-      ),
-      agentProviderAdapter: adapter,
+      agentRuntimeAdapters: [adapter],
+      agentRuntimeStore: new FileAgentRuntimeStore(manifest.agentRuntimeDir),
+      discourseStore: new FileDiscourseStore(manifest.discourseDir),
+      discourseWorkspaceRoot: manifest.discourseWorkspaceRoot,
       allowAgentNetworkAccess: false,
       agentProviderStartupDisabledReason: disabledReason,
       codexPath: path.join(rootDir, 'missing-codex')
@@ -378,8 +453,19 @@ describe('Task Monki development seed data', () => {
     try {
       const after = await store.snapshot();
       expect(initialize).not.toHaveBeenCalled();
-      await expect(service.getAgentProviderState()).resolves.toMatchObject({
-        preflight: { ready: false, problems: [disabledReason] },
+      await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
+        runtimes: [
+          {
+            preflight: {
+              readiness: {
+                status: 'DISABLED',
+                canStart: false,
+                detail: disabledReason
+              }
+            },
+            models: []
+          }
+        ],
         models: []
       });
       expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
@@ -413,7 +499,7 @@ describe('Task Monki development seed data', () => {
       ).rejects.toThrow(disabledReason);
       await expect(
         service.refinePrompt({
-          repositoryId: (await service.getRepositoryCatalog()).selectedRepositoryId!,
+          repositoryId: before.repositories[0]!.id,
           input: 'Do not start Codex from fixture mode.'
         })
       ).rejects.toThrow(disabledReason);
@@ -497,6 +583,15 @@ function prView(snapshot: TaskSnapshot, task: Task) {
     reviewRollup: selectLatestReviewRollup(snapshot, task),
     mergeSnapshot: selectLatestMergeSnapshot(snapshot, task)
   });
+}
+
+async function readStoreSnapshot(storeDir: string): Promise<TaskSnapshot> {
+  const store = new FileTaskStore(storeDir);
+  try {
+    return await store.snapshot();
+  } finally {
+    await store.close();
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

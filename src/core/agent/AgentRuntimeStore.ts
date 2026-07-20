@@ -17,7 +17,7 @@ import type {
 } from '../../shared/agent';
 
 export interface CreateAgentRuntimeServerInput {
-  provider: string;
+  runtimeId: AgentServerInstance['runtimeId'];
   runtimeKind: AgentServerInstance['runtimeKind'];
   transport: AgentServerInstance['transport'];
   executable: string;

@@ -6,12 +6,11 @@ import type {
   AgentRunMode,
   BranchPublicationStatus,
   CiChecksStatus,
-  CodexReviewResult,
+  AgentReviewResult,
   CompletionPolicy,
   DomainEvent,
   GitHubCheckDetailRecord,
   GitSnapshotRecord,
-  GitStatus,
   InteractionRequestRecord,
   InteractionRequestType,
   MergeStatus,
@@ -20,18 +19,20 @@ import type {
   RunRecord,
   Task,
   TaskIteration,
-  WorktreeRecord
+  WorktreeRecord,
+  PreviewGenerationState
 } from '../shared/contracts';
 import { TASK_STORE_SCHEMA_VERSION } from '../shared/contracts';
 import { buildDiffEvidence, inspectGitSnapshot } from '../core/git/GitSnapshotService';
 import { git } from '../core/git/gitCli';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
-import { FileRepositoryRegistry } from '../core/storage/FileRepositoryRegistry';
-import { NodeRepositoryInspector } from '../core/repository/NodeRepositoryInspector';
+import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
 import { createDomainEvent } from '../core/storage/domainEvent';
 import { WorktreeService } from '../core/worktree/WorktreeService';
-import { FileDiscourseStore } from '../core/storage/FileDiscourseStore';
+import { validateRepositoryPath } from '../core/repository/RepositoryPreflight';
+import { previewRouteHostname } from '../core/preview/PreviewRouteHostname';
+import { DETERMINISTIC_DEV_SEED_ENV_VAR } from './devSeedEnvironment';
 import type {
   AgentAssignmentSnapshot,
   BuiltInAgentProfileId,
@@ -44,7 +45,7 @@ import type {
   DiscourseResponseWaveRecord
 } from '../shared/discourse';
 
-export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v1';
+export const TASK_MONKI_DEV_SEED_VERSION = 'task-monki-dev-seed/v3';
 export const TASK_MONKI_DEV_SEED_MARKER = '.task-monki-dev-seed';
 
 export type DevSeedScenarioGroup =
@@ -54,6 +55,7 @@ export type DevSeedScenarioGroup =
   | 'delivery'
   | 'completion'
   | 'workflow'
+  | 'preview'
   | 'discourse';
 
 export type DevSeedScenarioSet = 'all' | DevSeedScenarioGroup;
@@ -81,21 +83,26 @@ export interface DevSeedManifest {
   rootDir: string;
   storeDir: string;
   repositoryPath: string;
+  secondaryRepositoryPath: string;
   worktreeRoot: string;
-  appSettingsPath: string;
-  repositoryRegistryDir: string;
+  previewRoot: string;
   discourseDir: string;
   agentRuntimeDir: string;
+  discourseWorkspaceRoot: string;
+  appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
   env: {
     TASK_MANAGER_STORE_DIR: string;
     TASK_MANAGER_APP_SETTINGS_PATH: string;
-    TASK_MANAGER_REPOSITORY_REGISTRY_DIR: string;
-    TASK_MANAGER_DISCOURSE_DIR: string;
-    TASK_MANAGER_AGENT_RUNTIME_DIR: string;
     TASK_MANAGER_REPO_PATH: string;
     TASK_MANAGER_WORKTREE_ROOT: string;
+    TASK_MANAGER_PREVIEW_ROOT: string;
+    TASK_MANAGER_DISCOURSE_DIR: string;
+    TASK_MANAGER_AGENT_RUNTIME_DIR: string;
+    TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: string;
+    TASK_MANAGER_PREVIEW_RECONCILE: '0';
+    TASK_MANAGER_DETERMINISTIC_SEED: '1';
     TASK_MANAGER_DEV_SEED_MODE: '1';
   };
   counts: {
@@ -104,6 +111,7 @@ export interface DevSeedManifest {
     runs: number;
     worktrees: number;
     events: number;
+    conversations: number;
   };
   scenarios: DevSeedManifestScenario[];
 }
@@ -112,11 +120,13 @@ export interface SeedTaskMonkiDevelopmentDataOptions {
   rootDir?: string;
   storeDir?: string;
   repositoryPath?: string;
+  secondaryRepositoryPath?: string;
   worktreeRoot?: string;
-  appSettingsPath?: string;
-  repositoryRegistryDir?: string;
+  previewRoot?: string;
   discourseDir?: string;
   agentRuntimeDir?: string;
+  discourseWorkspaceRoot?: string;
+  appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
 }
@@ -181,48 +191,48 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('interaction-stale', 'agent', 'Stale interaction', 'An approval request became stale.', [
     'interaction:STALE'
   ]),
-  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without Codex review.', [
-    'codex-review:NOT_RUN'
+  scenario('review-not-run', 'review', 'Review not run', 'Implementation completed without an agent review.', [
+    'agent-review:NOT_RUN'
   ]),
-  scenario('review-running', 'review', 'Review running', 'Codex review run is active.', [
-    'codex-review:RUNNING'
+  scenario('review-running', 'review', 'Review running', 'Agent review run is active.', [
+    'agent-review:RUNNING'
   ]),
-  scenario('review-passed', 'review', 'Review passed', 'Codex review passed with structured result.', [
-    'codex-review:PASSED'
+  scenario('review-passed', 'review', 'Review passed', 'Agent review passed with structured result.', [
+    'agent-review:PASSED'
   ]),
   scenario(
     'review-needs-changes',
     'review',
     'Review needs changes',
-    'Codex review found actionable issues.',
-    ['codex-review:NEEDS_CHANGES']
+    'Agent review found actionable issues.',
+    ['agent-review:NEEDS_CHANGES']
   ),
   scenario(
     'review-inconclusive',
     'review',
     'Review inconclusive',
-    'Codex review completed without a definitive verdict.',
-    ['codex-review:INCONCLUSIVE']
+    'Agent review completed without a definitive verdict.',
+    ['agent-review:INCONCLUSIVE']
   ),
-  scenario('review-failed', 'review', 'Review failed', 'Codex review failed before completion.', [
-    'codex-review:FAILED'
+  scenario('review-failed', 'review', 'Review failed', 'Agent review failed before completion.', [
+    'agent-review:FAILED'
   ]),
-  scenario('review-canceled', 'review', 'Review canceled', 'Codex review was canceled.', [
-    'codex-review:CANCELED'
+  scenario('review-canceled', 'review', 'Review canceled', 'Agent review was canceled.', [
+    'agent-review:CANCELED'
   ]),
   scenario(
     'review-stale-after-follow-up',
     'review',
     'Stale review after follow-up',
     'A completed follow-up made the previous review stale.',
-    ['codex-review:STALE', 'mode:FOLLOW_UP']
+    ['agent-review:STALE', 'mode:FOLLOW_UP']
   ),
   scenario(
     'review-follow-up-active',
     'review',
     'Follow-up active',
     'Follow-up implementation is running after review findings.',
-    ['codex-review:STALE', 'agent:RUNNING']
+    ['agent-review:STALE', 'agent:RUNNING']
   ),
   scenario(
     'no-pr-git-not-inspected',
@@ -401,18 +411,37 @@ export const DEV_SEED_SCENARIOS: DevSeedScenarioDefinition[] = [
   scenario('task-archived', 'workflow', 'Archived task', 'Task is archived as a terminal workflow state.', [
     'phase:ARCHIVED'
   ]),
+  scenario('preview-missing-recipe', 'preview', 'Preview recipe missing', 'The task has a worktree but no explicit preview recipe.', ['preview:UNAVAILABLE']),
+  scenario('preview-approval-required', 'preview', 'Preview approval required', 'A resolved native plan awaits explicit approval.', ['preview:APPROVAL_REQUIRED']),
+  scenario('preview-active-approval-required', 'preview', 'Active preview needs new approval', 'The current preview remains actionable while a changed plan awaits approval.', ['preview:READY', 'replacement:APPROVAL_REQUIRED']),
+  scenario('preview-preparing', 'preview', 'Preview preparing', 'Captured source preparation is in progress.', ['preview:PREPARING_SOURCE']),
+  scenario('preview-ready', 'preview', 'Preview ready', 'Readiness passed and the stable route is attached.', ['preview:READY']),
+  scenario('preview-oci-ready', 'preview', 'OCI preview ready', 'PostgreSQL and Redis are ready after the selected migration and seed scenario.', ['preview:READY', 'resources:POSTGRES_REDIS']),
+  scenario('preview-compose-approval-required', 'preview', 'Compose preview approval required', 'Normalized Compose authority is ready for explicit approval.', ['preview:APPROVAL_REQUIRED', 'adapter:COMPOSE']),
+  scenario('preview-compose-updating', 'preview', 'Compose preview updating', 'The stable Compose project is inside serialized activation.', ['preview:RUNNING_GRAPH', 'adapter:COMPOSE']),
+  scenario('preview-compose-reset-required', 'preview', 'Compose preview reset required', 'A data compatibility change requires explicit destructive reset.', ['preview:RECOVERY_REQUIRED', 'adapter:COMPOSE', 'change:DESTRUCTIVE_RESET_REQUIRED']),
+  scenario('preview-compose-ready', 'preview', 'Compose preview ready', 'One task-scoped Compose project is ready with stable routes and owned data.', ['preview:READY', 'adapter:COMPOSE']),
+  scenario('preview-compose-recovery', 'preview', 'Compose preview recovery', 'Serialized Compose activation failed while owned volumes remained preserved.', ['preview:RECOVERY_REQUIRED', 'adapter:COMPOSE']),
+  scenario('preview-replacing', 'preview', 'Preview replacing', 'The active preview stays routed while a candidate waits for readiness.', ['preview:REPLACING']),
+  scenario('preview-replacement-failed', 'preview', 'Preview replacement failed', 'A failed candidate leaves the active preview available.', ['preview:READY', 'replacement:FAILED']),
+  scenario('preview-failed', 'preview', 'Preview failed', 'A preview job failed with retained bounded logs.', ['preview:FAILED']),
+  scenario('preview-stale', 'preview', 'Preview stale', 'A ready preview serves captured source older than current Git evidence.', ['preview:READY', 'freshness:STALE']),
+  scenario('preview-stopped', 'preview', 'Preview stopped', 'Owned runtime state was removed while compact evidence remains.', ['preview:STOPPED']),
+  scenario('preview-recovery-required', 'preview', 'Preview recovery required', 'Restart recovery has not yet verified the recorded process.', ['preview:RECOVERY_REQUIRED']),
+  scenario('preview-cleanup-incomplete', 'preview', 'Preview cleanup incomplete', 'Task Monki refused cleanup because ownership could not be verified.', ['preview:CLEANUP_INCOMPLETE']),
   scenario('discourse-empty', 'discourse', 'Empty discourse', 'A new human conversation with no messages.', ['discourse:empty']),
   scenario('discourse-context-picker', 'discourse', 'Context picker draft', 'A durable draft with task and repository context.', ['discourse:draft', 'context:structured']),
   scenario('discourse-human-only', 'discourse', 'Human-only conversation', 'Human notes, reply ancestry, and a correction.', ['discourse:human-only']),
-  scenario('discourse-team-running', 'discourse', 'Team response running', 'Reserved seeded surface for a running Team response.', ['discourse:team', 'status:RUNNING']),
-  scenario('discourse-panel-partial', 'discourse', 'Partial panel', 'Reserved seeded surface for partial independent answers.', ['discourse:panel', 'status:PARTIAL']),
-  scenario('discourse-review-silent', 'discourse', 'Review with no concerns', 'Reserved seeded surface for explicit no-concern review receipts.', ['discourse:review', 'outcome:NO_CONCERN_FOUND']),
-  scenario('discourse-author-correction', 'discourse', 'Author correction', 'Reserved seeded surface for attributable correction provenance.', ['discourse:correction']),
-  scenario('discourse-followup-queued', 'discourse', 'Follow-up queued', 'Reserved seeded surface for a durable queued response.', ['discourse:queue']),
-  scenario('discourse-context-stale', 'discourse', 'Context changed', 'Conversation context changed after an earlier message.', ['discourse:context', 'freshness:STALE']),
+  scenario('discourse-team-running', 'discourse', 'Team response running', 'A lead response is running while reviewers wait.', ['discourse:team', 'status:RUNNING']),
+  scenario('discourse-panel-partial', 'discourse', 'Partial panel', 'One independent panel answer completed while another failed.', ['discourse:panel', 'status:PARTIAL']),
+  scenario('discourse-review-silent', 'discourse', 'Review with no concerns', 'Both reviewers returned explicit no-concern receipts.', ['discourse:review', 'outcome:NO_CONCERN_FOUND']),
+  scenario('discourse-author-correction', 'discourse', 'Author correction', 'A material review concern produced an attributable correction.', ['discourse:correction']),
+  scenario('discourse-followup-queued', 'discourse', 'Follow-up queued', 'A follow-up waits behind the active response.', ['discourse:queue']),
+  scenario('discourse-context-stale', 'discourse', 'Context changed', 'Dispatch awaits reconfirmation after context changed.', ['discourse:context', 'freshness:STALE']),
   scenario('discourse-context-unavailable', 'discourse', 'Context unavailable', 'Historical context remains visible when its source is unavailable.', ['discourse:context', 'availability:UNAVAILABLE']),
-  scenario('discourse-recovery-required', 'discourse', 'Recovery required', 'Reserved seeded surface for an ambiguous provider response.', ['discourse:recovery']),
-  scenario('discourse-long-history', 'discourse', 'Long conversation', 'A paginated transcript with more than one message page.', ['discourse:pagination']),
+  scenario('discourse-recovery-required', 'discourse', 'Recovery required', 'Ambiguous delivery is fenced for explicit recovery.', ['discourse:recovery']),
+  scenario('discourse-canceled', 'discourse', 'Response canceled', 'A stopped response remains attributable without implying failure or silence.', ['discourse:canceled']),
+  scenario('discourse-long-history', 'discourse', 'Long conversation', 'A paginated transcript preserves stable reading position.', ['discourse:pagination']),
   scenario('discourse-archived', 'discourse', 'Archived conversation', 'A completed conversation in the archive.', ['discourse:archived'])
 ];
 
@@ -420,11 +449,13 @@ interface SeedPaths {
   rootDir: string;
   storeDir: string;
   repositoryPath: string;
+  secondaryRepositoryPath: string;
   worktreeRoot: string;
-  appSettingsPath: string;
-  repositoryRegistryDir: string;
+  previewRoot: string;
   discourseDir: string;
   agentRuntimeDir: string;
+  discourseWorkspaceRoot: string;
+  appSettingsPath: string;
   manifestPath: string;
   envFilePath: string;
 }
@@ -432,6 +463,8 @@ interface SeedPaths {
 interface SeedContext extends SeedPaths {
   scenarioSet: DevSeedScenarioSet;
   store: FileTaskStore;
+  repositoryId: string;
+  secondaryRepositoryId: string;
   worktrees: WorktreeService;
   serverInstanceId: string;
   baseSha: string;
@@ -482,29 +515,29 @@ export async function seedTaskMonkiDevelopmentData(
     { encoding: 'utf8', mode: 0o600 }
   );
 
-  await initSeedRepository(paths.rootDir, paths.repositoryPath);
+  await initSeedRepository(paths.rootDir, paths.secondaryRepositoryPath, 'remote-secondary.git');
+  await initSeedRepository(paths.rootDir, paths.repositoryPath, 'remote.git');
 
   const store = new FileTaskStore(paths.storeDir);
   await store.init();
-  const appSettingsStore = new AppSettingsStore(paths.appSettingsPath);
-  const repositoryRegistry = new FileRepositoryRegistry(
-    paths.repositoryRegistryDir,
-    new NodeRepositoryInspector()
+  const secondaryRepository = await store.addRepository(
+    await validateRepositoryPath(paths.secondaryRepositoryPath)
   );
-  const registry = await repositoryRegistry.reconcile([
-    { path: paths.repositoryPath, source: 'DEFAULT', isDefault: true }
-  ]);
+  const repository = await store.addRepository(
+    await validateRepositoryPath(paths.repositoryPath)
+  );
+  const appSettingsStore = new AppSettingsStore(paths.appSettingsPath);
   await appSettingsStore.update({
     firstLaunchSetupCompleted: true,
     defaultModel: DEFAULT_AGENT_SETTINGS.model ?? null,
     defaultReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
     reviewModel: DEFAULT_AGENT_SETTINGS.model ?? null,
-    reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null
+    reviewReasoningEffort: DEFAULT_AGENT_SETTINGS.reasoningEffort ?? null,
+    selectedRepositoryId: repository.id
   });
-  await appSettingsStore.setSelectedRepositoryId(registry.defaultRepositoryId);
 
   const server = await store.createAgentServer({
-    provider: 'codex',
+    runtimeId: 'codex',
     runtimeKind: 'APP_SERVER',
     transport: 'STDIO',
     executable: 'codex-seed-runtime',
@@ -522,6 +555,8 @@ export async function seedTaskMonkiDevelopmentData(
     ...paths,
     scenarioSet,
     store,
+    repositoryId: repository.id,
+    secondaryRepositoryId: secondaryRepository.id,
     worktrees: new WorktreeService(paths.worktreeRoot),
     serverInstanceId: server.id,
     baseSha: (await git(paths.repositoryPath, ['rev-parse', 'HEAD'])).trim(),
@@ -530,7 +565,6 @@ export async function seedTaskMonkiDevelopmentData(
     protocolCounter: 0,
     prCounter: 100
   };
-
   const discourseStore = new FileDiscourseStore(paths.discourseDir);
   await discourseStore.init();
 
@@ -540,8 +574,7 @@ export async function seedTaskMonkiDevelopmentData(
         definition,
         discourseStore,
         taskStore: store,
-        repositoryPath: paths.repositoryPath,
-        repositoryId: registry.defaultRepositoryId ?? registry.repositories[0]?.id ?? ''
+        repositoryId: repository.id
       });
       ctx.scenarios.push({ ...definition, conversationId });
       continue;
@@ -553,6 +586,18 @@ export async function seedTaskMonkiDevelopmentData(
       relatedTaskIds: result.relatedTaskIds
     });
   }
+  await store.createBoard({
+    name: 'Secondary repository',
+    color: 'VIOLET',
+    repositoryIds: [secondaryRepository.id],
+    workflowPhases: []
+  });
+  await store.createBoard({
+    name: 'Review across repositories',
+    color: 'BLUE',
+    repositoryIds: [],
+    workflowPhases: ['REVIEW', 'IN_REVIEW']
+  });
   await store.updateAgentServer(server.id, {
     status: 'EXITED',
     exitedAt: new Date().toISOString(),
@@ -571,11 +616,14 @@ export async function seedTaskMonkiDevelopmentData(
     env: {
       TASK_MANAGER_STORE_DIR: paths.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: paths.appSettingsPath,
-      TASK_MANAGER_REPOSITORY_REGISTRY_DIR: paths.repositoryRegistryDir,
-      TASK_MANAGER_DISCOURSE_DIR: paths.discourseDir,
-      TASK_MANAGER_AGENT_RUNTIME_DIR: paths.agentRuntimeDir,
       TASK_MANAGER_REPO_PATH: paths.repositoryPath,
       TASK_MANAGER_WORKTREE_ROOT: paths.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: paths.previewRoot,
+      TASK_MANAGER_DISCOURSE_DIR: paths.discourseDir,
+      TASK_MANAGER_AGENT_RUNTIME_DIR: paths.agentRuntimeDir,
+      TASK_MANAGER_DISCOURSE_WORKSPACE_ROOT: paths.discourseWorkspaceRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      [DETERMINISTIC_DEV_SEED_ENV_VAR]: '1',
       TASK_MANAGER_DEV_SEED_MODE: '1'
     },
     counts: {
@@ -583,7 +631,8 @@ export async function seedTaskMonkiDevelopmentData(
       scenarios: ctx.scenarios.length,
       runs: snapshot.runs.length,
       worktrees: snapshot.worktrees.length,
-      events: snapshot.events.length
+      events: snapshot.events.length,
+      conversations: ctx.scenarios.filter((scenario) => scenario.conversationId).length
     },
     scenarios: ctx.scenarios
   };
@@ -596,6 +645,12 @@ export async function seedTaskMonkiDevelopmentData(
     encoding: 'utf8',
     mode: 0o600
   });
+  await Promise.all([
+    fs.chmod(paths.manifestPath, 0o600),
+    fs.chmod(paths.envFilePath, 0o600)
+  ]);
+  await discourseStore.close();
+  await store.close();
   return manifest;
 }
 
@@ -603,7 +658,6 @@ async function seedDiscourseScenario(input: {
   definition: DevSeedScenarioDefinition;
   discourseStore: FileDiscourseStore;
   taskStore: FileTaskStore;
-  repositoryPath: string;
   repositoryId: string;
 }): Promise<string> {
   const { definition, discourseStore } = input;
@@ -625,7 +679,7 @@ async function seedDiscourseScenario(input: {
     await input.taskStore.createTask({
       title: '[seed:discourse-context] Context source',
       prompt: 'Provide durable task context for Discourse seed scenarios.',
-      repositoryPath: input.repositoryPath
+      repositoryId: input.repositoryId
     });
   const append = (body: string, suffix: string, options: {
     replyToMessageId?: string;
@@ -650,11 +704,7 @@ async function seedDiscourseScenario(input: {
       policy: 'NONE',
       recipientParticipantIds: [],
       tokens: [
-        {
-          kind: 'TASK',
-          entityId: task.id,
-          labelSnapshot: task.title
-        },
+        { kind: 'TASK', entityId: task.id, labelSnapshot: task.title },
         {
           kind: 'REPOSITORY',
           entityId: input.repositoryId,
@@ -679,7 +729,7 @@ async function seedDiscourseScenario(input: {
       }
     );
     const reply = await append(
-      'Agreed. Repository context should also be explicit rather than inherited from the board filter.',
+      'Agreed. Repository context should be explicit rather than inherited from the board filter.',
       'reply',
       { replyToMessageId: root.id }
     );
@@ -697,7 +747,8 @@ async function seedDiscourseScenario(input: {
     'discourse-review-silent',
     'discourse-author-correction',
     'discourse-followup-queued',
-    'discourse-recovery-required'
+    'discourse-recovery-required',
+    'discourse-canceled'
   ].includes(definition.slug)) {
     const trigger = await append(definition.description, 'message');
     await seedDiscourseAgentWaveState({
@@ -784,7 +835,7 @@ async function seedDiscourseScenario(input: {
   return conversation.id;
 }
 
-const DISCOURSE_SEED_TIME = '2026-07-13T09:00:00.000Z';
+const DISCOURSE_SEED_TIME = '2026-07-20T09:00:00.000Z';
 
 function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
   if ([
@@ -793,7 +844,7 @@ function discourseSeedPolicy(slug: string): DiscourseDefaultPolicy {
     'discourse-author-correction'
   ].includes(slug)) return 'TEAM';
   if (slug === 'discourse-panel-partial') return 'PANEL';
-  if (['discourse-followup-queued', 'discourse-recovery-required', 'discourse-context-stale'].includes(slug)) {
+  if (['discourse-followup-queued', 'discourse-recovery-required', 'discourse-context-stale', 'discourse-canceled'].includes(slug)) {
     return 'DIRECT';
   }
   return 'NONE';
@@ -840,7 +891,7 @@ function discourseSeedBindings(
         agentProfileId: profileId,
         profileRevision: 1,
         displayNameSnapshot: displayName,
-        providerId: 'codex',
+        runtimeId: 'codex',
         model: 'scenario-model',
         modelProvider: 'openai',
         reasoningEffort: 'medium',
@@ -869,7 +920,7 @@ async function seedDiscourseAgentWaveState(input: {
     agentProfileId: binding.revision.agentProfileId,
     profileRevision: binding.revision.profileRevision,
     displayNameSnapshot: binding.revision.displayNameSnapshot,
-    providerId: binding.revision.providerId,
+    runtimeId: binding.revision.runtimeId,
     model: binding.revision.model,
     modelProvider: binding.revision.modelProvider,
     reasoningEffort: binding.revision.reasoningEffort,
@@ -903,7 +954,6 @@ async function seedDiscourseAgentWaveState(input: {
   });
 
   if (input.slug === 'discourse-context-stale') return;
-
   if (input.slug === 'discourse-followup-queued') {
     await seedWaveRunning(input.store, input.conversationId, first.wave.id);
     await seedJobRunning(input.store, input.conversationId, first.jobs[0]!.id);
@@ -916,14 +966,9 @@ async function seedDiscourseAgentWaveState(input: {
     });
     return;
   }
-
   if (input.slug === 'discourse-recovery-required') {
     await seedWaveRunning(input.store, input.conversationId, first.wave.id);
-    const starting = await seedJobStarting(
-      input.store,
-      input.conversationId,
-      first.jobs[0]!.id
-    );
+    const starting = await seedJobStarting(input.store, input.conversationId, first.jobs[0]!.id);
     await input.store.updateJob({
       conversationId: input.conversationId,
       expectedRevision: starting.recordRevision,
@@ -935,7 +980,7 @@ async function seedDiscourseAgentWaveState(input: {
         delivery: 'AMBIGUOUS',
         error: {
           code: 'DELIVERY_AMBIGUOUS',
-          message: 'Provider delivery could not be confirmed after restart.',
+          message: 'Agent delivery could not be confirmed after restart.',
           category: 'DELIVERY',
           retryable: false
         }
@@ -951,12 +996,69 @@ async function seedDiscourseAgentWaveState(input: {
     return;
   }
 
+  if (input.slug === 'discourse-canceled') {
+    await seedWaveRunning(input.store, input.conversationId, first.wave.id);
+    const running = await seedJobRunning(
+      input.store,
+      input.conversationId,
+      first.jobs[0]!.id
+    );
+    const cancelRequested = await input.store.updateJob({
+      conversationId: input.conversationId,
+      expectedRevision: running.recordRevision,
+      clientOperationId: `${input.slug}:job-cancel-requested`,
+      job: {
+        ...running,
+        recordRevision: running.recordRevision + 1,
+        status: 'CANCEL_REQUESTED'
+      }
+    });
+    await input.store.updateJob({
+      conversationId: input.conversationId,
+      expectedRevision: cancelRequested.recordRevision,
+      clientOperationId: `${input.slug}:job-canceled`,
+      job: {
+        ...cancelRequested,
+        recordRevision: cancelRequested.recordRevision + 1,
+        status: 'CANCELED',
+        delivery: 'TERMINAL',
+        finishedAt: DISCOURSE_SEED_TIME
+      }
+    });
+    let wave = requireSeedWave(
+      await input.store.getConversation(input.conversationId),
+      first.wave.id
+    );
+    for (const status of ['STOP_REQUESTED', 'STOPPING'] as const) {
+      wave = await input.store.updateWave({
+        conversationId: input.conversationId,
+        expectedRevision: wave.recordRevision,
+        clientOperationId: `${input.slug}:wave:${status}`,
+        wave: { ...wave, recordRevision: wave.recordRevision + 1, status }
+      });
+    }
+    await input.store.updateWave({
+      conversationId: input.conversationId,
+      expectedRevision: wave.recordRevision,
+      clientOperationId: `${input.slug}:wave-settled`,
+      wave: {
+        ...wave,
+        recordRevision: wave.recordRevision + 1,
+        status: 'SETTLED',
+        phase: 'COMPLETE',
+        outcome: 'CANCELED',
+        settlementReason: 'STOPPED',
+        settledAt: DISCOURSE_SEED_TIME
+      }
+    });
+    return;
+  }
+
   await seedWaveRunning(input.store, input.conversationId, first.wave.id);
   if (input.slug === 'discourse-team-running') {
     await seedJobRunning(input.store, input.conversationId, first.jobs[0]!.id);
     return;
   }
-
   if (input.slug === 'discourse-panel-partial') {
     await seedCompleteContribution(
       input.store,
@@ -998,13 +1100,7 @@ async function seedDiscourseAgentWaveState(input: {
     expectedConversationRevision: aggregate.conversation.recordRevision,
     clientOperationId: `${input.slug}:add-reviews`
   });
-  await seedCompleteReview(
-    input.store,
-    input.conversationId,
-    reviewerJobs[0]!.id,
-    leadMessageId,
-    []
-  );
+  await seedCompleteReview(input.store, input.conversationId, reviewerJobs[0]!.id, leadMessageId, []);
   const concern = input.slug === 'discourse-author-correction'
     ? [seedConcern(input.conversationId, first.wave.id, reviewerJobs[1]!, leadMessageId)]
     : [];
@@ -1041,14 +1137,10 @@ async function seedDiscourseAgentWaveState(input: {
     expectedConversationRevision: beforeCorrection.conversation.recordRevision,
     clientOperationId: `${input.slug}:add-correction`
   });
-  const runningCorrection = await seedJobRunning(
-    input.store,
-    input.conversationId,
-    correctionJob.id
-  );
+  const runningCorrection = await seedJobRunning(input.store, input.conversationId, correctionJob.id);
   const correctionMessage = await input.store.appendAgentMessage({
     conversationId: input.conversationId,
-    body: 'Correction: discourse runs are isolated from task workflow, while shared scheduler capacity remains globally bounded.',
+    body: 'Correction: discourse records remain isolated from task workflow, while each owner still uses bounded scheduling.',
     stableParticipantId: correctionAssignment.stableParticipantId,
     participantRevisionId: correctionAssignment.participantRevisionId,
     displayNameSnapshot: correctionAssignment.displayNameSnapshot,
@@ -1143,7 +1235,12 @@ async function seedWavePlan(input: {
     transcriptOrdinals: [input.triggerOrdinal],
     attachmentIds: [],
     permissionProfileHash: 'd'.repeat(64),
-    budget: { inputBytes: 128, estimatedInputTokens: 32, reservedOutputTokens: 16_000, sourceCount: 0 },
+    budget: {
+      inputBytes: 128,
+      estimatedInputTokens: 32,
+      reservedOutputTokens: 16_000,
+      sourceCount: 0
+    },
     exclusions: [],
     contextSchemaVersion: 1,
     promptPolicyVersion: 1,
@@ -1192,7 +1289,11 @@ function seedJobRecord(input: {
   };
 }
 
-async function seedWaveRunning(store: FileDiscourseStore, conversationId: string, waveId: string) {
+async function seedWaveRunning(
+  store: FileDiscourseStore,
+  conversationId: string,
+  waveId: string
+) {
   for (const status of ['SNAPSHOTTING', 'QUEUED', 'RUNNING'] as const) {
     const wave = requireSeedWave(await store.getConversation(conversationId), waveId);
     await store.updateWave({
@@ -1209,7 +1310,11 @@ async function seedWaveRunning(store: FileDiscourseStore, conversationId: string
   }
 }
 
-async function seedJobStarting(store: FileDiscourseStore, conversationId: string, jobId: string) {
+async function seedJobStarting(
+  store: FileDiscourseStore,
+  conversationId: string,
+  jobId: string
+) {
   let job = requireSeedJob(await store.getConversation(conversationId), jobId);
   job = await store.updateJob({
     conversationId,
@@ -1231,7 +1336,11 @@ async function seedJobStarting(store: FileDiscourseStore, conversationId: string
   });
 }
 
-async function seedJobRunning(store: FileDiscourseStore, conversationId: string, jobId: string) {
+async function seedJobRunning(
+  store: FileDiscourseStore,
+  conversationId: string,
+  jobId: string
+) {
   const starting = await seedJobStarting(store, conversationId, jobId);
   return store.updateJob({
     conversationId,
@@ -1283,7 +1392,11 @@ async function seedCompleteContribution(
   return message.id;
 }
 
-async function seedFailJob(store: FileDiscourseStore, conversationId: string, jobId: string) {
+async function seedFailJob(
+  store: FileDiscourseStore,
+  conversationId: string,
+  jobId: string
+) {
   const job = await seedJobRunning(store, conversationId, jobId);
   await store.updateJob({
     conversationId,
@@ -1350,14 +1463,14 @@ function seedConcern(
     reviewJobId: reviewJob.id,
     reviewerParticipantRevisionId: reviewJob.assignment.participantRevisionId,
     targetMessageId,
-    targetClaim: 'Discourse work is completely separate from shared runtime capacity.',
+    targetClaim: 'Discourse work is completely separate from bounded runtime capacity.',
     category: 'runtime isolation',
     severity: 'MATERIAL',
     confidence: 'HIGH',
     evidenceStatus: 'LOGICAL_CONTRADICTION',
-    reason: 'The answer omits that task and discourse jobs share a globally bounded scheduler.',
-    evidence: 'Both owners lease work through AgentTurnScheduler.',
-    suggestedResolution: 'Clarify owner isolation while acknowledging shared scheduler capacity.',
+    reason: 'The answer overstates isolation and omits that both owners still enforce bounded scheduling.',
+    evidence: 'Task and discourse scheduling are distinct but individually capacity-limited.',
+    suggestedResolution: 'Clarify record ownership while acknowledging bounded runtime capacity.',
     requiredAccessAvailable: true,
     recordRevision: 1,
     createdAt: DISCOURSE_SEED_TIME
@@ -1438,18 +1551,17 @@ function scenariosForSet(set: DevSeedScenarioSet): DevSeedScenarioDefinition[] {
 }
 
 function assertValidScenarioSet(value: string): asserts value is DevSeedScenarioSet {
-  if (
-    ![
-      'all',
-      'board',
-      'agent',
-      'review',
-      'delivery',
-      'completion',
-      'workflow',
-      'discourse'
-    ].includes(value)
-  ) {
+  if (![
+    'all',
+    'board',
+    'agent',
+    'review',
+    'delivery',
+    'completion',
+    'workflow',
+    'preview',
+    'discourse'
+  ].includes(value)) {
     throw new Error(`Unknown seed scenario set: ${value}`);
   }
 }
@@ -1460,13 +1572,17 @@ function resolveSeedPaths(options: SeedTaskMonkiDevelopmentDataOptions): SeedPat
     rootDir,
     storeDir: path.resolve(options.storeDir ?? path.join(rootDir, 'store')),
     repositoryPath: path.resolve(options.repositoryPath ?? path.join(rootDir, 'repo')),
-    worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
-    appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
-    repositoryRegistryDir: path.resolve(
-      options.repositoryRegistryDir ?? path.join(rootDir, 'repository-registry')
+    secondaryRepositoryPath: path.resolve(
+      options.secondaryRepositoryPath ?? path.join(rootDir, 'repo-secondary')
     ),
+    worktreeRoot: path.resolve(options.worktreeRoot ?? path.join(rootDir, 'worktrees')),
+    previewRoot: path.resolve(options.previewRoot ?? path.join(rootDir, 'preview-runtime')),
     discourseDir: path.resolve(options.discourseDir ?? path.join(rootDir, 'discourse')),
     agentRuntimeDir: path.resolve(options.agentRuntimeDir ?? path.join(rootDir, 'agent-runtime')),
+    discourseWorkspaceRoot: path.resolve(
+      options.discourseWorkspaceRoot ?? path.join(rootDir, 'discourse-workspaces')
+    ),
+    appSettingsPath: path.resolve(options.appSettingsPath ?? path.join(rootDir, 'app-settings.json')),
     manifestPath: path.join(rootDir, 'manifest.json'),
     envFilePath: path.join(rootDir, 'dev-api.env')
   };
@@ -1605,6 +1721,25 @@ async function seedScenario(
       const state = await createImplementedTask(ctx, definition);
       return { task: await ctx.store.transitionTask(state.task.id, 'ARCHIVED', 'Seed archived state') };
     }
+    case 'preview-missing-recipe':
+    case 'preview-approval-required':
+    case 'preview-active-approval-required':
+    case 'preview-preparing':
+    case 'preview-ready':
+    case 'preview-oci-ready':
+    case 'preview-compose-approval-required':
+    case 'preview-compose-updating':
+    case 'preview-compose-reset-required':
+    case 'preview-compose-ready':
+    case 'preview-compose-recovery':
+    case 'preview-replacing':
+    case 'preview-replacement-failed':
+    case 'preview-failed':
+    case 'preview-stale':
+    case 'preview-stopped':
+    case 'preview-recovery-required':
+    case 'preview-cleanup-incomplete':
+      return { task: (await createPreviewScenario(ctx, definition)).task };
     default:
       throw new Error(`No seed builder registered for ${definition.slug}`);
   }
@@ -1623,7 +1758,8 @@ async function createSeedTask(
       '',
       'This task exists so agents can verify UI and workflow states without inventing local state.'
     ].join('\n'),
-    repositoryPath: ctx.repositoryPath,
+    repositoryId:
+      definition.slug === 'board-backlog' ? ctx.secondaryRepositoryId : ctx.repositoryId,
     completionPolicy,
     agentSettings: DEFAULT_AGENT_SETTINGS
   });
@@ -1657,7 +1793,7 @@ async function createWorktreeState(
     return { task: await requireTask(ctx, task.id), iteration, worktree: failed };
   }
 
-  const created = await ctx.worktrees.create(worktree);
+  const created = await ctx.worktrees.create(worktree, ctx.repositoryPath);
   let storedWorktree = await ctx.store.updateWorktree(created, 'WORKTREE_CREATED');
 
   if (gitState === 'missing') {
@@ -1686,6 +1822,409 @@ async function createWorktreeState(
 
   task = await requireTask(ctx, task.id);
   return { task, iteration, worktree: storedWorktree, gitSnapshot };
+}
+
+async function createPreviewScenario(
+  ctx: SeedContext,
+  definition: DevSeedScenarioDefinition
+): Promise<SeededTaskState> {
+  const state = await createWorktreeState(ctx, definition, 'clean');
+  if (definition.slug === 'preview-missing-recipe') return state;
+  const ociReady = definition.slug === 'preview-oci-ready';
+  const composePreview = definition.slug.startsWith('preview-compose-');
+  const composeEngine = {
+    contextName: 'desktop-linux', endpointDigest: 'seed-endpoint', engineId: 'seed-engine',
+    serverVersion: '28.0.4', apiVersion: '1.48', operatingSystem: 'linux', architecture: 'arm64'
+  };
+  const now = new Date().toISOString();
+  let plan = await ctx.store.savePreviewPlan({
+    id: `seed-plan-${definition.slug}`,
+    taskId: state.task.id,
+    iterationId: state.iteration.id,
+    worktreeId: state.worktree.id,
+    recipePath: '.taskmonki/preview.yaml',
+    recipeVersion: 1,
+    recipeDigest: `seed-recipe-${definition.slug}`,
+    executionDigest:
+      definition.slug === 'preview-active-approval-required'
+        ? 'seed-preview-execution-v2'
+        : 'seed-preview-execution-v1',
+    executionPlan: {
+      version: 1,
+      jobs: [
+        {
+          id: 'prepare',
+          label: 'Prepare application',
+          cwd: '.',
+          command: ['node', 'scripts/prepare-preview.mjs'],
+          needs: {},
+          env: {},
+          role: 'generic',
+          retrySafe: false
+        },
+        ...(ociReady ? [
+          {
+            id: 'migrate', label: 'Migrate database', cwd: '.',
+            command: ['node', 'scripts/migrate.mjs'],
+            needs: { database: 'ready' as const },
+            env: { DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' } },
+            role: 'migration' as const, retrySafe: false
+          },
+          {
+            id: 'seed', label: 'Seed development data', cwd: '.',
+            command: ['node', 'scripts/seed.mjs'],
+            needs: { migrate: 'succeeded' as const, database: 'ready' as const, cache: 'ready' as const },
+            env: {
+              DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' },
+              REDIS_URL: { type: 'redis-url' as const, resource: 'cache' }
+            },
+            role: 'seed' as const, retrySafe: true
+          }
+        ] : [])
+      ],
+      resources: ociReady ? [
+        {
+          id: 'database', label: 'PostgreSQL', type: 'postgres' as const,
+          image: 'postgres:17-alpine', database: 'app',
+          limits: { cpus: 1, memoryMb: 256, diskMb: 1024, pids: 128 }
+        },
+        {
+          id: 'cache', label: 'Redis', type: 'redis' as const,
+          image: 'redis:7-alpine',
+          limits: { cpus: 0.5, memoryMb: 128, diskMb: 256, pids: 64 }
+        }
+      ] : [],
+      services: [
+        {
+          id: 'web',
+          label: 'Start web application',
+          cwd: '.',
+          command: ['node', 'server.mjs'],
+          needs: ociReady
+            ? { prepare: 'succeeded' as const, seed: 'succeeded' as const, database: 'ready' as const, cache: 'ready' as const }
+            : { prepare: 'succeeded' as const },
+          env: ociReady ? {
+            NODE_ENV: 'development',
+            DATABASE_URL: { type: 'postgres-url' as const, resource: 'database' },
+            REDIS_URL: { type: 'redis-url' as const, resource: 'cache' }
+          } : { NODE_ENV: 'development' },
+          ports: { http: { env: 'PORT' } },
+          ready: { type: 'http', port: 'http', path: '/health/ready', timeoutSeconds: 30 },
+          critical: true,
+          restart: { mode: 'never', maxRestarts: 0, backoffMs: 250 }
+        }
+      ],
+      workers: [],
+      routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+      scenarios: ociReady
+        ? [{ id: 'full', label: 'Full sample data', jobs: ['migrate', 'seed'], resources: ['database', 'cache'] }]
+        : [{ id: 'default', jobs: [], resources: [] }],
+      selectedScenarioId: ociReady ? 'full' : 'default'
+    },
+    warnings: [
+      'Native preview commands run as your local user and are not sandboxed.',
+      'Commands may access the network; Task Monki does not enforce a no-network mode.'
+    ],
+    createdAt: now
+  });
+  if (composePreview) {
+    plan = await ctx.store.savePreviewPlan({
+      ...plan,
+      executionPlan: {
+        version: 1,
+        adapter: 'COMPOSE',
+        compose: {
+          files: ['compose.yaml'], projectDirectory: '.', profiles: [], rootServices: ['web'],
+          services: [{
+            id: 'web', ports: { http: { target: 3000, protocol: 'tcp' } },
+            ready: { type: 'http', port: 'http', path: '/ready', timeoutSeconds: 30 }
+          }],
+          inspection: {
+            composeVersion: '2.40.0', supportsNoEnvResolution: true,
+            trustDigest: `seed-compose-trust-${definition.slug}`,
+            configDigest: `seed-compose-config-${definition.slug}`,
+            hostInputs: [
+              { kind: 'COMPOSE_FILE', path: 'compose.yaml' },
+              { kind: 'ENV_FILE', path: 'preview.env', format: 'COMPOSE' }
+            ],
+            services: [{
+              id: 'web', image: 'seed/web:latest', dependsOn: [{
+                service: 'database', condition: 'service_healthy', required: true, restart: false
+              }],
+              exposedPorts: [3000], environmentKeys: ['DATABASE_URL'], secretSources: [], namedVolumes: [],
+              networks: ['default'], healthcheck: { test: ['CMD', 'true'] }
+            }, {
+              id: 'database', image: 'postgres:17-alpine', dependsOn: [],
+              exposedPorts: [5432], environmentKeys: ['POSTGRES_DB'], secretSources: ['database-password'],
+              namedVolumes: [{ source: 'database-data', target: '/var/lib/postgresql/data', readOnly: false }],
+              networks: ['default'], healthcheck: { test: ['CMD-SHELL', 'pg_isready'] }
+            }],
+            volumes: [{ name: 'database-data', external: false }],
+            networks: [{ name: 'default', external: false }]
+          }
+        },
+        inputs: [], attachments: [], jobs: [], resources: [], services: [], workers: [],
+        routes: [{ id: 'app', service: 'web', port: 'http', primary: true }],
+        scenarios: [{ id: 'default', jobs: [], resources: [] }], selectedScenarioId: 'default'
+      },
+      warnings: [
+        'Compose previews use one serialized task-scoped project; route downtime begins when activation starts.',
+        'Task Monki never delivers private-vault values to Compose.'
+      ],
+      ociCapability: {
+        status: 'READY', contextName: composeEngine.contextName,
+        supportsMemoryLimit: true, supportsCpuLimit: true, supportsPidsLimit: true,
+        identity: composeEngine
+      }
+    });
+  }
+  if (['preview-approval-required', 'preview-compose-approval-required'].includes(definition.slug)) return state;
+  const generationPlan =
+    definition.slug === 'preview-active-approval-required'
+      ? await ctx.store.savePreviewPlan({
+          ...plan,
+          id: `seed-plan-${definition.slug}-active`,
+          recipeDigest: `seed-recipe-${definition.slug}-active`,
+          executionDigest: 'seed-preview-execution-v1',
+          createdAt: new Date(Date.parse(now) - 1).toISOString()
+        })
+      : plan;
+  const approval = await ctx.store.savePreviewApproval({
+    id: `seed-approval-${definition.slug}`,
+    taskId: state.task.id,
+    planId: generationPlan.id,
+    executionDigest: generationPlan.executionDigest,
+    scope: 'TASK',
+    approvedAt: now
+  });
+  const generationState = previewStateForSeed(definition.slug);
+  const generationId = `seed-generation-${definition.slug}`;
+  const manifest = await ctx.store.writeTextArtifact(
+    state.task.id,
+    'preview-source-manifest',
+    `${JSON.stringify({ version: 1, headSha: state.gitSnapshot?.headSha, entries: [], digest: 'seed-manifest' })}\n`
+  );
+  const routeAttached = generationState === 'READY';
+  const routeHostname = previewRouteHostname(state.task.id, 'app');
+  let generation = await ctx.store.savePreviewGeneration({
+    id: generationId,
+    previewKey: `task-${state.task.id.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 16)}`,
+    taskId: state.task.id,
+    iterationId: state.iteration.id,
+    worktreeId: state.worktree.id,
+    planId: generationPlan.id,
+    approvalId: approval.id,
+    executionDigest: generationPlan.executionDigest,
+    adapter: composePreview ? 'COMPOSE' : 'NATIVE',
+    composeChange: composePreview ? 'RESTART_PRESERVE_DATA' : undefined,
+    sourceGitSnapshotId: state.gitSnapshot?.id ?? 'seed-git',
+    sourceHeadSha: state.gitSnapshot?.headSha ?? ctx.baseSha,
+    sourceDirtyFingerprint: state.gitSnapshot?.dirtyFingerprint ?? 'seed-dirty',
+    sourceManifestArtifactId: manifest.id,
+    sourceManifestDigest: 'seed-manifest',
+    workspacePath: path.join(ctx.previewRoot, state.task.id, generationId),
+    state: generationState,
+    routingState: generationState === 'READY' ? 'ACTIVE' : 'CANDIDATE',
+    freshness: definition.slug === 'preview-stale' ? 'STALE' : 'CURRENT',
+    routes: routeAttached
+      ? [
+          {
+            id: 'app',
+            hostname: routeHostname,
+            url: `http://${routeHostname}:31337/`,
+            gatewayPort: 31337,
+            targetHost: '127.0.0.1',
+            targetPort: 41000 + ctx.scenarios.length,
+            state: 'ATTACHED'
+          }
+        ]
+      : [],
+    failureReason:
+      generationState === 'FAILED'
+        ? 'Preview job prepare failed with exit code 7.'
+        : definition.slug === 'preview-compose-recovery'
+          ? 'Compose activation failed after the stable project began changing; verified data volumes were preserved.'
+          : undefined,
+    cleanupReason:
+      generationState === 'CLEANUP_INCOMPLETE'
+        ? 'Recorded native process identity could not be verified; cleanup was refused.'
+        : undefined,
+    createdAt: now,
+    updatedAt: now,
+    readyAt: routeAttached ? now : undefined,
+    stoppedAt: generationState === 'STOPPED' ? now : undefined
+  });
+  if (composePreview) {
+    const engine = composeEngine;
+    const replacementState = ['preview-compose-updating', 'preview-compose-reset-required'].includes(definition.slug);
+    let activeGenerationId: string | undefined;
+    if (replacementState) {
+      const activeId = `${generation.id}-active`;
+      const activeAt = new Date(Date.parse(now) - 1_000).toISOString();
+      await ctx.store.savePreviewGeneration({
+        ...generation,
+        id: activeId,
+        workspacePath: path.join(ctx.previewRoot, state.task.id, activeId),
+        state: 'READY',
+        routingState: 'ACTIVE',
+        composeChange: 'IN_PLACE_UPDATE',
+        replacesGenerationId: undefined,
+        routes: [{
+          id: 'app', hostname: routeHostname,
+          url: `http://${routeHostname}:31337/`,
+          gatewayPort: 31337, targetHost: '127.0.0.1',
+          targetPort: 41000 + ctx.scenarios.length, state: 'ATTACHED'
+        }],
+        failureReason: undefined,
+        createdAt: activeAt,
+        updatedAt: activeAt,
+        readyAt: activeAt
+      });
+      generation = await ctx.store.savePreviewGeneration({
+        ...generation,
+        composeChange: definition.slug === 'preview-compose-reset-required'
+          ? 'DESTRUCTIVE_RESET_REQUIRED'
+          : 'IN_PLACE_UPDATE',
+        replacesGenerationId: activeId,
+        failureReason: definition.slug === 'preview-compose-reset-required'
+          ? 'Compose preview requires explicit data reset: data-bearing service compatibility changed.'
+          : undefined
+      });
+      activeGenerationId = activeId;
+    }
+    await ctx.store.savePreviewComposeProject({
+      id: `seed-compose-project-${definition.slug}`,
+      taskId: state.task.id,
+      previewKey: generation.previewKey,
+      projectName: `taskmonki_seed_${definition.slug.replace(/[^a-z0-9]/g, '_')}`,
+      state: definition.slug === 'preview-compose-updating'
+        ? 'UPDATING'
+        : definition.slug === 'preview-compose-reset-required' || generationState === 'READY'
+          ? 'READY'
+          : 'RECOVERY_REQUIRED',
+      engine,
+      composeVersion: '2.40.0',
+      trustDigest: `seed-compose-trust-${definition.slug}`,
+      configDigest: `seed-compose-config-${definition.slug}`,
+      ownershipMarkerDigest: 'seed-compose-marker',
+      activeGenerationId: activeGenerationId ?? (generationState === 'READY' ? generation.id : undefined),
+      pendingGenerationId: definition.slug === 'preview-compose-updating' ? generation.id : undefined,
+      containers: generationState === 'READY' || replacementState ? [{
+        serviceId: 'web', object: {
+          engine, objectId: `seed-container-${definition.slug}`, objectName: `seed-${definition.slug}-web-1`, labelsDigest: 'seed-labels'
+        }
+      }] : [],
+      volumes: [{
+        logicalName: 'database-data', external: false, state: 'ACTIVE',
+        object: { engine, objectId: `seed-volume-${definition.slug}`, objectName: `seed-${definition.slug}-data`, labelsDigest: 'seed-labels' }
+      }],
+      networks: generationState === 'READY' || replacementState ? [{
+        logicalName: 'default', external: false,
+        object: { engine, objectId: `seed-network-${definition.slug}`, objectName: `seed-${definition.slug}-default`, labelsDigest: 'seed-labels' }
+      }] : [],
+      failureReason: generation.failureReason,
+      createdAt: now,
+      updatedAt: now
+    });
+    return state;
+  }
+  if (generationState === 'PREPARING_SOURCE') return state;
+  const stdout = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stdout');
+  const stderr = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stderr');
+  if (generationState === 'FAILED') {
+    await ctx.store.appendBoundedArtifact(stderr.id, 'intentional seeded preview failure\n');
+  }
+  const attemptState =
+    generationState === 'READY' ? 'READY'
+    : generationState === 'STOPPED' ? 'STOPPED'
+    : generationState === 'FAILED' ? 'FAILED'
+    : 'RECOVERY_REQUIRED';
+  await ctx.store.savePreviewNodeAttempt({
+    id: `seed-attempt-${definition.slug}`,
+    taskId: state.task.id,
+    generationId: generation.id,
+    nodeId: generationState === 'FAILED' ? 'prepare' : 'web',
+    kind: generationState === 'FAILED' ? 'JOB' : 'SERVICE',
+    attempt: 1,
+    commandDigest: 'seed-command',
+    state: attemptState,
+    stdoutArtifactId: stdout.id,
+    stderrArtifactId: stderr.id,
+    startedAt: now,
+    endedAt: ['FAILED', 'STOPPED'].includes(generationState) ? now : undefined,
+    exitCode: generationState === 'FAILED' ? 7 : undefined,
+    readiness: generationState === 'READY'
+      ? { status: 'PASSED', lastStatusCode: 204, observedAt: now }
+      : undefined
+  });
+  await ctx.store.savePreviewResource({
+    id: `seed-resource-${definition.slug}`,
+    taskId: state.task.id,
+    generationId: generation.id,
+    logicalNodeId: generationState === 'FAILED' ? 'prepare' : 'web',
+    adapterKind: 'NATIVE_PROCESS',
+    state:
+      generationState === 'READY' ? 'RUNNING'
+      : generationState === 'STOPPED' ? 'STOPPED'
+      : generationState === 'FAILED' ? 'FAILED'
+      : generationState === 'CLEANUP_INCOMPLETE' ? 'CLEANUP_INCOMPLETE'
+      : 'PREPARED',
+    ownershipMarkerDigest: 'seed-marker',
+    receiptPath: path.join(ctx.previewRoot, state.task.id, generation.id, 'runtime', 'seed.json'),
+    targetHost: '127.0.0.1',
+    targetPort: 41000 + ctx.scenarios.length,
+    updatedAt: now,
+    cleanupError:
+      generationState === 'CLEANUP_INCOMPLETE' ? 'Seeded unverified ownership identity.' : undefined
+  });
+  if (['preview-replacing', 'preview-replacement-failed'].includes(definition.slug)) {
+    const failed = definition.slug === 'preview-replacement-failed';
+    const candidateAt = new Date(Date.parse(now) + 1).toISOString();
+    const candidateId = `${generationId}-candidate`;
+    await ctx.store.savePreviewGeneration({
+      ...generation,
+      id: candidateId,
+      workspacePath: path.join(ctx.previewRoot, state.task.id, candidateId),
+      state: failed ? 'FAILED' : 'WAITING_READY',
+      routingState: 'CANDIDATE',
+      replacesGenerationId: generation.id,
+      routes: [],
+      failureReason: failed ? 'Candidate web service exited before readiness.' : undefined,
+      createdAt: candidateAt,
+      updatedAt: candidateAt,
+      readyAt: undefined
+    });
+    const candidateStdout = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stdout');
+    const candidateStderr = await ctx.store.createPreviewArtifact(state.task.id, 'preview-stderr');
+    if (failed) await ctx.store.appendBoundedArtifact(candidateStderr.id, 'candidate readiness failed\n');
+    await ctx.store.savePreviewNodeAttempt({
+      id: `seed-attempt-${definition.slug}-candidate`, taskId: state.task.id,
+      generationId: candidateId, nodeId: 'web', kind: 'SERVICE', attempt: 1,
+      commandDigest: 'seed-candidate-command', state: failed ? 'FAILED' : 'WAITING_READY',
+      stdoutArtifactId: candidateStdout.id, stderrArtifactId: candidateStderr.id,
+      startedAt: candidateAt, endedAt: failed ? candidateAt : undefined,
+      readiness: { status: failed ? 'FAILED' : 'PENDING', lastError: failed ? 'Service exited.' : undefined }
+    });
+    await ctx.store.savePreviewResource({
+      id: `seed-resource-${definition.slug}-candidate`, taskId: state.task.id,
+      generationId: candidateId, logicalNodeId: 'web', adapterKind: 'NATIVE_PROCESS',
+      state: failed ? 'FAILED' : 'RUNNING', ownershipMarkerDigest: 'seed-marker',
+      receiptPath: path.join(ctx.previewRoot, state.task.id, candidateId, 'runtime', 'seed.json'),
+      targetHost: '127.0.0.1', targetPort: 42000 + ctx.scenarios.length, updatedAt: candidateAt
+    });
+  }
+  return state;
+}
+
+function previewStateForSeed(slug: string): PreviewGenerationState {
+  if (slug === 'preview-preparing') return 'PREPARING_SOURCE';
+  if (slug === 'preview-compose-updating') return 'RUNNING_GRAPH';
+  if (['preview-ready', 'preview-oci-ready', 'preview-compose-ready', 'preview-stale', 'preview-replacing', 'preview-replacement-failed', 'preview-active-approval-required'].includes(slug)) return 'READY';
+  if (slug === 'preview-failed') return 'FAILED';
+  if (slug === 'preview-stopped') return 'STOPPED';
+  if (['preview-recovery-required', 'preview-compose-recovery', 'preview-compose-reset-required'].includes(slug)) return 'RECOVERY_REQUIRED';
+  if (slug === 'preview-cleanup-incomplete') return 'CLEANUP_INCOMPLETE';
+  throw new Error(`No seeded preview state for ${slug}.`);
 }
 
 async function createImplementedTask(
@@ -1784,7 +2323,7 @@ async function seedActiveRunProgress(
     iterationId: run.iterationId,
     runId: run.id,
     sessionId: run.sessionId,
-    provider: 'codex',
+    runtimeId: 'codex',
     explanation: input.explanation ?? 'Implementation is in progress.',
     steps,
     rawMessage: await rawMessage(ctx, 'INBOUND', {
@@ -1965,7 +2504,7 @@ async function createReviewScenario(
 
   const result = reviewResultFor(definition.slug);
   await completeRun(ctx, review, result.summary, state.gitSnapshot?.id, {
-    codexReviewResult: result
+    agentReviewResult: result
   });
 
   if (
@@ -2098,7 +2637,7 @@ async function createForkScenario(
   const alternative = await ctx.store.createForkedAlternativeTask({
     title: `[seed:${definition.slug}:alternative] Alternative approach`,
     prompt: 'Seeded fork alternative for UI coverage.',
-    repositoryPath: ctx.repositoryPath,
+    repositoryId: ctx.repositoryId,
     agentSettings: DEFAULT_AGENT_SETTINGS,
     sourceTaskId: source.task.id,
     sourceRunId: source.run.id
@@ -2216,7 +2755,7 @@ async function createRun(
     task,
     iteration: state.iteration,
     worktree: state.worktree,
-    provider: 'codex',
+    runtimeId: 'codex',
     role: options.role ?? (mode === 'REVIEW' ? 'REVIEW' : 'PRIMARY'),
     requestedSettings: DEFAULT_AGENT_SETTINGS
   });
@@ -2274,6 +2813,7 @@ async function createInteraction(
 ): Promise<InteractionRequestRecord> {
   const requestRawMessage = await rawMessage(ctx, 'INBOUND', { type, runId: run.id });
   return ctx.store.createInteractionRequest({
+    runtimeId: run.runtimeId,
     serverInstanceId: ctx.serverInstanceId,
     providerRequestId: `seed-request-${++ctx.protocolCounter}`,
     taskId: run.taskId,
@@ -2310,7 +2850,7 @@ async function createInteraction(
           },
     allowedActions:
       type === 'USER_INPUT'
-        ? ['ANSWER', 'CANCEL']
+        ? ['ANSWER']
         : ['ACCEPT', 'ACCEPT_FOR_SESSION', 'DECLINE', 'CANCEL'],
     policyWarnings: type === 'USER_INPUT' ? [] : ['Seeded approval warning.'],
     requestRawMessage
@@ -2519,10 +3059,10 @@ async function recordPr(
   });
 }
 
-function reviewResultFor(slug: string): CodexReviewResult {
+function reviewResultFor(slug: string): AgentReviewResult {
   if (slug === 'review-needs-changes' || slug === 'review-stale-after-follow-up' || slug === 'review-follow-up-active') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'NEEDS_CHANGES',
       summary: 'Seed review found changes that should be addressed.',
       findings: [
@@ -2540,14 +3080,14 @@ function reviewResultFor(slug: string): CodexReviewResult {
   }
   if (slug === 'review-inconclusive') {
     return {
-      schemaVersion: 'codex-review/v1',
+      schemaVersion: 'agent-review/v1',
       verdict: 'INCONCLUSIVE',
       summary: 'Seed review could not reach a confident verdict.',
       findings: []
     };
   }
   return {
-    schemaVersion: 'codex-review/v1',
+    schemaVersion: 'agent-review/v1',
     verdict: 'PASSED',
     summary: 'Seed review passed.',
     findings: []
@@ -2567,8 +3107,12 @@ function totalCheckCount(options: RecordPrOptions): number {
   return explicitCount || options.checkDetails?.length || 0;
 }
 
-async function initSeedRepository(rootDir: string, repositoryPath: string): Promise<void> {
-  const remotePath = path.join(rootDir, 'remote.git');
+async function initSeedRepository(
+  rootDir: string,
+  repositoryPath: string,
+  remoteName: string
+): Promise<void> {
+  const remotePath = path.join(rootDir, remoteName);
   await fs.mkdir(repositoryPath, { recursive: true });
   await fs.mkdir(remotePath, { recursive: true });
   await git(remotePath, ['init', '--bare']);
@@ -2612,7 +3156,10 @@ async function refreshStoredWorktree(
   ctx: SeedContext,
   worktree: WorktreeRecord
 ): Promise<WorktreeRecord> {
-  return ctx.store.updateWorktree(await ctx.worktrees.verify(worktree), 'WORKTREE_VERIFIED');
+  return ctx.store.updateWorktree(
+    await ctx.worktrees.verify(worktree, ctx.repositoryPath),
+    'WORKTREE_VERIFIED'
+  );
 }
 
 async function rawMessage(

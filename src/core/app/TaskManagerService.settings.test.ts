@@ -1,18 +1,29 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AgentModel, AgentRuntimeId } from '../../shared/agent';
+import type { AgentRuntimeAdapter } from '../agent/AgentRuntimeAdapter';
+import { createRuntimeReadiness } from '../agent/AgentRuntimeReadiness';
+import { acpCapabilities } from '../agent/acp/AcpRuntimeProfiles';
+import { CodexAppServerAdapter } from '../agent/codex/CodexAppServerAdapter';
 import { TASK_MONKI_CODEX_BIN_ENV } from '../agent/codex/CodexRuntimeResolver';
-import { getGitExecutablePath, configureGitExecutablePath } from '../git/gitCli';
+import { getGitExecutablePath, configureGitExecutablePath, git } from '../git/gitCli';
+import { AppEventBus } from '../runner/AppEventBus';
 import { MemoryAppSettingsStore } from '../settings/AppSettingsStore';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { TaskManagerService } from './TaskManagerService';
+import { addTestRepository } from '../../testSupport/repositoryFixture';
 import {
   writeNodeExecutable,
   writeOutputExecutable
 } from '../../testSupport/fakeExecutable';
+import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
+import { TEST_ACP_PROFILE } from '../../testSupport/acpRuntimeProfile';
 
-describe('TaskManagerService settings', () => {
+const SERVICE_INTEGRATION_TIMEOUT_MS = 20_000;
+
+describe('TaskManagerService settings', { timeout: SERVICE_INTEGRATION_TIMEOUT_MS }, () => {
   const originalGitPath = process.env.TASK_MANAGER_GIT_PATH;
   const originalCodexBin = process.env[TASK_MONKI_CODEX_BIN_ENV];
   const originalPath = process.env.PATH;
@@ -103,7 +114,7 @@ describe('TaskManagerService settings', () => {
     await service.init();
     try {
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers[0]?.argv).toEqual([
+      expect(codexServers(snapshot)[0]?.argv).toEqual([
         'app-server',
         '--stdio',
         '-c',
@@ -145,7 +156,7 @@ describe('TaskManagerService settings', () => {
         apps: 'disabled'
       });
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers[0]?.argv).toEqual([
+      expect(codexServers(snapshot)[0]?.argv).toEqual([
         'app-server',
         '--stdio',
         '-c',
@@ -168,7 +179,7 @@ describe('TaskManagerService settings', () => {
     } finally {
       await service.shutdown();
     }
-  });
+  }, 20_000);
 
   it('aborts browser-dev startup when MCP disable discovery cannot be proven', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
@@ -192,24 +203,53 @@ describe('TaskManagerService settings', () => {
     await service.shutdown();
   });
 
-  it('defers provider restart while a run requires recovery', async () => {
+  it('keeps deterministic seed hosts inert without starting Codex', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-inert-seed-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const repository = await addTestRepository(store, dir);
+    const reason = 'Codex is disabled while deterministic seed scenarios are loaded.';
+    const service = new TaskManagerService(store, dir, undefined, {
+      codexPath: 'codex-not-used',
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentProviderStartupDisabledReason: reason
+    });
+
+    await service.init();
+    try {
+      expect((await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness).toMatchObject({
+        status: 'DISABLED',
+        canStart: false,
+        detail: reason
+      });
+      expect((await store.snapshot()).agentServers).toHaveLength(0);
+      await expect(
+        service.refinePrompt({ repositoryId: repository.id, input: 'Refine me.' })
+      ).rejects.toThrow(reason);
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('applies deferred Codex settings after the last Codex run terminalizes', async () => {
     delete process.env[TASK_MONKI_CODEX_BIN_ENV];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-recovery-'));
     const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
       version: '9.9.9'
     });
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: executable,
-      appSettingsStore: new MemoryAppSettingsStore(),
-      worktreeRoot: path.join(dir, 'worktrees')
+    const events = new AppEventBus();
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable,
+      events
     });
     await service.init();
     try {
       const task = await store.createTask({
         title: 'Recovery settings guard',
         prompt: 'Keep recovery state stable.',
-        repositoryPath: dir
+        repositoryId: (await addTestRepository(store, dir)).id
       });
       const { iteration, worktree } = await store.createIterationAndWorktree({
         task,
@@ -221,7 +261,7 @@ describe('TaskManagerService settings', () => {
         task,
         iteration,
         worktree,
-        provider: 'codex'
+        runtimeId: 'codex'
       });
       const run = await store.createRun({
         task,
@@ -240,10 +280,92 @@ describe('TaskManagerService settings', () => {
       });
 
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers).toHaveLength(1);
-      expect((await service.getAgentProviderState()).preflight.warnings).toContain(
-        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
+      expect(codexServers(snapshot)).toHaveLength(1);
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
       );
+
+      await store.updateRun(run.id, { status: 'FAILED' });
+      events.emit({
+        type: 'run.terminal',
+        taskId: task.id,
+        iterationId: iteration.id,
+        runId: run.id,
+        worktreeId: worktree.id,
+        payload: { status: 'FAILED' },
+        at: new Date().toISOString()
+      });
+
+      const restarted = await waitForAgentServerSnapshot(store, 2, true);
+      expect(codexServers(restarted).map((server) => server.status).sort()).toEqual([
+        'EXITED',
+        'READY'
+      ]);
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).not.toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
+  it('restarts idle Codex while another provider owns active work', async () => {
+    delete process.env[TASK_MONKI_CODEX_BIN_ENV];
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-settings-other-run-'));
+    const executable = await writeFakeCodex(path.join(dir, 'bin'), 'codex', {
+      version: '9.9.9'
+    });
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable,
+      additionalAdapters: [opencode]
+    });
+    await service.init();
+    try {
+      const task = await store.createTask({
+        title: 'Other provider stays active',
+        prompt: 'Keep OpenCode active.',
+        repositoryId: (await addTestRepository(store, dir)).id,
+        runtimeId: 'opencode',
+        agentSettings: { runtimeId: 'opencode' }
+      });
+      const { iteration, worktree } = await store.createIterationAndWorktree({
+        task,
+        branchName: 'codex/other-provider-active',
+        worktreePath: path.join(dir, 'other-worktree'),
+        baseSha: 'base'
+      });
+      const session = await store.createAgentSession({
+        task,
+        iteration,
+        worktree,
+        runtimeId: 'opencode'
+      });
+      const run = await store.createRun({
+        task,
+        session,
+        mode: 'IMPLEMENTATION',
+        prompt: task.prompt
+      });
+      await store.updateRun(run.id, { status: 'RUNNING' });
+
+      await service.updateAppSettings({
+        codexExternalTools: { webSearchMode: 'cached' }
+      });
+
+      const restarted = await waitForAgentServerSnapshot(store, 2, true);
+      expect(codexServers(restarted).map((server) => server.status).sort()).toEqual([
+        'EXITED',
+        'READY'
+      ]);
+      expect(await store.getRun(run.id)).toMatchObject({ status: 'RUNNING' });
     } finally {
       await service.shutdown();
     }
@@ -258,10 +380,10 @@ describe('TaskManagerService settings', () => {
     });
     const fakeGit = await writeOutputExecutable(dir, 'fake-git', 'git version git-only');
     const store = new FileTaskStore(path.join(dir, 'store'));
-    const service = new TaskManagerService(store, dir, undefined, {
-      codexPath: executable,
-      appSettingsStore: new MemoryAppSettingsStore(),
-      worktreeRoot: path.join(dir, 'worktrees')
+    const service = createCodexSettingsTestService({
+      store,
+      repositoryPath: dir,
+      executable
     });
 
     await service.init();
@@ -273,11 +395,13 @@ describe('TaskManagerService settings', () => {
       });
 
       const snapshot = await waitForAgentServerSnapshot(store);
-      expect(snapshot.agentServers).toHaveLength(1);
-      expect(snapshot.agentServers[0]?.executable).toBe(executable);
+      expect(codexServers(snapshot)).toHaveLength(1);
+      expect(codexServers(snapshot)[0]?.executable).toBe(executable);
       expect(getGitExecutablePath()).toBe(fakeGit);
-      expect((await service.getAgentProviderState()).preflight.warnings).not.toContain(
-        'Codex executable or tool settings changed and will apply after active runs finish or the app restarts.'
+      expect(
+        (await service.getAgentRuntimeCatalog()).runtimes[0]?.preflight.readiness.diagnostics
+      ).not.toContainEqual(
+        expect.objectContaining({ code: 'RUNTIME_RESTART_REQUIRED' })
       );
     } finally {
       await service.shutdown();
@@ -341,8 +465,8 @@ describe('TaskManagerService settings', () => {
         resolvedPath: await expectedDiscoveredPath(staleCodex),
         version: 'codex-cli 0.22.0'
       });
-      expect(snapshot.agentServers[0]?.executable).toBe(compatibleCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedExecutable).toBe(
+      expect(codexServers(snapshot)[0]?.executable).toBe(compatibleCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedExecutable).toBe(
         compatibleCodex
       );
     } finally {
@@ -373,8 +497,8 @@ describe('TaskManagerService settings', () => {
     try {
       const snapshot = await waitForAgentServerSnapshot(store);
 
-      expect(snapshot.agentServers[0]?.executable).toBe(customCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+      expect(codexServers(snapshot)[0]?.executable).toBe(customCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedSource).toBe('config');
     } finally {
       await service.shutdown();
     }
@@ -408,8 +532,8 @@ describe('TaskManagerService settings', () => {
         resolvedPath: envCodex,
         status: 'ok'
       });
-      expect(snapshot.agentServers[0]?.executable).toBe(envCodex);
-      expect(snapshot.agentServers[0]?.runtimeResolution?.selectedSource).toBe('config');
+      expect(codexServers(snapshot)[0]?.executable).toBe(envCodex);
+      expect(codexServers(snapshot)[0]?.runtimeResolution?.selectedSource).toBe('config');
     } finally {
       await service.shutdown();
     }
@@ -443,7 +567,487 @@ describe('TaskManagerService settings', () => {
       version: 'codex-cli env-test'
     });
   });
+
+  it('persists provider disablement and rejects disabled defaults and task creation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-disable-'));
+    const settingsStore = new MemoryAppSettingsStore();
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: settingsStore,
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+    await store.init();
+
+    await expect(
+      service.updateAppSettings({ disabledRuntimeIds: ['opencode'] })
+    ).resolves.toMatchObject({ disabledRuntimeIds: ['opencode'] });
+    await expect(
+      service.updateAppSettings({ defaultRuntimeId: 'opencode' })
+    ).rejects.toThrow('cannot be disabled while it is the default task runtime');
+    await expect(
+      service.createTask({
+        title: 'Disabled provider task',
+        prompt: 'Do not create this task.',
+        repositoryId: (await addTestRepository(store, dir)).id,
+        runtimeId: 'opencode'
+      })
+    ).rejects.toThrow('OpenCode is disabled');
+
+    expect((await settingsStore.get()).defaultRuntimeId).toBe('codex');
+    await service.shutdown();
+  });
+
+  it('does not disable a runtime that owns active or recovery-required work', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-active-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      worktreeRoot: path.join(dir, 'worktrees')
+    });
+    await store.init();
+    const task = await store.createTask({
+      title: 'Active provider task',
+      prompt: 'Keep this runtime enabled.',
+      repositoryId: (await addTestRepository(store, dir)).id,
+      runtimeId: 'cursor-agent-acp',
+      agentSettings: { runtimeId: 'cursor-agent-acp' }
+    });
+    const { iteration, worktree } = await store.createIterationAndWorktree({
+      task,
+      branchName: 'codex/runtime-active',
+      worktreePath: path.join(dir, 'worktree'),
+      baseSha: 'base'
+    });
+    const session = await store.createAgentSession({
+      task,
+      iteration,
+      worktree,
+      runtimeId: 'cursor-agent-acp'
+    });
+    const run = await store.createRun({
+      task,
+      session,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt
+    });
+    await store.updateRun(run.id, { status: 'RECOVERY_REQUIRED' });
+
+    await expect(
+      service.updateAppSettings({ disabledRuntimeIds: ['cursor-agent-acp'] })
+    ).rejects.toThrow('active or requires recovery');
+    await expect(service.getAppSettings()).resolves.toMatchObject({
+      disabledRuntimeIds: []
+    });
+    await service.shutdown();
+  });
+
+  it('keeps disabled runtimes stopped and initializes them when re-enabled', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-toggle-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const codex = createLifecycleRuntime(store, 'codex', 'Codex');
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    const configureRuntime = vi.fn().mockResolvedValue(undefined);
+    (opencode as AgentRuntimeAdapter).configureRuntime = configureRuntime;
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [codex, opencode],
+      defaultAgentRuntimeId: 'codex'
+    });
+
+    await service.init();
+    await opencode.initialize();
+    await service.updateAppSettings({ disabledRuntimeIds: ['opencode'] });
+    expect(opencode.shutdown).toHaveBeenCalledOnce();
+
+    await service.updateAppSettings({
+      runtimeExecutablePaths: { opencode: '/opt/task-monki/opencode' }
+    });
+    expect(configureRuntime).toHaveBeenLastCalledWith({
+      executable: '/opt/task-monki/opencode',
+      restart: false
+    });
+    expect(opencode.initialize).toHaveBeenCalledOnce();
+
+    await service.updateAppSettings({ disabledRuntimeIds: [] });
+    expect(opencode.initialize).toHaveBeenCalledTimes(2);
+    const catalog = await service.getAgentRuntimeCatalog();
+    expect(
+      catalog.runtimes.find((runtime) => runtime.preflight.runtime.id === 'opencode')
+        ?.preflight.readiness.status
+    ).toBe('READY');
+    await service.shutdown();
+  });
+
+  it('serializes runtime disablement behind a provider start', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-race-'));
+    const repositoryPath = path.join(root, 'repo');
+    await fs.mkdir(repositoryPath);
+    await initializeRepository(repositoryPath);
+    const store = new FileTaskStore(path.join(root, 'store'));
+    const codex = createLifecycleRuntime(store, 'codex', 'Codex');
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    const service = new TaskManagerService(store, repositoryPath, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [codex, opencode],
+      defaultAgentRuntimeId: 'codex',
+      worktreeRoot: path.join(root, 'worktrees')
+    });
+    await service.init();
+    const task = await service.createTask({
+      title: 'Runtime lifecycle race',
+      prompt: 'Exercise provider startup.',
+      repositoryId: (await addTestRepository(store, repositoryPath)).id,
+      runtimeId: 'opencode',
+      agentSettings: { runtimeId: 'opencode', model: 'scenario-model' }
+    });
+    const resolvedModel = (await opencode.listModels())[0]!;
+    let releaseResolve!: () => void;
+    const resolveGate = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    let markResolveEntered!: () => void;
+    const resolveEntered = new Promise<void>((resolve) => {
+      markResolveEntered = resolve;
+    });
+    vi.mocked(opencode.resolveExecution).mockImplementation(async (input) => {
+      markResolveEntered();
+      await resolveGate;
+      return {
+        settings: {
+          ...input.settings,
+          runtimeId: 'opencode',
+          model: resolvedModel.model,
+          modelProvider: resolvedModel.modelProvider
+        },
+        model: resolvedModel
+      };
+    });
+
+    const starting = service.startRun({ taskId: task.id });
+    await resolveEntered;
+    const disabling = service.updateAppSettings({ disabledRuntimeIds: ['opencode'] });
+    let disableSettled = false;
+    void disabling.then(
+      () => { disableSettled = true; },
+      () => { disableSettled = true; }
+    );
+    await Promise.resolve();
+    expect(disableSettled).toBe(false);
+
+    releaseResolve();
+    await expect(starting).resolves.toMatchObject({ status: 'RUNNING' });
+    await expect(disabling).rejects.toThrow('active or requires recovery');
+    expect(opencode.shutdown).not.toHaveBeenCalled();
+    await expect(service.getAppSettings()).resolves.toMatchObject({
+      disabledRuntimeIds: []
+    });
+    await service.shutdown();
+  });
+
+  it('serializes live catalog discovery before runtime disablement', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-catalog-disable-race-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const codex = createLifecycleRuntime(store, 'codex', 'Codex');
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    const models = await opencode.listModels();
+    vi.mocked(opencode.listModels).mockClear();
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    let markCatalogEntered!: () => void;
+    const catalogEntered = new Promise<void>((resolve) => {
+      markCatalogEntered = resolve;
+    });
+    vi.mocked(opencode.listModels).mockImplementation(async () => {
+      markCatalogEntered();
+      await catalogGate;
+      return models;
+    });
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [codex, opencode],
+      defaultAgentRuntimeId: 'codex'
+    });
+    await service.init();
+
+    const catalog = service.getAgentRuntimeCatalog();
+    await catalogEntered;
+    const disabling = service.updateAppSettings({ disabledRuntimeIds: ['opencode'] });
+    await Promise.resolve();
+    expect(opencode.shutdown).not.toHaveBeenCalled();
+
+    releaseCatalog();
+    const beforeDisable = await catalog;
+    expect(
+      beforeDisable.runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === 'opencode'
+      )?.preflight.readiness.status
+    ).toBe('READY');
+    await expect(disabling).resolves.toMatchObject({
+      disabledRuntimeIds: ['opencode']
+    });
+    expect(opencode.shutdown).toHaveBeenCalledOnce();
+    const afterDisable = await service.getAgentRuntimeCatalog();
+    expect(
+      afterDisable.runtimes.find(
+        (runtime) => runtime.preflight.runtime.id === 'opencode'
+      )?.preflight.readiness.status
+    ).toBe('DISABLED');
+    expect(opencode.listModels).toHaveBeenCalledOnce();
+    await service.shutdown();
+  });
+
+  it('allows active-run controls while unrelated catalog discovery is pending', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-control-catalog-'));
+    const repositoryPath = path.join(root, 'repo');
+    await fs.mkdir(repositoryPath);
+    await initializeRepository(repositoryPath);
+    const store = new FileTaskStore(path.join(root, 'store'));
+    const runtime = createLifecycleRuntime(store, 'codex', 'Codex');
+    const capabilities = await runtime.capabilities();
+    vi.mocked(runtime.capabilities).mockResolvedValue({
+      ...capabilities,
+      activeTurnSteering: {
+        maturity: 'stable',
+        detail: 'Lifecycle test runtime accepts active-turn steering.'
+      }
+    });
+    const service = new TaskManagerService(store, repositoryPath, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [runtime],
+      worktreeRoot: path.join(root, 'worktrees')
+    });
+    await service.init();
+    const task = await service.createTask({
+      title: 'Runtime control remains responsive',
+      prompt: 'Exercise provider controls.',
+      repositoryId: (await addTestRepository(store, repositoryPath)).id,
+      runtimeId: 'codex',
+      agentSettings: { runtimeId: 'codex', model: 'scenario-model' }
+    });
+    const run = await service.startRun({ taskId: task.id });
+    const models = await runtime.listModels();
+    vi.mocked(runtime.listModels).mockClear();
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    let markCatalogEntered!: () => void;
+    const catalogEntered = new Promise<void>((resolve) => {
+      markCatalogEntered = resolve;
+    });
+    vi.mocked(runtime.listModels).mockImplementation(async () => {
+      markCatalogEntered();
+      await catalogGate;
+      return models;
+    });
+    const steerTurn = vi.spyOn(runtime, 'steerTurn');
+    const interruptTurn = vi.spyOn(runtime, 'interruptTurn');
+
+    const catalog = service.getAgentRuntimeCatalog();
+    await catalogEntered;
+    await expect(
+      service.steerRun({ taskId: task.id, runId: run.id, instruction: 'Continue safely.' })
+    ).resolves.toBeUndefined();
+    await expect(service.cancelRun({ runId: run.id })).resolves.toBeUndefined();
+    expect(steerTurn).toHaveBeenCalledOnce();
+    expect(interruptTurn).toHaveBeenCalledOnce();
+
+    releaseCatalog();
+    await expect(catalog).resolves.toBeDefined();
+    await service.shutdown();
+  });
+
+  it('settles interrupted initialization before provider shutdown and store closure', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-init-shutdown-race-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const closeStore = vi.spyOn(store, 'close');
+    const runtime = createLifecycleRuntime(store, 'codex', 'Codex');
+    let releaseInitialization!: () => void;
+    const initializationGate = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    let markInitializationEntered!: () => void;
+    const initializationEntered = new Promise<void>((resolve) => {
+      markInitializationEntered = resolve;
+    });
+    vi.mocked(runtime.initialize).mockImplementation(async () => {
+      markInitializationEntered();
+      await initializationGate;
+    });
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [runtime]
+    });
+
+    const initializing = service.init();
+    await initializationEntered;
+    const shutdown = service.shutdown();
+    await Promise.resolve();
+    expect(runtime.shutdown).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseInitialization();
+    await expect(initializing).rejects.toThrow('shutting down');
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(runtime.shutdown).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('queues shutdown behind provider lifecycle work and rejects later starts', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-runtime-shutdown-race-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const closeStore = vi.spyOn(store, 'close');
+    const runtime = createLifecycleRuntime(store, 'codex', 'Codex');
+    const models = await runtime.listModels();
+    vi.mocked(runtime.listModels).mockClear();
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    let markCatalogEntered!: () => void;
+    const catalogEntered = new Promise<void>((resolve) => {
+      markCatalogEntered = resolve;
+    });
+    vi.mocked(runtime.listModels).mockImplementation(async () => {
+      markCatalogEntered();
+      await catalogGate;
+      return models;
+    });
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [runtime]
+    });
+    await service.init();
+
+    const catalog = service.getAgentRuntimeCatalog();
+    await catalogEntered;
+    const shutdown = service.shutdown();
+    await expect(service.getAgentRuntimeCatalog()).rejects.toThrow('shutting down');
+    expect(runtime.shutdown).not.toHaveBeenCalled();
+    expect(closeStore).not.toHaveBeenCalled();
+
+    releaseCatalog();
+    await expect(catalog).resolves.toBeDefined();
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(runtime.shutdown).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
+  });
+
+  it('serializes task runtime release before provider disablement', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-release-disable-race-'));
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const codex = createLifecycleRuntime(store, 'codex', 'Codex');
+    const opencode = createLifecycleRuntime(store, 'opencode', 'OpenCode');
+    let releaseTask!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseTask = resolve;
+    });
+    let markReleaseEntered!: () => void;
+    const releaseEntered = new Promise<void>((resolve) => {
+      markReleaseEntered = resolve;
+    });
+    const releaseRuntimeTask = vi.fn(async () => {
+      markReleaseEntered();
+      await releaseGate;
+    });
+    (opencode as AgentRuntimeAdapter).releaseTask = releaseRuntimeTask;
+    const service = new TaskManagerService(store, dir, undefined, {
+      appSettingsStore: new MemoryAppSettingsStore(),
+      agentRuntimeAdapters: [codex, opencode],
+      defaultAgentRuntimeId: 'codex'
+    });
+    await service.init();
+    const task = await service.createTask({
+      title: 'Release runtime before disabling',
+      prompt: 'Delete this inactive provider task.',
+      repositoryId: (await addTestRepository(store, dir)).id,
+      runtimeId: 'opencode',
+      agentSettings: { runtimeId: 'opencode' }
+    });
+
+    const deletion = service.deleteTask({ taskId: task.id });
+    const disabling = service.updateAppSettings({ disabledRuntimeIds: ['opencode'] });
+    await releaseEntered;
+    await Promise.resolve();
+    expect(opencode.shutdown).not.toHaveBeenCalled();
+
+    releaseTask();
+    await expect(deletion).resolves.toEqual({
+      taskId: task.id,
+      removedWorktree: false
+    });
+    await expect(disabling).resolves.toMatchObject({
+      disabledRuntimeIds: ['opencode']
+    });
+    expect(releaseRuntimeTask).toHaveBeenCalledWith(task.id);
+    expect(opencode.shutdown).toHaveBeenCalledOnce();
+    await service.shutdown();
+  });
 });
+
+function createLifecycleRuntime(
+  store: FileTaskStore,
+  runtimeId: AgentRuntimeId,
+  displayName: string
+): ScriptedAgentRuntimeAdapter {
+  const adapter = new ScriptedAgentRuntimeAdapter(store);
+  const descriptor = {
+    ...TEST_ACP_PROFILE.descriptor,
+    id: runtimeId,
+    displayName
+  };
+  Object.defineProperty(adapter, 'descriptor', { value: descriptor });
+  const profile = { ...TEST_ACP_PROFILE, descriptor };
+  const capabilities = {
+    ...acpCapabilities(profile),
+    sessionControls: {
+      maturity: 'unsupported' as const,
+      detail: 'Lifecycle test runtime has no native session controls.'
+    }
+  };
+  const model: AgentModel = {
+    id: `${runtimeId}:test/scenario-model`,
+    runtimeId,
+    modelProvider: 'test',
+    model: 'scenario-model',
+    displayName: 'Scenario model',
+    hidden: false,
+    supportedReasoningEfforts: [],
+    serviceTiers: [],
+    inputModalities: ['text'],
+    isDefault: true
+  };
+  vi.spyOn(adapter, 'initialize');
+  vi.spyOn(adapter, 'shutdown');
+  vi.spyOn(adapter, 'capabilities').mockResolvedValue(capabilities);
+  vi.spyOn(adapter, 'preflight').mockResolvedValue({
+    runtime: descriptor,
+    readiness: createRuntimeReadiness('READY', `${displayName} is ready.`),
+    capabilities
+  });
+  vi.spyOn(adapter, 'listModels').mockResolvedValue([model]);
+  vi.spyOn(adapter, 'resolveExecution').mockImplementation(async (input) => ({
+    settings: {
+      ...input.settings,
+      runtimeId,
+      model: model.model,
+      modelProvider: model.modelProvider
+    },
+    model
+  }));
+  return adapter;
+}
+
+async function initializeRepository(repositoryPath: string): Promise<void> {
+  await git(repositoryPath, ['init']);
+  await git(repositoryPath, ['config', 'user.email', 'task-monki@example.invalid']);
+  await git(repositoryPath, ['config', 'user.name', 'Task Monki']);
+  await fs.writeFile(path.join(repositoryPath, 'README.md'), '# Runtime test\n', 'utf8');
+  await git(repositoryPath, ['add', 'README.md']);
+  await git(repositoryPath, ['commit', '-m', 'Initial commit']);
+}
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
@@ -461,17 +1065,51 @@ function withPath(...entries: string[]): string {
   return [...entries, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter);
 }
 
+function createCodexSettingsTestService(input: {
+  store: FileTaskStore;
+  repositoryPath: string;
+  executable: string;
+  events?: AppEventBus;
+  additionalAdapters?: readonly AgentRuntimeAdapter[];
+}): TaskManagerService {
+  const events = input.events ?? new AppEventBus();
+  const codex = new CodexAppServerAdapter(input.store, events, {
+    cwd: input.repositoryPath,
+    executable: input.executable,
+    requestTimeoutMs: 2_000,
+    restartDelaysMs: []
+  });
+  return new TaskManagerService(input.store, input.repositoryPath, events, {
+    codexPath: input.executable,
+    appSettingsStore: new MemoryAppSettingsStore(),
+    worktreeRoot: path.join(input.repositoryPath, 'worktrees'),
+    agentRuntimeAdapters: [codex, ...(input.additionalAdapters ?? [])]
+  });
+}
+
 async function waitForAgentServerSnapshot(
-  store: FileTaskStore
+  store: FileTaskStore,
+  minimumCodexServers = 1,
+  requireReady = false
 ): Promise<Awaited<ReturnType<FileTaskStore['snapshot']>>> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const snapshot = await store.snapshot();
-    if (snapshot.agentServers.length > 0) {
+    const servers = codexServers(snapshot);
+    if (
+      servers.length >= minimumCodexServers &&
+      (!requireReady || servers.some((server) => server.status === 'READY'))
+    ) {
       return snapshot;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for Codex App Server startup.');
+}
+
+function codexServers(
+  snapshot: Awaited<ReturnType<FileTaskStore['snapshot']>>
+) {
+  return snapshot.agentServers.filter((server) => server.runtimeId === 'codex');
 }
 
 async function writeFakeCodex(
