@@ -219,7 +219,11 @@ export function RepositorySwitcher({
                     role="menuitem"
                     tabIndex={-1}
                     className="tm-repo-menu__disconnect"
-                    onClick={() => void onDisconnectRepository(activeOption.id)}
+                    onClick={() => {
+                      setOpen(false);
+                      triggerRef.current?.focus();
+                      void onDisconnectRepository(activeOption.id);
+                    }}
                   >
                     Disconnect
                   </button>

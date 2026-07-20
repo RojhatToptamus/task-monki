@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   createInitialProjection,
+  type PreviewGenerationRecord,
   type PreviewManagedResourceRecord,
   type PreviewPlanRecord,
-  type Task
+  type Task,
+  type WorktreeStatus
 } from '../../shared/contracts';
 import {
   buildPreviewPlanGroups,
@@ -12,7 +14,8 @@ import {
   selectPreviewActionGeneration,
   selectPreviewDiagnosticAttempts,
   selectPreviewOverviewProjection,
-  selectPreviewResetResources
+  selectPreviewResetResources,
+  shouldShowPreviewOverview
 } from './preview';
 
 const task: Task = {
@@ -35,6 +38,67 @@ const task: Task = {
 };
 
 describe('preview view model', () => {
+  it('hides only neutral unstarted Preview and keeps actions, blockers, or evidence visible', () => {
+    const notCreated = buildPreviewViewModel({
+      task: taskWithWorktreeStatus('NOT_CREATED'),
+      plans: [],
+      approvals: [],
+      generations: [],
+      attempts: []
+    });
+    const unchecked = buildPreviewViewModel({
+      task: taskWithWorktreeStatus('PRESENT'),
+      worktree: uncheckedWorktree(),
+      plans: [],
+      approvals: [],
+      generations: [],
+      attempts: []
+    });
+    const setupRequired = buildPreviewViewModel({
+      task: taskWithWorktreeStatus('PRESENT'),
+      worktree: uncheckedWorktree(),
+      plans: [],
+      approvals: [],
+      generations: [],
+      attempts: [],
+      resolution: {
+        status: 'UNAVAILABLE',
+        reasonCode: 'RECIPE_MISSING',
+        reason: 'No Preview recipe exists.'
+      }
+    });
+    const blockers = (['MISSING', 'ERROR', 'LOCKED', 'PRUNABLE'] as const).map(
+      (status) => buildPreviewViewModel({
+        task: taskWithWorktreeStatus(status),
+        worktree: { ...uncheckedWorktree(), status },
+        plans: [],
+        approvals: [],
+        generations: [],
+        attempts: []
+      })
+    );
+    const failed = previewViewForGeneration('FAILED');
+    const running = previewViewForGeneration('READY');
+    const stopped = previewViewForGeneration('STOPPED');
+
+    expect(shouldShowPreviewOverview(notCreated)).toBe(false);
+    expect(unchecked.actions).toContainEqual({
+      id: 'RESOLVE',
+      label: 'Check preview',
+      kind: 'secondary'
+    });
+    for (const view of [
+      unchecked,
+      setupRequired,
+      ...blockers,
+      failed,
+      running,
+      stopped
+    ]) {
+      expect(shouldShowPreviewOverview(view), view.status).toBe(true);
+    }
+  });
+
   it('keeps resolve and approval distinct from execution', () => {
     const unchecked = buildPreviewViewModel({
       task,
@@ -552,6 +616,56 @@ describe('preview view model', () => {
 
 function uncheckedWorktree() {
   return { id: 'worktree-1', taskId: task.id, iterationId: 'iteration-1', repositoryId: 'repository-1', worktreePath: '/worktree', branchName: 'codex/task', baseSha: 'base', status: 'PRESENT' as const, createdAt: task.createdAt, updatedAt: task.updatedAt };
+}
+
+function taskWithWorktreeStatus(status: WorktreeStatus): Task {
+  return {
+    ...task,
+    projection: {
+      ...task.projection,
+      worktree: status
+    }
+  };
+}
+
+function previewViewForGeneration(state: PreviewGenerationRecord['state']) {
+  const plan = testPlan();
+  const approval = {
+    id: 'approval',
+    taskId: task.id,
+    planId: plan.id,
+    executionDigest: plan.executionDigest,
+    scope: 'TASK' as const,
+    approvedAt: task.createdAt
+  };
+  const generation: PreviewGenerationRecord = {
+    id: `generation-${state.toLowerCase()}`,
+    previewKey: 'task-task1',
+    taskId: task.id,
+    iterationId: 'iteration-1',
+    worktreeId: 'worktree-1',
+    planId: plan.id,
+    approvalId: approval.id,
+    executionDigest: plan.executionDigest,
+    sourceGitSnapshotId: 'git',
+    sourceHeadSha: 'head',
+    sourceDirtyFingerprint: 'clean',
+    workspacePath: `/preview/${state.toLowerCase()}`,
+    state,
+    routingState: state === 'READY' ? 'ACTIVE' : 'RETIRED',
+    freshness: 'CURRENT',
+    routes: [],
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt
+  };
+  return buildPreviewViewModel({
+    task: taskWithWorktreeStatus('PRESENT'),
+    worktree: uncheckedWorktree(),
+    plans: [plan],
+    approvals: [approval],
+    generations: [generation],
+    attempts: []
+  });
 }
 
 function testPlan(): PreviewPlanRecord {

@@ -31,6 +31,7 @@ describe('ReviewPanel', () => {
     expect(html).toContain('Current activity');
     expect(html).toContain('Reading src/renderer/ui/TaskDetail.tsx.');
     expect(html).toContain('Stop');
+    expect(html).not.toContain('tm-reviewcard__activity-dot');
   });
 
   it('renders stale review output as context without duplicating the next action', () => {
@@ -70,6 +71,29 @@ describe('ReviewPanel', () => {
     expect(html).toContain('feedface');
     expect(html).toContain('Request can hang');
     expect(html).not.toContain('Run review again');
+    expect(html).toContain('Blocker');
+    expect(html).not.toContain('Major');
+    expect(html).not.toContain('Minor');
+    expect(html).not.toContain('Nit');
+    expect(html).not.toContain('tm-reviewfindings__count--empty');
+  });
+
+  it('keeps the pending review scope without a nested neutral box or empty result row', () => {
+    const html = renderToStaticMarkup(
+      <ReviewPanel
+        reviewGate={{ status: 'NOT_RUN' }}
+        gitSnapshot={gitSnapshotFixture()}
+        actionBusy={false}
+        reviewPending={false}
+        onStopReview={() => {}}
+      />
+    );
+
+    expect(html).toContain('Will review');
+    expect(html).toContain('abc12345 · 3 files · dirty');
+    expect(html).not.toContain('tm-reviewcard__meta--box');
+    expect(html).not.toContain('Last result');
+    expect(html).not.toContain('>none<');
   });
 });
 

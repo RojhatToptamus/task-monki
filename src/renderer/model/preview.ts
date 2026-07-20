@@ -7,6 +7,7 @@ import type {
   PreviewPlanRecord,
   ResolvePreviewResult,
   Task,
+  WorktreeStatus,
   WorktreeRecord
 } from '../../shared/contracts';
 import { PREVIEW_POSIX_INHERITED_ENV_KEYS } from '../../shared/preview';
@@ -112,6 +113,20 @@ export function selectPreviewOverviewProjection(
     summary: previewOverviewSummary(view),
     primaryRoute: openGeneration && route ? { generation: openGeneration, route } : undefined
   };
+}
+
+export function shouldShowPreviewOverview(view: PreviewViewModel): boolean {
+  return Boolean(
+    view.tone !== 'neutral' ||
+      view.actions.length > 0 ||
+      view.plan ||
+      view.generation ||
+      view.activeGeneration ||
+      view.replacementGeneration ||
+      view.failedReplacementGeneration ||
+      view.recoveryGeneration ||
+      view.latestAttempt
+  );
 }
 
 function previewOverviewSummary(view: PreviewViewModel): string {
@@ -450,11 +465,11 @@ function formatProbe(
 }
 
 export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewViewModel {
-  if (!input.worktree || input.worktree.status !== 'PRESENT') {
+  const worktreeStatus = input.worktree?.status ?? input.task.projection.worktree;
+  if (worktreeStatus !== 'PRESENT') {
+    const unavailable = previewWorktreeUnavailable(worktreeStatus);
     return {
-      status: 'Unavailable',
-      tone: 'neutral',
-      summary: 'Prepare the task worktree before checking preview configuration.',
+      ...unavailable,
       actions: []
     };
   }
@@ -715,6 +730,49 @@ export function buildPreviewViewModel(input: PreviewViewModelInput): PreviewView
     latestAttempt,
     actions: [{ id: 'STOP', label: 'Cancel and clean up', kind: 'secondary' }]
   };
+}
+
+function previewWorktreeUnavailable(
+  status: WorktreeStatus
+): Pick<PreviewViewModel, 'status' | 'tone' | 'summary'> {
+  switch (status) {
+    case 'MISSING':
+      return {
+        status: 'Worktree missing',
+        tone: 'error',
+        summary: 'Restore the task worktree before checking Preview.'
+      };
+    case 'ERROR':
+      return {
+        status: 'Worktree error',
+        tone: 'error',
+        summary: 'Resolve the task worktree error before checking Preview.'
+      };
+    case 'LOCKED':
+      return {
+        status: 'Worktree locked',
+        tone: 'warning',
+        summary: 'Unlock the task worktree before checking Preview.'
+      };
+    case 'PRUNABLE':
+      return {
+        status: 'Worktree needs attention',
+        tone: 'warning',
+        summary: 'Reconcile the task worktree before checking Preview.'
+      };
+    case 'UNKNOWN':
+      return {
+        status: 'Worktree unavailable',
+        tone: 'warning',
+        summary: 'Refresh task worktree evidence before checking Preview.'
+      };
+    default:
+      return {
+        status: 'Unavailable',
+        tone: 'neutral',
+        summary: 'Prepare the task worktree before checking Preview.'
+      };
+  }
 }
 
 function summarizeStoppedPreview(plan: PreviewPlanRecord | undefined, compact: boolean): string {

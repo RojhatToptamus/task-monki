@@ -73,6 +73,7 @@ describe('Preview surfaces', () => {
     );
 
     expect(html).toContain('Not checked');
+    expect(html).toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Check preview');
     expect(html).not.toContain('id="preview-plan-authority"');
     expect(html).not.toContain('id="preview-application"');
@@ -140,10 +141,14 @@ routes:
         onValidate={async () => ({ status: 'VALID' })}
         onAccept={async () => ({ recipePath: '.taskmonki/preview.yaml' })}
         onDiscard={async () => {}}
+        fallbackReturnFocusRef={{ current: null }}
+        modalRootRef={{ current: null }}
+        onModalOpenChange={() => {}}
       />
     );
 
     expect(html).toContain('Review Preview configuration');
+    expect(html).not.toContain('tm-preview-recipe-review--compact');
     expect(html).toContain('Complete YAML');
     expect(html).toContain('command: [node, server.mjs]');
     expect(html).toContain('package.json — The dev script runs server.mjs.');
@@ -169,14 +174,46 @@ routes:
         onValidate={async () => ({ status: 'VALID' })}
         onAccept={async () => ({ recipePath: '.taskmonki/preview.yaml' })}
         onDiscard={async () => {}}
+        fallbackReturnFocusRef={{ current: null }}
+        modalRootRef={{ current: null }}
+        onModalOpenChange={() => {}}
       />
     );
 
     expect(html).toContain('Agent is drafting the recipe');
     expect(html).toContain('Reading only the bounded evidence bundle');
+    expect(html).toContain('tm-preview-recipe-review--compact');
     expect(html).toContain('Close');
-    expect(html).toContain('Discard');
-    expect(html).toContain('disabled=""');
+    expect(html).not.toContain('Discard');
+    expect(html).not.toContain('Regenerate');
+    expect(html).not.toContain('Accept &amp; save recipe');
+  });
+
+  it('keeps a failed generation compact and offers only the relevant retry', () => {
+    const html = renderToStaticMarkup(
+      <PreviewRecipeGenerationModal
+        taskId="task-1"
+        state={{
+          taskId: 'task-1',
+          status: 'FAILED',
+          message: 'The bounded evidence did not prove a runnable command.'
+        }}
+        onClose={() => {}}
+        onRegenerate={async () => {}}
+        onValidate={async () => ({ status: 'VALID' })}
+        onAccept={async () => ({ recipePath: '.taskmonki/preview.yaml' })}
+        onDiscard={async () => {}}
+        fallbackReturnFocusRef={{ current: null }}
+        modalRootRef={{ current: null }}
+        onModalOpenChange={() => {}}
+      />
+    );
+
+    expect(html).toContain('tm-preview-recipe-review--compact');
+    expect(html).toContain('Draft not generated');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('Discard');
+    expect(html).not.toContain('Accept &amp; save recipe');
   });
 
   it('routes private-input checks through Preview before allowing Overview to start', () => {
@@ -212,6 +249,7 @@ routes:
     const html = renderToStaticMarkup(<PreviewWorkspace {...previewProps()} />);
 
     expect(html).toContain('Execution plan');
+    expect(html).not.toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Approve plan');
     expect(html).toContain('Application');
     expect(html).toContain('Setup jobs');
@@ -265,6 +303,7 @@ routes:
     expect(html).toContain('Set value…');
     expect(html).toContain('Checks once at startup');
     expect(html).toContain('Ownership');
+    expect(html).not.toContain('tm-preview-private-input__dot');
     expect(html).toContain('accounts — checked or used, never managed');
     expect(html).not.toContain('type="password"');
   });
@@ -283,6 +322,7 @@ routes:
     expect(html).toContain('web');
     expect(html).toContain('prepare');
     expect(html).toContain('Queued');
+    expect(html).not.toContain('tm-preview-row__dot');
     expect(html).not.toContain('Not run');
     expect(html).not.toContain('id="preview-routes"');
     expect((html.match(/Starting/g) ?? [])).toHaveLength(1);
@@ -356,6 +396,7 @@ routes:
     })} />);
 
     expect(html).toContain('web failed during preview startup');
+    expect(html).toContain('tm-preview-workspace tm-preview-workspace--focused');
     expect(html).toContain('Try again');
     expect(html).toContain('View logs');
     expect(html).not.toContain('docker run');
@@ -424,6 +465,7 @@ routes:
     })} />);
     expect(cleanupHtml).toContain('Cleanup incomplete');
     expect(cleanupHtml).toContain('Retry cleanup');
+    expect(cleanupHtml).toContain('class="primary-button"');
     expect(cleanupHtml).not.toContain('raw ownership marker');
     expect(cleanupHtml).not.toContain('internal-cleanup-canary');
     expect((cleanupHtml.match(/Task Monki could not verify exact cleanup/g) ?? []))
@@ -527,7 +569,10 @@ function previewProps(options: {
     onStop: async () => {},
     onResetData: async () => {},
     onRetrySetup: async () => {},
-    onReadLog: async () => ({ chunk: '', nextOffset: 0, endOfFile: true })
+    onReadLog: async () => ({ chunk: '', nextOffset: 0, endOfFile: true }),
+    fallbackReturnFocusRef: { current: null },
+    modalRootRef: { current: null },
+    onModalOpenChange: () => {}
   };
 }
 

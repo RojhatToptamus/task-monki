@@ -40,6 +40,27 @@ describe('renderer interaction foundation styles', () => {
     expect(nativeRule).toContain('-webkit-appearance: none');
   });
 
+  it('keeps selected Inbox counts readable in the collapsed sidebar', async () => {
+    const css = await readStyles();
+    const selectedUrgentCount = ruleBody(
+      css,
+      '.tm-nav--collapsed .tm-nav__item--active .tm-nav__count--urgent'
+    );
+
+    expect(selectedUrgentCount).toContain('background: var(--action)');
+    expect(selectedUrgentCount).toContain('color: var(--on-accent)');
+    expect(selectedUrgentCount).toContain('border-color: var(--surface2)');
+  });
+
+  it('uses the compact interface metadata scale for PR supporting text', async () => {
+    const css = await readStyles();
+    const identity = ruleBody(css, '.tm-prstatus__identity');
+    const metadata = ruleBody(css, '.tm-prstatus__meta');
+
+    expect(identity).toContain('font: 500 11.5px/1.45 var(--font-ui)');
+    expect(metadata).toContain('margin-top: -4px');
+  });
+
   it('stops every continuous status animation when reduced motion is requested', async () => {
     const css = await readStyles();
     const reducedMotionStart = css.lastIndexOf('@media (prefers-reduced-motion: reduce)');
@@ -52,8 +73,6 @@ describe('renderer interaction foundation styles', () => {
       '.status-pill--running .status-pill__dot',
       '.tm-pulse',
       '.tm-exec__spinner',
-      '.tm-preview-statusline--info > span:first-child',
-      '.tm-preview-row__dot--action',
       '.tm-preview-recipe-progress__dot',
       '.tm-prstatus__dot--pulse',
       '.tm-prcheck__dot--pending',
@@ -62,6 +81,7 @@ describe('renderer interaction foundation styles', () => {
       expect(reducedMotion).toContain(selector);
     }
     expect(reducedMotion).toMatch(/animation: none/);
+    expect(reducedMotion).toMatch(/\.tm-detail__mascot-video\s*\{[^}]*transition: none/);
   });
 });
 

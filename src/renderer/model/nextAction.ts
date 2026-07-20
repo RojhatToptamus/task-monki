@@ -11,12 +11,12 @@ import {
 import type { FinishEvidenceState, FinishRequirement } from '../ui/taskView';
 
 /**
- * The single "what should I do next?" answer for a task's Overview. The audit
- * (§04) found this scattered across the header, two card footers, and the rail;
- * this selector centralizes it so one rail panel can render a status sentence
- * plus exactly one recommended (filled) action, with escape hatches demoted to
- * quiet buttons. It decides *which* action leads and *what to say* — the UI owns
- * the click handlers and disabled reasons.
+ * The single "what should I do next?" answer for a task. The audit (§04) found
+ * this scattered across the header, card footers, and Overview rail; this
+ * selector centralizes it so one surface can render a status sentence plus
+ * exactly one recommended action, with escape hatches demoted to quiet buttons.
+ * It decides *which* action leads and *what to say* — the UI owns click handlers
+ * and disabled reasons.
  */
 
 export type NextActionId =
@@ -36,7 +36,7 @@ export interface NextActionChoice {
 export interface NextActionModel {
   /** One sentence answering "where is this task and what's the ask?". */
   sentence: string;
-  /** The recommended action — the page's only filled button (undefined while busy/idle). */
+  /** The recommended action (undefined while busy or idle). */
   primary?: NextActionChoice;
   /** Escape hatches — quiet buttons offered alongside the primary. */
   secondaries: NextActionChoice[];
@@ -61,6 +61,13 @@ export interface NextActionInput {
   implementationRunStatus?: AgentRunStatus;
   /** Provider completed, but Task Monki blocked review after independent evidence checks. */
   implementationRetryRequired?: boolean;
+}
+
+export function shouldShowOverviewNextAction(
+  reviewPhaseVisible: boolean,
+  awaitingMoveToReview: boolean
+): boolean {
+  return reviewPhaseVisible && !awaitingMoveToReview;
 }
 
 const REQUEST_CHANGES: NextActionChoice = { id: 'request-changes', label: 'Request changes' };

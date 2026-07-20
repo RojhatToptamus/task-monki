@@ -137,6 +137,7 @@ export function TaskActionsMenu({
             className="tm-taskmenu__item tm-taskmenu__item--danger"
             onClick={() => {
               setOpen(false);
+              triggerRef.current?.focus();
               onRequestDelete(taskId);
             }}
           >

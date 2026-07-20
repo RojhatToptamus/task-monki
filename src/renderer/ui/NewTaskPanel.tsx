@@ -51,6 +51,7 @@ import {
   resolveSelectedRepositoryId
 } from '../model/repositories';
 import { RepositorySelect } from './RepositoryPicker';
+import { useDialogFocusBoundary } from './dialogFocus';
 import {
   AgentModelSelector,
   type ModelDiscoveryStatus
@@ -73,6 +74,7 @@ interface NewTaskPanelProps {
   onReadClipboardImage?(): Promise<ClipboardAttachmentImage | undefined>;
   onDiscoverAgentRuntimeModels?(runtimeId: string): Promise<void>;
   returnFocusRef?: RefObject<HTMLElement | null>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
   onResize?(): void;
   onClose(): void;
 }
@@ -93,6 +95,7 @@ export function NewTaskPanel({
   onReadClipboardImage,
   onDiscoverAgentRuntimeModels,
   returnFocusRef,
+  fallbackReturnFocusRef,
   onResize,
   onClose
 }: NewTaskPanelProps) {
@@ -136,11 +139,6 @@ export function NewTaskPanel({
   );
   const panelRef = useRef<HTMLFormElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
-  const previouslyFocusedElementRef = useRef<HTMLElement | null>(
-    typeof document !== 'undefined' && document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null
-  );
   const submittingRef = useRef(false);
   const resizeStateRef = useRef<{ startX: number; startWidth: number } | undefined>(
     undefined
@@ -286,10 +284,6 @@ export function NewTaskPanel({
   );
 
   useEffect(() => {
-    titleInputRef.current?.focus({ preventScroll: true });
-  }, []);
-
-  useEffect(() => {
     const resizePanelForViewport = () => {
       const nextBounds = getNewTaskPanelWidthBounds(window.innerWidth);
       setPanelWidthBounds(nextBounds);
@@ -302,25 +296,21 @@ export function NewTaskPanel({
     return () => window.removeEventListener('resize', resizePanelForViewport);
   }, [onResize]);
 
-  useEffect(
-    () => () => {
-      const previouslyFocusedElement =
-        returnFocusRef?.current ?? previouslyFocusedElementRef.current;
-      queueMicrotask(() => {
-        if (panelClosedRef.current && previouslyFocusedElement?.isConnected) {
-          previouslyFocusedElement.focus();
-        }
-      });
-    },
-    [panelClosedRef, returnFocusRef]
-  );
-
   const closePanel = useCallback(() => {
     if (panelClosedRef.current || submittingRef.current) return;
     closeAttachments();
     setIsClosing(true);
     onClose();
   }, [closeAttachments, onClose, panelClosedRef]);
+
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: titleInputRef,
+    fallbackReturnFocusRef,
+    busy: isSubmitting,
+    onClose: closePanel,
+    returnFocus: returnFocusRef?.current
+  });
 
   const resizePanel = useCallback(
     (nextWidth: number) => {
@@ -329,47 +319,6 @@ export function NewTaskPanel({
     },
     [onResize, panelWidthBounds.max, panelWidthBounds.min]
   );
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) {
-        return;
-      }
-      if (event.key === 'Escape') {
-        closePanel();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const panel = panelRef.current;
-      if (!panel) return;
-      const focusable = Array.from(
-        panel.querySelectorAll<HTMLElement>(
-          'button, input, textarea, select, summary, [tabindex]'
-        )
-      ).filter(
-        (element) =>
-          !element.hasAttribute('disabled') &&
-          element.tabIndex >= 0 &&
-          element.getAttribute('aria-hidden') !== 'true' &&
-          element.offsetParent !== null
-      );
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      } else if (!panel.contains(document.activeElement)) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [closePanel]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -514,9 +463,23 @@ export function NewTaskPanel({
         ref={panelRef}
         className="slideover__panel"
         onSubmit={submit}
+        onKeyDown={(event) => {
+          if (
+            event.key !== 'Enter' ||
+            (!event.metaKey && !event.ctrlKey) ||
+            event.nativeEvent.isComposing
+          ) {
+            return;
+          }
+          event.preventDefault();
+          if (!createDisabled) {
+            event.currentTarget.requestSubmit();
+          }
+        }}
         role="dialog"
-        aria-modal="true"
+        aria-modal="false"
         aria-label="New task"
+        tabIndex={-1}
       >
         <div
           className="slideover__resize"
@@ -935,6 +898,7 @@ export function NewTaskPanel({
               type="submit"
               disabled={createDisabled}
               aria-busy={isSubmitting}
+              aria-keyshortcuts="Meta+Enter Control+Enter"
               aria-label={
                 selectedRepository
                   ? `Create task in ${selectedRepository.name}`

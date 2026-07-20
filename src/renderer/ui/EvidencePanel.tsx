@@ -259,24 +259,14 @@ export function EvidencePanel({
               <p className="tm-diffbrowser__empty">Loading diff...</p>
             ) : hasDiffFiles ? (
               <>
-                <div className="tm-diffscope-tabs" role="tablist" aria-label="Diff scope">
-                  {DIFF_SCOPE_TABS.map((tab) => (
-                    <button
-                      key={tab.value}
-                      type="button"
-                      role="tab"
-                      aria-selected={diffScope === tab.value}
-                      className={diffScope === tab.value ? 'tm-diffscope-tabs__tab--active' : ''}
-                      onClick={() => {
-                        setDiffScope(tab.value);
-                        setSelectedFileId(undefined);
-                        setFilterMenuOpen(false);
-                      }}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
+                <DiffScopeControls
+                  value={diffScope}
+                  onChange={(scope) => {
+                    setDiffScope(scope);
+                    setSelectedFileId(undefined);
+                    setFilterMenuOpen(false);
+                  }}
+                />
                 <div className="tm-filefilter">
                   <div className="tm-filefilter__search">
                     <svg
@@ -415,20 +405,14 @@ export function EvidencePanel({
                 </div>
 
                 {filteredDiffFiles.length > 0 ? (
-                  <div className="tm-diffbrowser__tree" role="tree" aria-label="Changed files">
-                    {fileTree.children.map((node) => (
-                      <DiffTreeRow
-                        key={node.id}
-                        node={node}
-                        depth={0}
-                        selectedFileId={selectedFile?.id}
-                        collapsedDirectoryIds={collapsedDirectoryIds}
-                        onToggleDirectory={toggleDirectory}
-                        onSelectFile={setSelectedFileId}
-                        onOpenPathMenu={openPathMenu}
-                      />
-                    ))}
-                  </div>
+                  <DiffFileTree
+                    nodes={fileTree.children}
+                    selectedFileId={selectedFile?.id}
+                    collapsedDirectoryIds={collapsedDirectoryIds}
+                    onToggleDirectory={toggleDirectory}
+                    onSelectFile={setSelectedFileId}
+                    onOpenPathMenu={openPathMenu}
+                  />
                 ) : (
                   <p className="tm-diffbrowser__empty">
                     {diffEmptyMessage(diffScope, filterActive)}
@@ -638,6 +622,63 @@ function buildEvidenceStrip({
   return parts.join(' · ');
 }
 
+export function DiffScopeControls({
+  value,
+  onChange
+}: {
+  value: DiffEvidenceScope;
+  onChange(value: DiffEvidenceScope): void;
+}) {
+  return (
+    <div className="tm-diffscope-tabs" role="group" aria-label="Diff scope">
+      {DIFF_SCOPE_TABS.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={value === option.value}
+          className={value === option.value ? 'tm-diffscope-tabs__tab--active' : ''}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function DiffFileTree({
+  nodes,
+  selectedFileId,
+  collapsedDirectoryIds,
+  onToggleDirectory,
+  onSelectFile,
+  onOpenPathMenu
+}: {
+  nodes: DiffTreeNode[];
+  selectedFileId?: string;
+  collapsedDirectoryIds: ReadonlySet<string>;
+  onToggleDirectory(directoryId: string): void;
+  onSelectFile(fileId: string): void;
+  onOpenPathMenu?(relativePath: string, event: MouseEvent): void;
+}) {
+  return (
+    <ul className="tm-diffbrowser__tree" aria-label="Changed files">
+      {nodes.map((node) => (
+        <DiffTreeRow
+          key={node.id}
+          node={node}
+          depth={0}
+          selectedFileId={selectedFileId}
+          collapsedDirectoryIds={collapsedDirectoryIds}
+          onToggleDirectory={onToggleDirectory}
+          onSelectFile={onSelectFile}
+          onOpenPathMenu={onOpenPathMenu}
+        />
+      ))}
+    </ul>
+  );
+}
+
 function DiffTreeRow({
   node,
   depth,
@@ -650,7 +691,7 @@ function DiffTreeRow({
   node: DiffTreeNode;
   depth: number;
   selectedFileId?: string;
-  collapsedDirectoryIds: Set<string>;
+  collapsedDirectoryIds: ReadonlySet<string>;
   onToggleDirectory(directoryId: string): void;
   onSelectFile(fileId: string): void;
   onOpenPathMenu?(relativePath: string, event: MouseEvent): void;
@@ -662,12 +703,10 @@ function DiffTreeRow({
   if (node.type === 'directory') {
     const collapsed = collapsedDirectoryIds.has(node.id);
     return (
-      <div className="tm-difftree__group" role="none">
+      <li className="tm-difftree__group">
         <button
           type="button"
           className="tm-difftree__row tm-difftree__row--directory"
-          role="treeitem"
-          aria-level={depth + 1}
           aria-expanded={!collapsed}
           style={rowStyle}
           onClick={() => onToggleDirectory(node.id)}
@@ -689,7 +728,7 @@ function DiffTreeRow({
           <DiffStat additions={node.additions} deletions={node.deletions} />
         </button>
         {!collapsed ? (
-          <div role="group">
+          <ul className="tm-difftree__children">
             {node.children.map((child) => (
               <DiffTreeRow
                 key={child.id}
@@ -702,33 +741,33 @@ function DiffTreeRow({
                 onOpenPathMenu={onOpenPathMenu}
               />
             ))}
-          </div>
+          </ul>
         ) : null}
-      </div>
+      </li>
     );
   }
 
   const selected = selectedFileId === node.file.id;
   return (
-    <button
-      type="button"
-      className={`tm-difftree__row tm-difftree__row--file ${
-        selected ? 'tm-difftree__row--selected' : ''
-      }`}
-      role="treeitem"
-      aria-level={depth + 1}
-      aria-selected={selected}
-      style={rowStyle}
-      title={node.path}
-      onClick={() => onSelectFile(node.file.id)}
-      onContextMenu={(event) => onOpenPathMenu?.(node.file.path, event)}
-    >
-      <span className="tm-difftree__spacer" aria-hidden="true" />
-      <StatusIcon status={node.file.status} />
-      <span className="tm-difftree__name tm-difftree__name--file">{node.name}</span>
-      <span className="tm-difftree__count" aria-hidden="true" />
-      <DiffStat additions={node.additions} deletions={node.deletions} />
-    </button>
+    <li className="tm-difftree__item">
+      <button
+        type="button"
+        className={`tm-difftree__row tm-difftree__row--file ${
+          selected ? 'tm-difftree__row--selected' : ''
+        }`}
+        aria-current={selected ? 'true' : undefined}
+        style={rowStyle}
+        title={node.path}
+        onClick={() => onSelectFile(node.file.id)}
+        onContextMenu={(event) => onOpenPathMenu?.(node.file.path, event)}
+      >
+        <span className="tm-difftree__spacer" aria-hidden="true" />
+        <StatusIcon status={node.file.status} />
+        <span className="tm-difftree__name tm-difftree__name--file">{node.name}</span>
+        <span className="tm-difftree__count" aria-hidden="true" />
+        <DiffStat additions={node.additions} deletions={node.deletions} />
+      </button>
+    </li>
   );
 }
 
@@ -865,7 +904,10 @@ function PanelToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 function StatusIcon({ status }: { status: DiffFile['status'] }) {
   return (
-    <span className={`tm-difffile__status tm-difffile__status--${status}`}>
+    <span
+      className={`tm-difffile__status tm-difffile__status--${status}`}
+      aria-label={statusLabel(status)}
+    >
       {statusShortLabel(status)}
     </span>
   );
@@ -960,6 +1002,10 @@ function statusShortLabel(status: DiffFile['status']): string {
     case 'modified':
       return 'M';
   }
+}
+
+function statusLabel(status: DiffFile['status']): string {
+  return status[0].toUpperCase() + status.slice(1);
 }
 
 interface DiffScopeContext {

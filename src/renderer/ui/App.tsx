@@ -7,7 +7,8 @@ import {
   useState,
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode
+  type ReactNode,
+  type RefObject
 } from 'react';
 import {
   BOARD_COLORS,
@@ -77,6 +78,8 @@ import { NewTaskPanel } from './NewTaskPanel';
 import { RepositoryPicker } from './RepositoryPicker';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
+import { useDialogFocusBoundary } from './dialogFocus';
+import { ImpactList } from './ImpactList';
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -164,7 +167,7 @@ function isHorizontalCanvasControl(target: EventTarget | null): boolean {
     target instanceof Element &&
     Boolean(
       target.closest(
-        'button, input, textarea, select, a, summary, [role="button"], [role="separator"]'
+        '.tm-titlebar, button, input, textarea, select, a, summary, [role="button"], [role="separator"]'
       )
     )
   );
@@ -182,6 +185,7 @@ export function App() {
   const [boardEditor, setBoardEditor] = useState<Board | 'new' | undefined>();
   const [areSavedViewsExpanded, setAreSavedViewsExpanded] = useState(true);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
+  const [isTaskDetailModalOpen, setIsTaskDetailModalOpen] = useState(false);
   const [lastTaskId, setLastTaskId] = useState<string | undefined>();
   const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
   const [isNewTaskClosing, setIsNewTaskClosing] = useState(false);
@@ -199,6 +203,7 @@ export function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isCanvasDragging, setIsCanvasDragging] = useState(false);
   const newTaskButtonRef = useRef<HTMLButtonElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
   const canvasViewportRef = useRef<HTMLDivElement>(null);
   const canvasPanFrameRef = useRef<number | undefined>(undefined);
   const canvasResizeFrameRef = useRef<number | undefined>(undefined);
@@ -1636,67 +1641,25 @@ export function App() {
   const showDetail = isDetailOpen && Boolean(selectedTask);
 
   const resolvedTheme = resolveTheme(theme, prefersDark);
+  const appOwnedModalOpen = Boolean(deleteCandidate || repositoryDisconnect || boardEditor);
+  const appBackgroundModalOpen = appOwnedModalOpen || isTaskDetailModalOpen;
 
   return (
     <div
+      ref={appRootRef}
       className="tm-app app-shell"
+      tabIndex={-1}
       data-input-modality={inputModality}
       data-theme={resolvedTheme}
       data-window-platform={windowChromePlatform}
       onKeyDownCapture={() => setInputModality('keyboard')}
       onPointerDownCapture={() => setInputModality('pointer')}
     >
-      <header className="tm-titlebar" data-window-platform={windowChromePlatform}>
-        {windowChromePlatform === 'macos' ? (
-          <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
-        ) : null}
-        <button
-          type="button"
-          className="tm-iconbtn"
-          onClick={toggleSidebar}
-          aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          <PanelIcon />
-        </button>
-        <div className="tm-titlebar__nav">
-          <button
-            type="button"
-            className="tm-iconbtn"
-            onClick={goBack}
-            disabled={!canGoBack}
-            aria-label="Back"
-            title="Back"
-          >
-            <ArrowLeftIcon />
-          </button>
-          <button
-            type="button"
-            className="tm-iconbtn"
-            onClick={goForward}
-            disabled={!canGoForward}
-            aria-label="Forward"
-            title="Forward"
-          >
-            <ArrowRightIcon />
-          </button>
-        </div>
-        <div className="tm-titlebar__spacer" />
-        <button
-          ref={newTaskButtonRef}
-          type="button"
-          className="tm-newtask"
-          onClick={openNewTask}
-          disabled={!canCreateTask}
-          title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
-        >
-          + New task
-        </button>
-      </header>
-
       <div
         ref={canvasViewportRef}
         className={`tm-body ${isCanvasDragging ? 'tm-body--dragging' : ''}`}
+        inert={appOwnedModalOpen ? true : undefined}
+        aria-hidden={appOwnedModalOpen ? true : undefined}
         onWheel={(event) => {
           if (
             !isNewTaskClosing &&
@@ -1716,7 +1679,65 @@ export function App() {
       >
         <div className="tm-canvas">
           <div className="tm-canvas__workspace">
-            <aside className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}>
+            <header
+              className="tm-titlebar"
+              data-window-platform={windowChromePlatform}
+              inert={appBackgroundModalOpen ? true : undefined}
+              aria-hidden={appBackgroundModalOpen ? true : undefined}
+            >
+              {windowChromePlatform === 'macos' ? (
+                <div className="tm-titlebar__traffic-spacer" aria-hidden="true" />
+              ) : null}
+              <button
+                type="button"
+                className="tm-iconbtn"
+                onClick={toggleSidebar}
+                aria-label={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                title={isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              >
+                <PanelIcon />
+              </button>
+              <div className="tm-titlebar__nav">
+                <button
+                  type="button"
+                  className="tm-iconbtn"
+                  onClick={goBack}
+                  disabled={!canGoBack}
+                  aria-label="Back"
+                  title="Back"
+                >
+                  <ArrowLeftIcon />
+                </button>
+                <button
+                  type="button"
+                  className="tm-iconbtn"
+                  onClick={goForward}
+                  disabled={!canGoForward}
+                  aria-label="Forward"
+                  title="Forward"
+                >
+                  <ArrowRightIcon />
+                </button>
+              </div>
+              <div className="tm-titlebar__spacer" />
+              <button
+                ref={newTaskButtonRef}
+                type="button"
+                className="tm-newtask"
+                onClick={openNewTask}
+                disabled={!canCreateTask}
+                title={canCreateTask ? 'New task' : 'Finish setup before creating tasks'}
+              >
+                + New task
+              </button>
+            </header>
+
+            <div className="tm-canvas__content">
+            <aside
+              className={`tm-nav ${isSidebarCollapsed ? 'tm-nav--collapsed' : ''}`}
+              inert={isTaskDetailModalOpen ? true : undefined}
+              aria-hidden={isTaskDetailModalOpen ? true : undefined}
+            >
           <div className="tm-nav__brand">
             <img
               className="tm-nav__brand-mark"
@@ -1931,6 +1952,7 @@ export function App() {
             onTransition={transitionTask}
             onArchive={archiveTask}
             onRequestDelete={requestDeleteTask}
+            onModalOpenChange={setIsTaskDetailModalOpen}
           />
         ) : (
           <MainColumn
@@ -1964,6 +1986,7 @@ export function App() {
             onEditBoard={setBoardEditor}
           />
             )}
+            </div>
           </div>
 
           {isNewTaskOpen ? (
@@ -1982,6 +2005,7 @@ export function App() {
               onReadClipboardImage={taskManagerApi.readClipboardImage}
               onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
               returnFocusRef={newTaskButtonRef}
+              fallbackReturnFocusRef={appRootRef}
               onResize={keepNewTaskPanelInView}
               onClose={closeNewTask}
             />
@@ -1996,6 +2020,7 @@ export function App() {
           gitSnapshot={deleteCandidateGitSnapshot}
           onCancel={() => setDeleteCandidateId(undefined)}
           onConfirm={(removeWorktree) => deleteTask(deleteCandidate.id, removeWorktree)}
+          fallbackReturnFocusRef={appRootRef}
         />
       ) : null}
 
@@ -2005,6 +2030,7 @@ export function App() {
           impact={repositoryDisconnect.impact}
           onCancel={() => setRepositoryDisconnect(undefined)}
           onConfirm={confirmRepositoryDisconnect}
+          fallbackReturnFocusRef={appRootRef}
         />
       ) : null}
 
@@ -2016,6 +2042,7 @@ export function App() {
           onCancel={() => setBoardEditor(undefined)}
           onSave={saveBoard}
           onDelete={deleteBoard}
+          fallbackReturnFocusRef={appRootRef}
         />
       ) : null}
 
@@ -2050,13 +2077,15 @@ function BoardEditorModal({
   repositories,
   onCancel,
   onSave,
-  onDelete
+  onDelete,
+  fallbackReturnFocusRef
 }: {
   board?: Board;
   repositories: RepositoryOption[];
   onCancel(): void;
   onSave(input: CreateBoardRequest): Promise<void>;
   onDelete(boardId: string): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [name, setName] = useState(board?.name ?? '');
   const [color, setColor] = useState<BoardColor>(board?.color ?? 'NEUTRAL');
@@ -2066,6 +2095,16 @@ function BoardEditorModal({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const panelRef = useRef<HTMLFormElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: nameInputRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
 
   const toggleWorkflowPhase = (workflowPhase: WorkflowPhase) => {
     setWorkflowPhases((current) =>
@@ -2104,13 +2143,18 @@ function BoardEditorModal({
   return (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="board-editor-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <form className="tm-modal__panel tm-board-editor" onSubmit={submit}>
+      <form
+        ref={panelRef}
+        className="tm-modal__panel tm-board-editor"
+        tabIndex={-1}
+        onSubmit={submit}
+      >
         <h3 id="board-editor-title">{board ? 'Edit saved view' : 'New saved view'}</h3>
 
         <label className="field">
           <span>Name</span>
           <input
-            autoFocus
+            ref={nameInputRef}
             value={name}
             maxLength={80}
             placeholder="For example, Review across repositories"
@@ -2240,14 +2284,25 @@ function RepositoryDisconnectModal({
   repository,
   impact,
   onCancel,
-  onConfirm
+  onConfirm,
+  fallbackReturnFocusRef
 }: {
   repository: Repository;
   impact: RepositoryImpact;
   onCancel(): void;
   onConfirm(): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [busy, setBusy] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: cancelRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
   const submit = async () => {
     if (impact.blockingReason) return;
     setBusy(true);
@@ -2266,7 +2321,9 @@ function RepositoryDisconnectModal({
     >
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
       <div
+        ref={panelRef}
         className="tm-modal__panel tm-delete-modal"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
       >
         <h3 id="disconnect-repository-title">Disconnect {repository.name}?</h3>
@@ -2274,20 +2331,28 @@ function RepositoryDisconnectModal({
           Tasks, worktrees, branches, commits, reviews, and delivery evidence stay intact. Task
           actions that need this checkout remain unavailable until it is reconnected.
         </p>
-        <div className="tm-modal__requirements">
-          <div className="tm-modal__requirement">
-            <strong>{impact.taskCount}</strong> tasks
-          </div>
-          <div className="tm-modal__requirement">
-            <strong>{impact.worktreeCount}</strong> worktrees
-          </div>
-          <div className="tm-modal__requirement">
-            <strong>{impact.openPullRequestCount}</strong> open pull requests
-          </div>
-        </div>
+        <ImpactList
+          ariaLabel="Repository disconnect impact"
+          groups={[
+            {
+              kind: 'untouched',
+              items: [
+                `${impact.taskCount} tasks`,
+                `${impact.worktreeCount} worktrees`,
+                `${impact.openPullRequestCount} open pull requests`
+              ]
+            }
+          ]}
+        />
         {impact.blockingReason ? <div className="tm-error">{impact.blockingReason}</div> : null}
         <div className="tm-modal__actions">
-          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+          <button
+            ref={cancelRef}
+            type="button"
+            className="outline-button"
+            disabled={busy}
+            onClick={onCancel}
+          >
             Cancel
           </button>
           <button
@@ -2309,18 +2374,30 @@ function DeleteTaskModal({
   worktree,
   gitSnapshot,
   onCancel,
-  onConfirm
+  onConfirm,
+  fallbackReturnFocusRef
 }: {
   task: Task;
   worktree?: WorktreeRecord;
   gitSnapshot?: GitSnapshotRecord;
   onCancel(): void;
   onConfirm(removeWorktree: boolean): Promise<DeleteTaskResult>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const [removeWorktree, setRemoveWorktree] = useState(false);
   const [busy, setBusy] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const worktreeRemoval = describeWorktreeRemoval(worktree, gitSnapshot);
   const canRemoveWorktree = worktreeRemoval.status === 'available';
+
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: cancelRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
 
   useEffect(() => {
     setRemoveWorktree(false);
@@ -2343,7 +2420,7 @@ function DeleteTaskModal({
   return (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div className="tm-modal__panel tm-delete-modal">
+      <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
         <div className="tm-delete-modal__head">
           <span className="tm-delete-modal__mark" aria-hidden="true">
             <TrashIcon />
@@ -2357,25 +2434,28 @@ function DeleteTaskModal({
           </div>
         </div>
 
-        <div className="tm-delete-modal__grid">
-          <section className="tm-delete-modal__col tm-delete-modal__col--remove">
-            <h4>Deleted</h4>
-            <ul>
-              <li>Task record and workflow state</li>
-              <li>Local run, event, and session records</li>
-              <li>Managed attachments, artifacts, and evidence records</li>
-            </ul>
-          </section>
-          <section className="tm-delete-modal__col tm-delete-modal__col--keep">
-            <h4>Kept</h4>
-            <ul>
-              <li>Repository and Git history</li>
-              <li>Remote branch, PR, and commits</li>
-              <li>Fork alternatives and source tasks</li>
-              <li>Provider history and external protocol-journal traces</li>
-            </ul>
-          </section>
-        </div>
+        <ImpactList
+          ariaLabel="Task deletion impact"
+          groups={[
+            {
+              kind: 'deleted',
+              items: [
+                'Task record and workflow state',
+                'Local run, event, and session records',
+                'Managed attachments, artifacts, and evidence records'
+              ]
+            },
+            {
+              kind: 'kept',
+              items: [
+                'Repository and Git history',
+                'Remote branch, PR, and commits',
+                'Fork alternatives and source tasks',
+                'Provider history and external protocol-journal traces'
+              ]
+            }
+          ]}
+        />
 
         <label
           className={`tm-delete-modal__worktree ${
@@ -2395,7 +2475,13 @@ function DeleteTaskModal({
         </label>
 
         <div className="tm-modal__actions">
-          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
+          <button
+            ref={cancelRef}
+            type="button"
+            className="outline-button"
+            disabled={busy}
+            onClick={onCancel}
+          >
             Cancel
           </button>
           <button type="button" className="danger-button" disabled={busy} onClick={submit}>

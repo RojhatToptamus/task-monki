@@ -1,11 +1,13 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
   type ReactNode,
   type RefObject
 } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   PreviewApprovalRecord,
   PreviewComposeProjectRecord,
@@ -38,6 +40,7 @@ import {
   selectPreviewActionGeneration,
   selectPreviewOverviewProjection,
   selectPreviewResetResources,
+  shouldShowPreviewOverview,
   type PreviewActionId,
   type PreviewActionModel,
   type PreviewViewModel
@@ -55,6 +58,8 @@ import {
   handleMenuKeyDown,
   menuTriggerFocusTarget
 } from './menuKeyboard';
+import { useDialogFocusBoundary } from './dialogFocus';
+import { ImpactList } from './ImpactList';
 
 export interface PreviewPanelProps {
   task: Task;
@@ -100,6 +105,9 @@ export interface PreviewPanelProps {
   onResetData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
   onRetrySetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
   onReadLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<ReadPreviewLogResult>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }
 
 interface PreviewConfirmation {
@@ -109,7 +117,6 @@ interface PreviewConfirmation {
   danger: boolean;
   impacts?: Array<{
     tone: 'deleted' | 'kept' | 'untouched';
-    label: string;
     detail: string;
   }>;
   requireText?: string;
@@ -135,6 +142,9 @@ export function PreviewOverviewCard(
   props: PreviewPanelProps & { onShowDetails(): void }
 ) {
   const controller = usePreviewController(props);
+  if (!shouldShowPreviewOverview(controller.view)) {
+    return null;
+  }
   const projection = selectPreviewOverviewProjection(controller.view);
   const action = projection.recommendedAction;
   const secondaryAction = projection.secondaryAction;
@@ -285,6 +295,11 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
   const localConfiguration = props.resolution?.status === 'CONFIGURATION_REQUIRED'
     ? props.resolution
     : undefined;
+  const focusedWorkspace = !localConfiguration && !configurationRequired && (
+    !plan ||
+    ['Ready to start', 'Stopped', 'Failed', 'Recovery required', 'Cleanup incomplete']
+      .includes(controller.view.status)
+  );
 
   useEffect(() => {
     if (!readinessPending || !plan) return;
@@ -305,11 +320,13 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
   }
 
   return (
-    <section className="tm-preview-workspace" aria-label="Preview">
+    <section
+      className={`tm-preview-workspace${focusedWorkspace ? ' tm-preview-workspace--focused' : ''}`}
+      aria-label="Preview"
+    >
       <header className="tm-preview-workspace__head">
         <div className="tm-preview-workspace__decision">
           <div className={`tm-preview-statusline tm-preview-statusline--${presentation.tone}`}>
-            <span aria-hidden="true" />
             <strong>{presentation.status}</strong>
             {presentation.meta ? <small>{presentation.meta}</small> : null}
             {plan?.executionPlan.adapter === 'COMPOSE' ? (
@@ -364,7 +381,11 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
           {primaryAction ? (
             <button
               type="button"
-              className={primaryAction.id === 'STOP' ? 'outline-button' : 'primary-button'}
+              className={
+                primaryAction.id === 'STOP' && controller.view.status !== 'Cleanup incomplete'
+                  ? 'outline-button'
+                  : 'primary-button'
+              }
               disabled={isActionDisabled(controller, primaryAction.id) || (
                 (configurationRequired || readinessPending) && primaryAction.id === 'START'
               )}
@@ -440,8 +461,15 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
             props.task.id,
             plan.executionPlan.selectedScenarioId
           )}
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+          modalRootRef={props.modalRootRef}
+          onModalOpenChange={props.onModalOpenChange}
         />
-      ) : !localConfiguration && plan && !approvalRequired ? <div className="tm-preview-workspace__columns">
+      ) : !localConfiguration && plan && !approvalRequired ? <div
+        className={`tm-preview-workspace__columns${
+          focusedWorkspace ? ' tm-preview-workspace__columns--focused' : ''
+        }`}
+      >
         <div className="tm-preview-workspace__column">
           {showOperationalEvidence ? (
             <PreviewApplicationSection
@@ -499,6 +527,9 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
                 props.task.id,
                 plan.executionPlan.selectedScenarioId
               )}
+              fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+              modalRootRef={props.modalRootRef}
+              onModalOpenChange={props.onModalOpenChange}
             />
           ) : null}
           {controller.view.generation && !approvalRequired ? (
@@ -517,6 +548,9 @@ export function PreviewWorkspace(props: PreviewPanelProps) {
           busy={controller.confirmationBusy}
           onCancel={controller.closeConfirmation}
           onConfirm={() => void controller.confirm()}
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+          modalRootRef={props.modalRootRef}
+          onModalOpenChange={props.onModalOpenChange}
         />
       ) : null}
     </section>
@@ -817,11 +851,10 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
   };
 
   return (
-    <section className="tm-preview-workspace" aria-label="Preview">
+    <section className="tm-preview-workspace tm-preview-workspace--focused" aria-label="Preview">
       <header className="tm-preview-workspace__head tm-preview-setup__head">
         <div className="tm-preview-workspace__decision">
           <div className="tm-preview-statusline tm-preview-statusline--action">
-            <span aria-hidden="true" />
             <strong>Preview setup</strong>
             <small>Recipe required</small>
           </div>
@@ -878,6 +911,9 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
           onValidate={props.onValidateRecipeDraft}
           onAccept={props.onAcceptRecipeDraft}
           onDiscard={discard}
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+          modalRootRef={props.modalRootRef}
+          onModalOpenChange={props.onModalOpenChange}
         />
       ) : null}
     </section>
@@ -892,7 +928,10 @@ export function PreviewRecipeGenerationModal({
   onRegenerate,
   onValidate,
   onAccept,
-  onDiscard
+  onDiscard,
+  fallbackReturnFocusRef,
+  modalRootRef,
+  onModalOpenChange
 }: {
   taskId: string;
   state: PreviewRecipeGenerationSnapshot;
@@ -906,8 +945,12 @@ export function PreviewRecipeGenerationModal({
     yaml: string
   ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
   onDiscard(): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [yaml, setYaml] = useState(state.draft?.yaml ?? '');
   const [loadedDraftId, setLoadedDraftId] = useState(state.draft?.id);
   const [edited, setEdited] = useState(false);
@@ -916,12 +959,9 @@ export function PreviewRecipeGenerationModal({
   const [discarding, setDiscarding] = useState(false);
   const [regenerateArmed, setRegenerateArmed] = useState(false);
   const busy = accepting || discarding;
-  const busyRef = useRef(busy);
-  const closeRef = useRef(onClose);
-  busyRef.current = busy;
-  closeRef.current = onClose;
   const generating = state.status === 'GENERATING';
   const report = state.report ?? state.draft?.report;
+  const compact = !state.draft && !report;
 
   useEffect(() => {
     if (state.draft && state.draft.id !== loadedDraftId) {
@@ -933,31 +973,19 @@ export function PreviewRecipeGenerationModal({
     }
   }, [loadedDraftId, state.draft]);
 
-  useEffect(() => {
-    panelRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busyRef.current) closeRef.current();
-      if (event.key !== 'Tab') return;
-      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
-      ) ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      returnFocus?.focus();
-    };
-  }, [returnFocus]);
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: closeButtonRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose,
+    returnFocus
+  });
+
+  useLayoutEffect(() => {
+    onModalOpenChange(true);
+    return () => onModalOpenChange(false);
+  }, [onModalOpenChange]);
 
   const validateAndAccept = async () => {
     const draft = state.draft;
@@ -994,7 +1022,7 @@ export function PreviewRecipeGenerationModal({
     }
   };
 
-  return (
+  const dialog = (
     <div
       className="tm-modal tm-preview-recipe-modal"
       role="dialog"
@@ -1004,7 +1032,9 @@ export function PreviewRecipeGenerationModal({
       <div className="tm-modal__scrim" onClick={busy ? undefined : onClose} />
       <div
         ref={panelRef}
-        className="tm-modal__panel tm-preview-recipe-review"
+        className={`tm-modal__panel tm-preview-recipe-review ${
+          compact ? 'tm-preview-recipe-review--compact' : ''
+        }`}
         tabIndex={-1}
       >
         <header className="tm-preview-recipe-review__head">
@@ -1016,6 +1046,7 @@ export function PreviewRecipeGenerationModal({
             </p>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             className="tm-preview-recipe-review__close"
             disabled={busy}
@@ -1086,38 +1117,54 @@ export function PreviewRecipeGenerationModal({
             <button type="button" className="outline-button" disabled={busy} onClick={onClose}>
               Close
             </button>
-            <button
-              type="button"
-              className="tm-preview-recipe-review__discard"
-              disabled={busy}
-              onClick={() => void discard()}
-            >
-              {discarding ? 'Discarding…' : 'Discard'}
-            </button>
+            {state.draft ? (
+              <button
+                type="button"
+                className="tm-preview-recipe-review__discard"
+                disabled={busy}
+                onClick={() => void discard()}
+              >
+                {discarding ? 'Discarding…' : 'Discard'}
+              </button>
+            ) : null}
           </div>
           <div className="tm-preview-recipe-review__primary">
-            {regenerateArmed ? <span>Your edits will be replaced.</span> : null}
-            <button
-              type="button"
-              className="outline-button"
-              disabled={busy || generating}
-              onClick={() => void regenerate()}
-            >
-              {regenerateArmed ? 'Replace draft' : 'Regenerate'}
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={!state.draft || busy || generating}
-              onClick={() => void validateAndAccept()}
-            >
-              {accepting ? 'Checking…' : 'Accept & save recipe'}
-            </button>
+            {state.draft ? (
+              <>
+                {regenerateArmed ? <span>Your edits will be replaced.</span> : null}
+                <button
+                  type="button"
+                  className="outline-button"
+                  disabled={busy || generating}
+                  onClick={() => void regenerate()}
+                >
+                  {regenerateArmed ? 'Replace draft' : 'Regenerate'}
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={busy || generating}
+                  onClick={() => void validateAndAccept()}
+                >
+                  {accepting ? 'Checking…' : 'Accept & save recipe'}
+                </button>
+              </>
+            ) : !generating ? (
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void regenerate()}
+              >
+                {state.status === 'EMPTY' ? 'Generate draft' : 'Try again'}
+              </button>
+            ) : null}
           </div>
         </footer>
       </div>
     </div>
   );
+  return modalRootRef.current ? createPortal(dialog, modalRootRef.current) : dialog;
 }
 
 function PreviewRecipeGenerationReportView({
@@ -1258,7 +1305,6 @@ function usePreviewController(props: PreviewPanelProps): PreviewController {
       impacts: destructive ? [
         {
           tone: 'deleted',
-          label: 'Deleted',
           detail: adapter === 'COMPOSE'
             ? 'Task-scoped project containers, owned networks, owned volumes, and their data'
             : hasManagedData
@@ -1267,12 +1313,10 @@ function usePreviewController(props: PreviewPanelProps): PreviewController {
         },
         {
           tone: 'kept',
-          label: 'Kept',
           detail: 'Worktree, branch, approved plan, public bindings, and retained evidence'
         },
         {
           tone: 'untouched',
-          label: 'Never touched',
           detail: 'Attached dependencies and resources owned outside this preview'
         }
       ] : undefined,
@@ -1289,9 +1333,9 @@ function usePreviewController(props: PreviewPanelProps): PreviewController {
       confirmLabel: `Reset ${resourceId}`,
       danger: true,
       impacts: [
-        { tone: 'deleted', label: 'Deleted', detail: `${resourceId} managed data` },
-        { tone: 'kept', label: 'Kept', detail: 'Other managed data, worktree, stable route identities, and approval' },
-        { tone: 'untouched', label: 'Never touched', detail: 'Attached dependencies' }
+        { tone: 'deleted', detail: `${resourceId} managed data` },
+        { tone: 'kept', detail: 'Other managed data, worktree, stable route identities, and approval' },
+        { tone: 'untouched', detail: 'Attached dependencies' }
       ],
       returnFocus,
       run: () => runReset(resourceId)
@@ -1653,11 +1697,11 @@ function PlanAdvisories({ warnings }: { warnings: string[] }) {
   return (
     <section className="tm-preview-surface tm-preview-advisories">
       <h3 className="tm-preview-surface__title">Advisories</h3>
-      <div className="tm-preview-advisories__list">
+      <ul className="tm-preview-advisories__list">
         {warnings.map((warning) => (
-          <p key={warning}><span aria-hidden="true" />{warning}</p>
+          <li key={warning}>{warning}</li>
         ))}
-      </div>
+      </ul>
     </section>
   );
 }
@@ -2102,7 +2146,10 @@ function PreviewConfigurationRequired({
   localBindings,
   requestedInputId,
   onInputRequestHandled,
-  onChanged
+  onChanged,
+  fallbackReturnFocusRef,
+  modalRootRef,
+  onModalOpenChange
 }: {
   taskId: string;
   plan: PreviewPlanRecord;
@@ -2112,6 +2159,9 @@ function PreviewConfigurationRequired({
   requestedInputId?: string;
   onInputRequestHandled(): void;
   onChanged(): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   return (
     <div className="tm-preview-workspace__columns tm-preview-configuration">
@@ -2124,6 +2174,9 @@ function PreviewConfigurationRequired({
           requestedInputId={requestedInputId}
           onInputRequestHandled={onInputRequestHandled}
           onChanged={onChanged}
+          fallbackReturnFocusRef={fallbackReturnFocusRef}
+          modalRootRef={modalRootRef}
+          onModalOpenChange={onModalOpenChange}
         />
         <PreviewBindingsSection
           plan={plan}
@@ -2148,7 +2201,10 @@ function PreviewPrivateInputsSection({
   wide = false,
   requestedInputId,
   onInputRequestHandled,
-  onChanged
+  onChanged,
+  fallbackReturnFocusRef,
+  modalRootRef,
+  onModalOpenChange
 }: {
   taskId: string;
   plan: PreviewPlanRecord;
@@ -2157,6 +2213,9 @@ function PreviewPrivateInputsSection({
   requestedInputId?: string;
   onInputRequestHandled?(): void;
   onChanged(): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   const inputs = plan.executionPlan.inputs ?? [];
   const blockers = new Map(
@@ -2186,6 +2245,9 @@ function PreviewPrivateInputsSection({
             openRequested={requestedInputId === input.id}
             onOpenHandled={onInputRequestHandled}
             onChanged={onChanged}
+            fallbackReturnFocusRef={fallbackReturnFocusRef}
+            modalRootRef={modalRootRef}
+            onModalOpenChange={onModalOpenChange}
           />
         ))}
       </div>
@@ -2197,14 +2259,13 @@ function PreviewStartBlockers({ blockers }: { blockers: PreviewExecutionBlocker[
   return (
     <section className="tm-preview-surface tm-preview-blockers">
       <h3 className="tm-preview-surface__title">Blocking start</h3>
-      <div className="tm-preview-advisories__list">
+      <ul className="tm-preview-advisories__list">
         {blockers.map((blocker) => (
-          <p key={`${blocker.kind}-${blocker.inputId}`}>
-            <span aria-hidden="true" />
-            <span><code>{blocker.inputId}</code> {executionBlockerDescription(blocker)} — required</span>
-          </p>
+          <li key={`${blocker.kind}-${blocker.inputId}`}>
+            <code>{blocker.inputId}</code> {executionBlockerDescription(blocker)} — required
+          </li>
         ))}
-      </div>
+      </ul>
     </section>
   );
 }
@@ -2255,6 +2316,9 @@ function PrivateInputControl(props: {
   openRequested?: boolean;
   onOpenHandled?(): void;
   onChanged(): Promise<void>;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   const valueRef = useRef<HTMLInputElement>(null);
   const keyRef = useRef<HTMLInputElement>(null);
@@ -2322,12 +2386,6 @@ function PrivateInputControl(props: {
       } · value hidden`;
   return (
     <div className={`tm-preview-private-input${props.wide ? ' tm-preview-private-input--wide' : ''}`}>
-      <span
-        className={`tm-preview-private-input__dot tm-preview-private-input__dot--${
-          props.blocker ? blockerTone(props.blocker) : 'success'
-        }`}
-        aria-hidden="true"
-      />
       <code className="tm-preview-private-input__id">{props.inputId}</code>
       <span className="tm-preview-private-input__status" title={props.label}>{inputStatus}</span>
       <div className="tm-preview-private-input__actions">
@@ -2434,6 +2492,9 @@ function PrivateInputControl(props: {
             });
             if (imported) setEditorOpen(false);
           })()}
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+          modalRootRef={props.modalRootRef}
+          onModalOpenChange={props.onModalOpenChange}
         />
       ) : null}
       {confirmDelete ? (
@@ -2455,6 +2516,9 @@ function PrivateInputControl(props: {
             }) ?? Promise.reject(new Error('Private input API unavailable.')));
             setConfirmDelete(false);
           })()}
+          fallbackReturnFocusRef={props.fallbackReturnFocusRef}
+          modalRootRef={props.modalRootRef}
+          onModalOpenChange={props.onModalOpenChange}
         />
       ) : null}
     </div>
@@ -2470,7 +2534,10 @@ function PreviewPrivateInputEditorModal({
   feedback,
   onCancel,
   onSave,
-  onImport
+  onImport,
+  fallbackReturnFocusRef,
+  modalRootRef,
+  onModalOpenChange
 }: {
   label: string;
   inputId: string;
@@ -2481,38 +2548,30 @@ function PreviewPrivateInputEditorModal({
   onCancel(): void;
   onSave(): void;
   onImport(): void;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const busyRef = useRef(busy);
-  const cancelRef = useRef(onCancel);
-  busyRef.current = busy;
-  cancelRef.current = onCancel;
-  useEffect(() => {
-    valueRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busyRef.current) cancelRef.current();
-      if (event.key !== 'Tab') return;
-      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
-      ) ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [valueRef]);
-  return (
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: valueRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel
+  });
+  useLayoutEffect(() => {
+    onModalOpenChange(true);
+    return () => onModalOpenChange(false);
+  }, [onModalOpenChange]);
+  const dialog = (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="preview-private-input-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div ref={panelRef} className="tm-modal__panel tm-preview-private-editor">
+      <div
+        ref={panelRef}
+        className="tm-modal__panel tm-preview-private-editor"
+        tabIndex={-1}
+      >
         <div>
           <h3 id="preview-private-input-title">Set {label}</h3>
           <p>
@@ -2552,6 +2611,7 @@ function PreviewPrivateInputEditorModal({
       </div>
     </div>
   );
+  return modalRootRef.current ? createPortal(dialog, modalRootRef.current) : dialog;
 }
 
 function PreviewActionMenu({
@@ -2666,59 +2726,53 @@ function PreviewConfirmationModal({
   confirmation,
   busy,
   onCancel,
-  onConfirm
+  onConfirm,
+  fallbackReturnFocusRef,
+  modalRootRef,
+  onModalOpenChange
 }: {
   confirmation: PreviewConfirmation;
   busy: boolean;
   onCancel(): void;
   onConfirm(): void;
+  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
+  modalRootRef: RefObject<HTMLElement | null>;
+  onModalOpenChange(open: boolean): void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const [confirmationText, setConfirmationText] = useState('');
-  const busyRef = useRef(busy);
-  const onCancelRef = useRef(onCancel);
-  busyRef.current = busy;
-  onCancelRef.current = onCancel;
   useEffect(() => setConfirmationText(''), [confirmation.requireText]);
-  useEffect(() => {
-    panelRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !busyRef.current) onCancelRef.current();
-      if (event.key !== 'Tab') return;
-      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-      confirmation.returnFocus?.focus();
-    };
-  }, [confirmation.returnFocus]);
-  return (
+  useDialogFocusBoundary({
+    dialogRef: panelRef,
+    initialFocusRef: cancelButtonRef,
+    fallbackReturnFocusRef,
+    busy,
+    onClose: onCancel,
+    returnFocus: confirmation.returnFocus
+  });
+  useLayoutEffect(() => {
+    onModalOpenChange(true);
+    return () => onModalOpenChange(false);
+  }, [onModalOpenChange]);
+  const dialog = (
     <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="preview-confirmation-title">
       <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div ref={panelRef} className="tm-modal__panel tm-preview-confirmation">
+      <div
+        ref={panelRef}
+        className="tm-modal__panel tm-preview-confirmation"
+        tabIndex={-1}
+      >
         <h3 id="preview-confirmation-title">{confirmation.title}</h3>
         <p>{confirmation.body}</p>
         {confirmation.impacts?.length ? (
-          <div className="tm-preview-confirmation__impacts">
-            {confirmation.impacts.map((impact) => (
-              <div key={impact.label}>
-                <span className={`tm-preview-confirmation__dot tm-preview-confirmation__dot--${impact.tone}`} aria-hidden="true" />
-                <strong>{impact.label}</strong>
-                <p>{impact.detail}</p>
-              </div>
-            ))}
-          </div>
+          <ImpactList
+            ariaLabel="Preview action impact"
+            groups={confirmation.impacts.map((impact) => ({
+              kind: impact.tone,
+              items: [impact.detail]
+            }))}
+          />
         ) : null}
         {confirmation.requireText ? (
           <label className="tm-field tm-preview-confirmation__phrase">
@@ -2733,7 +2787,13 @@ function PreviewConfirmationModal({
           </label>
         ) : null}
         <div className="tm-modal__actions">
-          <button type="button" className="outline-button" autoFocus disabled={busy} onClick={onCancel}>
+          <button
+            ref={cancelButtonRef}
+            type="button"
+            className="outline-button"
+            disabled={busy}
+            onClick={onCancel}
+          >
             Cancel
           </button>
           <button
@@ -2750,6 +2810,7 @@ function PreviewConfirmationModal({
       </div>
     </div>
   );
+  return modalRootRef.current ? createPortal(dialog, modalRootRef.current) : dialog;
 }
 
 function PreviewLogDock({
@@ -2838,10 +2899,6 @@ function OperationalRow({
 }) {
   return (
     <div className="tm-preview-row">
-      <span
-        className={`tm-preview-row__dot tm-preview-row__dot--${toneForRecordState(state)}`}
-        aria-hidden="true"
-      />
       <div className="tm-preview-row__copy">
         <strong>{title}</strong>
         <span>{kind}</span>
@@ -3098,12 +3155,6 @@ function executionBlockerDescription(blocker: PreviewExecutionBlocker): string {
   return 'secure encryption unavailable';
 }
 
-function blockerTone(blocker: PreviewExecutionBlocker): 'action' | 'error' {
-  return blocker.kind === 'PRIVATE_INPUT_MISSING' || blocker.kind === 'PRIVATE_INPUT_LOCKED'
-    ? 'action'
-    : 'error';
-}
-
 function describeExecutionBlockers(blockers: PreviewExecutionBlocker[]): string {
   if (blockers.length === 0) return 'Required private inputs are unavailable.';
   return blockers.map(
@@ -3120,13 +3171,6 @@ function uniqueGenerations(
     seen.add(generation.id);
     return true;
   });
-}
-
-function toneForRecordState(state: string): 'success' | 'action' | 'error' | 'neutral' {
-  if (['READY', 'RUNNING', 'ATTACHED', 'PASSED', 'SUCCEEDED', 'ACTIVE'].includes(state)) return 'success';
-  if (['FAILED', 'RECOVERY_REQUIRED', 'CLEANUP_INCOMPLETE', 'SETUP_FAILED'].includes(state)) return 'error';
-  if (['STARTING', 'PREPARING_SOURCE', 'RUNNING_GRAPH', 'WAITING_READY', 'UPDATING', 'PENDING'].includes(state)) return 'action';
-  return 'neutral';
 }
 
 function humanize(value: string): string {

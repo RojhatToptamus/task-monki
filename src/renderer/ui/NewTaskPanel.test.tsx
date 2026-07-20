@@ -223,6 +223,7 @@ describe('NewTaskPanel', () => {
         })}
         onDiscardAttachmentDraft={async () => undefined}
         onDiscoverAgentRuntimeModels={discoverModels}
+        fallbackReturnFocusRef={{ current: null }}
         onClose={() => undefined}
       />
     );
@@ -358,12 +359,14 @@ describe('NewTaskPanel', () => {
           })}
           onDiscardAttachmentDraft={async () => undefined}
           onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+          fallbackReturnFocusRef={{ current: null }}
           onClose={() => undefined}
         />
       );
     const html = renderPanel();
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
+    expect(html).toContain('role="dialog" aria-modal="false"');
     expect(html).toContain('Execution policy');
     expect(html).toContain('Restricted');
     expect(html).toMatch(/class="is-selected" aria-pressed="true">Restricted</u);
@@ -376,6 +379,9 @@ describe('NewTaskPanel', () => {
     expect(html).not.toContain('type="radio"');
     expect(html).not.toContain('role="radiogroup"');
     expect(html).toContain('aria-label="Create task in project"');
+    expect(html).toContain('aria-keyshortcuts="Meta+Enter Control+Enter"');
+    expect(html).toContain('aria-label="Execution policy"');
+    expect(html).toContain('aria-pressed="true">Restricted</button>');
     expect(html).toContain('Ask for approval');
     expect(html).toContain('Approve for me');
     expect(html).toContain('Full access');

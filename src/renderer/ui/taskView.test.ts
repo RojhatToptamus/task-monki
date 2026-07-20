@@ -15,6 +15,8 @@ import {
   getFinishEvidenceState,
   markDoneModalCopy,
   reviewFindingCountLabel,
+  selectTaskCardRepositoryIdentity,
+  shouldShowInboxRepository,
   tasksSpanMultipleRepositories
 } from './taskView';
 
@@ -52,7 +54,6 @@ describe('task card view model', () => {
 
     expect(vm.stateLabel).toBe('Needs approval');
     expect(vm.stateTone).toBe('action');
-    expect(vm.hasDecision).toBe(true);
   });
 
   it('keeps a failed implementation in progress and does not label it ready for review', () => {
@@ -314,6 +315,47 @@ describe('task card view model', () => {
     expect(tasksSpanMultipleRepositories([])).toBe(false);
   });
 
+  it('resolves card repository identity for global, single-repository, and missing-repository views', () => {
+    const repositoryNames = new Map([
+      ['repository-a', { name: 'repo', status: 'AVAILABLE' as const }],
+      ['repository-b', { name: 'repo-secondary', status: 'AVAILABLE' as const }],
+      ['repository-missing', { name: 'offline-repo', status: 'MISSING' as const }]
+    ]);
+
+    expect(
+      selectTaskCardRepositoryIdentity('repository-a', repositoryNames, true)
+    ).toEqual({ showRepo: true, repositoryName: 'repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-a', repositoryNames, false)
+    ).toEqual({ showRepo: false, repositoryName: 'repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-missing', repositoryNames, false)
+    ).toEqual({ showRepo: true, repositoryName: 'offline-repo' });
+    expect(
+      selectTaskCardRepositoryIdentity('repository-absent', repositoryNames, false)
+    ).toEqual({ showRepo: true, repositoryName: 'Missing repository' });
+  });
+
+  it('shows Inbox repository identity only when it distinguishes or identifies a missing repository', () => {
+    const a = createTask({ id: 'a', repositoryId: 'repository-a' });
+    const b = createTask({ id: 'b', repositoryId: 'repository-a' });
+    const c = createTask({ id: 'c', repositoryId: 'repository-b' });
+
+    expect(
+      shouldShowInboxRepository([a, b], [{ id: 'repository-a', status: 'AVAILABLE' }])
+    ).toBe(false);
+    expect(
+      shouldShowInboxRepository([a, c], [
+        { id: 'repository-a', status: 'AVAILABLE' },
+        { id: 'repository-b', status: 'AVAILABLE' }
+      ])
+    ).toBe(true);
+    expect(
+      shouldShowInboxRepository([a], [{ id: 'repository-a', status: 'MISSING' }])
+    ).toBe(true);
+    expect(shouldShowInboxRepository([a], [])).toBe(true);
+  });
+
   it('suppresses a status pill that only restates its column', () => {
     const ready = createTask({ workflowPhase: 'READY' });
     expect(buildTaskCardVM(ready, { columnKey: 'ready' }).showState).toBe(false);
@@ -322,6 +364,9 @@ describe('task card view model', () => {
 
     const done = createTask({ workflowPhase: 'DONE' });
     expect(buildTaskCardVM(done, { columnKey: 'done' }).showState).toBe(false);
+
+    const inProgress = createTask({ workflowPhase: 'IN_PROGRESS' });
+    expect(buildTaskCardVM(inProgress, { columnKey: 'progress' }).showState).toBe(false);
 
     // A pill that refines the Review column is kept.
     const needsChanges = createTask({

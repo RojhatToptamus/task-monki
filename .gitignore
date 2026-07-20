@@ -45,6 +45,7 @@ docs/**/.DS_Store
 .DS_Store
 
 # Local design-audit exports used during UI review; never ship these.
+/screenshots/
 /Untitled.zip
 /untitled/
 /untitled_extracted/

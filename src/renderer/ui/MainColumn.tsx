@@ -38,8 +38,10 @@ import {
   BOARD_COLUMNS,
   buildTaskCardVM,
   columnTasks,
+  selectTaskCardRepositoryIdentity,
   tasksForView,
   tasksSpanMultipleRepositories,
+  shouldShowInboxRepository,
   type NavView,
   type TaskCardVM
 } from './taskView';
@@ -676,7 +678,9 @@ function BoardKanban({
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
-  const repositoryNames = new Map(repositories.map((repository) => [repository.id, repository.name]));
+  const repositoriesById = new Map(
+    repositories.map((repository) => [repository.id, repository])
+  );
   return (
     <div className="tm-board">
       {BOARD_COLUMNS.map((column) => {
@@ -685,7 +689,7 @@ function BoardKanban({
           <section className="tm-col" key={column.key}>
             <div className="tm-col__head">
               <span className="tm-col__dot" style={dotStyle(column.tone)} />
-              <strong className="tm-col__label">{column.label}</strong>
+              <h2 className="tm-col__label">{column.label}</h2>
               <span className="tm-col__count">{cards.length}</span>
             </div>
             <div className="tm-col__cards">
@@ -693,10 +697,14 @@ function BoardKanban({
                 <TaskCard
                   key={task.id}
                   vm={buildTaskCardVM(task, {
-                    showRepo: showRepository,
                     columnKey: column.key,
-                    repositoryName: repositoryNames.get(task.repositoryId)
+                    ...selectTaskCardRepositoryIdentity(
+                      task.repositoryId,
+                      repositoriesById,
+                      showRepository
+                    )
                   })}
+                  headingLevel={3}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onRequestDelete={onRequestDelete}
@@ -726,7 +734,9 @@ function CardGrid({
   onRequestDelete(id: string): void;
 }) {
   const showRepo = tasksSpanMultipleRepositories(tasks);
-  const repositoryNames = new Map(repositories.map((repository) => [repository.id, repository.name]));
+  const repositoriesById = new Map(
+    repositories.map((repository) => [repository.id, repository])
+  );
   const showReviewCount = view === 'review';
   return (
     <div className="tm-grid">
@@ -738,10 +748,15 @@ function CardGrid({
             <TaskCard
               key={task.id}
               vm={buildTaskCardVM(task, {
-                showRepo,
                 showReviewCount,
-                repositoryName: repositoryNames.get(task.repositoryId)
+                columnKey: view === 'active' ? 'progress' : view,
+                ...selectTaskCardRepositoryIdentity(
+                  task.repositoryId,
+                  repositoriesById,
+                  showRepo
+                )
               })}
+              headingLevel={2}
               onSelect={onSelect}
               onArchive={onArchive}
               onRequestDelete={onRequestDelete}
@@ -755,17 +770,20 @@ function CardGrid({
 
 export function TaskCard({
   vm,
+  headingLevel = 3,
   onSelect,
   onArchive,
   onRequestDelete
 }: {
   vm: TaskCardVM;
+  headingLevel?: 2 | 3;
   onSelect(id: string): void;
   onArchive(id: string): void;
   onRequestDelete(id: string): void;
 }) {
+  const TitleHeading = headingLevel === 2 ? 'h2' : 'h3';
   return (
-    <article className={`tm-card ${vm.hasDecision ? 'tm-card--decision' : ''}`}>
+    <article className="tm-card">
       {/* Full-card click target sits behind the content so the kebab can be a
           real sibling next to the title (a button can't nest inside a button). */}
       <button
@@ -775,13 +793,16 @@ export function TaskCard({
         onClick={() => onSelect(vm.id)}
       />
       <div className="tm-card__body">
-        <div className="tm-card__top">
-          <span className="tm-card__num">{vm.num}</span>
-          <span style={{ flex: 1 }} />
-          {vm.showState ? <Chip tone={vm.stateTone} label={vm.stateLabel} /> : null}
-        </div>
+        {vm.meta || vm.showState ? (
+          <div className="tm-card__top">
+            {vm.meta ? <span className="tm-card__meta">{vm.meta}</span> : null}
+            {vm.showState ? (
+              <Chip tone={vm.stateTone} label={vm.stateLabel} showDot={false} />
+            ) : null}
+          </div>
+        ) : null}
         <div className="tm-card__titlerow">
-          <strong className="tm-card__title">{vm.title}</strong>
+          <TitleHeading className="tm-card__title">{vm.title}</TitleHeading>
           <TaskActionsMenu
             taskId={vm.id}
             title={vm.title}
@@ -797,7 +818,6 @@ export function TaskCard({
             <span aria-hidden="true">↳</span> {vm.lineage}
           </div>
         ) : null}
-        {vm.meta ? <div className="tm-card__meta">{vm.meta}</div> : null}
         {vm.evidence.length > 0 ? (
         <div className="tm-card__evidence" aria-label="Task evidence">
           {vm.evidence.map((item, index) => (
@@ -807,7 +827,6 @@ export function TaskCard({
                 item.tone ? `tm-card__evidence-item--${item.tone}` : ''
               }`}
             >
-              <span className="tm-card__evidence-dot" aria-hidden="true" />
               {item.value ? (
                 <span className="tm-card__evidence-value">{item.value}</span>
               ) : null}
@@ -851,6 +870,10 @@ function Inbox({
   ): Promise<void>;
 }) {
   const decisions = tasks.filter((task) => describeTaskAttention(task));
+  const repositoryNames = new Map(
+    repositories.map((repository) => [repository.id, repository.name])
+  );
+  const showRepository = shouldShowInboxRepository(decisions, repositories);
 
   return (
     <div className="tm-inbox">
@@ -866,7 +889,8 @@ function Inbox({
             <InboxDecisionCard
               key={task.id}
               task={task}
-              repositoryName={repositories.find((repository) => repository.id === task.repositoryId)?.name}
+              repositoryName={repositoryNames.get(task.repositoryId) ?? 'Missing repository'}
+              showRepository={showRepository}
               interaction={activeInteractionForTask(interactionRequests, task.id)}
               onSelect={onSelect}
               onRespondToInteraction={onRespondToInteraction}
@@ -878,15 +902,17 @@ function Inbox({
   );
 }
 
-function InboxDecisionCard({
+export function InboxDecisionCard({
   task,
   repositoryName,
+  showRepository,
   interaction,
   onSelect,
   onRespondToInteraction
 }: {
   task: Task;
-  repositoryName?: string;
+  repositoryName: string;
+  showRepository: boolean;
   interaction?: InteractionRequestRecord;
   onSelect(id: string): void;
   onRespondToInteraction(
@@ -896,11 +922,12 @@ function InboxDecisionCard({
 }) {
   const [busy, setBusy] = useState(false);
   const attention = describeTaskAttention(task);
-  const dotTone =
+  const attentionTone =
     attention?.tone === 'error' ? 'error' : attention?.tone === 'info' ? 'info' : 'action';
   // Inline decisions come straight from the interaction's allowed actions, so
   // answering here drives the same handler the detail page uses (no new IPC).
   const inline = interaction ? inboxInteractionDecisions(interaction) : {};
+  const openIsPrimary = !inline.approve;
 
   const respond = async (decision: AgentInteractionDecision) => {
     if (!interaction || busy) {
@@ -917,16 +944,21 @@ function InboxDecisionCard({
   };
 
   return (
-    <div className="tm-decision">
-      <div className="tm-decision__head">
-        <span className={`tm-pulse tm-pulse--${dotTone}`} />
-        <span className="tm-decision__kind">{attention?.label}</span>
+    <article className="tm-decision">
+      <div className="tm-decision__body">
+        <div className="tm-decision__head">
+          <span className={`tm-decision__kind tm-decision__kind--${attentionTone}`}>
+            {attention?.label}
+          </span>
+          {showRepository ? (
+            <span className="tm-decision__repository">{repositoryName}</span>
+          ) : null}
+        </div>
+        <h2 className="tm-decision__title">{task.title}</h2>
+        <p className="tm-decision__summary" title={attention?.detail ?? task.projection.summary}>
+          {attention?.detail ?? task.projection.summary}
+        </p>
       </div>
-      <strong className="tm-decision__title">{task.title}</strong>
-      <div className="tm-decision__task">
-        {repositoryName ?? 'Unknown repository'} · {humanizeEnum(task.workflowPhase)}
-      </div>
-      <p className="tm-decision__summary">{attention?.detail ?? task.projection.summary}</p>
       <div className="tm-decision__actions">
         {inline.approve ? (
           <button
@@ -950,13 +982,14 @@ function InboxDecisionCard({
         ) : null}
         <button
           type="button"
-          className="tm-decision__open"
+          className={openIsPrimary ? 'tm-decision__open primary-button' : 'tm-decision__open'}
+          aria-label={`Open task: ${task.title}`}
           onClick={() => onSelect(task.id)}
         >
-          Open task →
+          Open task
         </button>
       </div>
-    </div>
+    </article>
   );
 }
 

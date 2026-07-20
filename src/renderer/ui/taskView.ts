@@ -2,6 +2,7 @@ import type {
   AgentReviewFinding,
   AgentReviewGateStatus,
   MergeStatus,
+  Repository,
   Task,
   VerifiedChecksEvidence,
   WorkflowPhase
@@ -37,7 +38,6 @@ export interface CardEvidenceItem {
 
 export interface TaskCardVM {
   id: string;
-  num: string;
   title: string;
   meta?: string;
   /** Lineage cue for a forked task, e.g. "fork of #task-rev"; undefined otherwise. */
@@ -47,7 +47,6 @@ export interface TaskCardVM {
   stateTone: Tone;
   showState: boolean;
   archived: boolean;
-  hasDecision: boolean;
   evidence: CardEvidenceItem[];
 }
 
@@ -102,6 +101,11 @@ export interface TaskCardOptions {
    */
   showReviewCount?: boolean;
   repositoryName?: string;
+}
+
+export interface TaskCardRepositoryIdentity {
+  showRepo: boolean;
+  repositoryName: string;
 }
 
 export interface FinishEvidenceWarning {
@@ -606,9 +610,6 @@ function deliveryLineTone(task: Task): Tone {
 export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
   const state = describeTaskState(task);
-  const hasDecision = ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
-    task.projection.agentRun
-  );
   const evidence = evidenceLineForTask(task);
   if (showReviewCount) {
     const findingLabel = reviewFindingCountLabel(task);
@@ -619,7 +620,6 @@ export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): Task
   }
   return {
     id: task.id,
-    num: `#${formatShortId(task.id)}`,
     title: task.title,
     meta: showRepo ? options.repositoryName : undefined,
     lineage: task.forkedFromTaskId
@@ -630,7 +630,6 @@ export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): Task
     stateTone: state.tone,
     showState: !stateRestatesColumn(state.label, columnKey),
     archived: task.workflowPhase === 'ARCHIVED',
-    hasDecision,
     evidence
   };
 }
@@ -647,6 +646,9 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
   if (columnKey === 'done') {
     return stateLabel === 'Done';
   }
+  if (columnKey === 'progress') {
+    return stateLabel === 'In progress';
+  }
   return false;
 }
 
@@ -660,6 +662,33 @@ export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
     }
   }
   return false;
+}
+
+/** Resolve repository card copy per task so an orphaned repository is never silently hidden. */
+export function selectTaskCardRepositoryIdentity(
+  repositoryId: string,
+  repositories: ReadonlyMap<string, Pick<Repository, 'name' | 'status'>>,
+  showRepositoryForView: boolean
+): TaskCardRepositoryIdentity {
+  const repository = repositories.get(repositoryId);
+  return {
+    showRepo: showRepositoryForView || repository?.status !== 'AVAILABLE',
+    repositoryName: repository?.name ?? 'Missing repository'
+  };
+}
+
+/** Inbox rows need repository identity only when it distinguishes a task or its repository is missing. */
+export function shouldShowInboxRepository(
+  tasks: Task[],
+  repositories: Pick<Repository, 'id' | 'status'>[]
+): boolean {
+  const repositoryStatuses = new Map(
+    repositories.map((repository) => [repository.id, repository.status])
+  );
+  return (
+    tasksSpanMultipleRepositories(tasks) ||
+    tasks.some((task) => repositoryStatuses.get(task.repositoryId) !== 'AVAILABLE')
+  );
 }
 
 function reviewRequirement(status: AgentReviewGateStatus): FinishRequirement {

@@ -7,6 +7,7 @@ import {
   isActiveNonReviewRun,
   isCompletedCurrentImplementationRun,
   selectNextAction,
+  shouldShowOverviewNextAction,
   type NextActionInput
 } from './nextAction';
 
@@ -288,6 +289,15 @@ describe('selectNextAction', () => {
     );
     expect(model.primary).toBeUndefined();
     expect(model.sentence).toMatch(/done/i);
+  });
+});
+
+describe('shouldShowOverviewNextAction', () => {
+  it('keeps the task-level transition exclusive from the Overview rail', () => {
+    expect(shouldShowOverviewNextAction(true, false)).toBe(true);
+    expect(shouldShowOverviewNextAction(true, true)).toBe(false);
+    expect(shouldShowOverviewNextAction(false, true)).toBe(false);
+    expect(shouldShowOverviewNextAction(false, false)).toBe(false);
   });
 });
 

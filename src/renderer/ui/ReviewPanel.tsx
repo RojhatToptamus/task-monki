@@ -97,7 +97,6 @@ export function ReviewPanel({
             <div className="tm-reviewcard__activity" aria-live="polite">
               <span className="tm-reviewcard__activity-k">Current activity</span>
               <div className="tm-reviewcard__activity-row">
-                <span className="tm-reviewcard__activity-dot" />
                 <span className="tm-reviewcard__activity-text">
                   {reviewActivity?.label ?? 'Preparing review context.'}
                 </span>
@@ -108,11 +107,9 @@ export function ReviewPanel({
           <div className="tm-reviewcard__summary">
             <p>{reviewBody(reviewGate, reviewRun)}</p>
             {effectiveStatus === 'NOT_RUN' ? (
-              <div className="tm-reviewcard__meta tm-reviewcard__meta--box">
+              <div className="tm-reviewcard__meta">
                 <span>Will review</span>
                 <strong>{currentDiff}</strong>
-                <span>Last result</span>
-                <strong>none</strong>
               </div>
             ) : (
               <div className="tm-reviewcard__meta">
@@ -132,7 +129,6 @@ export function ReviewPanel({
           </div>
         )}
       </div>
-
     </section>
   );
 }
@@ -176,16 +172,17 @@ function SeverityDistribution({ findings }: { findings: AgentReviewFinding[] }) 
   const counts = FINDING_LEVELS.map((level) => ({
     ...level,
     count: findings.filter((finding) => finding.severity === level.severity).length
-  }));
+  })).filter((level) => level.count > 0);
+  if (counts.length === 0) {
+    return null;
+  }
   return (
     <div className="tm-reviewfindings__distribution">
       <div className="tm-reviewfindings__counts" aria-label="Review finding severity counts">
         {counts.map((level) => (
           <span
             key={level.severity}
-            className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}${
-              level.count > 0 ? '' : ' tm-reviewfindings__count--empty'
-            }`}
+            className={`tm-reviewfindings__count tm-reviewfindings__count--${level.tone}`}
           >
             <span className="tm-reviewfindings__count-dot" />
             <strong>{level.count}</strong>
