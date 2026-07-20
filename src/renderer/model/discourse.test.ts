@@ -24,12 +24,14 @@ import {
   discourseAgentSelectionFromCurrentRevision,
   discourseConcernResolutionLabel,
   discourseClientMessageWasPersisted,
+  discourseConversationActionsDisabled,
   discourseDraftsAlreadySent,
   discourseJobStatusLabel,
   discourseMentionCandidates,
   discoursePendingSendFingerprint,
   discourseReviewResultLabel,
   discourseResponseReadiness,
+  discourseResponseTone,
   discourseResponderToggleDisabled,
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail,
@@ -38,6 +40,7 @@ import {
   isNearScrollBottom,
   interruptedDiscourseAcceptedSends,
   recoverPendingDiscourseCreateForReplacement,
+  retainedDiscourseComposerTokensAfterSend,
   shouldShowNewResponses,
   visibleDiscourseResponseWaves,
   visibleDiscourseResponseWavePlacements,
@@ -45,6 +48,50 @@ import {
 } from './discourse';
 
 describe('discourse renderer model', () => {
+  it('keeps destructive conversation actions unavailable until runtime work settles', () => {
+    expect(discourseConversationActionsDisabled({
+      aggregate: { waves: [{ status: 'RUNNING' }] as DiscourseResponseWaveRecord[] },
+      sending: false,
+      responseDecisionPending: false
+    })).toBe(true);
+    expect(discourseConversationActionsDisabled({
+      aggregate: { waves: [{ status: 'SETTLED' }] as DiscourseResponseWaveRecord[] },
+      sending: false,
+      responseDecisionPending: true
+    })).toBe(true);
+    expect(discourseConversationActionsDisabled({
+      aggregate: { waves: [{ status: 'SETTLED' }] as DiscourseResponseWaveRecord[] },
+      sending: false,
+      responseDecisionPending: false
+    })).toBe(false);
+  });
+
+  it('retains conversation-scoped responders while clearing per-message context after send', () => {
+    const tokens = [
+      {
+        key: 'AGENT:builtin.lead',
+        kind: 'AGENT',
+        entityId: 'builtin.lead',
+        labelSnapshot: 'Lead',
+        available: true
+      },
+      {
+        key: 'REPOSITORY:repository-1',
+        kind: 'REPOSITORY',
+        entityId: 'repository-1',
+        labelSnapshot: 'task-monki',
+        available: true
+      }
+    ] as const;
+
+    expect(retainedDiscourseComposerTokensAfterSend('DIRECT', tokens))
+      .toEqual([tokens[0]]);
+    expect(retainedDiscourseComposerTokensAfterSend('PANEL', tokens))
+      .toEqual([tokens[0]]);
+    expect(retainedDiscourseComposerTokensAfterSend('TEAM', tokens)).toEqual([]);
+    expect(retainedDiscourseComposerTokensAfterSend('NONE', tokens)).toEqual([]);
+  });
+
   it('seeds Panel from available responders and keeps unavailable selections removable', () => {
     const available = new Set(['builtin.skeptic', 'builtin.verifier'] as const);
     expect(defaultDiscourseResponderRoster({
@@ -355,6 +402,46 @@ describe('discourse renderer model', () => {
       discourseJobStatusLabel('CANCELED'),
       discourseJobStatusLabel('CONTEXT_STALE')
     ]).toEqual(['Waiting to start', 'Completed', 'Failed', 'Canceled', 'Context changed']);
+  });
+
+  it.each([
+    ['PLANNED', undefined, undefined, 'idle'],
+    ['RUNNING', undefined, 'RUNNING', 'working'],
+    ['RUNNING', undefined, 'RECOVERY_REQUIRED', 'waiting'],
+    ['SETTLED', 'COMPLETE', undefined, 'verified'],
+    ['SETTLED', 'FAILED', undefined, 'blocked'],
+    ['SETTLED', 'PARTIAL', undefined, 'waiting'],
+    ['SETTLED', 'CANCELED', undefined, 'idle']
+  ] as const)(
+    'maps %s / %s / %s response state to the %s presentation tone',
+    (status, outcome, activeJobStatus, tone) => {
+      expect(discourseResponseTone({
+        wave: {
+          status,
+          outcome,
+          dispatchGate: {
+            status: 'READY',
+            previewFingerprint: 'preview-1',
+            confirmedAtRevision: 1
+          }
+        },
+        activeJobStatus
+      })).toBe(tone);
+    }
+  );
+
+  it('shows changed pre-dispatch context as waiting even before a job starts', () => {
+    expect(discourseResponseTone({
+      wave: {
+        status: 'PLANNED',
+        dispatchGate: {
+          status: 'RECONFIRMATION_REQUIRED',
+          previewFingerprint: 'old',
+          currentFingerprint: 'new',
+          mismatchReason: 'Repository changed'
+        }
+      }
+    })).toBe('waiting');
   });
 
   it('shows explicit review failure, cancellation, and stale-context receipts', () => {

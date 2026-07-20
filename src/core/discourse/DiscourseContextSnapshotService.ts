@@ -13,6 +13,7 @@ import { assessDiscourseJobBudget } from './DiscourseBudget';
 import type { DiscourseJobBudgetAssessment } from './DiscourseBudget';
 import {
   appendDiscourseSystemContext,
+  DISCOURSE_PROMPT_POLICY_VERSION,
   type DiscoursePromptAssembly
 } from './DiscoursePromptBuilder';
 import type {
@@ -143,7 +144,7 @@ export class DiscourseContextSnapshotService {
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
           contextSchemaVersion: 1,
-          promptPolicyVersion: 1,
+          promptPolicyVersion: DISCOURSE_PROMPT_POLICY_VERSION,
           createdAt,
           resolvedAt: createdAt,
           error: {
@@ -169,7 +170,7 @@ export class DiscourseContextSnapshotService {
           budget: emptyBudget(sources.length),
           exclusions: [...preview.exclusions],
           contextSchemaVersion: 1,
-          promptPolicyVersion: 1,
+          promptPolicyVersion: DISCOURSE_PROMPT_POLICY_VERSION,
           createdAt,
           resolvedAt: createdAt
         };

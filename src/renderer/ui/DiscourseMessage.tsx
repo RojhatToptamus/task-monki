@@ -69,7 +69,7 @@ export function DiscourseMessage({
           : ''
       }`}
     >
-      <div className="tm-discourse-message__rail">
+      <div className="tm-discourse-message__rail" aria-hidden="true">
         <span>
           {user
             ? 'Y'
@@ -86,7 +86,7 @@ export function DiscourseMessage({
             <span className="tm-discourse-message__state">Corrected</span>
           ) : null}
           {job ? (
-            <span className="tm-discourse-message__state">
+            <span className="tm-discourse-message__metadata">
               {job.assignment.model} ·{' '}
               {job.freshnessAtCompletion === 'FRESH'
                 ? 'context fresh'

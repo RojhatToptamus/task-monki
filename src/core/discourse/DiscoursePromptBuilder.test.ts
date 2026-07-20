@@ -147,6 +147,125 @@ describe('DiscoursePromptBuilder', () => {
     expect(skepticPrompt).toContain('decision-changing caveat');
     expect(skepticPrompt).not.toContain('emphasize the operating path');
   });
+
+  it('carries bounded attributed review receipts into a later answer', () => {
+    const assignment = assignmentFor('builtin.lead', 'lead-1', 'Lead', 'RESPONDENT');
+    const job = jobFor(
+      assignment,
+      'ANSWER',
+      ['follow-up'],
+      ['trigger', 'lead-message', 'follow-up']
+    );
+    const aggregate = aggregateFor(job);
+    const skepticalReview = jobFor(
+      assignmentFor('builtin.skeptic', 'skeptic-1', 'Skeptic', 'REVIEWER'),
+      'CRITIQUE',
+      ['lead-message'],
+      ['trigger', 'lead-message']
+    );
+    skepticalReview.id = 'skeptical-review';
+    skepticalReview.status = 'COMPLETED';
+    skepticalReview.finishedAt = '2026-07-13T00:01:00.000Z';
+    skepticalReview.result = {
+      kind: 'REVIEW',
+      outcome: 'CONCERNS',
+      reviewedScope: 'lead-message',
+      limitations: [],
+      requiredAccessAvailable: true,
+      concernIds: ['race-concern']
+    };
+    const verifierReview = jobFor(
+      assignmentFor('builtin.verifier', 'verifier-1', 'Verifier', 'REVIEWER'),
+      'CRITIQUE',
+      ['lead-message'],
+      ['trigger', 'lead-message']
+    );
+    verifierReview.id = 'verifier-review';
+    verifierReview.status = 'COMPLETED';
+    verifierReview.finishedAt = '2026-07-13T00:02:00.000Z';
+    verifierReview.result = {
+      kind: 'REVIEW',
+      outcome: 'NO_CONCERN_FOUND',
+      reviewedScope: 'lead-message',
+      limitations: [],
+      requiredAccessAvailable: true,
+      concernIds: []
+    };
+    aggregate.jobs.push(skepticalReview, verifierReview);
+    aggregate.concerns = [{
+      ...concernFor('race-concern', 'MATERIAL', 'HIGH', 'CITED_SOURCE'),
+      reviewJobId: skepticalReview.id,
+      targetClaim: 'Deletion and send fail symmetrically.',
+      evidence: 'The revision fence makes the outcome order-dependent.'
+    }, {
+      ...concernFor('unrelated', 'MATERIAL', 'HIGH', 'CITED_SOURCE'),
+      reviewJobId: skepticalReview.id,
+      targetMessageId: 'not-visible',
+      evidence: 'This must not leak into the bounded response window.'
+    }];
+
+    const assembly = assembleDiscoursePrompt({
+      aggregate,
+      job,
+      snapshot: snapshotFor([1, 2, 3]),
+      messages: [
+        messageFor('trigger', 1, 'Inspect the race.', { kind: 'USER' }),
+        messageFor('lead-message', 2, 'Both operations fail.', agentAuthor('lead-1', 'Lead')),
+        messageFor('follow-up', 3, 'Refine the claim.', { kind: 'USER' })
+      ]
+    });
+
+    expect(assembly.prompt).toContain('Relevant prior review receipts');
+    expect(assembly.prompt).toContain('"reviewer":"Skeptic"');
+    expect(assembly.prompt).toContain('"outcome":"NO_CONCERN_FOUND"');
+    expect(assembly.prompt).toContain('The revision fence makes the outcome order-dependent.');
+    expect(assembly.prompt).not.toContain('This must not leak');
+    expect(assembly.prompt).toContain('End untrusted historical review receipts.');
+    expect(totalBudgetBytes(assembly.budgetSections)).toBe(
+      Buffer.byteLength(assembly.prompt, 'utf8')
+    );
+  });
+
+  it('keeps prior review receipts out of independent review prompts', () => {
+    const assignment = assignmentFor('builtin.skeptic', 'skeptic-1', 'Skeptic', 'REVIEWER');
+    const job = jobFor(assignment, 'CRITIQUE', ['lead-message'], ['trigger', 'lead-message']);
+    const aggregate = aggregateFor(job);
+    const peerReview = jobFor(
+      assignmentFor('builtin.verifier', 'verifier-1', 'Verifier', 'REVIEWER'),
+      'CRITIQUE',
+      ['lead-message'],
+      ['trigger', 'lead-message']
+    );
+    peerReview.id = 'peer-review-job';
+    peerReview.status = 'COMPLETED';
+    peerReview.result = {
+      kind: 'REVIEW',
+      outcome: 'CONCERNS',
+      reviewedScope: 'lead-message',
+      limitations: [],
+      requiredAccessAvailable: true,
+      concernIds: ['peer-concern']
+    };
+    aggregate.jobs.push(peerReview);
+    aggregate.concerns = [{
+      ...concernFor('peer-concern', 'MATERIAL', 'HIGH', 'OBSERVED_CONTEXT'),
+      reviewJobId: peerReview.id,
+      evidence: 'Peer evidence must remain isolated.'
+    }];
+
+    const prompt = buildDiscoursePrompt({
+      aggregate,
+      job,
+      snapshot: snapshotFor([1]),
+      messages: [
+        messageFor('trigger', 1, 'Question', { kind: 'USER' }),
+        messageFor('lead-message', 2, 'Lead answer', agentAuthor('lead-1', 'Lead'))
+      ]
+    });
+
+    expect(prompt).not.toContain('Relevant prior review receipts');
+    expect(prompt).not.toContain('Peer evidence must remain isolated.');
+  });
 });
 
 function totalBudgetBytes(
@@ -309,7 +428,7 @@ function concernFor(
   id: string,
   severity: 'MATERIAL',
   confidence: 'HIGH',
-  evidenceStatus: 'OBSERVED_CONTEXT' | 'SPECULATIVE'
+  evidenceStatus: 'OBSERVED_CONTEXT' | 'CITED_SOURCE' | 'SPECULATIVE'
 ) {
   return {
     id,

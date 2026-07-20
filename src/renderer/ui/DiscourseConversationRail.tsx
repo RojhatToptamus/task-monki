@@ -48,14 +48,14 @@ export function DiscourseConversationRail({
       <aside
         ref={railRef}
         className={`tm-discourse-rail ${modalOpen ? 'tm-discourse-rail--open' : ''}`}
-        aria-label="Discourse conversations"
+        aria-labelledby="discourse-rail-title"
         aria-modal={modalOpen ? true : undefined}
         role={modalOpen ? 'dialog' : undefined}
         tabIndex={modalOpen ? -1 : undefined}
       >
         <div className="tm-discourse-rail__head">
           <div>
-            <h1>Discourse</h1>
+            <h2 id="discourse-rail-title">Discourse</h2>
             <p>Technical conversations across tasks and repositories</p>
           </div>
           <button
@@ -73,6 +73,7 @@ export function DiscourseConversationRail({
           <span className="tm-visually-hidden">Search conversation titles</span>
           <input
             ref={searchRef}
+            type="search"
             value={query}
             placeholder="Search conversations"
             onChange={(event) => onQueryChange(event.target.value)}
@@ -109,6 +110,7 @@ export function DiscourseConversationRail({
               className={`tm-discourse-thread ${
                 conversation.id === selectedConversationId ? 'tm-discourse-thread--active' : ''
               }`}
+              title={conversation.title}
               aria-current={conversation.id === selectedConversationId ? 'page' : undefined}
               onClick={() => onSelectConversation(conversation.id)}
             >
@@ -124,20 +126,30 @@ export function DiscourseConversationRail({
                   >
                     {conversation.unreadCount}
                   </span>
-                ) : (
-                  <time>{formatCompactDate(conversation.lastMessageAt ?? conversation.updatedAt)}</time>
-                )}
+                ) : null}
+                <time dateTime={conversation.lastMessageAt ?? conversation.updatedAt}>
+                  {formatCompactDate(conversation.lastMessageAt ?? conversation.updatedAt)}
+                </time>
               </span>
             </button>
           ))}
           {conversations.length === 0 && !newConversation ? (
-            <p className="tm-discourse-rail__empty">
-              {query
-                ? 'No titles match your search.'
-                : archived
-                  ? 'No archived conversations.'
-                  : 'No conversations yet.'}
-            </p>
+            <div className="tm-discourse-rail__empty">
+              <strong>
+                {query
+                  ? 'No conversations match'
+                  : archived
+                    ? 'Archive is empty'
+                    : 'No conversations yet'}
+              </strong>
+              <span>
+                {query
+                  ? 'Try a different conversation title.'
+                  : archived
+                    ? 'Archived conversations will appear here.'
+                    : 'Start a conversation to keep technical decisions together.'}
+              </span>
+            </div>
           ) : null}
         </div>
       </aside>

@@ -77,15 +77,14 @@ export function DiscourseAgentConfigurationBar({
         className={`tm-discourse-agent-config ${
           expanded ? 'tm-discourse-agent-config--expanded' : ''
         }`}
-        aria-label={compactSheetOpen ? undefined : 'Agents for next response'}
-        aria-labelledby={compactSheetOpen ? titleId : undefined}
+        aria-labelledby={titleId}
         aria-modal={compactSheetOpen ? true : undefined}
         role={compactSheetOpen ? 'dialog' : undefined}
         tabIndex={compactSheetOpen ? -1 : undefined}
       >
       <header>
         <div>
-          <span id={titleId}>Responders</span>
+          <h2 id={titleId}>Responders</h2>
           <div className="tm-discourse-agent-config__summary">
             {selections.map((selection) => {
               const entry = catalog.agents.find(
@@ -160,7 +159,7 @@ export function DiscourseAgentConfigurationBar({
         </div>
       ) : null}
       {expanded ? (
-        <div className="tm-discourse-agent-config__list">
+        <div className="tm-discourse-agent-config__list" aria-label="Responder settings">
           {selections.map((selection) => {
             const entry = catalog.agents.find(
               (candidate) => candidate.profile.id === selection.agentProfileId
@@ -232,6 +231,11 @@ export function DiscourseAgentConfigurationBar({
           })}
         </div>
       ) : null}
+      {expanded ? (
+        <p className="tm-discourse-agent-config__note">
+          {configurationNote(policy)} Changes apply to the next response in this conversation.
+        </p>
+      ) : null}
       </section>
     </>
   );
@@ -239,4 +243,13 @@ export function DiscourseAgentConfigurationBar({
 
 function capitalize(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1).toLowerCase()}`;
+}
+
+function configurationNote(policy: DiscourseDefaultPolicy): string {
+  switch (policy) {
+    case 'DIRECT': return 'Choose one responder.';
+    case 'PANEL': return 'Choose two or three independent responders.';
+    case 'TEAM': return 'Lead answers, then Skeptic and Verifier review before any correction.';
+    case 'NONE': return '';
+  }
 }

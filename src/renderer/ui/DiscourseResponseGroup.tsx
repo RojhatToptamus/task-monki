@@ -3,6 +3,7 @@ import {
   discourseConcernResolutionLabel,
   discourseJobStatusLabel,
   discourseResponsePolicyLabel,
+  discourseResponseTone,
   discourseReviewResultLabel,
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail
@@ -48,7 +49,10 @@ export function DiscourseResponseGroup({
     ? discourseTeamCompletionSummary({ jobs, concerns })
     : undefined;
   const terminalDetail = discourseTerminalJobDetail(jobs);
-  const label = wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
+  const stopPending = wave.status === 'STOP_REQUESTED' || wave.status === 'STOPPING';
+  const label = stopPending
+    ? 'Stopping response'
+    : wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
     ? 'Context changed before dispatch'
     : teamSummary
       ? teamSummary.label
@@ -67,7 +71,9 @@ export function DiscourseResponseGroup({
             : wave.outcome === 'FAILED' || wave.outcome === 'NO_RESPONSE'
               ? 'Response failed'
               : 'Partial response';
-  const detail = wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
+  const detail = stopPending
+    ? 'Finishing the current agent step and preserving completed work.'
+    : wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
     ? 'Review the latest context before asking the agent again.'
     : teamSummary
       ? teamSummary.detail
@@ -89,9 +95,16 @@ export function DiscourseResponseGroup({
   ].includes(wave.status);
   const retryable =
     wave.status === 'SETTLED' && wave.outcome !== 'COMPLETE' && wave.outcome !== 'CANCELED';
+  const tone = discourseResponseTone({
+    wave,
+    activeJobStatus: active?.status
+  });
 
   return (
-    <li className="tm-discourse-response" aria-label="Agent response status">
+    <li
+      className={`tm-discourse-response tm-discourse-response--${tone}`}
+      aria-label="Agent response status"
+    >
       <header>
         <span
           className={`tm-discourse-response__pulse ${
@@ -107,7 +120,13 @@ export function DiscourseResponseGroup({
             <button type="button" onClick={() => onStop(wave.id)}>Cancel</button>
           </span>
         ) : stoppable ? (
-          <button type="button" onClick={() => onStop(wave.id)}>Stop</button>
+          <button
+            type="button"
+            disabled={stopPending}
+            onClick={() => onStop(wave.id)}
+          >
+            {stopPending ? 'Stopping…' : 'Stop'}
+          </button>
         ) : retryable ? (
           <button type="button" onClick={() => onRetry(wave.id)}>Try again</button>
         ) : null}

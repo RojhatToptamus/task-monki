@@ -10,6 +10,8 @@ import {
 export interface DiscourseActionMenuItem {
   label: string;
   danger?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
   pressed?: boolean;
   onSelect(): void;
 }
@@ -110,6 +112,8 @@ export function DiscourseActionMenu({
               role={item.pressed === undefined ? 'menuitem' : 'menuitemcheckbox'}
               tabIndex={-1}
               aria-checked={item.pressed === undefined ? undefined : item.pressed}
+              disabled={item.disabled}
+              title={item.disabled ? item.disabledReason : undefined}
               className={item.danger ? 'tm-discourse-menu__danger' : undefined}
               onClick={() => {
                 triggerRef.current?.focus({ preventScroll: true });

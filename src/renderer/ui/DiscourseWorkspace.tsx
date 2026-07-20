@@ -28,6 +28,7 @@ import {
   defaultDiscourseResponderRoster,
   defaultDiscourseAgentSelection,
   discourseClientMessageWasPersisted,
+  discourseConversationActionsDisabled,
   discourseDraftsAlreadySent,
   discourseAcceptedSendForClientMessage,
   discourseMentionCandidates,
@@ -43,6 +44,7 @@ import {
   messageAuthorLabel,
   messageContext,
   recoverPendingDiscourseCreateForReplacement,
+  retainedDiscourseComposerTokensAfterSend,
   shouldShowNewResponses,
   visibleDiscourseResponseWavePlacements,
   visibleConversationSummaries
@@ -547,7 +549,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         console.error('Could not remove a draft whose message was already accepted.', error);
       });
     }
-    if (activeDraft && acceptedDraftIds.has(activeDraft.id)) {
+    // A normal send can be observed by the event refresh before its handler has
+    // removed the local draft. Only restore from a durable draft when no send
+    // is currently completing; otherwise this would emit a false recovery and
+    // reset the composer twice.
+    if (!sending && activeDraft && acceptedDraftIds.has(activeDraft.id)) {
       const scope = draftAutosave.currentScope();
       if (scope) draftAutosave.clear(scope);
       if (draftSaveTimerRef.current !== undefined) {
@@ -557,12 +563,20 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       setReplyTargetId(undefined);
       setCorrectionTargetId(undefined);
       setSelectedSourceMessageIds([]);
-      setComposer(createDiscourseComposerMentionState());
+      setComposer({
+        ...createDiscourseComposerMentionState(),
+        tokens: retainedDiscourseComposerTokensAfterSend(
+          activeDraft.policy,
+          composerTokensFromDraft(activeDraft.tokens)
+        )
+      });
       setAgentSelectionOverrides({});
+      setAgentConfigOpen(false);
+      setResponsePolicy(activeDraft.policy);
       setComposerVersion((value) => value + 1);
       onNotify('Recovered the conversation without resending its saved message.', 'info');
     }
-  }, [activeDraft, alreadySentDrafts, draftAutosave, onNotify]);
+  }, [activeDraft, alreadySentDrafts, draftAutosave, onNotify, sending]);
 
   const selectedAgentProfileIds = composer.tokens
     .filter((token) => token.kind === 'AGENT')
@@ -733,6 +747,13 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     [aggregate]
   );
   const responseDecisionPending = interruptedAcceptedSends.length > 0;
+  const conversationActionsDisabled = discourseConversationActionsDisabled({
+    aggregate,
+    sending,
+    responseDecisionPending
+  });
+  const conversationActionsDisabledReason =
+    'Stop or finish the active response before archiving or deleting this conversation.';
   const composerUnavailable =
     conversationUnavailable || responseDecisionPending || activeDraftAlreadySent;
   const contextTokens = composer.tokens.filter((token) => token.kind !== 'AGENT');
@@ -1119,6 +1140,10 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     const draftScope = draftAutosave.currentScope();
     const sentPolicy = responsePolicy;
     const sentSelections = activeAgentSelections.map((selection) => ({ ...selection }));
+    const retainedComposerTokens = retainedDiscourseComposerTokensAfterSend(
+      sentPolicy,
+      state.tokens
+    );
     const sentReplyTargetId = replyTargetId;
     const sentCorrectionTargetId = correctionTargetId;
     const sentSourceMessageIds = [...selectedSourceMessageIds];
@@ -1300,8 +1325,9 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         setReplyTargetId(undefined);
         setCorrectionTargetId(undefined);
         setSelectedSourceMessageIds([]);
-        setComposer(createDiscourseComposerMentionState());
+        setComposer({ ...createDiscourseComposerMentionState(), tokens: retainedComposerTokens });
         setAgentSelectionOverrides({});
+        setAgentConfigOpen(false);
         setComposerVersion((value) => value + 1);
         setResponsePolicy(sentPolicy);
         if (wasNewConversation) {
@@ -1373,8 +1399,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               setReplyTargetId(undefined);
               setCorrectionTargetId(undefined);
               setSelectedSourceMessageIds([]);
-              setComposer(createDiscourseComposerMentionState());
+              setComposer({
+                ...createDiscourseComposerMentionState(),
+                tokens: retainedComposerTokens
+              });
               setAgentSelectionOverrides({});
+              setAgentConfigOpen(false);
               setComposerVersion((value) => value + 1);
               setResponsePolicy(sentPolicy);
               selectedConversationIdRef.current = conversationId;
@@ -1718,12 +1748,26 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   );
 
   if (loading) {
-    return <div className="tm-discourse tm-discourse--loading" aria-busy="true">Loading Discourse…</div>;
+    return (
+      <div
+        className="tm-discourse tm-discourse--loading"
+        role="status"
+        aria-busy="true"
+        aria-label="Loading Discourse"
+      >
+        <div className="tm-discourse-loading-rail" aria-hidden="true">
+          <span /><span /><span /><span /><span />
+        </div>
+        <div className="tm-discourse-loading-conversation" aria-hidden="true">
+          <span /><span /><span />
+        </div>
+      </div>
+    );
   }
 
   if (workspaceLoadFailed) {
     return (
-      <div className="tm-discourse tm-discourse--loading" role="alert">
+      <div className="tm-discourse tm-discourse--failed" role="alert">
         <div className="tm-discourse-workspace-error">
           <strong>Discourse could not be loaded</strong>
           <span>Conversations, agents, and drafts are unavailable until the connection recovers.</span>
@@ -1769,38 +1813,43 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
               <form
+                className="tm-discourse-title-form"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void renameConversation();
                 }}
               >
-                <input
-                  autoFocus
-                  value={renameValue}
-                  aria-label="Conversation title"
-                  onChange={(event) => setRenameValue(event.target.value)}
-                  onBlur={() => setRenameOpen(false)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') {
-                      event.preventDefault();
-                      setRenameOpen(false);
-                    }
-                  }}
-                />
+                <h1>
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    aria-label="Conversation title"
+                    onChange={(event) => setRenameValue(event.target.value)}
+                    onBlur={() => setRenameOpen(false)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault();
+                        setRenameOpen(false);
+                      }
+                    }}
+                  />
+                </h1>
               </form>
             ) : (
-              <button
-                type="button"
-                className="tm-discourse-title-button"
-                disabled={!aggregate}
-                onClick={() => {
-                  if (!aggregate) return;
-                  setRenameValue(aggregate.conversation.title);
-                  setRenameOpen(true);
-                }}
-              >
-                {aggregate?.conversation.title ?? selectedSummary?.title ?? 'New conversation'}
-              </button>
+              <h1>
+                <button
+                  type="button"
+                  className="tm-discourse-title-button"
+                  disabled={!aggregate}
+                  onClick={() => {
+                    if (!aggregate) return;
+                    setRenameValue(aggregate.conversation.title);
+                    setRenameOpen(true);
+                  }}
+                >
+                  {aggregate?.conversation.title ?? selectedSummary?.title ?? 'New conversation'}
+                </button>
+              </h1>
             )}
             <div className="tm-discourse-header__meta">
               <span>{aggregate?.participants.length ? `${aggregate.participants.length} agent${aggregate.participants.length === 1 ? '' : 's'}` : 'No agents'}</span>
@@ -1822,12 +1871,16 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               <DiscourseActionMenu
                 className="tm-discourse-menu"
                 label="Conversation actions"
-                trigger="•••"
+                trigger={<MoreIcon />}
                 items={[
                   {
                     label: aggregate.conversation.status === 'ARCHIVED'
                       ? 'Restore conversation'
                       : 'Archive conversation',
+                    disabled:
+                      aggregate.conversation.status !== 'ARCHIVED' &&
+                      conversationActionsDisabled,
+                    disabledReason: conversationActionsDisabledReason,
                     onSelect: () => void setArchived(
                       aggregate.conversation.status !== 'ARCHIVED'
                     )
@@ -1835,6 +1888,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                   {
                     label: 'Delete conversation',
                     danger: true,
+                    disabled: conversationActionsDisabled,
+                    disabledReason: conversationActionsDisabledReason,
                     onSelect: () => setConfirmAction({ type: 'delete-conversation' })
                   }
                 ]}
@@ -2315,3 +2370,4 @@ function ContextIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14" />
 function SidebarIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14M6.5 8h.01M6.5 11h.01" /></svg>; }
 function PersonIcon() { return <svg {...ICON}><circle cx="12" cy="8" r="3" /><path d="M5 20c.8-4 3.1-6 7-6s6.2 2 7 6" /></svg>; }
 function RoundtableIcon() { return <svg {...ICON} width={28} height={28}><circle cx="12" cy="12" r="4" /><circle cx="5" cy="7" r="2" /><circle cx="19" cy="7" r="2" /><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /></svg>; }
+function MoreIcon() { return <svg {...ICON}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></svg>; }

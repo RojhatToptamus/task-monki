@@ -242,6 +242,7 @@ export function AgentModelSelector({
           aria-busy={discovery?.runtimeId === runtimeId && discovery.status === 'loading'}
           aria-invalid={selectionUnavailable || undefined}
           aria-describedby={selectionUnavailable && showSelectionError ? selectionErrorId : undefined}
+          title={triggerSummary}
           disabled={disabled || runtimes.length === 0}
           onClick={() => setOpen((current) => !current)}
           onKeyDown={(event) => {
@@ -410,11 +411,12 @@ export function AgentModelSelector({
                 type="button"
                 className={reasoningEffort === '' ? 'is-selected' : ''}
                 aria-pressed={reasoningEffort === ''}
+                aria-label="Default reasoning"
                 disabled={disabled}
                 onClick={() => onReasoningEffortChange('')}
               >
                 <span />
-                <small>Default</small>
+                <small>{compact ? 'Auto' : 'Default'}</small>
               </button>
             ) : null}
             {efforts.map((effort) => (
@@ -422,12 +424,13 @@ export function AgentModelSelector({
                 type="button"
                 className={effort === reasoningEffort ? 'is-selected' : ''}
                 aria-pressed={effort === reasoningEffort}
+                aria-label={`${formatReasoningEffort(effort)} reasoning`}
                 disabled={disabled}
                 key={effort}
                 onClick={() => onReasoningEffortChange(effort)}
               >
                 <span />
-                <small>{formatReasoningEffort(effort)}</small>
+                <small>{compactReasoningEffort(effort, compact)}</small>
               </button>
             ))}
           </div>
@@ -437,6 +440,11 @@ export function AgentModelSelector({
       {access}
     </div>
   );
+}
+
+function compactReasoningEffort(effort: string, compact: boolean): string {
+  const label = formatReasoningEffort(effort);
+  return compact && label === 'Medium' ? 'Med' : label;
 }
 
 export function agentModelMenuGeometry(input: {

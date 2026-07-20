@@ -38,6 +38,27 @@ export interface DiscourseResponseReadiness {
   requirement: string;
 }
 
+/** Archive and delete require the durable conversation runtime to be settled. */
+export function discourseConversationActionsDisabled(input: {
+  aggregate?: Pick<DiscourseConversationAggregateRecord, 'waves'>;
+  sending: boolean;
+  responseDecisionPending: boolean;
+}): boolean {
+  return input.sending ||
+    input.responseDecisionPending ||
+    Boolean(input.aggregate?.waves.some((wave) => wave.status !== 'SETTLED'));
+}
+
+/** Per-message context clears after send; Direct/Panel responder choices stay conversation-scoped. */
+export function retainedDiscourseComposerTokensAfterSend(
+  policy: DiscourseDefaultPolicy,
+  tokens: readonly DiscourseComposerToken[]
+): DiscourseComposerToken[] {
+  return policy === 'DIRECT' || policy === 'PANEL'
+    ? tokens.filter((token) => token.kind === 'AGENT')
+    : [];
+}
+
 export function discourseResponsePolicyLabel(
   policy: DiscourseDefaultPolicy | DiscourseWavePolicy
 ): string {
@@ -537,6 +558,34 @@ export function discourseJobStatusLabel(status: DiscourseJobStatus): string {
     case 'FAILED': return 'Failed';
     case 'CANCELED': return 'Canceled';
     case 'CONTEXT_STALE': return 'Context changed';
+  }
+}
+
+export type DiscourseResponseTone = 'working' | 'idle' | 'waiting' | 'blocked' | 'verified';
+
+/** Maps durable wave/job state to the small semantic vocabulary used by the transcript. */
+export function discourseResponseTone(input: {
+  wave: Pick<DiscourseResponseWaveRecord, 'status' | 'outcome' | 'dispatchGate'>;
+  activeJobStatus?: DiscourseJobStatus;
+}): DiscourseResponseTone {
+  if (input.wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED') return 'waiting';
+  if (input.activeJobStatus === 'RECOVERY_REQUIRED') return 'waiting';
+  if (input.activeJobStatus === 'QUEUED') return 'idle';
+  if (['RESOLVING_CONTEXT', 'STARTING', 'RUNNING', 'CANCEL_REQUESTED']
+    .includes(input.activeJobStatus ?? '')) return 'working';
+  if (input.wave.status !== 'SETTLED') {
+    return input.wave.status === 'QUEUED' || input.wave.status === 'PLANNED'
+      ? 'idle'
+      : 'working';
+  }
+  switch (input.wave.outcome) {
+    case 'COMPLETE': return 'verified';
+    case 'FAILED':
+    case 'NO_RESPONSE': return 'blocked';
+    case 'STALE':
+    case 'PARTIAL': return 'waiting';
+    case 'CANCELED':
+    default: return 'idle';
   }
 }
 

@@ -68,7 +68,7 @@ export function ContextPreview({
         <header>
           <div>
             <h2 id="discourse-preview-title">What agents will see</h2>
-            <p>Provisional context manifest · valid until {formatMessageTime(preview.expiresAt)}</p>
+            <p>Preview for this message · available until {formatMessageTime(preview.expiresAt)}</p>
           </div>
           <button type="button" className="tm-iconbtn" aria-label="Close context preview" onClick={onClose}>×</button>
         </header>
@@ -113,7 +113,7 @@ export function ContextPreview({
           </section>
         ) : null}
         <footer>
-          <span className="tm-discourse-preview__hash">Manifest {preview.fingerprint.slice(0, 10)}</span>
+          <span className="tm-discourse-preview__note">Context preview</span>
           <button type="button" className="primary-button" onClick={onClose}>Done</button>
         </footer>
       </div>
