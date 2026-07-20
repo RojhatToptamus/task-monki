@@ -5,6 +5,7 @@ interface CliOptions {
   storeDir?: string;
   repositoryPath?: string;
   worktreeRoot?: string;
+  previewRoot?: string;
   appSettingsPath?: string;
   scenarioSet?: DevSeedScenarioSet;
   reset?: boolean;
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
     storeDir: options.storeDir,
     repositoryPath: options.repositoryPath,
     worktreeRoot: options.worktreeRoot,
+    previewRoot: options.previewRoot,
     appSettingsPath: options.appSettingsPath,
     scenarioSet: options.scenarioSet,
     reset: options.reset
@@ -34,6 +36,7 @@ async function main(): Promise<void> {
   for (const [key, value] of Object.entries(manifest.env)) {
     console.log(`export ${key}=${JSON.stringify(value)}`);
   }
+  console.log('Seed files are mode 0600.');
   console.log('');
   console.log('Then run:');
   console.log('  npm run dev:api');
@@ -64,6 +67,9 @@ function parseArgs(args: string[]): CliOptions {
       case '--worktree-root':
         options.worktreeRoot = readValue(args, ++index, arg);
         break;
+      case '--preview-root':
+        options.previewRoot = readValue(args, ++index, arg);
+        break;
       case '--app-settings-path':
         options.appSettingsPath = readValue(args, ++index, arg);
         break;
@@ -86,14 +92,14 @@ function readValue(args: string[], index: number, flag: string): string {
 }
 
 function readScenarioSet(value: string): DevSeedScenarioSet {
-  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow'].includes(value)) {
+  if (['all', 'board', 'agent', 'review', 'delivery', 'completion', 'workflow', 'preview'].includes(value)) {
     return value as DevSeedScenarioSet;
   }
   throw new Error(`Unknown scenario set: ${value}`);
 }
 
 function printHelp(): void {
-  console.log(`Usage: node dist-electron/dev/seed.js [options]
+  console.log(`Usage: node dist-tools/dev/seed.js [options]
 
 Options:
   --reset                    Reset the seed-owned root before generating data.
@@ -101,8 +107,9 @@ Options:
   --store-dir <path>         FileTaskStore directory.
   --repo-path <path>         Generated fixture repository path.
   --worktree-root <path>     Generated worktree root.
+  --preview-root <path>      Generated preview runtime root.
   --app-settings-path <path> App settings JSON path.
-  --scenario-set <set>       all, board, agent, review, delivery, completion, workflow.
+  --scenario-set <set>       all, board, agent, review, delivery, completion, workflow, preview.
 `);
 }
 

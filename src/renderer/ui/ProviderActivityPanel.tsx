@@ -4,6 +4,7 @@ import type {
   AgentPlanRevisionRecord,
   AgentProtocolMessageReference,
   AgentSessionRecord,
+  AttachmentSubmissionRecord,
   DomainEvent,
   InteractionRequestRecord,
   RunRecord
@@ -194,6 +195,9 @@ function ProviderRunView({
               <RawProviderMessage reference={run.providerTerminalRawMessage} />
             ) : null}
           </div>
+          {run.attachmentSubmissions?.length ? (
+            <AttachmentSubmissionDetails submissions={run.attachmentSubmissions} />
+          ) : null}
           {plans.length > 0 ? <PlanHistory plans={plans} /> : null}
           <ProviderActivitySections sections={activityProjection.sections} />
           {runItems.length > 0 || providerEvents.length > 0 ? (
@@ -240,6 +244,51 @@ function ProviderRunView({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function AttachmentSubmissionDetails({
+  submissions
+}: {
+  submissions: AttachmentSubmissionRecord[];
+}) {
+  return (
+    <details className="provider-raw-protocol provider-attachment-submissions">
+      <summary>
+        <span>
+          <strong>Attachment submissions</strong>
+          <small>
+            {submissions.length} {submissions.length === 1 ? 'file' : 'files'} · recorded after
+            provider start
+          </small>
+        </span>
+      </summary>
+      <div className="provider-raw-protocol__body">
+        <p className="muted">
+          Submission evidence does not prove that the model read or used a file.
+        </p>
+        {[...submissions]
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .map((submission) => (
+            <article className="provider-item provider-item--event" key={submission.attachmentId}>
+              <header>
+                <strong>
+                  {submission.kind === 'image' ? 'Image' : 'Text'} attachment #{submission.ordinal + 1}
+                </strong>
+                <span>{humanizeEnum(submission.submittedAs)}</span>
+              </header>
+              <p>
+                {submission.mediaType} · {submission.byteCount.toLocaleString()} bytes ·{' '}
+                <code>sha256:{submission.sha256.slice(0, 12)}…</code>
+              </p>
+              <footer>
+                Turn {submission.providerTurnId} · submitted{' '}
+                {new Date(submission.submittedAt).toLocaleString()}
+              </footer>
+            </article>
+          ))}
+      </div>
+    </details>
   );
 }
 
@@ -321,7 +370,7 @@ function ProviderLifecycleEvent({ event }: { event: DomainEvent }) {
           bytes).
         </p>
       ) : eventType === 'thread/compacted' ? (
-        <p>Codex reported automatic context compaction.</p>
+        <p>The agent runtime reported automatic context compaction.</p>
       ) : (
         <p>{stringValue(payload.message) ?? eventType}</p>
       )}
@@ -501,7 +550,7 @@ function ItemBody({
     );
   }
   if (type === 'CONTEXT_COMPACTION') {
-    return <p>Codex reported conversation context compaction.</p>;
+    return <p>The agent runtime reported conversation context compaction.</p>;
   }
   if (type === 'REVIEW') {
     return <p className="provider-message">{stringValue(payload.review) || 'Review mode event'}</p>;

@@ -14,7 +14,8 @@ import {
   buildFailingChecksInvestigationPrompt,
   buildPrStatusActionState,
   buildPrStatusCreateOrPushTitle,
-  buildPrStatusViewModel
+  buildPrStatusViewModel,
+  shouldShowPrStatusOnOverview
 } from './prStatus';
 
 const now = '2026-07-01T10:00:00.000Z';
@@ -52,6 +53,32 @@ describe('buildPrStatusViewModel', () => {
     expect(actionState.createOrPushReason).toBe(
       'Run implementation or make a task change before opening a PR.'
     );
+  });
+
+  it('keeps delivery unavailable until a blocked implementation is retried', () => {
+    const reason = 'Retry or continue this implementation before review.';
+    const task = taskFixture({
+      currentRunId: 'run-1',
+      projection: {
+        ...createInitialProjection(now),
+        worktree: 'PRESENT',
+        git: 'DIRTY',
+        implementationRetry: { runId: 'run-1', reason }
+      }
+    });
+    const view = buildPrStatusViewModel({
+      task,
+      gitSnapshot: gitFixture({ status: 'DIRTY', workingDiffFileCount: 1 })
+    });
+    const actions = buildPrStatusActionState({
+      view,
+      implementationRetryReason: reason
+    });
+
+    expect(view.canCreateDraftPr).toBe(true);
+    expect(view.createDraftPrDisabledReason).toBe(reason);
+    expect(actions.createOrPushDisabled).toBe(true);
+    expect(actions.createOrPushReason).toBe(reason);
   });
 
   it('explains why no PR action is unavailable before a worktree exists', () => {
@@ -721,6 +748,104 @@ describe('buildPrStatusCreateOrPushTitle', () => {
   });
 });
 
+describe('shouldShowPrStatusOnOverview', () => {
+  it('hides neutral unstarted states and keeps blockers, delivery decisions, or evidence visible', () => {
+    const cleanNoChange = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture({
+        commitsAheadOfBase: 0,
+        committedDiffFileCount: 0
+      })
+    });
+    const dirty = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture({
+        unstagedCount: 1,
+        workingDiffFileCount: 1,
+        status: 'DIRTY'
+      })
+    });
+    const publicationFailed = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture(),
+      branchPublication: branchPublicationFixture({
+        status: 'FAILED',
+        error: 'Push failed. Try again.'
+      })
+    });
+    const diverged = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture({ status: 'DIVERGED', behindCount: 1 })
+    });
+    const existing = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture()
+    });
+    const stale = buildPrStatusViewModel({
+      task: taskFixture(),
+      gitSnapshot: gitFixture({
+        headSha: 'local-newer',
+        commitsAheadOfBase: 2,
+        committedDiffFileCount: 2
+      }),
+      pullRequest: prFixture({ headRefOid: 'published-older' })
+    });
+    const terminal = buildPrStatusViewModel({
+      task: taskFixture(),
+      pullRequest: prFixture({ status: 'MERGED', state: 'MERGED' })
+    });
+    const notCreated = buildPrStatusViewModel({
+      task: taskFixture({
+        projection: {
+          ...createInitialProjection(now),
+          worktree: 'NOT_CREATED'
+        }
+      })
+    });
+    const notInspected = buildPrStatusViewModel({
+      task: taskFixture({
+        projection: {
+          ...createInitialProjection(now),
+          worktree: 'PRESENT',
+          git: 'NOT_INSPECTED'
+        }
+      })
+    });
+    const missingWorktree = buildPrStatusViewModel({
+      task: taskFixture({
+        projection: {
+          ...createInitialProjection(now),
+          worktree: 'MISSING'
+        }
+      })
+    });
+    const worktreeError = buildPrStatusViewModel({
+      task: taskFixture({
+        projection: {
+          ...createInitialProjection(now),
+          worktree: 'ERROR'
+        }
+      })
+    });
+
+    expect(shouldShowPrStatusOnOverview(cleanNoChange)).toBe(false);
+    expect(shouldShowPrStatusOnOverview(notCreated)).toBe(false);
+    expect(shouldShowPrStatusOnOverview(notInspected)).toBe(false);
+    for (const view of [
+      dirty,
+      publicationFailed,
+      diverged,
+      existing,
+      stale,
+      terminal,
+      missingWorktree,
+      worktreeError
+    ]) {
+      expect(shouldShowPrStatusOnOverview(view)).toBe(true);
+    }
+  });
+});
+
 describe('buildBoardDeliveryLine', () => {
   it('shows one compact PR delivery line', () => {
     expect(
@@ -741,9 +866,10 @@ describe('buildBoardDeliveryLine', () => {
 function taskFixture(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1',
+    runtimeId: 'codex',
     title: 'Task',
     prompt: 'Prompt',
-    repositoryPath: '/tmp/repo',
+    repositoryId: '/tmp/repo',
     workflowPhase: 'REVIEW',
     resolution: 'NONE',
     completionPolicy: 'LOCAL_ACCEPTANCE',

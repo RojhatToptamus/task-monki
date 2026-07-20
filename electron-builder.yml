@@ -7,9 +7,15 @@ directories:
   output: release
 
 files:
-  - dist-electron/**
+  - dist-electron/core/**
+  - dist-electron/electron/**
+  - dist-electron/shared/**
   - dist-renderer/**
   - package.json
+
+extraResources:
+  - from: src/core/preview/runtime/native-preview-launcher.mjs
+    to: native-preview-launcher.mjs
 
 extraMetadata:
   main: dist-electron/electron/main.js

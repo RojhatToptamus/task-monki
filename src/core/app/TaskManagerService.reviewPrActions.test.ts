@@ -8,8 +8,123 @@ import {
   type TaskMonkiScenario
 } from '../../testSupport/taskMonkiScenario';
 import { writeNodeExecutable } from '../../testSupport/fakeExecutable';
+import { createDomainEvent } from '../storage/domainEvent';
 
 describe('TaskManagerService review and PR action coordination', () => {
+  it('rejects review for a failed implementation and keeps retry recovery in progress', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-failed-run-review-guard'
+    });
+    const task = await scenario.createTask({
+      title: 'Failed implementation',
+      prompt: 'Fail before implementation completes.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id });
+
+    await scenario.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_FAILED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: { error: 'Provider rejected the turn.' }
+      })
+    );
+
+    await expect(
+      scenario.service.startReview({ taskId: task.id, runId: run.id })
+    ).rejects.toThrow(
+      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+    );
+    expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
+    expect(scenario.agent.startedReviews).toHaveLength(0);
+  });
+
+  it('rejects a completed analysis run as a review source', async () => {
+    const scenario = await createTaskMonkiScenario({
+      name: 'task-monki-analysis-review-guard'
+    });
+    const task = await scenario.createTask({
+      title: 'Read-only analysis',
+      prompt: 'Inspect without changing the worktree.'
+    });
+    const run = await scenario.service.startRun({ taskId: task.id, mode: 'ANALYSIS' });
+
+    await scenario.store.appendEvent(
+      createDomainEvent({
+        type: 'AGENT_RUN_COMPLETED',
+        taskId: task.id,
+        iterationId: run.iterationId,
+        runId: run.id,
+        worktreeId: run.worktreeId,
+        agentSessionId: run.sessionId,
+        source: 'provider',
+        payload: { terminalStatus: 'completed' }
+      })
+    );
+
+    await expect(
+      scenario.service.startReview({ taskId: task.id, runId: run.id })
+    ).rejects.toThrow(
+      'A review requires a successfully completed implementation run. Retry or continue this run first.'
+    );
+    expect((await scenario.store.getTask(task.id))?.workflowPhase).toBe('IN_PROGRESS');
+    expect(scenario.agent.startedReviews).toHaveLength(0);
+  });
+
+  it.each(['ANALYSIS', 'COMPACTION'] as const)(
+    'keeps a historical review contextual after a completed %s run',
+    async (mode) => {
+      const scenario = await createTaskMonkiScenario({
+        name: `task-monki-historical-review-${mode.toLowerCase()}`
+      });
+      const task = await scenario.createTask({
+        title: 'Historical review context',
+        prompt: 'Implement, review, then perform newer non-implementation work.'
+      });
+      const implementation = await scenario.service.startRun({ taskId: task.id });
+      await scenario.completeRun(implementation.id, 'Implementation finished.');
+
+      const historicalReview = await scenario.service.startReview({
+        taskId: task.id,
+        runId: implementation.id
+      });
+      await scenario.completeRun(historicalReview.id, 'The historical review passed.');
+
+      const current = await scenario.service.startRun({ taskId: task.id, mode });
+      await scenario.completeRun(current.id, `${mode} finished.`);
+
+      const currentTask = await scenario.store.getTask(task.id);
+      expect(currentTask).toMatchObject({
+        currentRunId: current.id,
+        workflowPhase: 'IN_PROGRESS',
+        projection: {
+          agentReview: {
+            runId: historicalReview.id,
+            sourceRunId: implementation.id,
+            status: 'STALE'
+          }
+        }
+      });
+
+      await expect(
+        scenario.service.startReview({ taskId: task.id, runId: implementation.id })
+      ).rejects.toThrow(
+        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      );
+      await expect(
+        scenario.service.startReview({ taskId: task.id, runId: current.id })
+      ).rejects.toThrow(
+        'A review requires a successfully completed implementation run. Retry or continue this run first.'
+      );
+      expect(scenario.agent.startedReviews).toHaveLength(1);
+    },
+    15_000
+  );
+
   it('makes review and PR actions deterministic around a running review', async () => {
     const ghPath = await writeFakeGh();
     const scenario = await createScenarioWithCompletedRun(
@@ -37,7 +152,7 @@ describe('TaskManagerService review and PR action coordination', () => {
       runId: scenario.run.id
     });
 
-    await expect(second).rejects.toThrow(/Codex review .*running|Wait for the Codex review/);
+    await expect(second).rejects.toThrow(/Agent review .*running|Wait for the agent review/);
     await expect(first).resolves.toMatchObject({
       taskId: scenario.taskId,
       mode: 'REVIEW',
@@ -51,29 +166,29 @@ describe('TaskManagerService review and PR action coordination', () => {
 
     await expect(
       scenario.service.startReview({ taskId: scenario.taskId, runId: scenario.run.id })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting a review.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting a review.');
     await expect(
       scenario.service.startRun({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting agent work.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting agent work.');
     await expect(
       scenario.service.continueRun({
         taskId: scenario.taskId,
         runId: scenario.run.id,
         instruction: 'Fix the failing checks.'
       })
-    ).rejects.toThrow('Wait for the Codex review to finish before starting follow-up work.');
+    ).rejects.toThrow('Wait for the agent review to finish before starting follow-up work.');
     await expect(
       scenario.service.createDeliveryCommit({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before creating a delivery commit.');
+    ).rejects.toThrow('Wait for the agent review to finish before creating a delivery commit.');
     await expect(
       scenario.service.publishBranch({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before publishing the branch.');
+    ).rejects.toThrow('Wait for the agent review to finish before publishing the branch.');
     await expect(
       scenario.service.createPullRequest({ taskId: scenario.taskId })
-    ).rejects.toThrow('Wait for the Codex review to finish before opening a pull request.');
+    ).rejects.toThrow('Wait for the agent review to finish before opening a pull request.');
     await expect(
       scenario.service.transitionTask({ taskId: scenario.taskId, toPhase: 'DONE' })
-    ).rejects.toThrow('Wait for the Codex review to finish before changing this task.');
+    ).rejects.toThrow('Wait for the agent review to finish before changing this task.');
 
     const refreshed = await scenario.service.refreshGitHub({ taskId: scenario.taskId });
     expect(refreshed).toMatchObject({
@@ -87,7 +202,7 @@ describe('TaskManagerService review and PR action coordination', () => {
     expect(currentReview).toMatchObject({ mode: 'REVIEW', status: 'RUNNING' });
     expect(scenario.serviceHarness.agent.startedTurns).toHaveLength(1);
     expect(scenario.serviceHarness.agent.startedReviews).toHaveLength(1);
-  });
+  }, 15_000);
 });
 
 async function createScenarioWithCompletedRun(

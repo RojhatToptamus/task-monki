@@ -93,7 +93,7 @@ function goal(
     taskId: 'task-1',
     iterationId: 'iteration-1',
     sessionId: 'session-1',
-    provider: 'codex',
+    runtimeId: 'codex',
     taskGoalHash: 'hash-1',
     syncState: input.syncState,
     source: input.source ?? 'PROVIDER_NOTIFICATION',

@@ -153,6 +153,8 @@ export function mapCodexInteractionResponse(
         case 'DECLINE':
           mapped = 'decline';
           break;
+        case 'DECLINE_FOR_SESSION':
+          throw new Error('Codex does not expose a persistent command-denial decision.');
         case 'CANCEL':
           mapped = 'cancel';
           break;

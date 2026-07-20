@@ -1,10 +1,7 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import type {
   CodexExternalToolSettings,
   ExternalExecutablePathSettings,
   TaskManagerAppSettings,
-  TaskManagerRepositorySettings,
   TaskManagerThemePreference
 } from '../../shared/agent';
 import {
@@ -12,6 +9,12 @@ import {
   TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
 } from '../../shared/agent';
 import type { UpdateAppSettingsRequest } from '../../shared/contracts';
+import {
+  readPrivateFile,
+  writePrivateFileAtomically
+} from '../filesystem/secureFilesystem';
+
+const MAX_APP_SETTINGS_FILE_BYTES = 1024 * 1024;
 
 export interface AppSettingsStorage {
   get(): Promise<TaskManagerAppSettings>;
@@ -32,9 +35,19 @@ export class AppSettingsStore implements AppSettingsStorage {
 
   async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     await this.init();
-    this.settings = mergeAppSettings(this.settings, input);
-    await this.persistQueued();
-    return cloneSettings(this.settings);
+    const operation = this.writeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const candidate = mergeAppSettings(this.settings, input);
+        await this.persist(candidate);
+        this.settings = candidate;
+        return cloneSettings(candidate);
+      });
+    this.writeQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   private async init(): Promise<void> {
@@ -42,9 +55,9 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = await fs.readFile(this.filePath, 'utf8');
+      raw = await readPrivateFile(this.filePath, MAX_APP_SETTINGS_FILE_BYTES);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
@@ -55,45 +68,17 @@ export class AppSettingsStore implements AppSettingsStorage {
       return;
     }
 
-    try {
-      this.settings = normalizeAppSettings(JSON.parse(raw) as unknown);
-    } catch {
-      await this.moveInvalidSettingsFileAside();
-      this.settings = normalizeAppSettings(DEFAULT_TASK_MANAGER_APP_SETTINGS);
-      await this.persist();
-    }
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(raw);
+    this.settings = normalizeAppSettings(JSON.parse(decoded) as unknown);
 
     this.loaded = true;
   }
 
-  private async persistQueued(): Promise<void> {
-    const operation = this.writeQueue
-      .catch(() => undefined)
-      .then(() => this.persist());
-    this.writeQueue = operation.catch(() => undefined);
-    await operation;
-  }
-
-  private async persist(): Promise<void> {
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmpPath = `${this.filePath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(this.settings, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    });
-    await fs.rename(tmpPath, this.filePath);
-  }
-
-  private async moveInvalidSettingsFileAside(): Promise<void> {
-    const timestamp = new Date().toISOString().replace(/[^0-9A-Za-z_-]/g, '-');
-    const backupPath = `${this.filePath}.invalid-${timestamp}`;
-    try {
-      await fs.rename(this.filePath, backupPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
-    }
+  private async persist(settings = this.settings): Promise<void> {
+    await writePrivateFileAtomically(
+      this.filePath,
+      `${JSON.stringify(settings, null, 2)}\n`
+    );
   }
 }
 
@@ -101,45 +86,61 @@ export class MemoryAppSettingsStore implements AppSettingsStorage {
   private settings: TaskManagerAppSettings;
 
   constructor(initialSettings: Partial<TaskManagerAppSettings> = {}) {
-    this.settings = normalizeAppSettings(initialSettings);
+    this.settings = normalizeAppSettings({
+      ...structuredClone(DEFAULT_TASK_MANAGER_APP_SETTINGS),
+      ...initialSettings,
+      schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION
+    });
   }
 
   get(): Promise<TaskManagerAppSettings> {
     return Promise.resolve(cloneSettings(this.settings));
   }
 
-  update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
+  async update(input: UpdateAppSettingsRequest): Promise<TaskManagerAppSettings> {
     this.settings = mergeAppSettings(this.settings, input);
-    return Promise.resolve(cloneSettings(this.settings));
+    return cloneSettings(this.settings);
   }
 }
 
 export function normalizeAppSettings(value: unknown): TaskManagerAppSettings {
-  const record = isRecord(value) ? value : {};
-  const repositories = normalizeRepositories(record.repositories);
+  if (!isRecord(value) || value.schemaVersion !== TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION) {
+    const schemaVersion = isRecord(value) ? value.schemaVersion : undefined;
+    throw new Error(
+      `Unsupported Task Monki app settings schema ${String(schemaVersion)}. ` +
+        'Delete the local app settings and restart; migrations are intentionally not supported.'
+    );
+  }
+  const record = value;
+  if (!isCurrentAppSettingsRecord(record)) {
+    throw new Error(
+      `Task Monki app settings schema ${TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION} is invalid. ` +
+        'Delete the local app settings and restart; fallback values are intentionally not applied.'
+    );
+  }
   return {
     schemaVersion: TASK_MANAGER_APP_SETTINGS_SCHEMA_VERSION,
-    theme: normalizeTheme(record.theme),
-    sidebarCollapsed:
-      typeof record.sidebarCollapsed === 'boolean'
-        ? record.sidebarCollapsed
-        : DEFAULT_TASK_MANAGER_APP_SETTINGS.sidebarCollapsed,
-    showMascot:
-      typeof record.showMascot === 'boolean'
-        ? record.showMascot
-        : DEFAULT_TASK_MANAGER_APP_SETTINGS.showMascot,
-    firstLaunchSetupCompleted: normalizeFirstLaunchSetupCompleted(
-      record.firstLaunchSetupCompleted,
-      repositories
-    ),
-    defaultModel: normalizeOptionalString(record.defaultModel),
-    defaultReasoningEffort: normalizeOptionalString(record.defaultReasoningEffort),
-    promptRefinementModel: normalizeOptionalString(record.promptRefinementModel),
-    reviewModel: normalizeOptionalString(record.reviewModel),
-    reviewReasoningEffort: normalizeOptionalString(record.reviewReasoningEffort),
-    codexExternalTools: normalizeCodexExternalTools(record.codexExternalTools),
-    externalExecutables: normalizeExternalExecutables(record.externalExecutables),
-    repositories
+    theme: record.theme,
+    sidebarCollapsed: record.sidebarCollapsed,
+    showMascot: record.showMascot,
+    firstLaunchSetupCompleted: record.firstLaunchSetupCompleted,
+    disabledRuntimeIds: [...record.disabledRuntimeIds],
+    defaultRuntimeId: record.defaultRuntimeId,
+    defaultModel: record.defaultModel,
+    defaultModelProvider: record.defaultModelProvider,
+    defaultReasoningEffort: record.defaultReasoningEffort,
+    promptRefinementModel: record.promptRefinementModel,
+    promptRefinementRuntimeId: record.promptRefinementRuntimeId,
+    promptRefinementModelProvider: record.promptRefinementModelProvider,
+    reviewModel: record.reviewModel,
+    reviewRuntimeId: record.reviewRuntimeId,
+    reviewModelProvider: record.reviewModelProvider,
+    reviewReasoningEffort: record.reviewReasoningEffort,
+    codexExternalTools: { ...record.codexExternalTools },
+    externalExecutables: { ...record.externalExecutables },
+    runtimeExecutablePaths: { ...record.runtimeExecutablePaths },
+    selectedRepositoryId: record.selectedRepositoryId,
+    previewGateway: { ...record.previewGateway }
   };
 }
 
@@ -152,16 +153,28 @@ export function mergeAppSettings(
     patch.theme = normalizeTheme(input.theme);
   }
   if (input.sidebarCollapsed !== undefined) {
-    patch.sidebarCollapsed = input.sidebarCollapsed === true;
+    patch.sidebarCollapsed = requireBoolean(input.sidebarCollapsed, 'sidebarCollapsed');
   }
   if (input.showMascot !== undefined) {
-    patch.showMascot = input.showMascot === true;
+    patch.showMascot = requireBoolean(input.showMascot, 'showMascot');
   }
   if (input.firstLaunchSetupCompleted !== undefined) {
-    patch.firstLaunchSetupCompleted = input.firstLaunchSetupCompleted === true;
+    patch.firstLaunchSetupCompleted = requireBoolean(
+      input.firstLaunchSetupCompleted,
+      'firstLaunchSetupCompleted'
+    );
+  }
+  if (input.disabledRuntimeIds !== undefined) {
+    patch.disabledRuntimeIds = normalizeRuntimeIds(input.disabledRuntimeIds);
+  }
+  if (input.defaultRuntimeId !== undefined) {
+    patch.defaultRuntimeId = requireString(input.defaultRuntimeId, 'defaultRuntimeId');
   }
   if ('defaultModel' in input) {
     patch.defaultModel = normalizeOptionalString(input.defaultModel);
+  }
+  if ('defaultModelProvider' in input) {
+    patch.defaultModelProvider = normalizeOptionalString(input.defaultModelProvider);
   }
   if ('defaultReasoningEffort' in input) {
     patch.defaultReasoningEffort = normalizeOptionalString(input.defaultReasoningEffort);
@@ -169,28 +182,60 @@ export function mergeAppSettings(
   if ('promptRefinementModel' in input) {
     patch.promptRefinementModel = normalizeOptionalString(input.promptRefinementModel);
   }
+  if ('promptRefinementRuntimeId' in input) {
+    patch.promptRefinementRuntimeId = normalizeOptionalString(input.promptRefinementRuntimeId);
+  }
+  if ('promptRefinementModelProvider' in input) {
+    patch.promptRefinementModelProvider = normalizeOptionalString(
+      input.promptRefinementModelProvider
+    );
+  }
   if ('reviewModel' in input) {
     patch.reviewModel = normalizeOptionalString(input.reviewModel);
+  }
+  if ('reviewRuntimeId' in input) {
+    patch.reviewRuntimeId = normalizeOptionalString(input.reviewRuntimeId);
+  }
+  if ('reviewModelProvider' in input) {
+    patch.reviewModelProvider = normalizeOptionalString(input.reviewModelProvider);
   }
   if ('reviewReasoningEffort' in input) {
     patch.reviewReasoningEffort = normalizeOptionalString(input.reviewReasoningEffort);
   }
-  if (input.codexExternalTools) {
+  if (input.codexExternalTools !== undefined) {
+    if (!isRecord(input.codexExternalTools)) {
+      throw new Error('codexExternalTools must be an object.');
+    }
     patch.codexExternalTools = normalizeCodexExternalTools({
       ...current.codexExternalTools,
       ...input.codexExternalTools
     });
   }
-  if (input.externalExecutables) {
+  if (input.externalExecutables !== undefined) {
+    if (!isRecord(input.externalExecutables)) {
+      throw new Error('externalExecutables must be an object.');
+    }
     patch.externalExecutables = normalizeExternalExecutables({
       ...current.externalExecutables,
       ...input.externalExecutables
     });
   }
-  if (input.repositories) {
-    patch.repositories = normalizeRepositories({
-      ...current.repositories,
-      ...input.repositories
+  if (input.runtimeExecutablePaths !== undefined) {
+    if (!isRecord(input.runtimeExecutablePaths)) {
+      throw new Error('runtimeExecutablePaths must be an object.');
+    }
+    patch.runtimeExecutablePaths = normalizeRuntimeExecutablePaths({
+      ...current.runtimeExecutablePaths,
+      ...input.runtimeExecutablePaths
+    });
+  }
+  if ('selectedRepositoryId' in input) {
+    patch.selectedRepositoryId = normalizeOptionalString(input.selectedRepositoryId) ?? null;
+  }
+  if (input.previewGateway) {
+    patch.previewGateway = normalizePreviewGateway({
+      ...current.previewGateway,
+      ...input.previewGateway
     });
   }
   return normalizeAppSettings({
@@ -200,75 +245,188 @@ export function mergeAppSettings(
 }
 
 function normalizeTheme(value: unknown): TaskManagerThemePreference {
-  return value === 'light' || value === 'dark' || value === 'device' ? value : 'device';
+  if (value !== 'light' && value !== 'dark' && value !== 'device') {
+    throw new Error('Theme must be light, dark, or device.');
+  }
+  return value;
 }
 
 function normalizeCodexExternalTools(value: unknown): CodexExternalToolSettings {
-  const record = isRecord(value) ? value : {};
+  if (!isRecord(value)) {
+    throw new Error('Codex external tool settings are invalid.');
+  }
+  if (
+    !['disabled', 'cached', 'live'].includes(String(value.webSearchMode)) ||
+    !['disabled', 'all'].includes(String(value.mcpServers)) ||
+    !['disabled', 'enabled'].includes(String(value.apps))
+  ) {
+    throw new Error('Codex external tool settings are invalid.');
+  }
   return {
-    webSearchMode:
-      record.webSearchMode === 'cached' || record.webSearchMode === 'live'
-        ? record.webSearchMode
-        : 'disabled',
-    mcpServers: record.mcpServers === 'all' ? 'all' : 'disabled',
-    apps: record.apps === 'enabled' ? 'enabled' : 'disabled'
+    webSearchMode: value.webSearchMode as CodexExternalToolSettings['webSearchMode'],
+    mcpServers: value.mcpServers as CodexExternalToolSettings['mcpServers'],
+    apps: value.apps as CodexExternalToolSettings['apps']
   };
 }
 
 function normalizeExternalExecutables(value: unknown): ExternalExecutablePathSettings {
-  const record = isRecord(value) ? value : {};
-  return {
-    gitExecutablePath: normalizeExecutablePath(record.gitExecutablePath),
-    codexExecutablePath: normalizeExecutablePath(record.codexExecutablePath),
-    ghExecutablePath: normalizeExecutablePath(record.ghExecutablePath)
-  };
-}
-
-function normalizeRepositories(value: unknown): TaskManagerRepositorySettings {
-  const record = isRecord(value) ? value : {};
-  const knownPaths = Array.isArray(record.knownPaths)
-    ? uniqueStrings(record.knownPaths.map((candidate) => normalizeOptionalString(candidate)))
-    : [];
-  const selectedPath = normalizeOptionalString(record.selectedPath) ?? null;
-  return {
-    knownPaths,
-    selectedPath
-  };
-}
-
-function normalizeFirstLaunchSetupCompleted(
-  value: unknown,
-  repositories: TaskManagerRepositorySettings
-): boolean {
-  if (typeof value === 'boolean') {
-    return value;
+  if (!isRecord(value)) {
+    throw new Error('External executable settings are invalid.');
   }
-  return Boolean(repositories.selectedPath || repositories.knownPaths.length > 0);
+  return {
+    gitExecutablePath: normalizeExecutablePath(value.gitExecutablePath),
+    codexExecutablePath: normalizeExecutablePath(value.codexExecutablePath),
+    ghExecutablePath: normalizeExecutablePath(value.ghExecutablePath)
+  };
+}
+
+function normalizeRuntimeExecutablePaths(
+  value: unknown
+): TaskManagerAppSettings['runtimeExecutablePaths'] {
+  if (!isRecord(value)) {
+    throw new Error('Runtime executable settings are invalid.');
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([runtimeId, executable]) => [
+      requireString(runtimeId, 'Runtime id'),
+      normalizeExecutablePath(executable)
+    ])
+  );
+}
+
+function normalizeRuntimeIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error('disabledRuntimeIds must be an array.');
+  }
+  return [...new Set(value.map((runtimeId) => requireString(runtimeId, 'Runtime id')))];
+}
+
+function normalizePreviewGateway(value: unknown): TaskManagerAppSettings['previewGateway'] {
+  if (!isRecord(value) || Object.keys(value).length !== 1) {
+    throw new Error('Preview gateway settings are invalid.');
+  }
+  const port = value.port;
+  if (port !== null && (!Number.isInteger(port) || Number(port) < 10_000 || Number(port) > 65_535)) {
+    throw new Error('Preview gateway port must be null or an integer from 10000 to 65535.');
+  }
+  return { port: port === null ? null : Number(port) };
 }
 
 function normalizeExecutablePath(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string') {
+    throw new Error('Executable paths must be strings or null.');
+  }
   return normalizeOptionalString(value) ?? null;
 }
 
 function normalizeOptionalString(value: unknown): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error('Setting values must be strings or null.');
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function uniqueStrings(values: Array<string | undefined>): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const value of values) {
-    if (!value || seen.has(value)) {
-      continue;
-    }
-    seen.add(value);
-    out.push(value);
-  }
-  return out;
+function requireString(value: unknown, name: string): string {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) throw new Error(`${name} must be a non-empty string.`);
+  return normalized;
+}
+
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== 'boolean') throw new Error(`${name} must be a boolean.`);
+  return value;
+}
+
+function isCurrentAppSettingsRecord(
+  record: Record<string, unknown>
+): record is Record<string, unknown> & TaskManagerAppSettings {
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'theme',
+    'sidebarCollapsed',
+    'showMascot',
+    'firstLaunchSetupCompleted',
+    'disabledRuntimeIds',
+    'defaultRuntimeId',
+    'defaultModel',
+    'defaultModelProvider',
+    'defaultReasoningEffort',
+    'promptRefinementModel',
+    'promptRefinementRuntimeId',
+    'promptRefinementModelProvider',
+    'reviewModel',
+    'reviewRuntimeId',
+    'reviewModelProvider',
+    'reviewReasoningEffort',
+    'codexExternalTools',
+    'externalExecutables',
+    'runtimeExecutablePaths',
+    'selectedRepositoryId',
+    'previewGateway'
+  ]);
+  const optionalStrings = [
+    record.defaultModel,
+    record.defaultModelProvider,
+    record.defaultReasoningEffort,
+    record.promptRefinementModel,
+    record.promptRefinementRuntimeId,
+    record.promptRefinementModelProvider,
+    record.reviewModel,
+    record.reviewRuntimeId,
+    record.reviewModelProvider,
+    record.reviewReasoningEffort
+  ];
+  const tools = record.codexExternalTools;
+  const executables = record.externalExecutables;
+  const runtimeExecutablePaths = record.runtimeExecutablePaths;
+  const previewGateway = record.previewGateway;
+  return (
+    Object.keys(record).every((key) => allowedKeys.has(key)) &&
+    (record.theme === 'light' || record.theme === 'dark' || record.theme === 'device') &&
+    typeof record.sidebarCollapsed === 'boolean' &&
+    typeof record.showMascot === 'boolean' &&
+    typeof record.firstLaunchSetupCompleted === 'boolean' &&
+    Array.isArray(record.disabledRuntimeIds) &&
+    record.disabledRuntimeIds.every(isCanonicalRequiredString) &&
+    new Set(record.disabledRuntimeIds).size === record.disabledRuntimeIds.length &&
+    isCanonicalRequiredString(record.defaultRuntimeId) &&
+    optionalStrings.every(isCanonicalOptionalString) &&
+    isRecord(tools) &&
+    Object.keys(tools).length === 3 &&
+    ['disabled', 'cached', 'live'].includes(String(tools.webSearchMode)) &&
+    ['disabled', 'all'].includes(String(tools.mcpServers)) &&
+    ['disabled', 'enabled'].includes(String(tools.apps)) &&
+    isRecord(executables) &&
+    Object.keys(executables).length === 3 &&
+    isCanonicalNullableString(executables.gitExecutablePath) &&
+    isCanonicalNullableString(executables.codexExecutablePath) &&
+    isCanonicalNullableString(executables.ghExecutablePath) &&
+    isRecord(runtimeExecutablePaths) &&
+    Object.entries(runtimeExecutablePaths).every(
+      ([runtimeId, executable]) =>
+        isCanonicalRequiredString(runtimeId) && isCanonicalNullableString(executable)
+    ) &&
+    isCanonicalNullableString(record.selectedRepositoryId) &&
+    isRecord(previewGateway) &&
+    Object.keys(previewGateway).length === 1 &&
+    (previewGateway.port === null ||
+      (Number.isInteger(previewGateway.port) &&
+        Number(previewGateway.port) >= 10_000 &&
+        Number(previewGateway.port) <= 65_535))
+  );
+}
+
+function isCanonicalRequiredString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value;
+}
+
+function isCanonicalOptionalString(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && value.length > 0 && value.trim() === value);
+}
+
+function isCanonicalNullableString(value: unknown): boolean {
+  return value === null || (typeof value === 'string' && value.length > 0 && value.trim() === value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

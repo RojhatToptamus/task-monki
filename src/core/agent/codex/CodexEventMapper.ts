@@ -20,11 +20,12 @@ import type { TokenUsageBreakdown } from './protocol/generated/v2/TokenUsageBrea
 import type { TurnPlanStep } from './protocol/generated/v2/TurnPlanStep';
 import type { ThreadStatus } from './protocol/generated/v2/ThreadStatus';
 import type { Turn } from './protocol/generated/v2/Turn';
+import { CODEX_RUNTIME_ID } from '../../../shared/agent';
 
 export function mapModel(model: Model): AgentModel {
   return {
-    id: model.id,
-    provider: 'codex',
+    id: `${CODEX_RUNTIME_ID}:${model.id}`,
+    runtimeId: CODEX_RUNTIME_ID,
     model: model.model,
     displayName: model.displayName,
     description: model.description,
@@ -75,7 +76,7 @@ export function settingsFromThreadResponse(response: {
       response.sandbox.type === 'dangerFullAccess'
         ? true
         : response.sandbox.type === 'externalSandbox'
-          ? undefined
+          ? response.sandbox.networkAccess === 'enabled'
           : response.sandbox.networkAccess
   };
 }
@@ -98,7 +99,7 @@ export function settingsFromThreadSettings(
       settings.sandboxPolicy.type === 'dangerFullAccess'
         ? true
         : settings.sandboxPolicy.type === 'externalSandbox'
-          ? undefined
+          ? settings.sandboxPolicy.networkAccess === 'enabled'
           : settings.sandboxPolicy.networkAccess
   };
 }
@@ -174,8 +175,11 @@ export function toSandboxPolicy(
     type: 'workspaceWrite',
     writableRoots: [worktreePath],
     networkAccess: settings.networkAccess ?? false,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false
+    // Worktrees are explicit writable roots, including when they live below a
+    // temp directory. Do not implicitly grant the rest of $TMPDIR or /tmp,
+    // which may contain other Task Monki worktrees and delivery caches.
+    excludeTmpdirEnvVar: true,
+    excludeSlashTmp: true
   };
 }
 
@@ -289,7 +293,10 @@ export function formatFinalArtifact(
 }
 
 function mapSandbox(policy: SandboxPolicy): AgentExecutionSettings['sandbox'] {
-  if (policy.type === 'dangerFullAccess') {
+  if (policy.type === 'dangerFullAccess' || policy.type === 'externalSandbox') {
+    // Task Monki does not provide the out-of-process sandbox promised by this
+    // provider mode. Treat it as full access rather than projecting a managed
+    // workspace boundary that Codex is not enforcing.
     return 'DANGER_FULL_ACCESS';
   }
   if (policy.type === 'readOnly') {

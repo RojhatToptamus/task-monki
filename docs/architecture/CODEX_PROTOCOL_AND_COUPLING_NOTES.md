@@ -1,9 +1,9 @@
 # Codex Protocol And Coupling Notes
 
-Date: 2026-06-25
+Date: 2026-07-11
 
-This is the current protocol boundary note. Older phase-by-phase investigation
-logs were removed because they repeated stale implementation status.
+This document defines the current Codex protocol boundary and compatibility
+policy.
 
 ## Protocol baseline
 
@@ -43,6 +43,9 @@ Task Monki probes candidate Codex executables in this order:
 The probe records `--version`, detects the supported stdio App Server launch
 form from `codex app-server --help`, starts the candidate with a temporary
 `CODEX_HOME`, initializes JSON-RPC, and verifies the methods Task Monki uses.
+`CODEX_HOME` is admitted by the explicit
+`task-monki/codex-environment@v1` contract rather than the portable child
+environment, so other runtimes cannot inherit Codex state.
 Automatic discovery picks a compatible runtime instead of failing on an older
 incompatible candidate that appears earlier on `PATH`. Explicit configuration is
 treated as intentional and must be compatible.
@@ -55,6 +58,7 @@ as normal workflow warnings.
 
 Task Monki should depend on a provider-neutral orchestration model:
 
+- immutable task runtime identity and runtime-scoped provider IDs;
 - sessions;
 - runs;
 - interactions;
@@ -68,7 +72,8 @@ materializer, and raw journal.
 Do not spread Codex protocol terms into product workflow decisions unless the
 term is part of a provider-neutral Task Monki concept. For example:
 
-- Good: `RunRecord.mode === "REVIEW"` and `projection.codexReview.status`.
+- Good: `RunRecord.mode === "REVIEW"` and the local review-gate projection
+  (`projection.agentReview` remains provider-neutral).
 - Risky: UI decisions based directly on a raw `thread/status/changed` payload.
 
 ## Generated bindings

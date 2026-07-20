@@ -10,15 +10,33 @@ describe('run activity projection', () => {
   it('groups consecutive context reads and keeps the group key stable when appended', () => {
     const run = runFixture();
     const firstTwo = [
-      readItem('read-a', '/Users/rojhat/project/src/a.ts', '2026-07-07T10:01:00.000Z'),
-      readItem('read-b', '/Users/rojhat/project/src/b.ts', '2026-07-07T10:02:00.000Z')
+      readItem(
+        'read-a',
+        '/Users/rojhat/project/src/a.ts',
+        '2026-07-07T10:01:00.000Z',
+        'run-1',
+        '/Users/rojhat/project'
+      ),
+      readItem(
+        'read-b',
+        '/Users/rojhat/project/src/b.ts',
+        '2026-07-07T10:02:00.000Z',
+        'run-1',
+        '/Users/rojhat/project'
+      )
     ];
     const projection = buildRunActivityProjection({ run, items: firstTwo });
     const appended = buildRunActivityProjection({
       run,
       items: [
         ...firstTwo,
-        readItem('read-c', '/Users/rojhat/project/src/c.ts', '2026-07-07T10:03:00.000Z')
+        readItem(
+          'read-c',
+          '/Users/rojhat/project/src/c.ts',
+          '2026-07-07T10:03:00.000Z',
+          'run-1',
+          '/Users/rojhat/project'
+        )
       ]
     });
 
@@ -176,9 +194,22 @@ describe('run activity projection', () => {
           payload: { namespace: 'multi-agent', tool: 'spawn' }
         }),
         itemFixture({
+          id: 'search',
+          type: 'OTHER',
+          payload: {
+            kind: 'search',
+            title: 'Find tests',
+            rawInput: { query: '*.test.ts', path: 'src' }
+          }
+        }),
+        itemFixture({
           id: 'web',
           type: 'WEB_SEARCH',
-          payload: { query: 'opencode timeline projection' }
+          payload: {
+            kind: 'fetch',
+            title: 'Fetch ACP docs',
+            rawInput: { url: 'https://agentclientprotocol.com/protocol/v1/tool-calls' }
+          }
         }),
         itemFixture({
           id: 'compact',
@@ -196,14 +227,36 @@ describe('run activity projection', () => {
     expect(projection.rows.map((row) => row.category)).toEqual([
       'mcp',
       'mcp',
+      'search',
       'web',
       'compaction',
       'subagent'
     ]);
     expect(projection.sections.map((section) => section.key)).toEqual([
+      'files',
       'tools',
       'subagents'
     ]);
+    expect(projection.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'search', label: 'Search', detail: '*.test.ts' }),
+        expect.objectContaining({
+          category: 'web',
+          label: 'Web',
+          detail: 'https://agentclientprotocol.com/protocol/v1/tool-calls'
+        })
+      ])
+    );
+  });
+
+  it('does not fabricate an actionable request from run status alone', () => {
+    const projection = buildRunActivityProjection({
+      run: runFixture({ status: 'AWAITING_APPROVAL' }),
+      items: [],
+      interactions: []
+    });
+
+    expect(projection.rows).toEqual([]);
   });
 
   it('maps permission and question interactions into request rows', () => {
@@ -275,13 +328,43 @@ describe('run activity projection', () => {
     ]);
     expect(JSON.stringify(projection.rows)).not.toContain('old-read');
   });
+
+  it('shortens Windows repository paths without disguising external paths', () => {
+    const run = runFixture();
+    const projection = buildRunActivityProjection({
+      run,
+      groupContext: false,
+      items: [
+        readItem(
+          'repository-read',
+          'C:\\Users\\runner\\project\\repo\\README.md',
+          '2026-07-07T10:01:00.000Z',
+          'run-1',
+          'C:\\Users\\runner\\project\\repo'
+        ),
+        readItem(
+          'external-read',
+          'D:\\external\\src\\secrets.txt',
+          '2026-07-07T10:02:00.000Z',
+          'run-1',
+          'C:\\Users\\runner\\project\\repo'
+        )
+      ]
+    });
+
+    expect(projection.rows).toMatchObject([
+      { category: 'read', detail: 'README.md' },
+      { category: 'read', detail: 'D:/external/src/secrets.txt' }
+    ]);
+  });
 });
 
 function readItem(
   id: string,
   path: string,
   at: string,
-  runId = 'run-1'
+  runId = 'run-1',
+  cwd?: string
 ): AgentItemRecord {
   return commandItem({
     id,
@@ -289,7 +372,8 @@ function readItem(
     providerCompletedAt: at,
     payload: {
       command: `sed -n 1,10p ${path}`,
-      commandActions: [{ type: 'read', path }]
+      commandActions: [{ type: 'read', path }],
+      ...(cwd ? { cwd } : {})
     }
   });
 }
@@ -307,6 +391,7 @@ function commandItem(
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
@@ -349,6 +434,7 @@ function interactionFixture(
 ): InteractionRequestRecord {
   return {
     id: 'interaction-1',
+    runtimeId: 'codex',
     serverInstanceId: 'server-1',
     providerRequestId: 'request-1',
     taskId: 'task-1',

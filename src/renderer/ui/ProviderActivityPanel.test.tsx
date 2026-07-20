@@ -56,11 +56,49 @@ describe('ProviderActivityPanel', () => {
     expect(html).toContain('/bin/zsh');
     expect(html).toContain('secret output line');
   });
+
+  it('shows path-free attachment submission evidence without claiming consumption', () => {
+    const run = runFixture({
+      status: 'COMPLETED',
+      attachmentSubmissions: [
+        {
+          attachmentId: 'attachment-1',
+          ordinal: 0,
+          kind: 'image',
+          mediaType: 'image/png',
+          byteCount: 1_024,
+          sha256: 'a'.repeat(64),
+          submittedAs: 'localImage',
+          verifiedAt: '2026-07-07T10:00:30.000Z',
+          providerTurnId: 'turn-1',
+          submittedAt: '2026-07-07T10:00:31.000Z'
+        }
+      ]
+    });
+
+    const html = renderToStaticMarkup(
+      <ProviderActivityPanel
+        runs={[run]}
+        sessions={[sessionFixture()]}
+        items={[]}
+        planRevisions={[]}
+        interactions={[]}
+        events={[]}
+      />
+    );
+
+    expect(html).toContain('Attachment submissions');
+    expect(html).toContain('recorded after provider start');
+    expect(html).toContain('does not prove that the model read or used a file');
+    expect(html).toContain('sha256:aaaaaaaaaaaa…');
+    expect(html).not.toContain('/attachment-deliveries/');
+  });
 });
 
 function runFixture(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
+    runtimeId: 'codex',
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
@@ -85,7 +123,7 @@ function sessionFixture(overrides: Partial<AgentSessionRecord> = {}): AgentSessi
     taskId: 'task-1',
     iterationId: 'iteration-1',
     worktreeId: 'worktree-1',
-    provider: 'codex',
+    runtimeId: 'codex',
     role: 'PRIMARY',
     providerSessionId: 'thread-1',
     relationshipState: 'RESOLVED',
@@ -109,7 +147,7 @@ function planFixture(
     iterationId: 'iteration-1',
     runId: 'run-1',
     sessionId: 'session-1',
-    provider: 'codex',
+    runtimeId: 'codex',
     revision: 1,
     explanation: 'Plan',
     steps: [{ step: 'Verify', status: 'IN_PROGRESS' }],
@@ -143,6 +181,7 @@ function interactionFixture(
 ): InteractionRequestRecord {
   return {
     id: 'interaction-1',
+    runtimeId: 'codex',
     serverInstanceId: 'server-1',
     providerRequestId: 'request-1',
     taskId: 'task-1',

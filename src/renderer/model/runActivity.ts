@@ -75,7 +75,6 @@ export function buildRunActivityProjection(input: {
   run: Pick<RunRecord, 'id' | 'status' | 'startedAt' | 'lastEventAt'>;
   items: AgentItemRecord[];
   interactions?: InteractionRequestRecord[];
-  includeWaiting?: boolean;
   groupContext?: boolean;
 }): RunActivityProjection {
   const runItems = input.items.filter((item) => item.runId === input.run.id);
@@ -90,11 +89,7 @@ export function buildRunActivityProjection(input: {
     ...activityRowFromInteraction(interaction),
     order: order++
   }));
-  const waiting = input.includeWaiting === false
-    ? undefined
-    : waitingActivityRow(input.run, requestRows);
-  const candidates = waiting ? [...itemRows, ...requestRows, { ...waiting, order: order++ }] : [...itemRows, ...requestRows];
-  const rows = [...candidates]
+  const rows = [...itemRows, ...requestRows]
     .sort((a, b) => a.at.localeCompare(b.at) || a.order - b.order)
     .map(stripCandidateOrder);
   const groupedRows = input.groupContext === false ? rows : groupContextRows(rows);
@@ -208,17 +203,36 @@ function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
         })
       ];
     case 'WEB_SEARCH':
-      return [
-        rowFromItem(item, {
-          category: 'web',
-          label: 'Web',
-          detail: compactValue(stringValue(payload.query) ?? 'search', 72),
-          tone: activityToneForStatus(activityStatusForItem(item.status), false),
-          status: activityStatusForItem(item.status),
-          at,
-          suffix: `web:${normalizeKey(stringValue(payload.query) ?? '')}`
-        })
-      ];
+      {
+        const detail = providerToolDetail(payload, 'request');
+        return [
+          rowFromItem(item, {
+            category: 'web',
+            label: 'Web',
+            detail,
+            tone: activityToneForStatus(activityStatusForItem(item.status), false),
+            status: activityStatusForItem(item.status),
+            at,
+            suffix: `web:${normalizeKey(detail)}`
+          })
+        ];
+      }
+    case 'OTHER':
+      if (payload.kind === 'search') {
+        const detail = providerToolDetail(payload, 'project');
+        return [
+          rowFromItem(item, {
+            category: 'search',
+            label: 'Search',
+            detail,
+            tone: activityToneForStatus(activityStatusForItem(item.status), false),
+            status: activityStatusForItem(item.status),
+            at,
+            suffix: `search:${normalizeKey(detail)}`
+          })
+        ];
+      }
+      return [];
     case 'CONTEXT_COMPACTION':
       return [
         rowFromItem(item, {
@@ -264,7 +278,6 @@ function activityRowsFromItem(item: AgentItemRecord): RunActivityLeaf[] {
     case 'PLAN':
     case 'REASONING_SUMMARY':
     case 'USER_MESSAGE':
-    case 'OTHER':
     default:
       return [];
   }
@@ -307,9 +320,10 @@ function commandActionActivityRows(
   const action = objectPayload(value);
   const type = stringValue(action.type);
   const command = stringValue(action.command) ?? stringValue(payload.command);
+  const cwd = stringValue(payload.cwd) ?? stringValue(action.cwd);
   if (type === 'read') {
     const path = stringValue(action.path) ?? extractPath(command ?? '');
-    const detail = shortPath(path) ?? compactValue(stringValue(action.name) ?? 'file', 72);
+    const detail = shortPath(path, cwd) ?? compactValue(stringValue(action.name) ?? 'file', 72);
     return [
       rowFromItem(item, {
         category: 'read',
@@ -324,7 +338,7 @@ function commandActionActivityRows(
     ];
   }
   if (type === 'listFiles') {
-    const detail = shortPath(stringValue(action.path)) ?? 'project files';
+    const detail = shortPath(stringValue(action.path), cwd) ?? 'project files';
     return [
       rowFromItem(item, {
         category: 'list',
@@ -340,7 +354,8 @@ function commandActionActivityRows(
   if (type === 'search') {
     const detail = searchActivityDetail(
       stringValue(action.query),
-      stringValue(action.path)
+      stringValue(action.path),
+      cwd
     );
     return [
       rowFromItem(item, {
@@ -477,46 +492,6 @@ function activityRowFromInteraction(interaction: InteractionRequestRecord): RunA
     sourceItemIds: [],
     sourceInteractionIds: [interaction.id]
   };
-}
-
-function waitingActivityRow(
-  run: Pick<RunRecord, 'id' | 'status' | 'startedAt' | 'lastEventAt'>,
-  requestRows: ActivityCandidate[]
-): RunActivityLeaf | undefined {
-  const at = run.lastEventAt ?? run.startedAt;
-  if (run.status === 'AWAITING_APPROVAL') {
-    if (requestRows.some((row) => row.category === 'permission' && row.status === 'active')) {
-      return undefined;
-    }
-    return {
-      key: `run-waiting:${run.id}:permission`,
-      category: 'permission',
-      label: 'Waiting',
-      detail: 'for approval',
-      tone: 'action',
-      status: 'active',
-      at,
-      sourceItemIds: [],
-      sourceInteractionIds: []
-    };
-  }
-  if (run.status === 'AWAITING_USER_INPUT') {
-    if (requestRows.some((row) => row.category === 'question' && row.status === 'active')) {
-      return undefined;
-    }
-    return {
-      key: `run-waiting:${run.id}:question`,
-      category: 'question',
-      label: 'Waiting',
-      detail: 'for user input',
-      tone: 'action',
-      status: 'active',
-      at,
-      sourceItemIds: [],
-      sourceInteractionIds: []
-    };
-  }
-  return undefined;
 }
 
 function rowFromItem(
@@ -705,13 +680,32 @@ function activityToneForStatus(
   return verified ? 'success' : 'neutral';
 }
 
-function searchActivityDetail(query: string | undefined, path: string | undefined): string {
+function searchActivityDetail(
+  query: string | undefined,
+  path: string | undefined,
+  cwd?: string
+): string {
   const compactQuery = query ? compactValue(query, 56) : undefined;
-  const compactPath = shortPath(path);
+  const compactPath = shortPath(path, cwd);
   if (compactQuery && compactPath) {
     return `${compactQuery} · ${compactPath}`;
   }
   return compactQuery ?? compactPath ?? 'project';
+}
+
+function providerToolDetail(
+  payload: Record<string, unknown>,
+  fallback: string
+): string {
+  const rawInput = objectPayload(payload.rawInput);
+  return compactValue(
+    stringValue(rawInput.query) ??
+      stringValue(rawInput.url) ??
+      stringValue(rawInput.path) ??
+      stringValue(payload.title) ??
+      fallback,
+    72
+  );
 }
 
 function compactToolName(payload: Record<string, unknown>): string | undefined {
@@ -947,7 +941,7 @@ function cleanOverviewText(text: string | undefined): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/(^|\s)(\/[^\s'")]+(?:\/[^\s'")]+){2,})/g, (_match, prefix: string, value: string) => {
-      return `${prefix}${shortPath(value) ?? value}`;
+      return `${prefix}${shortPath(value, undefined, true) ?? value}`;
     });
 }
 
@@ -990,15 +984,42 @@ function extractPath(text: string): string | undefined {
   return text.match(/(?:^|\s)([./~\w-]+(?:\/[\w.-]+)+)(?=$|\s|[.,;:)])/u)?.[1];
 }
 
-function shortPath(path: string | undefined): string | undefined {
+function shortPath(
+  path: string | undefined,
+  cwd?: string,
+  allowAnchoredAbsolute = false
+): string | undefined {
   if (!path) {
     return undefined;
   }
   const cleaned = path.replace(/^[`'"]+|[`'".,;:]+$/g, '');
-  const segments = cleaned.split('/').filter(Boolean);
+  const normalized = cleaned.replace(/\\/g, '/');
+  if (portableAbsolutePath(normalized)) {
+    const relative = cwd
+      ? relativePortablePath(cwd.replace(/\\/g, '/'), normalized)
+      : undefined;
+    if (relative) return relative;
+    if (allowAnchoredAbsolute) {
+      const anchored = anchoredRelativePath(normalized);
+      if (anchored) return anchored;
+    }
+    return compactAbsolutePath(normalized);
+  }
+  return compactRelativePath(normalized);
+}
+
+function compactRelativePath(normalized: string): string | undefined {
+  const segments = normalized.split('/').filter(Boolean);
   if (segments.length === 0) {
     return undefined;
   }
+  const anchored = anchoredRelativePath(normalized);
+  if (anchored) return anchored;
+  return segments.length <= 5 ? segments.join('/') : segments.slice(-5).join('/');
+}
+
+function anchoredRelativePath(normalized: string): string | undefined {
+  const segments = normalized.split('/').filter(Boolean);
   const anchor = ['src', 'tests', 'test', 'docs', 'scripts'].find((candidate) =>
     segments.includes(candidate)
   );
@@ -1012,10 +1033,65 @@ function shortPath(path: string | undefined): string | undefined {
     const repoRelative = segments.slice(repoIndex + 1);
     return repoRelative.length <= 5 ? repoRelative.join('/') : repoRelative.slice(-5).join('/');
   }
-  if (!cleaned.startsWith('/') && segments.length <= 5) {
-    return segments.join('/');
+  return undefined;
+}
+
+function portableAbsolutePath(value: string): boolean {
+  return /^(?:[A-Za-z]:\/|\/)/u.test(value);
+}
+
+function relativePortablePath(
+  basePath: string,
+  candidatePath: string
+): string | undefined {
+  if (!portableAbsolutePath(basePath) || !portableAbsolutePath(candidatePath)) {
+    return undefined;
   }
-  return segments.slice(-3).join('/');
+  const windowsStyle =
+    /^[A-Za-z]:\//u.test(candidatePath) || candidatePath.startsWith('//');
+  const baseWindowsStyle = /^[A-Za-z]:\//u.test(basePath) || basePath.startsWith('//');
+  if (windowsStyle !== baseWindowsStyle) return undefined;
+
+  const baseSegments = portablePathSegments(basePath);
+  const candidateSegments = portablePathSegments(candidatePath);
+  if (candidateSegments.length <= baseSegments.length) return undefined;
+  const equal = windowsStyle
+    ? (left: string, right: string) =>
+        left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+    : (left: string, right: string) => left === right;
+  if (
+    !baseSegments.every((segment, index) =>
+      equal(segment, candidateSegments[index] ?? '')
+    )
+  ) {
+    return undefined;
+  }
+  return compactRelativePath(candidateSegments.slice(baseSegments.length).join('/'));
+}
+
+function portablePathSegments(value: string): string[] {
+  const output: string[] = [];
+  for (const segment of value.split('/').filter(Boolean)) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      output.pop();
+      continue;
+    }
+    output.push(segment);
+  }
+  return output;
+}
+
+function compactAbsolutePath(value: string): string {
+  const segments = portablePathSegments(value);
+  if (segments.length <= 4) return value;
+  if (/^[A-Za-z]:\//u.test(value)) {
+    return `${segments[0]}/…/${segments.slice(-3).join('/')}`;
+  }
+  if (value.startsWith('//')) {
+    return `//${segments.slice(0, 2).join('/')}/…/${segments.slice(-3).join('/')}`;
+  }
+  return `/…/${segments.slice(-3).join('/')}`;
 }
 
 function plural(count: number, word: string): string {

@@ -1,3 +1,4 @@
+import type { Ref } from 'react';
 import type { DomainEvent } from '../../shared/contracts';
 import type {
   TaskActivityEvidence,
@@ -11,48 +12,76 @@ interface TaskActivityPanelProps {
   view: TaskActivityViewModel;
   variant: 'overview' | 'debug';
   rawEvents?: DomainEvent[];
+  onViewAll?: () => void;
+  rootRef?: Ref<HTMLElement>;
 }
 
-export function TaskActivityPanel({ view, variant, rawEvents = [] }: TaskActivityPanelProps) {
+export function TaskActivityPanel({
+  view,
+  variant,
+  rawEvents = [],
+  onViewAll,
+  rootRef
+}: TaskActivityPanelProps) {
   if (variant === 'overview') {
-    return <OverviewTaskActivity view={view} />;
+    return <OverviewTaskActivity view={view} onViewAll={onViewAll} />;
   }
 
-  return <DebugTaskActivity view={view} rawEvents={rawEvents} />;
+  return <DebugTaskActivity view={view} rawEvents={rawEvents} rootRef={rootRef} />;
 }
 
-function OverviewTaskActivity({ view }: { view: TaskActivityViewModel }) {
+function OverviewTaskActivity({
+  view,
+  onViewAll
+}: {
+  view: TaskActivityViewModel;
+  onViewAll?: () => void;
+}) {
   if (!view.items.length) {
     return null;
   }
+  const latest = view.items.at(-1);
+  if (!latest) {
+    return null;
+  }
+  const earlierCount = view.hiddenCount + view.items.length - 1;
 
   return (
     <section
       className="tm-panel tm-taskactivity-panel tm-taskactivity-panel--overview"
-      aria-label="Activity Timeline"
+      aria-label="Activity"
     >
       <div className="tm-taskactivity__head">
-        <h3 className="tm-panel__title">Activity Timeline</h3>
-        {view.hiddenCount > 0 ? (
+        <h3 className="tm-panel__title">Activity</h3>
+        {earlierCount > 0 ? (
           <span className="tm-taskactivity__count">
-            {view.hiddenCount} earlier {view.hiddenCount === 1 ? 'item' : 'items'}
+            {earlierCount} earlier {earlierCount === 1 ? 'item' : 'items'}
           </span>
         ) : null}
       </div>
-      <TaskActivityList items={view.items} />
+      <TaskActivityList items={[latest]} />
+      {onViewAll && earlierCount > 0 ? (
+        <button type="button" className="tm-taskactivity__viewall" onClick={onViewAll}>
+          View full activity
+        </button>
+      ) : null}
     </section>
   );
 }
 
 function DebugTaskActivity({
   view,
-  rawEvents
+  rawEvents,
+  rootRef
 }: {
   view: TaskActivityViewModel;
   rawEvents: DomainEvent[];
+  rootRef?: Ref<HTMLElement>;
 }) {
   return (
     <section
+      ref={rootRef}
+      tabIndex={rootRef ? -1 : undefined}
       className="card card--activity tm-taskactivity-panel tm-taskactivity-panel--debug"
       aria-label="Task activity"
     >

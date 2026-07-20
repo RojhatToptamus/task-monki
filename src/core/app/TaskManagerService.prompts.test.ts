@@ -31,7 +31,7 @@ describe('TaskManagerService prompt composition', () => {
     expect(scenario.agent.steeredTurns[0]?.prompt).toContain(
       'Do not commit, push, merge'
     );
-  });
+  }, 15_000);
 
   it('allows a recovery-required source run to continue with bounded prior-run context', async () => {
     const scenario = await createTaskMonkiScenario({
@@ -64,6 +64,14 @@ describe('TaskManagerService prompt composition', () => {
     expect(prompt).toContain(
       'Previous provider final summary excerpt (context only, not verified evidence)'
     );
-    expect(prompt).toContain('Continue from the current local state.');
-  });
+    expect(
+      prompt.endsWith('Additional user instruction:\nContinue from the current local state.')
+    ).toBe(true);
+    await expect(scenario.store.getRun(run.id)).resolves.toMatchObject({
+      status: 'INTERRUPTED',
+      recoveryState: 'NONE',
+      terminalReason:
+        'Recovery-required run was superseded by an explicit continue or retry action.'
+    });
+  }, 15_000);
 });

@@ -18,13 +18,13 @@ jobs:
         include:
           - platform: macOS
             os: macos-latest
-            command: npm run dist:mac -- --publish always
+            command: npm run dist:mac -- --publish never
           - platform: Windows
             os: windows-latest
-            command: npm run dist:win -- --publish always
+            command: npm run dist:win -- --publish never
           - platform: Linux
             os: ubuntu-latest
-            command: npm run dist:linux -- --publish always
+            command: npm run dist:linux -- --publish never
 
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +42,14 @@ jobs:
 
       - run: npm test
 
-      - name: Build and upload unsigned artifacts
+      - name: Build unsigned artifacts
         run: ${{ matrix.command }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify packaged artifacts
+        run: npm run verify:release-artifacts
+
+      - name: Smoke test packaged runtime
+        run: npm run verify:packaged-runtime
 
       - name: Generate checksums
         if: runner.os != 'Windows'
@@ -60,10 +64,14 @@ jobs:
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
             Set-Content release/SHA256SUMS-Windows.txt
 
-      - name: Upload checksums
+      - name: Upload verified artifacts and checksums
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: release/SHA256SUMS-${{ runner.os }}.txt
+          fail_on_unmatched_files: true
+          files: |
+            release/Task-Monki-*
+            release/latest*.yml
+            release/SHA256SUMS-${{ runner.os }}.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

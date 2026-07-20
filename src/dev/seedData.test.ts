@@ -1,7 +1,14 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { AgentRuntimeAdapter } from '../core/agent/AgentRuntimeAdapter';
+import {
+  CODEX_RUNTIME_DESCRIPTOR,
+  codexCapabilities
+} from '../core/agent/codex/codexCapabilities';
+import { TaskManagerService } from '../core/app/TaskManagerService';
+import { posixModeMatches } from '../core/filesystem/secureFilesystem';
 import { AppSettingsStore } from '../core/settings/AppSettingsStore';
 import { FileTaskStore } from '../core/storage/FileTaskStore';
 import type { Task, TaskSnapshot } from '../shared/contracts';
@@ -17,12 +24,18 @@ import {
 import { buildPrStatusViewModel } from '../renderer/model/prStatus';
 import { buildRunProgressViewModel } from '../renderer/model/runProgress';
 import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
+import { selectBoardTasks } from '../renderer/model/boards';
+import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
   DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
   seedTaskMonkiDevelopmentData,
   type DevSeedManifest
 } from './seedData';
+import {
+  DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
+  deterministicDevSeedProviderDisabledReason
+} from './devSeedEnvironment';
 
 describe('Task Monki development seed data', () => {
   let rootDir: string;
@@ -32,8 +45,8 @@ describe('Task Monki development seed data', () => {
   beforeAll(async () => {
     rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-test-'));
     manifest = await seedTaskMonkiDevelopmentData({ rootDir, reset: true });
-    snapshot = await new FileTaskStore(manifest.storeDir).snapshot();
-  }, 90_000);
+    snapshot = await readStoreSnapshot(manifest.storeDir);
+  }, 180_000);
 
   afterAll(async () => {
     if (rootDir) {
@@ -51,16 +64,33 @@ describe('Task Monki development seed data', () => {
     expect(manifest.catalogVersion).toBe(TASK_MONKI_DEV_SEED_VERSION);
     expect(snapshot.schemaVersion).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(settings.firstLaunchSetupCompleted).toBe(true);
-    expect(settings.repositories.selectedPath).toBe(manifest.repositoryPath);
-    expect(settings.repositories.knownPaths).toContain(manifest.repositoryPath);
+    expect(snapshot.repositories).toHaveLength(2);
+    const primaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.repositoryPath)
+    );
+    const secondaryRepository = snapshot.repositories.find(
+      (repository) => repository.name === path.basename(manifest.secondaryRepositoryPath)
+    );
+    expect(settings.selectedRepositoryId).toBe(primaryRepository?.id);
+    expect(primaryRepository?.path).toBe(await fs.realpath(manifest.repositoryPath));
+    expect(secondaryRepository?.path).toBe(await fs.realpath(manifest.secondaryRepositoryPath));
+    expect(secondaryRepository).toMatchObject({ status: 'AVAILABLE' });
     expect(await pathExists(manifest.manifestPath)).toBe(true);
     expect(await pathExists(manifest.envFilePath)).toBe(true);
     expect(manifest.env).toMatchObject({
       TASK_MANAGER_STORE_DIR: manifest.storeDir,
       TASK_MANAGER_APP_SETTINGS_PATH: manifest.appSettingsPath,
       TASK_MANAGER_REPO_PATH: manifest.repositoryPath,
-      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot
+      TASK_MANAGER_WORKTREE_ROOT: manifest.worktreeRoot,
+      TASK_MANAGER_PREVIEW_ROOT: manifest.previewRoot,
+      TASK_MANAGER_PREVIEW_RECONCILE: '0',
+      TASK_MANAGER_DETERMINISTIC_SEED: '1',
+      TASK_MANAGER_DEV_SEED_MODE: '1'
     });
+    expect(deterministicDevSeedProviderDisabledReason(manifest.env)).toBe(
+      DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON
+    );
+    expect(posixModeMatches(await fs.stat(manifest.envFilePath), 0o600)).toBe(true);
 
     expect(manifest.scenarios.map((scenario) => scenario.slug)).toEqual(
       DEV_SEED_SCENARIOS.map((scenario) => scenario.slug)
@@ -73,6 +103,55 @@ describe('Task Monki development seed data', () => {
       const task = taskForScenario(manifest, snapshot, scenario.slug);
       expect(task.title).toContain(`[seed:${scenario.slug}]`);
     }
+
+    expect(taskForScenario(manifest, snapshot, 'board-backlog').repositoryId).toBe(
+      secondaryRepository?.id
+    );
+    expect(snapshot.boards.map((board) => board.name)).toEqual([
+      'Review across repositories',
+      'Secondary repository'
+    ]);
+    expect(snapshot.boards.map((board) => board.color)).toEqual(['BLUE', 'VIOLET']);
+    const secondaryBoard = snapshot.boards.find(
+      (board) => board.name === 'Secondary repository'
+    );
+    expect(secondaryBoard?.repositoryIds).toEqual([secondaryRepository?.id]);
+    expect(selectBoardTasks(snapshot.tasks, secondaryBoard).map((task) => task.id)).toEqual([
+      taskForScenario(manifest, snapshot, 'board-backlog').id
+    ]);
+  });
+
+  it('seeds every native preview UI state without embedding runtime logs in the snapshot', () => {
+    const view = (slug: string) => {
+      const task = taskForScenario(manifest, snapshot, slug);
+      return buildPreviewViewModel({
+        task,
+        worktree: snapshot.worktrees.find((record) => record.id === task.currentWorktreeId),
+        plans: snapshot.previewPlans.filter((record) => record.taskId === task.id),
+        approvals: snapshot.previewApprovals.filter((record) => record.taskId === task.id),
+        generations: snapshot.previewGenerations.filter((record) => record.taskId === task.id),
+        attempts: snapshot.previewNodeAttempts.filter((record) => record.taskId === task.id)
+      });
+    };
+    expect(view('preview-missing-recipe').status).toBe('Not checked');
+    expect(view('preview-approval-required').status).toBe('Approval required');
+    expect(view('preview-active-approval-required').actions.map((action) => action.id)).toEqual([
+      'OPEN', 'APPROVE', 'STOP'
+    ]);
+    expect(view('preview-preparing').status).toBe('Starting');
+    expect(view('preview-ready').status).toBe('Running');
+    expect(view('preview-compose-ready')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-compose-recovery').summary).toContain('verified data volumes are preserved');
+    expect(view('preview-replacing').status).toBe('Replacing');
+    expect(view('preview-replacement-failed')).toMatchObject({ status: 'Running', tone: 'success' });
+    expect(view('preview-replacement-failed').summary).toContain('latest replacement did not reach readiness');
+    expect(view('preview-replacement-failed').summary).not.toContain('Candidate web service exited');
+    expect(view('preview-failed').status).toBe('Failed');
+    expect(view('preview-stale').status).toContain('stale');
+    expect(view('preview-stopped').status).toBe('Stopped');
+    expect(view('preview-recovery-required').status).toBe('Recovery required');
+    expect(view('preview-cleanup-incomplete').status).toBe('Cleanup incomplete');
+    expect(JSON.stringify(snapshot)).not.toContain('intentional seeded preview failure');
   });
 
   it('drives review, interaction, PR, and completion states from records and events', () => {
@@ -108,8 +187,12 @@ describe('Task Monki development seed data', () => {
       expect.arrayContaining([
         expect.objectContaining({ category: 'read', label: 'Read' }),
         expect.objectContaining({ category: 'edit', label: 'Edited' }),
-        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' }),
-        expect.objectContaining({ category: 'permission', label: 'Waiting', detail: 'for approval' })
+        expect.objectContaining({ category: 'verify', label: 'Ran', detail: 'npm run typecheck' })
+      ])
+    );
+    expect(approvalProgress?.activityTail).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ category: 'permission', label: 'Waiting' })
       ])
     );
 
@@ -119,8 +202,8 @@ describe('Task Monki development seed data', () => {
     );
     const runningReviewActivity = buildReviewActivityViewModel({
       reviewRun: runningReviewRun,
-      reviewRunning: runningReviewTask.projection.codexReview?.status === 'RUNNING',
-      useRunActivity: runningReviewTask.projection.codexReview?.status === 'RUNNING',
+      reviewRunning: runningReviewTask.projection.agentReview?.status === 'RUNNING',
+      useRunActivity: runningReviewTask.projection.agentReview?.status === 'RUNNING',
       items: snapshot.agentItems
     });
     expect(runningReviewActivity).toEqual({
@@ -197,7 +280,7 @@ describe('Task Monki development seed data', () => {
     ]);
 
     const reviewTask = taskForScenario(manifest, snapshot, 'review-needs-changes');
-    expect(reviewTask.projection.codexReview).toMatchObject({ status: 'NEEDS_CHANGES' });
+    expect(reviewTask.projection.agentReview).toMatchObject({ status: 'NEEDS_CHANGES' });
     expect(
       snapshot.runs.find((run) => run.taskId === reviewTask.id && run.mode === 'REVIEW')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -209,7 +292,7 @@ describe('Task Monki development seed data', () => {
 
     const staleReview = taskForScenario(manifest, snapshot, 'review-stale-after-follow-up');
     expect(staleReview.workflowPhase).toBe('REVIEW');
-    expect(staleReview.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(staleReview.projection.agentReview).toMatchObject({ status: 'STALE' });
     expect(
       snapshot.runs.find((run) => run.taskId === staleReview.id && run.mode === 'FOLLOW_UP')
     ).toMatchObject({ status: 'COMPLETED' });
@@ -217,7 +300,7 @@ describe('Task Monki development seed data', () => {
     const activeFollowUp = taskForScenario(manifest, snapshot, 'review-follow-up-active');
     expect(activeFollowUp.workflowPhase).toBe('IN_PROGRESS');
     expect(activeFollowUp.projection.agentRun).toBe('RUNNING');
-    expect(activeFollowUp.projection.codexReview).toMatchObject({ status: 'STALE' });
+    expect(activeFollowUp.projection.agentReview).toMatchObject({ status: 'STALE' });
 
     const failedChecks = prView(snapshot, taskForScenario(manifest, snapshot, 'delivery-checks-failed'));
     expect(failedChecks).toMatchObject({
@@ -292,6 +375,88 @@ describe('Task Monki development seed data', () => {
     expect(manualMerged.workflowPhase).not.toBe('DONE');
   });
 
+  it('preserves every seeded scenario during provider-inert restricted initialization', async () => {
+    const store = new FileTaskStore(manifest.storeDir);
+    const before = await store.snapshot();
+    const initialize = vi.fn(async () => undefined);
+    const adapter = {
+      descriptor: CODEX_RUNTIME_DESCRIPTOR,
+      initialize,
+      capabilities: vi.fn(async () => codexCapabilities()),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as AgentRuntimeAdapter;
+    const disabledReason =
+      'Codex is disabled while deterministic development seed scenarios are loaded.';
+    const service = new TaskManagerService(store, manifest.repositoryPath, undefined, {
+      appSettingsStore: new AppSettingsStore(manifest.appSettingsPath),
+      agentRuntimeAdapters: [adapter],
+      allowAgentNetworkAccess: false,
+      agentProviderStartupDisabledReason: disabledReason,
+      codexPath: path.join(rootDir, 'missing-codex')
+    });
+
+    await service.init();
+    try {
+      const after = await store.snapshot();
+      expect(initialize).not.toHaveBeenCalled();
+      await expect(service.getAgentRuntimeCatalog()).resolves.toMatchObject({
+        runtimes: [
+          {
+            preflight: {
+              readiness: {
+                status: 'DISABLED',
+                canStart: false,
+                detail: disabledReason
+              }
+            },
+            models: []
+          }
+        ],
+        models: []
+      });
+      expect(seedLifecycleSnapshot(after)).toEqual(seedLifecycleSnapshot(before));
+      expect({
+        tasks: after.tasks.length,
+        runs: after.runs.length,
+        worktrees: after.worktrees.length,
+        events: after.events.length
+      }).toEqual({
+        tasks: manifest.counts.tasks,
+        runs: manifest.counts.runs,
+        worktrees: manifest.counts.worktrees,
+        events: manifest.counts.events
+      });
+      for (const run of after.runs) {
+        expect(run.requestedSettings).toMatchObject({
+          sandbox: 'WORKSPACE_WRITE',
+          networkAccess: false,
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user'
+        });
+      }
+
+      const readyTask = taskForScenario(manifest, after, 'board-ready');
+      await expect(service.startRun({ taskId: readyTask.id })).rejects.toThrow(
+        disabledReason
+      );
+      const runningTask = taskForScenario(manifest, after, 'agent-running');
+      await expect(
+        service.cancelRun({ runId: runningTask.currentRunId! })
+      ).rejects.toThrow(disabledReason);
+      await expect(
+        service.refinePrompt({
+          repositoryId: before.repositories[0]!.id,
+          input: 'Do not start Codex from fixture mode.'
+        })
+      ).rejects.toThrow(disabledReason);
+      expect(seedLifecycleSnapshot(await store.snapshot())).toEqual(
+        seedLifecycleSnapshot(before)
+      );
+    } finally {
+      await service.shutdown();
+    }
+  });
+
   it('refuses to reset non-seed-owned non-empty directories', async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-dev-seed-safety-'));
     try {
@@ -305,6 +470,42 @@ describe('Task Monki development seed data', () => {
     }
   });
 });
+
+function seedLifecycleSnapshot(snapshot: TaskSnapshot) {
+  return {
+    tasks: snapshot.tasks.map((task) => ({
+      id: task.id,
+      currentRunId: task.currentRunId,
+      projection: task.projection
+    })),
+    runs: snapshot.runs.map((run) => ({
+      id: run.id,
+      status: run.status,
+      recoveryState: run.recoveryState,
+      terminalReason: run.terminalReason
+    })),
+    sessions: snapshot.agentSessions.map((session) => ({
+      id: session.id,
+      status: session.status,
+      requestedSettings: session.requestedSettings,
+      observedSettings: session.observedSettings
+    })),
+    interactions: snapshot.interactionRequests.map((interaction) => ({
+      id: interaction.id,
+      status: interaction.status,
+      resolution: interaction.resolution
+    })),
+    counts: {
+      tasks: snapshot.tasks.length,
+      runs: snapshot.runs.length,
+      worktrees: snapshot.worktrees.length,
+      events: snapshot.events.length,
+      sessions: snapshot.agentSessions.length,
+      interactions: snapshot.interactionRequests.length,
+      servers: snapshot.agentServers.length
+    }
+  };
+}
 
 function taskForScenario(manifest: DevSeedManifest, snapshot: TaskSnapshot, slug: string): Task {
   const scenario = manifest.scenarios.find((candidate) => candidate.slug === slug);
@@ -328,6 +529,15 @@ function prView(snapshot: TaskSnapshot, task: Task) {
     reviewRollup: selectLatestReviewRollup(snapshot, task),
     mergeSnapshot: selectLatestMergeSnapshot(snapshot, task)
   });
+}
+
+async function readStoreSnapshot(storeDir: string): Promise<TaskSnapshot> {
+  const store = new FileTaskStore(storeDir);
+  try {
+    return await store.snapshot();
+  } finally {
+    await store.close();
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

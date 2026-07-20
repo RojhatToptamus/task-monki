@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { OverviewActivityLeaf, OverviewActivityRow } from '../model/overviewRunActivity';
 
 interface RunActivityTimelineProps {
@@ -42,6 +43,7 @@ export function RunActivityTimeline({
 
 function ActivityRow({ row }: { row: OverviewActivityRow }) {
   const expandable = row.grouped && row.children && row.children.length > 0;
+  const [open, setOpen] = useState(Boolean(row.defaultOpen));
   const className = [
     'tm-run-activity__row',
     `tm-run-activity__row--${row.kind}`,
@@ -51,7 +53,11 @@ function ActivityRow({ row }: { row: OverviewActivityRow }) {
 
   if (expandable) {
     return (
-      <details className={className} open={row.defaultOpen}>
+      <details
+        className={className}
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
         <summary className="tm-run-activity__summary">
           <ActivityIcon icon={row.icon} />
           <ActivityCopy row={row} />

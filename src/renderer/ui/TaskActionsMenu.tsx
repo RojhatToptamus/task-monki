@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { OpenTargetRef } from '../../shared/contracts';
 import { OpenTargetMenuItems } from './OpenTargetMenu';
+import {
+  focusMenuItem,
+  handleMenuBlur,
+  handleMenuKeyDown,
+  menuTriggerFocusTarget,
+  type MenuFocusTarget
+} from './menuKeyboard';
 
 interface TaskActionsMenuProps {
   taskId: string;
@@ -22,59 +29,98 @@ export function TaskActionsMenu({
   className
 }: TaskActionsMenuProps) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const initialFocusRef = useRef<MenuFocusTarget>('first');
+  const hasOpenTarget = Boolean(openTarget);
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    const onPointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) {
-        setOpen(false);
+    const frame = window.requestAnimationFrame(() => {
+      if (hasOpenTarget && initialFocusRef.current === 'first') {
+        menuRef.current?.focus();
+      } else {
+        focusMenuItem(menuRef.current, initialFocusRef.current);
       }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+    });
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
         setOpen(false);
       }
     };
 
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
     return () => {
+      window.cancelAnimationFrame(frame);
       window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
     };
-  }, [open]);
+  }, [hasOpenTarget, open]);
 
   return (
-    <div className={`tm-taskmenu ${className ?? ''}`} ref={menuRef}>
+    <div className={`tm-taskmenu ${className ?? ''}`} ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className="tm-taskmenu__trigger"
         aria-label={`Task options for ${title}`}
         aria-haspopup="menu"
         aria-expanded={open}
         title="Task options"
+        onKeyDown={(event) => {
+          const target = menuTriggerFocusTarget(event.key);
+          if (!target) {
+            return;
+          }
+          event.preventDefault();
+          initialFocusRef.current = target;
+          if (open) {
+            focusMenuItem(menuRef.current, target);
+          } else {
+            setOpen(true);
+          }
+        }}
         onClick={(event) => {
           event.stopPropagation();
+          initialFocusRef.current = 'first';
           setOpen((current) => !current);
         }}
       >
         <KebabIcon />
       </button>
       {open ? (
-        <div className="tm-taskmenu__menu" role="menu">
+        <div
+          ref={menuRef}
+          className="tm-taskmenu__menu"
+          role="menu"
+          tabIndex={-1}
+          aria-label={`Task options for ${title}`}
+          onKeyDown={(event) =>
+            handleMenuKeyDown(event, {
+              onClose: () => setOpen(false),
+              returnFocus: triggerRef.current
+            })
+          }
+          onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
+        >
           {openTarget ? (
             <>
-              <OpenTargetMenuItems target={openTarget} onActionComplete={() => setOpen(false)} />
-              <div className="tm-pathmenu__separator" />
+              <OpenTargetMenuItems
+                target={openTarget}
+                onActionComplete={() => setOpen(false)}
+                autoFocusFirst
+              />
+              <div className="tm-pathmenu__separator" role="separator" />
             </>
           ) : null}
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             className="tm-taskmenu__item"
             disabled={archived}
             onClick={() => {
@@ -87,9 +133,11 @@ export function TaskActionsMenu({
           <button
             type="button"
             role="menuitem"
+            tabIndex={-1}
             className="tm-taskmenu__item tm-taskmenu__item--danger"
             onClick={() => {
               setOpen(false);
+              triggerRef.current?.focus();
               onRequestDelete(taskId);
             }}
           >

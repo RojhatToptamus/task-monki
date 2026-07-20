@@ -38,7 +38,7 @@ export class WorktreeService {
     task: Task,
     base: { baseRef?: string; baseSha: string }
   ): WorktreeSpec {
-    const branchName = `codex/task-${task.id.slice(0, 8)}-${slugify(task.title)}`;
+    const branchName = `task-monki/task-${task.id.slice(0, 8)}-${slugify(task.title)}`;
     return {
       branchName,
       worktreePath: path.join(this.rootDir, task.id),
@@ -47,14 +47,14 @@ export class WorktreeService {
     };
   }
 
-  async create(record: WorktreeRecord): Promise<WorktreeRecord> {
+  async create(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
     await fs.mkdir(path.dirname(record.worktreePath), { recursive: true });
 
     if (await pathExists(record.worktreePath)) {
-      return this.verify(record);
+      return this.verify(record, repositoryPath);
     }
 
-    const branchExists = await gitSucceeds(record.repositoryPath, [
+    const branchExists = await gitSucceeds(repositoryPath, [
       'show-ref',
       '--verify',
       '--quiet',
@@ -62,20 +62,20 @@ export class WorktreeService {
     ]);
 
     if (branchExists) {
-      await git(record.repositoryPath, ['worktree', 'add', record.worktreePath, record.branchName], 60_000);
+      await git(repositoryPath, ['worktree', 'add', record.worktreePath, record.branchName], 60_000);
     } else {
       await git(
-        record.repositoryPath,
+        repositoryPath,
         ['worktree', 'add', '-b', record.branchName, record.worktreePath, record.baseSha],
         60_000
       );
     }
 
-    return this.verify(record);
+    return this.verify(record, repositoryPath);
   }
 
-  async verify(record: WorktreeRecord): Promise<WorktreeRecord> {
-    const parsed = await listGitWorktrees(record.repositoryPath);
+  async verify(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    const parsed = await listGitWorktrees(repositoryPath);
     const expectedPath = await canonicalPath(record.worktreePath);
     const resolved = await Promise.all(
       parsed.map(async (candidate) => ({
@@ -104,14 +104,14 @@ export class WorktreeService {
     };
   }
 
-  async remove(record: WorktreeRecord): Promise<WorktreeRecord> {
-    const repositoryPath = await canonicalPath(record.repositoryPath);
+  async remove(record: WorktreeRecord, repositoryPath: string): Promise<WorktreeRecord> {
+    repositoryPath = await canonicalPath(repositoryPath);
     const worktreePath = await canonicalPath(record.worktreePath);
     if (repositoryPath === worktreePath) {
       throw new Error('Task Monki will not remove the original repository checkout.');
     }
 
-    const verified = await this.verify(record);
+    const verified = await this.verify(record, repositoryPath);
     if (verified.status === 'MISSING') {
       return {
         ...verified,
@@ -130,7 +130,7 @@ export class WorktreeService {
       );
     }
 
-    await git(record.repositoryPath, ['worktree', 'remove', record.worktreePath], 60_000);
+    await git(repositoryPath, ['worktree', 'remove', record.worktreePath], 60_000);
     return {
       ...verified,
       status: 'REMOVED',

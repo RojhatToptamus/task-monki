@@ -5,9 +5,9 @@ This file is the first stop for AI agents working in this repository.
 ## Project
 
 Task Monki is a local task board for running AI coding work in isolated Git
-worktrees. It delegates implementation to Codex App Server, while Task Monki
-keeps independent evidence for Git, tests, GitHub delivery, workflow state, and
-local acceptance.
+worktrees. It delegates implementation to first-class agent runtimes while Task
+Monki keeps independent evidence for Git, tests, GitHub delivery, workflow
+state, and local acceptance.
 
 ## Read Before Editing
 
@@ -16,11 +16,13 @@ local acceptance.
 - `docs/PRODUCT_WORKFLOW.md`
   - Product phases, action rules, and UI priorities.
 - `docs/APP_SERVER_ARCHITECTURE.md`
-  - App Server process model, records, adapter responsibilities, and recovery
-    rules.
+  - Codex-specific App Server process, protocol, and recovery rules.
+- `docs/architecture/AGENT_RUNTIME_ARCHITECTURE.md`
+  - Runtime registry, identity, provider capability, routing, and recovery
+    rules shared across integrations.
 - `DESIGN.md`
   - Frontend and design guidance for coherent Task Monki UI changes.
-- `docs/workflows/CODEX_REVIEW_WORKFLOW_LIFECYCLE.md`
+- `docs/workflows/AGENT_REVIEW_WORKFLOW_LIFECYCLE.md`
   - Required reading before changing review, request-changes, stale-review,
     follow-up, or interrupt behavior.
 - `docs/workflows/PR_STATUS_CARD_FLOW.md`
@@ -34,12 +36,12 @@ local acceptance.
 
 - Task Monki is authoritative for tasks, workflow phase, worktrees, Git state,
   test state, GitHub delivery state, and acceptance.
-- Codex is authoritative only for its own App Server, threads, turns, items,
-  approvals, plans, settings, models, and usage events.
+- Each agent runtime is authoritative only for its own processes, sessions,
+  turns, items, approvals, plans, settings, models, and usage events.
 - Provider output is telemetry, not verified evidence.
 - Local Git/test/GitHub checks must be observed by Task Monki before they affect
   workflow or delivery decisions.
-- A Codex review is a detached quality gate inside the Review phase.
+- An agent review is a detached quality gate inside the Review phase.
 - Requesting review changes starts follow-up implementation work and belongs in
   In Progress until that work finishes.
 - Stale review findings may be shown as context, but they must not be treated as

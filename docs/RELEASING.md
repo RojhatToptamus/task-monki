@@ -1,12 +1,12 @@
 # Releasing Task Monki
 
-Date: 2026-07-08
+Date: 2026-07-11
 
-Task Monki's MVP release channel uses unsigned artifacts attached to draft
-GitHub Releases. Trusted Developer ID code signing, notarization,
-package-manager publishing, and automatic updates are intentionally out of
-scope for this phase. macOS app bundles are ad-hoc signed only to preserve
-bundle integrity before DMG/ZIP packaging.
+Task Monki's current release channel uses unsigned artifacts attached to draft
+GitHub Releases. It does not use trusted Developer ID code signing,
+notarization, package-manager publishing, or automatic updates. macOS app
+bundles are ad-hoc signed only to preserve bundle integrity before DMG/ZIP
+packaging.
 
 ## Release Artifacts
 
@@ -46,6 +46,45 @@ Build an unpacked app for the current platform:
 npm run dist:dir
 ```
 
+After building the full release targets for the current platform, verify their
+archive signatures, expected architectures/names, update metadata, minimum
+sizes, compressed archive integrity, and native package payloads:
+
+```sh
+npm run verify:release-artifacts
+```
+
+The release workflow runs this structural verifier on each native platform
+before generating checksums or uploading artifacts. This catches truncated or
+malformed installers even when the packaging command itself exits successfully.
+On macOS it asks `hdiutil` to verify each DMG. On Linux it asks `dpkg-deb` to
+inspect the Debian package and extracts the AppImage without FUSE. ZIP and NSIS
+payloads are tested with the pinned 7-Zip binary used by the build toolchain.
+
+Also execute the unpacked Electron binary for the current operating system and
+CPU architecture:
+
+```sh
+npm run verify:packaged-runtime
+```
+
+The packaged-runtime check also inspects `app.asar`: the Electron main entry
+point must be present, while `dist-tools`, `dist-electron/dev`, and `src/dev`
+must be absent. Development seed, API, and provider-smoke programs compile to
+the ignored `dist-tools/` tree and are never part of a production package.
+
+This runs Electron in its supported Node mode and checks the reported Electron
+version, operating system, and architecture. The release workflow runs the
+same smoke test on native macOS, Windows, and Linux runners after packaging and
+before generating checksums or uploading artifacts. It proves that each runner
+can execute the packaged runtime; the manual renderer and workflow smoke test
+below still verifies the application UI and end-to-end behavior.
+
+Normal pull-request and `main` CI also builds an unpacked native package and
+runs this smoke test on macOS, Windows, and Linux. Keep the full release
+artifact verifier in the tag workflow because normal CI does not build the
+installers and archives.
+
 On macOS, verify the unpacked bundle and confirm generic resources do not carry
 detached code-signature extended attributes. Also confirm the root bundle is
 ad-hoc signed without Hardened Runtime:
@@ -80,18 +119,19 @@ signed as standalone code. The release build intentionally fails if those files
 receive detached `com.apple.cs.*` extended attributes again.
 
 The unsigned alpha macOS configuration also disables Hardened Runtime. Hardened
-Runtime is part of the future Developer ID signed and notarized path; combined
-with ad-hoc signing it can leave macOS-launched Electron builds stuck before
-helper processes start.
+Runtime belongs to a Developer ID signed and notarized release configuration;
+combined with ad-hoc signing it can leave macOS-launched Electron builds stuck
+before helper processes start.
 
 Smoke test only against a throwaway local Git repository:
 
 1. Launch the unpacked app.
 2. Confirm the renderer loads.
-3. Open Settings and confirm Git and Codex CLI report available tool status.
-4. Confirm Auto-detect shows resolved paths and live versions.
+3. Open Settings and confirm Git and at least one configured agent runtime are ready.
+4. Confirm the runtime catalog shows unavailable runtimes independently, with
+   resolved versions or actionable probe failures where supported.
 5. Confirm a custom invalid GitHub CLI path reports `gh` as unavailable without
-   blocking Git or Codex, then reset it to Auto-detect.
+   blocking Git or agent runtimes, then reset it to Auto-detect.
 6. Add the throwaway repository.
 7. Validate the repository.
 8. Create a smoke task and prepare a worktree.
@@ -191,18 +231,3 @@ Dock icon with no renderer window until the quarantine attribute is removed.
 Keep the platform artifact names clear and leave generated `.blockmap` and
 `latest-*.yml` assets attached for this alpha. They are normal electron-builder
 metadata, but they should not be presented as primary downloads in the notes.
-
-## Future Signed Release Work
-
-Add signing in a separate change from the unsigned MVP:
-
-- macOS: Developer ID Application certificate, hardened runtime, notarization,
-  stapling, and signing validation.
-- Windows: code-signing certificate or trusted signing service, plus timestamped
-  signatures.
-- CI: add signing secrets and set `forceCodeSigning: true` only after signed
-  builds are required.
-
-Automatic updates should also be a separate change. Use a prompted update flow,
-not forced restarts, because Task Monki can have active Codex App Server runs,
-Git operations, GitHub delivery operations, and local worktrees.

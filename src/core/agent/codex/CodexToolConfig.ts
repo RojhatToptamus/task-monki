@@ -4,6 +4,7 @@ import {
 } from '../../../shared/agent';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
 import { execFilePortable } from '../../process/portableChildProcess';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 const CODEX_MCP_LIST_TIMEOUT_MS = 5_000;
 
 interface CodexMcpServerListEntry {
@@ -33,6 +34,23 @@ export function normalizeCodexExternalToolSettings(
   };
 }
 
+export function assertCodexAttachmentExternalToolsDisabled(
+  settings: CodexExternalToolSettings | undefined,
+  hasAttachments: boolean
+): void {
+  if (!hasAttachments) return;
+  const normalized = normalizeCodexExternalToolSettings(settings);
+  if (
+    normalized.webSearchMode !== 'disabled' ||
+    normalized.mcpServers !== 'disabled' ||
+    normalized.apps !== 'disabled'
+  ) {
+    throw new Error(
+      'Attachments require Codex web search, MCP servers, and apps to be disabled.'
+    );
+  }
+}
+
 export function codexExternalToolConfigOverrides(
   settings: CodexExternalToolSettings = DEFAULT_CODEX_EXTERNAL_TOOL_SETTINGS
 ): string[] {
@@ -49,8 +67,19 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
   environment?: NodeJS.ProcessEnv;
   settings?: CodexExternalToolSettings;
   mcpServerConfigOverrides?: readonly string[];
+  failClosedMcpDiscovery?: boolean;
 }): Promise<string[]> {
   const normalized = normalizeCodexExternalToolSettings(input.settings);
+  if (
+    input.failClosedMcpDiscovery &&
+    (normalized.webSearchMode !== 'disabled' ||
+      normalized.mcpServers !== 'disabled' ||
+      normalized.apps !== 'disabled')
+  ) {
+    throw new Error(
+      'Codex external tools must all be disabled for the browser development boundary.'
+    );
+  }
   const overrides = codexExternalToolConfigOverrides(normalized);
   if (normalized.mcpServers === 'all') {
     return overrides;
@@ -66,10 +95,17 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
       ...(await listDisabledCodexMcpServerConfigOverrides(
         input.executable,
         input.cwd,
-        input.environment
+        input.environment,
+        { requireCompleteDiscovery: input.failClosedMcpDiscovery === true }
       ))
     ];
-  } catch {
+  } catch (error) {
+    if (input.failClosedMcpDiscovery) {
+      throw new Error(
+        'Codex MCP configuration could not be completely inspected and disabled for the browser development boundary.',
+        { cause: error }
+      );
+    }
     return overrides;
   }
 }
@@ -77,15 +113,19 @@ export async function resolveCodexExternalToolConfigOverrides(input: {
 export async function listDisabledCodexMcpServerConfigOverrides(
   executable: string,
   cwd: string,
-  environment?: NodeJS.ProcessEnv
+  environment?: NodeJS.ProcessEnv,
+  options: { requireCompleteDiscovery?: boolean } = {}
 ): Promise<string[]> {
   const { stdout } = await execFilePortable(executable, ['mcp', 'list', '--json'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: CODEX_MCP_LIST_TIMEOUT_MS,
     maxBuffer: 1024 * 1024
   });
-  return parseDisabledCodexMcpServerConfigOverrides(stdout);
+  return parseDisabledCodexMcpServerConfigOverrides(stdout, options);
 }
 
 export function parseEnabledCodexMcpServerNames(stdout: string): string[] {
@@ -94,23 +134,41 @@ export function parseEnabledCodexMcpServerNames(stdout: string): string[] {
     .filter((name): name is string => name !== undefined);
 }
 
-export function parseDisabledCodexMcpServerConfigOverrides(stdout: string): string[] {
+export function parseDisabledCodexMcpServerConfigOverrides(
+  stdout: string,
+  options: { requireCompleteDiscovery?: boolean } = {}
+): string[] {
   const payload = JSON.parse(stdout) as unknown;
   if (!Array.isArray(payload)) {
+    if (options.requireCompleteDiscovery) throw incompleteMcpDiscovery();
     return [];
   }
 
   const overrides = new Map<string, string>();
   for (const item of payload) {
     if (!item || typeof item !== 'object') {
+      if (options.requireCompleteDiscovery) throw incompleteMcpDiscovery();
       continue;
     }
-    const override = mcpDisableConfigOverride(item as CodexMcpServerListEntry);
+    const entry = item as CodexMcpServerListEntry;
+    if (entry.enabled !== true) {
+      if (options.requireCompleteDiscovery && entry.enabled !== false) {
+        throw incompleteMcpDiscovery();
+      }
+      continue;
+    }
+    const override = mcpDisableConfigOverride(entry);
     if (override) {
       overrides.set(override.name, override.config);
+    } else if (options.requireCompleteDiscovery) {
+      throw incompleteMcpDiscovery();
     }
   }
   return [...overrides.values()];
+}
+
+function incompleteMcpDiscovery(): Error {
+  return new Error('Codex reported an enabled MCP server that could not be disabled safely.');
 }
 
 function mcpDisableConfigOverride(

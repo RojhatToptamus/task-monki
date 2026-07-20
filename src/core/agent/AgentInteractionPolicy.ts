@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { realpathSync } from 'node:fs';
+import { isAgentProviderPermissionAction } from '../../shared/contracts';
 import type {
   AgentCommandApprovalDecision,
   AgentCommandApprovalRequest,
@@ -20,6 +21,7 @@ import type {
   InteractionRequestType,
   RunRecord
 } from '../../shared/contracts';
+import { isRedactedExternalPathReference } from './AgentPermissionRedaction';
 
 export interface AgentInteractionPolicy {
   allowedActions: AgentInteractionAction[];
@@ -32,6 +34,8 @@ export function buildInteractionPolicy(input: {
   session: AgentSessionRecord;
   run: RunRecord;
   providerItemPayload?: unknown;
+  /** Exact additional files allowed by the caller's policy. */
+  additionalReadOnlyPaths?: readonly string[];
 }): AgentInteractionPolicy {
   switch (input.type) {
     case 'COMMAND_APPROVAL':
@@ -50,7 +54,8 @@ export function buildInteractionPolicy(input: {
       return permissionPolicy(
         input.request as AgentPermissionApprovalRequest,
         input.session,
-        input.run
+        input.run,
+        input.additionalReadOnlyPaths
       );
     case 'MCP_ELICITATION':
       return {
@@ -70,7 +75,7 @@ export function buildInteractionPolicy(input: {
       return {
         allowedActions: ['ANSWER'],
         warnings: [
-          'User-input requests are experimental in the current Codex protocol.'
+          'User-input requests are runtime-controlled and may interrupt an active agent turn.'
         ]
       };
     }
@@ -86,7 +91,8 @@ export function validateInteractionDecision(
   interaction: InteractionRequestRecord,
   decision: AgentInteractionDecision,
   session: AgentSessionRecord,
-  run: RunRecord
+  run: RunRecord,
+  additionalReadOnlyPaths: readonly string[] = []
 ): void {
   if (decision.interactionType !== interaction.type) {
     throw new Error(
@@ -116,7 +122,8 @@ export function validateInteractionDecision(
         interaction.request as AgentPermissionApprovalRequest,
         decision as AgentPermissionApprovalDecision,
         session,
-        run
+        run,
+        additionalReadOnlyPaths
       );
       return;
     case 'MCP_ELICITATION':
@@ -141,7 +148,10 @@ export function validateInteractionDecision(
 export function interactionTerminalStatus(
   decision: AgentInteractionDecision
 ): InteractionRequestRecord['status'] {
-  if (decision.action === 'DECLINE') {
+  if (
+    decision.action === 'DECLINE' ||
+    decision.action === 'DECLINE_FOR_SESSION'
+  ) {
     return 'DECLINED';
   }
   if (decision.action === 'CANCEL') {
@@ -156,6 +166,12 @@ function commandPolicy(
   run: RunRecord
 ): AgentInteractionPolicy {
   const warnings: string[] = [];
+  if (
+    !request.command?.trim() &&
+    (!request.commandActions || request.commandActions.length === 0)
+  ) {
+    warnings.push('Task Monki could not verify the requested command.');
+  }
   if (request.cwd && !isAllowedWorkspacePath(session.worktreePath, request.cwd)) {
     warnings.push('The command working directory is outside the task worktree.');
   }
@@ -227,12 +243,14 @@ function fileChangePolicy(
 function permissionPolicy(
   request: AgentPermissionApprovalRequest,
   session: AgentSessionRecord,
-  run: RunRecord
+  run: RunRecord,
+  additionalReadOnlyPaths: readonly string[] = []
 ): AgentInteractionPolicy {
   const warnings = permissionPolicyWarnings(
     request.permissions,
     session.worktreePath,
-    run.requestedSettings.networkAccess === true
+    run.requestedSettings.networkAccess === true,
+    additionalReadOnlyPaths
   );
   const hasGrantablePermission = hasAnyPermission(request.permissions) && warnings.length === 0;
   return {
@@ -247,6 +265,36 @@ function validateCommandDecision(
   request: AgentCommandApprovalRequest,
   decision: AgentCommandApprovalDecision
 ): void {
+  const providerOptionId =
+    'providerOptionId' in decision ? decision.providerOptionId : undefined;
+  if (request.providerOptions !== undefined) {
+    if (decision.action === 'CANCEL') {
+      if (providerOptionId !== undefined) {
+        throw new Error('Cancellation cannot select a provider permission option.');
+      }
+    } else if (!isAgentProviderPermissionAction(decision.action)) {
+      throw new Error(
+        'A provider permission request accepts only an exact provider option or cancellation.'
+      );
+    } else {
+      if (!providerOptionId) {
+        throw new Error('A provider permission decision requires its exact option ID.');
+      }
+      const option = request.providerOptions.find(
+        (candidate) => candidate.id === providerOptionId
+      );
+      if (!option) {
+        throw new Error('The selected provider permission option is not part of this request.');
+      }
+      if (option.action !== decision.action) {
+        throw new Error(
+          'The selected provider permission option does not match the requested decision.'
+        );
+      }
+    }
+  } else if (providerOptionId !== undefined) {
+    throw new Error('This command approval request has no provider permission options.');
+  }
   if (decision.action === 'ACCEPT_EXEC_POLICY_AMENDMENT') {
     if (!deepEqual(decision.amendment, request.proposedExecPolicyAmendment)) {
       throw new Error('The execution-policy amendment does not match the provider proposal.');
@@ -267,7 +315,8 @@ function validatePermissionDecision(
   request: AgentPermissionApprovalRequest,
   decision: AgentPermissionApprovalDecision,
   session: AgentSessionRecord,
-  run: RunRecord
+  run: RunRecord,
+  additionalReadOnlyPaths: readonly string[]
 ): void {
   if (decision.action === 'DECLINE') {
     return;
@@ -278,7 +327,8 @@ function validatePermissionDecision(
   const warnings = permissionPolicyWarnings(
     decision.permissions,
     session.worktreePath,
-    run.requestedSettings.networkAccess === true
+    run.requestedSettings.networkAccess === true,
+    additionalReadOnlyPaths
   );
   if (warnings.length > 0) {
     throw new Error(warnings.join(' '));
@@ -331,25 +381,48 @@ function validateUserInputDecision(
 function permissionPolicyWarnings(
   permissions: AgentPermissionProfile,
   worktreePath: string,
-  networkAllowed: boolean
+  networkAllowed: boolean,
+  additionalReadOnlyPaths: readonly string[]
 ): string[] {
   const warnings: string[] = [];
   if (permissions.network?.enabled && !networkAllowed) {
     warnings.push('The task policy does not allow network access.');
   }
-  for (const candidate of permissionPaths(permissions)) {
-    if (!isAllowedWorkspacePath(worktreePath, candidate)) {
-      warnings.push(`Filesystem permission is outside the task worktree: ${candidate}`);
+  for (const candidate of permissions.fileSystem?.read ?? []) {
+    if (!isAllowedReadPath(worktreePath, candidate, additionalReadOnlyPaths)) {
+      warnings.push(
+        `Filesystem read permission is outside the task worktree and run attachments: ${candidate}`
+      );
     }
   }
-  if (
-    permissions.fileSystem?.entries?.some(
-      (entry) => !isConcretePathEntry(entry.path)
-    )
-  ) {
-    warnings.push('Non-path filesystem permission entries are not supported.');
+  for (const candidate of permissions.fileSystem?.write ?? []) {
+    if (!isAllowedWorkspacePath(worktreePath, candidate)) {
+      warnings.push(`Filesystem write permission is outside the task worktree: ${candidate}`);
+    }
   }
-  return warnings;
+  for (const entry of permissions.fileSystem?.entries ?? []) {
+    if (!isConcretePathEntry(entry.path)) {
+      warnings.push('Non-path filesystem permission entries are not supported.');
+      continue;
+    }
+    if (
+      (entry.access === 'read' || entry.access === 'deny') &&
+      !isAllowedReadPath(worktreePath, entry.path.path, additionalReadOnlyPaths)
+    ) {
+      warnings.push(
+        `Filesystem ${entry.access} permission is outside the task worktree and run attachments: ${entry.path.path}`
+      );
+    }
+    if (
+      entry.access === 'write' &&
+      !isAllowedWorkspacePath(worktreePath, entry.path.path)
+    ) {
+      warnings.push(
+        `Filesystem write permission is outside the task worktree: ${entry.path.path}`
+      );
+    }
+  }
+  return [...new Set(warnings)];
 }
 
 function isPermissionSubset(
@@ -472,24 +545,40 @@ function mcpAllowedValues(
   return undefined;
 }
 
-function permissionPaths(permissions: AgentPermissionProfile): string[] {
-  const paths = [
-    ...(permissions.fileSystem?.read ?? []),
-    ...(permissions.fileSystem?.write ?? [])
-  ];
-  for (const entry of permissions.fileSystem?.entries ?? []) {
-    if (isJsonObject(entry.path) && entry.path.type === 'path' && typeof entry.path.path === 'string') {
-      paths.push(entry.path.path);
-    }
-  }
-  return paths;
-}
-
-function isConcretePathEntry(value: AgentJsonValue): boolean {
+function isConcretePathEntry(
+  value: AgentJsonValue
+): value is { type: 'path'; path: string } {
   return (
     isJsonObject(value) &&
     value.type === 'path' &&
     typeof value.path === 'string'
+  );
+}
+
+function isAllowedReadPath(
+  worktreePath: string,
+  candidate: string,
+  additionalReadOnlyPaths: readonly string[]
+): boolean {
+  if (isRedactedExternalPathReference(candidate)) {
+    return false;
+  }
+  if (isAllowedWorkspacePath(worktreePath, candidate)) {
+    return true;
+  }
+  if (!path.isAbsolute(candidate)) {
+    return false;
+  }
+  const lexicalCandidate = path.resolve(candidate);
+  const resolved = canonicalPath(candidate);
+  if (!resolved) {
+    return false;
+  }
+  return additionalReadOnlyPaths.some(
+    (allowedPath) =>
+      path.isAbsolute(allowedPath) &&
+      path.resolve(allowedPath) === lexicalCandidate &&
+      canonicalPath(allowedPath) === resolved
   );
 }
 
@@ -504,9 +593,18 @@ function readFileChangePaths(payload: unknown): string[] {
 }
 
 function isAllowedWorkspacePath(worktreePath: string, candidate: string): boolean {
+  if (isRedactedExternalPathReference(candidate)) {
+    return false;
+  }
   const root = canonicalPath(worktreePath);
+  if (!root) {
+    return false;
+  }
   const resolvedCandidate = path.resolve(root, candidate);
   const resolved = canonicalPath(resolvedCandidate);
+  if (!resolved) {
+    return false;
+  }
   const relative = path.relative(root, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     return false;
@@ -515,11 +613,25 @@ function isAllowedWorkspacePath(worktreePath: string, candidate: string): boolea
   return !['.git', '.agents', '.codex'].includes(firstSegment);
 }
 
-function canonicalPath(candidate: string): string {
-  try {
-    return realpathSync.native(candidate);
-  } catch {
-    return path.resolve(candidate);
+function canonicalPath(candidate: string): string | undefined {
+  let current = path.resolve(candidate);
+  const missingSegments: string[] = [];
+
+  while (true) {
+    try {
+      return path.resolve(realpathSync.native(current), ...missingSegments);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        return undefined;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return undefined;
+      }
+      missingSegments.unshift(path.basename(current));
+      current = parent;
+    }
   }
 }
 

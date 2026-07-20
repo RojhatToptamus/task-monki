@@ -6,19 +6,74 @@ import type {
   AgentReviewTarget,
   AgentRetryStrategy,
   AgentRecoveryState,
+  AgentRuntimeId,
   AgentRunMode,
   AgentRunStatus,
   AgentServerInstance,
+  AgentSessionControlSet,
+  AgentSessionControlValue,
   AgentSessionRecord,
   AgentSettingsObservationRecord,
   AgentSubagentObservationRecord,
   AgentUsageSnapshotRecord,
   InteractionRequestRecord
 } from './agent';
+import type {
+  AcceptPreviewRecipeDraftRequest,
+  AcceptPreviewRecipeDraftResult,
+  ApprovePreviewPlanRequest,
+  DiscardPreviewRecipeDraftRequest,
+  DeletePreviewLocalAttachmentBindingRequest,
+  GeneratePreviewRecipeRequest,
+  GetPreviewRecipeGenerationRequest,
+  OpenPreviewRequest,
+  OpenPreviewResult,
+  PreviewApprovalRecord,
+  PreviewComposeProjectRecord,
+  PreviewGenerationRecord,
+  PreviewGenerationAttachmentRecord,
+  PreviewLocalAttachmentBindingRecord,
+  PreviewManagedEnvironmentRecord,
+  PreviewManagedResourceRecord,
+  PreviewNodeAttemptRecord,
+  PreviewPlanRecord,
+  PreviewRecipeGenerationSnapshot,
+  PreviewRecipeValidation,
+  PreviewResourceRecord,
+  ReadPreviewLogRequest,
+  ReadPreviewLogResult,
+  ResetPreviewDataRequest,
+  RetryPreviewSetupRequest,
+  ResolvePreviewRequest,
+  ResolvePreviewResult,
+  SetPreviewLocalAttachmentBindingRequest,
+  StartPreviewRequest,
+  StopPreviewRequest,
+  ValidatePreviewRecipeDraftRequest
+} from './preview';
+import type {
+  AttachmentContent,
+  AttachmentSubmissionRecord,
+  AttachmentDraftSnapshot,
+  ClipboardAttachmentImage,
+  DiscardTaskAttachmentDraftRequest,
+  ReadTaskAttachmentRequest,
+  StageTaskAttachmentBatchRequest,
+  TaskAttachmentRecord
+} from './attachments';
 
 export * from './agent';
+export * from './attachments';
+export * from './preview';
 
-export const TASK_STORE_SCHEMA_VERSION = 9 as const;
+export const TASK_STORE_SCHEMA_VERSION = 19 as const;
+
+const TASK_CREATION_TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
+
+/** Opaque renderer-generated idempotency key for task creation retries. */
+export function isTaskCreationToken(value: unknown): value is string {
+  return typeof value === 'string' && TASK_CREATION_TOKEN.test(value);
+}
 
 export type WorkflowPhase =
   | 'BACKLOG'
@@ -112,7 +167,7 @@ export type ProcessStatus =
   | 'ORPHANED'
   | 'UNKNOWN';
 
-export type RepositoryPreflightStatus = 'VALID' | 'INVALID' | 'UNKNOWN';
+export type RepositoryPreflightStatus = 'VALID' | 'MISSING' | 'INVALID' | 'UNKNOWN';
 
 export type ArtifactStatus = 'NONE' | 'FINAL_MESSAGE_PRESENT' | 'MISSING';
 
@@ -205,7 +260,7 @@ export type ReviewStatus =
   | 'STALE'
   | 'UNKNOWN';
 
-export type CodexReviewGateStatus =
+export type AgentReviewGateStatus =
   | 'NOT_RUN'
   | 'RUNNING'
   | 'PASSED'
@@ -215,11 +270,11 @@ export type CodexReviewGateStatus =
   | 'CANCELED'
   | 'STALE';
 
-export type CodexReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
+export type AgentReviewFindingSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR' | 'NIT';
 
-export interface CodexReviewFinding {
+export interface AgentReviewFinding {
   id: string;
-  severity: CodexReviewFindingSeverity;
+  severity: AgentReviewFindingSeverity;
   title: string;
   explanation: string;
   path?: string;
@@ -228,15 +283,16 @@ export interface CodexReviewFinding {
   recommendation?: string;
 }
 
-export interface CodexReviewResult {
-  schemaVersion: 'codex-review/v1';
+export interface AgentReviewResult {
+  /** Durable schema-13 wire value for provider-neutral review artifacts. */
+  schemaVersion: 'agent-review/v1';
   verdict: 'PASSED' | 'NEEDS_CHANGES' | 'INCONCLUSIVE';
   summary: string;
-  findings: CodexReviewFinding[];
+  findings: AgentReviewFinding[];
 }
 
-export interface CodexReviewGateProjection {
-  status: CodexReviewGateStatus;
+export interface AgentReviewGateProjection {
+  status: AgentReviewGateStatus;
   runId?: string;
   sourceRunId?: string;
   reviewedGitSnapshotId?: string;
@@ -244,7 +300,7 @@ export interface CodexReviewGateProjection {
   reviewedDirtyFingerprint?: string;
   finalArtifactId?: string;
   summary?: string;
-  result?: CodexReviewResult;
+  result?: AgentReviewResult;
   updatedAt?: string;
 }
 
@@ -259,71 +315,88 @@ export type MergeStatus =
   | 'CLOSED_UNMERGED'
   | 'UNKNOWN';
 
-export type DomainEventType =
-  | 'TASK_CREATED'
-  | 'TASK_ALTERNATIVE_CREATED'
-  | 'TASK_ITERATION_CREATED'
-  | 'TRANSITION_REQUESTED'
-  | 'TRANSITION_COMPLETED'
-  | 'TRANSITION_BLOCKED'
-  | 'WORKTREE_CREATE_REQUESTED'
-  | 'WORKTREE_CREATED'
-  | 'WORKTREE_VERIFIED'
-  | 'WORKTREE_FAILED'
-  | 'GIT_SNAPSHOT_CAPTURED'
-  | 'DELIVERY_COMMIT_CREATED'
-  | 'DIFF_ARTIFACT_CREATED'
-  | 'PROMPT_REFINED'
-  | 'GITHUB_PREFLIGHT_COMPLETED'
-  | 'BRANCH_PUBLISH_REQUESTED'
-  | 'BRANCH_PUBLISHED'
-  | 'BRANCH_PUBLISH_FAILED'
-  | 'PR_CREATE_REQUESTED'
-  | 'PR_BODY_ARTIFACT_CREATED'
-  | 'PR_SNAPSHOT_CAPTURED'
-  | 'CI_ROLLUP_CAPTURED'
-  | 'REVIEW_ROLLUP_CAPTURED'
-  | 'MERGE_SNAPSHOT_CAPTURED'
-  | 'GITHUB_SYNC_FAILED'
-  | 'PROCESS_STARTED'
-  | 'AGENT_SESSION_CREATED'
-  | 'AGENT_RUN_STARTED'
-  | 'AGENT_ACTIVITY_RECEIVED'
-  | 'AGENT_GOAL_UPDATED'
-  | 'AGENT_GOAL_CLEARED'
-  | 'AGENT_GOAL_SYNC_FAILED'
-  | 'AGENT_PLAN_REVISED'
-  | 'AGENT_USAGE_UPDATED'
-  | 'AGENT_SETTINGS_OBSERVED'
-  | 'AGENT_SUBAGENT_DISCOVERED'
-  | 'AGENT_SUBAGENT_UPDATED'
-  | 'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED'
-  | 'AGENT_PROTOCOL_INCIDENT'
-  | 'AGENT_ITEM_UPDATED'
-  | 'AGENT_INTERACTION_REQUESTED'
-  | 'AGENT_INTERACTION_RESOLVED'
-  | 'AGENT_RUN_COMPLETED'
-  | 'AGENT_RUN_FAILED'
-  | 'AGENT_RUN_INTERRUPTED'
-  | 'AGENT_MUTATION_AMBIGUOUS'
-  | 'AGENT_REVIEW_POLICY_VIOLATION'
-  | 'AGENT_RUNTIME_LOST'
-  | 'AGENT_RUNTIME_RECONCILED'
-  | 'PROCESS_EXITED'
-  | 'PROCESS_SIGNALED'
-  | 'CANCEL_REQUESTED'
-  | 'ARTIFACT_CREATED'
-  | 'PROJECTION_UPDATED'
-  | 'REPOSITORY_PREFLIGHT_COMPLETED';
+export const DOMAIN_EVENT_TYPES = [
+  'TASK_CREATED',
+  'TASK_ALTERNATIVE_CREATED',
+  'TASK_ITERATION_CREATED',
+  'TRANSITION_REQUESTED',
+  'TRANSITION_COMPLETED',
+  'TRANSITION_BLOCKED',
+  'WORKTREE_CREATE_REQUESTED',
+  'WORKTREE_CREATED',
+  'WORKTREE_VERIFIED',
+  'WORKTREE_FAILED',
+  'GIT_SNAPSHOT_CAPTURED',
+  'DELIVERY_COMMIT_CREATED',
+  'DIFF_ARTIFACT_CREATED',
+  'PROMPT_REFINED',
+  'GITHUB_PREFLIGHT_COMPLETED',
+  'BRANCH_PUBLISH_REQUESTED',
+  'BRANCH_PUBLISHED',
+  'BRANCH_PUBLISH_FAILED',
+  'PR_CREATE_REQUESTED',
+  'PR_BODY_ARTIFACT_CREATED',
+  'PR_SNAPSHOT_CAPTURED',
+  'CI_ROLLUP_CAPTURED',
+  'REVIEW_ROLLUP_CAPTURED',
+  'MERGE_SNAPSHOT_CAPTURED',
+  'GITHUB_SYNC_FAILED',
+  'PROCESS_STARTED',
+  'AGENT_SESSION_CREATED',
+  'AGENT_RUN_STARTED',
+  'AGENT_ACTIVITY_RECEIVED',
+  'AGENT_GOAL_UPDATED',
+  'AGENT_GOAL_CLEARED',
+  'AGENT_GOAL_SYNC_FAILED',
+  'AGENT_PLAN_REVISED',
+  'AGENT_USAGE_UPDATED',
+  'AGENT_SETTINGS_OBSERVED',
+  'AGENT_SUBAGENT_DISCOVERED',
+  'AGENT_SUBAGENT_UPDATED',
+  'AGENT_SUBAGENT_RELATIONSHIP_UNRESOLVED',
+  'AGENT_PROTOCOL_INCIDENT',
+  'AGENT_ITEM_UPDATED',
+  'AGENT_INTERACTION_REQUESTED',
+  'AGENT_INTERACTION_RESOLVED',
+  'AGENT_RUN_COMPLETED',
+  'AGENT_RUN_FAILED',
+  'AGENT_RUN_INTERRUPTED',
+  'IMPLEMENTATION_OUTCOME_BLOCKED',
+  'AGENT_MUTATION_AMBIGUOUS',
+  'AGENT_REVIEW_POLICY_VIOLATION',
+  'AGENT_RUNTIME_LOST',
+  'AGENT_RUNTIME_RECONCILED',
+  'PROCESS_EXITED',
+  'PROCESS_SIGNALED',
+  'CANCEL_REQUESTED',
+  'ARTIFACT_CREATED',
+  'PROJECTION_UPDATED',
+  'REPOSITORY_PREFLIGHT_COMPLETED',
+  'PREVIEW_PLAN_RESOLVED',
+  'PREVIEW_PLAN_APPROVED',
+  'PREVIEW_GENERATION_CREATED',
+  'PREVIEW_GENERATION_UPDATED',
+  'PREVIEW_NODE_UPDATED',
+  'PREVIEW_RESOURCE_UPDATED',
+  'PREVIEW_RECONCILED'
+] as const;
 
-export type ArtifactKind =
-  | 'agent-prompt'
-  | 'agent-output'
-  | 'agent-diagnostics'
-  | 'agent-final'
-  | 'diff'
-  | 'git-snapshot'
-  | 'pr-body';
+export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
+
+export const ARTIFACT_KINDS = [
+  'agent-prompt',
+  'agent-output',
+  'agent-diagnostics',
+  'agent-final',
+  'diff',
+  'git-snapshot',
+  'pr-body',
+  'preview-source-manifest',
+  'preview-stdout',
+  'preview-stderr'
+] as const;
+
+export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 export interface Finding {
   id: string;
@@ -349,23 +422,39 @@ export interface StatusProjection {
   ciChecks: CiChecksStatus;
   reviews: ReviewStatus;
   /**
-   * Local Codex diff-review gate. This is intentionally separate from
-   * GitHub PR review rollups above and is additive for older local stores.
+   * Local agent diff-review gate, independent from GitHub PR reviews.
    */
-  codexReview?: CodexReviewGateProjection;
+  agentReview?: AgentReviewGateProjection;
   merge: MergeStatus;
   artifact: ArtifactStatus;
   health: HealthStatus;
   summary: string;
+  /**
+   * Task Monki-owned outcome for a provider-completed implementation that
+   * cannot advance until replacement implementation work starts.
+   */
+  implementationRetry?: {
+    runId: string;
+    reason: string;
+  };
   findings: Finding[];
   updatedAt: string;
 }
 
 export interface Task {
   id: string;
+  /** Immutable agent-runtime binding for this task. */
+  runtimeId: AgentRuntimeId;
   title: string;
   prompt: string;
-  repositoryPath: string;
+  repositoryId: string;
+  /**
+   * Present only for tasks created through an idempotent client request.
+   * Internally-created alternatives intentionally omit it.
+   */
+  creationToken?: string;
+  /** SHA-256 of the normalized request paired with `creationToken`. */
+  creationRequestFingerprint?: string;
   workflowPhase: WorkflowPhase;
   resolution: Resolution;
   completionPolicy: CompletionPolicy;
@@ -401,7 +490,7 @@ export interface WorktreeRecord {
   id: string;
   taskId: string;
   iterationId: string;
-  repositoryPath: string;
+  repositoryId: string;
   worktreePath: string;
   branchName: string;
   baseRef?: string;
@@ -447,6 +536,8 @@ export interface GitSnapshotRecord {
 
 export interface RunRecord {
   id: string;
+  /** Copied from the owning session so recovery never depends on a default runtime. */
+  runtimeId: AgentRuntimeId;
   taskId: string;
   iterationId: string;
   worktreeId: string;
@@ -478,6 +569,7 @@ export interface RunRecord {
   eventCount: number;
   lastEventType?: string;
   finalMessage?: string;
+  attachmentSubmissions?: AttachmentSubmissionRecord[];
 }
 
 export interface GitHubRepositoryRecord {
@@ -600,6 +692,8 @@ export interface DomainEvent {
   agentItemId?: string;
   interactionRequestId?: string;
   worktreeId?: string;
+  previewPlanId?: string;
+  previewGenerationId?: string;
   source:
     | 'ui'
     | 'provider'
@@ -609,7 +703,8 @@ export interface DomainEvent {
     | 'projection'
     | 'git'
     | 'github'
-    | 'prompt';
+    | 'prompt'
+    | 'preview';
   sourceEventId: string;
   occurredAt: string;
   receivedAt: string;
@@ -627,8 +722,79 @@ export interface RepositoryPreflight {
   checkedAt: string;
 }
 
+export type RepositoryStatus = 'AVAILABLE' | 'MISSING' | 'INVALID' | 'DISCONNECTED';
+
+/** Durable repository identity. The filesystem path is mutable connection metadata. */
+export interface Repository {
+  id: string;
+  name: string;
+  path: string;
+  status: RepositoryStatus;
+  headSha?: string;
+  branch?: string;
+  remotes: RepositoryPreflight['remotes'];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  checkedAt?: string;
+}
+
+export interface RepositoryImpact {
+  repositoryId: string;
+  taskCount: number;
+  activeRunCount: number;
+  worktreeCount: number;
+  openPullRequestCount: number;
+  blockingReason?: string;
+}
+
+/** A saved filter over authoritative tasks; boards never own task membership. */
+export const BOARD_COLORS = [
+  'NEUTRAL',
+  'BLUE',
+  'AMBER',
+  'GREEN',
+  'ROSE',
+  'VIOLET'
+] as const;
+
+export type BoardColor = (typeof BOARD_COLORS)[number];
+
+export interface Board {
+  id: string;
+  name: string;
+  color: BoardColor;
+  repositoryIds: string[];
+  workflowPhases: WorkflowPhase[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateBoardRequest {
+  name: string;
+  color: BoardColor;
+  repositoryIds: string[];
+  workflowPhases: WorkflowPhase[];
+}
+
+export interface UpdateBoardRequest extends CreateBoardRequest {
+  boardId: string;
+}
+
+export interface DisconnectRepositoryRequest {
+  repositoryId: string;
+  confirmed: boolean;
+}
+
+export interface ReconnectRepositoryRequest {
+  repositoryId: string;
+  path: string;
+}
+
 export interface TaskSnapshot {
   schemaVersion: typeof TASK_STORE_SCHEMA_VERSION;
+  repositories: Repository[];
+  boards: Board[];
   tasks: Task[];
   iterations: TaskIteration[];
   worktrees: WorktreeRecord[];
@@ -649,16 +815,31 @@ export interface TaskSnapshot {
   agentSettingsObservations: AgentSettingsObservationRecord[];
   agentSubagentObservations: AgentSubagentObservationRecord[];
   interactionRequests: InteractionRequestRecord[];
+  previewPlans: PreviewPlanRecord[];
+  previewApprovals: PreviewApprovalRecord[];
+  previewComposeProjects: PreviewComposeProjectRecord[];
+  previewGenerations: PreviewGenerationRecord[];
+  previewManagedEnvironments: PreviewManagedEnvironmentRecord[];
+  previewManagedResources: PreviewManagedResourceRecord[];
+  previewGenerationAttachments: PreviewGenerationAttachmentRecord[];
+  previewLocalBindings: PreviewLocalAttachmentBindingRecord[];
+  previewNodeAttempts: PreviewNodeAttemptRecord[];
+  previewResources: PreviewResourceRecord[];
   events: DomainEvent[];
   artifacts: ArtifactRecord[];
+  attachments: TaskAttachmentRecord[];
 }
 
 export interface CreateTaskRequest {
   title: string;
   prompt: string;
-  repositoryPath: string;
+  repositoryId: string;
+  /** Stable across retries of one logical create action. */
+  creationToken?: string;
   completionPolicy?: CompletionPolicy;
+  runtimeId?: AgentRuntimeId;
   agentSettings?: AgentExecutionSettings;
+  attachmentDraftId?: string;
 }
 
 export interface StartRunRequest {
@@ -702,6 +883,23 @@ export interface StartReviewRequest {
 export interface SyncAgentGoalRequest {
   taskId: string;
   sessionId: string;
+}
+
+export interface UpdateAgentNativeSessionRequest {
+  taskId: string;
+  sessionId: string;
+  runtimeId: AgentRuntimeId;
+  controlId: string;
+  value: AgentSessionControlValue;
+  revision: string;
+}
+
+export interface UpdateAgentNativeSessionResult {
+  taskId: string;
+  sessionId: string;
+  runtimeId: AgentRuntimeId;
+  native: import('./agent').AgentJsonValue;
+  controls: AgentSessionControlSet;
 }
 
 export interface RespondToInteractionRequest {
@@ -752,9 +950,11 @@ export interface ProtocolMessageRecord {
 }
 
 export interface RefinePromptRequest {
-  repositoryPath: string;
+  repositoryId: string;
   input: string;
+  runtimeId?: AgentRuntimeId;
   model?: string;
+  modelProvider?: import('./agent').AgentModelProviderId;
 }
 
 export interface RefinePromptResponse {
@@ -768,14 +968,23 @@ export interface UpdateAppSettingsRequest {
   sidebarCollapsed?: boolean;
   showMascot?: boolean;
   firstLaunchSetupCompleted?: boolean;
+  disabledRuntimeIds?: import('./agent').AgentRuntimeId[];
+  defaultRuntimeId?: import('./agent').AgentRuntimeId;
   defaultModel?: string | null;
+  defaultModelProvider?: import('./agent').AgentModelProviderId | null;
   defaultReasoningEffort?: string | null;
   promptRefinementModel?: string | null;
+  promptRefinementRuntimeId?: import('./agent').AgentRuntimeId | null;
+  promptRefinementModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewModel?: string | null;
+  reviewRuntimeId?: import('./agent').AgentRuntimeId | null;
+  reviewModelProvider?: import('./agent').AgentModelProviderId | null;
   reviewReasoningEffort?: string | null;
   codexExternalTools?: Partial<import('./agent').CodexExternalToolSettings>;
   externalExecutables?: Partial<import('./agent').ExternalExecutablePathSettings>;
-  repositories?: Partial<import('./agent').TaskManagerRepositorySettings>;
+  runtimeExecutablePaths?: Record<import('./agent').AgentRuntimeId, string | null>;
+  selectedRepositoryId?: string | null;
+  previewGateway?: Partial<import('./agent').PreviewGatewaySettings>;
 }
 
 export type ExternalToolId = 'git' | 'codex' | 'gh';
@@ -826,7 +1035,7 @@ export interface OpenTargetDetectedApp {
 export type OpenTargetRef =
   | {
       type: 'repository';
-      repositoryPath: string;
+      repositoryId: string;
     }
   | {
       type: 'worktree';
@@ -908,26 +1117,39 @@ export interface AppUpdateEvent {
     | 'run.diagnostic'
     | 'run.terminal'
     | 'interaction.updated'
+    | 'repository.updated'
+    | 'board.updated'
+    | 'board.deleted'
     | 'worktree.updated'
     | 'git.updated'
     | 'github.updated'
     | 'prompt.refined'
-    | 'provider.updated'
+    | 'runtime.updated'
     | 'projection.updated'
     | 'finding.updated'
+    | 'preview.updated'
+    | 'preview.recipe-generation.updated'
+    | 'preview.log.updated'
     | 'task.deleted';
   taskId: string;
   iterationId?: string;
   runId?: string;
   worktreeId?: string;
+  previewGenerationId?: string;
   payload: unknown;
   at: string;
 }
 
 export interface TaskManagerApi {
-  getDefaultRepositoryPath(): Promise<string>;
   chooseRepositoryFolder(): Promise<string | undefined>;
-  validateRepository(path: string): Promise<RepositoryPreflight>;
+  addRepository(path: string): Promise<Repository>;
+  getRepositoryImpact(repositoryId: string): Promise<RepositoryImpact>;
+  disconnectRepository(input: DisconnectRepositoryRequest): Promise<Repository>;
+  reconnectRepository(input: ReconnectRepositoryRequest): Promise<Repository>;
+  refreshRepository(repositoryId: string): Promise<Repository>;
+  createBoard(input: CreateBoardRequest): Promise<Board>;
+  updateBoard(input: UpdateBoardRequest): Promise<Board>;
+  deleteBoard(boardId: string): Promise<void>;
   getAppSettings(): Promise<import('./agent').TaskManagerAppSettings>;
   updateAppSettings(
     input: UpdateAppSettingsRequest
@@ -938,8 +1160,18 @@ export interface TaskManagerApi {
   executeOpenTargetAction(
     input: ExecuteOpenTargetActionRequest
   ): Promise<OpenTargetActionResult>;
-  getAgentProviderState(): Promise<import('./agent').AgentProviderState>;
+  getAgentRuntimeCatalog(): Promise<import('./agent').AgentRuntimeCatalog>;
+  discoverAgentRuntimeModels(
+    runtimeId: import('./agent').AgentRuntimeId
+  ): Promise<import('./agent').AgentRuntimeState>;
+  updateAgentNativeSession(
+    input: UpdateAgentNativeSessionRequest
+  ): Promise<UpdateAgentNativeSessionResult>;
   listTasks(): Promise<TaskSnapshot>;
+  stageTaskAttachmentBatch(input: StageTaskAttachmentBatchRequest): Promise<AttachmentDraftSnapshot>;
+  discardTaskAttachmentDraft(input: DiscardTaskAttachmentDraftRequest): Promise<void>;
+  readTaskAttachment(input: ReadTaskAttachmentRequest): Promise<AttachmentContent>;
+  readClipboardImage(): Promise<ClipboardAttachmentImage | undefined>;
   createTask(input: CreateTaskRequest): Promise<Task>;
   refinePrompt(input: RefinePromptRequest): Promise<RefinePromptResponse>;
   prepareWorktree(input: PrepareWorktreeRequest): Promise<WorktreeRecord>;
@@ -959,6 +1191,35 @@ export interface TaskManagerApi {
   publishBranch(input: PublishBranchRequest): Promise<BranchPublicationRecord>;
   createPullRequest(input: CreatePullRequestRequest): Promise<PullRequestSnapshotRecord>;
   refreshGitHub(input: RefreshGitHubRequest): Promise<PullRequestSnapshotRecord | undefined>;
+  resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult>;
+  getPreviewRecipeGeneration(
+    input: GetPreviewRecipeGenerationRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  generatePreviewRecipe(
+    input: GeneratePreviewRecipeRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  validatePreviewRecipeDraft(
+    input: ValidatePreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeValidation>;
+  acceptPreviewRecipeDraft(
+    input: AcceptPreviewRecipeDraftRequest
+  ): Promise<AcceptPreviewRecipeDraftResult>;
+  discardPreviewRecipeDraft(
+    input: DiscardPreviewRecipeDraftRequest
+  ): Promise<PreviewRecipeGenerationSnapshot>;
+  approvePreviewPlan(input: ApprovePreviewPlanRequest): Promise<PreviewApprovalRecord>;
+  startPreview(input: StartPreviewRequest): Promise<PreviewGenerationRecord>;
+  stopPreview(input: StopPreviewRequest): Promise<PreviewGenerationRecord>;
+  openPreview(input: OpenPreviewRequest): Promise<OpenPreviewResult>;
+  readPreviewLog(input: ReadPreviewLogRequest): Promise<ReadPreviewLogResult>;
+  resetPreviewData(input: ResetPreviewDataRequest): Promise<PreviewGenerationRecord>;
+  retryPreviewSetup(input: RetryPreviewSetupRequest): Promise<PreviewGenerationRecord>;
+  setPreviewLocalAttachmentBinding(
+    input: SetPreviewLocalAttachmentBindingRequest
+  ): Promise<PreviewLocalAttachmentBindingRecord>;
+  deletePreviewLocalAttachmentBinding(
+    input: DeletePreviewLocalAttachmentBindingRequest
+  ): Promise<void>;
   transitionTask(input: TransitionTaskRequest): Promise<Task>;
   deleteTask(input: DeleteTaskRequest): Promise<DeleteTaskResult>;
   readArtifact(input: ReadArtifactRequest): Promise<string>;
@@ -981,7 +1242,7 @@ export function createInitialProjection(now: string): StatusProjection {
     githubPullRequest: 'UNLINKED',
     ciChecks: 'NOT_APPLICABLE',
     reviews: 'NOT_APPLICABLE',
-    codexReview: { status: 'NOT_RUN' },
+    agentReview: { status: 'NOT_RUN' },
     merge: 'NOT_APPLICABLE',
     artifact: 'NONE',
     health: 'INFO',
@@ -989,4 +1250,14 @@ export function createInitialProjection(now: string): StatusProjection {
     findings: [],
     updatedAt: now
   };
+}
+
+export function getImplementationRetryReason(
+  task: Pick<Task, 'currentRunId' | 'projection'>
+): string | undefined {
+  const retry = task.projection.implementationRetry;
+  if (!retry || retry.runId !== task.currentRunId) {
+    return undefined;
+  }
+  return retry.reason;
 }

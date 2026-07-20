@@ -4,11 +4,18 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { sanitizeEnvironment } from '../../process/ProcessSupervisor';
-import { execFilePortable, spawnPortable } from '../../process/portableChildProcess';
+import {
+  execFilePortable,
+  isPortableProcessTreeRunning,
+  spawnPortable,
+  terminatePortableProcessTree,
+  waitForPortableProcessTreeExit
+} from '../../process/portableChildProcess';
 import {
   compareCodexVersions,
   parseCodexVersionOutput
 } from './CodexRuntimeVersion';
+import { CODEX_ENVIRONMENT_POLICY } from './CodexEnvironmentPolicy';
 
 export const TASK_MONKI_CODEX_BIN_ENV = 'TASK_MONKI_CODEX_BIN';
 
@@ -240,6 +247,15 @@ export async function probeCodexRuntime(
         detail: `Codex App Server is missing required methods: ${capabilityResult.missingMethods.join(', ')}.`
       };
     }
+    if (capabilityResult.incompatible) {
+      return {
+        candidate,
+        compatible: false,
+        version,
+        launch,
+        detail: capabilityResult.detail
+      };
+    }
   }
 
   return {
@@ -257,7 +273,10 @@ export async function probeCodexVersion(
 ): Promise<string> {
   const { stdout } = await execFilePortable(executable, ['--version'], {
     cwd,
-    env: sanitizeEnvironment(environment ?? process.env),
+    env: sanitizeEnvironment(
+      environment ?? process.env,
+      CODEX_ENVIRONMENT_POLICY.allowedKeys
+    ),
     timeout: 10_000,
     maxBuffer: 1024 * 1024
   });
@@ -320,17 +339,21 @@ async function probeJsonRpcCapabilities(
       ok: false;
       detail: string;
       missingMethods?: TaskMonkiCodexAppServerMethod[];
+      incompatible?: boolean;
     }
 > {
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-codex-probe-'));
   const child = spawnPortable(executable, launch.argv, {
     cwd: options.cwd,
     env: {
-      ...sanitizeEnvironment(options.environment ?? process.env),
+      ...sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       CODEX_HOME: codexHome
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-    detached: false
+    detached: process.platform !== 'win32'
   }) as ChildProcessWithoutNullStreams;
 
   let stderr = '';
@@ -421,11 +444,23 @@ async function probeJsonRpcCapabilities(
     notify('initialized', {});
 
     const missingMethods: TaskMonkiCodexAppServerMethod[] = [];
+    let permissionProfileProblem: string | undefined;
     await Promise.all(
       TASK_MONKI_REQUIRED_CODEX_APP_SERVER_METHODS.map(async (method) => {
-        const response = await request(method, capabilityProbeParams(method));
-        if (response.error && isMethodNotFound(response.error)) {
-          missingMethods.push(method);
+        const response = await request(
+          method,
+          capabilityProbeParams(method, options.cwd)
+        );
+        if (response.error) {
+          if (isMethodNotFound(response.error)) {
+            missingMethods.push(method);
+          } else if (method === 'thread/start') {
+            permissionProfileProblem = `Codex permission-profile probe failed: ${
+              response.error.message ?? 'unknown error'
+            }`;
+          }
+        } else if (method === 'thread/start') {
+          permissionProfileProblem = permissionProfileProbeProblem(response.result, options.cwd);
         }
       })
     );
@@ -438,6 +473,13 @@ async function probeJsonRpcCapabilities(
         missingMethods
       };
     }
+    if (permissionProfileProblem) {
+      return {
+        ok: false,
+        detail: permissionProfileProblem,
+        incompatible: true
+      };
+    }
     return { ok: true };
   } catch (error) {
     return {
@@ -447,18 +489,30 @@ async function probeJsonRpcCapabilities(
   } finally {
     reader.close();
     child.stdin.destroy();
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill('SIGTERM');
-      if (!(await waitForClose(child, 1_000))) {
-        child.kill('SIGKILL');
+    let cleanupFailure: unknown;
+    try {
+      if (isPortableProcessTreeRunning(child)) {
+        await terminatePortableProcessTree(child, 'SIGTERM');
+        if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+          await terminatePortableProcessTree(child, 'SIGKILL');
+          if (!(await waitForPortableProcessTreeExit(child, 1_000))) {
+            throw new Error(
+              `Codex capability probe process ${child.pid ?? '<unknown>'} did not exit after SIGKILL.`
+            );
+          }
+        }
       }
+    } catch (cause) {
+      cleanupFailure = cause;
     }
     await fs.rm(codexHome, { recursive: true, force: true });
+    if (cleanupFailure) throw cleanupFailure;
   }
 }
 
 function capabilityProbeParams(
-  method: TaskMonkiCodexAppServerMethod
+  method: TaskMonkiCodexAppServerMethod,
+  cwd: string
 ): Record<string, unknown> {
   switch (method) {
     case 'account/read':
@@ -467,7 +521,21 @@ function capabilityProbeParams(
       return { cursor: null, limit: 1, includeHidden: false };
     case 'thread/start':
       return {
-        model: '__task_monki_capability_probe_invalid_model__',
+        cwd,
+        config: {
+          default_permissions: 'task_monki_capability_probe',
+          permissions: {
+            task_monki_capability_probe: {
+              filesystem: { ':minimal': 'read', [cwd]: 'read' },
+              network: { enabled: false }
+            }
+          },
+          features: {
+            multi_agent: false,
+            multi_agent_v2: false,
+            memories: false
+          }
+        },
         ephemeral: true
       };
     case 'thread/resume':
@@ -500,6 +568,30 @@ function capabilityProbeParams(
   }
 }
 
+function permissionProfileProbeProblem(result: unknown, cwd: string): string | undefined {
+  if (!result || typeof result !== 'object') {
+    return 'Codex did not return permission-profile evidence for the compatibility probe.';
+  }
+  const response = result as {
+    activePermissionProfile?: { id?: unknown; extends?: unknown } | null;
+    runtimeWorkspaceRoots?: unknown;
+  };
+  if (
+    response.activePermissionProfile?.id !== 'task_monki_capability_probe' ||
+    response.activePermissionProfile.extends != null
+  ) {
+    return 'Codex did not activate the requested Task Monki permission profile.';
+  }
+  if (
+    !Array.isArray(response.runtimeWorkspaceRoots) ||
+    response.runtimeWorkspaceRoots.length !== 1 ||
+    response.runtimeWorkspaceRoots[0] !== cwd
+  ) {
+    return 'Codex did not attest the requested Task Monki runtime workspace root.';
+  }
+  return undefined;
+}
+
 function isMethodNotFound(error: { code?: number; message?: string }): boolean {
   return (
     error.code === -32601 ||
@@ -523,7 +615,10 @@ async function execFileText(
   try {
     const { stdout, stderr } = await execFilePortable(executable, argv, {
       cwd: options.cwd,
-      env: sanitizeEnvironment(options.environment ?? process.env),
+      env: sanitizeEnvironment(
+        options.environment ?? process.env,
+        CODEX_ENVIRONMENT_POLICY.allowedKeys
+      ),
       timeout: 10_000,
       maxBuffer: 1024 * 1024
     });
@@ -697,25 +792,5 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once('spawn', resolve);
     child.once('error', reject);
-  });
-}
-
-function waitForClose(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number
-): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve(true);
-  }
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off('close', onClose);
-      resolve(false);
-    }, timeoutMs);
-    const onClose = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once('close', onClose);
   });
 }

@@ -1,3 +1,4 @@
+import { createRef } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { TaskActivityPanel, formatTaskActivityTimestamp } from './TaskActivityPanel';
@@ -59,6 +60,54 @@ describe('Activity Timeline timestamp formatting', () => {
     expect(html).not.toContain('<summary>Details</summary>');
   });
 
+  it('shows only the latest Overview item and accounts for bounded and hidden history', () => {
+    const html = renderToStaticMarkup(
+      <TaskActivityPanel
+        variant="overview"
+        onViewAll={() => {}}
+        view={{
+          hiddenCount: 2,
+          totalCount: 4,
+          items: [
+            {
+              id: 'older',
+              at: '2026-07-02T10:04:00.000Z',
+              actor: 'Task Monki',
+              title: 'Worktree ready',
+              tone: 'success',
+              category: 'workflow'
+            },
+            {
+              id: 'latest',
+              at: '2026-07-02T10:05:00.000Z',
+              actor: 'Review',
+              title: 'Completed',
+              tone: 'action',
+              category: 'review'
+            }
+          ]
+        }}
+      />
+    );
+
+    expect(html).toContain('<h3 class="tm-panel__title">Activity</h3>');
+    expect(html).toContain('Completed');
+    expect(html).not.toContain('Worktree ready');
+    expect(html).toContain('3 earlier items');
+    expect(html).toContain('View full activity');
+  });
+
+  it('omits the Overview activity surface when there are no items', () => {
+    const html = renderToStaticMarkup(
+      <TaskActivityPanel
+        variant="overview"
+        view={{ hiddenCount: 0, totalCount: 0, items: [] }}
+      />
+    );
+
+    expect(html).toBe('');
+  });
+
   it('renders debug task activity with the same evidence rows and a separate raw audit', () => {
     const html = renderToStaticMarkup(
       <TaskActivityPanel
@@ -112,5 +161,18 @@ describe('Activity Timeline timestamp formatting', () => {
     expect(html).toContain('Full event audit · 2 events');
     expect(html).toContain('Task created');
     expect(html).toContain('Checks synced');
+  });
+
+  it('makes the Debug activity region programmatically focusable when a focus target is supplied', () => {
+    const html = renderToStaticMarkup(
+      <TaskActivityPanel
+        variant="debug"
+        rootRef={createRef<HTMLElement>()}
+        view={{ hiddenCount: 0, totalCount: 0, items: [] }}
+      />
+    );
+
+    expect(html).toContain('aria-label="Task activity"');
+    expect(html).toContain('tabindex="-1"');
   });
 });

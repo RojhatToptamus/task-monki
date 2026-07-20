@@ -1,7 +1,8 @@
 import type {
-  CodexReviewFinding,
-  CodexReviewGateStatus,
+  AgentReviewFinding,
+  AgentReviewGateStatus,
   MergeStatus,
+  Repository,
   Task,
   VerifiedChecksEvidence,
   WorkflowPhase
@@ -9,8 +10,10 @@ import type {
 import {
   completionPolicyRequiresMerge,
   completionPolicyRequiresPassingChecks,
+  getImplementationRetryReason,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
+import { isImplementationOutcomeBlocked } from '../model/nextAction';
 import {
   canCreateDeliveryCommit,
   formatShortId
@@ -35,18 +38,53 @@ export interface CardEvidenceItem {
 
 export interface TaskCardVM {
   id: string;
-  num: string;
   title: string;
   meta?: string;
   /** Lineage cue for a forked task, e.g. "fork of #task-rev"; undefined otherwise. */
   lineage?: string;
-  repositoryPath: string;
+  repositoryId: string;
   stateLabel: string;
   stateTone: Tone;
   showState: boolean;
   archived: boolean;
-  hasDecision: boolean;
   evidence: CardEvidenceItem[];
+}
+
+export interface RunFailureBannerViewModel {
+  status: 'FAILED' | 'LOST' | 'RECOVERY_REQUIRED' | 'NEEDS_RETRY';
+  title: string;
+  detail: string;
+}
+
+export function describeRunFailureBanner(
+  task: Task
+): RunFailureBannerViewModel | undefined {
+  if (isImplementationOutcomeBlocked(task)) {
+    return {
+      status: 'NEEDS_RETRY',
+      title: 'Implementation needs another pass',
+      detail:
+        getImplementationRetryReason(task) ??
+        'Retry or continue this implementation before review.'
+    };
+  }
+  switch (task.projection.agentRun) {
+    case 'FAILED':
+      return {
+        status: 'FAILED',
+        title: 'The agent run failed',
+        detail: `${task.projection.summary} Retry in this session or continue from the current worktree.`
+      };
+    case 'LOST':
+    case 'RECOVERY_REQUIRED':
+      return {
+        status: task.projection.agentRun,
+        title: 'Task Monki cannot prove the final provider state',
+        detail: task.projection.summary
+      };
+    default:
+      return undefined;
+  }
 }
 
 export interface TaskCardOptions {
@@ -62,6 +100,12 @@ export interface TaskCardOptions {
    * the Review queue where that count is the signal engineers scan for.
    */
   showReviewCount?: boolean;
+  repositoryName?: string;
+}
+
+export interface TaskCardRepositoryIdentity {
+  showRepo: boolean;
+  repositoryName: string;
 }
 
 export interface FinishEvidenceWarning {
@@ -111,14 +155,18 @@ export function describeTaskState(task: Task): { label: string; tone: Tone } {
   }
 
   const attention = describeTaskAttention(task);
-  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+  if (
+    attention &&
+    (reviewAttentionShouldWin(task.projection.agentRun) ||
+      isImplementationOutcomeBlocked(task))
+  ) {
     return {
       label: attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
     };
   }
 
-  const review = codexReviewGate(task);
+  const review = taskReviewGate(task);
   if (REVIEW_PHASES.includes(task.workflowPhase) || review.status === 'RUNNING') {
     switch (review.status) {
       case 'RUNNING':
@@ -180,7 +228,11 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
   }
 
   const attention = describeTaskAttention(task);
-  if (attention && reviewAttentionShouldWin(task.projection.agentRun)) {
+  if (
+    attention &&
+    (reviewAttentionShouldWin(task.projection.agentRun) ||
+      isImplementationOutcomeBlocked(task))
+  ) {
     return {
       label: attention.label,
       tone: attention.tone === 'error' ? 'error' : 'action'
@@ -208,12 +260,12 @@ export function describeTaskHeaderState(task: Task): { label: string; tone: Tone
   return { label: humanizeEnum(task.workflowPhase), tone: 'neutral' };
 }
 
-export function codexReviewGate(task: Task): NonNullable<Task['projection']['codexReview']> {
-  return task.projection.codexReview ?? { status: 'NOT_RUN' };
+export function taskReviewGate(task: Task): NonNullable<Task['projection']['agentReview']> {
+  return task.projection.agentReview ?? { status: 'NOT_RUN' };
 }
 
-export function canRequestCodexReviewChanges(
-  review: NonNullable<Task['projection']['codexReview']>,
+export function canRequestReviewChanges(
+  review: NonNullable<Task['projection']['agentReview']>,
   effectiveStatus = review.status,
   hasReviewOutput = Boolean(review.result)
 ): boolean {
@@ -228,7 +280,7 @@ export function canRequestCodexReviewChanges(
 
 export function getFinishEvidenceState(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -258,7 +310,7 @@ export function getFinishEvidenceState(
 
 export function finishRequirementsForTask(
   task: Task,
-  reviewStatus: CodexReviewGateStatus = codexReviewGate(task).status,
+  reviewStatus: AgentReviewGateStatus = taskReviewGate(task).status,
   dirtyFileCount?: number,
   mergeStatus: MergeStatus = task.projection.merge,
   ciStatus: Task['projection']['ciChecks'] = task.projection.ciChecks,
@@ -279,7 +331,7 @@ export function finishRequirementsForTask(
 
 export function finishActionsForTask(input: {
   task: Task;
-  reviewStatus: CodexReviewGateStatus;
+  reviewStatus: AgentReviewGateStatus;
   finishEvidence: FinishEvidenceState;
   actionBusy?: boolean;
   actionsPaused?: boolean;
@@ -345,7 +397,7 @@ const REVIEW_FEEDBACK_RUNS = new Set<Task['projection']['agentRun']>([
 ]);
 
 function isFixingReviewFeedback(task: Task): boolean {
-  const review = codexReviewGate(task);
+  const review = taskReviewGate(task);
   return (
     task.workflowPhase === 'IN_PROGRESS' &&
     REVIEW_FEEDBACK_RUNS.has(task.projection.agentRun) &&
@@ -355,38 +407,38 @@ function isFixingReviewFeedback(task: Task): boolean {
 }
 
 function reviewFinishWarning(
-  status: CodexReviewGateStatus
+  status: AgentReviewGateStatus
 ): FinishEvidenceWarning | undefined {
   if (status === 'PASSED') {
     return undefined;
   }
   if (status === 'STALE') {
     return {
-      title: 'Codex review is stale.',
+      title: 'Review is stale.',
       detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   if (status === 'NEEDS_CHANGES') {
     return {
-      title: 'Codex review requested changes.',
+      title: 'Review requested changes.',
       detail: 'Request changes or mark the current result done as an owner override.'
     };
   }
   if (status === 'RUNNING') {
     return {
-      title: 'Codex review is running.',
+      title: 'Review is running.',
       detail: 'Wait for the review to finish before marking done cleanly.'
     };
   }
   if (status === 'FAILED' || status === 'INCONCLUSIVE' || status === 'CANCELED') {
     return {
-      title: `Codex review is ${humanizeEnum(status).toLowerCase()}.`,
+      title: `Review is ${humanizeEnum(status).toLowerCase()}.`,
       detail: 'Run review again before marking done cleanly, or mark done anyway.'
     };
   }
   return {
-    title: 'No passing Codex review is recorded.',
-    detail: 'Run Codex review before marking done cleanly, or mark done anyway.'
+    title: 'No passing review is recorded.',
+    detail: 'Run review before marking done cleanly, or mark done anyway.'
   };
 }
 
@@ -468,9 +520,13 @@ function verificationFinishBlocker(
 }
 
 function reviewAttentionShouldWin(agentRun: Task['projection']['agentRun']): boolean {
-  return ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT', 'RECOVERY_REQUIRED', 'LOST'].includes(
-    agentRun
-  );
+  return [
+    'AWAITING_APPROVAL',
+    'AWAITING_USER_INPUT',
+    'FAILED',
+    'RECOVERY_REQUIRED',
+    'LOST'
+  ].includes(agentRun);
 }
 
 export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
@@ -485,7 +541,7 @@ export function evidenceLineForTask(task: Task): CardEvidenceItem[] {
 }
 
 const FINDING_SEVERITY_LABELS: Array<{
-  severity: CodexReviewFinding['severity'];
+  severity: AgentReviewFinding['severity'];
   singular: string;
 }> = [
   { severity: 'BLOCKER', singular: 'blocker' },
@@ -500,7 +556,7 @@ const FINDING_SEVERITY_LABELS: Array<{
  * Returns undefined when there is no recorded review result with findings.
  */
 export function reviewFindingCountLabel(task: Task): string | undefined {
-  const findings = codexReviewGate(task).result?.findings;
+  const findings = taskReviewGate(task).result?.findings;
   if (!findings || findings.length === 0) {
     return undefined;
   }
@@ -513,7 +569,7 @@ export function reviewFindingCountLabel(task: Task): string | undefined {
 
 /** The most salient severity tone across a task's review findings. */
 export function reviewFindingTone(task: Task): Tone {
-  const findings = codexReviewGate(task).result?.findings ?? [];
+  const findings = taskReviewGate(task).result?.findings ?? [];
   if (findings.some((finding) => finding.severity === 'BLOCKER')) {
     return 'error';
   }
@@ -551,16 +607,9 @@ function deliveryLineTone(task: Task): Tone {
   return 'neutral';
 }
 
-export function taskMeta(task: Task): string {
-  return repositoryName(task.repositoryPath);
-}
-
 export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): TaskCardVM {
   const { showRepo = true, columnKey, showReviewCount = false } = options;
   const state = describeTaskState(task);
-  const hasDecision = ['AWAITING_APPROVAL', 'AWAITING_USER_INPUT'].includes(
-    task.projection.agentRun
-  );
   const evidence = evidenceLineForTask(task);
   if (showReviewCount) {
     const findingLabel = reviewFindingCountLabel(task);
@@ -571,18 +620,16 @@ export function buildTaskCardVM(task: Task, options: TaskCardOptions = {}): Task
   }
   return {
     id: task.id,
-    num: `#${formatShortId(task.id)}`,
     title: task.title,
-    meta: showRepo ? taskMeta(task) : undefined,
+    meta: showRepo ? options.repositoryName : undefined,
     lineage: task.forkedFromTaskId
       ? `fork of #${formatShortId(task.forkedFromTaskId)}`
       : undefined,
-    repositoryPath: task.repositoryPath,
+    repositoryId: task.repositoryId,
     stateLabel: state.label,
     stateTone: state.tone,
     showState: !stateRestatesColumn(state.label, columnKey),
     archived: task.workflowPhase === 'ARCHIVED',
-    hasDecision,
     evidence
   };
 }
@@ -599,6 +646,9 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
   if (columnKey === 'done') {
     return stateLabel === 'Done';
   }
+  if (columnKey === 'progress') {
+    return stateLabel === 'In progress';
+  }
   return false;
 }
 
@@ -606,7 +656,7 @@ function stateRestatesColumn(stateLabel: string, columnKey: string | undefined):
 export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
   const seen = new Set<string>();
   for (const task of tasks) {
-    seen.add(task.repositoryPath);
+    seen.add(task.repositoryId);
     if (seen.size > 1) {
       return true;
     }
@@ -614,7 +664,34 @@ export function tasksSpanMultipleRepositories(tasks: Task[]): boolean {
   return false;
 }
 
-function reviewRequirement(status: CodexReviewGateStatus): FinishRequirement {
+/** Resolve repository card copy per task so an orphaned repository is never silently hidden. */
+export function selectTaskCardRepositoryIdentity(
+  repositoryId: string,
+  repositories: ReadonlyMap<string, Pick<Repository, 'name' | 'status'>>,
+  showRepositoryForView: boolean
+): TaskCardRepositoryIdentity {
+  const repository = repositories.get(repositoryId);
+  return {
+    showRepo: showRepositoryForView || repository?.status !== 'AVAILABLE',
+    repositoryName: repository?.name ?? 'Missing repository'
+  };
+}
+
+/** Inbox rows need repository identity only when it distinguishes a task or its repository is missing. */
+export function shouldShowInboxRepository(
+  tasks: Task[],
+  repositories: Pick<Repository, 'id' | 'status'>[]
+): boolean {
+  const repositoryStatuses = new Map(
+    repositories.map((repository) => [repository.id, repository.status])
+  );
+  return (
+    tasksSpanMultipleRepositories(tasks) ||
+    tasks.some((task) => repositoryStatuses.get(task.repositoryId) !== 'AVAILABLE')
+  );
+}
+
+function reviewRequirement(status: AgentReviewGateStatus): FinishRequirement {
   switch (status) {
     case 'PASSED':
       return { label: 'Review', detail: 'passed', tone: 'success', unresolved: false };
@@ -731,10 +808,6 @@ function checksRequirement(
   };
 }
 
-export function repositoryName(repositoryPath: string): string {
-  const parts = repositoryPath.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? repositoryPath;
-}
 
 export type NavView = 'inbox' | 'board' | 'active' | 'review' | 'done' | 'settings';
 
@@ -801,5 +874,5 @@ export function columnTasks(tasks: Task[], column: BoardColumnDef): Task[] {
 }
 
 function isReviewQueueTask(task: Task): boolean {
-  return REVIEW_PHASES.includes(task.workflowPhase) || codexReviewGate(task).status === 'RUNNING';
+  return REVIEW_PHASES.includes(task.workflowPhase) || taskReviewGate(task).status === 'RUNNING';
 }

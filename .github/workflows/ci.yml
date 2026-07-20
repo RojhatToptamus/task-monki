@@ -8,7 +8,18 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: Verify ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            os: macos-latest
+          - platform: Linux
+            os: ubuntu-latest
+          - platform: Windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,3 +31,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Build unpacked native package
+        run: npm exec electron-builder -- --dir
+      - name: Smoke test packaged runtime
+        run: npm run verify:packaged-runtime

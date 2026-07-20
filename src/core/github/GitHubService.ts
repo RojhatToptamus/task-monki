@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import type {
   BranchPublicationRecord,
   CiChecksStatus,
@@ -136,10 +135,9 @@ export class GitHubService {
   }
 
   async createOrFindDraftPullRequest(input: {
-    task: Task;
     worktree: WorktreeRecord;
     baseRef?: string;
-    bodyFilePath: string;
+    body: string;
     title: string;
   }): Promise<GitHubPrSync> {
     const existing = await this.findOpenPullRequest(input.worktree);
@@ -155,14 +153,16 @@ export class GitHubService {
         '--title',
         input.title,
         '--body-file',
-        input.bodyFilePath,
+        '-',
         '--base',
         input.baseRef ?? input.worktree.baseRef ?? 'main',
         '--head',
         input.worktree.branchName
       ],
       input.worktree.worktreePath,
-      120_000
+      120_000,
+      [],
+      input.body
     );
 
     const url = createResult.stdout.trim().split(/\s+/).find((value) => value.startsWith('http'));
@@ -209,46 +209,49 @@ export class GitHubService {
     );
   }
 
-  async writePullRequestBody(input: {
-    filePath: string;
+  buildPullRequestBody(input: {
     task: Task;
     gitDiffStat?: string;
     agentSummary?: string;
-  }): Promise<string> {
-    const body = [
+  }): string {
+    return [
       `## Summary`,
       '',
       input.task.prompt.trim().slice(0, 1200),
       '',
       '## Local evidence',
       '',
-      `- Diff stat: ${input.gitDiffStat?.trim() || 'No diff stat captured.'}`,
+      `- Diff stat: ${input.gitDiffStat?.trim().slice(0, 4000) || 'No diff stat captured.'}`,
       '',
       '## Agent summary',
       '',
-      input.agentSummary?.trim() || 'No agent final summary captured.',
+      input.agentSummary?.trim().slice(0, 8000) || 'No agent final summary captured.',
       '',
       '## Delivery note',
       '',
       'Created by Task Monki as a draft PR. Merge remains a human/GitHub decision.',
       ''
     ].join('\n');
-    await fs.writeFile(input.filePath, body, 'utf8');
-    return body;
   }
 
   private async exec(
     argv: string[],
     cwd: string,
     timeout = 30_000,
-    allowedExitCodes: number[] = []
+    allowedExitCodes: number[] = [],
+    stdin?: string | Buffer
   ): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFilePortable(this.ghExecutable, argv, {
-        cwd,
-        timeout,
-        maxBuffer: 20 * 1024 * 1024
-      });
+      const { stdout, stderr } = await execFilePortable(
+        this.ghExecutable,
+        argv,
+        {
+          cwd,
+          timeout,
+          maxBuffer: 20 * 1024 * 1024
+        },
+        stdin
+      );
       return { stdout, stderr };
     } catch (error) {
       const execError = error as ExecError;
