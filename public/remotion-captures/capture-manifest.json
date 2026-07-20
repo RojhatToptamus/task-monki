@@ -1,0 +1,1404 @@
+{
+  "schemaVersion": 1,
+  "runId": "showcase-1784541990960",
+  "capturedAt": "2026-07-20T10:06:30.960Z",
+  "viewport": {
+    "width": 1920,
+    "height": 1080,
+    "deviceScaleFactor": 1
+  },
+  "task": {
+    "id": "showcase-atlas-launch-dashboard",
+    "title": "Build Atlas launch operations dashboard",
+    "repository": "Atlas Web",
+    "branch": "task-monki/launch-dashboard-preview"
+  },
+  "provenance": {
+    "gitRevision": "f5e43052beb3915436e3d90d2630a9c90546166a",
+    "dirtyStateSha256": "301a5aaa468267e3df25322ac6dc95a71613aa3634e808795093b201c45ae979",
+    "sceneSpecSha256": "b53662c598e060595fb8be91f833e5f981a6f9d0a74770e85999aa3883343cdb",
+    "renderer": {
+      "origin": "http://127.0.0.1:43110",
+      "pid": 40648
+    },
+    "api": {
+      "origin": "http://127.0.0.1:43099",
+      "pid": 42355
+    },
+    "preview": {
+      "origin": "http://127.0.0.1:43130",
+      "pid": 40647,
+      "repositoryPath": "/private/tmp/task-monki-showcase-preview-repo",
+      "baseSha": "9fced6cbeb9bd4ed3c40167d873c43c4c6bc3cf2",
+      "implementationSha": "0bd1c4df2fc4169e2c902ebf2184f751fa52fd18",
+      "finalSha": "87032a9daaf95157cfae232d0252061a37608dd8",
+      "testCommand": "node --test dashboard.test.mjs",
+      "testSummary": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0
+      },
+      "testOutputSha256": "261bc5ad93e50e5c883d88f2e27acd6c0c4822b7a8f8e3ca87a7246a44836711"
+    }
+  },
+  "scenes": [
+    {
+      "id": "board",
+      "image": "01-multi-repository-board.png",
+      "sourceKind": "task-monki",
+      "sha256": "ffa6d5a17e8b7b7e2abdccf5b5acda35c1d53ecc7e4520b111ada553e3fddf98",
+      "byteCount": 63076,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "New task repository",
+        "selector": "button[aria-label^=\"New task repository:\"]",
+        "rect": {
+          "x": 10,
+          "y": 1023,
+          "width": 191,
+          "height": 45
+        },
+        "point": {
+          "x": 105.5,
+          "y": 1045.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Task Monki",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "repository-menu",
+      "image": "02-repository-menu.png",
+      "sourceKind": "task-monki",
+      "sha256": "db943dff4cac0e18d608dbccabc4fc5698689e864dc55d542fd344e7be8be864",
+      "byteCount": 82270,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Atlas Web",
+        "selector": "button[role=\"menuitemradio\"]",
+        "text": "Atlas Web",
+        "rect": {
+          "x": 17,
+          "y": 871,
+          "width": 322,
+          "height": 52
+        },
+        "point": {
+          "x": 178,
+          "y": 897
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Atlas Web…/Code/atlas-web",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "atlas-selected",
+      "image": "03-atlas-repository-selected.png",
+      "sourceKind": "task-monki",
+      "sha256": "fbe0ef46276951d8d0813553eb106da31dabbfbe679a320d0862bc0792df3ef1",
+      "byteCount": 63307,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "+ New task",
+        "selector": "button",
+        "text": "+ New task",
+        "rect": {
+          "x": 1810.078125,
+          "y": 10.5,
+          "width": 93.921875,
+          "height": 30
+        },
+        "point": {
+          "x": 1857.0390625,
+          "y": 25.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "+ New task",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "composer",
+      "image": "04-new-task-canvas.png",
+      "sourceKind": "task-monki",
+      "sha256": "7fa6ff3746988c19681d744dfa84c4be1ea58d70225fe6f5a1c0c52f19763bd9",
+      "byteCount": 55930,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "fill",
+        "label": "Task description",
+        "selector": "#task-description",
+        "rect": {
+          "x": 1426,
+          "y": 261,
+          "width": 460,
+          "height": 280
+        },
+        "point": {
+          "x": 1656,
+          "y": 401
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "textarea",
+          "text": "",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "rough-request",
+      "image": "05-rough-request.png",
+      "sourceKind": "task-monki",
+      "sha256": "4b12aa778574e88c061f7371cbc74fc9a94a9d30eb3be8bcde5e1f3b993738b8",
+      "byteCount": 70392,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Refine",
+        "selector": ".field__refine",
+        "rect": {
+          "x": 1831.484375,
+          "y": 238,
+          "width": 55.515625,
+          "height": 15
+        },
+        "point": {
+          "x": 1859.2421875,
+          "y": 245.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Refine",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "refining",
+      "image": "06-refining.png",
+      "sourceKind": "task-monki",
+      "sha256": "48c812a91124ae43d21cf389f40b9dfd60df5b53d34b86f6e943fec14acfc351",
+      "byteCount": 68492,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      }
+    },
+    {
+      "id": "proposal",
+      "image": "07-refinement-proposal.png",
+      "sourceKind": "task-monki",
+      "sha256": "c3d3b39caf747f488dfa265b925609a8ef06baf7d0d17f00848910b2b2979be6",
+      "byteCount": 110562,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Accept",
+        "selector": "button",
+        "text": "Accept",
+        "rect": {
+          "x": 1792.9375,
+          "y": 868,
+          "width": 80.0625,
+          "height": 36
+        },
+        "point": {
+          "x": 1832.96875,
+          "y": 886
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Accept",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "accepted-request",
+      "image": "08-refined-request-accepted.png",
+      "sourceKind": "task-monki",
+      "sha256": "c3724565f47a65fe070d5e03d2e2dbe3c435bd28cac0bdee588326ad50e551f2",
+      "byteCount": 91647,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Run configuration",
+        "selector": ".newtask-settings > summary",
+        "rect": {
+          "x": 1425,
+          "y": 606,
+          "width": 462,
+          "height": 46
+        },
+        "point": {
+          "x": 1656,
+          "y": 629
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Codex · GPT-5.3 Codex · Medium",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "run-configuration",
+      "image": "09-run-configuration.png",
+      "sourceKind": "task-monki",
+      "sha256": "ca4e4ba335e36f6ece5ac23a688b8565f97958deb8fa3be5cc7040f53975037e",
+      "byteCount": 114840,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Run configuration agent and model",
+        "selector": "button[aria-label^=\"Run configuration:\"]",
+        "rect": {
+          "x": 1524,
+          "y": 669,
+          "width": 348,
+          "height": 32
+        },
+        "point": {
+          "x": 1698,
+          "y": 685
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Codex · GPT-5.3 Codex",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "provider-catalog",
+      "image": "10-provider-catalog.png",
+      "sourceKind": "task-monki",
+      "sha256": "564c9c7d5e4e3e50ddcb96aadb3995bab5b4f46c719fc768f0ade6d87196bcee",
+      "byteCount": 117359,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Composer 1",
+        "selector": "button",
+        "text": "Composer 1",
+        "rect": {
+          "x": 1531,
+          "y": 622,
+          "width": 334,
+          "height": 34
+        },
+        "point": {
+          "x": 1698,
+          "y": 639
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "Composer 1",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "cursor-selected",
+      "image": "11-cursor-selected.png",
+      "sourceKind": "task-monki",
+      "sha256": "0123b3c16139156864ae4c0a1ce9167983e78f540308c27e3868a67eaea8a95a",
+      "byteCount": 112577,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "New task"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Create task",
+        "selector": "button[aria-label^=\"Create task in Atlas Web\"]",
+        "rect": {
+          "x": 1784.8125,
+          "y": 1029,
+          "width": 109.1875,
+          "height": 36
+        },
+        "point": {
+          "x": 1839.40625,
+          "y": 1047
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Create task",
+          "aria": "Create task in Atlas Web"
+        }
+      }
+    },
+    {
+      "id": "created-board",
+      "image": "12-created-task-on-board.png",
+      "sourceKind": "task-monki",
+      "sha256": "32a77c0de31290a5b1d37cacf6f04082012c33888e4d4664500815bc0a3907ff",
+      "byteCount": 69193,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Build Atlas launch operations dashboard",
+        "selector": "button[aria-label^=\"Open \"]",
+        "text": "Build Atlas launch operations dashboard",
+        "rect": {
+          "x": 239,
+          "y": 325,
+          "width": 398.5,
+          "height": 70
+        },
+        "point": {
+          "x": 438.25,
+          "y": 360
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "",
+          "aria": "Open Build Atlas launch operations dashboard"
+        }
+      }
+    },
+    {
+      "id": "ready-task",
+      "image": "13-ready-task.png",
+      "sourceKind": "task-monki",
+      "sha256": "d0cce4de0de1c4fc23ed44ace74a86e1a12dc1f096625352b432be68d295d0e7",
+      "byteCount": 64817,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Prepare worktree",
+        "selector": "button",
+        "text": "Prepare worktree",
+        "rect": {
+          "x": 1760.15625,
+          "y": 77,
+          "width": 135.84375,
+          "height": 34
+        },
+        "point": {
+          "x": 1828.078125,
+          "y": 94
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Prepare worktree",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "worktree-ready",
+      "image": "15-worktree-ready.png",
+      "sourceKind": "task-monki",
+      "sha256": "19faba237ce435c378a5f7fa032ad57c0fd264b72813620f6fbaf722237973b9",
+      "byteCount": 89851,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Start implementation",
+        "selector": "button",
+        "text": "Start implementation",
+        "rect": {
+          "x": 1736.734375,
+          "y": 77,
+          "width": 159.265625,
+          "height": 34
+        },
+        "point": {
+          "x": 1816.3671875,
+          "y": 94
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Start implementation",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "implementation-running",
+      "image": "16-implementation-running.png",
+      "sourceKind": "task-monki",
+      "sha256": "1ade16fa348dac0d5247c1e8648f202407c7419b54f33502a09ce66ba442ba48",
+      "byteCount": 129548,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Debug",
+        "selector": "button",
+        "text": "Debug",
+        "rect": {
+          "x": 478.765625,
+          "y": 136,
+          "width": 75.0625,
+          "height": 32
+        },
+        "point": {
+          "x": 516.296875,
+          "y": 152
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Debug1",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "debug",
+      "image": "17-debug-session.png",
+      "sourceKind": "task-monki",
+      "sha256": "d5958866f1ff3493db69ae20d9676803b41ca1eea70b62b181f1d46df0cdb135",
+      "byteCount": 129006,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Overview",
+        "selector": "button",
+        "text": "Overview",
+        "rect": {
+          "x": 236,
+          "y": 136,
+          "width": 67.84375,
+          "height": 32
+        },
+        "point": {
+          "x": 269.921875,
+          "y": 152
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Overview",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "implementation-settled",
+      "image": "18-implementation-settled.png",
+      "sourceKind": "task-monki",
+      "sha256": "0d5a2bab4d02ddb8c22b5832c99ad614d2ef08fa5fc959a5d2e611e4147f2546",
+      "byteCount": 130285,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      }
+    },
+    {
+      "id": "review-ready",
+      "image": "19-review-ready.png",
+      "sourceKind": "task-monki",
+      "sha256": "f78fedc04bc3012d0a43b529d4ae6ed2aa4944a12abf9c3daf4286aac56afa6d",
+      "byteCount": 152139,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Run review",
+        "selector": "button",
+        "text": "Run review",
+        "rect": {
+          "x": 1216.515625,
+          "y": 237.5,
+          "width": 422.484375,
+          "height": 36
+        },
+        "point": {
+          "x": 1427.7578125,
+          "y": 255.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Run review",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "review-needs-changes",
+      "image": "20-review-needs-changes.png",
+      "sourceKind": "task-monki",
+      "sha256": "ed2c84041480eb95d985cd9fdbc67994e7977dba4f2f49196263bec94168908a",
+      "byteCount": 174279,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Request changes",
+        "selector": "button",
+        "text": "Request changes",
+        "rect": {
+          "x": 1216.515625,
+          "y": 237.5,
+          "width": 300.984375,
+          "height": 36
+        },
+        "point": {
+          "x": 1367.0078125,
+          "y": 255.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Request changes",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "request-changes",
+      "image": "21-request-changes.png",
+      "sourceKind": "task-monki",
+      "sha256": "d7fa826e5d18aa79f7821ce76484889ca52e16ee35e6de87373a456f9c0daf38",
+      "byteCount": 211053,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "Request changes"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Full instruction",
+        "selector": ".tm-reviewdrawer__instruction > summary",
+        "rect": {
+          "x": 1423,
+          "y": 773.46875,
+          "width": 475,
+          "height": 15
+        },
+        "point": {
+          "x": 1660.5,
+          "y": 780.96875
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "summary",
+          "text": "Full instruction",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "full-instruction",
+      "image": "22-full-instruction.png",
+      "sourceKind": "task-monki",
+      "sha256": "2c9dfcfd2cf403bc2a37384698f5229c56f954d3c364d3e1a130b108c2e2104a",
+      "byteCount": 243727,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "Request changes"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Send to agent",
+        "selector": "button",
+        "text": "Send to agent",
+        "rect": {
+          "x": 1773,
+          "y": 1028,
+          "width": 125,
+          "height": 36
+        },
+        "point": {
+          "x": 1835.5,
+          "y": 1046
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Send to agent",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "followup-running",
+      "image": "23-followup-running.png",
+      "sourceKind": "task-monki",
+      "sha256": "3534f69e67420803e1e203abe4d82d0d34104cff3b4a6ae80d78fef6580ffb7b",
+      "byteCount": 152129,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      }
+    },
+    {
+      "id": "review-again",
+      "image": "24-review-again.png",
+      "sourceKind": "task-monki",
+      "sha256": "932ce3d1ad6cbbbc5032ea98b262c7dd0ad1833f5bfdf05cded97ee238e7ebd3",
+      "byteCount": 155826,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Run review again",
+        "selector": "button",
+        "text": "Run review again",
+        "rect": {
+          "x": 1216.515625,
+          "y": 257,
+          "width": 422.484375,
+          "height": 36
+        },
+        "point": {
+          "x": 1427.7578125,
+          "y": 275
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Run review again",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "review-passed",
+      "image": "25-review-passed.png",
+      "sourceKind": "task-monki",
+      "sha256": "546587df6fa51ee6b4be6af63b83f911a5f8c46150edd04245d2abae49989ca1",
+      "byteCount": 156458,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Evidence",
+        "selector": "button",
+        "text": "Evidence",
+        "rect": {
+          "x": 396.34375,
+          "y": 136,
+          "width": 66.421875,
+          "height": 32
+        },
+        "point": {
+          "x": 429.5546875,
+          "y": 152
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Evidence",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "evidence-all",
+      "image": "26-evidence-all.png",
+      "sourceKind": "task-monki",
+      "sha256": "9d13f37a733bf92e8dd08a21e596efa809366b6440cefa8dacc22b79a7ee643f",
+      "byteCount": 124660,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "dashboard.mjs",
+        "selector": ".tm-difftree__row--file",
+        "text": "dashboard.mjs",
+        "rect": {
+          "x": 244,
+          "y": 397,
+          "width": 288,
+          "height": 28
+        },
+        "point": {
+          "x": 388,
+          "y": 411
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "dashboard.mjs",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "evidence-dashboard",
+      "image": "27-evidence-dashboard.png",
+      "sourceKind": "task-monki",
+      "sha256": "05a40aa08c91b70c75ec48aef489a9a4324e8b2cd042438c225fe78cfd96d0e2",
+      "byteCount": 161874,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Preview",
+        "selector": "button",
+        "text": "Preview",
+        "rect": {
+          "x": 319.84375,
+          "y": 136,
+          "width": 59.1875,
+          "height": 32
+        },
+        "point": {
+          "x": 349.4375,
+          "y": 152
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Preview",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "preview-workspace",
+      "image": "28-preview-workspace.png",
+      "sourceKind": "task-monki",
+      "sha256": "2b8cce0ebfea526b12ea2fee620a368baf850ce5decfe29e4759d26fe6d41052",
+      "byteCount": 84254,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Open preview",
+        "selector": "button",
+        "text": "Open preview",
+        "rect": {
+          "x": 1486.1875,
+          "y": 191,
+          "width": 123.8125,
+          "height": 36
+        },
+        "point": {
+          "x": 1548.09375,
+          "y": 209
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Open preview",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "preview-output",
+      "image": "29-preview-output.png",
+      "sourceKind": "preview-inset",
+      "sha256": "aa548cf0718e2d081107de45520e84a6009ae9301eefb195e1ea6a34015d767b",
+      "byteCount": 150016,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43130/",
+        "title": "Atlas Launch Operations",
+        "appMarker": "atlas-preview",
+        "previewReady": true,
+        "hasTaskMonkiRoot": false,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      }
+    },
+    {
+      "id": "preview-return",
+      "image": "30-preview-return.png",
+      "sourceKind": "task-monki",
+      "sha256": "5b81d0fe80a59060ffc2961987536272272441c5319c5337e205580d0507188f",
+      "byteCount": 84147,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Overview",
+        "selector": "button",
+        "text": "Overview",
+        "rect": {
+          "x": 236,
+          "y": 136,
+          "width": 67.84375,
+          "height": 32
+        },
+        "point": {
+          "x": 269.921875,
+          "y": 152
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Overview",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "acceptance-ready",
+      "image": "31-acceptance-ready.png",
+      "sourceKind": "task-monki",
+      "sha256": "5281163a5c0ac5073a9adb1c2f2b8ac73e848cf0baf4340d9956609c54df5f66",
+      "byteCount": 156423,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Mark done",
+        "selector": "button",
+        "text": "Mark done",
+        "rect": {
+          "x": 1216.515625,
+          "y": 237.5,
+          "width": 422.484375,
+          "height": 36
+        },
+        "point": {
+          "x": 1427.7578125,
+          "y": 255.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Mark done",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "mark-done",
+      "image": "32-mark-done.png",
+      "sourceKind": "task-monki",
+      "sha256": "f63bc267428ae9e883ecdd4c866a820f728c627b189adb662be7f2f7c3ecacaf",
+      "byteCount": 177604,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [
+            "mark-done-title"
+          ],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "Confirm Mark done",
+        "selector": ".tm-modal__actions button",
+        "text": "Mark done",
+        "rect": {
+          "x": 1113.9375,
+          "y": 557.5,
+          "width": 103.0625,
+          "height": 36
+        },
+        "point": {
+          "x": 1165.46875,
+          "y": 575.5
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "button",
+          "text": "Mark done",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "done-detail",
+      "image": "33-done-detail.png",
+      "sourceKind": "task-monki",
+      "sha256": "afbae618686ae07ef1a07de5c77957633aa51070af002d21c4e7448eb1baf1a3",
+      "byteCount": 151676,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      },
+      "action": {
+        "kind": "click",
+        "label": "All tasks",
+        "selector": "button",
+        "text": "All tasks",
+        "rect": {
+          "x": 10,
+          "y": 147,
+          "width": 191,
+          "height": 32
+        },
+        "point": {
+          "x": 105.5,
+          "y": 163
+        },
+        "hitMatches": true,
+        "hit": {
+          "tag": "span",
+          "text": "All tasks",
+          "aria": null
+        }
+      }
+    },
+    {
+      "id": "closing-board",
+      "image": "34-completed-board.png",
+      "sourceKind": "task-monki",
+      "sha256": "1ca8003611c003433dcf463d89ac970319e778bbbbdcb5362925ba444a654c5e",
+      "byteCount": 69120,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080
+      },
+      "page": {
+        "url": "http://127.0.0.1:43110/",
+        "title": "Task Monki",
+        "appMarker": null,
+        "previewReady": false,
+        "hasTaskMonkiRoot": true,
+        "overlays": {
+          "dialogs": [],
+          "notifiers": []
+        }
+      }
+    }
+  ],
+  "captureSetSha256": "235c5675ff72b0fc64031e7c703dcc7a324c14b0561f55ad4d3c0ffee70c1ba9"
+}

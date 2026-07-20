@@ -6,330 +6,102 @@ import {
   staticFile,
   useCurrentFrame,
 } from "remotion";
+import captureManifestSource from "../../public/remotion-captures/capture-manifest.json";
+import sceneSpecsSource from "../../scripts/showcase-scenes.json";
 
 export const VIDEO_FPS = 30;
 
+type Point = { x: number; y: number };
+type Rect = Point & { width: number; height: number };
+type Chapter = {
+  eyebrow: string;
+  title: string;
+  align?: "left" | "right";
+};
+type SceneSpec = {
+  id: string;
+  image: string;
+  backgroundImage?: string;
+  duration: number;
+  sourceKind: "task-monki" | "preview-inset";
+  chapter?: Chapter;
+};
+type CaptureAction = {
+  kind: "click" | "fill";
+  label: string;
+  point: Point;
+  rect: Rect;
+  hitMatches: boolean;
+};
+type CaptureRecord = {
+  id: string;
+  image: string;
+  sourceKind: SceneSpec["sourceKind"];
+  action?: CaptureAction;
+};
+type CaptureManifest = {
+  captureSetSha256: string;
+  task: {
+    id: string;
+    title: string;
+    repository: string;
+    branch: string;
+  };
+  scenes: CaptureRecord[];
+};
+type Shot = SceneSpec & {
+  durationFrames: number;
+  record: CaptureRecord;
+  cursorFrom?: Point;
+};
+
 const seconds = (value: number) => Math.round(value * VIDEO_FPS);
 const easeOut = Easing.bezier(0.16, 1, 0.3, 1);
+const sceneSpecs = sceneSpecsSource as SceneSpec[];
+const captureManifest = captureManifestSource as CaptureManifest;
+const captureById = new Map(
+  captureManifest.scenes.map((scene) => [scene.id, scene]),
+);
 
-interface ShotSpec {
-  id: string;
-  duration: number;
-  image: string;
-  camera?: CameraMove;
-  cursor?: CursorMove;
-}
-
-interface CameraMove {
-  zoomFrom: number;
-  zoomTo: number;
-  panFrom: [number, number];
-  panTo: [number, number];
-}
-
-interface CursorMove {
-  from: [number, number];
-  to: [number, number];
-  arriveAt?: number;
-  clickAt?: number;
-}
-
-const shots: ShotSpec[] = [
-  {
-    id: "board-open",
-    duration: seconds(2),
-    image: "01-board.png",
-    cursor: {
-      from: [1680, 72],
-      to: [1854, 23],
-      arriveAt: seconds(1.1),
-      clickAt: seconds(1.32),
-    },
-  },
-  {
-    id: "new-task-empty",
-    duration: seconds(1.2),
-    image: "02-new-task-empty.png",
-    cursor: {
-      from: [1854, 23],
-      to: [1450, 139],
-      arriveAt: seconds(0.72),
-      clickAt: seconds(0.92),
-    },
-  },
-  {
-    id: "new-task-title-start",
-    duration: seconds(0.7),
-    image: "03-new-task-title-start.png",
-  },
-  {
-    id: "new-task-title-full",
-    duration: seconds(1),
-    image: "04-new-task-title-full.png",
-    cursor: {
-      from: [1450, 139],
-      to: [1450, 222],
-      arriveAt: seconds(0.55),
-      clickAt: seconds(0.76),
-    },
-  },
-  {
-    id: "new-task-description-full",
-    duration: seconds(1.3),
-    image: "05-new-task-description-full.png",
-    cursor: {
-      from: [1450, 222],
-      to: [1870, 182],
-      arriveAt: seconds(0.78),
-      clickAt: seconds(1),
-    },
-  },
-  {
-    id: "new-task-refining",
-    duration: seconds(0.9),
-    image: "06-new-task-refining.png",
-  },
-  {
-    id: "new-task-refined",
-    duration: seconds(2.4),
-    image: "07-new-task-refined.png",
-    cursor: {
-      from: [1870, 182],
-      to: [1452, 1048],
-      arriveAt: seconds(1.45),
-      clickAt: seconds(1.72),
-    },
-  },
-  {
-    id: "created-task-notifier",
-    duration: seconds(1.2),
-    image: "08-created-task-notifier.png",
-  },
-  {
-    id: "created-task-board",
-    duration: seconds(1.7),
-    image: "09-created-task-board.png",
-    cursor: {
-      from: [1452, 1048],
-      to: [408, 226],
-      arriveAt: seconds(1.05),
-      clickAt: seconds(1.28),
-    },
-  },
-  {
-    id: "created-task-open",
-    duration: seconds(1.9),
-    image: "10-created-task-open.png",
-    cursor: {
-      from: [408, 226],
-      to: [1828, 79],
-      arriveAt: seconds(1.06),
-      clickAt: seconds(1.3),
-    },
-  },
-  {
-    id: "prepare-worktree-notifier",
-    duration: seconds(1.2),
-    image: "11-prepare-worktree-notifier.png",
-  },
-  {
-    id: "worktree-ready",
-    duration: seconds(1.55),
-    image: "12-worktree-ready.png",
-    cursor: {
-      from: [1828, 79],
-      to: [1808, 79],
-      arriveAt: seconds(0.86),
-      clickAt: seconds(1.08),
-    },
-  },
-  {
-    id: "start-task-notifier",
-    duration: seconds(1.2),
-    image: "13-start-task-notifier.png",
-  },
-  {
-    id: "created-task-running",
-    duration: seconds(1.65),
-    image: "14-created-task-running.png",
-  },
-  {
-    id: "created-task-finished",
-    duration: seconds(2.2),
-    image: "15-created-task-finished.png",
-    cursor: {
-      from: [520, 640],
-      to: [360, 470],
-      arriveAt: seconds(1.25),
-      clickAt: seconds(1.5),
-    },
-  },
-  {
-    id: "review-running-a",
-    duration: seconds(0.85),
-    image: "16-review-running-a.png",
-  },
-  {
-    id: "review-running-b",
-    duration: seconds(0.85),
-    image: "17-review-running-b.png",
-  },
-  {
-    id: "review-running-c",
-    duration: seconds(1),
-    image: "18-review-running-c.png",
-  },
-  {
-    id: "review-complete",
-    duration: seconds(2.8),
-    image: "19-review-complete.png",
-    cursor: {
-      from: [360, 470],
-      to: [357, 816],
-      arriveAt: seconds(1.55),
-      clickAt: seconds(1.82),
-    },
-  },
-  {
-    id: "request-changes-open",
-    duration: seconds(1.35),
-    image: "20-request-changes-open.png",
-    cursor: {
-      from: [357, 816],
-      to: [1446, 509],
-      arriveAt: seconds(0.8),
-      clickAt: seconds(1.02),
-    },
-  },
-  {
-    id: "request-changes-checkboxes",
-    duration: seconds(1.2),
-    image: "21-request-changes-checkboxes.png",
-  },
-  {
-    id: "request-changes-submit",
-    duration: seconds(1.45),
-    image: "22-request-changes-submit.png",
-    cursor: {
-      from: [1446, 509],
-      to: [1835, 1047],
-      arriveAt: seconds(0.9),
-      clickAt: seconds(1.13),
-    },
-  },
-  {
-    id: "followup-started-overview",
-    duration: seconds(1.15),
-    image: "23-followup-started-overview.png",
-  },
-  {
-    id: "followup-overview",
-    duration: seconds(1.75),
-    image: "24-followup-overview.png",
-  },
-  {
-    id: "evidence-tab-click",
-    duration: seconds(1.1),
-    image: "25-evidence-tab-click.png",
-    cursor: {
-      from: [1835, 1047],
-      to: [382, 164],
-      arriveAt: seconds(0.72),
-      clickAt: seconds(0.94),
-    },
-  },
-  {
-    id: "evidence-all",
-    duration: seconds(1.8),
-    image: "26-evidence-all.png",
-    cursor: {
-      from: [382, 164],
-      to: [515, 262],
-      arriveAt: seconds(1),
-      clickAt: seconds(1.25),
-    },
-  },
-  {
-    id: "evidence-uncommitted",
-    duration: seconds(1.5),
-    image: "27-evidence-uncommitted.png",
-    cursor: {
-      from: [515, 262],
-      to: [423, 262],
-      arriveAt: seconds(0.78),
-      clickAt: seconds(1),
-    },
-  },
-  {
-    id: "evidence-committed",
-    duration: seconds(1.4),
-    image: "28-evidence-committed.png",
-  },
-  {
-    id: "debug-tab-click",
-    duration: seconds(1.05),
-    image: "29-debug-tab-click.png",
-    cursor: {
-      from: [423, 262],
-      to: [461, 164],
-      arriveAt: seconds(0.7),
-      clickAt: seconds(0.9),
-    },
-  },
-  {
-    id: "debug",
-    duration: seconds(2.2),
-    image: "30-debug.png",
-  },
-  {
-    id: "settings-click",
-    duration: seconds(1.05),
-    image: "31-settings-click.png",
-    cursor: {
-      from: [461, 164],
-      to: [75, 318],
-      arriveAt: seconds(0.68),
-      clickAt: seconds(0.9),
-    },
-  },
-  {
-    id: "settings",
-    duration: seconds(2),
-    image: "32-settings.png",
-  },
-  {
-    id: "board-click",
-    duration: seconds(1),
-    image: "33-board-click.png",
-    cursor: {
-      from: [75, 318],
-      to: [70, 160],
-      arriveAt: seconds(0.6),
-      clickAt: seconds(0.82),
-    },
-  },
-  {
-    id: "closing",
-    duration: seconds(2.6),
-    image: "34-closing-board.png",
-  },
-];
+const shots = sceneSpecs.map<Shot>((scene, index) => {
+  const record = captureById.get(scene.id);
+  if (
+    !record ||
+    record.image !== scene.image ||
+    record.sourceKind !== scene.sourceKind
+  ) {
+    throw new Error(`Capture manifest does not match scene ${scene.id}.`);
+  }
+  const priorAction = captureManifest.scenes
+    .slice(0, index)
+    .reverse()
+    .find((candidate) => candidate.action)?.action;
+  return {
+    ...scene,
+    durationFrames: seconds(scene.duration),
+    record,
+    cursorFrom: record.action
+      ? (priorAction?.point ?? { x: 1740, y: 76 })
+      : undefined,
+  };
+});
 
 const sceneStarts = shots.reduce<number[]>((starts, shot, index) => {
-  starts.push(index === 0 ? 0 : starts[index - 1] + shots[index - 1].duration);
+  starts.push(
+    index === 0 ? 0 : starts[index - 1] + shots[index - 1].durationFrames,
+  );
   return starts;
 }, []);
 
 export const VIDEO_DURATION_FRAMES =
-  sceneStarts.at(-1)! + shots.at(-1)!.duration;
+  sceneStarts.at(-1)! + shots.at(-1)!.durationFrames;
 
 export function TaskMonkiShowcase() {
   const frame = useCurrentFrame();
-
   return (
     <AbsoluteFill className="tmv-root">
       {shots.map((shot, index) => (
-        <Shot
+        <Scene
           key={shot.id}
           shot={shot}
           start={sceneStarts[index]}
@@ -345,118 +117,247 @@ export function TaskMonkiPoster() {
     <AbsoluteFill className="tmv-root">
       <Img
         className="tmv-shot__image"
-        src={staticFile("remotion-captures/26-evidence-all.png")}
+        src={staticFile("remotion-captures/34-completed-board.png")}
       />
+      <div className="tmv-poster">
+        <span>LOCAL AI WORKSPACE</span>
+        <strong>Task Monki</strong>
+        <p>One Atlas task, from rough request to accepted branch.</p>
+      </div>
     </AbsoluteFill>
   );
 }
 
-function Shot({
+function Scene({
   shot,
   start,
   frame,
 }: {
-  shot: ShotSpec;
+  shot: Shot;
   start: number;
   frame: number;
 }) {
   const localFrame = frame - start;
-  const visible = localFrame >= 0 && localFrame < shot.duration;
-  if (!visible) {
-    return null;
-  }
-
-  const cameraMove =
-    shot.camera ??
-    ({
-      zoomFrom: 1,
-      zoomTo: 1,
-      panFrom: [0, 0],
-      panTo: [0, 0],
-    } satisfies CameraMove);
-  const camera = easedProgress(localFrame, 0, shot.duration);
-  const scale = interpolate(
-    camera,
-    [0, 1],
-    [cameraMove.zoomFrom, cameraMove.zoomTo],
-  );
-  const x = interpolate(
-    camera,
-    [0, 1],
-    [cameraMove.panFrom[0], cameraMove.panTo[0]],
-  );
-  const y = interpolate(
-    camera,
-    [0, 1],
-    [cameraMove.panFrom[1], cameraMove.panTo[1]],
-  );
+  if (localFrame < 0 || localFrame >= shot.durationFrames) return null;
+  const action = shot.record.action;
 
   return (
     <AbsoluteFill>
-      <div
-        className="tmv-shot"
-        style={{
-          transform: `translate3d(${x}px, ${y}px, 0) scale(${scale})`,
-        }}
-      >
+      {shot.sourceKind === "preview-inset" ? (
+        <PreviewInset shot={shot} />
+      ) : (
         <Img
           className="tmv-shot__image"
           src={staticFile(`remotion-captures/${shot.image}`)}
         />
-      </div>
-      {shot.cursor ? <Cursor cursor={shot.cursor} frame={localFrame} /> : null}
+      )}
+      {shot.chapter ? (
+        <ChapterCard
+          chapter={shot.chapter}
+          action={action}
+          frame={localFrame}
+          duration={shot.durationFrames}
+        />
+      ) : null}
+      {action && shot.cursorFrom ? (
+        <>
+          {action.kind === "fill" ? (
+            <TypedFill
+              action={action}
+              frame={localFrame}
+              duration={shot.durationFrames}
+            />
+          ) : null}
+          <MeasuredCursor
+            action={action}
+            from={shot.cursorFrom}
+            frame={localFrame}
+            duration={shot.durationFrames}
+          />
+        </>
+      ) : null}
     </AbsoluteFill>
   );
 }
 
-function Cursor({ cursor, frame }: { cursor: CursorMove; frame: number }) {
-  const arriveAt = cursor.arriveAt ?? cursor.clickAt ?? seconds(1);
+function PreviewInset({ shot }: { shot: Shot }) {
+  if (!shot.backgroundImage) {
+    throw new Error(
+      `Preview scene ${shot.id} is missing its Task Monki background.`,
+    );
+  }
+  return (
+    <AbsoluteFill className="tmv-preview-context">
+      <Img
+        className="tmv-shot__image tmv-preview-context__background"
+        src={staticFile(`remotion-captures/${shot.backgroundImage}`)}
+      />
+      <div className="tmv-preview-window">
+        <div className="tmv-preview-window__bar">
+          <strong>Task Monki Preview</strong>
+          <span>{captureManifest.task.repository}</span>
+          <code>{captureManifest.task.branch}</code>
+        </div>
+        <Img
+          className="tmv-preview-window__image"
+          src={staticFile(`remotion-captures/${shot.image}`)}
+        />
+      </div>
+    </AbsoluteFill>
+  );
+}
+
+function ChapterCard({
+  chapter,
+  action,
+  frame,
+  duration,
+}: {
+  chapter: Chapter;
+  action?: CaptureAction;
+  frame: number;
+  duration: number;
+}) {
+  const enter = easedProgress(frame, seconds(0.12), seconds(0.42));
+  const exit = interpolate(
+    frame,
+    [Math.max(seconds(1.2), duration - seconds(0.35)), duration],
+    [1, 0],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+  );
+  const horizontal = action
+    ? action.point.x < 960
+      ? "right"
+      : "left"
+    : (chapter.align ?? "left");
+  const vertical =
+    action && action.point.y > 800
+      ? "bottom"
+      : action && action.point.y > 540
+        ? "top"
+        : "bottom";
+  return (
+    <div
+      className={`tmv-chapter tmv-chapter--${horizontal} tmv-chapter--${vertical}`}
+      style={{
+        opacity: enter * exit,
+        transform: `translate3d(0, ${interpolate(enter, [0, 1], [12, 0])}px, 0)`,
+      }}
+    >
+      <span>{chapter.eyebrow}</span>
+      <strong>{chapter.title}</strong>
+    </div>
+  );
+}
+
+function MeasuredCursor({
+  action,
+  from,
+  frame,
+  duration,
+}: {
+  action: CaptureAction;
+  from: Point;
+  frame: number;
+  duration: number;
+}) {
+  const arriveAt =
+    action.kind === "fill"
+      ? seconds(0.34)
+      : Math.max(seconds(0.3), duration - seconds(0.58));
+  const clickAt =
+    action.kind === "fill"
+      ? seconds(0.46)
+      : Math.max(arriveAt + 2, duration - seconds(0.2));
   const progress = easedProgress(frame, 0, arriveAt);
-  const x = interpolate(progress, [0, 1], [cursor.from[0], cursor.to[0]]);
-  const y = interpolate(progress, [0, 1], [cursor.from[1], cursor.to[1]]);
-  const clickAge =
-    typeof cursor.clickAt === "number"
-      ? frame - cursor.clickAt
-      : Number.NEGATIVE_INFINITY;
+  const x = interpolate(progress, [0, 1], [from.x, action.point.x]);
+  const y = interpolate(progress, [0, 1], [from.y, action.point.y]);
+  const clickAge = frame - clickAt;
   const clickOpacity =
-    clickAge >= 0 && clickAge <= 18
-      ? interpolate(clickAge, [0, 8, 18], [0.58, 0.34, 0], {
+    clickAge >= 0 && clickAge <= 16
+      ? interpolate(clickAge, [0, 6, 16], [0.72, 0.42, 0], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
         })
       : 0;
   const clickScale =
-    clickAge >= 0 && clickAge <= 18
-      ? interpolate(clickAge, [0, 18], [0.82, 1.9], {
+    clickAge >= 0 && clickAge <= 16
+      ? interpolate(clickAge, [0, 16], [0.72, 1.8], {
           extrapolateLeft: "clamp",
           extrapolateRight: "clamp",
           easing: easeOut,
         })
-      : 0.82;
+      : 0.72;
+  const focusOpacity = interpolate(
+    frame,
+    [Math.max(0, arriveAt - 4), arriveAt, clickAt + 5],
+    [0, 0.58, 0],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+  );
 
   return (
-    <div
-      className="tmv-cursor"
-      style={{
-        transform: `translate3d(${x}px, ${y}px, 0)`,
-      }}
-    >
+    <>
       <span
-        className="tmv-cursor__click"
+        className="tmv-target-focus"
         style={{
-          opacity: clickOpacity,
-          transform: `scale(${clickScale})`,
+          left: action.rect.x,
+          top: action.rect.y,
+          width: action.rect.width,
+          height: action.rect.height,
+          opacity: focusOpacity,
         }}
       />
-      <svg viewBox="0 0 31 35" aria-hidden="true">
-        <path
-          d="M3.4 2.8 27.6 22l-12.1 1.5-6.2 9.8L3.4 2.8Z"
-          fill="#f4f5f6"
-          stroke="#15171a"
-          strokeLinejoin="round"
-          strokeWidth="2.5"
+      <div
+        className="tmv-cursor"
+        style={{ transform: `translate3d(${x - 3}px, ${y - 3}px, 0)` }}
+      >
+        <span
+          className="tmv-cursor__click"
+          style={{ opacity: clickOpacity, transform: `scale(${clickScale})` }}
         />
-      </svg>
+        <svg viewBox="0 0 31 35" aria-hidden="true">
+          <path
+            d="M3.4 2.8 27.6 22l-12.1 1.5-6.2 9.8L3.4 2.8Z"
+            fill="#f4f5f6"
+            stroke="#15171a"
+            strokeLinejoin="round"
+            strokeWidth="2.5"
+          />
+        </svg>
+      </div>
+    </>
+  );
+}
+
+function TypedFill({
+  action,
+  frame,
+  duration,
+}: {
+  action: CaptureAction;
+  frame: number;
+  duration: number;
+}) {
+  const prompt =
+    "Build an operations dashboard for the Atlas launch team. Show release readiness, service health, current blockers, and the critical path.";
+  const progress = interpolate(
+    frame,
+    [seconds(0.5), Math.max(seconds(0.75), duration - seconds(0.12))],
+    [0, 1],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+  );
+  const visible = prompt.slice(0, Math.floor(prompt.length * progress));
+  return (
+    <div
+      className="tmv-fill-text"
+      style={{
+        left: action.rect.x + 10,
+        top: action.rect.y + 8,
+        width: action.rect.width - 20,
+      }}
+    >
+      {visible}
+      <span className="tmv-fill-text__caret">|</span>
     </div>
   );
 }

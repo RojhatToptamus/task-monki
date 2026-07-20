@@ -1,0 +1,508 @@
+[
+  {
+    "id": "board",
+    "image": "01-multi-repository-board.png",
+    "duration": 2.3,
+    "sourceKind": "task-monki",
+    "requiredText": ["All tasks", "Task Monki", "Atlas Web"],
+    "chapter": {
+      "eyebrow": "LOCAL AI WORKSPACE",
+      "title": "Every repository. One operational view."
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "New task repository",
+      "target": { "selector": "button[aria-label^=\"New task repository:\"]" },
+      "resultText": ["Repositories"]
+    }
+  },
+  {
+    "id": "repository-menu",
+    "image": "02-repository-menu.png",
+    "duration": 1.2,
+    "sourceKind": "task-monki",
+    "requiredText": ["Repositories", "Atlas Web"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Atlas Web",
+      "target": {
+        "selector": "button[role=\"menuitemradio\"]",
+        "text": "Atlas Web"
+      },
+      "resultText": ["Atlas Web"]
+    }
+  },
+  {
+    "id": "atlas-selected",
+    "image": "03-atlas-repository-selected.png",
+    "duration": 1.3,
+    "sourceKind": "task-monki",
+    "requiredText": ["New task repository", "Atlas Web"],
+    "exitAction": {
+      "kind": "click",
+      "label": "+ New task",
+      "target": { "selector": "button", "text": "+ New task", "exact": true },
+      "resultText": ["New task"]
+    }
+  },
+  {
+    "id": "composer",
+    "image": "04-new-task-canvas.png",
+    "duration": 2.0,
+    "sourceKind": "task-monki",
+    "requiredText": ["New task", "Atlas Web"],
+    "exitAction": {
+      "kind": "fill",
+      "label": "Task description",
+      "target": { "selector": "#task-description" },
+      "value": "roughPrompt"
+    }
+  },
+  {
+    "id": "rough-request",
+    "image": "05-rough-request.png",
+    "duration": 2.1,
+    "sourceKind": "task-monki",
+    "requiredText": ["Build an operations dashboard", "Refine"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Refine",
+      "target": { "selector": ".field__refine" },
+      "resultText": ["Refining"]
+    }
+  },
+  {
+    "id": "refining",
+    "image": "06-refining.png",
+    "duration": 1.1,
+    "sourceKind": "task-monki",
+    "requiredText": ["Refining"],
+    "exitAction": {
+      "kind": "wait",
+      "resultText": ["Refined description", "Verification:"]
+    }
+  },
+  {
+    "id": "proposal",
+    "image": "07-refinement-proposal.png",
+    "duration": 3.0,
+    "sourceKind": "task-monki",
+    "requiredText": ["Refined description", "status-freshness", "Accept"],
+    "chapter": {
+      "eyebrow": "PROMPT REFINEMENT",
+      "title": "A rough request becomes executable work.",
+      "align": "right"
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Accept",
+      "target": { "selector": "button", "text": "Accept", "exact": true }
+    }
+  },
+  {
+    "id": "accepted-request",
+    "image": "08-refined-request-accepted.png",
+    "duration": 1.3,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "Build the Atlas launch operations dashboard",
+      "Run configuration"
+    ],
+    "exitAction": {
+      "kind": "click",
+      "label": "Run configuration",
+      "target": { "selector": ".newtask-settings > summary" }
+    }
+  },
+  {
+    "id": "run-configuration",
+    "image": "09-run-configuration.png",
+    "duration": 1.6,
+    "sourceKind": "task-monki",
+    "requiredText": ["Agent", "Access", "Network access"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Run configuration agent and model",
+      "target": { "selector": "button[aria-label^=\"Run configuration:\"]" },
+      "resultText": ["Cursor Agent"]
+    }
+  },
+  {
+    "id": "provider-catalog",
+    "image": "10-provider-catalog.png",
+    "duration": 2.2,
+    "sourceKind": "task-monki",
+    "requiredText": ["Codex", "OpenCode", "Cursor Agent", "Composer 1"],
+    "chapter": {
+      "eyebrow": "RUNTIME CHOICE",
+      "title": "Cursor implements. Codex reviews."
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Composer 1",
+      "target": { "selector": "button", "text": "Composer 1" }
+    }
+  },
+  {
+    "id": "cursor-selected",
+    "image": "11-cursor-selected.png",
+    "duration": 1.3,
+    "sourceKind": "task-monki",
+    "requiredText": ["Cursor Agent", "Composer 1", "Create task"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Create task",
+      "target": {
+        "selector": "button[aria-label^=\"Create task in Atlas Web\"]"
+      },
+      "resultText": ["Build Atlas launch operations dashboard"]
+    }
+  },
+  {
+    "id": "created-board",
+    "image": "12-created-task-on-board.png",
+    "duration": 1.6,
+    "sourceKind": "task-monki",
+    "requiredText": ["Build Atlas launch operations dashboard"],
+    "forbiddenText": ["Task created."],
+    "exitAction": {
+      "kind": "click",
+      "label": "Build Atlas launch operations dashboard",
+      "target": {
+        "selector": "button[aria-label^=\"Open \"]",
+        "text": "Build Atlas launch operations dashboard"
+      },
+      "resultText": ["Prepare worktree"]
+    }
+  },
+  {
+    "id": "ready-task",
+    "image": "13-ready-task.png",
+    "duration": 1.4,
+    "sourceKind": "task-monki",
+    "requiredText": ["Prepare worktree", "Atlas Web"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Prepare worktree",
+      "target": {
+        "selector": "button",
+        "text": "Prepare worktree",
+        "exact": true
+      },
+      "resultText": ["Start implementation"]
+    }
+  },
+  {
+    "id": "worktree-ready",
+    "image": "15-worktree-ready.png",
+    "duration": 1.5,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "Start implementation",
+      "task-monki/launch-dashboard-preview"
+    ],
+    "exitAction": {
+      "kind": "click",
+      "label": "Start implementation",
+      "target": {
+        "selector": "button",
+        "text": "Start implementation",
+        "exact": true
+      },
+      "resultText": ["Agent progress"]
+    }
+  },
+  {
+    "id": "implementation-running",
+    "image": "16-implementation-running.png",
+    "duration": 2.3,
+    "sourceKind": "task-monki",
+    "requiredText": ["Agent progress", "Verify status freshness and readiness"],
+    "chapter": {
+      "eyebrow": "ISOLATED EXECUTION",
+      "title": "The branch moves. Task Monki keeps the evidence."
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Debug",
+      "target": { "selector": "button", "text": "Debug" },
+      "resultText": ["Provider activity"]
+    }
+  },
+  {
+    "id": "debug",
+    "image": "17-debug-session.png",
+    "duration": 2.3,
+    "sourceKind": "task-monki",
+    "requiredText": ["Provider activity", "composer-1"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Overview",
+      "target": { "selector": "button", "text": "Overview", "exact": true },
+      "resultText": ["Agent progress"]
+    }
+  },
+  {
+    "id": "implementation-settled",
+    "image": "18-implementation-settled.png",
+    "duration": 0.9,
+    "sourceKind": "task-monki",
+    "requiredText": ["Agent progress"],
+    "exitAction": {
+      "kind": "advance",
+      "to": "IMPLEMENTATION_COMPLETED",
+      "resultText": ["Run review"]
+    }
+  },
+  {
+    "id": "review-ready",
+    "image": "19-review-ready.png",
+    "duration": 1.6,
+    "sourceKind": "task-monki",
+    "requiredText": ["Run review", "Implementation completed"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Run review",
+      "target": { "selector": "button", "text": "Run review", "exact": true },
+      "resultText": ["Status freshness is hard-coded"]
+    }
+  },
+  {
+    "id": "review-needs-changes",
+    "image": "20-review-needs-changes.png",
+    "duration": 3.0,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "Status freshness is hard-coded",
+      "dashboard.mjs",
+      "Request changes"
+    ],
+    "chapter": {
+      "eyebrow": "CODEX DETACHED REVIEW",
+      "title": "A real finding becomes the next action.",
+      "align": "right"
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Request changes",
+      "target": {
+        "selector": "button",
+        "text": "Request changes",
+        "exact": true
+      },
+      "resultText": ["Findings to attach"]
+    }
+  },
+  {
+    "id": "request-changes",
+    "image": "21-request-changes.png",
+    "duration": 1.6,
+    "sourceKind": "task-monki",
+    "requiredText": ["Findings to attach", "1 selected", "Full instruction"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Full instruction",
+      "target": { "selector": ".tm-reviewdrawer__instruction > summary" }
+    }
+  },
+  {
+    "id": "full-instruction",
+    "image": "22-full-instruction.png",
+    "duration": 2.8,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "dashboard.mjs",
+      "Derive the relative age",
+      "Send to agent"
+    ],
+    "exitAction": {
+      "kind": "click",
+      "label": "Send to agent",
+      "target": {
+        "selector": "button",
+        "text": "Send to agent",
+        "exact": true
+      },
+      "resultText": ["The agent is working"]
+    }
+  },
+  {
+    "id": "followup-running",
+    "image": "23-followup-running.png",
+    "duration": 2.3,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "The agent is working",
+      "Reviewed diff no longer matches the worktree",
+      "Status freshness is hard-coded"
+    ],
+    "forbiddenText": ["Follow-up run started."],
+    "exitAction": {
+      "kind": "advance",
+      "to": "FOLLOWUP_COMPLETED",
+      "resultText": ["Run review again"]
+    }
+  },
+  {
+    "id": "review-again",
+    "image": "24-review-again.png",
+    "duration": 1.5,
+    "sourceKind": "task-monki",
+    "requiredText": ["Run review again", "Run completed", "The diff changed"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Run review again",
+      "target": {
+        "selector": "button",
+        "text": "Run review again",
+        "exact": true
+      },
+      "resultText": ["Detached review passed"]
+    }
+  },
+  {
+    "id": "review-passed",
+    "image": "25-review-passed.png",
+    "duration": 2.5,
+    "sourceKind": "task-monki",
+    "requiredText": ["Passed", "Detached review passed", "Evidence"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Evidence",
+      "target": { "selector": "button", "text": "Evidence", "exact": true },
+      "resultText": ["Changed files"]
+    }
+  },
+  {
+    "id": "evidence-all",
+    "image": "26-evidence-all.png",
+    "duration": 3.2,
+    "sourceKind": "task-monki",
+    "requiredText": ["Changed files", "dashboard.mjs", "dashboard.test.mjs"],
+    "exitAction": {
+      "kind": "click",
+      "label": "dashboard.mjs",
+      "target": {
+        "selector": ".tm-difftree__row--file",
+        "text": "dashboard.mjs"
+      },
+      "resultText": ["formatStatusAge"]
+    }
+  },
+  {
+    "id": "evidence-dashboard",
+    "image": "27-evidence-dashboard.png",
+    "duration": 3.2,
+    "sourceKind": "task-monki",
+    "requiredText": [
+      "dashboard.mjs",
+      "formatStatusAge",
+      "/api/launch-status",
+      "status.checkedAt"
+    ],
+    "chapter": {
+      "eyebrow": "BRANCH EVIDENCE · 2 FOCUSED TESTS PASS",
+      "title": "The status-freshness fix is visible in the diff."
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Preview",
+      "target": { "selector": "button", "text": "Preview", "exact": true },
+      "resultText": ["Application", "Routes"]
+    }
+  },
+  {
+    "id": "preview-workspace",
+    "image": "28-preview-workspace.png",
+    "duration": 2.6,
+    "sourceKind": "task-monki",
+    "requiredText": ["Running", "Application", "Routes", "Open preview"],
+    "chapter": {
+      "eyebrow": "BRANCH PREVIEW",
+      "title": "Run the branch before accepting it.",
+      "align": "right"
+    },
+    "exitAction": {
+      "kind": "click",
+      "label": "Open preview",
+      "target": { "selector": "button", "text": "Open preview", "exact": true }
+    }
+  },
+  {
+    "id": "preview-output",
+    "image": "29-preview-output.png",
+    "backgroundImage": "28-preview-workspace.png",
+    "duration": 4.0,
+    "sourceKind": "preview-inset",
+    "requiredText": [
+      "Launch operations",
+      "All systems operational",
+      "task-monki/launch-dashboard-preview"
+    ]
+  },
+  {
+    "id": "preview-return",
+    "image": "30-preview-return.png",
+    "duration": 1.2,
+    "sourceKind": "task-monki",
+    "requiredText": ["Preview", "Open preview"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Overview",
+      "target": { "selector": "button", "text": "Overview", "exact": true },
+      "resultText": ["Mark done"]
+    }
+  },
+  {
+    "id": "acceptance-ready",
+    "image": "31-acceptance-ready.png",
+    "duration": 1.9,
+    "sourceKind": "task-monki",
+    "requiredText": ["Passed", "Mark done"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Mark done",
+      "target": { "selector": "button", "text": "Mark done", "exact": true }
+    }
+  },
+  {
+    "id": "mark-done",
+    "image": "32-mark-done.png",
+    "duration": 1.7,
+    "sourceKind": "task-monki",
+    "requiredText": ["Records the current local result as done", "Mark done"],
+    "exitAction": {
+      "kind": "click",
+      "label": "Confirm Mark done",
+      "target": {
+        "selector": ".tm-modal__actions button",
+        "text": "Mark done",
+        "exact": true
+      },
+      "resultText": ["Done"]
+    }
+  },
+  {
+    "id": "done-detail",
+    "image": "33-done-detail.png",
+    "duration": 1.5,
+    "sourceKind": "task-monki",
+    "requiredText": ["Done", "This task is done", "Passed"],
+    "exitAction": {
+      "kind": "click",
+      "label": "All tasks",
+      "target": { "selector": "button", "text": "All tasks", "exact": true }
+    }
+  },
+  {
+    "id": "closing-board",
+    "image": "34-completed-board.png",
+    "duration": 2.8,
+    "sourceKind": "task-monki",
+    "requiredText": ["Build Atlas launch operations dashboard", "Done"],
+    "chapter": {
+      "eyebrow": "TASK MONKI",
+      "title": "One task. Reviewed, verified, previewed, accepted."
+    }
+  }
+]
