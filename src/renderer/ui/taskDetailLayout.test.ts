@@ -21,6 +21,21 @@ describe('task detail layout styles', () => {
 
     expect(rule?.groups?.body).toContain('grid-template-columns: 1fr');
   });
+
+  it('reflows progress metadata and completed-change actions at the 400px checkpoint', async () => {
+    const css = await readStyles();
+    const narrow = css.slice(css.lastIndexOf('@media (max-width: 520px)'));
+
+    expect(narrow).toMatch(
+      /\.tm-runheader\s*\{[^}]*grid-template-columns: 9px minmax\(0, 1fr\) auto auto/
+    );
+    expect(narrow).toMatch(
+      /\.tm-runheader__scope,[\s\S]*?\.tm-runheader__trailing\s*\{[^}]*white-space: normal/
+    );
+    expect(narrow).toMatch(
+      /\.tm-change-summary__head > \.outline-button\s*\{[^}]*grid-column: 2/
+    );
+  });
 });
 
 function readStyles(): Promise<string> {

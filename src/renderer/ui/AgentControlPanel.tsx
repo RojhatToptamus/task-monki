@@ -150,13 +150,6 @@ export function AgentControlPanel({
             >
               Add instruction
             </button>
-            <button
-              type="button"
-              className="outline-button outline-button--danger"
-              onClick={() => void onInterrupt(run.id)}
-            >
-              Stop run
-            </button>
           </div>
         ) : null}
 

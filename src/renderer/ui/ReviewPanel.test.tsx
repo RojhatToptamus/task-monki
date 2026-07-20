@@ -91,6 +91,7 @@ describe('ReviewPanel', () => {
 
     expect(html).toContain('Will review');
     expect(html).toContain('abc12345 · 3 files · dirty');
+    expect(html).not.toContain('Run a review before marking done or shipping this diff.');
     expect(html).not.toContain('tm-reviewcard__meta--box');
     expect(html).not.toContain('Last result');
     expect(html).not.toContain('>none<');

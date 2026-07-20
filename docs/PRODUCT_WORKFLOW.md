@@ -49,6 +49,11 @@ Start. Attachment-backed creation still requires a runtime/model with an
 attested attachment boundary because Task Monki must validate modality and
 isolation before adopting the draft.
 
+The New Task composer is a parallel workspace panel rather than a modal
+decision. Closing it preserves title and description text for the current app
+session, while unsubmitted attachment batches are still discarded. A
+successful Create clears the preserved text draft.
+
 ## Runtime and model configuration
 
 First-launch defaults, New Task, and Settings use the same runtime/model

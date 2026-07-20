@@ -73,9 +73,51 @@ describe('describeTaskAttention', () => {
     );
 
     expect(attention).toMatchObject({
-      label: 'Delivery blocked',
-      detail: 'Remote checks are failing.'
+      label: 'Checks failed',
+      detail: 'GitHub checks need attention.'
     });
+  });
+
+  it('uses completion language for a merged task that still requires manual acceptance', () => {
+    const attention = describeTaskAttention(
+      taskFixture({
+        completionPolicy: 'MANUAL',
+        workflowPhase: 'IN_REVIEW',
+        projection: {
+          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
+          githubPullRequest: 'MERGED',
+          merge: 'MERGED',
+          summary: 'GitHub reports the pull request merged.'
+        }
+      })
+    );
+
+    expect(attention).toEqual({
+      label: 'Waiting for Mark done',
+      detail: 'The pull request is merged; this task requires manual completion.',
+      tone: 'info'
+    });
+  });
+
+  it('does not expose raw merge enums in generic delivery attention', () => {
+    const attention = describeTaskAttention(
+      taskFixture({
+        projection: {
+          ...createInitialProjection('2026-01-01T00:00:00.000Z'),
+          githubPullRequest: 'OPEN_READY',
+          merge: 'NOT_MERGED',
+          health: 'ERROR',
+          summary: 'GitHub merge state: NOT_MERGED.'
+        }
+      })
+    );
+
+    expect(attention).toEqual({
+      label: 'Delivery needs attention',
+      detail: 'Open the task to review the current GitHub evidence.',
+      tone: 'error'
+    });
+    expect(`${attention?.label} ${attention?.detail}`).not.toContain('NOT_MERGED');
   });
 });
 

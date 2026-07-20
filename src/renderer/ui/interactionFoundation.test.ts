@@ -52,6 +52,37 @@ describe('renderer interaction foundation styles', () => {
     expect(selectedUrgentCount).toContain('border-color: var(--surface2)');
   });
 
+  it('provides immediate press feedback without changing control geometry', async () => {
+    const css = await readStyles();
+    const active = ruleBody(
+      css,
+      ":where(button, [role='button']):not(:disabled):active"
+    );
+
+    expect(active).toContain('filter: brightness(0.88)');
+    expect(active).not.toContain('transform');
+  });
+
+  it('keeps faint annotation text readable and supports contrast and transparency preferences', async () => {
+    const css = await readStyles();
+    const lightFaint = themeToken(css, ':root', '--faint');
+    const lightSurface = themeToken(css, ':root', '--surface');
+    const darkFaint = themeToken(css, ".app-shell[data-theme='dark']", '--faint');
+    const darkSurface = themeToken(css, ".app-shell[data-theme='dark']", '--surface');
+
+    expect(contrast(lightFaint, lightSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(darkFaint, darkSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(css).toMatch(
+      /@media \(prefers-reduced-transparency: reduce\)[\s\S]*backdrop-filter: none/
+    );
+    expect(css).toMatch(/@media \(prefers-contrast: more\)[\s\S]*--border-strong/);
+  });
+
+  it('does not retain the unused parallel tm-btn family', async () => {
+    const css = await readStyles();
+    expect(css).not.toMatch(/\.tm-btn(?:--[a-z-]+)?\s*\{/);
+  });
+
   it('uses the compact interface metadata scale for PR supporting text', async () => {
     const css = await readStyles();
     const identity = ruleBody(css, '.tm-prstatus__identity');

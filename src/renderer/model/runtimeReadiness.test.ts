@@ -98,6 +98,18 @@ describe('runtimeReadinessView', () => {
       nextAction: 'Review security limits'
     });
   });
+
+  it('reserves Disabled for the settings switch instead of runtime availability', () => {
+    const view = runtimeReadinessView(
+      state(createRuntimeReadiness('DISABLED', 'The runtime is disabled in Settings.'))
+    );
+
+    expect(view).toMatchObject({
+      canStart: false,
+      label: 'Unavailable',
+      optionSuffix: ' (unavailable)'
+    });
+  });
 });
 
 function state(

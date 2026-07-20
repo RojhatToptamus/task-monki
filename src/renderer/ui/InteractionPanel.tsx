@@ -309,7 +309,6 @@ function CommandRequest({
               {hasAction(interaction, 'ACCEPT') ? (
                 <ActionButton
                   label="Allow once"
-                  variant="secondary"
                   disabled={disabled}
                   onClick={() =>
                     onRespond({
@@ -326,6 +325,7 @@ function CommandRequest({
                       ? 'Always allow'
                       : 'Allow for session'
                   }
+                  variant="secondary"
                   disabled={disabled}
                   onClick={submitPersistentChoice}
                 />

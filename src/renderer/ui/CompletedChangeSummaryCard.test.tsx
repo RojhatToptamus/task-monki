@@ -6,7 +6,7 @@ import { CompletedChangeSummaryCard } from './CompletedChangeSummaryCard';
 describe('CompletedChangeSummaryCard', () => {
   it('renders a compact completed-run change summary with expandable remaining files', () => {
     const html = renderToStaticMarkup(
-      <CompletedChangeSummaryCard summary={summaryFixture()} onReviewChanges={() => {}} />
+      <CompletedChangeSummaryCard summary={summaryFixture()} onViewDiff={() => {}} />
     );
 
     expect(html).toContain('Edited 4 files');
@@ -17,7 +17,7 @@ describe('CompletedChangeSummaryCard', () => {
     expect(html).toContain('src/renderer/model/overviewRunActivity.test.ts');
     expect(html).toContain('Show 1 more file');
     expect(html).toContain('src/renderer/ui/TaskDetail.tsx');
-    expect(html).toContain('Review changes');
+    expect(html).toContain('View diff');
     expect(html).not.toContain('Undo');
   });
 
@@ -40,7 +40,7 @@ describe('CompletedChangeSummaryCard', () => {
           hiddenFiles: [],
           hiddenFileCount: 0
         }}
-        onReviewChanges={() => {}}
+        onViewDiff={() => {}}
       />
     );
 

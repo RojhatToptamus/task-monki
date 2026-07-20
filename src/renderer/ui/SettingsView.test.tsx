@@ -85,6 +85,10 @@ describe('SettingsView', () => {
     );
 
     expect(html).toContain('aria-label="Settings sections"');
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('role="tab" aria-selected="true"');
+    expect(html).toContain('aria-controls="settings-panel-agents"');
+    expect(html).toContain('role="tabpanel" aria-labelledby="settings-tab-agents"');
     expect(html).toContain('>Agents<');
     expect(html).toContain('>Models<');
     expect(html).toContain('>Tools<');

@@ -279,12 +279,14 @@ describe('NewTaskPanel', () => {
       attachmentsEnabled = true,
       defaultPresetId = capabilities.executionPolicy.defaultPresetId,
       repositoryId = 'repository-1',
-      repositories = defaultRepositories
+      repositories = defaultRepositories,
+      initialTextDraft
     }: {
       attachmentsEnabled?: boolean;
       defaultPresetId?: string;
       repositoryId?: string;
       repositories?: Repository[];
+      initialTextDraft?: { title: string; prompt: string };
     } = {}) =>
       renderToStaticMarkup(
         <NewTaskPanel
@@ -359,6 +361,7 @@ describe('NewTaskPanel', () => {
           })}
           onDiscardAttachmentDraft={async () => undefined}
           onDiscoverAgentRuntimeModels={discoverAgentRuntimeModels}
+          initialTextDraft={initialTextDraft}
           fallbackReturnFocusRef={{ current: null }}
           onClose={() => undefined}
         />
@@ -366,7 +369,8 @@ describe('NewTaskPanel', () => {
     const html = renderPanel();
 
     expect(discoverAgentRuntimeModels).not.toHaveBeenCalled();
-    expect(html).toContain('role="dialog" aria-modal="false"');
+    expect(html).toContain('aria-label="New task"');
+    expect(html).not.toContain('role="dialog"');
     expect(html).toContain('Execution policy');
     expect(html).toContain('Restricted');
     expect(html).toMatch(/class="is-selected" aria-pressed="true">Restricted</u);
@@ -409,6 +413,15 @@ describe('NewTaskPanel', () => {
     expect(html).toContain('The saved runtime change will apply after this turn.');
     expect(html).not.toContain('Internal ACP client-tool notice.');
     expect(html).not.toContain('Reasoning effort');
+
+    const preservedDraftHtml = renderPanel({
+      initialTextDraft: {
+        title: 'Preserved title',
+        prompt: 'Preserved description'
+      }
+    });
+    expect(preservedDraftHtml).toContain('value="Preserved title"');
+    expect(preservedDraftHtml).toContain('>Preserved description</textarea>');
 
     const fullAccessHtml = renderPanel({ defaultPresetId: 'full-access' });
     expect(fullAccessHtml).toContain('Required by this execution policy.');

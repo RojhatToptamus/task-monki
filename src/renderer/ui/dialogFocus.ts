@@ -37,10 +37,12 @@ export function handleDialogKeyDown(
   {
     dialog,
     busy,
+    trapFocus = true,
     onClose
   }: {
     dialog: HTMLElement;
     busy: boolean;
+    trapFocus?: boolean;
     onClose(): void;
   }
 ): void {
@@ -55,7 +57,7 @@ export function handleDialogKeyDown(
     }
     return;
   }
-  if (event.key !== 'Tab') {
+  if (event.key !== 'Tab' || !trapFocus) {
     return;
   }
   const focusable = dialogFocusableElements(dialog);
@@ -106,24 +108,30 @@ export function useDialogFocusBoundary({
   initialFocusRef,
   fallbackReturnFocusRef,
   busy,
+  trapFocus = true,
   onClose,
-  returnFocus
+  returnFocus,
+  shouldReturnFocus
 }: {
   dialogRef: RefObject<HTMLElement | null>;
   initialFocusRef?: RefObject<HTMLElement | null>;
   fallbackReturnFocusRef?: RefObject<HTMLElement | null>;
   busy: boolean;
+  trapFocus?: boolean;
   onClose(): void;
   returnFocus?: HTMLElement | null;
+  shouldReturnFocus?(): boolean;
 }): void {
   const busyRef = useRef(busy);
   const closeRef = useRef(onClose);
+  const shouldReturnFocusRef = useRef(shouldReturnFocus);
   const returnFocusRef = useRef<HTMLElement | null>(
     returnFocus ??
       (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null))
   );
   busyRef.current = busy;
   closeRef.current = onClose;
+  shouldReturnFocusRef.current = shouldReturnFocus;
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -135,6 +143,7 @@ export function useDialogFocusBoundary({
         handleDialogKeyDown(event, {
           dialog,
           busy: busyRef.current,
+          trapFocus,
           onClose: closeRef.current
         });
       }
@@ -143,6 +152,12 @@ export function useDialogFocusBoundary({
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKeyDown);
+      if (
+        shouldReturnFocusRef.current &&
+        !shouldReturnFocusRef.current()
+      ) {
+        return;
+      }
       const primaryTarget = returnFocusRef.current;
       queueMicrotask(() => {
         dialogReturnFocusTarget(primaryTarget, fallbackReturnFocusRef?.current)?.focus({
@@ -150,7 +165,7 @@ export function useDialogFocusBoundary({
         });
       });
     };
-  }, [dialogRef, fallbackReturnFocusRef, initialFocusRef]);
+  }, [dialogRef, fallbackReturnFocusRef, initialFocusRef, trapFocus]);
 
   useEffect(() => {
     if (!busy) {
