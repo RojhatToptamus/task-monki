@@ -5,6 +5,7 @@ import {
   createDiscourseComposerMentionState,
   DEFAULT_DISCOURSE_MENTION_SELECTION_MODE,
   findDiscourseMentionQuery,
+  lastRenderedDiscourseComposerToken,
   moveDiscourseMentionActiveOption,
   rankDiscourseMentionCandidates,
   redoDiscourseMentionSelection,
@@ -26,6 +27,22 @@ const agent: DiscourseMentionCandidate = {
 };
 
 describe('discourse mention composer model', () => {
+  it('targets the last visible token when agent chips are represented elsewhere', () => {
+    const state = {
+      ...createDiscourseComposerMentionState(),
+      tokens: [
+        { key: 'TASK:1', kind: 'TASK' as const, entityId: '1', labelSnapshot: 'Task', available: true },
+        { key: 'AGENT:lead', kind: 'AGENT' as const, entityId: 'lead', labelSnapshot: 'Lead', available: true }
+      ]
+    };
+    expect(lastRenderedDiscourseComposerToken(state, false)?.key).toBe('TASK:1');
+    expect(lastRenderedDiscourseComposerToken({
+      ...state,
+      tokens: [state.tokens[1]!]
+    }, false)).toBeUndefined();
+    expect(lastRenderedDiscourseComposerToken(state, true)?.key).toBe('AGENT:lead');
+  });
+
   it('ships the token-only fallback until inline labels pass the rendered AT gate', () => {
     expect(DEFAULT_DISCOURSE_MENTION_SELECTION_MODE).toBe('TOKEN_ONLY');
   });

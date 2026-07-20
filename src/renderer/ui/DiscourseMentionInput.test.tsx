@@ -41,7 +41,7 @@ describe('DiscourseMentionInput accessibility prototype', () => {
     expect(html).toContain('aria-multiline="true"');
     expect(html).toContain('aria-autocomplete="list"');
     expect(html).toContain('aria-expanded="true"');
-    expect(html).toMatch(/aria-activedescendant="discourse-option-[^"]+-builtin-verifier"/u);
+    expect(html).toMatch(/aria-activedescendant="discourse-option-[^"]+-AGENT-builtin-verifier"/u);
     expect(html).toContain('role="listbox"');
     expect(html).toContain('role="group" aria-label="Agents"');
     expect(html).toContain('role="group" aria-label="Tasks"');
@@ -49,5 +49,26 @@ describe('DiscourseMentionInput accessibility prototype', () => {
     expect(html).toContain('role="option" aria-selected="true"');
     expect(html).toContain('aria-disabled="true"');
     expect(html).toContain('role="status"');
+  });
+
+  it('keeps option identities distinct when entity kinds share an id', () => {
+    const html = renderToStaticMarkup(
+      <DiscourseMentionInput
+        initialText="@shared"
+        candidates={[
+          {
+            kind: 'TASK', id: 'shared', label: 'Shared task', description: 'Task',
+            searchAliases: [], available: true
+          },
+          {
+            kind: 'REPOSITORY', id: 'shared', label: 'Shared repository',
+            description: 'Repository', searchAliases: [], available: true
+          }
+        ]}
+      />
+    );
+
+    expect(html).toMatch(/id="discourse-option-[^"]+-TASK-shared"/u);
+    expect(html).toMatch(/id="discourse-option-[^"]+-REPOSITORY-shared"/u);
   });
 });

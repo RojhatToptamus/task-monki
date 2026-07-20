@@ -706,7 +706,6 @@ async function seedDiscourseScenario(input: {
       conversationId,
       body: 'Compare the implementation against @context source and @repository.',
       policy: 'NONE',
-      recipientParticipantIds: [],
       tokens: [
         { kind: 'TASK', entityId: task.id, labelSnapshot: task.title },
         {

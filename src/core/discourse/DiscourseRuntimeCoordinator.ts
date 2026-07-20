@@ -15,7 +15,7 @@ import type {
   DiscourseResponseWaveRecord,
   StructuredDiscourseError
 } from '../../shared/discourse';
-import { DISCOURSE_LIMITS } from '../../shared/discourse';
+import { DISCOURSE_LIMITS, isEligibleDiscourseConcern } from '../../shared/discourse';
 import { createAgentSessionAccessEpoch, assertDiscourseExecutionContext } from '../agent/AgentRuntimeOwnership';
 import type { AgentRuntimeStore } from '../agent/AgentRuntimeStore';
 import {
@@ -24,8 +24,7 @@ import {
   type StartedScopedAgentTurn
 } from '../agent/AgentScopedTurnProvider';
 import {
-  deriveDiscourseWaveAggregate,
-  isEligibleDiscourseConcern
+  deriveDiscourseWaveAggregate
 } from './DiscourseState';
 import {
   parseDiscourseCorrection,
@@ -66,6 +65,7 @@ export interface IngestDiscourseFailureInput {
   completedAt: string;
   providerTerminalSource: string;
   reason: string;
+  error?: StructuredDiscourseError;
 }
 
 export type DiscourseTerminalIngestionResult =
@@ -84,6 +84,11 @@ export type DiscourseCorrectionIngestionResult =
   | DiscourseTerminalIngestionResult
   | { kind: 'CORRECTION'; job: DiscourseAgentJobRecord }
   | { kind: 'INVALID_RESULT'; job: DiscourseAgentJobRecord; error: StructuredDiscourseError };
+
+export type DiscourseSuccessfulTerminalIngestionResult =
+  | DiscourseTerminalIngestionResult
+  | DiscourseReviewIngestionResult
+  | DiscourseCorrectionIngestionResult;
 
 export interface DiscourseRuntimeRecoveryResult {
   recoveredJobIds: string[];
@@ -480,27 +485,49 @@ export class DiscourseRuntimeCoordinator {
       if (['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
         continue;
       }
-      if (
-        !['RUNNING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED'].includes(job.status) ||
-        !job.runId
-      ) {
+      if (!['RUNNING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED'].includes(job.status)) {
+        throw new Error('Active wave interruption found an unsafe job checkpoint.');
+      }
+      if (job.status === 'RECOVERY_REQUIRED') {
+        const recoveryRuns = runtimeSnapshot.runs.filter((run) =>
+          runtimeRunBelongsToJob(run, input.conversationId, job)
+        );
+        if (recoveryRuns.some((run) =>
+          !isRuntimeTerminal(run.status) && run.status !== 'RECOVERY_REQUIRED'
+        )) {
+          throw new Error('Recovery stop found an active runtime outside its recovery fence.');
+        }
+        continue;
+      }
+      if (!job.runId) {
         throw new Error('Active wave interruption found an unsafe job checkpoint.');
       }
       const run = requireRuntimeRun(runtimeSnapshot.runs, job.runId);
-      const recoverableStop =
-        run.status === 'RECOVERY_REQUIRED' &&
-        (run.delivery === 'AMBIGUOUS' ||
-          run.delivery === 'NOT_DELIVERED' ||
-          (run.delivery === 'ACKNOWLEDGED' &&
-            ['NOT_DELIVERED', 'AMBIGUOUS'].includes(run.interruptDelivery ?? '')));
+      if (!runtimeRunMatchesExactJobAttempt(run, input.conversationId, job)) {
+        await this.markJobRecovery(
+          input.conversationId,
+          job.id,
+          'The Discourse job references a runtime record outside its durable attempt identity.',
+          `${input.clientOperationId}:stop-invalid-runtime-link:${job.id}`
+        );
+        return this.stopActiveWave(input, provider);
+      }
+      if (run.status === 'RECOVERY_REQUIRED') {
+        await this.markJobRecovery(
+          input.conversationId,
+          job.id,
+          run.terminalReason ?? 'The provider turn requires recovery before it can be stopped.',
+          `${input.clientOperationId}:stop-project-runtime-recovery:${job.id}`
+        );
+        return this.stopActiveWave(input, provider);
+      }
       if (
         !(
           (run.status === 'RUNNING' && run.delivery === 'ACKNOWLEDGED') ||
           (run.status === 'INTERRUPTING' &&
-            ['SENDING', 'ACKNOWLEDGED'].includes(run.interruptDelivery ?? '')) ||
-          recoverableStop
+            ['SENDING', 'ACKNOWLEDGED'].includes(run.interruptDelivery ?? ''))
         ) ||
-        (!recoverableStop && !run.providerTurnId)
+        !run.providerTurnId
       ) {
         throw new Error('Active wave interruption cannot prove its provider turn identity.');
       }
@@ -534,6 +561,16 @@ export class DiscourseRuntimeCoordinator {
         continue;
       }
       let job = originalJob;
+      if (job.status === 'RECOVERY_REQUIRED') {
+        recoveryRequired = (await this.cancelRecoveredJob(
+          input.conversationId,
+          job,
+          input.reason,
+          `${input.clientOperationId}:recovery-stop:${job.id}`,
+          provider
+        )) || recoveryRequired;
+        continue;
+      }
       if (job.status === 'RUNNING') {
         job = await this.discourse.updateJob({
           conversationId: input.conversationId,
@@ -565,59 +602,24 @@ export class DiscourseRuntimeCoordinator {
         );
         interruptIssuedByThisCall = true;
       } else if (run.status === 'RECOVERY_REQUIRED' || job.status === 'RECOVERY_REQUIRED') {
-        if (run.status !== 'RECOVERY_REQUIRED' || job.status !== 'RECOVERY_REQUIRED') {
-          throw new Error('Recovery stop found mismatched runtime and curated checkpoints.');
-        }
-        if (run.delivery === 'NOT_DELIVERED') {
-          run = await this.runtime.updateRun(
-            run.id,
-            run.recordRevision,
-            {
-              status: 'INTERRUPTED',
-              recoveryState: 'NONE',
-              terminalReason: input.reason,
-              lastEventAt: this.now(),
-              endedAt: this.now()
-            },
-            `${input.clientOperationId}:runtime-recovery-canceled:${job.id}`
-          );
-          await this.settleRuntimeAfterTerminal(
-            session,
-            run,
-            run.endedAt!,
-            `${input.clientOperationId}:runtime-recovery-settled:${job.id}`
-          );
-        }
-        const entry = (await this.runtime.snapshot()).queueEntries.find(
-          (candidate) => candidate.runId === run.id
+        await this.markJobRecovery(
+          input.conversationId,
+          job.id,
+          run.terminalReason ?? 'The provider turn requires recovery before it can be stopped.',
+          `${input.clientOperationId}:stop-project-recovery:${job.id}`
         );
-        if (entry?.status === 'LEASED') {
-          await this.runtime.settleQueueEntry(
-            entry.id,
-            entry.recordRevision,
-            `${input.clientOperationId}:queue-recovery-stopped:${job.id}`
-          );
-        } else if (entry?.status === 'QUEUED' && run.delivery === 'NOT_DELIVERED') {
-          await this.runtime.cancelQueueEntry(
-            entry.id,
-            entry.recordRevision,
-            input.reason,
-            `${input.clientOperationId}:queue-recovery-canceled:${job.id}`
-          );
-        } else if (!entry || !['SETTLED', 'CANCELED'].includes(entry.status)) {
-          throw new Error('Recovery stop lost its durable scheduler entry.');
-        }
-        await this.discourse.updateJob({
-          conversationId: input.conversationId,
-          expectedRevision: job.recordRevision,
-          clientOperationId: `${input.clientOperationId}:job-recovery-canceled:${job.id}`,
-          job: {
-            ...job,
-            recordRevision: job.recordRevision + 1,
-            status: 'CANCELED',
-            finishedAt: this.now()
-          }
-        });
+        const recoveryJob = requireJob(
+          (await this.discourse.getConversation(input.conversationId)).jobs,
+          job.id,
+          job.waveId
+        );
+        recoveryRequired = (await this.cancelRecoveredJob(
+          input.conversationId,
+          recoveryJob,
+          input.reason,
+          `${input.clientOperationId}:recovery-stop:${job.id}`,
+          provider
+        )) || recoveryRequired;
         continue;
       } else if (run.interruptDelivery === 'ACKNOWLEDGED') {
         continue;
@@ -733,11 +735,22 @@ export class DiscourseRuntimeCoordinator {
       input.waveId
     );
     if (wave.status === 'SETTLED') return wave;
-    if (recoveryRequired) {
+    if (recoveryRequired && wave.status === 'STOP_REQUESTED') {
+      await this.discourse.updateWave({
+        conversationId: input.conversationId,
+        expectedRevision: wave.recordRevision,
+        clientOperationId: `${input.clientOperationId}:wave-stop-recovery`,
+        wave: {
+          ...wave,
+          recordRevision: wave.recordRevision + 1,
+          status: 'STOPPING'
+        }
+      });
+    } else if (recoveryRequired && wave.status !== 'STOPPING') {
       await this.markWaveRecovery(
         input.conversationId,
         wave,
-        input.clientOperationId
+        `${input.clientOperationId}:stop-recovery:${wave.recordRevision}`
       );
     } else if (wave.status === 'STOP_REQUESTED') {
       await this.discourse.updateWave({
@@ -828,6 +841,16 @@ export class DiscourseRuntimeCoordinator {
     const aggregate = await this.discourse.getConversation(entry.scope.conversationId);
     let job = requireJob(aggregate.jobs, entry.scope.jobId, entry.scope.waveId);
     let wave = requireWave(aggregate.waves, entry.scope.waveId);
+    if (
+      !runtimeRunMatchesExactJobAttempt(
+        run,
+        entry.scope.conversationId,
+        job
+      )
+    ) {
+      throw new Error('Discourse dispatch found a stale runtime attempt.');
+    }
+    assertExistingJobLink(job, session, run);
     if (run.status !== 'QUEUED' || job.status !== 'RESOLVING_CONTEXT') {
       throw new Error('Discourse dispatch checkpoint is not safe to submit.');
     }
@@ -1063,6 +1086,102 @@ export class DiscourseRuntimeCoordinator {
     return { run, session, scope, ...(tombstone ? { tombstone } : {}) };
   }
 
+  /**
+   * A provider terminal may project into the curated conversation only from
+   * the exact run linked to the durable job, and only after every sibling
+   * claim is terminal. Provably unsubmitted siblings are closed locally;
+   * delivered or ambiguous siblings keep their scheduler capacity and fence
+   * the job until provider evidence resolves them.
+   */
+  private async prepareTerminalProjection(
+    run: AgentRuntimeRunRecord,
+    session: AgentRuntimeSessionRecord,
+    job: DiscourseAgentJobRecord,
+    completedAt: string,
+    operationId: string
+  ): Promise<{ job: DiscourseAgentJobRecord; mayProject: boolean }> {
+    if (
+      job.runId !== run.id ||
+      !runtimeRunMatchesExactJobAttempt(run, job.conversationId, job)
+    ) {
+      await this.settleRuntimeAfterTerminal(session, run, completedAt, operationId);
+      await this.recoverConversation(job.conversationId);
+      return {
+        job: requireJob(
+          (await this.discourse.getConversation(job.conversationId)).jobs,
+          job.id,
+          job.waveId
+        ),
+        mayProject: false
+      };
+    }
+
+    const snapshot = await this.runtime.snapshot();
+    const siblings = snapshot.runs.filter(
+      (candidate) =>
+        candidate.id !== run.id &&
+        runtimeRunBelongsToJob(candidate, job.conversationId, job)
+    );
+    let unresolvedSibling = false;
+    for (const candidate of siblings) {
+      let sibling = (await this.runtime.getRun(candidate.id)) ?? candidate;
+      if (isRuntimeTerminal(sibling.status)) continue;
+      if (!['NOT_SENT', 'NOT_DELIVERED'].includes(sibling.delivery)) {
+        unresolvedSibling = true;
+        continue;
+      }
+      sibling = await this.runtime.updateRun(
+        sibling.id,
+        sibling.recordRevision,
+        {
+          status: 'INTERRUPTED',
+          delivery: 'NOT_DELIVERED',
+          recoveryState: 'NONE',
+          terminalReason: 'A different authoritative attempt reached provider terminal.',
+          lastEventAt: completedAt,
+          endedAt: completedAt
+        },
+        `${operationId}:sibling-terminal:${sibling.id}`
+      );
+      const siblingSnapshot = await this.runtime.snapshot();
+      const siblingSession = requireRuntimeSession(siblingSnapshot.sessions, sibling.sessionId);
+      await this.settleRuntimeAfterTerminal(
+        siblingSession,
+        sibling,
+        completedAt,
+        `${operationId}:sibling-settle:${sibling.id}`
+      );
+      const siblingEntry = (await this.runtime.snapshot()).queueEntries.find(
+        (candidateEntry) => candidateEntry.runId === sibling.id
+      );
+      if (siblingEntry?.status === 'QUEUED') {
+        await this.runtime.cancelQueueEntry(
+          siblingEntry.id,
+          siblingEntry.recordRevision,
+          'A different authoritative attempt reached provider terminal.',
+          `${operationId}:sibling-cancel:${sibling.id}`
+        );
+      }
+    }
+    if (!unresolvedSibling) return { job, mayProject: true };
+
+    await this.markJobRecovery(
+      job.conversationId,
+      job.id,
+      'Another delivered runtime attempt remains unresolved for this Discourse job.',
+      `${operationId}:terminal-sibling-recovery`
+    );
+    await this.settleRuntimeAfterTerminal(session, run, completedAt, operationId);
+    return {
+      job: requireJob(
+        (await this.discourse.getConversation(job.conversationId)).jobs,
+        job.id,
+        job.waveId
+      ),
+      mayProject: false
+    };
+  }
+
   private async failInvalidResult(
     job: DiscourseAgentJobRecord,
     input: IngestDiscourseContributionInput,
@@ -1185,6 +1304,15 @@ export class DiscourseRuntimeCoordinator {
     if (!['ANSWER', 'TARGETED_REPLY', 'SYNTHESIZE'].includes(job.role)) {
       throw new Error('This terminal ingestion path accepts contribution-producing jobs only.');
     }
+    const projection = await this.prepareTerminalProjection(
+      run,
+      session,
+      job,
+      input.completedAt,
+      input.clientOperationId
+    );
+    job = projection.job;
+    if (!projection.mayProject) return { kind: 'IGNORED_TERMINAL', job };
     if (['FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
       await this.settleRuntimeAfterTerminal(
         session,
@@ -1245,6 +1373,7 @@ export class DiscourseRuntimeCoordinator {
           recordRevision: job.recordRevision + 1,
           status: 'COMPLETED',
           delivery: 'TERMINAL',
+          error: undefined,
           freshnessAtCompletion: input.freshnessAtCompletion,
           result: { kind: 'CONTRIBUTION', outputMessageId: message.id },
           finishedAt: input.completedAt
@@ -1265,6 +1394,32 @@ export class DiscourseRuntimeCoordinator {
     return { kind: 'CURATED', message };
   }
 
+  /**
+   * Routes successful provider evidence by the durable runtime purpose. Keeping
+   * this decision beside terminal ingestion ensures live events and startup
+   * recovery cannot disagree about review and correction output.
+   */
+  async ingestSuccessfulTerminal(
+    input: IngestDiscourseContributionInput
+  ): Promise<DiscourseSuccessfulTerminalIngestionResult> {
+    const run = await this.runtime.getRun(input.runId);
+    if (!run || run.scope.kind !== 'DISCOURSE') {
+      throw new Error(`Discourse runtime run not found: ${input.runId}`);
+    }
+    switch (run.purpose) {
+      case 'DISCOURSE_CRITIQUE':
+        return this.ingestReview(input);
+      case 'DISCOURSE_CORRECT':
+        return this.ingestCorrection(input);
+      case 'DISCOURSE_ANSWER':
+      case 'DISCOURSE_TARGETED_REPLY':
+      case 'DISCOURSE_SYNTHESIZE':
+        return this.ingestContribution(input);
+      default:
+        throw new Error(`Unsupported discourse runtime purpose: ${run.purpose}`);
+    }
+  }
+
   async ingestReview(
     input: IngestDiscourseContributionInput
   ): Promise<DiscourseReviewIngestionResult> {
@@ -1281,6 +1436,15 @@ export class DiscourseRuntimeCoordinator {
     if (job.role !== 'CRITIQUE' || job.targetMessageIds.length !== 1) {
       throw new Error('This terminal ingestion path accepts one-target review jobs only.');
     }
+    const projection = await this.prepareTerminalProjection(
+      run,
+      session,
+      job,
+      input.completedAt,
+      input.clientOperationId
+    );
+    job = projection.job;
+    if (!projection.mayProject) return { kind: 'IGNORED_TERMINAL', job };
     if (['FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
       await this.settleRuntimeAfterTerminal(
         session,
@@ -1349,6 +1513,7 @@ export class DiscourseRuntimeCoordinator {
           recordRevision: job.recordRevision + 1,
           status: 'COMPLETED',
           delivery: 'TERMINAL',
+          error: undefined,
           freshnessAtCompletion: input.freshnessAtCompletion,
           result: {
             kind: 'REVIEW',
@@ -1383,6 +1548,15 @@ export class DiscourseRuntimeCoordinator {
     if (job.role !== 'CORRECT') {
       throw new Error('This terminal ingestion path accepts correction jobs only.');
     }
+    const projection = await this.prepareTerminalProjection(
+      run,
+      session,
+      job,
+      input.completedAt,
+      input.clientOperationId
+    );
+    job = projection.job;
+    if (!projection.mayProject) return { kind: 'IGNORED_TERMINAL', job };
     if (['FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
       await this.settleRuntimeAfterTerminal(
         session,
@@ -1448,6 +1622,7 @@ export class DiscourseRuntimeCoordinator {
           recordRevision: job.recordRevision + 1,
           status: 'COMPLETED',
           delivery: 'TERMINAL',
+          error: undefined,
           freshnessAtCompletion: input.freshnessAtCompletion,
           result: {
             kind: 'CORRECTION',
@@ -1507,15 +1682,18 @@ export class DiscourseRuntimeCoordinator {
       return { kind: 'CONVERSATION_DELETED' };
     }
     const aggregate = await this.discourse.getConversation(run.scope.conversationId);
-    const job = requireJob(aggregate.jobs, run.scope.jobId, run.scope.waveId);
+    let job = requireJob(aggregate.jobs, run.scope.jobId, run.scope.waveId);
+    const wave = requireWave(aggregate.waves, run.scope.waveId);
+    const cancellationRequested =
+      job.status === 'CANCEL_REQUESTED' ||
+      (job.status === 'RECOVERY_REQUIRED' &&
+        ['STOP_REQUESTED', 'STOPPING'].includes(wave.status));
     if (!isRuntimeTerminal(run.status)) {
-      const canceled =
-        job.status === 'CANCEL_REQUESTED' || job.status === 'RECOVERY_REQUIRED';
       run = await this.runtime.updateRun(
         run.id,
         run.recordRevision,
         {
-          status: canceled ? 'INTERRUPTED' : 'FAILED',
+          status: cancellationRequested ? 'INTERRUPTED' : 'FAILED',
           delivery: 'TERMINAL',
           ...(run.interruptDelivery ? { interruptDelivery: 'TERMINAL' } : {}),
           recoveryState: 'NONE',
@@ -1534,8 +1712,16 @@ export class DiscourseRuntimeCoordinator {
         `${input.clientOperationId}:runtime-interrupt-terminal`
       );
     }
+    const projection = await this.prepareTerminalProjection(
+      run,
+      session,
+      job,
+      input.completedAt,
+      input.clientOperationId
+    );
+    job = projection.job;
+    if (!projection.mayProject) return { kind: 'FAILED' };
     if (!['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) {
-      const canceled = job.status === 'CANCEL_REQUESTED' || job.status === 'RECOVERY_REQUIRED';
       await this.discourse.updateJob({
         conversationId: scope.conversationId,
         expectedRevision: job.recordRevision,
@@ -1543,12 +1729,12 @@ export class DiscourseRuntimeCoordinator {
         job: {
           ...job,
           recordRevision: job.recordRevision + 1,
-          status: canceled ? 'CANCELED' : 'FAILED',
+          status: cancellationRequested ? 'CANCELED' : 'FAILED',
           delivery: 'TERMINAL',
-          ...(canceled
+          ...(cancellationRequested
             ? { error: undefined }
             : {
-                error: {
+                error: input.error ?? {
                   code: 'PROVIDER_UNAVAILABLE',
                   message: input.reason,
                   category: 'PROVIDER',
@@ -1601,32 +1787,67 @@ export class DiscourseRuntimeCoordinator {
           recoveryRequiredJobIds.add(run.scope.jobId);
         }
       }
+      if (recoveryRequiredJobIds.size === 0) {
+        await this.runtime.purgeDiscourseConversation(conversationId);
+      }
       return toRecoveryResult(recoveredJobIds, recoveryRequiredJobIds, tombstonedRunIds);
     }
 
     const aggregate = await this.discourse.getConversation(conversationId);
     for (const originalJob of aggregate.jobs) {
       let job = originalJob;
-      const matchingRuns = runtimeSnapshot.runs.filter(
-        (run) =>
-          run.scope.kind === 'DISCOURSE' &&
-          run.scope.conversationId === conversationId &&
-          run.scope.waveId === job.waveId &&
-          run.scope.jobId === job.id &&
-          run.scope.attemptId === job.attemptId &&
-          run.generationKey === job.generationKey
+      const claimedRuns = runtimeSnapshot.runs.filter((run) =>
+        runtimeRunBelongsToJob(run, conversationId, job)
       );
-      if (matchingRuns.length > 1) {
+      const matchingRuns = claimedRuns.filter((run) =>
+        runtimeRunMatchesExactJobAttempt(run, conversationId, job)
+      );
+      const linkedRun = job.runId
+        ? matchingRuns.find((candidate) => candidate.id === job.runId)
+        : undefined;
+      const authoritativeRun = linkedRun ?? (
+        !job.runId && matchingRuns.length === 1 ? matchingRuns[0] : undefined
+      );
+      const unresolvedSiblingClaims = authoritativeRun
+        ? claimedRuns.filter(
+            (candidate) => candidate.id !== authoritativeRun.id && !isRuntimeTerminal(candidate.status)
+          )
+        : claimedRuns;
+      if ((!authoritativeRun && claimedRuns.length > 0) || unresolvedSiblingClaims.length > 0) {
+        await this.markJobRecovery(
+          conversationId,
+          job.id,
+          authoritativeRun
+            ? 'Another runtime record still claims active work for the same Discourse job.'
+            : 'A runtime record claims the Discourse job without its authoritative durable identity.',
+          `recover-duplicate-runtime:${job.id}`
+        );
         recoveryRequiredJobIds.add(job.id);
         continue;
       }
-      let run = matchingRuns[0];
-      if (!run) {
-        if (job.runId) recoveryRequiredJobIds.add(job.id);
+      if (!authoritativeRun) {
+        if (job.runId) {
+          await this.markJobRecovery(
+            conversationId,
+            job.id,
+            'The Discourse job references a runtime record that no longer exists.',
+            `recover-missing-runtime:${job.id}`
+          );
+          recoveryRequiredJobIds.add(job.id);
+        }
         continue;
       }
+      let run: AgentRuntimeRunRecord = authoritativeRun;
       const session = runtimeSnapshot.sessions.find((candidate) => candidate.id === run.sessionId);
       if (!session || (job.runId && job.runId !== run.id)) {
+        await this.markJobRecovery(
+          conversationId,
+          job.id,
+          !session
+            ? 'The Discourse runtime session is missing.'
+            : 'The Discourse job and runtime records no longer agree on their identity.',
+          `recover-invalid-runtime-link:${job.id}`
+        );
         recoveryRequiredJobIds.add(job.id);
         continue;
       }
@@ -1655,6 +1876,12 @@ export class DiscourseRuntimeCoordinator {
         try {
           assertExistingJobLink(job, session, run);
         } catch {
+          await this.markJobRecovery(
+            conversationId,
+            job.id,
+            'The Discourse job and runtime records no longer agree on their durable execution context.',
+            `recover-invalid-job-link:${job.id}`
+          );
           recoveryRequiredJobIds.add(job.id);
           continue;
         }
@@ -1794,28 +2021,109 @@ export class DiscourseRuntimeCoordinator {
         continue;
       }
 
+      if (
+        run.status === 'RECOVERY_REQUIRED' &&
+        !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)
+      ) {
+        const delivery = job.delivery === 'ACKNOWLEDGED'
+          ? 'ACKNOWLEDGED'
+          : run.delivery === 'SENDING'
+            ? 'AMBIGUOUS'
+            : run.delivery;
+        if (job.status !== 'RECOVERY_REQUIRED' || job.delivery !== delivery) {
+          job = await this.discourse.updateJob({
+            conversationId,
+            expectedRevision: job.recordRevision,
+            clientOperationId: `recover-required-job:${run.id}`,
+            job: {
+              ...job,
+              recordRevision: job.recordRevision + 1,
+              status: 'RECOVERY_REQUIRED',
+              delivery,
+              error: {
+                code: 'DELIVERY_AMBIGUOUS',
+                message:
+                  run.terminalReason ??
+                  'The provider request has no authoritative terminal result.',
+                category: 'DELIVERY',
+                retryable: false
+              }
+            }
+          });
+        }
+        const recoveryWave = requireWave(
+          (await this.discourse.getConversation(conversationId)).waves,
+          job.waveId
+        );
+        await this.markWaveRecovery(
+          conversationId,
+          recoveryWave,
+          `recover-required:${run.id}`
+        );
+        recoveryRequiredJobIds.add(job.id);
+        continue;
+      }
+
+      if (run.status === 'COMPLETED' && job.status === 'COMPLETED') {
+        await this.settleRuntimeAfterTerminal(
+          session,
+          run,
+          run.endedAt ?? run.lastEventAt ?? this.now(),
+          `recover-completed-checkpoint:${run.id}`
+        );
+        await this.reconcileWaveFromChildren(
+          conversationId,
+          job.waveId,
+          `recover-completed-checkpoint:${run.id}`
+        );
+        recoveredJobIds.add(job.id);
+        continue;
+      }
+
       if (run.status === 'COMPLETED' && job.status !== 'COMPLETED') {
         const body = await this.runtime.readArtifact(run.outputArtifactId);
         if (
-          !body.trim() ||
           !run.providerTurnId ||
           !run.endedAt ||
           !run.contextFreshnessAtCompletion
         ) {
+          await this.markJobRecovery(
+            conversationId,
+            job.id,
+            'The provider completed, but its durable terminal evidence is incomplete.',
+            `recover-incomplete-terminal:${run.id}`
+          );
           recoveryRequiredJobIds.add(job.id);
           continue;
         }
-        const result = await this.ingestContribution({
-          runId: run.id,
-          providerTurnId: run.providerTurnId,
-          body,
-          freshnessAtCompletion: run.contextFreshnessAtCompletion,
-          clientOperationId: `recover-terminal:${run.id}`,
-          completedAt: run.endedAt,
-          providerTerminalSource: run.providerTerminalSource ?? 'RUNTIME_RECOVERY'
-        });
-        if (result.kind === 'CURATED') recoveredJobIds.add(job.id);
-        else tombstonedRunIds.add(run.id);
+        if (body.trim()) {
+          const result = await this.ingestSuccessfulTerminal({
+            runId: run.id,
+            providerTurnId: run.providerTurnId,
+            body,
+            freshnessAtCompletion: run.contextFreshnessAtCompletion,
+            clientOperationId: `recover-terminal:${run.id}`,
+            completedAt: run.endedAt,
+            providerTerminalSource: run.providerTerminalSource ?? 'RUNTIME_RECOVERY'
+          });
+          if (result.kind === 'CONVERSATION_DELETED') tombstonedRunIds.add(run.id);
+        } else {
+          await this.ingestFailure({
+            runId: run.id,
+            providerTurnId: run.providerTurnId,
+            clientOperationId: `recover-terminal:${run.id}`,
+            completedAt: run.endedAt,
+            providerTerminalSource: run.providerTerminalSource ?? 'RUNTIME_RECOVERY',
+            reason: 'The agent completed without a usable response.',
+            error: {
+              code: 'OUTPUT_MISSING',
+              message: 'The agent completed without a usable response.',
+              category: 'VALIDATION',
+              retryable: true
+            }
+          });
+        }
+        recoveredJobIds.add(job.id);
         continue;
       }
 
@@ -1854,6 +2162,12 @@ export class DiscourseRuntimeCoordinator {
           recoveredJobIds.add(job.id);
           continue;
         }
+        await this.markJobRecovery(
+          conversationId,
+          job.id,
+          'The provider runtime ended without enough terminal evidence to settle the Discourse job.',
+          `recover-incomplete-failure:${run.id}`
+        );
         recoveryRequiredJobIds.add(job.id);
         continue;
       }
@@ -1966,10 +2280,19 @@ export class DiscourseRuntimeCoordinator {
     completedAt: string,
     operationId: string
   ): Promise<void> {
-    if (session.status !== 'IDLE') {
+    const snapshot = await this.runtime.snapshot();
+    const currentSession = requireRuntimeSession(snapshot.sessions, session.id);
+    const sessionStillOwnsProviderWork = snapshot.runs.some(
+      (candidate) =>
+        candidate.id !== run.id &&
+        candidate.sessionId === session.id &&
+        !isRuntimeTerminal(candidate.status) &&
+        !['NOT_SENT', 'NOT_DELIVERED'].includes(candidate.delivery)
+    );
+    if (currentSession.status !== 'IDLE' && !sessionStillOwnsProviderWork) {
       await this.runtime.updateSession(
-        session.id,
-        session.recordRevision,
+        currentSession.id,
+        currentSession.recordRevision,
         { status: 'IDLE', lastAttachedAt: completedAt },
         `${operationId}:session-idle`
       );
@@ -2217,7 +2540,7 @@ export class DiscourseRuntimeCoordinator {
     wave: DiscourseResponseWaveRecord,
     operationId: string
   ): Promise<void> {
-    if (wave.status === 'RECOVERY_REQUIRED') return;
+    if (['RECOVERY_REQUIRED', 'STOP_REQUESTED', 'STOPPING'].includes(wave.status)) return;
     await this.discourse.updateWave({
       conversationId,
       expectedRevision: wave.recordRevision,
@@ -2228,6 +2551,273 @@ export class DiscourseRuntimeCoordinator {
         status: 'RECOVERY_REQUIRED'
       }
     });
+  }
+
+  private async markJobRecovery(
+    conversationId: string,
+    jobId: string,
+    message: string,
+    operationId: string
+  ): Promise<void> {
+    const aggregate = await this.discourse.getConversation(conversationId);
+    let job = aggregate.jobs.find((candidate) => candidate.id === jobId);
+    if (!job) throw new Error(`Discourse job not found: ${jobId}`);
+    if (['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status)) return;
+    await this.quarantineRuntimeAttempts(
+      conversationId,
+      job,
+      message,
+      operationId
+    );
+    if (job.status !== 'RECOVERY_REQUIRED' || job.error?.message !== message) {
+      job = await this.discourse.updateJob({
+        conversationId,
+        expectedRevision: job.recordRevision,
+        clientOperationId: `${operationId}:job-recovery`,
+        job: {
+          ...job,
+          recordRevision: job.recordRevision + 1,
+          status: 'RECOVERY_REQUIRED',
+          error: {
+            code: 'DELIVERY_AMBIGUOUS',
+            message,
+            category: 'DELIVERY',
+            retryable: false
+          }
+        }
+      });
+    }
+    const current = await this.discourse.getConversation(conversationId);
+    const wave = requireWave(current.waves, job.waveId);
+    if (wave.status !== 'SETTLED') {
+      await this.markWaveRecovery(conversationId, wave, operationId);
+    }
+  }
+
+  private async quarantineRuntimeAttempts(
+    conversationId: string,
+    job: DiscourseAgentJobRecord,
+    message: string,
+    operationId: string
+  ): Promise<void> {
+    const snapshot = await this.runtime.snapshot();
+    const implicated = snapshot.runs.filter((run) =>
+      runtimeRunBelongsToJob(run, conversationId, job)
+    );
+    for (const candidate of implicated) {
+      let run = (await this.runtime.getRun(candidate.id)) ?? candidate;
+      if (!isRuntimeTerminal(run.status) && run.status !== 'RECOVERY_REQUIRED') {
+        run = await this.runtime.updateRun(
+          run.id,
+          run.recordRevision,
+          {
+            status: 'RECOVERY_REQUIRED',
+            ...(run.delivery === 'NOT_SENT'
+              ? { delivery: 'NOT_DELIVERED' as const }
+              : run.delivery === 'SENDING'
+                ? { delivery: 'AMBIGUOUS' as const }
+                : {}),
+            recoveryState: 'REQUIRES_USER_ACTION',
+            terminalReason: message,
+            lastEventAt: this.now()
+          },
+          `${operationId}:runtime-recovery:${run.id}`
+        );
+      }
+      const entry = (await this.runtime.snapshot()).queueEntries.find(
+        (candidateEntry) => candidateEntry.runId === run.id
+      );
+      if (entry?.status === 'QUEUED') {
+        await this.runtime.cancelQueueEntry(
+          entry.id,
+          entry.recordRevision,
+          message,
+          `${operationId}:queue-recovery-canceled:${run.id}`
+        );
+      } else if (entry?.status === 'LEASED' && isRuntimeTerminal(run.status)) {
+        await this.runtime.settleQueueEntry(
+          entry.id,
+          entry.recordRevision,
+          `${operationId}:queue-recovery-settled:${run.id}`
+        );
+      }
+    }
+  }
+
+  private async cancelRecoveredJob(
+    conversationId: string,
+    job: DiscourseAgentJobRecord,
+    reason: string,
+    operationId: string,
+    provider: AgentScopedTurnProvider
+  ): Promise<boolean> {
+    const snapshot = await this.runtime.snapshot();
+    const implicated = snapshot.runs.filter((run) =>
+      runtimeRunBelongsToJob(run, conversationId, job)
+    );
+    let providerInterruptPending = false;
+    let recoveryRequired = false;
+    for (const candidate of implicated) {
+      let run = (await this.runtime.getRun(candidate.id)) ?? candidate;
+      if (!isRuntimeTerminal(run.status)) {
+        if (run.status !== 'RECOVERY_REQUIRED') {
+          throw new Error('Recovery stop found an active runtime outside its recovery fence.');
+        }
+        const provablyNotDelivered = ['NOT_SENT', 'NOT_DELIVERED'].includes(run.delivery);
+        const currentSnapshot = await this.runtime.snapshot();
+        const session = currentSnapshot.sessions.find(
+          (candidateSession) => candidateSession.id === run.sessionId
+        );
+        if (provablyNotDelivered) {
+          run = await this.runtime.updateRun(
+            run.id,
+            run.recordRevision,
+            {
+              status: 'INTERRUPTED',
+              delivery: 'NOT_DELIVERED',
+              recoveryState: 'NONE',
+              terminalReason: reason,
+              lastEventAt: this.now(),
+              endedAt: this.now()
+            },
+            `${operationId}:runtime-terminal:${run.id}`
+          );
+        } else if (
+          run.delivery === 'ACKNOWLEDGED' &&
+          run.providerTurnId &&
+          session &&
+          (!run.interruptDelivery || run.interruptDelivery === 'NOT_DELIVERED')
+        ) {
+          run = await this.runtime.updateRun(
+            run.id,
+            run.recordRevision,
+            {
+              status: 'RUNNING',
+              interruptDelivery: undefined,
+              stopRequestedAt: undefined,
+              recoveryState: 'NONE',
+              lastEventAt: this.now()
+            },
+            `${operationId}:runtime-active:${run.id}`
+          );
+          run = await this.runtime.updateRun(
+            run.id,
+            run.recordRevision,
+            {
+              status: 'INTERRUPTING',
+              interruptDelivery: 'SENDING',
+              stopRequestedAt: this.now(),
+              terminalReason: reason,
+              lastEventAt: this.now()
+            },
+            `${operationId}:runtime-stop-intent:${run.id}`
+          );
+          try {
+            if (!provider.interruptScopedTurn) {
+              throw new AgentScopedMutationError(
+                'NOT_DELIVERED',
+                'The scoped provider does not support interruption.'
+              );
+            }
+            await provider.interruptScopedTurn({ session, run });
+            const latest = (await this.runtime.getRun(run.id)) ?? run;
+            if (!isRuntimeTerminal(latest.status)) {
+              run = latest.status === 'INTERRUPTING' && latest.interruptDelivery === 'SENDING'
+                ? await this.runtime.updateRun(
+                    latest.id,
+                    latest.recordRevision,
+                    { interruptDelivery: 'ACKNOWLEDGED', lastEventAt: this.now() },
+                    `${operationId}:runtime-stop-ack:${run.id}`
+                  )
+                : latest;
+              providerInterruptPending = true;
+            } else {
+              run = latest;
+            }
+          } catch (error) {
+            const latest = (await this.runtime.getRun(run.id)) ?? run;
+            if (!isRuntimeTerminal(latest.status)) {
+              const interruptDelivery = error instanceof AgentScopedMutationError
+                ? error.delivery
+                : 'AMBIGUOUS';
+              run = await this.runtime.updateRun(
+                latest.id,
+                latest.recordRevision,
+                {
+                  status: 'RECOVERY_REQUIRED',
+                  interruptDelivery,
+                  recoveryState: 'REQUIRES_USER_ACTION',
+                  terminalReason: error instanceof Error ? error.message : String(error),
+                  lastEventAt: this.now()
+                },
+                `${operationId}:runtime-stop-recovery:${run.id}`
+              );
+              recoveryRequired = true;
+            } else {
+              run = latest;
+            }
+          }
+        } else {
+          recoveryRequired = true;
+        }
+      }
+      const latest = await this.runtime.snapshot();
+      const session = latest.sessions.find((candidateSession) => candidateSession.id === run.sessionId);
+      if (session && isRuntimeTerminal(run.status)) {
+        await this.settleRuntimeAfterTerminal(session, run, run.endedAt ?? this.now(), operationId);
+      }
+      const entry = (await this.runtime.snapshot()).queueEntries.find(
+        (candidateEntry) => candidateEntry.runId === run.id
+      );
+      if (entry?.status === 'QUEUED' && isRuntimeTerminal(run.status)) {
+        await this.runtime.cancelQueueEntry(
+          entry.id,
+          entry.recordRevision,
+          reason,
+          `${operationId}:queue-canceled:${run.id}`
+        );
+      } else if (entry?.status === 'LEASED' && isRuntimeTerminal(run.status)) {
+        await this.runtime.settleQueueEntry(
+          entry.id,
+          entry.recordRevision,
+          `${operationId}:queue-settled:${run.id}`
+        );
+      }
+    }
+    const current = requireJob(
+      (await this.discourse.getConversation(conversationId)).jobs,
+      job.id,
+      job.waveId
+    );
+    if (recoveryRequired) return true;
+    if (providerInterruptPending && current.status === 'RECOVERY_REQUIRED') {
+      await this.discourse.updateJob({
+        conversationId,
+        expectedRevision: current.recordRevision,
+        clientOperationId: `${operationId}:job-stop-intent`,
+        job: {
+          ...current,
+          recordRevision: current.recordRevision + 1,
+          status: 'CANCEL_REQUESTED',
+          error: undefined
+        }
+      });
+      return false;
+    }
+    if (current.status !== 'CANCELED' && current.status !== 'CANCEL_REQUESTED') {
+      await this.discourse.updateJob({
+        conversationId,
+        expectedRevision: current.recordRevision,
+        clientOperationId: `${operationId}:job-canceled`,
+        job: {
+          ...current,
+          recordRevision: current.recordRevision + 1,
+          status: 'CANCELED',
+          finishedAt: this.now()
+        }
+      });
+    }
+    return false;
   }
 }
 
@@ -2246,6 +2836,30 @@ function executionContextFromSession(
     throw new Error('Discourse runtime execution context belongs to another session.');
   }
   return structuredClone(session.executionContext);
+}
+
+function runtimeRunBelongsToJob(
+  run: AgentRuntimeRunRecord,
+  conversationId: string,
+  job: DiscourseAgentJobRecord
+): boolean {
+  if (run.scope.kind !== 'DISCOURSE' || run.scope.conversationId !== conversationId) {
+    return false;
+  }
+  return run.scope.waveId === job.waveId && run.scope.jobId === job.id;
+}
+
+function runtimeRunMatchesExactJobAttempt(
+  run: AgentRuntimeRunRecord,
+  conversationId: string,
+  job: DiscourseAgentJobRecord
+): boolean {
+  return run.scope.kind === 'DISCOURSE' &&
+    run.scope.conversationId === conversationId &&
+    run.scope.waveId === job.waveId &&
+    run.scope.jobId === job.id &&
+    run.scope.attemptId === job.attemptId &&
+    run.generationKey === job.generationKey;
 }
 
 function purposeForJob(job: DiscourseAgentJobRecord): AgentRuntimePurpose {

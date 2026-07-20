@@ -969,6 +969,63 @@ describe('DiscourseService', () => {
     });
   });
 
+  it('terminalizes queued jobs when context changes again during reconfirmation', async () => {
+    const fixture = await serviceFixture('reconfirmation-second-drift');
+    const conversation = await fixture.service.createConversation({
+      title: 'Context reconfirmation',
+      defaultPolicy: 'DIRECT',
+      agents: selections('builtin.lead'),
+      clientOperationId: 'create-reconfirmation'
+    });
+    const preview = await fixture.service.previewContext({
+      conversationId: conversation.id,
+      messageContext: []
+    });
+    const prepare = fixture.snapshots.prepare.bind(fixture.snapshots);
+    vi.spyOn(fixture.snapshots, 'prepare').mockImplementation(async (input) => {
+      const prepared = await prepare(input);
+      return {
+        ...prepared,
+        preview: { ...prepared.preview, fingerprint: 'changed-preview-fingerprint' }
+      };
+    });
+    const sent = await fixture.service.sendMessage({
+      conversationId: conversation.id,
+      body: 'Answer only if this frozen context still matches.',
+      context: [],
+      clientMessageId: 'reconfirmation-message',
+      policy: 'DIRECT',
+      agents: selections('builtin.lead'),
+      previewFingerprint: preview.fingerprint
+    });
+    expect(sent.wave).toMatchObject({
+      status: 'PLANNED',
+      dispatchGate: {
+        status: 'RECONFIRMATION_REQUIRED',
+        currentFingerprint: 'changed-preview-fingerprint'
+      }
+    });
+
+    await fixture.service.confirmWaveContext({
+      conversationId: conversation.id,
+      waveId: sent.wave!.id,
+      previewFingerprint: 'changed-preview-fingerprint',
+      expectedWaveRevision: sent.wave!.recordRevision,
+      clientOperationId: 'confirm-after-second-drift'
+    });
+    const aggregate = await fixture.discourseStore.getConversation(conversation.id);
+    expect(aggregate.waves[0]).toMatchObject({
+      status: 'SETTLED',
+      outcome: 'STALE',
+      settlementReason: 'CONTEXT_CHANGED'
+    });
+    expect(aggregate.jobs[0]).toMatchObject({
+      status: 'CONTEXT_STALE',
+      delivery: 'NOT_SENT',
+      error: { code: 'CONTEXT_CHANGED' }
+    });
+  });
+
   it('revalidates provider availability for existing participants before persisting a send', async () => {
     let currentRuntimeCatalog = runtimeCatalog();
     const fixture = await serviceFixture(
@@ -1237,7 +1294,7 @@ describe('DiscourseService', () => {
       fixture.provider,
       'dispatch-lead'
     );
-    const leadTerminal = await fixture.coordinator.ingestContribution({
+    const leadTerminal = await fixture.coordinator.ingestSuccessfulTerminal({
       runId: leadRun.id,
       providerTurnId: leadRun.providerTurnId!,
       body: 'The migration is fully reversible.',
@@ -1270,15 +1327,32 @@ describe('DiscourseService', () => {
       requiredAccessAvailable: true,
       concerns: []
     });
-    await fixture.coordinator.ingestReview({
-      runId: reviewRuns[0]!.id,
-      providerTurnId: reviewRuns[0]!.providerTurnId!,
-      body: noConcern,
-      freshnessAtCompletion: 'FRESH',
-      clientOperationId: 'terminal-review-1',
-      completedAt: '2026-07-13T00:11:00.000Z',
-      providerTerminalSource: 'TEST_TERMINAL'
+    const firstReviewOutput = await fixture.runtimeStore.getArtifact(
+      reviewRuns[0]!.outputArtifactId
+    );
+    await fixture.runtimeStore.updateArtifact({
+      artifactId: firstReviewOutput!.id,
+      expectedRevision: firstReviewOutput!.recordRevision,
+      clientOperationId: 'terminal-review-1-output',
+      content: noConcern
     });
+    await fixture.runtimeStore.updateRun(
+      reviewRuns[0]!.id,
+      reviewRuns[0]!.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        contextFreshnessAtCompletion: 'FRESH',
+        providerTerminalSource: 'TEST_RECOVERY_TERMINAL',
+        lastEventAt: '2026-07-13T00:11:00.000Z',
+        endedAt: '2026-07-13T00:11:00.000Z'
+      },
+      'terminal-review-1-runtime'
+    );
+    await fixture.service.recoverConversation(conversation.id);
+    expect((await fixture.discourseStore.getConversation(conversation.id)).jobs.find(
+      (job) => job.id === reviews[0]!.id
+    )).toMatchObject({ status: 'COMPLETED', result: { kind: 'REVIEW' } });
     await fixture.service.advanceWave(conversation.id, sent.wave!.id, 'advance-review-1');
     const concernReview = JSON.stringify({
       outcome: 'CONCERNS',
@@ -1296,7 +1370,7 @@ describe('DiscourseService', () => {
         suggestedResolution: 'State that rollback requires an explicit reverse migration.'
       }]
     });
-    await fixture.coordinator.ingestReview({
+    await fixture.coordinator.ingestSuccessfulTerminal({
       runId: reviewRuns[1]!.id,
       providerTurnId: reviewRuns[1]!.providerTurnId!,
       body: concernReview,
@@ -1328,20 +1402,34 @@ describe('DiscourseService', () => {
       fixture.provider,
       'dispatch-correction'
     );
-    const correctionTerminal = await fixture.coordinator.ingestCorrection({
-      runId: correctionRun.id,
-      providerTurnId: correctionRun.providerTurnId!,
-      body: JSON.stringify({
-        outcome: 'REVISED',
-        body: 'The migration is one-way unless an explicit reverse migration is provided.',
-        limitations: []
-      }),
-      freshnessAtCompletion: 'FRESH',
-      clientOperationId: 'terminal-correction',
-      completedAt: '2026-07-13T00:13:00.000Z',
-      providerTerminalSource: 'TEST_TERMINAL'
+    const correctionBody = JSON.stringify({
+      outcome: 'REVISED',
+      body: 'The migration is one-way unless an explicit reverse migration is provided.',
+      limitations: []
     });
-    expect(correctionTerminal.kind).toBe('CURATED');
+    const correctionOutput = await fixture.runtimeStore.getArtifact(
+      correctionRun.outputArtifactId
+    );
+    await fixture.runtimeStore.updateArtifact({
+      artifactId: correctionOutput!.id,
+      expectedRevision: correctionOutput!.recordRevision,
+      clientOperationId: 'terminal-correction-output',
+      content: correctionBody
+    });
+    await fixture.runtimeStore.updateRun(
+      correctionRun.id,
+      correctionRun.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        contextFreshnessAtCompletion: 'FRESH',
+        providerTerminalSource: 'TEST_RECOVERY_TERMINAL',
+        lastEventAt: '2026-07-13T00:13:00.000Z',
+        endedAt: '2026-07-13T00:13:00.000Z'
+      },
+      'terminal-correction-runtime'
+    );
+    await fixture.service.recoverConversation(conversation.id);
 
     aggregate = await fixture.discourseStore.getConversation(conversation.id);
     expect(aggregate).toMatchObject({

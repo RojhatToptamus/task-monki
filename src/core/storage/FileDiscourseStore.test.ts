@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -387,8 +388,10 @@ describe('FileDiscourseStore', () => {
     const draft = await fixture.store.saveDraft({
       conversationId: 'conversation-1',
       body: 'unfinished note',
+      replyToMessageId: 'message-parent',
+      supersedesMessageId: 'message-original',
+      sourceMessageIds: ['message-source-1', 'message-source-2'],
       policy: 'NONE',
-      recipientParticipantIds: [],
       tokens: [{
         kind: 'TASK',
         entityId: 'task-1',
@@ -400,10 +403,14 @@ describe('FileDiscourseStore', () => {
       kind: 'TASK',
       entityId: 'task-1'
     })]);
+    expect(draft).toMatchObject({
+      replyToMessageId: 'message-parent',
+      supersedesMessageId: 'message-original',
+      sourceMessageIds: ['message-source-1', 'message-source-2']
+    });
     const agentDraft = await fixture.store.saveDraft({
       body: 'ask the lead',
       policy: 'DIRECT',
-      recipientParticipantIds: [],
       agentSelections: [{
         agentProfileId: 'builtin.lead',
         runtimeId: 'codex',
@@ -437,8 +444,10 @@ describe('FileDiscourseStore', () => {
       conversationId: 'conversation-1',
       expectedRevision: draft.recordRevision,
       body: 'unfinished note, revised',
+      replyToMessageId: draft.replyToMessageId,
+      supersedesMessageId: draft.supersedesMessageId,
+      sourceMessageIds: draft.sourceMessageIds,
       policy: 'NONE',
-      recipientParticipantIds: [],
       tokens: draft.tokens
     });
     await createConversation(fixture.store, 'conversation-2', 'create-2');
@@ -447,14 +456,18 @@ describe('FileDiscourseStore', () => {
       conversationId: 'conversation-2',
       expectedRevision: updated.recordRevision,
       body: updated.body,
+      replyToMessageId: updated.replyToMessageId,
+      supersedesMessageId: updated.supersedesMessageId,
+      sourceMessageIds: updated.sourceMessageIds,
       policy: updated.policy,
-      recipientParticipantIds: updated.recipientParticipantIds,
       tokens: updated.tokens
     });
     expect(rebound).toMatchObject({
       id: draft.id,
       conversationId: 'conversation-2',
-      recordRevision: updated.recordRevision + 1
+      recordRevision: updated.recordRevision + 1,
+      supersedesMessageId: 'message-original',
+      sourceMessageIds: ['message-source-1', 'message-source-2']
     });
     await expect(fixture.store.saveDraft({
       draftId: draft.id,
@@ -462,7 +475,6 @@ describe('FileDiscourseStore', () => {
       expectedRevision: draft.recordRevision,
       body: 'stale write',
       policy: 'NONE',
-      recipientParticipantIds: [],
       tokens: []
     })).rejects.toThrow('draft changed');
 
@@ -470,6 +482,84 @@ describe('FileDiscourseStore', () => {
     expect(await restarted.listDrafts()).toEqual([rebound]);
     await restarted.deleteDraft({ draftId: rebound.id, expectedRevision: rebound.recordRevision });
     expect(await restarted.getDraft(rebound.id)).toBeUndefined();
+  });
+
+  it('projects legacy drafts into the current durable shape without leaking removed fields', async () => {
+    const fixture = await storeFixture();
+    const draft = await fixture.store.saveDraft({
+      body: 'Legacy draft body',
+      policy: 'DIRECT',
+      tokens: []
+    });
+    const draftPath = path.join(fixture.root, 'drafts', `${draft.id}.json`);
+    const parsed = JSON.parse(await fs.readFile(draftPath, 'utf8')) as {
+      schemaVersion: number;
+      draft: Record<string, unknown>;
+      checksum: string;
+    };
+    const legacyDraft: Record<string, unknown> = {
+      ...parsed.draft,
+      recipientParticipantIds: ['participant-legacy']
+    };
+    delete legacyDraft.sourceMessageIds;
+    const unsigned = { schemaVersion: parsed.schemaVersion, draft: legacyDraft };
+    await fs.writeFile(draftPath, `${JSON.stringify({
+      ...unsigned,
+      checksum: testChecksum(unsigned)
+    })}\n`, { mode: 0o600 });
+
+    const loaded = await new FileDiscourseStore(fixture.root).getDraft(draft.id);
+    expect(loaded).toMatchObject({
+      id: draft.id,
+      body: 'Legacy draft body',
+      sourceMessageIds: [],
+      agentSelections: []
+    });
+    expect(loaded).not.toHaveProperty('recipientParticipantIds');
+  });
+
+  it('deletes conversation-owned drafts even when an unrelated draft has a bad checksum', async () => {
+    const fixture = await storeFixture();
+    const first = await createConversation(fixture.store, 'conversation-1', 'create-1');
+    await createConversation(fixture.store, 'conversation-2', 'create-2');
+    const deletedDraft = await fixture.store.saveDraft({
+      conversationId: first.id,
+      body: 'Delete with conversation one',
+      policy: 'NONE',
+      tokens: []
+    });
+    const unrelatedDraft = await fixture.store.saveDraft({
+      conversationId: 'conversation-2',
+      body: 'Keep conversation two',
+      policy: 'NONE',
+      tokens: []
+    });
+    const unrelatedPath = path.join(
+      fixture.root,
+      'drafts',
+      `${unrelatedDraft.id}.json`
+    );
+    const corrupted = JSON.parse(await fs.readFile(unrelatedPath, 'utf8')) as {
+      draft: { body: string };
+    };
+    corrupted.draft.body = 'Changed without updating the checksum';
+    await fs.writeFile(unrelatedPath, `${JSON.stringify(corrupted)}\n`, { mode: 0o600 });
+
+    await expect(fixture.store.deleteConversation({
+      conversationId: first.id,
+      expectedRevision: first.recordRevision,
+      clientOperationId: 'delete-with-unrelated-corrupt-draft'
+    })).resolves.toMatchObject({ conversationId: first.id });
+    await expect(
+      fs.stat(path.join(fixture.root, 'drafts', `${deletedDraft.id}.json`))
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(unrelatedPath)).resolves.toBeDefined();
+
+    const restarted = new FileDiscourseStore(fixture.root);
+    await expect(restarted.init()).resolves.toBeUndefined();
+    expect((await restarted.listConversations()).conversations.map(({ id }) => id)).toEqual([
+      'conversation-2'
+    ]);
   });
 
   it('finds a human message by client identity beyond the newest transcript page', async () => {
@@ -770,6 +860,12 @@ describe('FileDiscourseStore', () => {
       body: 'Keep this message timestamp.',
       clientMessageId: 'message-1'
     });
+    const draft = await fixture.store.saveDraft({
+      conversationId: created.id,
+      body: 'Conversation-owned draft',
+      policy: 'NONE',
+      tokens: []
+    });
     const beforeArchive = await fixture.store.getConversation(created.id);
     const archived = await fixture.store.setConversationArchived({
       conversationId: created.id,
@@ -801,6 +897,7 @@ describe('FileDiscourseStore', () => {
     });
     expect(await fixture.store.getConversationTombstone(created.id)).toEqual(tombstone);
     expect(await fixture.store.listConversations()).toEqual({ conversations: [] });
+    expect(await fixture.store.getDraft(draft.id)).toBeUndefined();
     await expect(fixture.store.getConversation(created.id)).rejects.toThrow('was deleted');
     await expect(
       createConversation(fixture.store, 'conversation-1', 'create-reused-id')
@@ -826,6 +923,7 @@ describe('FileDiscourseStore', () => {
     const restarted = new FileDiscourseStore(fixture.root);
     expect(await restarted.getConversationTombstone(created.id)).toEqual(tombstone);
     expect(await restarted.listConversations()).toEqual({ conversations: [] });
+    expect(await restarted.listDrafts()).toEqual([]);
   });
 
   it('repairs a deletion interrupted after its authoritative event append', async () => {
@@ -1207,4 +1305,19 @@ function contextSnapshot(
     createdAt: '2026-07-13T00:01:00.000Z',
     resolvedAt: '2026-07-13T00:01:00.000Z'
   };
+}
+
+function testChecksum(value: unknown): string {
+  return crypto.createHash('sha256').update(testStableStringify(value)).digest('hex');
+}
+
+function testStableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(testStableStringify).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${testStableStringify(record[key])}`)
+    .join(',')}}`;
 }

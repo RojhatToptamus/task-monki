@@ -19,7 +19,8 @@ import type {
   DiscourseConcernRecord,
   DiscourseAgentSelectionInput,
   DiscourseAcceptedSendRecord,
-  AgentAssignmentSnapshot
+  AgentAssignmentSnapshot,
+  SaveDiscourseDraftRequest
 } from '../../shared/discourse';
 
 export interface CreateDiscourseConversationInput {
@@ -172,17 +173,7 @@ export interface DiscourseStore {
     expectedRevision: number;
     clientOperationId: string;
   }): Promise<ConversationContextRevisionRecord>;
-  saveDraft(input: {
-    draftId?: string;
-    conversationId?: string;
-    expectedRevision?: number;
-    body: string;
-    replyToMessageId?: string;
-    policy: DiscourseDefaultPolicy;
-    recipientParticipantIds: string[];
-    agentSelections?: DiscourseAgentSelectionInput[];
-    tokens: DiscourseDraftTokenInput[];
-  }): Promise<DiscourseDraftRecord>;
+  saveDraft(input: SaveDiscourseDraftRequest): Promise<DiscourseDraftRecord>;
   getDraft(draftId: string): Promise<DiscourseDraftRecord | undefined>;
   listDrafts(): Promise<DiscourseDraftRecord[]>;
   deleteDraft(input: { draftId: string; expectedRevision: number }): Promise<void>;

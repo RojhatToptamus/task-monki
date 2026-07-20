@@ -2085,12 +2085,7 @@ function assertRuntimeRunLifecycle(run: AgentRuntimeRunRecord): void {
   if (
     run.status === 'RECOVERY_REQUIRED' &&
     (run.recoveryState === 'NONE' ||
-      (run.delivery !== 'AMBIGUOUS' &&
-        run.delivery !== 'NOT_DELIVERED' &&
-        !(
-          run.delivery === 'ACKNOWLEDGED' &&
-          ['AMBIGUOUS', 'NOT_DELIVERED'].includes(run.interruptDelivery ?? '')
-        )))
+      !['AMBIGUOUS', 'NOT_DELIVERED', 'ACKNOWLEDGED'].includes(run.delivery))
   ) {
     throw new Error('Recovery-required agent runtime work lacks recovery metadata.');
   }

@@ -184,29 +184,15 @@ export class DiscourseContextResolver {
     const pinnedKeys = new Set(
       input.pinned.map((reference) => `${reference.entityKind}:${reference.entityId}`)
     );
-    const rootByRepository = new Map<string, string>();
-    for (const reference of resolved) {
-      if (!reference.repositoryId || !reference.canonicalRoot) continue;
-      const existing = rootByRepository.get(reference.repositoryId);
-      if (!existing || reference.snapshot.entityKind === 'TASK') {
-        rootByRepository.set(reference.repositoryId, reference.canonicalRoot);
-      }
-    }
     const rootOrder = uniqueStrings(
       resolved.flatMap((reference) =>
-        reference.repositoryId && rootByRepository.has(reference.repositoryId)
-          ? [rootByRepository.get(reference.repositoryId)!]
-          : reference.canonicalRoot
-            ? [reference.canonicalRoot]
-            : []
+        reference.canonicalRoot ? [reference.canonicalRoot] : []
       )
     );
     const allowedRoots = new Set(rootOrder.slice(0, DISCOURSE_LIMITS.maxFilesystemRootsPerWave));
     const exclusions: string[] = [];
     const references = resolved.map((reference): DiscourseContextPreviewReference => {
-      const effectiveRoot = reference.repositoryId
-        ? rootByRepository.get(reference.repositoryId)
-        : reference.canonicalRoot;
+      const effectiveRoot = reference.canonicalRoot;
       const overflow = Boolean(effectiveRoot && !allowedRoots.has(effectiveRoot));
       if (overflow) {
         exclusions.push(

@@ -56,6 +56,70 @@ describe('DiscourseContextResolver', () => {
     ).rejects.toThrow('Unknown discourse repository context id');
   });
 
+  it('preserves distinct task worktrees from the same repository as separate read roots', async () => {
+    const fixture = await contextFixture();
+    const firstWorktreePath = path.join(path.dirname(fixture.repositoryPath), 'worktree-one');
+    const secondWorktreePath = path.join(path.dirname(fixture.repositoryPath), 'worktree-two');
+    await git(path.dirname(fixture.repositoryPath), [
+      'clone', '--quiet', '--no-hardlinks', fixture.repositoryPath, firstWorktreePath
+    ]);
+    await git(path.dirname(fixture.repositoryPath), [
+      'clone', '--quiet', '--no-hardlinks', fixture.repositoryPath, secondWorktreePath
+    ]);
+    const firstTask = await fixture.tasks.createTask({
+      title: 'First worktree context',
+      prompt: 'Inspect the first task checkout.',
+      repositoryId: fixture.repository.id
+    });
+    const secondTask = await fixture.tasks.createTask({
+      title: 'Second worktree context',
+      prompt: 'Inspect the second task checkout.',
+      repositoryId: fixture.repository.id
+    });
+    const first = await fixture.tasks.createIterationAndWorktree({
+      task: firstTask,
+      branchName: 'first-context',
+      worktreePath: firstWorktreePath,
+      baseSha: fixture.repository.headSha!
+    });
+    const second = await fixture.tasks.createIterationAndWorktree({
+      task: secondTask,
+      branchName: 'second-context',
+      worktreePath: secondWorktreePath,
+      baseSha: fixture.repository.headSha!
+    });
+    await fixture.tasks.updateWorktree(
+      { ...first.worktree, status: 'PRESENT' },
+      'WORKTREE_CREATED'
+    );
+    await fixture.tasks.updateWorktree(
+      { ...second.worktree, status: 'PRESENT' },
+      'WORKTREE_CREATED'
+    );
+
+    const resolved = await fixture.resolver.resolveSelections([
+      { entityKind: 'TASK', entityId: firstTask.id },
+      { entityKind: 'TASK', entityId: secondTask.id }
+    ]);
+    const preview = await fixture.resolver.preview({
+      pinned: [],
+      messageContext: [
+        { entityKind: 'TASK', entityId: firstTask.id },
+        { entityKind: 'TASK', entityId: secondTask.id }
+      ]
+    });
+
+    expect(resolved.map((reference) => reference.canonicalRoot)).toEqual([
+      firstWorktreePath,
+      secondWorktreePath
+    ]);
+    expect(preview.filesystemRootCount).toBe(2);
+    expect(preview.references).toEqual([
+      expect.objectContaining({ entityId: firstTask.id, accessMode: 'FILESYSTEM_READ' }),
+      expect.objectContaining({ entityId: secondTask.id, accessMode: 'FILESYSTEM_READ' })
+    ]);
+  });
+
   it('changes task and repository generations when their live working tree changes', async () => {
     const fixture = await contextFixture();
     const task = await fixture.tasks.createTask({

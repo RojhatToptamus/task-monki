@@ -11,6 +11,7 @@ import type {
 } from '../../shared/discourse';
 import { DISCOURSE_LIMITS } from '../../shared/discourse';
 import { AgentTurnScheduler } from '../agent/AgentTurnScheduler';
+import { createAgentSessionAccessEpoch } from '../agent/AgentRuntimeOwnership';
 import type {
   AgentScopedTurnProvider,
   StartScopedAgentTurnInput
@@ -453,7 +454,7 @@ describe('DiscourseRuntimeCoordinator', () => {
         },
         fixture.provider
       )
-    ).resolves.toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    ).resolves.toMatchObject({ status: 'STOPPING' });
     expect(fixture.provider.interruptCalls).toHaveLength(1);
     expect((await fixture.runtime.snapshot()).runs[0]).toMatchObject({
       status: 'RECOVERY_REQUIRED',
@@ -467,34 +468,48 @@ describe('DiscourseRuntimeCoordinator', () => {
       {
         conversationId: fixture.conversationId,
         waveId: fixture.waveId,
-        clientOperationId: 'ambiguous-active-stop',
+        clientOperationId: 'ambiguous-active-stop-again',
         reason: 'User stopped the active response.'
       },
       fixture.provider
     )).resolves.toMatchObject({
-      status: 'SETTLED',
-      outcome: 'CANCELED',
-      settlementReason: 'USER_CANCELED'
+      status: 'STOPPING'
     });
     await fixture.coordinator.recoverConversation(fixture.conversationId);
     expect(fixture.provider.interruptCalls).toHaveLength(1);
     expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
-      status: 'SETTLED'
+      status: 'LEASED'
     });
     expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0]).toMatchObject({
-      status: 'CANCELED',
+      status: 'RECOVERY_REQUIRED',
       delivery: 'ACKNOWLEDGED'
     });
+    expect((await fixture.runtime.snapshot()).runs[0]).toMatchObject({
+      status: 'RECOVERY_REQUIRED',
+      delivery: 'ACKNOWLEDGED',
+      recoveryState: 'REQUIRES_USER_ACTION'
+    });
+    const recoveringAggregate = await fixture.discourse.getConversation(fixture.conversationId);
+    await expect(fixture.coordinator.setConversationArchived({
+      conversationId: fixture.conversationId,
+      archived: true,
+      expectedRevision: recoveringAggregate.conversation.recordRevision,
+      clientOperationId: 'archive-after-ambiguous-stop'
+    })).rejects.toThrow('safely settle the active response');
 
-    await expect(fixture.coordinator.ingestContribution({
+    await expect(fixture.coordinator.ingestFailure({
       runId: (await fixture.runtime.snapshot()).runs[0]!.id,
       providerTurnId: 'provider-turn-1',
-      body: 'This late provider output remains runtime evidence only.',
-      freshnessAtCompletion: 'FRESH',
       clientOperationId: 'late-after-recovery-stop',
       completedAt: '2026-07-13T00:10:00.000Z',
-      providerTerminalSource: 'TEST_LATE_TERMINAL'
-    })).resolves.toMatchObject({ kind: 'IGNORED_TERMINAL' });
+      providerTerminalSource: 'TEST_LATE_TERMINAL',
+      reason: 'The provider eventually confirmed the interrupted turn ended.'
+    })).resolves.toMatchObject({ kind: 'FAILED' });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).waves[0])
+      .toMatchObject({ status: 'SETTLED', outcome: 'CANCELED' });
     expect((await fixture.discourse.listMessages({
       conversationId: fixture.conversationId,
       limit: 100
@@ -524,23 +539,42 @@ describe('DiscourseRuntimeCoordinator', () => {
       waveId: fixture.waveId,
       clientOperationId: 'not-delivered-stop',
       reason: 'User stopped the response.'
-    }, fixture.provider)).resolves.toMatchObject({ status: 'RECOVERY_REQUIRED' });
+    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
     expect((await fixture.runtime.snapshot()).runs[0]).toMatchObject({
       status: 'RECOVERY_REQUIRED',
       delivery: 'ACKNOWLEDGED',
       interruptDelivery: 'NOT_DELIVERED'
     });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'LEASED'
+    });
+    fixture.provider.notDeliveredInterrupt = false;
 
     await expect(fixture.coordinator.stopActiveWave({
       conversationId: fixture.conversationId,
       waveId: fixture.waveId,
       clientOperationId: 'not-delivered-stop-confirmed',
-      reason: 'User confirmed local stop.'
+      reason: 'User retried stopping the provider turn.'
     }, fixture.provider)).resolves.toMatchObject({
-      status: 'SETTLED',
-      outcome: 'CANCELED'
+      status: 'STOPPING'
     });
-    expect(fixture.provider.interruptCalls).toHaveLength(1);
+    expect(fixture.provider.interruptCalls).toHaveLength(2);
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'LEASED'
+    });
+    await fixture.coordinator.ingestFailure({
+      runId: (await fixture.runtime.snapshot()).runs[0]!.id,
+      providerTurnId: 'provider-turn-1',
+      clientOperationId: 'not-delivered-stop-terminal',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_INTERRUPTED',
+      reason: 'Provider confirmed interruption.'
+    });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).waves[0])
+      .toMatchObject({ status: 'SETTLED', outcome: 'CANCELED' });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
   });
 
   it('terminalizes an oversized answer as a retryable structured failure', async () => {
@@ -584,6 +618,43 @@ describe('DiscourseRuntimeCoordinator', () => {
       waves: [{ status: 'SETTLED', outcome: 'NO_RESPONSE' }],
       jobs: [{ status: 'FAILED', error: { code: 'INVALID_RESULT' } }]
     });
+  });
+
+  it('preserves an empty completed response as a typed validation failure', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Return a visible answer.',
+      clientOperationId: 'prepare-empty-output'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-empty-output');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-empty-output'
+    );
+    await fixture.coordinator.ingestFailure({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      clientOperationId: 'terminal-empty-output',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_EMPTY_TERMINAL',
+      reason: 'Provider completed without a response.',
+      error: {
+        code: 'OUTPUT_MISSING',
+        message: 'The agent completed without a usable response.',
+        category: 'VALIDATION',
+        retryable: true
+      }
+    });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0])
+      .toMatchObject({
+        status: 'FAILED',
+        error: { code: 'OUTPUT_MISSING', category: 'VALIDATION', retryable: true }
+      });
   });
 
   it('allows archive and delete only after discourse runtime settlement', async () => {
@@ -697,6 +768,13 @@ describe('DiscourseRuntimeCoordinator', () => {
       'Persisted only as terminal runtime output.'
     );
     expect(await fixture.discourse.listConversations()).toEqual({ conversations: [] });
+    await fixture.coordinator.recoverConversation(fixture.conversationId);
+    expect(await fixture.runtime.snapshot()).toMatchObject({
+      sessions: [],
+      runs: [],
+      queueEntries: [],
+      artifacts: []
+    });
   });
 
   it('recovers a terminal runtime record into the missing curated job/message link', async () => {
@@ -744,6 +822,633 @@ describe('DiscourseRuntimeCoordinator', () => {
     expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
       waves: [{ status: 'SETTLED', outcome: 'COMPLETE' }],
       jobs: [{ status: 'COMPLETED', result: { kind: 'CONTRIBUTION' } }]
+    });
+  });
+
+  it('settles the runtime lease when recovery finds a curated completed job', async () => {
+    const fixture = await coordinatorFixture();
+    const prepared = await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Recover after the curated terminal commit.',
+      clientOperationId: 'prepare-curated-checkpoint'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-curated-checkpoint');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-curated-checkpoint'
+    );
+    const completedAt = '2026-07-13T00:10:00.000Z';
+    const output = await fixture.runtime.getArtifact(prepared.run.outputArtifactId);
+    await fixture.runtime.updateArtifact({
+      artifactId: output!.id,
+      expectedRevision: output!.recordRevision,
+      clientOperationId: 'curated-checkpoint-output',
+      content: 'The curated answer was committed before runtime settlement.'
+    });
+    await fixture.runtime.updateRun(
+      running.id,
+      running.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        contextFreshnessAtCompletion: 'FRESH',
+        providerTerminalSource: 'TEST_TERMINAL',
+        endedAt: completedAt,
+        lastEventAt: completedAt
+      },
+      'curated-checkpoint-runtime-terminal'
+    );
+    const aggregate = await fixture.discourse.getConversation(fixture.conversationId);
+    const job = aggregate.jobs[0]!;
+    const message = await fixture.discourse.appendAgentMessage({
+      conversationId: fixture.conversationId,
+      body: 'The curated answer was committed before runtime settlement.',
+      stableParticipantId: job.assignment.stableParticipantId,
+      participantRevisionId: job.assignment.participantRevisionId,
+      displayNameSnapshot: job.assignment.displayNameSnapshot,
+      waveId: job.waveId,
+      jobId: job.id,
+      contextSnapshotId: job.contextSnapshotId,
+      sourceMessageIds: job.visibleMessageIds,
+      freshnessAtCompletion: 'FRESH',
+      clientOperationId: 'curated-checkpoint-message'
+    });
+    await fixture.discourse.updateJob({
+      conversationId: fixture.conversationId,
+      expectedRevision: job.recordRevision,
+      clientOperationId: 'curated-checkpoint-job-terminal',
+      job: {
+        ...job,
+        recordRevision: job.recordRevision + 1,
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        freshnessAtCompletion: 'FRESH',
+        result: { kind: 'CONTRIBUTION', outputMessageId: message.id },
+        finishedAt: completedAt
+      }
+    });
+
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'LEASED'
+    });
+    expect(await fixture.coordinator.recoverConversation(fixture.conversationId)).toEqual({
+      recoveredJobIds: [fixture.jobId],
+      recoveryRequiredJobIds: [],
+      tombstonedRunIds: []
+    });
+    expect(await fixture.runtime.getSession(running.sessionId)).toMatchObject({ status: 'IDLE' });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).waves[0]).toMatchObject({
+      status: 'SETTLED',
+      outcome: 'COMPLETE'
+    });
+  });
+
+  it('recovers an empty provider terminal as the same structured failure as live ingestion', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Return a usable answer.',
+      clientOperationId: 'prepare-empty-terminal'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-empty-terminal');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-empty-terminal'
+    );
+    await fixture.runtime.updateRun(
+      running.id,
+      running.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        contextFreshnessAtCompletion: 'FRESH',
+        providerTerminalSource: 'TEST_TERMINAL',
+        endedAt: '2026-07-13T00:10:00.000Z',
+        lastEventAt: '2026-07-13T00:10:00.000Z'
+      },
+      'empty-runtime-terminal'
+    );
+
+    expect(await fixture.coordinator.recoverConversation(fixture.conversationId)).toEqual({
+      recoveredJobIds: [fixture.jobId],
+      recoveryRequiredJobIds: [],
+      tombstonedRunIds: []
+    });
+    expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
+      waves: [{ status: 'SETTLED', outcome: 'NO_RESPONSE' }],
+      jobs: [{
+        status: 'FAILED',
+        delivery: 'TERMINAL',
+        error: {
+          code: 'OUTPUT_MISSING',
+          message: 'The agent completed without a usable response.'
+        }
+      }]
+    });
+    expect((await fixture.runtime.snapshot()).queueEntries[0]).toMatchObject({
+      status: 'SETTLED'
+    });
+  });
+
+  it('quarantines every duplicate runtime claim and lets an explicit stop settle it locally', async () => {
+    const fixture = await coordinatorFixture();
+    const prepared = await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Never dispatch duplicate runtime claims.',
+      clientOperationId: 'prepare-duplicate-runtime'
+    });
+    const duplicateRunId = 'duplicate-runtime-run';
+    const duplicate = await fixture.runtime.createRun({
+      id: duplicateRunId,
+      owner: prepared.run.owner,
+      scope: prepared.run.scope,
+      sessionId: prepared.run.sessionId,
+      sessionAccessEpoch: prepared.run.sessionAccessEpoch,
+      purpose: prepared.run.purpose,
+      generationKey: prepared.run.generationKey,
+      clientOperationId: 'create-duplicate-runtime',
+      requestedSettings: prepared.run.requestedSettings,
+      promptArtifactId: 'duplicate-prompt',
+      outputArtifactId: 'duplicate-output',
+      diagnosticArtifactId: 'duplicate-diagnostic'
+    });
+    await Promise.all([
+      fixture.runtime.createArtifact({
+        id: duplicate.promptArtifactId,
+        owner: duplicate.owner,
+        runId: duplicate.id,
+        kind: 'PROMPT',
+        clientOperationId: 'duplicate-prompt-artifact',
+        content: 'Never dispatch duplicate runtime claims.'
+      }),
+      fixture.runtime.createArtifact({
+        id: duplicate.outputArtifactId,
+        owner: duplicate.owner,
+        runId: duplicate.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'duplicate-output-artifact',
+        content: ''
+      }),
+      fixture.runtime.createArtifact({
+        id: duplicate.diagnosticArtifactId,
+        owner: duplicate.owner,
+        runId: duplicate.id,
+        kind: 'DIAGNOSTIC',
+        clientOperationId: 'duplicate-diagnostic-artifact',
+        content: ''
+      })
+    ]);
+    await fixture.runtime.enqueueRun(
+      duplicate.id,
+      'DISCOURSE_RESPONSE',
+      'enqueue-duplicate-runtime'
+    );
+
+    expect(await fixture.coordinator.recoverConversation(fixture.conversationId)).toEqual({
+      recoveredJobIds: [],
+      recoveryRequiredJobIds: [fixture.jobId],
+      tombstonedRunIds: []
+    });
+    const quarantined = await fixture.runtime.snapshot();
+    expect(quarantined.runs).toHaveLength(2);
+    expect(quarantined.runs.every((run) => run.status === 'RECOVERY_REQUIRED')).toBe(true);
+    expect(quarantined.queueEntries.every((entry) => entry.status === 'CANCELED')).toBe(true);
+    expect(await fixture.scheduler.leaseAvailable('lease-after-quarantine')).toEqual([]);
+    expect(fixture.provider.calls).toHaveLength(0);
+
+    await expect(fixture.coordinator.stopActiveWave({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      clientOperationId: 'stop-duplicate-recovery',
+      reason: 'User stopped the inconsistent response.'
+    }, fixture.provider)).resolves.toMatchObject({
+      status: 'SETTLED',
+      outcome: 'CANCELED'
+    });
+    const settled = await fixture.runtime.snapshot();
+    expect(settled.runs.every((run) => run.status === 'INTERRUPTED')).toBe(true);
+    expect(settled.runs.every((run) => run.recoveryState === 'NONE')).toBe(true);
+    expect(fixture.provider.calls).toHaveLength(0);
+  });
+
+  it('retains capacity and interrupts an acknowledged turn when a stale runtime claim is quarantined', async () => {
+    const fixture = await coordinatorFixture();
+    const prepared = await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Fence stale attempts without losing the active provider turn.',
+      clientOperationId: 'prepare-active-duplicate'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-active-duplicate');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-active-duplicate'
+    );
+    if (prepared.run.scope.kind !== 'DISCOURSE') {
+      throw new Error('Expected a Discourse runtime scope.');
+    }
+    const stale = await fixture.runtime.createRun({
+      id: 'stale-active-duplicate',
+      owner: prepared.run.owner,
+      scope: { ...prepared.run.scope, attemptId: 'stale-attempt' },
+      sessionId: prepared.run.sessionId,
+      sessionAccessEpoch: prepared.run.sessionAccessEpoch,
+      purpose: prepared.run.purpose,
+      generationKey: 'stale-generation',
+      clientOperationId: 'create-stale-active-duplicate',
+      requestedSettings: prepared.run.requestedSettings,
+      promptArtifactId: 'stale-active-prompt',
+      outputArtifactId: 'stale-active-output',
+      diagnosticArtifactId: 'stale-active-diagnostic'
+    });
+    await Promise.all([
+      fixture.runtime.createArtifact({
+        id: stale.promptArtifactId,
+        owner: stale.owner,
+        runId: stale.id,
+        kind: 'PROMPT',
+        clientOperationId: 'stale-active-prompt-artifact',
+        content: 'Fence stale attempts without losing the active provider turn.'
+      }),
+      fixture.runtime.createArtifact({
+        id: stale.outputArtifactId,
+        owner: stale.owner,
+        runId: stale.id,
+        kind: 'OUTPUT',
+        clientOperationId: 'stale-active-output-artifact',
+        content: ''
+      }),
+      fixture.runtime.createArtifact({
+        id: stale.diagnosticArtifactId,
+        owner: stale.owner,
+        runId: stale.id,
+        kind: 'DIAGNOSTIC',
+        clientOperationId: 'stale-active-diagnostic-artifact',
+        content: ''
+      })
+    ]);
+    await fixture.runtime.enqueueRun(
+      stale.id,
+      'DISCOURSE_RESPONSE',
+      'enqueue-stale-active-duplicate'
+    );
+
+    await expect(fixture.coordinator.recoverConversation(fixture.conversationId))
+      .resolves.toMatchObject({ recoveryRequiredJobIds: [fixture.jobId] });
+    let snapshot = await fixture.runtime.snapshot();
+    expect(snapshot.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: running.id, status: 'RECOVERY_REQUIRED', delivery: 'ACKNOWLEDGED' }),
+      expect.objectContaining({ id: stale.id, status: 'RECOVERY_REQUIRED', delivery: 'NOT_DELIVERED' })
+    ]));
+    expect(snapshot.queueEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: running.id, status: 'LEASED' }),
+      expect.objectContaining({ runId: stale.id, status: 'CANCELED' })
+    ]));
+    expect(await fixture.scheduler.leaseAvailable('lease-while-active-duplicate-fenced'))
+      .toEqual([]);
+
+    await expect(fixture.coordinator.stopActiveWave({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      clientOperationId: 'stop-active-duplicate',
+      reason: 'User stopped the inconsistent response.'
+    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
+    snapshot = await fixture.runtime.snapshot();
+    expect(fixture.provider.interruptCalls).toEqual([running.id]);
+    expect(snapshot.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: running.id, status: 'INTERRUPTING', interruptDelivery: 'ACKNOWLEDGED' }),
+      expect.objectContaining({ id: stale.id, status: 'INTERRUPTED', recoveryState: 'NONE' })
+    ]));
+    expect(snapshot.sessions.find((session) => session.id === running.sessionId))
+      .toMatchObject({ status: 'ACTIVE' });
+    expect(snapshot.queueEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: running.id, status: 'LEASED' }),
+      expect.objectContaining({ runId: stale.id, status: 'CANCELED' })
+    ]));
+
+    await fixture.coordinator.ingestFailure({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      clientOperationId: 'active-duplicate-terminal',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_INTERRUPTED',
+      reason: 'Provider confirmed interruption.'
+    });
+    snapshot = await fixture.runtime.snapshot();
+    expect(snapshot.queueEntries.find((entry) => entry.runId === running.id))
+      .toMatchObject({ status: 'SETTLED' });
+    expect(snapshot.sessions.find((session) => session.id === running.sessionId))
+      .toMatchObject({ status: 'IDLE' });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).waves[0])
+      .toMatchObject({ status: 'SETTLED', outcome: 'CANCELED' });
+  });
+
+  it('defers a natural terminal until a delivered duplicate claim also reaches terminal', async () => {
+    const fixture = await coordinatorFixture();
+    const { running, stale } = await prepareDeliveredDuplicate(fixture, 'natural-success');
+
+    await expect(fixture.coordinator.recoverConversation(fixture.conversationId))
+      .resolves.toMatchObject({ recoveryRequiredJobIds: [fixture.jobId] });
+    await expect(fixture.coordinator.ingestContribution({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      body: 'Only the authoritative attempt may become the visible answer.',
+      freshnessAtCompletion: 'FRESH',
+      clientOperationId: 'natural-success-authoritative-terminal',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL'
+    })).resolves.toMatchObject({ kind: 'IGNORED_TERMINAL' });
+    expect((await fixture.discourse.listMessages({
+      conversationId: fixture.conversationId,
+      limit: 100
+    })).messages).toHaveLength(1);
+    expect((await fixture.runtime.snapshot()).queueEntries.find((entry) => entry.runId === stale.id))
+      .toMatchObject({ status: 'LEASED' });
+
+    await fixture.coordinator.ingestFailure({
+      runId: stale.id,
+      providerTurnId: stale.providerTurnId!,
+      clientOperationId: 'natural-success-stale-terminal',
+      completedAt: '2026-07-13T00:11:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL',
+      reason: 'The stale provider attempt also ended.'
+    });
+    const aggregate = await fixture.discourse.getConversation(fixture.conversationId);
+    expect(aggregate).toMatchObject({
+      waves: [{ status: 'SETTLED', outcome: 'COMPLETE' }],
+      jobs: [{ status: 'COMPLETED', result: { kind: 'CONTRIBUTION' } }]
+    });
+    expect((await fixture.discourse.listMessages({
+      conversationId: fixture.conversationId,
+      limit: 100
+    })).messages.at(-1)?.body).toBe(
+      'Only the authoritative attempt may become the visible answer.'
+    );
+    expect((await fixture.runtime.snapshot()).queueEntries.every(
+      (entry) => entry.status === 'SETTLED'
+    )).toBe(true);
+  });
+
+  it('defers a natural failure until a delivered duplicate claim also reaches terminal', async () => {
+    const fixture = await coordinatorFixture();
+    const { running, stale } = await prepareDeliveredDuplicate(fixture, 'natural-failure');
+    await fixture.coordinator.recoverConversation(fixture.conversationId);
+
+    await fixture.coordinator.ingestFailure({
+      runId: running.id,
+      providerTurnId: running.providerTurnId!,
+      clientOperationId: 'natural-failure-authoritative-terminal',
+      completedAt: '2026-07-13T00:10:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL',
+      reason: 'The authoritative provider attempt failed.'
+    });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0])
+      .toMatchObject({ status: 'RECOVERY_REQUIRED' });
+
+    await fixture.coordinator.ingestFailure({
+      runId: stale.id,
+      providerTurnId: stale.providerTurnId!,
+      clientOperationId: 'natural-failure-stale-terminal',
+      completedAt: '2026-07-13T00:11:00.000Z',
+      providerTerminalSource: 'TEST_TERMINAL',
+      reason: 'The stale provider attempt also failed.'
+    });
+    expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
+      waves: [{ status: 'SETTLED', outcome: 'NO_RESPONSE' }],
+      jobs: [{ status: 'FAILED' }]
+    });
+    expect((await fixture.runtime.snapshot()).queueEntries.every(
+      (entry) => entry.status === 'SETTLED'
+    )).toBe(true);
+  });
+
+  it('never quarantines a referenced runtime whose scope belongs to another job', async () => {
+    const fixture = await coordinatorFixture();
+    const owner = {
+      kind: 'DISCOURSE' as const,
+      conversationId: fixture.conversationId,
+      stableParticipantId: 'foreign-participant'
+    };
+    const sessionId = 'foreign-job-session';
+    const accessEpoch = createAgentSessionAccessEpoch({
+      owner,
+      sessionId,
+      epoch: 1,
+      runtimeId: 'codex',
+      model: 'gpt-test',
+      executionContext: fixture.executionContext,
+      createdAt: '2026-07-13T00:02:00.000Z'
+    });
+    const session = await fixture.runtime.createSession({
+      id: sessionId,
+      owner,
+      accessEpoch,
+      executionContext: fixture.executionContext,
+      clientOperationId: 'create-foreign-job-session',
+      runtimeId: 'codex',
+      role: 'PRIMARY',
+      relationshipState: 'ROOT',
+      status: 'NOT_MATERIALIZED',
+      materialized: false,
+      requestedSettings: {
+        model: 'gpt-test',
+        sandbox: 'READ_ONLY',
+        approvalPolicy: 'NEVER',
+        networkAccess: false
+      }
+    });
+    const foreignRun = await fixture.runtime.createRun({
+      id: 'foreign-job-run',
+      owner,
+      scope: {
+        kind: 'DISCOURSE',
+        conversationId: fixture.conversationId,
+        waveId: fixture.waveId,
+        jobId: 'foreign-job',
+        contextSnapshotId: 'context-snapshot-1',
+        attemptId: 'foreign-attempt'
+      },
+      sessionId: session.id,
+      sessionAccessEpoch: session.accessEpoch.epoch,
+      purpose: 'DISCOURSE_ANSWER',
+      generationKey: 'foreign-generation',
+      clientOperationId: 'create-foreign-job-run',
+      requestedSettings: session.requestedSettings,
+      promptArtifactId: 'foreign-job-prompt',
+      outputArtifactId: 'foreign-job-output',
+      diagnosticArtifactId: 'foreign-job-diagnostic'
+    });
+    await Promise.all([
+      fixture.runtime.createArtifact({ id: foreignRun.promptArtifactId, owner, runId: foreignRun.id, kind: 'PROMPT', clientOperationId: 'foreign-prompt-artifact', content: 'Foreign job.' }),
+      fixture.runtime.createArtifact({ id: foreignRun.outputArtifactId, owner, runId: foreignRun.id, kind: 'OUTPUT', clientOperationId: 'foreign-output-artifact', content: '' }),
+      fixture.runtime.createArtifact({ id: foreignRun.diagnosticArtifactId, owner, runId: foreignRun.id, kind: 'DIAGNOSTIC', clientOperationId: 'foreign-diagnostic-artifact', content: '' })
+    ]);
+    const foreignEntry = await fixture.runtime.enqueueRun(
+      foreignRun.id,
+      'DISCOURSE_RESPONSE',
+      'enqueue-foreign-job-run'
+    );
+    const aggregate = await fixture.discourse.getConversation(fixture.conversationId);
+    const wave = aggregate.waves[0]!;
+    await fixture.discourse.updateWave({
+      conversationId: fixture.conversationId,
+      expectedRevision: wave.recordRevision,
+      clientOperationId: 'foreign-link-wave-snapshotting',
+      wave: { ...wave, recordRevision: wave.recordRevision + 1, status: 'SNAPSHOTTING' }
+    });
+    const job = aggregate.jobs[0]!;
+    await fixture.discourse.updateJob({
+      conversationId: fixture.conversationId,
+      expectedRevision: job.recordRevision,
+      clientOperationId: 'link-job-to-foreign-scope',
+      job: {
+        ...job,
+        recordRevision: job.recordRevision + 1,
+        status: 'RESOLVING_CONTEXT',
+        sessionId: session.id,
+        executionProfileHash: session.accessEpoch.executionProfileHash,
+        runId: foreignRun.id,
+        promptArtifactId: foreignRun.promptArtifactId,
+        outputArtifactId: foreignRun.outputArtifactId
+      }
+    });
+
+    await expect(fixture.coordinator.recoverConversation(fixture.conversationId))
+      .resolves.toMatchObject({ recoveryRequiredJobIds: [fixture.jobId] });
+    expect(await fixture.runtime.getRun(foreignRun.id)).toMatchObject({
+      status: 'QUEUED',
+      delivery: 'NOT_SENT'
+    });
+    expect((await fixture.runtime.snapshot()).queueEntries.find(
+      (entry) => entry.id === foreignEntry.id
+    )).toMatchObject({ status: 'QUEUED' });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0])
+      .toMatchObject({ status: 'RECOVERY_REQUIRED' });
+  });
+
+  it.each([
+    { name: 'ambiguous', delivery: 'AMBIGUOUS' as const, interruptDelivery: undefined },
+    { name: 'not-delivered interrupt', delivery: 'ACKNOWLEDGED' as const, interruptDelivery: 'NOT_DELIVERED' as const }
+  ])('projects a partial $name runtime recovery before stopping it', async ({ name, delivery, interruptDelivery }) => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Project the provider recovery checkpoint first.',
+      clientOperationId: `prepare-partial-${name}`
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable(`lease-partial-${name}`);
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      `dispatch-partial-${name}`
+    );
+    const recoveryBase = interruptDelivery
+      ? await fixture.runtime.updateRun(
+          running.id,
+          running.recordRevision,
+          {
+            status: 'INTERRUPTING',
+            interruptDelivery: 'SENDING',
+            stopRequestedAt: '2026-07-13T00:08:00.000Z',
+            lastEventAt: '2026-07-13T00:08:00.000Z'
+          },
+          `runtime-partial-${name}-intent`
+        )
+      : running;
+    await fixture.runtime.updateRun(
+      recoveryBase.id,
+      recoveryBase.recordRevision,
+      {
+        status: 'RECOVERY_REQUIRED',
+        delivery,
+        ...(interruptDelivery ? {
+          interruptDelivery
+        } : {}),
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: `Partial ${name} recovery checkpoint.`,
+        lastEventAt: '2026-07-13T00:08:00.000Z'
+      },
+      `runtime-partial-${name}`
+    );
+
+    await expect(fixture.coordinator.stopActiveWave({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      clientOperationId: `stop-partial-${name}`,
+      reason: 'User stopped the recovering response.'
+    }, fixture.provider)).resolves.toMatchObject({ status: 'STOPPING' });
+    expect((await fixture.discourse.getConversation(fixture.conversationId)).jobs[0])
+      .toMatchObject({
+        status: interruptDelivery ? 'CANCEL_REQUESTED' : 'RECOVERY_REQUIRED'
+      });
+    expect(fixture.provider.interruptCalls).toHaveLength(interruptDelivery ? 1 : 0);
+    expect((await fixture.runtime.snapshot()).queueEntries[0])
+      .toMatchObject({ status: 'LEASED' });
+  });
+
+  it('projects incomplete terminal evidence into durable recovery state', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Do not hide an incomplete provider terminal.',
+      clientOperationId: 'prepare-incomplete-terminal'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-incomplete-terminal');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-incomplete-terminal'
+    );
+    await fixture.runtime.updateRun(
+      running.id,
+      running.recordRevision,
+      {
+        status: 'COMPLETED',
+        delivery: 'TERMINAL',
+        endedAt: '2026-07-13T00:10:00.000Z',
+        lastEventAt: '2026-07-13T00:10:00.000Z'
+      },
+      'provider-incomplete-terminal'
+    );
+
+    expect(await fixture.coordinator.recoverConversation(fixture.conversationId)).toEqual({
+      recoveredJobIds: [],
+      recoveryRequiredJobIds: [fixture.jobId],
+      tombstonedRunIds: []
+    });
+    expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
+      waves: [{ status: 'RECOVERY_REQUIRED' }],
+      jobs: [{
+        status: 'RECOVERY_REQUIRED',
+        delivery: 'ACKNOWLEDGED',
+        error: {
+          code: 'DELIVERY_AMBIGUOUS',
+          message: 'The provider completed, but its durable terminal evidence is incomplete.'
+        }
+      }]
     });
   });
 
@@ -835,6 +1540,53 @@ describe('DiscourseRuntimeCoordinator', () => {
     });
     expect(fixture.provider.calls).toHaveLength(0);
   });
+
+  it('projects an existing runtime recovery checkpoint into durable job and wave state', async () => {
+    const fixture = await coordinatorFixture();
+    await fixture.coordinator.prepareJob({
+      conversationId: fixture.conversationId,
+      waveId: fixture.waveId,
+      jobId: fixture.jobId,
+      executionContext: fixture.executionContext,
+      prompt: 'Preserve an ambiguous provider checkpoint.',
+      clientOperationId: 'prepare-existing-recovery'
+    });
+    const [leased] = await fixture.scheduler.leaseAvailable('lease-existing-recovery');
+    const running = await fixture.coordinator.dispatchLeasedJob(
+      leased!.id,
+      fixture.provider,
+      'dispatch-existing-recovery'
+    );
+    await fixture.runtime.updateRun(
+      running.id,
+      running.recordRevision,
+      {
+        status: 'RECOVERY_REQUIRED',
+        delivery: 'AMBIGUOUS',
+        recoveryState: 'REQUIRES_USER_ACTION',
+        terminalReason: 'Provider connection ended before terminal evidence arrived.',
+        lastEventAt: '2026-07-13T00:09:00.000Z'
+      },
+      'runtime-existing-recovery'
+    );
+
+    expect(await fixture.coordinator.recoverConversation(fixture.conversationId)).toEqual({
+      recoveredJobIds: [],
+      recoveryRequiredJobIds: [fixture.jobId],
+      tombstonedRunIds: []
+    });
+    expect(await fixture.discourse.getConversation(fixture.conversationId)).toMatchObject({
+      waves: [{ status: 'RECOVERY_REQUIRED' }],
+      jobs: [{
+        status: 'RECOVERY_REQUIRED',
+        delivery: 'ACKNOWLEDGED',
+        error: {
+          code: 'DELIVERY_AMBIGUOUS',
+          message: 'Provider connection ended before terminal evidence arrived.'
+        }
+      }]
+    });
+  });
 });
 
 async function coordinatorFixture() {
@@ -911,6 +1663,119 @@ async function coordinatorFixture() {
     waveId: wave.id,
     jobId: job.id
   };
+}
+
+async function createSiblingRuntimeRun(
+  fixture: Awaited<ReturnType<typeof coordinatorFixture>>,
+  prepared: Awaited<ReturnType<DiscourseRuntimeCoordinator['prepareJob']>>,
+  input: {
+    id: string;
+    scope: Extract<typeof prepared.run.scope, { kind: 'DISCOURSE' }>;
+    generationKey: string;
+  }
+) {
+  const run = await fixture.runtime.createRun({
+    id: input.id,
+    owner: prepared.run.owner,
+    scope: input.scope,
+    sessionId: prepared.run.sessionId,
+    sessionAccessEpoch: prepared.run.sessionAccessEpoch,
+    purpose: prepared.run.purpose,
+    generationKey: input.generationKey,
+    clientOperationId: `create-${input.id}`,
+    requestedSettings: prepared.run.requestedSettings,
+    promptArtifactId: `${input.id}-prompt`,
+    outputArtifactId: `${input.id}-output`,
+    diagnosticArtifactId: `${input.id}-diagnostic`
+  });
+  await Promise.all([
+    fixture.runtime.createArtifact({
+      id: run.promptArtifactId,
+      owner: run.owner,
+      runId: run.id,
+      kind: 'PROMPT',
+      clientOperationId: `${input.id}-prompt-artifact`,
+      content: 'Sibling runtime prompt.'
+    }),
+    fixture.runtime.createArtifact({
+      id: run.outputArtifactId,
+      owner: run.owner,
+      runId: run.id,
+      kind: 'OUTPUT',
+      clientOperationId: `${input.id}-output-artifact`,
+      content: ''
+    }),
+    fixture.runtime.createArtifact({
+      id: run.diagnosticArtifactId,
+      owner: run.owner,
+      runId: run.id,
+      kind: 'DIAGNOSTIC',
+      clientOperationId: `${input.id}-diagnostic-artifact`,
+      content: ''
+    })
+  ]);
+  const queueEntry = await fixture.runtime.enqueueRun(
+    run.id,
+    'DISCOURSE_RESPONSE',
+    `enqueue-${input.id}`
+  );
+  return { run, queueEntry };
+}
+
+async function prepareDeliveredDuplicate(
+  fixture: Awaited<ReturnType<typeof coordinatorFixture>>,
+  id: string
+) {
+  const prepared = await fixture.coordinator.prepareJob({
+    conversationId: fixture.conversationId,
+    waveId: fixture.waveId,
+    jobId: fixture.jobId,
+    executionContext: fixture.executionContext,
+    prompt: 'Keep duplicate terminal projection fenced.',
+    clientOperationId: `prepare-${id}`
+  });
+  const [leased] = await fixture.scheduler.leaseAvailable(`lease-${id}`);
+  const running = await fixture.coordinator.dispatchLeasedJob(
+    leased!.id,
+    fixture.provider,
+    `dispatch-${id}`
+  );
+  if (prepared.run.scope.kind !== 'DISCOURSE') throw new Error('Expected Discourse scope.');
+  const sibling = await createSiblingRuntimeRun(fixture, prepared, {
+    id: `${id}-stale`,
+    scope: { ...prepared.run.scope, attemptId: `${id}-stale-attempt` },
+    generationKey: `${id}-stale-generation`
+  });
+  const siblingLease = await fixture.runtime.leaseQueueEntry(
+    sibling.queueEntry.id,
+    sibling.queueEntry.recordRevision,
+    `lease-${id}-stale`
+  );
+  let stale = await fixture.runtime.updateRun(
+    sibling.run.id,
+    sibling.run.recordRevision,
+    {
+      status: 'STARTING',
+      delivery: 'SENDING',
+      startedAt: '2026-07-13T00:07:00.000Z',
+      lastEventAt: '2026-07-13T00:07:00.000Z'
+    },
+    `start-${id}-stale`
+  );
+  stale = await fixture.runtime.updateRun(
+    stale.id,
+    stale.recordRevision,
+    {
+      status: 'RUNNING',
+      delivery: 'ACKNOWLEDGED',
+      providerTurnId: `${id}-stale-provider-turn`,
+      serverInstanceId: 'server-1',
+      lastEventAt: '2026-07-13T00:07:00.000Z'
+    },
+    `ack-${id}-stale`
+  );
+  void siblingLease;
+  return { running, stale };
 }
 
 class TestScopedProvider implements AgentScopedTurnProvider {

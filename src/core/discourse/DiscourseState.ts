@@ -1,3 +1,4 @@
+import { isEligibleDiscourseConcern } from '../../shared/discourse';
 import type {
   ContextSnapshotRecord,
   ContextSnapshotStatus,
@@ -25,7 +26,7 @@ const CONTEXT_TRANSITIONS: Readonly<Record<ContextSnapshotStatus, readonly Conte
 const WAVE_TRANSITIONS: Readonly<Record<DiscourseWaveStatus, readonly DiscourseWaveStatus[]>> = {
   PLANNED: ['SNAPSHOTTING', 'STOP_REQUESTED', 'SETTLED'],
   SNAPSHOTTING: ['QUEUED', 'STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
-  QUEUED: ['RUNNING', 'STOP_REQUESTED', 'SETTLED'],
+  QUEUED: ['RUNNING', 'STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
   RUNNING: ['STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
   STOP_REQUESTED: ['STOPPING', 'RECOVERY_REQUIRED', 'SETTLED'],
   STOPPING: ['RECOVERY_REQUIRED', 'SETTLED'],
@@ -34,8 +35,14 @@ const WAVE_TRANSITIONS: Readonly<Record<DiscourseWaveStatus, readonly DiscourseW
 };
 
 const JOB_TRANSITIONS: Readonly<Record<DiscourseJobStatus, readonly DiscourseJobStatus[]>> = {
-  QUEUED: ['RESOLVING_CONTEXT', 'CANCELED'],
-  RESOLVING_CONTEXT: ['STARTING', 'CANCEL_REQUESTED', 'FAILED', 'CONTEXT_STALE'],
+  QUEUED: ['RESOLVING_CONTEXT', 'RECOVERY_REQUIRED', 'CANCELED'],
+  RESOLVING_CONTEXT: [
+    'STARTING',
+    'CANCEL_REQUESTED',
+    'RECOVERY_REQUIRED',
+    'FAILED',
+    'CONTEXT_STALE'
+  ],
   STARTING: ['RUNNING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED', 'FAILED', 'CONTEXT_STALE'],
   RUNNING: [
     'CANCEL_REQUESTED',
@@ -45,7 +52,7 @@ const JOB_TRANSITIONS: Readonly<Record<DiscourseJobStatus, readonly DiscourseJob
     'CONTEXT_STALE'
   ],
   CANCEL_REQUESTED: ['RECOVERY_REQUIRED', 'COMPLETED', 'CANCELED'],
-  RECOVERY_REQUIRED: ['COMPLETED', 'FAILED', 'CANCELED'],
+  RECOVERY_REQUIRED: ['CANCEL_REQUESTED', 'COMPLETED', 'FAILED', 'CANCELED'],
   COMPLETED: [],
   FAILED: [],
   CANCELED: [],
@@ -191,7 +198,10 @@ export function reconcileDiscourseDelivery(
 
 export function assertDiscourseWaveRecord(record: DiscourseResponseWaveRecord): void {
   assertWaveAssignments(record);
-  if (record.dispatchGate.status === 'RECONFIRMATION_REQUIRED' && record.status !== 'PLANNED') {
+  if (
+    record.dispatchGate.status === 'RECONFIRMATION_REQUIRED' &&
+    !['PLANNED', 'SETTLED'].includes(record.status)
+  ) {
     throw new Error('A wave requiring preview reconfirmation cannot be dispatched.');
   }
   if (record.status === 'SETTLED') {
@@ -314,16 +324,6 @@ export function assertDiscourseJobRecord(record: DiscourseAgentJobRecord): void 
   }
 }
 
-export function isEligibleDiscourseConcern(concern: DiscourseConcernRecord): boolean {
-  return (
-    !concern.redundantOfConcernId &&
-    (concern.severity === 'MATERIAL' || concern.severity === 'BLOCKING') &&
-    (concern.confidence === 'MEDIUM' || concern.confidence === 'HIGH') &&
-    concern.evidenceStatus !== 'SPECULATIVE' &&
-    concern.requiredAccessAvailable
-  );
-}
-
 export interface DiscourseWaveAggregate {
   status: DiscourseWaveStatus;
   nextPhase?: DiscourseWavePhase;
@@ -383,8 +383,9 @@ export function deriveDiscourseWaveAggregate(
     };
   }
 
+  const stopRequested = wave.status === 'STOP_REQUESTED' || wave.status === 'STOPPING';
   if (jobs.some((job) => job.status === 'RECOVERY_REQUIRED')) {
-    return { status: 'RECOVERY_REQUIRED' };
+    return { status: stopRequested ? 'STOPPING' : 'RECOVERY_REQUIRED' };
   }
   if (
     jobs.some(
@@ -394,7 +395,6 @@ export function deriveDiscourseWaveAggregate(
     return { status: 'RECOVERY_REQUIRED' };
   }
 
-  const stopRequested = wave.status === 'STOP_REQUESTED' || wave.status === 'STOPPING';
   const activeJobs = jobs.filter((job) => !TERMINAL_JOB_STATUSES.has(job.status));
   if (stopRequested) {
     if (activeJobs.length > 0) {
@@ -707,6 +707,20 @@ function assertConcernReferences(input: DeriveDiscourseWaveAggregateInput): void
   }
 }
 
+export function assertDiscoursePolicyRoster(
+  policy: DiscourseResponseWaveRecord['policy'] | 'NONE',
+  participantCount: number
+): void {
+  const valid =
+    (policy === 'NONE' && participantCount === 0) ||
+    (policy === 'DIRECT' && participantCount === 1) ||
+    (policy === 'PANEL' && participantCount >= 2 && participantCount <= 3) ||
+    (policy === 'TEAM' && participantCount === 3) ||
+    (['TARGETED_REVIEW', 'TARGETED_REPLY', 'SYNTHESIS'].includes(policy) &&
+      participantCount === 1);
+  if (!valid) throw new Error(`Discourse ${policy.toLowerCase()} roster is incomplete.`);
+}
+
 function assertWaveAssignments(wave: DiscourseResponseWaveRecord): void {
   const keys = new Set<string>();
   for (const assignment of wave.assignments) {
@@ -719,6 +733,7 @@ function assertWaveAssignments(wave: DiscourseResponseWaveRecord): void {
     throw new Error('Optional discourse assignments are not supported in v1.');
   }
   const required = wave.assignments;
+  assertDiscoursePolicyRoster(wave.policy, required.length);
   if (wave.policy === 'TEAM') {
     const primaries = required.filter((assignment) => assignment.assignmentRole === 'PRIMARY');
     const reviewers = required.filter((assignment) => assignment.assignmentRole === 'REVIEWER');
@@ -727,14 +742,10 @@ function assertWaveAssignments(wave: DiscourseResponseWaveRecord): void {
     }
   } else if (wave.policy === 'PANEL') {
     if (
-      required.length < 1 ||
-      required.length > 3 ||
       required.some((assignment) => assignment.assignmentRole !== 'PANELIST')
     ) {
-      throw new Error('A Panel wave requires one to three required panelists.');
+      throw new Error('A Panel wave requires required panelists.');
     }
-  } else if (required.length !== 1) {
-    throw new Error('A single-agent discourse wave requires exactly one assignment.');
   }
 }
 

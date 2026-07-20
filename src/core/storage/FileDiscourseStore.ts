@@ -26,7 +26,8 @@ import {
   type DiscourseConcernRecord,
   type DiscourseAgentSelectionInput,
   type DiscourseAcceptedSendRecord,
-  type AgentAssignmentSnapshot
+  type AgentAssignmentSnapshot,
+  type SaveDiscourseDraftRequest
 } from '../../shared/discourse';
 import type {
   AppendHumanDiscourseMessageInput,
@@ -1235,18 +1236,7 @@ export class FileDiscourseStore implements DiscourseStore {
     });
   }
 
-  saveDraft(input: {
-    draftId?: string;
-    conversationId?: string;
-    expectedRevision?: number;
-    body: string;
-    replyToMessageId?: string;
-    policy: DiscourseDraftRecord['policy'];
-    recipientParticipantIds: string[];
-    agentSelections?: DiscourseAgentSelectionInput[];
-    pendingClientMessageId?: string;
-    tokens: DiscourseDraftTokenInput[];
-  }): Promise<DiscourseDraftRecord> {
+  saveDraft(input: SaveDiscourseDraftRequest): Promise<DiscourseDraftRecord> {
     return this.enqueueGlobal(async () => {
       await this.init();
       const id = input.draftId ?? this.createId();
@@ -1272,8 +1262,11 @@ export class FileDiscourseStore implements DiscourseStore {
         recordRevision: (existing?.recordRevision ?? 0) + 1,
         body: input.body,
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        ...(input.supersedesMessageId
+          ? { supersedesMessageId: input.supersedesMessageId }
+          : {}),
+        sourceMessageIds: uniqueIds(input.sourceMessageIds ?? []),
         policy: input.policy,
-        recipientParticipantIds: uniqueIds(input.recipientParticipantIds),
         agentSelections: normalizeDraftAgentSelections(input.agentSelections ?? []),
         ...(input.pendingClientMessageId
           ? { pendingClientMessageId: input.pendingClientMessageId }
@@ -1697,6 +1690,11 @@ export class FileDiscourseStore implements DiscourseStore {
   }
 
   private async cleanupDeletedConversation(conversationId: string): Promise<void> {
+    await this.cleanupDeletedConversationDirectory(conversationId);
+    await this.cleanupDraftsForDeletedConversations(new Set([conversationId]));
+  }
+
+  private async cleanupDeletedConversationDirectory(conversationId: string): Promise<void> {
     const directory = path.join(this.conversationsDir, conversationId);
     try {
       const stat = await fs.lstat(directory);
@@ -1709,6 +1707,40 @@ export class FileDiscourseStore implements DiscourseStore {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     this.handles.delete(conversationId);
+  }
+
+  private async cleanupDraftsForDeletedConversations(
+    conversationIds: ReadonlySet<string>
+  ): Promise<void> {
+    if (conversationIds.size === 0) return;
+    await this.enqueueGlobal(async () => {
+      const draftIds = (await fs.readdir(this.draftsDir))
+        .flatMap((file) => file.endsWith('.json') ? [file.slice(0, -5)] : [])
+        .filter((id) => SAFE_ID.test(id));
+      let changed = false;
+      for (const draftId of draftIds) {
+        const conversationId = await this.readDraftConversationIdForCleanup(draftId);
+        if (!conversationId || !conversationIds.has(conversationId)) continue;
+        await fs.unlink(this.draftPath(draftId)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        changed = true;
+      }
+      if (changed) await syncDirectoryIfSupported(this.draftsDir);
+    });
+  }
+
+  private async readDraftConversationIdForCleanup(
+    draftId: string
+  ): Promise<string | undefined> {
+    const parsed = await readPrivateJson(this.draftPath(draftId), MAX_DRAFT_BYTES);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const draft = (parsed as { draft?: unknown }).draft;
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return undefined;
+    const conversationId = (draft as { conversationId?: unknown }).conversationId;
+    return typeof conversationId === 'string' && SAFE_ID.test(conversationId)
+      ? conversationId
+      : undefined;
   }
 
   private withConversation<T>(
@@ -1806,10 +1838,30 @@ export class FileDiscourseStore implements DiscourseStore {
     }
     const storedDraft = record.draft as unknown as DiscourseDraftRecord;
     const draft: DiscourseDraftRecord = {
-      ...storedDraft,
+      id: storedDraft.id,
+      ...(storedDraft.conversationId
+        ? { conversationId: storedDraft.conversationId }
+        : {}),
+      recordRevision: storedDraft.recordRevision,
+      body: storedDraft.body,
+      ...(storedDraft.replyToMessageId
+        ? { replyToMessageId: storedDraft.replyToMessageId }
+        : {}),
+      ...(storedDraft.supersedesMessageId
+        ? { supersedesMessageId: storedDraft.supersedesMessageId }
+        : {}),
+      sourceMessageIds: Array.isArray(storedDraft.sourceMessageIds)
+        ? storedDraft.sourceMessageIds
+        : [],
+      policy: storedDraft.policy,
       agentSelections: Array.isArray(storedDraft.agentSelections)
         ? storedDraft.agentSelections
-        : []
+        : [],
+      ...(storedDraft.pendingClientMessageId
+        ? { pendingClientMessageId: storedDraft.pendingClientMessageId }
+        : {}),
+      tokens: storedDraft.tokens,
+      updatedAt: storedDraft.updatedAt
     };
     validateDraftRecord(draft, draftId);
     return draft;
@@ -1887,8 +1939,9 @@ export class FileDiscourseStore implements DiscourseStore {
       await this.persistIndex();
     }
     for (const tombstone of tombstones) {
-      await this.cleanupDeletedConversation(tombstone.conversationId);
+      await this.cleanupDeletedConversationDirectory(tombstone.conversationId);
     }
+    await this.cleanupDraftsForDeletedConversations(tombstoneIds);
   }
 
   private async persistConversationMetadata(loaded: LoadedConversation): Promise<void> {
@@ -2530,19 +2583,15 @@ function normalizeDraftTokens(
   });
 }
 
-function validateDraftInput(input: {
-  body: string;
-  replyToMessageId?: string;
-  recipientParticipantIds: string[];
-  agentSelections?: DiscourseAgentSelectionInput[];
-  pendingClientMessageId?: string;
-  tokens: DiscourseDraftTokenInput[];
-}): void {
+function validateDraftInput(input: SaveDiscourseDraftRequest): void {
   if (Buffer.byteLength(input.body, 'utf8') > DISCOURSE_LIMITS.maxHumanMessageBytes) {
     throw new Error('Discourse draft exceeds its text-size safety limit.');
   }
   if (input.replyToMessageId) requireSafeId(input.replyToMessageId, 'reply message id');
-  input.recipientParticipantIds.forEach((id) => requireSafeId(id, 'draft recipient id'));
+  if (input.supersedesMessageId) {
+    requireSafeId(input.supersedesMessageId, 'superseded message id');
+  }
+  (input.sourceMessageIds ?? []).forEach((id) => requireSafeId(id, 'draft source message id'));
   if (input.pendingClientMessageId) validateOperationId(input.pendingClientMessageId);
   normalizeDraftAgentSelections(input.agentSelections ?? []);
   normalizeDraftTokens(input.tokens);

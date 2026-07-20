@@ -4,9 +4,9 @@ import type {
   DiscourseConversationAggregateRecord,
   DiscourseMessageRecord
 } from '../../shared/discourse';
+import { isEligibleDiscourseConcern } from '../../shared/discourse';
 import { AgentProfileCatalog } from './AgentProfileCatalog';
 import type { DiscourseJobBudgetInput } from './DiscourseBudget';
-import { isEligibleDiscourseConcern } from './DiscourseState';
 
 export const DISCOURSE_PROMPT_POLICY_VERSION = 1 as const;
 
@@ -26,6 +26,27 @@ export interface DiscoursePromptAssembly {
   prompt: string;
   /** Non-overlapping measures of the exact prompt content above. */
   budgetSections: DiscoursePromptBudgetSections;
+}
+
+/** Adds runtime-only system context while keeping exact prompt accounting intact. */
+export function appendDiscourseSystemContext(
+  assembly: DiscoursePromptAssembly,
+  text: string
+): DiscoursePromptAssembly {
+  if (!text.trim()) return assembly;
+  const addition = `\n\n${text.trim()}`;
+  const measured = measure(addition);
+  return {
+    prompt: `${assembly.prompt}${addition}`,
+    budgetSections: {
+      ...assembly.budgetSections,
+      systemAndRole: {
+        bytes: assembly.budgetSections.systemAndRole.bytes + measured.bytes,
+        estimatedTokens:
+          assembly.budgetSections.systemAndRole.estimatedTokens + measured.estimatedTokens
+      }
+    }
+  };
 }
 
 /** Reconstructs a complete job prompt without relying on provider-side memory. */

@@ -4,8 +4,7 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
-  type ReactNode
+  useState
 } from 'react';
 import type {
   ConversationContextReferenceSnapshot,
@@ -16,7 +15,6 @@ import type {
   DiscourseDefaultPolicy,
   DiscourseAgentSelectionInput,
   BuiltInAgentProfileId,
-  DiscourseWavePolicy,
   DiscourseMessageRecord,
   DiscourseMentionCatalogSnapshot
 } from '../../shared/discourse';
@@ -27,16 +25,14 @@ import {
   canDeleteAbandonedDiscourseShell,
   currentDiscourseParticipantRevisions,
   currentPinnedContext,
+  defaultDiscourseResponderRoster,
   defaultDiscourseAgentSelection,
-  discourseConcernResolutionLabel,
   discourseClientMessageWasPersisted,
   discourseDraftsAlreadySent,
   discourseAcceptedSendForClientMessage,
-  discourseJobStatusLabel,
   discourseMentionCandidates,
-  discourseReviewResultLabel,
-  discourseTeamCompletionSummary,
-  discourseTerminalJobDetail,
+  discourseResponsePolicyLabel,
+  discourseResponseReadiness,
   draftTokensFromComposer,
   discourseAgentSelectionFromCurrentRevision,
   discoursePendingSendFingerprint,
@@ -54,16 +50,34 @@ import {
 import type { DiscourseComposerMentionState } from '../model/discourseMentions';
 import { createDiscourseComposerMentionState } from '../model/discourseMentions';
 import { DiscourseDraftAutosaveCoordinator } from '../model/discourseDraftAutosave';
-import { DiscourseMarkdown } from './DiscourseMarkdown';
+import { DiscourseActionMenu } from './DiscourseActionMenu';
+import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar';
+import { DiscourseConversationRail } from './DiscourseConversationRail';
+import { DiscourseMessage } from './DiscourseMessage';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
-import { AgentModelSelector } from './AgentModelSelector';
+import { DiscourseResponseGroup } from './DiscourseResponseGroup';
+import {
+  DiscoursePinIcon as PinIcon,
+  DiscourseRepositoryIcon as RepositoryIcon,
+  DiscourseTaskIcon as TaskIcon
+} from './DiscourseIcons';
+import {
+  ConfirmDialog,
+  ContextPreview,
+  InspectorDrawer,
+  InspectorSection
+} from './DiscourseOverlays';
+import { useDialogFocusBoundary } from './dialogFocus';
 
 interface DiscourseWorkspaceProps {
   onNotify(message: string, tone?: 'info' | 'success' | 'error'): void;
   onError(error: unknown, fallback: string): void;
 }
 
-type ConfirmAction = 'delete-conversation' | undefined;
+type ConfirmAction =
+  | { type: 'delete-conversation' }
+  | { type: 'delete-message'; message: DiscourseMessageRecord }
+  | undefined;
 
 interface DraftPersistenceInput {
   scope: ReturnType<DiscourseDraftAutosaveCoordinator['currentScope']>;
@@ -72,6 +86,8 @@ interface DraftPersistenceInput {
   policy: DiscourseDefaultPolicy;
   selections: DiscourseAgentSelectionInput[];
   replyToMessageId?: string;
+  supersedesMessageId?: string;
+  sourceMessageIds?: string[];
   pendingClientMessageId?: string;
   required?: boolean;
   quiet?: boolean;
@@ -123,15 +139,21 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [preview, setPreview] = useState<DiscourseContextPreview>();
   const [previewLoading, setPreviewLoading] = useState(false);
   const [acceptedSendActionId, setAcceptedSendActionId] = useState<string>();
-  const [inspectorOpen, setInspectorOpen] = useState(() =>
-    window.matchMedia('(min-width: 1181px)').matches
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
+  const [compactLayout, setCompactLayout] = useState(
+    () => window.matchMedia('(max-width: 760px)').matches
   );
+  const [agentConfigOpen, setAgentConfigOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>();
   const [newResponses, setNewResponses] = useState(false);
   const [streamDrafts, setStreamDrafts] = useState<Record<string, string>>({});
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const railRef = useRef<HTMLElement>(null);
+  const railSearchRef = useRef<HTMLInputElement>(null);
+  const railReturnFocusRef = useRef<HTMLButtonElement>(null);
   const messagesRef = useRef<DiscourseMessageRecord[]>([]);
   const draftsRef = useRef<DiscourseDraftRecord[]>([]);
   const draftAutosaveRef = useRef<DiscourseDraftAutosaveCoordinator | undefined>(undefined);
@@ -156,6 +178,29 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   >(undefined);
   const eventRefreshTimerRef = useRef<number | undefined>(undefined);
   const eventRefreshConversationIdsRef = useRef(new Set<string>());
+
+  const railModalOpen = railOpen && compactLayout;
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const update = () => setCompactLayout(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    if (!compactLayout) setRailOpen(false);
+  }, [compactLayout]);
+
+  useDialogFocusBoundary({
+    dialogRef: railRef,
+    initialFocusRef: railSearchRef,
+    fallbackReturnFocusRef: railReturnFocusRef,
+    busy: false,
+    onClose: () => setRailOpen(false),
+    active: railModalOpen
+  });
 
   const reportDiscourseError = useCallback((error: unknown, safeMessage: string) => {
     console.error(safeMessage, error);
@@ -435,15 +480,6 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     };
   }, [loadConversation, refreshSummaries, reportDiscourseError]);
 
-  useEffect(() => {
-    const compactLayout = window.matchMedia('(max-width: 1180px)');
-    const closeOverlayInspector = (event: MediaQueryListEvent) => {
-      if (event.matches) setInspectorOpen(false);
-    };
-    compactLayout.addEventListener('change', closeOverlayInspector);
-    return () => compactLayout.removeEventListener('change', closeOverlayInspector);
-  }, []);
-
   const activeDraft = useMemo(() => {
     if (selectedConversationId) {
       return drafts.find((draft) => draft.conversationId === selectedConversationId);
@@ -471,8 +507,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   useEffect(() => {
     draftAutosave.activate(selectedConversationId, activeDraft);
     setReplyTargetId(activeDraft?.replyToMessageId);
-    setCorrectionTargetId(undefined);
-    setSelectedSourceMessageIds([]);
+    setCorrectionTargetId(activeDraft?.supersedesMessageId);
+    setSelectedSourceMessageIds(activeDraft?.sourceMessageIds ?? []);
     const next = {
       ...createDiscourseComposerMentionState(activeDraft?.body ?? ''),
       tokens: composerTokensFromDraft(activeDraft?.tokens ?? [])
@@ -481,6 +517,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       conversations.find((conversation) => conversation.id === selectedConversationId)?.defaultPolicy ??
       'NONE';
     setResponsePolicy(defaultPolicy);
+    setAgentConfigOpen(false);
     setAgentSelectionOverrides(Object.fromEntries(
       (activeDraft?.agentSelections ?? []).map((selection) => [
         selection.agentProfileId,
@@ -560,6 +597,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         !input.snapshot.text &&
         input.snapshot.tokens.length === 0 &&
         !input.replyToMessageId &&
+        !input.supersedesMessageId &&
+        (input.sourceMessageIds?.length ?? 0) === 0 &&
         input.policy === 'NONE' &&
         input.selections.length === 0 &&
         !existing
@@ -571,8 +610,13 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         ...(conversationId ? { conversationId } : {}),
         body: input.snapshot.text,
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
+        ...(input.supersedesMessageId
+          ? { supersedesMessageId: input.supersedesMessageId }
+          : {}),
+        ...(input.sourceMessageIds?.length
+          ? { sourceMessageIds: input.sourceMessageIds }
+          : {}),
         policy: input.policy,
-        recipientParticipantIds: [],
         agentSelections: input.selections,
         ...(input.pendingClientMessageId
           ? { pendingClientMessageId: input.pendingClientMessageId }
@@ -603,7 +647,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           ...(pendingSendIdentityRef.current
             ? { pendingClientMessageId: pendingSendIdentityRef.current.clientMessageId }
             : {}),
-          ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+          ...(replyTargetId ? { replyToMessageId: replyTargetId } : {}),
+          ...(correctionTargetId ? { supersedesMessageId: correctionTargetId } : {}),
+          ...(selectedSourceMessageIds.length > 0
+            ? { sourceMessageIds: selectedSourceMessageIds }
+            : {})
         }
       : undefined;
 
@@ -631,7 +679,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         ...(pendingSendIdentityRef.current
           ? { pendingClientMessageId: pendingSendIdentityRef.current.clientMessageId }
           : {}),
-        ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+        ...(replyTargetId ? { replyToMessageId: replyTargetId } : {}),
+        ...(correctionTargetId ? { supersedesMessageId: correctionTargetId } : {}),
+        ...(selectedSourceMessageIds.length > 0
+          ? { sourceMessageIds: selectedSourceMessageIds }
+          : {})
       });
     }, 500);
     draftSaveTimerRef.current = timer;
@@ -639,7 +691,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       window.clearTimeout(timer);
       if (draftSaveTimerRef.current === timer) draftSaveTimerRef.current = undefined;
     };
-  }, [agentSelectionOverrides, aggregate, catalog, composer, draftAutosave, newConversation, persistDraft, replyTargetId, responsePolicy, selectedConversationId]);
+  }, [agentSelectionOverrides, aggregate, catalog, composer, correctionTargetId, draftAutosave, newConversation, persistDraft, replyTargetId, responsePolicy, selectedConversationId, selectedSourceMessageIds]);
 
   const candidates = useMemo(
     () => catalog ? discourseMentionCandidates(catalog, activeDraft?.tokens) : [],
@@ -673,6 +725,9 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const responseWavePlacements = aggregate
     ? visibleDiscourseResponseWavePlacements(aggregate, messages)
     : [];
+  const unanchoredResponseWave = responseWavePlacements.find(
+    (placement) => !placement.afterMessageId
+  )?.wave;
   const interruptedAcceptedSends = useMemo(
     () => interruptedDiscourseAcceptedSends(aggregate),
     [aggregate]
@@ -704,10 +759,15 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       )
     )
   );
-  const responseReady = responsePolicy === 'NONE' || (responsePolicy === 'TEAM' && teamReady) ||
-    (responsePolicy === 'DIRECT' && selectedAgentProfileIds.length === 1) ||
-    (responsePolicy === 'PANEL' && selectedAgentProfileIds.length >= 2 && selectedAgentProfileIds.length <= 3);
-  const safeResponseReady = responseReady && selectedAgentsReady && configuredAgentsReady;
+  const responseReadiness = discourseResponseReadiness({
+    policy: responsePolicy,
+    selectedAgentCount: selectedAgentProfileIds.length,
+    teamReady,
+    selectedAgentsReady,
+    configuredAgentsReady
+  });
+  const safeResponseReady = responseReadiness.ready;
+  const responseRequirement = responseReadiness.requirement;
 
   const updateComposer = (next: DiscourseComposerMentionState) => {
     setComposer(next);
@@ -721,13 +781,61 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   const changeResponsePolicy = (policy: DiscourseDefaultPolicy) => {
     setResponsePolicy(policy);
-    if (policy !== 'NONE' && policy !== 'TEAM') return;
+    if (policy === 'DIRECT') {
+      setAgentRoster(defaultDiscourseResponderRoster({
+        policy,
+        selectedProfileIds: selectedAgentProfileIds,
+        availableProfileIds: availableAgentProfileIds
+      }));
+      setAgentConfigOpen(true);
+      return;
+    }
+    if (policy === 'PANEL') {
+      setAgentRoster(defaultDiscourseResponderRoster({
+        policy,
+        selectedProfileIds: selectedAgentProfileIds,
+        availableProfileIds: availableAgentProfileIds
+      }));
+      setAgentConfigOpen(true);
+      return;
+    }
     const next = {
       ...composer,
       tokens: composer.tokens.filter((token) => token.kind !== 'AGENT')
     };
     setComposer(next);
     setComposerVersion((value) => value + 1);
+  };
+
+  const setAgentRoster = (profileIds: readonly BuiltInAgentProfileId[]) => {
+    const agentTokens = profileIds.flatMap((profileId) => {
+      const entry = catalog?.agents.find((candidate) => candidate.profile.id === profileId);
+      if (!entry) return [];
+      return [{
+        key: `AGENT:${profileId}`,
+        kind: 'AGENT' as const,
+        entityId: profileId,
+        labelSnapshot: entry.profile.displayName,
+        available: entry.availability === 'AVAILABLE'
+      }];
+    });
+    setComposer((current) => ({
+      ...current,
+      tokens: [...current.tokens.filter((token) => token.kind !== 'AGENT'), ...agentTokens]
+    }));
+    setComposerVersion((value) => value + 1);
+  };
+
+  const toggleRespondingAgent = (profileId: BuiltInAgentProfileId) => {
+    if (responsePolicy === 'DIRECT') {
+      setAgentRoster([profileId]);
+      return;
+    }
+    if (responsePolicy !== 'PANEL') return;
+    const selected = selectedAgentProfileIds.includes(profileId)
+      ? selectedAgentProfileIds.filter((candidate) => candidate !== profileId)
+      : [...selectedAgentProfileIds, profileId].slice(0, 3);
+    setAgentRoster(selected);
   };
 
   const updateAgentSelection = (selection: DiscourseAgentSelectionInput) => {
@@ -834,7 +942,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       selections: draftAgentSelections,
       ...(pendingClientMessageId ? { pendingClientMessageId } : {}),
       ...(required ? { required: true } : {}),
-      ...(replyTargetId ? { replyToMessageId: replyTargetId } : {})
+      ...(replyTargetId ? { replyToMessageId: replyTargetId } : {}),
+      ...(correctionTargetId ? { supersedesMessageId: correctionTargetId } : {}),
+      ...(selectedSourceMessageIds.length > 0
+        ? { sourceMessageIds: selectedSourceMessageIds }
+        : {})
     });
   };
 
@@ -970,6 +1082,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     setConversationLoadState({ status: 'loading' });
     setPreview(undefined);
     setNewResponses(false);
+    setRailOpen(false);
   };
 
   const startNewConversation = () => {
@@ -996,6 +1109,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
     setMessages([]);
     messagesRef.current = [];
     setPreview(undefined);
+    setRailOpen(false);
   };
 
   const send = async (state = composer) => {
@@ -1623,87 +1737,35 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
 
   return (
     <main className="tm-discourse">
-      <aside className="tm-discourse-rail" aria-label="Discourse conversations">
-        <div className="tm-discourse-rail__head">
-          <div>
-            <h1>Discourse</h1>
-            <p>Technical conversations across tasks and repositories</p>
-          </div>
-          <button
-            type="button"
-            className="tm-discourse-new"
-            disabled={sending}
-            onClick={startNewConversation}
-          >
-            <PlusIcon />
-            <span>New</span>
-          </button>
-        </div>
-        <label className="tm-discourse-search">
-          <SearchIcon />
-          <span className="sr-only">Search conversation titles</span>
-          <input
-            value={railQuery}
-            placeholder="Search conversations"
-            onChange={(event) => setRailQuery(event.target.value)}
-          />
-        </label>
-        <div className="tm-discourse-rail__filter" role="group" aria-label="Conversation status">
-          <button
-            type="button"
-            aria-pressed={!showArchived}
-            onClick={() => setShowArchived(false)}
-          >
-            Recent
-          </button>
-          <button
-            type="button"
-            aria-pressed={showArchived}
-            onClick={() => setShowArchived(true)}
-          >
-            Archive
-          </button>
-        </div>
-        <div className="tm-discourse-rail__list">
-          {newConversation && !showArchived ? (
-            <button className="tm-discourse-thread tm-discourse-thread--active" type="button">
-              <span className="tm-discourse-thread__title">New conversation</span>
-              <small>Draft</small>
-            </button>
-          ) : null}
-          {displayedConversations.map((conversation) => (
-            <button
-              type="button"
-              key={conversation.id}
-              disabled={sending}
-              className={`tm-discourse-thread ${
-                conversation.id === selectedConversationId ? 'tm-discourse-thread--active' : ''
-              }`}
-              onClick={() => selectConversation(conversation.id)}
-            >
-              <span className="tm-discourse-thread__title">{conversation.title}</span>
-              <span className="tm-discourse-thread__meta">
-                {conversation.needsAttention ? <span className="tm-discourse-attention">Needs attention</span> : null}
-                {conversation.unreadCount > 0 ? (
-                  <span className="tm-discourse-unread" aria-label={`${conversation.unreadCount} unread`}>
-                    {conversation.unreadCount}
-                  </span>
-                ) : (
-                  <time>{formatCompactDate(conversation.lastMessageAt ?? conversation.updatedAt)}</time>
-                )}
-              </span>
-            </button>
-          ))}
-          {displayedConversations.length === 0 && !newConversation ? (
-            <p className="tm-discourse-rail__empty">
-              {railQuery ? 'No titles match your search.' : showArchived ? 'No archived conversations.' : 'No conversations yet.'}
-            </p>
-          ) : null}
-        </div>
-      </aside>
+      <DiscourseConversationRail
+        archived={showArchived}
+        conversations={displayedConversations}
+        modalOpen={railModalOpen}
+        newConversation={newConversation}
+        query={railQuery}
+        railRef={railRef}
+        searchRef={railSearchRef}
+        selectedConversationId={selectedConversationId}
+        sending={sending}
+        onArchivedChange={setShowArchived}
+        onClose={() => setRailOpen(false)}
+        onNewConversation={startNewConversation}
+        onQueryChange={setRailQuery}
+        onSelectConversation={selectConversation}
+      />
 
       <section className="tm-discourse-conversation">
         <header className="tm-discourse-header">
+          <button
+            ref={railReturnFocusRef}
+            type="button"
+            className="tm-iconbtn tm-discourse-rail-toggle"
+            aria-label="Open conversations"
+            aria-expanded={railModalOpen}
+            onClick={() => setRailOpen(true)}
+          >
+            <SidebarIcon />
+          </button>
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
               <form
@@ -1717,7 +1779,13 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                   value={renameValue}
                   aria-label="Conversation title"
                   onChange={(event) => setRenameValue(event.target.value)}
-                  onBlur={() => void renameConversation()}
+                  onBlur={() => setRenameOpen(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setRenameOpen(false);
+                    }
+                  }}
                 />
               </form>
             ) : (
@@ -1751,28 +1819,38 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               <ContextIcon />
             </button>
             {aggregate ? (
-              <details className="tm-discourse-menu">
-                <summary aria-label="Conversation actions">•••</summary>
-                <div>
-                  <button type="button" onClick={() => void setArchived(aggregate.conversation.status !== 'ARCHIVED')}>
-                    {aggregate.conversation.status === 'ARCHIVED' ? 'Restore conversation' : 'Archive conversation'}
-                  </button>
-                  <button type="button" className="tm-discourse-menu__danger" onClick={() => setConfirmAction('delete-conversation')}>
-                    Delete conversation
-                  </button>
-                </div>
-              </details>
+              <DiscourseActionMenu
+                className="tm-discourse-menu"
+                label="Conversation actions"
+                trigger="•••"
+                items={[
+                  {
+                    label: aggregate.conversation.status === 'ARCHIVED'
+                      ? 'Restore conversation'
+                      : 'Archive conversation',
+                    onSelect: () => void setArchived(
+                      aggregate.conversation.status !== 'ARCHIVED'
+                    )
+                  },
+                  {
+                    label: 'Delete conversation',
+                    danger: true,
+                    onSelect: () => setConfirmAction({ type: 'delete-conversation' })
+                  }
+                ]}
+              />
             ) : null}
           </div>
         </header>
 
-        <div
-          className="tm-discourse-transcript"
-          ref={transcriptRef}
-          onScroll={(event) => {
-            if (isNearScrollBottom(event.currentTarget)) setNewResponses(false);
-          }}
-        >
+        <div className="tm-discourse-transcript-shell">
+          <div
+            className="tm-discourse-transcript"
+            ref={transcriptRef}
+            onScroll={(event) => {
+              if (isNearScrollBottom(event.currentTarget)) setNewResponses(false);
+            }}
+          >
           {conversationRefreshFailed || conversationRefreshing ? (
             <div
               className={`tm-discourse-status-banner ${
@@ -1822,6 +1900,18 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 </button>
               </div>
             </div>
+          ) : null}
+          {aggregate && unanchoredResponseWave ? (
+            <ol className="tm-discourse-messages tm-discourse-messages--unanchored-wave">
+              <DiscourseResponseGroup
+                aggregate={aggregate}
+                wave={unanchoredResponseWave}
+                streamDrafts={streamDrafts}
+                onStop={(waveId) => void stopWave(waveId)}
+                onConfirm={(waveId) => void confirmWaveContext(waveId)}
+                onRetry={prepareWaveRetry}
+              />
+            </ol>
           ) : null}
           {previousCursor ? (
             <button type="button" className="tm-discourse-load-older" onClick={() => void loadOlder()}>
@@ -1877,7 +1967,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                       });
                       setComposerVersion((value) => value + 1);
                     }}
-                    onDelete={() => void tombstoneMessage(message)}
+                    onDelete={() => setConfirmAction({ type: 'delete-message', message })}
                     onAskAuthor={() => prepareAgentFollowUp(message, 'AUTHOR')}
                     onAskOthers={() => prepareAgentFollowUp(message, 'OTHERS')}
                     selectedAsSource={selectedSourceMessageIds.includes(message.id)}
@@ -1904,21 +1994,21 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               ))}
             </ol>
           )}
-          <div aria-hidden="true" className="tm-discourse-transcript__end" />
+            <div aria-hidden="true" className="tm-discourse-transcript__end" />
+          </div>
+          {newResponses ? (
+            <button
+              type="button"
+              className="tm-discourse-new-responses"
+              onClick={() => {
+                scrollTranscriptToBottom(transcriptRef.current);
+                setNewResponses(false);
+              }}
+            >
+              New responses ↓
+            </button>
+          ) : null}
         </div>
-
-        {newResponses ? (
-          <button
-            type="button"
-            className="tm-discourse-new-responses"
-            onClick={() => {
-              scrollTranscriptToBottom(transcriptRef.current);
-              setNewResponses(false);
-            }}
-          >
-            New responses ↓
-          </button>
-        ) : null}
 
         <div className="tm-discourse-composer-wrap">
           {selectedSourceMessageIds.length > 0 ? (
@@ -1937,13 +2027,19 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             <ComposerTarget label="Correcting your earlier message" message={correctionTarget} onRemove={() => setCorrectionTargetId(undefined)} />
           ) : null}
           <div className="tm-discourse-composer">
-            {activeAgentProfileIds.length > 0 && catalog ? (
+            {responsePolicy !== 'NONE' && catalog ? (
               <DiscourseAgentConfigurationBar
                 aggregate={aggregate}
                 catalog={catalog}
+                compact={compactLayout}
                 disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                expanded={agentConfigOpen}
+                policy={responsePolicy}
                 selections={activeAgentSelections}
+                selectedProfileIds={activeAgentProfileIds}
                 onDiscoverModels={discoverAgentModels}
+                onExpandedChange={setAgentConfigOpen}
+                onToggleAgent={toggleRespondingAgent}
                 onSelectionChange={updateAgentSelection}
               />
             ) : null}
@@ -1952,6 +2048,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               candidates={candidates}
               initialText={composer.text}
               initialTokens={composer.tokens}
+              showAgentTokens={false}
               autoFocus={messages.length === 0}
               disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
               label="Message"
@@ -1990,7 +2087,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 <span className="tm-discourse-policy__mark"><PersonIcon /></span>
                 <span>
                   <label>
-                    <span className="sr-only">Response policy</span>
+                    <span className="tm-visually-hidden">Response policy</span>
                     <select
                       value={responsePolicy}
                       disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
@@ -2002,25 +2099,25 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                       <option value="TEAM" disabled={!teamReady}>Team</option>
                     </select>
                   </label>
-                  <small>{responsePolicyDetail(responsePolicy, selectedAgentProfileIds.length, teamReady)}</small>
+                  <small>{responseReadiness.detail}</small>
                 </span>
               </div>
               <div className="tm-discourse-composer__buttons">
                 <button
                   type="button"
                   className="tm-discourse-preview-button"
+                  aria-label={previewLoading ? 'Resolving agent context' : 'What agents will see'}
                   disabled={previewLoading || composerUnavailable}
                   onClick={() => void showPreview()}
                 >
-                  {previewLoading ? 'Resolving…' : 'What agents will see'}
+                  <ContextIcon />
+                  <span>{previewLoading ? 'Resolving…' : 'What agents will see'}</span>
                 </button>
                 <button
                   type="button"
                   className="tm-discourse-send"
                   disabled={!composer.text.trim() || !safeResponseReady || sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                  title={!safeResponseReady
-                    ? responsePolicyRequirement(responsePolicy, teamReady, configuredAgentsReady)
-                    : undefined}
+                  aria-describedby={!safeResponseReady ? 'discourse-response-requirement' : undefined}
                   onClick={() => void send()}
                 >
                   {sending ? 'Sending…' : 'Send'}
@@ -2028,16 +2125,17 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
                 </button>
               </div>
             </div>
+            {!safeResponseReady && responsePolicy !== 'NONE' ? (
+              <p id="discourse-response-requirement" className="tm-discourse-composer__requirement" role="status">
+                {responseRequirement}
+              </p>
+            ) : null}
           </div>
         </div>
       </section>
 
       {inspectorOpen ? (
-        <aside className="tm-discourse-inspector" aria-label="Conversation context and details">
-          <div className="tm-discourse-inspector__head">
-            <h2>Context</h2>
-            <button type="button" className="tm-iconbtn" aria-label="Close context inspector" onClick={() => setInspectorOpen(false)}>×</button>
-          </div>
+        <InspectorDrawer onClose={() => setInspectorOpen(false)}>
           <InspectorSection title="Pinned for future responses" count={pinned.length}>
             {pinned.length === 0 ? (
               <p className="tm-discourse-inspector__empty">Nothing is attached automatically. Mention a task or repository, then pin it explicitly.</p>
@@ -2057,7 +2155,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           </InspectorSection>
           <InspectorSection title="Response policy">
             <div className="tm-discourse-inspector__policy">
-              <strong>{responsePolicyLabel(responsePolicy)}</strong>
+              <strong>{discourseResponsePolicyLabel(responsePolicy)}</strong>
               <p>{responsePolicyDescription(responsePolicy)}</p>
             </div>
           </InspectorSection>
@@ -2093,11 +2191,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               <div><dt>Approvals</dt><dd>Never</dd></div>
             </dl>
           </InspectorSection>
-        </aside>
+        </InspectorDrawer>
       ) : null}
 
       {preview ? <ContextPreview preview={preview} onClose={() => setPreview(undefined)} /> : null}
-      {confirmAction === 'delete-conversation' ? (
+      {confirmAction?.type === 'delete-conversation' ? (
         <ConfirmDialog
           title="Delete conversation?"
           body="This removes the transcript and its Task Monki discourse records. Referenced tasks and repositories are not changed."
@@ -2106,248 +2204,20 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           onConfirm={() => void deleteConversation()}
         />
       ) : null}
+      {confirmAction?.type === 'delete-message' ? (
+        <ConfirmDialog
+          title="Delete message?"
+          body="The message will remain as a deleted entry so replies and conversation history stay coherent."
+          confirmLabel="Delete message"
+          onCancel={() => setConfirmAction(undefined)}
+          onConfirm={() => {
+            const message = confirmAction.message;
+            setConfirmAction(undefined);
+            void tombstoneMessage(message);
+          }}
+        />
+      ) : null}
     </main>
-  );
-}
-
-function DiscourseResponseGroup({
-  aggregate,
-  wave,
-  streamDrafts,
-  onStop,
-  onConfirm,
-  onRetry
-}: {
-  aggregate: DiscourseConversationAggregateRecord;
-  wave: DiscourseConversationAggregateRecord['waves'][number];
-  streamDrafts: Record<string, string>;
-  onStop(waveId: string): void;
-  onConfirm(waveId: string): void;
-  onRetry(waveId: string): void;
-}) {
-  const queuedAfterCurrent = wave.status === 'SETTLED'
-    ? 0
-    : aggregate.waves.filter(
-        (candidate) => candidate.status !== 'SETTLED' && candidate.id !== wave.id
-      ).length;
-  const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
-  const reviews = jobs.filter((job) => job.role === 'CRITIQUE');
-  const concerns = aggregate.concerns.filter((concern) => concern.waveId === wave.id);
-  const activeJobs = jobs.filter((job) => !['COMPLETED', 'FAILED', 'CANCELED', 'CONTEXT_STALE'].includes(job.status));
-  const active = activeJobs[0];
-  const activelyWorking = active && active.status !== 'RECOVERY_REQUIRED';
-  const streamingJobs = jobs.filter(
-    (job) => job.role === 'ANSWER' && Boolean(streamDrafts[job.id])
-  );
-  const completedTeam = wave.policy === 'TEAM' && wave.status === 'SETTLED' && wave.outcome === 'COMPLETE';
-  const teamSummary = completedTeam
-    ? discourseTeamCompletionSummary({ jobs, concerns })
-    : undefined;
-  const terminalDetail = discourseTerminalJobDetail(jobs);
-  const label = wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
-    ? 'Context changed before dispatch'
-    : teamSummary
-      ? teamSummary.label
-    : active
-      ? active.role === 'CRITIQUE'
-        ? 'Reviewing the lead answer'
-        : active.role === 'CORRECT'
-          ? 'Preparing a correction'
-          : wave.policy === 'PANEL'
-            ? 'Panel responding'
-            : discourseJobStatusLabel(active.status)
-      : wave.outcome === 'CANCELED'
-        ? 'Response stopped'
-        : wave.outcome === 'STALE'
-          ? 'Context changed'
-          : wave.outcome === 'FAILED' || wave.outcome === 'NO_RESPONSE'
-            ? 'Response failed'
-            : 'Partial response';
-  const detail = wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED'
-    ? 'Review the latest context before asking the agent again.'
-    : teamSummary
-      ? teamSummary.detail
-    : active?.status === 'RECOVERY_REQUIRED'
-      ? 'Task Monki could not confirm whether this response started. Stop it before trying again.'
-    : active
-      ? activeJobs.length > 1
-        ? `${activeJobs.length} agents are working independently.`
-        : `${active.assignment.displayNameSnapshot} · ${active.assignment.model}`
-      : terminalDetail ?? waveTerminalDetail(wave.outcome);
-  const stoppable = ['PLANNED', 'SNAPSHOTTING', 'QUEUED', 'RUNNING', 'STOP_REQUESTED', 'STOPPING', 'RECOVERY_REQUIRED'].includes(wave.status);
-  const retryable = wave.status === 'SETTLED' && wave.outcome !== 'COMPLETE' && wave.outcome !== 'CANCELED';
-  return (
-    <li
-      className="tm-discourse-response"
-      aria-live={wave.status === 'SETTLED' ? undefined : 'polite'}
-      aria-label="Agent response status"
-    >
-      <header>
-        <span className={`tm-discourse-response__pulse ${activelyWorking ? 'tm-discourse-response__pulse--active' : ''}`} />
-        <span><strong>{label}</strong><small>{detail}</small></span>
-        {wave.dispatchGate.status === 'RECONFIRMATION_REQUIRED' ? (
-          <span className="tm-discourse-response__actions">
-            <button type="button" onClick={() => onConfirm(wave.id)}>Continue</button>
-            <button type="button" onClick={() => onStop(wave.id)}>Cancel</button>
-          </span>
-        ) : stoppable
-          ? <button type="button" onClick={() => onStop(wave.id)}>Stop</button>
-          : retryable
-            ? <button type="button" onClick={() => onRetry(wave.id)}>Try again</button>
-            : null}
-      </header>
-      {streamingJobs.length > 0 ? (
-        <div className="tm-discourse-response__streams">
-          {streamingJobs.map((job) => (
-            <div key={job.id}>
-              <strong>{job.assignment.displayNameSnapshot}</strong>
-              <p>{streamDrafts[job.id]}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {reviews.length > 0 ? (
-        <ul className="tm-discourse-response__reviews" aria-label="Team review results">
-          {reviews.map((review) => (
-            <li key={review.id}>
-              <span>{review.assignment.displayNameSnapshot}</span>
-              <strong>{discourseReviewResultLabel(review)}</strong>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {concerns.length > 0 ? (
-        <div className="tm-discourse-response__concerns">
-          {concerns.map((concern) => (
-            <details key={concern.id}>
-              <summary>
-                <span>{capitalize(concern.severity)}</span>
-                {concern.targetClaim}
-                {concern.redundantOfConcernId
-                  ? <small>Duplicate signal</small>
-                  : discourseConcernResolutionLabel(concern)
-                    ? <small>{discourseConcernResolutionLabel(concern)}</small>
-                    : null}
-              </summary>
-              <div className="tm-discourse-response__concern-meta">
-                <span>{capitalize(concern.category)}</span>
-                <span>{capitalize(concern.evidenceStatus.replaceAll('_', ' '))}</span>
-                <span>{capitalize(concern.confidence)} confidence</span>
-              </div>
-              <p><strong>Why it matters</strong>{concern.reason}</p>
-              <p><strong>Evidence</strong>{concern.evidence}</p>
-              <p><strong>Suggested resolution</strong>{concern.suggestedResolution}</p>
-            </details>
-          ))}
-        </div>
-      ) : null}
-      <footer>
-        {responsePolicyLabel(wave.policy)} · up to {wave.policy === 'TEAM' ? 4 : wave.assignments.length} agent turn{wave.policy === 'DIRECT' ? '' : 's'}
-        {queuedAfterCurrent > 0 ? ` · ${queuedAfterCurrent} follow-up${queuedAfterCurrent === 1 ? '' : 's'} queued` : ''}
-      </footer>
-    </li>
-  );
-}
-
-function waveTerminalDetail(
-  outcome: DiscourseConversationAggregateRecord['waves'][number]['outcome']
-): string {
-  switch (outcome) {
-    case 'CANCELED': return 'The response was stopped before all agent work completed.';
-    case 'STALE': return 'Changed context prevented this response from being accepted.';
-    case 'FAILED': return 'The agents did not complete this response.';
-    case 'NO_RESPONSE': return 'No agent completed an answer.';
-    case 'PARTIAL': return 'Some agent work completed; incomplete results remain visible.';
-    case 'COMPLETE': return 'The response completed.';
-    default: return 'Response status is unavailable.';
-  }
-}
-
-function DiscourseMessage({
-  message,
-  replyTarget,
-  context,
-  job,
-  onNavigate,
-  onReply,
-  onCorrect,
-  onDelete,
-  onAskAuthor,
-  onAskOthers,
-  selectedAsSource,
-  onToggleSource
-}: {
-  message: DiscourseMessageRecord;
-  replyTarget?: DiscourseMessageRecord;
-  context: ConversationContextReferenceSnapshot[];
-  job?: DiscourseConversationAggregateRecord['jobs'][number];
-  onNavigate(messageId: string): void;
-  onReply(): void;
-  onCorrect(): void;
-  onDelete(): void;
-  onAskAuthor(): void;
-  onAskOthers(): void;
-  selectedAsSource: boolean;
-  onToggleSource(): void;
-}) {
-  const user = message.author.kind === 'USER';
-  return (
-    <li id={`discourse-message-${message.id}`} className={`tm-discourse-message tm-discourse-message--${message.author.kind.toLowerCase()} ${message.status !== 'VISIBLE' ? `tm-discourse-message--${message.status.toLowerCase()}` : ''}`}>
-      <div className="tm-discourse-message__rail">
-        <span>{user ? 'Y' : message.author.kind === 'AGENT' ? message.author.displayNameSnapshot.slice(0, 1) : 'M'}</span>
-      </div>
-      <article>
-        <header>
-          <strong>{messageAuthorLabel(message)}</strong>
-          <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
-          {message.status === 'SUPERSEDED' ? <span className="tm-discourse-message__state">Corrected</span> : null}
-          {job ? (
-            <span className="tm-discourse-message__state">
-              {job.assignment.model} · {job.freshnessAtCompletion === 'FRESH' ? 'context fresh' : job.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? 'context changed' : 'freshness unknown'}
-            </span>
-          ) : null}
-        </header>
-        {replyTarget ? (
-          <button type="button" className="tm-discourse-reply-reference" onClick={() => onNavigate(replyTarget.id)}>
-            <span>↳ {messageAuthorLabel(replyTarget)}</span>
-            {replyTarget.status === 'TOMBSTONE' ? 'Deleted message' : compactText(replyTarget.body, 90)}
-          </button>
-        ) : null}
-        {job?.freshnessAtCompletion === 'CHANGED_DURING_JOB' ? (
-          <p className="tm-discourse-message__stale-note">
-            Context changed while this response was running. It is preserved for history, not accepted as current evidence.
-          </p>
-        ) : null}
-        {message.status === 'TOMBSTONE' ? (
-          <p className="tm-discourse-message__tombstone">Message deleted</p>
-        ) : message.author.kind === 'AGENT' ? (
-          <DiscourseMarkdown text={message.body} />
-        ) : (
-          <p className="tm-discourse-message__body">{message.body}</p>
-        )}
-        {context.length > 0 ? (
-          <div className="tm-discourse-message__context" aria-label="Message context">
-            {context.map((reference) => (
-              <span key={`${reference.scope}:${reference.contextLinkId}`}>
-                {reference.scope === 'PINNED' ? <PinIcon /> : reference.entityKind === 'TASK' ? <TaskIcon /> : <RepositoryIcon />}
-                {reference.labelSnapshot}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        {message.status !== 'TOMBSTONE' ? (
-          <footer>
-            <button type="button" onClick={onReply}>Reply</button>
-            {!user && message.author.kind === 'AGENT' ? <button type="button" onClick={onAskAuthor}>Ask author</button> : null}
-            {!user && message.author.kind === 'AGENT' ? <button type="button" onClick={onAskOthers}>Ask others</button> : null}
-            <button type="button" aria-pressed={selectedAsSource} onClick={onToggleSource}>{selectedAsSource ? 'Selected' : 'Select'}</button>
-            {user && message.status === 'VISIBLE' ? <button type="button" onClick={onCorrect}>Correct</button> : null}
-            {user ? <button type="button" onClick={onDelete}>Delete</button> : null}
-            <button type="button" onClick={() => void navigator.clipboard?.writeText(message.body)}>Copy</button>
-          </footer>
-        ) : null}
-      </article>
-    </li>
   );
 }
 
@@ -2360,150 +2230,11 @@ function ComposerTarget({ label, message, onRemove }: { label: string; message: 
   );
 }
 
-function DiscourseAgentConfigurationBar({
-  aggregate,
-  catalog,
-  disabled,
-  selections,
-  onDiscoverModels,
-  onSelectionChange
-}: {
-  aggregate?: DiscourseConversationAggregateRecord;
-  catalog: DiscourseMentionCatalogSnapshot;
-  disabled: boolean;
-  selections: DiscourseAgentSelectionInput[];
-  onDiscoverModels(runtimeId: string): Promise<void>;
-  onSelectionChange(selection: DiscourseAgentSelectionInput): void;
-}) {
-  const eligible = eligibleDiscourseRuntimeCatalog(catalog);
-  return (
-    <section className="tm-discourse-agent-config" aria-label="Agents for next response">
-      <header>
-        <span>Agents for next response</span>
-        <small>Saved to this conversation when sent</small>
-      </header>
-      <div className="tm-discourse-agent-config__list">
-        {selections.map((selection) => {
-          const entry = catalog.agents.find(
-            (candidate) => candidate.profile.id === selection.agentProfileId
-          );
-          if (!entry) return null;
-          const currentRevision = currentDiscourseParticipantRevisions(aggregate).find(
-            (revision) => revision.agentProfileId === selection.agentProfileId
-          );
-          const selectedModel = eligible.models.find(
-            (model) =>
-              model.runtimeId === selection.runtimeId && model.id === selection.modelId
-          );
-          const fallbackSummary = selection.runtimeId
-            ? currentRevision?.runtimeId === selection.runtimeId
-              ? currentRevision.model
-              : 'Choose a model'
-            : 'Choose provider and model';
-          return (
-            <div className="tm-discourse-agent-config__agent" key={selection.agentProfileId}>
-              <span className="tm-discourse-agent-config__avatar" aria-hidden="true">
-                {entry.profile.displayName.slice(0, 1)}
-              </span>
-              <div className="tm-discourse-agent-config__identity">
-                <strong>{entry.profile.displayName}</strong>
-                <small>{capitalize(entry.profile.roleTemplate)}</small>
-              </div>
-              <AgentModelSelector
-                compact
-                label={`${entry.profile.displayName} provider and model`}
-                runtimeId={selection.runtimeId ?? ''}
-                modelId={selection.modelId ?? ''}
-                reasoningEffort={selection.reasoningEffort}
-                models={eligible.models}
-                runtimes={eligible.runtimes}
-                disabled={disabled}
-                fallbackSummary={fallbackSummary}
-                selectionUnavailable={!selectedModel}
-                onDiscoverModels={onDiscoverModels}
-                onSelectionChange={(runtimeId, modelId) => {
-                  const model = eligible.models.find(
-                    (candidate) =>
-                      candidate.runtimeId === runtimeId && candidate.id === modelId
-                  );
-                  const reasoningEffort =
-                    selection.runtimeId === runtimeId && selection.modelId === modelId
-                      ? selection.reasoningEffort
-                      : model?.defaultReasoningEffort;
-                  onSelectionChange({
-                    agentProfileId: selection.agentProfileId,
-                    ...(runtimeId ? { runtimeId } : {}),
-                    ...(modelId ? { modelId } : {}),
-                    ...(reasoningEffort
-                      ? { reasoningEffort }
-                      : {})
-                  });
-                }}
-                onReasoningEffortChange={(reasoningEffort) => {
-                  const { reasoningEffort: _current, ...base } = selection;
-                  onSelectionChange({
-                    ...base,
-                    ...(reasoningEffort ? { reasoningEffort } : {})
-                  });
-                }}
-              />
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function ContextPreview({ preview, onClose }: { preview: DiscourseContextPreview; onClose(): void }) {
-  return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="discourse-preview-title">
-      <div className="tm-modal__scrim" onClick={onClose} />
-      <div className="tm-modal__panel tm-discourse-preview">
-        <header>
-          <div><h2 id="discourse-preview-title">What agents will see</h2><p>Provisional context manifest · valid until {formatMessageTime(preview.expiresAt)}</p></div>
-          <button type="button" className="tm-iconbtn" aria-label="Close context preview" onClick={onClose}>×</button>
-        </header>
-        <section>
-          <h3>Selected context</h3>
-          {preview.references.length === 0 ? <p>No task or repository context. Only the message and bounded conversation history would be included.</p> : (
-            <ul>
-              {preview.references.map((reference) => (
-                <li key={`${reference.entityKind}:${reference.entityId}`}>
-                  <span className={`tm-discourse-context-kind tm-discourse-context-kind--${reference.entityKind.toLowerCase()}`}>{reference.entityKind === 'TASK' ? <TaskIcon /> : <RepositoryIcon />}</span>
-                  <span><strong>{reference.labelSnapshot}</strong><small>{reference.scope === 'PINNED' ? 'Pinned' : 'This message'} · {accessModeLabel(reference.accessMode)}</small></span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-        <section>
-          <h3>Safety boundary</h3>
-          <dl className="tm-discourse-preview__policy">
-            <div><dt>Repository roots</dt><dd>{preview.filesystemRootCount} read-only</dd></div>
-            <div><dt>Writes</dt><dd>Disabled</dd></div>
-            <div><dt>Network</dt><dd>Disabled</dd></div>
-            <div><dt>Tools & apps</dt><dd>Disabled</dd></div>
-          </dl>
-        </section>
-        {preview.exclusions.length > 0 ? <section className="tm-discourse-preview__exclusions"><h3>Exclusions</h3><ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul></section> : null}
-        <footer><span className="tm-discourse-preview__hash">Manifest {preview.fingerprint.slice(0, 10)}</span><button type="button" className="primary-button" onClick={onClose}>Done</button></footer>
-      </div>
-    </div>
-  );
-}
-
-function InspectorSection({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
-  return <section className="tm-discourse-inspector__section"><h3>{title}{count !== undefined ? <span>{count}</span> : null}</h3>{children}</section>;
-}
-
-function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }: { title: string; body: string; confirmLabel: string; onCancel(): void; onConfirm(): void }) {
-  return <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="discourse-confirm-title"><div className="tm-modal__scrim" onClick={onCancel} /><div className="tm-modal__panel tm-discourse-confirm"><h2 id="discourse-confirm-title">{title}</h2><p>{body}</p><div className="tm-modal__actions"><button type="button" className="outline-button" onClick={onCancel}>Cancel</button><button type="button" className="danger-button" onClick={onConfirm}>{confirmLabel}</button></div></div></div>;
-}
-
 function navigateToMessage(messageId: string): void {
   const target = document.getElementById(`discourse-message-${messageId}`);
-  target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target?.scrollIntoView({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
+  target?.focus({ preventScroll: true });
   target?.classList.add('tm-discourse-message--highlight');
   window.setTimeout(() => target?.classList.remove('tm-discourse-message--highlight'), 1_200);
 }
@@ -2556,73 +2287,8 @@ function compactText(value: string, limit: number): string {
   return compact.length <= limit ? compact : `${compact.slice(0, limit - 1).trimEnd()}…`;
 }
 
-function formatCompactDate(value: string): string {
-  const date = new Date(value);
-  const today = new Date();
-  if (date.toDateString() === today.toDateString()) {
-    return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(date);
-  }
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date);
-}
-
-function formatMessageTime(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value));
-}
-
 function availabilityLabel(value: string): string {
   return value === 'AVAILABLE' ? 'Available' : value === 'TOMBSTONED' ? 'Historical only' : 'Unavailable';
-}
-
-function accessModeLabel(value: string): string {
-  return value === 'FILESYSTEM_READ' ? 'Read-only files' : value === 'METADATA_ONLY' ? 'Metadata only' : 'Unavailable';
-}
-
-function responsePolicyLabel(policy: DiscourseDefaultPolicy | DiscourseWavePolicy): string {
-  switch (policy) {
-    case 'NONE': return 'No agents';
-    case 'DIRECT': return 'Direct';
-    case 'PANEL': return 'Panel';
-    case 'TEAM': return 'Team';
-    case 'TARGETED_REVIEW': return 'Review';
-    case 'TARGETED_REPLY': return 'Reply';
-    case 'SYNTHESIS': return 'Synthesis';
-  }
-}
-
-function responsePolicyDetail(
-  policy: DiscourseDefaultPolicy,
-  selectedAgents: number,
-  teamReady: boolean
-): string {
-  switch (policy) {
-    case 'NONE': return 'Human note · 0 agent turns';
-    case 'DIRECT': return selectedAgents === 1
-      ? 'One selected agent · 1 turn'
-      : 'Choose one agent with @';
-    case 'PANEL': return selectedAgents >= 2 && selectedAgents <= 3
-      ? `${selectedAgents} independent agents · ${selectedAgents} turns`
-      : 'Choose two or three agents with @';
-    case 'TEAM': return teamReady
-      ? 'Lead + 2 reviews + optional correction · up to 4 turns'
-      : 'Team needs all three agents available';
-  }
-}
-
-function responsePolicyRequirement(
-  policy: DiscourseDefaultPolicy,
-  teamReady: boolean,
-  configuredAgentsReady: boolean
-): string {
-  if (policy !== 'NONE' && !configuredAgentsReady) {
-    return 'Choose an available provider and model for each responding agent.';
-  }
-  return policy === 'DIRECT'
-    ? 'Choose one agent with @.'
-    : policy === 'PANEL'
-      ? 'Choose two or three agents with @.'
-      : policy === 'TEAM' && !teamReady
-        ? 'Team responses require all three agents to be available.'
-        : '';
 }
 
 function responsePolicyDescription(policy: DiscourseDefaultPolicy): string {
@@ -2645,11 +2311,7 @@ function isBuiltInAgentProfileId(
 }
 
 const ICON = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-function PlusIcon() { return <svg {...ICON}><path d="M12 5v14M5 12h14" /></svg>; }
-function SearchIcon() { return <svg {...ICON}><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>; }
 function ContextIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14" /></svg>; }
-function PinIcon() { return <svg {...ICON} width={12} height={12}><path d="m14 4 6 6-4 1-4 4-1 5-2-2-5 2 4-4 1-4z" /></svg>; }
+function SidebarIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14M6.5 8h.01M6.5 11h.01" /></svg>; }
 function PersonIcon() { return <svg {...ICON}><circle cx="12" cy="8" r="3" /><path d="M5 20c.8-4 3.1-6 7-6s6.2 2 7 6" /></svg>; }
-function TaskIcon() { return <svg {...ICON} width={13} height={13}><rect x="4" y="3" width="16" height="18" rx="2" /><path d="m8 10 2 2 4-4M8 16h8" /></svg>; }
-function RepositoryIcon() { return <svg {...ICON} width={13} height={13}><path d="M4 4h12a2 2 0 0 1 2 2v14H6a2 2 0 0 1-2-2z" /><path d="M8 4v16M18 8h2" /></svg>; }
 function RoundtableIcon() { return <svg {...ICON} width={28} height={28}><circle cx="12" cy="12" r="4" /><circle cx="5" cy="7" r="2" /><circle cx="19" cy="7" r="2" /><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /></svg>; }

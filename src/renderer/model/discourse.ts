@@ -1,5 +1,7 @@
+import { isEligibleDiscourseConcern } from '../../shared/discourse';
 import type {
   ConversationContextReferenceSnapshot,
+  BuiltInAgentProfileId,
   DiscourseAgentJobRecord,
   DiscourseConcernRecord,
   DiscourseConversationAggregateRecord,
@@ -14,7 +16,8 @@ import type {
   DiscourseJobStatus,
   DiscourseMentionCatalogSnapshot,
   DiscourseMessageRecord,
-  DiscourseResponseWaveRecord
+  DiscourseResponseWaveRecord,
+  DiscourseWavePolicy
 } from '../../shared/discourse';
 import type { AgentRuntimeCatalog } from '../../shared/agent';
 import type {
@@ -22,6 +25,114 @@ import type {
   DiscourseMentionCandidate
 } from './discourseMentions';
 import { repositoryDisplayPath } from './repositories';
+
+const BUILT_IN_DISCOURSE_ROSTER: readonly BuiltInAgentProfileId[] = [
+  'builtin.lead',
+  'builtin.skeptic',
+  'builtin.verifier'
+];
+
+export interface DiscourseResponseReadiness {
+  ready: boolean;
+  detail: string;
+  requirement: string;
+}
+
+export function discourseResponsePolicyLabel(
+  policy: DiscourseDefaultPolicy | DiscourseWavePolicy
+): string {
+  switch (policy) {
+    case 'NONE': return 'No agents';
+    case 'DIRECT': return 'Direct';
+    case 'PANEL': return 'Panel';
+    case 'TEAM': return 'Team';
+    case 'TARGETED_REVIEW': return 'Review';
+    case 'TARGETED_REPLY': return 'Reply';
+    case 'SYNTHESIS': return 'Synthesis';
+  }
+}
+
+export function defaultDiscourseResponderRoster(input: {
+  policy: 'DIRECT' | 'PANEL';
+  selectedProfileIds: readonly BuiltInAgentProfileId[];
+  availableProfileIds: ReadonlySet<BuiltInAgentProfileId>;
+}): BuiltInAgentProfileId[] {
+  const selected = input.selectedProfileIds.filter((profileId) =>
+    input.availableProfileIds.has(profileId)
+  );
+  if (input.policy === 'DIRECT') {
+    return [selected[0] ?? BUILT_IN_DISCOURSE_ROSTER.find((profileId) =>
+      input.availableProfileIds.has(profileId)
+    ) ?? 'builtin.lead'];
+  }
+  for (const profileId of BUILT_IN_DISCOURSE_ROSTER) {
+    if (selected.length >= 2) break;
+    if (input.availableProfileIds.has(profileId) && !selected.includes(profileId)) {
+      selected.push(profileId);
+    }
+  }
+  return selected.slice(0, 3);
+}
+
+export function discourseResponderToggleDisabled(input: {
+  controlsDisabled: boolean;
+  policy: DiscourseDefaultPolicy;
+  selectedProfileIds: readonly BuiltInAgentProfileId[];
+  profileId: BuiltInAgentProfileId;
+  available: boolean;
+}): boolean {
+  const selected = input.selectedProfileIds.includes(input.profileId);
+  return input.controlsDisabled ||
+    (!input.available && !selected) ||
+    (
+      input.policy === 'PANEL' &&
+      input.available &&
+      selected &&
+      input.selectedProfileIds.length <= 2
+    );
+}
+
+/**
+ * Keeps policy cardinality, availability, and runtime configuration in one
+ * renderer-owned projection so every composer state explains and gates the
+ * same response decision.
+ */
+export function discourseResponseReadiness(input: {
+  policy: DiscourseDefaultPolicy;
+  selectedAgentCount: number;
+  teamReady: boolean;
+  selectedAgentsReady: boolean;
+  configuredAgentsReady: boolean;
+}): DiscourseResponseReadiness {
+  const { policy, selectedAgentCount, teamReady, selectedAgentsReady, configuredAgentsReady } = input;
+  const detail = policy === 'NONE'
+    ? 'Human note · 0 agent turns'
+    : policy === 'DIRECT'
+      ? selectedAgentCount === 1
+        ? 'One selected agent · 1 turn'
+        : 'Choose one agent with @'
+      : policy === 'PANEL'
+        ? selectedAgentCount >= 2 && selectedAgentCount <= 3
+          ? `${selectedAgentCount} independent agents · ${selectedAgentCount} turns`
+          : 'Choose two or three agents with @'
+        : teamReady
+          ? 'Lead + 2 reviews + optional correction · up to 4 turns'
+          : 'Team needs all three agents available';
+  const requirement = policy === 'DIRECT' && selectedAgentCount !== 1
+    ? 'Choose one responding agent.'
+    : policy === 'PANEL' && (selectedAgentCount < 2 || selectedAgentCount > 3)
+      ? 'Choose two or three responding agents.'
+      : policy === 'TEAM' && !teamReady
+        ? 'Team responses require all three agents to be available.'
+        : policy !== 'NONE' && !selectedAgentsReady
+          ? selectedAgentCount === 1
+            ? 'The selected agent is unavailable. Check its connection in Settings.'
+            : 'One or more selected agents are unavailable. Check their connections in Settings.'
+          : policy !== 'NONE' && !configuredAgentsReady
+            ? 'Choose an available provider and model for each responding agent.'
+            : '';
+  return { ready: requirement.length === 0, detail, requirement };
+}
 
 export function discourseMentionCandidates(
   catalog: DiscourseMentionCatalogSnapshot,
@@ -384,14 +495,17 @@ export function visibleDiscourseResponseWaves(
 
 export interface DiscourseResponseWavePlacement {
   wave: DiscourseResponseWaveRecord;
-  afterMessageId: string;
+  afterMessageId?: string;
 }
 
 /**
  * Place each receipt beside the newest loaded message produced by its wave, or
  * beside the triggering user message before any output exists. Historical
- * receipts whose messages are outside the current page wait for that page to
- * load instead of appearing detached beneath unrelated newer answers.
+ * settled receipts whose messages are outside the current page wait for that
+ * page to load instead of appearing detached beneath unrelated newer answers.
+ * An active receipt is never hidden by pagination: without a loaded anchor it
+ * stays visible at the current edge of the transcript so Stop and recovery
+ * actions remain reachable.
  */
 export function visibleDiscourseResponseWavePlacements(
   aggregate: Pick<DiscourseConversationAggregateRecord, 'waves'>,
@@ -406,7 +520,8 @@ export function visibleDiscourseResponseWavePlacements(
       undefined
     );
     const anchor = waveMessage ?? messages.find((message) => message.id === wave.triggerMessageId);
-    return anchor ? [{ wave, afterMessageId: anchor.id }] : [];
+    if (anchor) return [{ wave, afterMessageId: anchor.id }];
+    return wave.status === 'SETTLED' ? [] : [{ wave }];
   });
 }
 
@@ -504,11 +619,7 @@ export function discourseTeamCompletionSummary(input: {
       detail: 'Skeptic and Verifier found no material concerns with complete access.'
     };
   }
-  const correctionRequired = input.concerns.some((concern) =>
-    !concern.redundantOfConcernId &&
-    concern.requiredAccessAvailable &&
-    (concern.severity === 'MATERIAL' || concern.severity === 'BLOCKING')
-  );
+  const correctionRequired = input.concerns.some(isEligibleDiscourseConcern);
   return correctionRequired
     ? {
         label: 'Review complete',

@@ -204,6 +204,8 @@ export class TaskManagerService {
   private readonly scopedTurnRouter?: AgentScopedTurnRouter;
   private readonly disposeScopedTurnEvents?: () => void;
   private discourseSchedulerWork?: Promise<void>;
+  private discourseSchedulerRetryTimer?: NodeJS.Timeout;
+  private discourseSchedulerRetryAttempt = 0;
   private readonly discourseDeltaStates = new Map<string, DiscourseDeltaAccumulatorState>();
   private readonly discourseDeltaTimers = new Map<string, NodeJS.Timeout>();
   private scopedTurnEventTail: Promise<void> = Promise.resolve();
@@ -397,9 +399,15 @@ export class TaskManagerService {
         }
       );
       this.disposeScopedTurnEvents = this.scopedTurnRouter?.subscribe((event) => {
-        this.scopedTurnEventTail = this.scopedTurnEventTail
-          .then(() => this.ingestScopedTurnEvent(event))
-          .catch(() => this.recoverAfterScopedTurnIngestionFailure(event));
+        const previousEvent = this.scopedTurnEventTail;
+        this.scopedTurnEventTail = this.enqueueTrackedRuntimeOperation(async () => {
+          await previousEvent;
+          try {
+            await this.ingestScopedTurnEvent(event);
+          } catch {
+            await this.recoverAfterScopedTurnIngestionFailure(event);
+          }
+        });
       });
     }
     this.agents = new AgentOrchestrator(
@@ -456,8 +464,6 @@ export class TaskManagerService {
   private async initializeInternal(): Promise<void> {
     await this.store.init();
     this.assertInitializing();
-    await this.initializeDiscourseRuntime();
-    this.assertInitializing();
     this.appSettings = await this.loadBoundarySafeAppSettings();
     this.assertInitializing();
     await this.assertRuntimeEnablementValid(this.appSettings);
@@ -486,6 +492,8 @@ export class TaskManagerService {
       [this.appSettings.defaultRuntimeId],
       new Set(this.appSettings.disabledRuntimeIds)
     );
+    this.assertInitializing();
+    await this.initializeDiscourseRuntime();
     this.assertInitializing();
     if (this.agentProviderStartupDisabledReason) return;
     const snapshot = await this.store.snapshot();
@@ -945,11 +953,15 @@ export class TaskManagerService {
   }
 
   getDiscourseMentionCatalog() {
-    return this.requireDiscourseService().getMentionCatalog();
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().getMentionCatalog()
+    );
   }
 
   createDiscourseConversation(input: CreateDiscourseConversationRequest) {
-    return this.requireDiscourseService().createConversation(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().createConversation(input)
+    );
   }
 
   appendHumanDiscourseMessage(input: AppendHumanDiscourseMessageRequest) {
@@ -957,11 +969,15 @@ export class TaskManagerService {
   }
 
   sendDiscourseMessage(input: SendDiscourseMessageRequest) {
-    return this.requireDiscourseService().sendMessage(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().sendMessage(input)
+    );
   }
 
   resumeDiscourseAcceptedSend(input: import('../../shared/discourse').ResumeDiscourseAcceptedSendRequest) {
-    return this.requireDiscourseService().resumeAcceptedSend(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().resumeAcceptedSend(input)
+    );
   }
 
   cancelDiscourseAcceptedSend(input: import('../../shared/discourse').CancelDiscourseAcceptedSendRequest) {
@@ -977,7 +993,9 @@ export class TaskManagerService {
   }
 
   previewDiscourseContext(input: PreviewDiscourseContextRequest) {
-    return this.requireDiscourseService().previewContext(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().previewContext(input)
+    );
   }
 
   saveDiscourseDraft(input: SaveDiscourseDraftRequest) {
@@ -1005,19 +1023,27 @@ export class TaskManagerService {
   }
 
   setDiscourseConversationArchived(input: SetDiscourseConversationArchivedRequest) {
-    return this.requireDiscourseService().setConversationArchived(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().setConversationArchived(input)
+    );
   }
 
   deleteDiscourseConversation(input: DeleteDiscourseConversationRequest) {
-    return this.requireDiscourseService().deleteConversation(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().deleteConversation(input)
+    );
   }
 
   stopDiscourseWave(input: StopDiscourseWaveRequest) {
-    return this.requireDiscourseService().stopWave(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().stopWave(input)
+    );
   }
 
   confirmDiscourseWaveContext(input: ConfirmDiscourseWaveContextRequest) {
-    return this.requireDiscourseService().confirmWaveContext(input);
+    return this.withRuntimeOperation(() =>
+      this.requireDiscourseService().confirmWaveContext(input)
+    );
   }
 
   async stageTaskAttachmentBatch(
@@ -1661,6 +1687,13 @@ export class TaskManagerService {
         `${runtime} cannot be disabled while run ${activeRun.id} is active or requires recovery.`
       );
     }
+    const scopedRuntime = await this.activeDiscourseRuntime(newlyDisabled);
+    if (scopedRuntime) {
+      const runtime = this.runtimeRegistry.require(scopedRuntime.runtimeId).descriptor.displayName;
+      throw new Error(
+        `${runtime} cannot be disabled while Discourse response ${scopedRuntime.runId} is active or requires recovery.`
+      );
+    }
   }
 
   private assertRuntimeEnabled(runtimeId: TaskManagerAppSettings['defaultRuntimeId']): void {
@@ -1671,11 +1704,40 @@ export class TaskManagerService {
 
   private async activeAgentRuntimeIds(): Promise<Set<AgentRuntimeId>> {
     const snapshot = await this.store.snapshot();
-    return new Set(
+    const runtimeIds = new Set<AgentRuntimeId>(
       snapshot.runs
         .filter((run) => ACTIVE_AGENT_RUN_STATUSES.has(run.status))
         .map((run) => run.runtimeId)
     );
+    if (!this.agentRuntimeStore) return runtimeIds;
+    const scoped = await this.agentRuntimeStore.snapshot();
+    const sessionRuntime = new Map(
+      scoped.sessions.map((session) => [session.id, session.runtimeId] as const)
+    );
+    for (const run of scoped.runs) {
+      if (!ACTIVE_SCOPED_AGENT_RUN_STATUSES.has(run.status)) continue;
+      const runtimeId = sessionRuntime.get(run.sessionId);
+      if (runtimeId) runtimeIds.add(runtimeId);
+    }
+    return runtimeIds;
+  }
+
+  private async activeDiscourseRuntime(
+    runtimeIds: ReadonlySet<AgentRuntimeId>
+  ): Promise<{ runId: string; runtimeId: AgentRuntimeId } | undefined> {
+    if (!this.agentRuntimeStore) return undefined;
+    const snapshot = await this.agentRuntimeStore.snapshot();
+    const sessionRuntime = new Map(
+      snapshot.sessions.map((session) => [session.id, session.runtimeId] as const)
+    );
+    for (const run of snapshot.runs) {
+      if (run.scope.kind !== 'DISCOURSE' || !ACTIVE_SCOPED_AGENT_RUN_STATUSES.has(run.status)) {
+        continue;
+      }
+      const runtimeId = sessionRuntime.get(run.sessionId);
+      if (runtimeId && runtimeIds.has(runtimeId)) return { runId: run.id, runtimeId };
+    }
+    return undefined;
   }
 
   async startReview(input: StartReviewRequest): Promise<RunRecord> {
@@ -1791,6 +1853,10 @@ export class TaskManagerService {
     if (this.lifecycleState === 'STOPPED') return Promise.resolve();
     this.lifecycleState = 'SHUTTING_DOWN';
     this.runtimeLifecycleClosing = true;
+    if (this.discourseSchedulerRetryTimer) {
+      clearTimeout(this.discourseSchedulerRetryTimer);
+      this.discourseSchedulerRetryTimer = undefined;
+    }
     const pendingInitialization = this.initWork;
     const pendingTaskActions = [...this.taskActionLocks.values()].map(
       ({ work }) => work
@@ -1827,11 +1893,11 @@ export class TaskManagerService {
       pendingRuntimeLifecycle,
       ...pendingRuntimeOperations
     ]);
+    this.disposeScopedTurnEvents?.();
+    await Promise.allSettled([this.scopedTurnEventTail ?? Promise.resolve()]);
     const [runtimeResult] = await Promise.allSettled([
       this.shutdownRuntimeOwners()
     ]);
-    this.disposeScopedTurnEvents?.();
-    await Promise.allSettled([this.scopedTurnEventTail ?? Promise.resolve()]);
     const [postRunEvidenceResult] = await Promise.allSettled([
       this.drainPostRunEvidence()
     ]);
@@ -1922,6 +1988,8 @@ export class TaskManagerService {
 
   private notifyDiscourseSchedulerWorkAvailable(): void {
     if (
+      this.runtimeLifecycleClosing ||
+      this.agentProviderStartupDisabledReason ||
       this.discourseSchedulerWork ||
       !this.discourseScheduler ||
       !this.discourseCoordinator ||
@@ -1929,11 +1997,35 @@ export class TaskManagerService {
     ) {
       return;
     }
-    const work = this.pumpDiscourseScheduler().finally(() => {
+    const work = this.enqueueTrackedRuntimeOperation(() =>
+      this.pumpDiscourseScheduler()
+    ).finally(() => {
       if (this.discourseSchedulerWork === work) this.discourseSchedulerWork = undefined;
     });
     this.discourseSchedulerWork = work;
-    void work.catch(() => undefined);
+    void work.then(
+      () => {
+        this.discourseSchedulerRetryAttempt = 0;
+      },
+      (error) => this.scheduleDiscourseSchedulerRetry(error)
+    );
+  }
+
+  private scheduleDiscourseSchedulerRetry(error: unknown): void {
+    if (this.runtimeLifecycleClosing || this.discourseSchedulerRetryTimer) return;
+    this.discourseSchedulerRetryAttempt += 1;
+    const delayMs = Math.min(
+      2_000,
+      125 * (2 ** Math.min(this.discourseSchedulerRetryAttempt - 1, 4))
+    );
+    console.error(
+      `Discourse scheduler dispatch failed; retrying in ${delayMs}ms.`,
+      error
+    );
+    this.discourseSchedulerRetryTimer = setTimeout(() => {
+      this.discourseSchedulerRetryTimer = undefined;
+      this.notifyDiscourseSchedulerWorkAvailable();
+    }, delayMs);
   }
 
   private async pumpDiscourseScheduler(): Promise<void> {
@@ -1943,7 +2035,17 @@ export class TaskManagerService {
       !this.scopedTurnRouter ||
       !this.discourseStore
     ) return;
+    const recoveredRuntime = await this.agentRuntimeStore?.snapshot();
+    if (
+      recoveredRuntime?.shutdownLatched &&
+      !recoveredRuntime.queueEntries.some((entry) => entry.status === 'LEASED')
+    ) {
+      await this.discourseScheduler.reopenAfterRecovery(
+        `discourse-reopen:${Date.now()}`
+      );
+    }
     for (;;) {
+      if (this.runtimeLifecycleClosing) return;
       const entries = await this.discourseScheduler.leaseAvailable(
         `discourse-dispatch:${Date.now()}`,
         { ownerKinds: ['DISCOURSE'] }
@@ -1971,6 +2073,11 @@ export class TaskManagerService {
               entry.id,
               `discourse-stale:${entry.id}:${entry.recordRevision}`
             );
+            await this.discourse?.advanceWave(
+              scope.conversationId,
+              scope.waveId,
+              `discourse-stale:${entry.id}:advance`
+            );
             continue;
           }
           const run = await this.discourseCoordinator.dispatchLeasedJob(
@@ -1991,9 +2098,17 @@ export class TaskManagerService {
             payload: { status: run.status, delivery: run.delivery },
             at: new Date().toISOString()
           });
-        } catch {
-          const recovery = await this.discourseCoordinator.recoverConversation(
+        } catch (error) {
+          if (this.discourse) {
+            await this.discourse.recoverConversation(scope.conversationId);
+          } else {
+            await this.discourseCoordinator.recoverConversation(scope.conversationId);
+          }
+          const recoveredAggregate = await this.discourseStore.getConversation(
             scope.conversationId
+          );
+          const recoveredJob = recoveredAggregate.jobs.find(
+            (candidate) => candidate.id === scope.jobId
           );
           this.events.emit({
             type: 'discourse.job.updated',
@@ -2004,13 +2119,15 @@ export class TaskManagerService {
               jobId: scope.jobId
             },
             taskId: `discourse:${scope.conversationId}`,
-            payload: {
-              status: recovery.recoveryRequiredJobIds.includes(scope.jobId)
-                ? 'RECOVERY_REQUIRED'
-                : 'QUEUED'
-            },
+            payload: recoveredJob
+              ? { status: recoveredJob.status, delivery: recoveredJob.delivery }
+              : { status: 'RECOVERY_REQUIRED' },
             at: new Date().toISOString()
           });
+          // Stop this lease cycle and let the supervised backoff retry it. A
+          // recovered QUEUED entry may otherwise be leased immediately in a
+          // tight loop while its provider remains unavailable.
+          throw error;
         }
       }
     }
@@ -2073,25 +2190,33 @@ export class TaskManagerService {
     if (event.type === 'RECOVERY_REQUIRED') {
       const run = await this.agentRuntimeStore.getRun(event.runId);
       if (!run || run.scope.kind !== 'DISCOURSE') return;
-      await this.discourseCoordinator.recoverConversation(run.scope.conversationId);
+      const scope = run.scope;
+      if (this.discourse) {
+        await this.discourse.recoverConversation(scope.conversationId);
+      } else {
+        await this.discourseCoordinator.recoverConversation(scope.conversationId);
+      }
+      const aggregate = this.discourseStore
+        ? await this.discourseStore.getConversation(scope.conversationId)
+        : undefined;
+      const job = aggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
       this.events.emit({
         type: 'discourse.job.updated',
         scope: {
           kind: 'DISCOURSE',
-          conversationId: run.scope.conversationId,
-          waveId: run.scope.waveId,
-          jobId: run.scope.jobId
+          conversationId: scope.conversationId,
+          waveId: scope.waveId,
+          jobId: scope.jobId
         },
-        taskId: `discourse:${run.scope.conversationId}`,
+        taskId: `discourse:${scope.conversationId}`,
         runId: run.id,
-        payload: {
-          status: 'RECOVERY_REQUIRED',
-          delivery: run.delivery,
-          reason: event.reason
-        },
+        payload: job
+          ? { status: job.status, delivery: job.delivery, reason: event.reason }
+          : { status: 'RECOVERY_REQUIRED', delivery: run.delivery, reason: event.reason },
         at: event.observedAt
       });
       this.discourseDeltaStates.delete(run.id);
+      this.notifyDiscourseSchedulerWorkAvailable();
       return;
     }
     const run = await this.agentRuntimeStore.getRun(event.runId);
@@ -2101,7 +2226,6 @@ export class TaskManagerService {
     const aggregate = this.discourseStore
       ? await this.discourseStore.getConversation(scope.conversationId)
       : undefined;
-    const job = aggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
     const snapshot = aggregate?.contextSnapshots.find(
       (candidate) => candidate.id === scope.contextSnapshotId
     );
@@ -2111,7 +2235,7 @@ export class TaskManagerService {
       ? await this.discourseContextSnapshots.freshness(snapshot)
       : run.contextFreshnessAtCompletion ?? 'UNKNOWN';
     const operationId = `discourse-terminal:${event.runId}:${event.providerTurnId}`;
-    if (event.status === 'completed' && body.trim() && job) {
+    if (event.status === 'completed' && body.trim()) {
       const terminal = {
         runId: event.runId,
         providerTurnId: event.providerTurnId,
@@ -2121,9 +2245,7 @@ export class TaskManagerService {
         completedAt: event.completedAt,
         providerTerminalSource: run.providerTerminalSource ?? 'PROVIDER_TERMINAL_EVENT'
       };
-      if (job.role === 'CRITIQUE') await this.discourseCoordinator.ingestReview(terminal);
-      else if (job.role === 'CORRECT') await this.discourseCoordinator.ingestCorrection(terminal);
-      else await this.discourseCoordinator.ingestContribution(terminal);
+      await this.discourseCoordinator.ingestSuccessfulTerminal(terminal);
     } else {
       await this.discourseCoordinator.ingestFailure({
         runId: event.runId,
@@ -2131,7 +2253,17 @@ export class TaskManagerService {
         clientOperationId: operationId,
         completedAt: event.completedAt,
         providerTerminalSource: run.providerTerminalSource ?? 'PROVIDER_TERMINAL_EVENT',
-        reason: event.error ?? `Agent Discourse turn ended with status ${event.status}.`
+        reason: event.error ?? `Agent Discourse turn ended with status ${event.status}.`,
+        ...(event.status === 'completed' && !body.trim()
+          ? {
+              error: {
+                code: 'OUTPUT_MISSING' as const,
+                message: 'The agent completed without a usable response.',
+                category: 'VALIDATION' as const,
+                retryable: true
+              }
+            }
+          : {})
       });
     }
     await this.discourse?.advanceWave(
@@ -2170,26 +2302,38 @@ export class TaskManagerService {
     if (!this.agentRuntimeStore || !this.discourseCoordinator) return;
     const run = await this.agentRuntimeStore.getRun(event.runId).catch(() => undefined);
     if (!run || run.scope.kind !== 'DISCOURSE') return;
-    await this.discourseCoordinator
-      .recoverConversation(run.scope.conversationId)
-      .catch(() => undefined);
+    const scope = run.scope;
+    if (this.discourse) {
+      await this.discourse.recoverConversation(scope.conversationId).catch(() => undefined);
+    } else {
+      await this.discourseCoordinator
+        .recoverConversation(scope.conversationId)
+        .catch(() => undefined);
+    }
+    const aggregate = this.discourseStore
+      ? await this.discourseStore.getConversation(scope.conversationId).catch(() => undefined)
+      : undefined;
+    const job = aggregate?.jobs.find((candidate) => candidate.id === scope.jobId);
     this.events.emit({
       type: 'discourse.job.updated',
       scope: {
         kind: 'DISCOURSE',
-        conversationId: run.scope.conversationId,
-        waveId: run.scope.waveId,
-        jobId: run.scope.jobId
+        conversationId: scope.conversationId,
+        waveId: scope.waveId,
+        jobId: scope.jobId
       },
-      taskId: `discourse:${run.scope.conversationId}`,
+      taskId: `discourse:${scope.conversationId}`,
       runId: run.id,
-      payload: {
-        status: 'RECOVERY_REQUIRED',
-        delivery: run.delivery,
-        reason: 'Agent output could not be durably incorporated. Recovery is required.'
-      },
+      payload: job
+        ? { status: job.status, delivery: job.delivery }
+        : {
+            status: 'RECOVERY_REQUIRED',
+            delivery: run.delivery,
+            reason: 'Agent output could not be durably incorporated. Recovery is required.'
+          },
       at: new Date().toISOString()
     });
+    this.notifyDiscourseSchedulerWorkAvailable();
   }
 
   async resolvePreview(input: ResolvePreviewRequest): Promise<ResolvePreviewResult> {
@@ -3138,7 +3282,18 @@ export class TaskManagerService {
   private withRuntimeOperation<T>(action: () => Promise<T>): Promise<T> {
     this.assertAcceptingWork();
     this.assertRuntimeLifecycleOpen();
-    const operation = this.runtimeLifecycleTail.then(action);
+    return this.enqueueTrackedRuntimeOperation(action);
+  }
+
+  private enqueueTrackedRuntimeOperation<T>(action: () => Promise<T>): Promise<T> {
+    const operation = this.runtimeLifecycleTail.then(() => {
+      this.assertRuntimeLifecycleOpen();
+      return action();
+    });
+    return this.trackRuntimeOperation(operation);
+  }
+
+  private trackRuntimeOperation<T>(operation: Promise<T>): Promise<T> {
     const settled = operation.then(
       () => undefined,
       () => undefined
@@ -3450,6 +3605,18 @@ function codexExternalToolsAreDisabled(
 }
 
 const ACTIVE_AGENT_RUN_STATUSES: ReadonlySet<RunRecord['status']> = new Set([
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'AWAITING_APPROVAL',
+  'AWAITING_USER_INPUT',
+  'INTERRUPTING',
+  'RECOVERY_REQUIRED'
+]);
+
+const ACTIVE_SCOPED_AGENT_RUN_STATUSES: ReadonlySet<
+  import('../../shared/agentRuntime').AgentRuntimeRunRecord['status']
+> = new Set([
   'QUEUED',
   'STARTING',
   'RUNNING',

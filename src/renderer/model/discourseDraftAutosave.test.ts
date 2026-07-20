@@ -79,7 +79,6 @@ function draft(
     recordRevision,
     body: `body-${recordRevision}`,
     policy: 'NONE',
-    recipientParticipantIds: [],
     tokens: [],
     updatedAt: '2026-07-15T08:00:00.000Z'
   };

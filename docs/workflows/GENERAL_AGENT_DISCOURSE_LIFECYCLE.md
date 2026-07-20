@@ -72,6 +72,10 @@ than silently widening access.
 Context generations include live Git HEAD, staged, unstaged, and untracked
 working-tree evidence for each readable task worktree or repository root.
 Stored Git snapshots alone do not prove freshness between Team phases.
+When more than one repository root is readable, every phase prompt includes a
+bounded filesystem guide naming the exact roots available to that provider
+turn. The guide is provider-only execution context; absolute local paths do not
+leak into the normal transcript or context inspector.
 
 ## Response policies
 
@@ -103,6 +107,13 @@ Stored Git snapshots alone do not prove freshness between Team phases.
   Lead correction when an eligible material concern exists.
 - It consumes at most four agent turns.
 
+Current product code creates only Direct, Panel, and Team waves. The stored
+contract still recognizes the earlier targeted-review, targeted-reply,
+synthesis, and compact-history policy/job values so existing conversation
+history remains readable and recoverable. They are compatibility-only values,
+not alternate production write paths; follow-ups and synthesis requests use the
+same Direct or Panel send path with explicit reply/source-message links.
+
 Mentioning one agent selects Direct; mentioning two or three selects Panel.
 Choosing a policy explicitly remains stable while the user selects recipients.
 Choosing Team or No agents removes stale agent-recipient mentions. Task and
@@ -114,7 +125,11 @@ default; an existing participant starts from its current durable revision.
 Direct and Panel expose the explicitly mentioned recipients, while Team exposes
 the canonical three-agent roster. Drafts persist the selected runtime-qualified
 model and reasoning level. Pending draft work is flushed before navigation, and
-an empty conversation created during a failed first send remains owned by the
+drafts also retain reply, correction, and synthesis-source intent so navigation
+or restart cannot silently turn a correction into an unrelated new message. The
+draft contract does not keep a second recipient list: responder identity comes
+only from the typed agent selections and structured mention tokens. An empty
+conversation created during a failed first send remains owned by the
 composer instead of appearing as a selectable rail item. If the unsent title,
 policy, or agent selection changes, the renderer first creates the replacement
 and rebinds the durable draft, then deletes only the superseded owned empty
@@ -263,7 +278,10 @@ Stop intent is durable before provider interruption:
   missing terminal becomes recovery-required instead of leaving the UI in
   Stopping indefinitely;
 - an ambiguous start or interrupt becomes recovery-required and is never
-  automatically replayed.
+  automatically replayed. Repeating Stop preserves the visible stopping intent
+  and the scheduler lease until provider terminal evidence arrives. A
+  definitively not-delivered interrupt may be retried only by a new explicit
+  Stop action.
 
 Recovery-required UI explains that Task Monki cannot safely confirm whether the
 response started and offers Stop. Context reconfirmation offers Continue and
@@ -273,9 +291,22 @@ silently duplicated.
 
 On restart, Task Monki repairs cross-store links, queued cancellations,
 terminal-before-curated-message crashes, lost queue linkage, and provably
-undelivered starts. The Discourse scheduler stays latched while a leased turn still
-needs reconciliation. No recovery path replays a provider mutation without
-proof that it was not delivered.
+undelivered starts. Duplicate or missing runtime records, invalid session/job
+links, and incomplete terminal evidence are projected into durable job and wave
+recovery state rather than existing only in a startup report. Runtime records
+that claim the same conversation, wave, and job are fenced even when their
+attempt or generation identity is stale; only the exact durable attempt may be
+dispatched. Runtime scope—not a stale curated run ID—defines ownership, so
+recovery never mutates task work or another conversation/job. A terminal from
+the authoritative attempt is not projected into the transcript until every
+delivered sibling claim also reaches terminal. A leased acknowledged or
+ambiguous turn keeps its capacity while fenced and is released only after
+provider terminal evidence. The Discourse
+scheduler stays latched while a leased turn still needs reconciliation. A
+dispatch-infrastructure failure exits the current lease cycle and retries under
+capped exponential backoff, preventing both a silent stall and a tight re-lease
+loop. No recovery path replays a provider mutation without proof that it was not
+delivered.
 
 ## Runtime compatibility
 

@@ -40,11 +40,18 @@ export type DiscourseConversationStatus = 'OPEN' | 'ARCHIVED';
 
 export type DiscourseDefaultPolicy = 'TEAM' | 'PANEL' | 'DIRECT' | 'NONE';
 
-export type DiscourseWavePolicy =
-  | Exclude<DiscourseDefaultPolicy, 'NONE'>
+/** Current user-authored response waves. */
+export type CurrentDiscourseWavePolicy = Exclude<DiscourseDefaultPolicy, 'NONE'>;
+
+/** Read/recovery compatibility for conversations written by earlier prototypes. */
+export type LegacyDiscourseWavePolicy =
   | 'TARGETED_REVIEW'
   | 'TARGETED_REPLY'
   | 'SYNTHESIS';
+
+export type DiscourseWavePolicy =
+  | CurrentDiscourseWavePolicy
+  | LegacyDiscourseWavePolicy;
 
 export type DiscourseParticipantRole = 'LEAD' | 'SKEPTIC' | 'VERIFIER' | 'GENERAL';
 
@@ -385,13 +392,17 @@ export interface DiscourseResponseWaveRecord {
   settledAt?: string;
 }
 
-export type DiscourseJobRole =
+export type CurrentDiscourseJobRole =
   | 'ANSWER'
   | 'CRITIQUE'
-  | 'CORRECT'
+  | 'CORRECT';
+
+export type LegacyDiscourseJobRole =
   | 'TARGETED_REPLY'
   | 'SYNTHESIZE'
   | 'COMPACT_HISTORY';
+
+export type DiscourseJobRole = CurrentDiscourseJobRole | LegacyDiscourseJobRole;
 
 export type DiscourseJobStatus =
   | 'QUEUED'
@@ -524,6 +535,17 @@ export interface DiscourseConcernRecord {
   createdAt: string;
 }
 
+/** One eligibility rule is shared by orchestration and user-facing summaries. */
+export function isEligibleDiscourseConcern(concern: DiscourseConcernRecord): boolean {
+  return (
+    !concern.redundantOfConcernId &&
+    (concern.severity === 'MATERIAL' || concern.severity === 'BLOCKING') &&
+    (concern.confidence === 'MEDIUM' || concern.confidence === 'HIGH') &&
+    concern.evidenceStatus !== 'SPECULATIVE' &&
+    concern.requiredAccessAvailable
+  );
+}
+
 export interface DiscourseSummaryRecord {
   id: string;
   conversationId: string;
@@ -558,8 +580,9 @@ export interface DiscourseDraftRecord {
   recordRevision: number;
   body: string;
   replyToMessageId?: string;
+  supersedesMessageId?: string;
+  sourceMessageIds?: string[];
   policy: DiscourseDefaultPolicy;
-  recipientParticipantIds: string[];
   agentSelections?: DiscourseAgentSelectionInput[];
   /** Durable identity of an agent send that may already have been accepted. */
   pendingClientMessageId?: string;
@@ -712,8 +735,9 @@ export interface SaveDiscourseDraftRequest {
   expectedRevision?: number;
   body: string;
   replyToMessageId?: string;
+  supersedesMessageId?: string;
+  sourceMessageIds?: string[];
   policy: DiscourseDefaultPolicy;
-  recipientParticipantIds: string[];
   agentSelections?: DiscourseAgentSelectionInput[];
   pendingClientMessageId?: string;
   tokens: DiscourseDraftTokenInput[];

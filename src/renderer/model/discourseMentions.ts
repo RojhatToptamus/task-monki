@@ -53,6 +53,13 @@ export interface DiscourseComposerMentionState extends DiscourseComposerSnapshot
   announcement: string;
 }
 
+export function lastRenderedDiscourseComposerToken(
+  state: Pick<DiscourseComposerMentionState, 'tokens'>,
+  showAgentTokens: boolean
+): DiscourseComposerToken | undefined {
+  return state.tokens.filter((token) => showAgentTokens || token.kind !== 'AGENT').at(-1);
+}
+
 export function createDiscourseComposerMentionState(
   text = ''
 ): DiscourseComposerMentionState {

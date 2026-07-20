@@ -17,6 +17,7 @@ import {
   composerTokensFromDraft,
   canDeleteAbandonedDiscourseShell,
   currentPinnedContext,
+  defaultDiscourseResponderRoster,
   currentDiscourseParticipantRevisions,
   defaultDiscourseAgentSelection,
   discourseAcceptedSendForClientMessage,
@@ -28,6 +29,8 @@ import {
   discourseMentionCandidates,
   discoursePendingSendFingerprint,
   discourseReviewResultLabel,
+  discourseResponseReadiness,
+  discourseResponderToggleDisabled,
   discourseTeamCompletionSummary,
   discourseTerminalJobDetail,
   draftTokensFromComposer,
@@ -42,6 +45,40 @@ import {
 } from './discourse';
 
 describe('discourse renderer model', () => {
+  it('seeds Panel from available responders and keeps unavailable selections removable', () => {
+    const available = new Set(['builtin.skeptic', 'builtin.verifier'] as const);
+    expect(defaultDiscourseResponderRoster({
+      policy: 'PANEL',
+      selectedProfileIds: ['builtin.lead'],
+      availableProfileIds: available
+    })).toEqual(['builtin.skeptic', 'builtin.verifier']);
+    expect(discourseResponderToggleDisabled({
+      controlsDisabled: false,
+      policy: 'PANEL',
+      selectedProfileIds: ['builtin.lead', 'builtin.skeptic'],
+      profileId: 'builtin.lead',
+      available: false
+    })).toBe(false);
+    expect(discourseResponderToggleDisabled({
+      controlsDisabled: false,
+      policy: 'PANEL',
+      selectedProfileIds: ['builtin.skeptic', 'builtin.verifier'],
+      profileId: 'builtin.skeptic',
+      available: true
+    })).toBe(true);
+  });
+
+  it.each([
+    [{ policy: 'DIRECT', selectedAgentCount: 0, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, false, 'Choose one responding agent.'],
+    [{ policy: 'PANEL', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, false, 'Choose two or three responding agents.'],
+    [{ policy: 'PANEL', selectedAgentCount: 2, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: true }, true, ''],
+    [{ policy: 'TEAM', selectedAgentCount: 3, teamReady: false, selectedAgentsReady: false, configuredAgentsReady: true }, false, 'Team responses require all three agents to be available.'],
+    [{ policy: 'DIRECT', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: false, configuredAgentsReady: true }, false, 'The selected agent is unavailable. Check its connection in Settings.'],
+    [{ policy: 'DIRECT', selectedAgentCount: 1, teamReady: true, selectedAgentsReady: true, configuredAgentsReady: false }, false, 'Choose an available provider and model for each responding agent.']
+  ] as const)('derives one coherent response gate for %j', (input, ready, requirement) => {
+    expect(discourseResponseReadiness(input)).toMatchObject({ ready, requirement });
+  });
+
   it('recovers an ambiguously created replacement before a second edit moves on', async () => {
     const requests: unknown[] = [];
     const superseded = await recoverPendingDiscourseCreateForReplacement({
@@ -294,6 +331,18 @@ describe('discourse renderer model', () => {
     )).toEqual([]);
   });
 
+  it('keeps an unanchored active response visible while historical receipts stay paged', () => {
+    const active = responseWave('direct-active', 'DIRECT', 'RECOVERY_REQUIRED');
+    active.triggerMessageId = 'prompt-outside-page';
+    const historical = responseWave('team-history', 'TEAM', 'SETTLED', 'COMPLETE');
+    historical.triggerMessageId = 'older-prompt';
+
+    expect(visibleDiscourseResponseWavePlacements(
+      { waves: [historical, active] },
+      [discourseMessage('newer-message', 100)]
+    )).toEqual([{ wave: active }]);
+  });
+
   it('keeps incomplete terminal receipts and names every terminal job status', () => {
     const failed = responseWave('failed-1', 'DIRECT', 'SETTLED', 'FAILED');
     const complete = responseWave('complete-2', 'DIRECT', 'SETTLED', 'COMPLETE');
@@ -367,6 +416,19 @@ describe('discourse renderer model', () => {
     }
     expect(discourseConcernResolutionLabel(concern)).toBe(resolutionLabel);
   });
+
+  it('does not claim a correction is missing for ineligible review signals', () => {
+    const concern = {
+      ...discourseConcern('ACKNOWLEDGED_UNRESOLVED'),
+      resolution: undefined,
+      confidence: 'LOW' as const,
+      evidenceStatus: 'SPECULATIVE' as const
+    };
+    expect(discourseTeamCompletionSummary({ jobs: [], concerns: [concern] })).toEqual({
+      label: 'Review complete',
+      detail: '1 structured concern recorded; no automatic correction was required.'
+    });
+  });
 });
 
 function responseWave(
@@ -413,6 +475,8 @@ function discourseConcern(
   return {
     id: 'concern-1',
     severity: 'MATERIAL',
+    confidence: 'HIGH',
+    evidenceStatus: 'LOGICAL_CONTRADICTION',
     requiredAccessAvailable: true,
     resolution: { correctionJobId: 'job-1', correctionMessageId: 'message-2', outcome }
   } as DiscourseConcernRecord;

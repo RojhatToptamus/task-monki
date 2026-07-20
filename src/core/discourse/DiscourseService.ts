@@ -56,8 +56,12 @@ import {
   DiscourseRuntimeCoordinator,
   discourseRuntimeSessionId
 } from './DiscourseRuntimeCoordinator';
-import { assembleDiscoursePrompt } from './DiscoursePromptBuilder';
 import {
+  appendDiscourseSystemContext,
+  assembleDiscoursePrompt
+} from './DiscoursePromptBuilder';
+import {
+  assertDiscoursePolicyRoster,
   deriveDiscourseWaveAggregate
 } from './DiscourseState';
 import type { DiscourseStore } from './DiscourseStore';
@@ -264,8 +268,7 @@ export class DiscourseService {
       const message = await this.findMessage(existingWave.triggerMessageId, input.conversationId);
       const runtime = this.options.runtime;
       if (runtime) {
-        await runtime.coordinator.recoverConversation(input.conversationId);
-        await this.activateNextWave(
+        await this.recoverAndAdvanceUnlocked(
           input.conversationId,
           `${existingWave.clientOperationId}:retry-recovery`
         );
@@ -602,8 +605,7 @@ export class DiscourseService {
       if (existingWave) {
         const runtime = this.options.runtime;
         if (runtime) {
-          await runtime.coordinator.recoverConversation(input.conversationId);
-          await this.activateNextWave(
+          await this.recoverAndAdvanceUnlocked(
             input.conversationId,
             `${existingWave.clientOperationId}:explicit-resume`
           );
@@ -671,9 +673,30 @@ export class DiscourseService {
         aggregate = await this.store.getConversation(conversationId);
         waveTriggerIds.add(accepted.triggerMessageId);
       }
-      await runtime.coordinator.recoverConversation(conversationId);
-      return this.activateNextWave(conversationId, `service-recovery:${conversationId}`);
+      return this.recoverAndAdvanceUnlocked(
+        conversationId,
+        `service-recovery:${conversationId}`
+      );
     });
+  }
+
+  private async recoverAndAdvanceUnlocked(
+    conversationId: string,
+    clientOperationId: string
+  ): Promise<DiscourseResponseWaveRecord | undefined> {
+    const runtime = this.options.runtime;
+    if (!runtime) return undefined;
+    await runtime.coordinator.recoverConversation(conversationId);
+    const aggregate = await this.store.getConversation(conversationId);
+    const activeWave = aggregate.waves.find((candidate) => candidate.status !== 'SETTLED');
+    if (activeWave) {
+      await this.advanceWaveUnlocked(
+        conversationId,
+        activeWave.id,
+        `${clientOperationId}:advance`
+      );
+    }
+    return this.activateNextWave(conversationId, `${clientOperationId}:next`);
   }
 
   confirmWaveContext(
@@ -718,6 +741,16 @@ export class DiscourseService {
         wave.dispatchGate.currentFingerprint !== input.previewFingerprint ||
         await runtime.contextSnapshots.freshness(snapshot) !== 'FRESH'
       ) {
+        const jobs = aggregate.jobs.filter((job) => job.waveId === wave.id);
+        await this.markQueuedJobsContextStale(
+          input.conversationId,
+          jobs,
+          `${input.clientOperationId}:context-stale`
+        );
+        wave = requireWave(
+          (await this.store.getConversation(input.conversationId)).waves,
+          wave.id
+        );
         return this.settleWaveForChangedContext(
           input.conversationId,
           wave,
@@ -1092,7 +1125,10 @@ export class DiscourseService {
   }): Promise<{ prompt?: string; error?: StructuredDiscourseError }> {
     const runtime = this.options.runtime;
     if (!runtime) throw new Error('Discourse agent execution is not configured.');
-    const assembly = assembleDiscoursePrompt(input);
+    const assembly = appendDiscourseSystemContext(
+      assembleDiscoursePrompt(input),
+      await runtime.contextSnapshots.promptFilesystemGuide(input.snapshot)
+    );
     const cumulativeWaveOutputBytes = await runtime.coordinator.cumulativeWaveOutputBytes(
       input.job.conversationId,
       input.job.waveId
@@ -1539,17 +1575,6 @@ export class DiscourseService {
     } else {
       await this.store.deleteConversation(input);
     }
-    const drafts = await this.store.listDrafts();
-    await Promise.all(
-      drafts
-        .filter((draft) => draft.conversationId === input.conversationId)
-        .map((draft) =>
-          this.store.deleteDraft({
-            draftId: draft.id,
-            expectedRevision: draft.recordRevision
-          })
-        )
-    );
     this.emit('discourse.summary.updated', input.conversationId, { deleted: true });
   }
 
@@ -1693,12 +1718,7 @@ function validateAgentSelections(
   if (ids.length !== input.length || ids.some((id) => !['builtin.lead', 'builtin.skeptic', 'builtin.verifier'].includes(id))) {
     throw new Error('Discourse participant roster is invalid.');
   }
-  const valid =
-    (policy === 'NONE' && ids.length === 0) ||
-    (policy === 'DIRECT' && ids.length === 1) ||
-    (policy === 'PANEL' && ids.length >= 2 && ids.length <= 3) ||
-    (policy === 'TEAM' && ids.length === 3);
-  if (!valid) throw new Error(`Discourse ${policy.toLowerCase()} roster is incomplete.`);
+  assertDiscoursePolicyRoster(policy, ids.length);
   if (policy === 'TEAM') {
     const team: BuiltInAgentProfileId[] = [
       'builtin.lead',

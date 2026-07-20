@@ -21,12 +21,12 @@ import {
   assertDiscourseWaveRecord,
   assertDiscourseWaveTransition,
   deriveDiscourseWaveAggregate,
-  isEligibleDiscourseConcern,
   reconcileDiscourseDelivery,
   resolveContextSnapshot,
   resolveDiscourseIdempotency,
   assertDiscourseMessageAppend
 } from './DiscourseState';
+import { isEligibleDiscourseConcern } from '../../shared/discourse';
 
 describe('discourse state transitions', () => {
   it('enumerates every context snapshot transition and keeps resolved snapshots immutable', () => {
@@ -68,7 +68,7 @@ describe('discourse state transitions', () => {
     const allowed = {
       PLANNED: ['SNAPSHOTTING', 'STOP_REQUESTED', 'SETTLED'],
       SNAPSHOTTING: ['QUEUED', 'STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
-      QUEUED: ['RUNNING', 'STOP_REQUESTED', 'SETTLED'],
+      QUEUED: ['RUNNING', 'STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
       RUNNING: ['STOP_REQUESTED', 'RECOVERY_REQUIRED', 'SETTLED'],
       STOP_REQUESTED: ['STOPPING', 'RECOVERY_REQUIRED', 'SETTLED'],
       STOPPING: ['RECOVERY_REQUIRED', 'SETTLED'],
@@ -93,8 +93,14 @@ describe('discourse state transitions', () => {
       'CONTEXT_STALE'
     ] as const;
     const allowed = {
-      QUEUED: ['RESOLVING_CONTEXT', 'CANCELED'],
-      RESOLVING_CONTEXT: ['STARTING', 'CANCEL_REQUESTED', 'FAILED', 'CONTEXT_STALE'],
+      QUEUED: ['RESOLVING_CONTEXT', 'RECOVERY_REQUIRED', 'CANCELED'],
+      RESOLVING_CONTEXT: [
+        'STARTING',
+        'CANCEL_REQUESTED',
+        'RECOVERY_REQUIRED',
+        'FAILED',
+        'CONTEXT_STALE'
+      ],
       STARTING: ['RUNNING', 'CANCEL_REQUESTED', 'RECOVERY_REQUIRED', 'FAILED', 'CONTEXT_STALE'],
       RUNNING: [
         'CANCEL_REQUESTED',
@@ -104,7 +110,7 @@ describe('discourse state transitions', () => {
         'CONTEXT_STALE'
       ],
       CANCEL_REQUESTED: ['RECOVERY_REQUIRED', 'COMPLETED', 'CANCELED'],
-      RECOVERY_REQUIRED: ['COMPLETED', 'FAILED', 'CANCELED'],
+      RECOVERY_REQUIRED: ['CANCEL_REQUESTED', 'COMPLETED', 'FAILED', 'CANCELED'],
       COMPLETED: [],
       FAILED: [],
       CANCELED: [],
@@ -273,6 +279,14 @@ describe('discourse record invariants', () => {
     );
   });
 
+  it('rejects a one-agent Panel at the durable domain boundary', () => {
+    const panel = wave('PANEL');
+    expect(() => assertDiscourseWaveRecord({
+      ...panel,
+      assignments: [panel.assignments[0]!]
+    })).toThrow('panel roster is incomplete');
+  });
+
   it('replays only an identical client operation and rejects key reuse with changed content', () => {
     expect(
       resolveDiscourseIdempotency({
@@ -350,6 +364,12 @@ describe('discourse wave aggregation', () => {
         jobs: [job('panel-1', 'ANSWER', 'RECOVERY_REQUIRED')]
       })
     ).toEqual({ status: 'RECOVERY_REQUIRED' });
+    expect(
+      deriveDiscourseWaveAggregate({
+        wave: { ...wave('PANEL'), status: 'STOPPING' },
+        jobs: [job('panel-1', 'ANSWER', 'RECOVERY_REQUIRED')]
+      })
+    ).toEqual({ status: 'STOPPING' });
   });
 
   it('blocks downstream work when terminal freshness cannot be inspected', () => {

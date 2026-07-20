@@ -13,6 +13,7 @@ import {
   createDiscourseComposerMentionState,
   DEFAULT_DISCOURSE_MENTION_SELECTION_MODE,
   findDiscourseMentionQuery,
+  lastRenderedDiscourseComposerToken,
   moveDiscourseMentionActiveOption,
   rankDiscourseMentionCandidates,
   redoDiscourseMentionSelection,
@@ -33,6 +34,7 @@ export interface DiscourseMentionInputProps {
   initialText?: string;
   initialTokens?: readonly DiscourseComposerToken[];
   selectionMode?: DiscourseMentionSelectionMode;
+  showAgentTokens?: boolean;
   label?: string;
   placeholder?: string;
   disabled?: boolean;
@@ -52,6 +54,7 @@ export function DiscourseMentionInput({
   initialText = '',
   initialTokens = [],
   selectionMode = DEFAULT_DISCOURSE_MENTION_SELECTION_MODE,
+  showAgentTokens = true,
   label = 'Message',
   placeholder = 'Ask a question or add a note…',
   disabled,
@@ -79,7 +82,7 @@ export function DiscourseMentionInput({
   const open = Boolean(query && dismissedQuery !== queryFingerprint);
   const availableOptionIds = results
     .filter((candidate) => candidate.available)
-    .map((candidate) => candidate.id);
+    .map(mentionCandidateKey);
   const effectiveActiveId =
     activeId && availableOptionIds.includes(activeId) ? activeId : availableOptionIds[0];
 
@@ -136,7 +139,9 @@ export function DiscourseMentionInput({
         return;
       }
       if ((event.key === 'Enter' || event.key === 'Tab') && effectiveActiveId) {
-        const candidate = results.find((result) => result.id === effectiveActiveId);
+        const candidate = results.find(
+          (result) => mentionCandidateKey(result) === effectiveActiveId
+        );
         if (candidate) {
           event.preventDefault();
           choose(candidate);
@@ -159,8 +164,14 @@ export function DiscourseMentionInput({
       state.text.length === 0 &&
       state.tokens.length > 0
     ) {
-      event.preventDefault();
-      document.getElementById(tokenButtonId(instanceId, state.tokens.at(-1)!.key))?.focus();
+      const renderedToken = lastRenderedDiscourseComposerToken(state, showAgentTokens);
+      const tokenButton = renderedToken
+        ? document.getElementById(tokenButtonId(instanceId, renderedToken.key))
+        : undefined;
+      if (tokenButton) {
+        event.preventDefault();
+        tokenButton.focus();
+      }
     }
   };
 
@@ -189,13 +200,15 @@ export function DiscourseMentionInput({
 
   return (
     <div className="discourse-mention-input">
-      <MentionTokenGroup
-        kind="AGENT"
-        label="Ask"
-        state={state}
-        instanceId={instanceId}
-        onRemove={removeToken}
-      />
+      {showAgentTokens ? (
+        <MentionTokenGroup
+          kind="AGENT"
+          label="Ask"
+          state={state}
+          instanceId={instanceId}
+          onRemove={removeToken}
+        />
+      ) : null}
       <MentionTokenGroup
         kind="CONTEXT"
         label="Context"
@@ -275,9 +288,9 @@ export function DiscourseMentionInput({
               </div>
               {group.map((candidate) => (
                 <div
-                  id={mentionOptionId(instanceId, candidate.id)}
+                  id={mentionOptionId(instanceId, mentionCandidateKey(candidate))}
                   role="option"
-                  aria-selected={candidate.id === effectiveActiveId}
+                  aria-selected={mentionCandidateKey(candidate) === effectiveActiveId}
                   aria-disabled={!candidate.available}
                   className="discourse-mention-input__option"
                   key={`${candidate.kind}:${candidate.id}`}
@@ -296,7 +309,7 @@ export function DiscourseMentionInput({
         ) : null}
       </div>
 
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      <div className="tm-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
         {state.announcement}
       </div>
     </div>
@@ -350,6 +363,10 @@ function MentionTokenGroup({
 
 function mentionOptionId(instanceId: string, candidateId: string): string {
   return `discourse-option-${instanceId}-${domSafeId(candidateId)}`;
+}
+
+function mentionCandidateKey(candidate: DiscourseMentionCandidate): string {
+  return `${candidate.kind}:${candidate.id}`;
 }
 
 function tokenButtonId(instanceId: string, tokenKey: string): string {
