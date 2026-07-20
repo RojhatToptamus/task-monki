@@ -11,6 +11,16 @@ const MENU_ITEM_SELECTOR = [
   '[role="menuitemcheckbox"]'
 ].join(',');
 
+const PAGE_TAB_STOP_SELECTOR = [
+  'a[href]',
+  'button:not(:disabled)',
+  'input:not(:disabled)',
+  'select:not(:disabled)',
+  'textarea:not(:disabled)',
+  'summary',
+  '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
 export function menuTriggerFocusTarget(key: string): MenuFocusTarget | undefined {
   if (key === 'ArrowDown') {
     return 'first';
@@ -43,13 +53,32 @@ export function menuNavigationIndex(
   }
 }
 
+export function menuTabTarget(
+  trigger: HTMLElement | null | undefined,
+  shiftKey: boolean,
+  tabStops: readonly HTMLElement[] = pageTabStops()
+): HTMLElement | undefined {
+  if (!trigger) return undefined;
+  const index = tabStops.indexOf(trigger);
+  if (index < 0) return undefined;
+  return tabStops[index + (shiftKey ? -1 : 1)];
+}
+
+export function isMenuPageTabStop(element: HTMLElement): boolean {
+  return (
+    element.tabIndex >= 0 &&
+    !element.closest('[role="menu"], [aria-hidden="true"], [inert]') &&
+    element.getClientRects().length > 0
+  );
+}
+
 export function focusMenuItem(
   menu: HTMLElement | null,
   target: MenuFocusTarget = 'first'
 ): void {
-  const items = enabledMenuItems(menu);
+  const items = navigableMenuItems(menu);
   if (items.length === 0) {
-    menu?.focus();
+    menu?.focus({ preventScroll: true });
     return;
   }
   const item =
@@ -58,12 +87,12 @@ export function focusMenuItem(
       : target === 'selected'
         ? items.find((candidate) => candidate.getAttribute('aria-checked') === 'true') ?? items[0]
         : items[0];
-  item?.focus();
+  item?.focus({ preventScroll: true });
 }
 
 export function focusOwningMenu(item: Element | null): HTMLElement | null {
   const menu = item?.closest<HTMLElement>('[role="menu"]') ?? null;
-  menu?.focus();
+  menu?.focus({ preventScroll: true });
   return menu;
 }
 
@@ -78,18 +107,21 @@ export function handleMenuKeyDown(
     event.preventDefault();
     event.stopPropagation();
     options.onClose();
-    options.returnFocus?.focus();
+    options.returnFocus?.focus({ preventScroll: true });
     return;
   }
 
   if (event.key === 'Tab') {
-    event.preventDefault();
+    const target = menuTabTarget(options.returnFocus, event.shiftKey);
     options.onClose();
-    options.returnFocus?.focus();
+    if (target) {
+      event.preventDefault();
+      target.focus({ preventScroll: true });
+    }
     return;
   }
 
-  const items = enabledMenuItems(event.currentTarget);
+  const items = navigableMenuItems(event.currentTarget);
   const currentIndex = items.findIndex((item) => item === document.activeElement);
   const nextIndex = menuNavigationIndex(event.key, currentIndex, items.length);
   if (nextIndex === undefined) {
@@ -98,7 +130,7 @@ export function handleMenuKeyDown(
 
   event.preventDefault();
   event.stopPropagation();
-  items[nextIndex]?.focus();
+  items[nextIndex]?.focus({ preventScroll: true });
 }
 
 export function handleMenuBlur(
@@ -111,14 +143,17 @@ export function handleMenuBlur(
   }
 }
 
-function enabledMenuItems(menu: HTMLElement | null): HTMLElement[] {
+function navigableMenuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) {
     return [];
   }
   return Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR)).filter((item) => {
-    if (item.getAttribute('aria-disabled') === 'true') {
-      return false;
-    }
     return !item.matches(':disabled');
   });
+}
+
+function pageTabStops(): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(PAGE_TAB_STOP_SELECTOR)
+  ).filter(isMenuPageTabStop);
 }

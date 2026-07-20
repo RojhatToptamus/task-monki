@@ -38,6 +38,51 @@ export interface DiscourseResponseReadiness {
   requirement: string;
 }
 
+export interface DiscourseResponseModeOption {
+  policy: DiscourseDefaultPolicy;
+  label: string;
+  description: string;
+}
+
+export interface DiscourseWorkspaceLayout {
+  compact: boolean;
+  inspectorOverlay: boolean;
+}
+
+const COMPACT_DISCOURSE_WORKSPACE_WIDTH = 880;
+const DOCKED_DISCOURSE_INSPECTOR_WIDTH = 1220;
+
+export function discourseWorkspaceLayout(width: number): DiscourseWorkspaceLayout {
+  return {
+    compact: width < COMPACT_DISCOURSE_WORKSPACE_WIDTH,
+    inspectorOverlay: width < DOCKED_DISCOURSE_INSPECTOR_WIDTH
+  };
+}
+
+/** Stable composer copy shared by the mode menu and conversation inspector. */
+export const DISCOURSE_RESPONSE_MODE_OPTIONS: readonly DiscourseResponseModeOption[] = [
+  {
+    policy: 'NONE',
+    label: 'Note',
+    description: 'Save a personal note; no agent responds.'
+  },
+  {
+    policy: 'DIRECT',
+    label: 'Direct',
+    description: 'One selected agent answers once.'
+  },
+  {
+    policy: 'PANEL',
+    label: 'Panel',
+    description: 'Several agents answer independently from the same context; they do not see one another’s current answers.'
+  },
+  {
+    policy: 'TEAM',
+    label: 'Team',
+    description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
+  }
+];
+
 /** Archive and delete require the durable conversation runtime to be settled. */
 export function discourseConversationActionsDisabled(input: {
   aggregate?: Pick<DiscourseConversationAggregateRecord, 'waves'>;
@@ -63,7 +108,7 @@ export function discourseResponsePolicyLabel(
   policy: DiscourseDefaultPolicy | DiscourseWavePolicy
 ): string {
   switch (policy) {
-    case 'NONE': return 'No agents';
+    case 'NONE': return 'Note';
     case 'DIRECT': return 'Direct';
     case 'PANEL': return 'Panel';
     case 'TEAM': return 'Team';
@@ -71,6 +116,13 @@ export function discourseResponsePolicyLabel(
     case 'TARGETED_REPLY': return 'Reply';
     case 'SYNTHESIS': return 'Synthesis';
   }
+}
+
+export function discourseResponsePolicyDescription(
+  policy: DiscourseDefaultPolicy
+): string {
+  return DISCOURSE_RESPONSE_MODE_OPTIONS.find((option) => option.policy === policy)!
+    .description;
 }
 
 export function defaultDiscourseResponderRoster(input: {
@@ -127,18 +179,12 @@ export function discourseResponseReadiness(input: {
 }): DiscourseResponseReadiness {
   const { policy, selectedAgentCount, teamReady, selectedAgentsReady, configuredAgentsReady } = input;
   const detail = policy === 'NONE'
-    ? 'Human note · 0 agent turns'
+    ? 'Personal note · no agent response'
     : policy === 'DIRECT'
-      ? selectedAgentCount === 1
-        ? 'One selected agent · 1 turn'
-        : 'Choose one agent with @'
+      ? '1 agent · 1 turn'
       : policy === 'PANEL'
-        ? selectedAgentCount >= 2 && selectedAgentCount <= 3
-          ? `${selectedAgentCount} independent agents · ${selectedAgentCount} turns`
-          : 'Choose two or three agents with @'
-        : teamReady
-          ? 'Lead + 2 reviews + optional correction · up to 4 turns'
-          : 'Team needs all three agents available';
+        ? '2–3 independent agents'
+        : 'Lead + 2 reviewers · up to 4 turns';
   const requirement = policy === 'DIRECT' && selectedAgentCount !== 1
     ? 'Choose one responding agent.'
     : policy === 'PANEL' && (selectedAgentCount < 2 || selectedAgentCount > 3)

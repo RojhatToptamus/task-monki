@@ -7,7 +7,11 @@ import type {
 import { messageAuthorLabel } from '../model/discourse';
 import { DiscourseActionMenu } from './DiscourseActionMenu';
 import {
+  DiscourseCheckIcon,
+  DiscourseCopyIcon,
+  DiscourseMoreIcon,
   DiscoursePinIcon,
+  DiscourseReplyIcon,
   DiscourseRepositoryIcon,
   DiscourseTaskIcon
 } from './DiscourseIcons';
@@ -136,14 +140,31 @@ export function DiscourseMessage({
         ) : null}
         {message.status !== 'TOMBSTONE' ? (
           <footer>
-            <button type="button" onClick={onReply}>Reply</button>
-            <button type="button" onClick={() => void copyMessage()}>
-              {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
+            <button
+              type="button"
+              className="tm-discourse-message-action"
+              aria-label="Reply"
+              title="Reply"
+              onClick={onReply}
+            >
+              <DiscourseReplyIcon />
             </button>
+            <button
+              type="button"
+              className="tm-discourse-message-action"
+              aria-label={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
+              title={copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
+              onClick={() => void copyMessage()}
+            >
+              {copyState === 'copied' ? <DiscourseCheckIcon /> : <DiscourseCopyIcon />}
+            </button>
+            <span className="tm-visually-hidden" role="status" aria-live="polite">
+              {copyState === 'copied' ? 'Message copied' : copyState === 'failed' ? 'Message could not be copied' : ''}
+            </span>
             <DiscourseActionMenu
               className="tm-discourse-message-menu"
               label={`More actions for ${messageAuthorLabel(message)}`}
-              trigger="More"
+              trigger={<DiscourseMoreIcon />}
               items={[
                 ...(!user && message.author.kind === 'AGENT'
                   ? [

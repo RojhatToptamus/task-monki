@@ -32,8 +32,10 @@ import {
   discourseDraftsAlreadySent,
   discourseAcceptedSendForClientMessage,
   discourseMentionCandidates,
+  discourseResponsePolicyDescription,
   discourseResponsePolicyLabel,
   discourseResponseReadiness,
+  discourseWorkspaceLayout,
   draftTokensFromComposer,
   discourseAgentSelectionFromCurrentRevision,
   discoursePendingSendFingerprint,
@@ -57,10 +59,16 @@ import { DiscourseAgentConfigurationBar } from './DiscourseAgentConfigurationBar
 import { DiscourseConversationRail } from './DiscourseConversationRail';
 import { DiscourseMessage } from './DiscourseMessage';
 import { DiscourseMentionInput } from './DiscourseMentionInput';
+import { DiscourseModeMenu } from './DiscourseModeMenu';
 import { DiscourseResponseGroup } from './DiscourseResponseGroup';
 import {
+  DiscourseContextPreviewIcon,
+  DiscourseMoreIcon,
+  DiscoursePanelLeftIcon,
+  DiscoursePanelRightIcon,
   DiscoursePinIcon as PinIcon,
   DiscourseRepositoryIcon as RepositoryIcon,
+  DiscourseRoundtableIcon,
   DiscourseTaskIcon as TaskIcon
 } from './DiscourseIcons';
 import {
@@ -143,9 +151,8 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [acceptedSendActionId, setAcceptedSendActionId] = useState<string>();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
-  const [compactLayout, setCompactLayout] = useState(
-    () => window.matchMedia('(max-width: 760px)').matches
-  );
+  const [compactLayout, setCompactLayout] = useState(true);
+  const [inspectorOverlayLayout, setInspectorOverlayLayout] = useState(true);
   const [agentConfigOpen, setAgentConfigOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
@@ -153,9 +160,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const [newResponses, setNewResponses] = useState(false);
   const [streamDrafts, setStreamDrafts] = useState<Record<string, string>>({});
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const railSearchRef = useRef<HTMLInputElement>(null);
   const railReturnFocusRef = useRef<HTMLButtonElement>(null);
+  const inspectorReturnFocusRef = useRef<HTMLButtonElement>(null);
+  const previewButtonRef = useRef<HTMLButtonElement>(null);
   const messagesRef = useRef<DiscourseMessageRecord[]>([]);
   const draftsRef = useRef<DiscourseDraftRecord[]>([]);
   const draftAutosaveRef = useRef<DiscourseDraftAutosaveCoordinator | undefined>(undefined);
@@ -184,12 +194,19 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   const railModalOpen = railOpen && compactLayout;
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 760px)');
-    const update = () => setCompactLayout(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, []);
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const update = (width: number) => {
+      const layout = discourseWorkspaceLayout(width);
+      setCompactLayout(layout.compact);
+      setInspectorOverlayLayout(layout.inspectorOverlay);
+    };
+    const updateFromElement = () => update(workspace.getBoundingClientRect().width);
+    updateFromElement();
+    const observer = new ResizeObserver(updateFromElement);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, [loading, workspaceLoadFailed]);
 
   useEffect(() => {
     if (!compactLayout) setRailOpen(false);
@@ -1780,7 +1797,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
   }
 
   return (
-    <main className="tm-discourse">
+    <main
+      ref={workspaceRef}
+      className={`tm-discourse ${compactLayout ? 'tm-discourse--compact' : ''} ${
+        inspectorOpen && !inspectorOverlayLayout ? 'tm-discourse--inspector-open' : ''
+      }`}
+    >
       <DiscourseConversationRail
         archived={showArchived}
         conversations={displayedConversations}
@@ -1804,11 +1826,12 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             ref={railReturnFocusRef}
             type="button"
             className="tm-iconbtn tm-discourse-rail-toggle"
-            aria-label="Open conversations"
+            aria-label={railModalOpen ? 'Close conversations' : 'Open conversations'}
             aria-expanded={railModalOpen}
-            onClick={() => setRailOpen(true)}
+            title={railModalOpen ? 'Close conversations' : 'Open conversations'}
+            onClick={() => setRailOpen((value) => !value)}
           >
-            <SidebarIcon />
+            <DiscoursePanelLeftIcon expanded={railModalOpen} />
           </button>
           <div className="tm-discourse-header__title">
             {renameOpen && aggregate ? (
@@ -1859,19 +1882,21 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           </div>
           <div className="tm-discourse-header__actions">
             <button
+              ref={inspectorReturnFocusRef}
               type="button"
               className="tm-iconbtn"
               aria-label={inspectorOpen ? 'Close context inspector' : 'Open context inspector'}
-              title="Context"
+              aria-expanded={inspectorOpen}
+              title={inspectorOpen ? 'Close conversation details' : 'Open conversation details'}
               onClick={() => setInspectorOpen((value) => !value)}
             >
-              <ContextIcon />
+              <DiscoursePanelRightIcon expanded={inspectorOpen} />
             </button>
             {aggregate ? (
               <DiscourseActionMenu
                 className="tm-discourse-menu"
                 label="Conversation actions"
-                trigger={<MoreIcon />}
+                trigger={<DiscourseMoreIcon />}
                 items={[
                   {
                     label: aggregate.conversation.status === 'ARCHIVED'
@@ -1975,7 +2000,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           ) : null}
           {conversationLoadFailed ? (
             <div className="tm-discourse-empty" role="alert">
-              <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
+              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
               <h2>Conversation unavailable</h2>
               <p>{conversationLoadState.detail ?? 'The conversation could not be loaded.'}</p>
               <button
@@ -1989,13 +2014,13 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             </div>
           ) : conversationPending ? (
             <div className="tm-discourse-empty tm-discourse-empty--loading" aria-busy="true">
-              <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
+              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
               <h2>Loading conversation…</h2>
               <p>Restoring messages, participants, and their saved agent configurations.</p>
             </div>
           ) : messages.length === 0 ? (
             <div className="tm-discourse-empty">
-              <span className="tm-discourse-empty__mark"><RoundtableIcon /></span>
+              <span className="tm-discourse-empty__mark"><DiscourseRoundtableIcon /></span>
               <h2>{newConversation ? 'Start a technical conversation' : 'Nothing has been said yet'}</h2>
               <p>Write a note, compare an approach, or attach a task or repository with <kbd>@</kbd>.</p>
             </div>
@@ -2138,36 +2163,33 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
               </div>
             ) : null}
             <div className="tm-discourse-composer__actions">
-              <div className="tm-discourse-policy">
-                <span className="tm-discourse-policy__mark"><PersonIcon /></span>
-                <span>
-                  <label>
-                    <span className="tm-visually-hidden">Response policy</span>
-                    <select
-                      value={responsePolicy}
-                      disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
-                      onChange={(event) => changeResponsePolicy(event.target.value as DiscourseDefaultPolicy)}
-                    >
-                      <option value="NONE">No agents</option>
-                      <option value="DIRECT">Direct</option>
-                      <option value="PANEL">Panel</option>
-                      <option value="TEAM" disabled={!teamReady}>Team</option>
-                    </select>
-                  </label>
-                  <small>{responseReadiness.detail}</small>
-                </span>
-              </div>
+              <DiscourseModeMenu
+                value={responsePolicy}
+                detail={responseReadiness.detail}
+                disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
+                teamReady={teamReady}
+                onChange={changeResponsePolicy}
+              />
               <div className="tm-discourse-composer__buttons">
                 <button
+                  ref={previewButtonRef}
                   type="button"
                   className="tm-discourse-preview-button"
                   aria-label={previewLoading ? 'Resolving agent context' : 'What agents will see'}
+                  aria-expanded={Boolean(preview)}
                   disabled={previewLoading || composerUnavailable}
-                  onClick={() => void showPreview()}
+                  onClick={() => preview ? setPreview(undefined) : void showPreview()}
                 >
-                  <ContextIcon />
+                  <DiscourseContextPreviewIcon />
                   <span>{previewLoading ? 'Resolving…' : 'What agents will see'}</span>
                 </button>
+                {preview ? (
+                  <ContextPreview
+                    preview={preview}
+                    returnFocus={previewButtonRef.current}
+                    onClose={() => setPreview(undefined)}
+                  />
+                ) : null}
                 <button
                   type="button"
                   className="tm-discourse-send"
@@ -2190,7 +2212,11 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
       </section>
 
       {inspectorOpen ? (
-        <InspectorDrawer onClose={() => setInspectorOpen(false)}>
+        <InspectorDrawer
+          modal={inspectorOverlayLayout}
+          returnFocus={inspectorReturnFocusRef.current}
+          onClose={() => setInspectorOpen(false)}
+        >
           <InspectorSection title="Pinned for future responses" count={pinned.length}>
             {pinned.length === 0 ? (
               <p className="tm-discourse-inspector__empty">Nothing is attached automatically. Mention a task or repository, then pin it explicitly.</p>
@@ -2211,7 +2237,7 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
           <InspectorSection title="Response policy">
             <div className="tm-discourse-inspector__policy">
               <strong>{discourseResponsePolicyLabel(responsePolicy)}</strong>
-              <p>{responsePolicyDescription(responsePolicy)}</p>
+              <p>{discourseResponsePolicyDescription(responsePolicy)}</p>
             </div>
           </InspectorSection>
           <InspectorSection title="Participants" count={aggregate?.participants.length ?? 0}>
@@ -2249,7 +2275,6 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
         </InspectorDrawer>
       ) : null}
 
-      {preview ? <ContextPreview preview={preview} onClose={() => setPreview(undefined)} /> : null}
       {confirmAction?.type === 'delete-conversation' ? (
         <ConfirmDialog
           title="Delete conversation?"
@@ -2346,15 +2371,6 @@ function availabilityLabel(value: string): string {
   return value === 'AVAILABLE' ? 'Available' : value === 'TOMBSTONED' ? 'Historical only' : 'Unavailable';
 }
 
-function responsePolicyDescription(policy: DiscourseDefaultPolicy): string {
-  switch (policy) {
-    case 'NONE': return 'Messages persist without starting agent work.';
-    case 'DIRECT': return 'One selected agent gives a focused response.';
-    case 'PANEL': return 'Two or three selected agents answer independently from the same frozen context.';
-    case 'TEAM': return 'Lead answers, Skeptic and Verifier review independently, and Lead corrects material concerns once.';
-  }
-}
-
 function capitalize(value: string): string {
   return value.charAt(0) + value.slice(1).toLocaleLowerCase();
 }
@@ -2364,10 +2380,3 @@ function isBuiltInAgentProfileId(
 ): value is 'builtin.lead' | 'builtin.skeptic' | 'builtin.verifier' {
   return ['builtin.lead', 'builtin.skeptic', 'builtin.verifier'].includes(value);
 }
-
-const ICON = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-function ContextIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14" /></svg>; }
-function SidebarIcon() { return <svg {...ICON}><path d="M4 5h16v14H4zM9 5v14M6.5 8h.01M6.5 11h.01" /></svg>; }
-function PersonIcon() { return <svg {...ICON}><circle cx="12" cy="8" r="3" /><path d="M5 20c.8-4 3.1-6 7-6s6.2 2 7 6" /></svg>; }
-function RoundtableIcon() { return <svg {...ICON} width={28} height={28}><circle cx="12" cy="12" r="4" /><circle cx="5" cy="7" r="2" /><circle cx="19" cy="7" r="2" /><circle cx="5" cy="18" r="2" /><circle cx="19" cy="18" r="2" /></svg>; }
-function MoreIcon() { return <svg {...ICON}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></svg>; }

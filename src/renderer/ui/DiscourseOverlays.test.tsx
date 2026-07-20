@@ -23,8 +23,11 @@ describe('Discourse context preview', () => {
     } satisfies DiscourseContextPreview;
     const html = renderToStaticMarkup(<ContextPreview preview={preview} onClose={vi.fn()} />);
 
-    expect(html).toContain('Preview for this message');
-    expect(html).toContain('Context preview');
+    expect(html).toContain('Available until');
+    expect(html).toContain('class="tm-discourse-context-popover"');
+    expect(html).toContain('aria-modal="false"');
+    expect(html).toContain('aria-label="Close context preview"');
+    expect(html).not.toContain('tm-modal__scrim');
     expect(html).not.toContain('private-internal-fingerprint');
     expect(html).not.toContain('Provisional context manifest');
   });

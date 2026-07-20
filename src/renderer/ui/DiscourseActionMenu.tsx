@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import {
   focusMenuItem,
   handleMenuBlur,
@@ -6,6 +6,7 @@ import {
   menuTriggerFocusTarget,
   type MenuFocusTarget
 } from './menuKeyboard';
+import { DiscourseCheckIcon } from './DiscourseIcons';
 
 export interface DiscourseActionMenuItem {
   label: string;
@@ -33,6 +34,14 @@ export function DiscourseActionMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const initialFocusRef = useRef<MenuFocusTarget>('first');
+  const menuId = useId().replace(/:/gu, '');
+  const disabledReasons = Array.from(
+    new Set(
+      items.flatMap((item) =>
+        item.disabled && item.disabledReason ? [item.disabledReason] : []
+      )
+    )
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -105,24 +114,46 @@ export function DiscourseActionMenu({
           })}
           onBlur={(event) => handleMenuBlur(event, () => setOpen(false))}
         >
-          {items.map((item) => (
-            <button
-              key={item.label}
-              type="button"
-              role={item.pressed === undefined ? 'menuitem' : 'menuitemcheckbox'}
-              tabIndex={-1}
-              aria-checked={item.pressed === undefined ? undefined : item.pressed}
-              disabled={item.disabled}
-              title={item.disabled ? item.disabledReason : undefined}
-              className={item.danger ? 'tm-discourse-menu__danger' : undefined}
-              onClick={() => {
-                triggerRef.current?.focus({ preventScroll: true });
-                setOpen(false);
-                item.onSelect();
-              }}
+          {items.map((item) => {
+            const disabledReasonId = item.disabled && item.disabledReason
+              ? `${menuId}-disabled-reason-${disabledReasons.indexOf(item.disabledReason)}`
+              : undefined;
+            return (
+              <button
+                key={item.label}
+                type="button"
+                role={item.pressed === undefined ? 'menuitem' : 'menuitemcheckbox'}
+                tabIndex={-1}
+                aria-checked={item.pressed === undefined ? undefined : item.pressed}
+                aria-disabled={item.disabled || undefined}
+                aria-label={item.label}
+                aria-describedby={disabledReasonId}
+                title={item.disabled ? item.disabledReason : undefined}
+                className={item.danger ? 'tm-discourse-menu__danger' : undefined}
+                onClick={() => {
+                  if (item.disabled) return;
+                  triggerRef.current?.focus({ preventScroll: true });
+                  setOpen(false);
+                  item.onSelect();
+                }}
+              >
+                <span className="tm-discourse-menu__copy">
+                  <span>{item.label}</span>
+                </span>
+                <span className="tm-discourse-menu__check" aria-hidden="true">
+                  {item.pressed ? <DiscourseCheckIcon /> : null}
+                </span>
+              </button>
+            );
+          })}
+          {disabledReasons.map((reason, index) => (
+            <p
+              id={`${menuId}-disabled-reason-${index}`}
+              className="tm-discourse-menu__disabled-reason"
+              key={reason}
             >
-              {item.label}
-            </button>
+              {reason}
+            </p>
           ))}
         </div>
       ) : null}

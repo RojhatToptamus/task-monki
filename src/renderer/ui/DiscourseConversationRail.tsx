@@ -1,5 +1,6 @@
 import type { Ref } from 'react';
 import type { DiscourseConversationSummary } from '../../shared/discourse';
+import { DiscoursePanelLeftIcon } from './DiscourseIcons';
 
 interface DiscourseConversationRailProps {
   archived: boolean;
@@ -41,7 +42,7 @@ export function DiscourseConversationRail({
         <button
           type="button"
           className="tm-discourse-drawer-scrim tm-discourse-drawer-scrim--rail"
-          aria-label="Close conversations"
+          aria-label="Dismiss conversation list"
           onClick={onClose}
         />
       ) : null}
@@ -58,15 +59,28 @@ export function DiscourseConversationRail({
             <h2 id="discourse-rail-title">Discourse</h2>
             <p>Technical conversations across tasks and repositories</p>
           </div>
-          <button
-            type="button"
-            className="tm-discourse-new"
-            disabled={sending}
-            onClick={onNewConversation}
-          >
-            <PlusIcon />
-            <span>New</span>
-          </button>
+          <div className="tm-discourse-rail__head-actions">
+            <button
+              type="button"
+              className="tm-discourse-new"
+              disabled={sending}
+              onClick={onNewConversation}
+            >
+              <PlusIcon />
+              <span>New</span>
+            </button>
+            {modalOpen ? (
+              <button
+                type="button"
+                className="tm-iconbtn tm-discourse-rail__close"
+                aria-label="Close conversation list"
+                title="Close conversation list"
+                onClick={onClose}
+              >
+                <DiscoursePanelLeftIcon expanded />
+              </button>
+            ) : null}
+          </div>
         </div>
         <label className="tm-discourse-search">
           <SearchIcon />

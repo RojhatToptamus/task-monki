@@ -40,14 +40,15 @@ describe('DiscourseMentionInput accessibility prototype', () => {
     expect(html).toContain('role="combobox"');
     expect(html).toContain('aria-multiline="true"');
     expect(html).toContain('aria-autocomplete="list"');
-    expect(html).toContain('aria-expanded="true"');
-    expect(html).toMatch(/aria-activedescendant="discourse-option-[^"]+-AGENT-builtin-verifier"/u);
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('aria-activedescendant');
     expect(html).toContain('role="listbox"');
     expect(html).toContain('role="group" aria-label="Agents"');
     expect(html).toContain('role="group" aria-label="Tasks"');
     expect(html).toContain('role="group" aria-label="Repositories"');
-    expect(html).toContain('role="option" aria-selected="true"');
+    expect(html).toContain('type="button" role="option" tabindex="-1" aria-selected="true"');
     expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('disabled="" class="discourse-mention-input__option"');
     expect(html).toContain('role="status"');
   });
 

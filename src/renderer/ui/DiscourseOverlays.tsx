@@ -1,76 +1,128 @@
-import { useRef, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import type { DiscourseContextPreview } from '../../shared/discourse';
-import { DiscourseRepositoryIcon, DiscourseTaskIcon } from './DiscourseIcons';
+import {
+  DiscourseCloseIcon,
+  DiscourseRepositoryIcon,
+  DiscourseTaskIcon
+} from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 export function InspectorDrawer({
   children,
+  modal,
+  returnFocus,
   onClose
 }: {
   children: ReactNode;
+  modal: boolean;
+  returnFocus?: HTMLElement | null;
   onClose(): void;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
-  useDialogFocusBoundary({ dialogRef, busy: false, onClose });
-  return (
+  const closeAndReturnFocus = () => {
+    onClose();
+    queueMicrotask(() => returnFocus?.focus({ preventScroll: true }));
+  };
+  useDialogFocusBoundary({
+    dialogRef,
+    busy: false,
+    onClose: closeAndReturnFocus,
+    returnFocus,
+    active: modal
+  });
+  const inspector = (
+    <aside
+      ref={dialogRef}
+      className={`tm-discourse-inspector ${modal ? 'tm-discourse-inspector--overlay' : ''}`}
+      role={modal ? 'dialog' : 'complementary'}
+      aria-modal={modal || undefined}
+      aria-labelledby="discourse-inspector-title"
+      tabIndex={modal ? -1 : undefined}
+    >
+      <div className="tm-discourse-inspector__head">
+        <h2 id="discourse-inspector-title">Conversation details</h2>
+        <button
+          type="button"
+          className="tm-iconbtn"
+          aria-label="Close conversation details"
+          title="Close conversation details"
+          onClick={closeAndReturnFocus}
+        >
+          <DiscourseCloseIcon />
+        </button>
+      </div>
+      {children}
+    </aside>
+  );
+  return modal ? (
     <div className="tm-discourse-drawer">
       <button
         type="button"
         className="tm-discourse-drawer-scrim"
-        aria-label="Close context"
-        onClick={onClose}
+        aria-label="Close conversation details"
+        onClick={closeAndReturnFocus}
       />
-      <aside
-        ref={dialogRef}
-        className="tm-discourse-inspector"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="discourse-inspector-title"
-        tabIndex={-1}
-      >
-        <div className="tm-discourse-inspector__head">
-          <h2 id="discourse-inspector-title">Conversation details</h2>
-          <button
-            type="button"
-            className="tm-iconbtn"
-            aria-label="Close conversation details"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </div>
-        {children}
-      </aside>
+      {inspector}
     </div>
-  );
+  ) : inspector;
 }
 
 export function ContextPreview({
   preview,
+  returnFocus,
   onClose
 }: {
   preview: DiscourseContextPreview;
+  returnFocus?: HTMLElement | null;
   onClose(): void;
 }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogFocusBoundary({ dialogRef, busy: false, onClose });
+  const dialogRef = useRef<HTMLElement>(null);
+  const returnFocusOnCloseRef = useRef(true);
+  useDialogFocusBoundary({
+    dialogRef,
+    busy: false,
+    trapFocus: false,
+    returnFocus,
+    onClose,
+    shouldReturnFocus: () => returnFocusOnCloseRef.current
+  });
+  useEffect(() => {
+    const closeOutside = (event: PointerEvent) => {
+      if (!dialogRef.current?.contains(event.target as Node)) {
+        returnFocusOnCloseRef.current = false;
+        onClose();
+      }
+    };
+    window.addEventListener('pointerdown', closeOutside);
+    return () => window.removeEventListener('pointerdown', closeOutside);
+  }, [onClose]);
   return (
-    <div
+    <aside
       ref={dialogRef}
       tabIndex={-1}
-      className="tm-modal"
+      className="tm-discourse-context-popover"
       role="dialog"
-      aria-modal="true"
+      aria-modal="false"
       aria-labelledby="discourse-preview-title"
     >
-      <div className="tm-modal__scrim" onClick={onClose} />
-      <div className="tm-modal__panel tm-discourse-preview">
+      <div className="tm-discourse-preview">
         <header>
           <div>
             <h2 id="discourse-preview-title">What agents will see</h2>
-            <p>Preview for this message · available until {formatMessageTime(preview.expiresAt)}</p>
+            <p>Available until {formatMessageTime(preview.expiresAt)}</p>
           </div>
-          <button type="button" className="tm-iconbtn" aria-label="Close context preview" onClick={onClose}>×</button>
+          <button
+            type="button"
+            className="tm-iconbtn"
+            aria-label="Close context preview"
+            title="Close context preview"
+            onClick={() => {
+              returnFocusOnCloseRef.current = true;
+              onClose();
+            }}
+          >
+            <DiscourseCloseIcon />
+          </button>
         </header>
         <section>
           <h3>Selected context</h3>
@@ -112,12 +164,8 @@ export function ContextPreview({
             <ul>{preview.exclusions.map((exclusion) => <li key={exclusion}>{exclusion}</li>)}</ul>
           </section>
         ) : null}
-        <footer>
-          <span className="tm-discourse-preview__note">Context preview</span>
-          <button type="button" className="primary-button" onClick={onClose}>Done</button>
-        </footer>
       </div>
-    </div>
+    </aside>
   );
 }
 

@@ -12,6 +12,7 @@ import {
   eligibleDiscourseRuntimeCatalog
 } from '../model/discourse';
 import { AgentModelSelector } from './AgentModelSelector';
+import { DiscourseCheckIcon, DiscourseSlidersIcon } from './DiscourseIcons';
 import { useDialogFocusBoundary } from './dialogFocus';
 
 interface DiscourseAgentConfigurationBarProps {
@@ -129,7 +130,8 @@ export function DiscourseAgentConfigurationBar({
           aria-expanded={expanded}
           onClick={() => onExpandedChange(!expanded)}
         >
-          {expanded ? 'Done' : 'Configure'}
+          <DiscourseSlidersIcon />
+          <span>{expanded ? 'Done' : 'Configure'}</span>
         </button>
       </header>
       {expanded && (policy === 'DIRECT' || policy === 'PANEL') ? (
@@ -154,6 +156,9 @@ export function DiscourseAgentConfigurationBar({
             >
               <span aria-hidden="true">{entry.profile.displayName.slice(0, 1)}</span>
               {entry.profile.displayName}
+              <span className="tm-discourse-agent-config__roster-check" aria-hidden="true">
+                {selectedProfileIds.includes(entry.profile.id) ? <DiscourseCheckIcon /> : null}
+              </span>
             </button>
           ))}
         </div>

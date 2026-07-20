@@ -14,6 +14,7 @@ import {
   codexCapabilities
 } from '../../core/agent/codex/codexCapabilities';
 import {
+  DISCOURSE_RESPONSE_MODE_OPTIONS,
   composerTokensFromDraft,
   canDeleteAbandonedDiscourseShell,
   currentPinnedContext,
@@ -31,9 +32,12 @@ import {
   discoursePendingSendFingerprint,
   discourseReviewResultLabel,
   discourseResponseReadiness,
+  discourseResponsePolicyDescription,
+  discourseResponsePolicyLabel,
   discourseResponseTone,
   discourseResponderToggleDisabled,
   discourseTeamCompletionSummary,
+  discourseWorkspaceLayout,
   discourseTerminalJobDetail,
   draftTokensFromComposer,
   eligibleDiscourseRuntimeCatalog,
@@ -48,6 +52,57 @@ import {
 } from './discourse';
 
 describe('discourse renderer model', () => {
+  it('derives responsive Discourse layout from available workspace width', () => {
+    expect(discourseWorkspaceLayout(549)).toEqual({
+      compact: true,
+      inspectorOverlay: true
+    });
+    expect(discourseWorkspaceLayout(879)).toEqual({
+      compact: true,
+      inspectorOverlay: true
+    });
+    expect(discourseWorkspaceLayout(880)).toEqual({
+      compact: false,
+      inspectorOverlay: true
+    });
+    expect(discourseWorkspaceLayout(1219)).toEqual({
+      compact: false,
+      inspectorOverlay: true
+    });
+    expect(discourseWorkspaceLayout(1220)).toEqual({
+      compact: false,
+      inspectorOverlay: false
+    });
+  });
+
+  it('defines one stable set of human-readable response modes', () => {
+    expect(DISCOURSE_RESPONSE_MODE_OPTIONS).toEqual([
+      {
+        policy: 'NONE',
+        label: 'Note',
+        description: 'Save a personal note; no agent responds.'
+      },
+      {
+        policy: 'DIRECT',
+        label: 'Direct',
+        description: 'One selected agent answers once.'
+      },
+      {
+        policy: 'PANEL',
+        label: 'Panel',
+        description: 'Several agents answer independently from the same context; they do not see one another’s current answers.'
+      },
+      {
+        policy: 'TEAM',
+        label: 'Team',
+        description: 'A Lead answers, reviewers critique it, then the Lead may correct or defend the answer.'
+      }
+    ]);
+    expect(discourseResponsePolicyLabel('NONE')).toBe('Note');
+    expect(discourseResponsePolicyDescription('PANEL'))
+      .toBe(DISCOURSE_RESPONSE_MODE_OPTIONS[2]!.description);
+  });
+
   it('keeps destructive conversation actions unavailable until runtime work settles', () => {
     expect(discourseConversationActionsDisabled({
       aggregate: { waves: [{ status: 'RUNNING' }] as DiscourseResponseWaveRecord[] },

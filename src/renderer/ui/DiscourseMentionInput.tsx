@@ -1,11 +1,11 @@
 import {
   useId,
+  useEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
-  type KeyboardEvent,
-  type MouseEvent
+  type KeyboardEvent
 } from 'react';
 import {
   canRedoDiscourseMentionSelection,
@@ -68,7 +68,9 @@ export function DiscourseMentionInput({
   }));
   const [activeId, setActiveId] = useState<string>();
   const [dismissedQuery, setDismissedQuery] = useState<string>();
+  const [focusWithin, setFocusWithin] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const instanceId = useId().replace(/:/gu, '');
   const listboxId = `discourse-mentions-${instanceId}`;
   const query = findDiscourseMentionQuery(state);
@@ -79,12 +81,35 @@ export function DiscourseMentionInput({
     () => (query ? rankDiscourseMentionCandidates(candidates, query.query) : []),
     [candidates, query]
   );
-  const open = Boolean(query && dismissedQuery !== queryFingerprint);
+  const open = Boolean(focusWithin && query && dismissedQuery !== queryFingerprint);
   const availableOptionIds = results
     .filter((candidate) => candidate.available)
     .map(mentionCandidateKey);
   const effectiveActiveId =
     activeId && availableOptionIds.includes(activeId) ? activeId : availableOptionIds[0];
+
+  useEffect(() => {
+    if (!open || !effectiveActiveId) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(mentionOptionId(instanceId, effectiveActiveId))?.scrollIntoView({
+        block: 'nearest',
+        inline: 'nearest'
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [effectiveActiveId, instanceId, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setFocusWithin(false);
+      setDismissedQuery(queryFingerprint);
+      setActiveId(undefined);
+    };
+    window.addEventListener('pointerdown', closeOutside);
+    return () => window.removeEventListener('pointerdown', closeOutside);
+  }, [open, queryFingerprint]);
 
   const commit = (next: DiscourseComposerMentionState) => {
     setState(next);
@@ -196,10 +221,22 @@ export function DiscourseMentionInput({
     restoreFocus(next);
   };
 
-  const preserveTextareaFocus = (event: MouseEvent) => event.preventDefault();
-
   return (
-    <div className="discourse-mention-input">
+    <div
+      ref={rootRef}
+      className="discourse-mention-input"
+      onFocusCapture={() => {
+        setFocusWithin(true);
+        setDismissedQuery(undefined);
+      }}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setFocusWithin(false);
+          setDismissedQuery(queryFingerprint);
+          setActiveId(undefined);
+        }
+      }}
+    >
       {showAgentTokens ? (
         <MentionTokenGroup
           kind="AGENT"
@@ -276,7 +313,6 @@ export function DiscourseMentionInput({
         role="listbox"
         aria-label="Mention agents, tasks, or repositories"
         hidden={!open}
-        onMouseDown={preserveTextareaFocus}
       >
         {(['AGENT', 'REPOSITORY', 'TASK'] as const).map((kind) => {
           const group = results.filter((candidate) => candidate.kind === kind);
@@ -287,19 +323,28 @@ export function DiscourseMentionInput({
                 {mentionKindLabel(kind)}
               </div>
               {group.map((candidate) => (
-                <div
+                <button
                   id={mentionOptionId(instanceId, mentionCandidateKey(candidate))}
+                  type="button"
                   role="option"
+                  tabIndex={-1}
                   aria-selected={mentionCandidateKey(candidate) === effectiveActiveId}
                   aria-disabled={!candidate.available}
+                  disabled={!candidate.available}
                   className="discourse-mention-input__option"
                   key={`${candidate.kind}:${candidate.id}`}
+                  onPointerDown={(event) => {
+                    if (event.pointerType === 'mouse') event.preventDefault();
+                  }}
+                  onPointerEnter={() => {
+                    if (candidate.available) setActiveId(mentionCandidateKey(candidate));
+                  }}
                   onClick={() => choose(candidate)}
                 >
                   <strong>{candidate.label}</strong>
                   <span>{candidate.description}</span>
                   {!candidate.available ? <span>Unavailable</span> : null}
-                </div>
+                </button>
               ))}
             </div>
           );
