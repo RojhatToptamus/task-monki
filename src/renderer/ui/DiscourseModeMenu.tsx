@@ -4,7 +4,11 @@ import {
   DISCOURSE_RESPONSE_MODE_OPTIONS,
   discourseResponsePolicyLabel
 } from '../model/discourse';
-import { DiscourseCheckIcon, DiscourseChevronDownIcon } from './DiscourseIcons';
+import {
+  DiscourseCheckIcon,
+  DiscourseChevronDownIcon,
+  DiscourseModeIcon
+} from './DiscourseIcons';
 import {
   focusMenuItem,
   handleMenuBlur,
@@ -15,13 +19,11 @@ import {
 
 export function DiscourseModeMenu({
   value,
-  detail,
   disabled,
   teamReady,
   onChange
 }: {
   value: DiscourseDefaultPolicy;
-  detail: string;
   disabled: boolean;
   teamReady: boolean;
   onChange(policy: DiscourseDefaultPolicy): void;
@@ -80,10 +82,8 @@ export function DiscourseModeMenu({
           else setOpen(true);
         }}
       >
-        <span>
-          <strong>{discourseResponsePolicyLabel(value)}</strong>
-          <small>{detail}</small>
-        </span>
+        <DiscourseModeIcon policy={value} />
+        <strong>{discourseResponsePolicyLabel(value)}</strong>
         <DiscourseChevronDownIcon />
       </button>
       {open ? (
@@ -120,6 +120,9 @@ export function DiscourseModeMenu({
                 }}
                 onClick={() => select(option.policy)}
               >
+                <span className="tm-discourse-mode-menu__icon">
+                  <DiscourseModeIcon policy={option.policy} />
+                </span>
                 <span className="tm-discourse-mode-menu__copy">
                   <strong>{option.label}</strong>
                   <small>{option.description}</small>

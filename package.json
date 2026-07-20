@@ -43,6 +43,7 @@
     "verify:packaged-runtime": "node scripts/verify-packaged-runtime.mjs"
   },
   "dependencies": {
+    "lucide-react": "^1.25.0",
     "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

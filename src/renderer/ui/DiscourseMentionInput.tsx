@@ -273,6 +273,7 @@ export function DiscourseMentionInput({
         }
         value={state.text}
         placeholder={placeholder}
+        rows={4}
         disabled={disabled}
         autoFocus={autoFocus}
         onChange={(event) => updateFromTextarea(event.currentTarget)}

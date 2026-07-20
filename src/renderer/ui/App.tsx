@@ -82,6 +82,7 @@ import { TaskDetail } from './TaskDetail';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ImpactList } from './ImpactList';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
+import { DiscourseNavIcon } from './DiscourseIcons';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
 
 const emptySnapshot: TaskSnapshot = {
@@ -1828,7 +1829,7 @@ export function App() {
               />
               <NavItem
                 label="Discourse"
-                icon={<DiscourseIcon />}
+                icon={<DiscourseNavIcon />}
                 count={discourseAttentionCount}
                 countNoun="conversation"
                 urgent={discourseAttentionCount > 0}
@@ -2682,15 +2683,6 @@ function PanelIcon() {
     <svg {...ICON_PROPS} width={17} height={17}>
       <rect x="3" y="3" width="18" height="18" rx="2" />
       <path d="M9 3v18" />
-    </svg>
-  );
-}
-
-function DiscourseIcon() {
-  return (
-    <svg {...ICON_PROPS} aria-hidden="true">
-      <path d="M7 16.5 3.5 19v-5.1A7.4 7.4 0 0 1 3 11.2C3 7.2 6.8 4 11.5 4S20 7.2 20 11.2s-3.8 7.2-8.5 7.2c-1.7 0-3.2-.4-4.5-1.1Z" />
-      <path d="M7.5 10.8h.01M11.5 10.8h.01M15.5 10.8h.01" />
     </svg>
   );
 }

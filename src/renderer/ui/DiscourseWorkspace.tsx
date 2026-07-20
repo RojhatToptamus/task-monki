@@ -2165,7 +2165,6 @@ export function DiscourseWorkspace({ onNotify, onError }: DiscourseWorkspaceProp
             <div className="tm-discourse-composer__actions">
               <DiscourseModeMenu
                 value={responsePolicy}
-                detail={responseReadiness.detail}
                 disabled={sending || composerUnavailable || aggregate?.conversation.status === 'ARCHIVED'}
                 teamReady={teamReady}
                 onChange={changeResponsePolicy}

@@ -7,7 +7,6 @@ describe('DiscourseModeMenu', () => {
     const html = renderToStaticMarkup(
       <DiscourseModeMenu
         value="DIRECT"
-        detail="One selected agent · 1 turn"
         disabled={false}
         teamReady
         onChange={vi.fn()}
@@ -17,7 +16,8 @@ describe('DiscourseModeMenu', () => {
     expect(html).toContain('aria-label="Response mode: Direct"');
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('aria-expanded="false"');
-    expect(html).toContain('One selected agent · 1 turn');
+    expect(html).toContain('lucide-message-square');
+    expect(html).not.toContain('One selected agent');
     expect(html).not.toContain('<select');
   });
 });

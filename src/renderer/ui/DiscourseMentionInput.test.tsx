@@ -38,6 +38,7 @@ describe('DiscourseMentionInput accessibility prototype', () => {
 
     expect(html).toContain('<label');
     expect(html).toContain('role="combobox"');
+    expect(html).toContain('rows="4"');
     expect(html).toContain('aria-multiline="true"');
     expect(html).toContain('aria-autocomplete="list"');
     expect(html).toContain('aria-expanded="false"');

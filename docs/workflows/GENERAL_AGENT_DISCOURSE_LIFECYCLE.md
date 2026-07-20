@@ -46,8 +46,9 @@ Matching results are bounded without letting a large task list consume every
 slot: each matching kind receives a reserved share before unused capacity is
 filled. Repositories are presented before task results so a large task list
 cannot push repository context below the practical keyboard/viewport boundary.
-The first available result is the active combobox option, so pointer, Arrow-key,
-Enter, and Tab selection all commit the same structured token.
+The first available result is the active combobox option, so mouse, touch,
+Arrow-key, Enter, and Tab selection all commit the same structured token.
+Escape closes the picker without changing the draft.
 
 The active board repository is never attached implicitly. A mention applies to
 one message. Pinning copies a task or repository reference into a new durable
@@ -82,6 +83,8 @@ leak into the normal transcript or context inspector.
 `No agents`
 
 - Appends a human message without creating a wave or consuming runtime turns.
+- Appears as **Note** in the composer because that label describes the user
+  outcome while the stored policy retains its durable domain name.
 
 `Direct`
 
@@ -167,6 +170,41 @@ immutable participant revision. Drift blocks the send; Task Monki does not
 silently reroute a historical participant. Role contracts are versioned, and a
 historical participant continues to receive the contract version recorded in
 its revision.
+
+## Renderer interaction contract
+
+The composer presents Note, Direct, Panel, and Team as one compact mode control.
+Its closed state contains only the mode icon, title, and disclosure chevron;
+the open menu owns the short explanation for each mode. The selected option is
+identified by a checkmark and programmatic selected state, with neutral hover
+and focus treatment rather than a color-only highlight. Changing the composer
+mode affects the next message only. An accepted intent and any active wave keep
+the policy with which they started.
+
+Responder configuration is conversation-scoped and stays adjacent to the
+composer. Direct and Panel expose the selected mentioned agents; Team exposes
+Lead, Skeptic, and Verifier. Provider, model, and reasoning selections remain
+attached to the participant revision described above, while core resolves any
+service-tier value, so the UI does not maintain a parallel routing source of
+truth. Configuration can be opened and dismissed without replacing the draft,
+reply target, mentions, or context selection.
+
+The message field starts as a practical multiline composer, grows with its
+content to a bounded height, then scrolls internally. Mention results use a
+combobox interaction shared by agent, task, and repository entities and support
+pointer, touch, Arrow keys, Enter, Tab, and Escape. Reply, copy, more, context,
+configuration, navigation, and mode actions use accessible icon controls with
+stable labels, tooltips, hover treatment, and visible keyboard focus. All
+Discourse glyphs are exported through `DiscourseIcons.tsx`, backed by Lucide,
+so navigation and conversation actions do not introduce one-off SVG styles.
+
+At compact widths, the conversation rail becomes a dismissible drawer and the
+context inspector and agent configuration use restrained overlay surfaces.
+Controls preserve their meaning and keyboard behavior when labels condense.
+Overlays stay within the viewport, have explicit close behavior, and avoid
+decorative halos or heavy shadows. Light, dark, increased-contrast, and reduced-
+motion behavior inherit the shared Task Monki tokens and accessibility rules in
+`DESIGN.md`.
 
 ## Wave ordering and waiting
 

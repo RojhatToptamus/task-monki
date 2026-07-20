@@ -34,7 +34,6 @@ const BUILT_IN_DISCOURSE_ROSTER: readonly BuiltInAgentProfileId[] = [
 
 export interface DiscourseResponseReadiness {
   ready: boolean;
-  detail: string;
   requirement: string;
 }
 
@@ -167,8 +166,8 @@ export function discourseResponderToggleDisabled(input: {
 
 /**
  * Keeps policy cardinality, availability, and runtime configuration in one
- * renderer-owned projection so every composer state explains and gates the
- * same response decision.
+ * renderer-owned projection so every composer state applies the same response
+ * constraints.
  */
 export function discourseResponseReadiness(input: {
   policy: DiscourseDefaultPolicy;
@@ -178,13 +177,6 @@ export function discourseResponseReadiness(input: {
   configuredAgentsReady: boolean;
 }): DiscourseResponseReadiness {
   const { policy, selectedAgentCount, teamReady, selectedAgentsReady, configuredAgentsReady } = input;
-  const detail = policy === 'NONE'
-    ? 'Personal note · no agent response'
-    : policy === 'DIRECT'
-      ? '1 agent · 1 turn'
-      : policy === 'PANEL'
-        ? '2–3 independent agents'
-        : 'Lead + 2 reviewers · up to 4 turns';
   const requirement = policy === 'DIRECT' && selectedAgentCount !== 1
     ? 'Choose one responding agent.'
     : policy === 'PANEL' && (selectedAgentCount < 2 || selectedAgentCount > 3)
@@ -198,7 +190,7 @@ export function discourseResponseReadiness(input: {
           : policy !== 'NONE' && !configuredAgentsReady
             ? 'Choose an available provider and model for each responding agent.'
             : '';
-  return { ready: requirement.length === 0, detail, requirement };
+  return { ready: requirement.length === 0, requirement };
 }
 
 export function discourseMentionCandidates(
