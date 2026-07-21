@@ -1,6 +1,6 @@
 {
   "name": "task-monki",
-  "version": "0.1.0-alpha.1",
+  "version": "0.2.0-alpha.1",
   "private": true,
   "license": "MIT",
   "description": "Experimental local task board for running AI coding agents in isolated Git worktrees.",
