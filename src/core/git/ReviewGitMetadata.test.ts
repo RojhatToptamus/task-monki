@@ -58,7 +58,13 @@ describe('resolveReviewGitMetadata', () => {
       await fs.realpath(absoluteGitDir)
     );
     await fs.chmod(gitEntry, 0o600);
-    await fs.writeFile(gitEntry, `gitdir: ${relativeGitDir}\n`, 'utf8');
+    const gitPointer = await fs.open(gitEntry, 'r+');
+    try {
+      await gitPointer.truncate(0);
+      await gitPointer.writeFile(`gitdir: ${relativeGitDir}\n`, 'utf8');
+    } finally {
+      await gitPointer.close();
+    }
 
     const metadata = await resolveReviewGitMetadata({
       repositoryPath: fixture.repository,
