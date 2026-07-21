@@ -96,9 +96,9 @@ import {
   permissionOutcomeForDecision,
   promptInputModalities,
   requestedNativeConfigValues,
-  textFromAcpContent,
-  type AcpNativeSessionState
+  textFromAcpContent
 } from './AcpEventMapper';
+import type { AcpNativeSessionState } from './AcpNativeSession';
 import {
   acpCapabilities,
   defaultAcpModel,

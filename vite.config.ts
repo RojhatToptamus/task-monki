@@ -86,7 +86,8 @@ export default defineConfig(() => {
       include: [
         'src/**/*.{test,spec}.{ts,tsx}',
         'scripts/**/*.{test,spec}.mjs'
-      ]
+      ],
+      exclude: ['src/renderer/**/*.dom.test.{ts,tsx}']
     }
   };
 });

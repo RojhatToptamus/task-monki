@@ -12,24 +12,16 @@ import {
   type AcpContentBlock,
   type AcpPermissionOption,
   type AcpSessionConfigOption,
-  type AcpSessionModelState,
-  type AcpSessionModeState,
   type AcpStopReason,
   type AcpToolCallStatus,
   type AcpToolKind
 } from './AcpProtocol';
 import type { AcpRuntimeProfile } from './AcpRuntimeProfiles';
+import type { AcpNativeSessionState } from './AcpNativeSession';
 import {
   redactAcpNativeValue,
   redactNativeString
 } from './AcpNativeRedaction';
-
-export interface AcpNativeSessionState {
-  sessionId: string;
-  modes: AcpSessionModeState | null;
-  models: AcpSessionModelState | null;
-  configOptions: AcpSessionConfigOption[];
-}
 
 export function mapAcpToolStatus(status: AcpToolCallStatus | null | undefined): AgentItemStatus {
   switch (status) {

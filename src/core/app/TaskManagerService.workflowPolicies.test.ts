@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { GitSnapshotRecord } from '../../shared/contracts';
 import {
   assertPublishReady,
-  mergeRunSettings,
   transitionBlocker
-} from './TaskManagerService';
+} from './TaskTransitionPolicy';
+import { mergeRunSettings } from './AgentRunSettingsPolicy';
 
-describe('Phase 3 delivery guards', () => {
+describe('TaskManagerService workflow policies', () => {
   it('allows draft PR publication readiness from committed Git evidence', () => {
     expect(() => assertPublishReady(gitSnapshot('head-1', 'fingerprint-1'))).not.toThrow();
   });

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ScriptedAgentRuntimeAdapter } from '../../testSupport/taskMonkiScenario';
 import type {
   AgentScopedRuntimeBinding,
+  AgentScopedTurnEvent,
   StartScopedAgentTurnInput
 } from '../agent/AgentScopedTurnProvider';
 import { AppEventBus } from '../runner/AppEventBus';
@@ -152,10 +153,29 @@ describe('TaskManagerService discourse runtime composition', () => {
     const taskStore = new FileTaskStore(path.join(root, 'tasks'));
     const runtimeStore = new FileAgentRuntimeStore(path.join(root, 'runtime'));
     const discourseStore = new FileDiscourseStore(path.join(root, 'discourse'));
+    let scopedTurnListener: ((event: AgentScopedTurnEvent) => void) | undefined;
+    const binding: AgentScopedRuntimeBinding = {
+      runtimeId: 'codex',
+      buildExecutionContext: async () => {
+        throw new Error('This shutdown test does not build scoped execution context.');
+      },
+      provider: {
+        startScopedTurn: async () => {
+          throw new Error('This shutdown test does not start scoped turns.');
+        },
+        onScopedTurnEvent: (listener) => {
+          scopedTurnListener = listener;
+          return () => {
+            if (scopedTurnListener === listener) scopedTurnListener = undefined;
+          };
+        }
+      }
+    };
     const service = new TaskManagerService(taskStore, root, undefined, {
       agentRuntimeAdapters: [new ScriptedAgentRuntimeAdapter(taskStore)],
       agentRuntimeStore: runtimeStore,
-      discourseStore
+      discourseStore,
+      agentScopedRuntimeBindings: [binding]
     });
     await service.init();
     const conversation = await service.createDiscourseConversation({
@@ -191,6 +211,15 @@ describe('TaskManagerService discourse runtime composition', () => {
     const shutdown = service.shutdown().then(() => {
       shutdownSettled = true;
     });
+    expect(() =>
+      scopedTurnListener?.({
+        type: 'DELTA',
+        runId: 'late-run',
+        providerTurnId: 'late-turn',
+        text: 'late shutdown output',
+        observedAt: new Date().toISOString()
+      })
+    ).not.toThrow();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(shutdownSettled).toBe(false);
 

@@ -29,11 +29,11 @@ import { buildReviewActivityViewModel } from '../renderer/model/reviewActivity';
 import { selectBoardTasks } from '../renderer/model/boards';
 import { buildPreviewViewModel } from '../renderer/model/preview';
 import {
-  DEV_SEED_SCENARIOS,
   TASK_MONKI_DEV_SEED_VERSION,
   seedTaskMonkiDevelopmentData,
   type DevSeedManifest
 } from './seedData';
+import { DEV_SEED_SCENARIOS } from './seedScenarios';
 import {
   DETERMINISTIC_DEV_SEED_PROVIDER_DISABLED_REASON,
   deterministicDevSeedProviderDisabledReason

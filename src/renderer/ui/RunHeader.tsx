@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ActionButtonTitle } from './ActionButtonTitle';
-import type { Tone } from './taskView';
+import type { Tone } from '../model/viewTypes';
 
 /**
  * Shared header for long-running agent operations: one load-bearing status dot,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Task } from '../../shared/contracts';
 import { createInitialProjection } from '../../shared/contracts';
-import { describeTaskAttention } from './BoardView';
+import { describeTaskAttention } from './taskAttention';
 
 describe('describeTaskAttention', () => {
   it('uses direct recovery copy for ambiguous runtime state', () => {

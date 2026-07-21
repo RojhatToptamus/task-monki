@@ -1,9 +1,9 @@
-import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { readRendererStyles } from '../../testSupport/rendererStyles';
 
 describe('task detail layout styles', () => {
   it('centers the bounded task canvas with the established column balance', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const rule = css.match(/\.tm-overview\s*\{(?<body>[^}]*)\}/);
     const body = rule?.groups?.body ?? '';
 
@@ -14,7 +14,7 @@ describe('task detail layout styles', () => {
   });
 
   it('stacks the centered columns at the existing responsive breakpoint', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const rule = css.match(
       /@media \(max-width: 1080px\)\s*\{\s*\.tm-overview\s*\{(?<body>[^}]*)\}/
     );
@@ -23,7 +23,7 @@ describe('task detail layout styles', () => {
   });
 
   it('reflows progress metadata and completed-change actions at the 400px checkpoint', async () => {
-    const css = await readStyles();
+    const css = await readRendererStyles();
     const narrow = css.slice(css.lastIndexOf('@media (max-width: 520px)'));
 
     expect(narrow).toMatch(
@@ -37,7 +37,3 @@ describe('task detail layout styles', () => {
     );
   });
 });
-
-function readStyles(): Promise<string> {
-  return readFile(new URL('../styles.css', import.meta.url), 'utf8');
-}

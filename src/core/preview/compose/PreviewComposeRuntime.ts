@@ -14,6 +14,7 @@ import type {
 } from '../../../shared/contracts';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import { PreviewReadinessService } from '../PreviewReadinessService';
+import { boundedPreviewFailure as safeFailure } from '../PreviewFailure';
 import { OciEngineAdapter } from '../runtime/OciEngineAdapter';
 import { classifyPreviewComposeChange } from './PreviewComposeChangePolicy';
 import { PreviewComposeCliAdapter, type PreviewComposeCommand } from './PreviewComposeCliAdapter';
@@ -671,10 +672,6 @@ function digestLabels(labels: Record<string, string>): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function safeFailure(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ').slice(0, 512);
 }
 
 function assertSameEngine(expected: PreviewOciEngineIdentity, actual: PreviewOciEngineIdentity): void {

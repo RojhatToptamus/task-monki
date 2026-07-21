@@ -90,7 +90,7 @@ Each task title starts with `[seed:<slug>]`, so the UI can be searched by slug.
 When a UI change needs a state that is not represented, extend the seed catalog
 instead of manually constructing state in the app:
 
-1. Add a scenario definition in `DEV_SEED_SCENARIOS`.
+1. Add a scenario definition in `src/dev/seedScenarios.ts`.
 2. Add a builder path that uses `FileTaskStore` APIs and domain events.
 3. Add or update `src/dev/seedData.test.ts` to assert the resulting selector or
    view-model output.

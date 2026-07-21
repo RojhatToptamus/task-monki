@@ -1,29 +1,22 @@
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
-  type FormEvent,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-  type RefObject
+  type PointerEvent as ReactPointerEvent
 } from 'react';
 import {
-  BOARD_COLORS,
   DEFAULT_TASK_MANAGER_APP_SETTINGS,
   TASK_STORE_SCHEMA_VERSION,
   type CreateTaskRequest,
   type CreateBoardRequest,
   type Board,
-  type BoardColor,
   type AgentInteractionDecision,
   type AgentRuntimeCatalog,
   type AgentRetryStrategy,
   type DeleteTaskResult,
   type ExternalToolStatusReport,
-  type GitSnapshotRecord,
   type InteractionRequestRecord,
   type Repository,
   type RepositoryImpact,
@@ -36,8 +29,7 @@ import {
   type TaskSnapshot,
   type UpdateAgentNativeSessionRequest,
   type UpdateAppSettingsRequest,
-  type WorkflowPhase,
-  type WorktreeRecord
+  type WorkflowPhase
 } from '../../shared/contracts';
 import type { PreviewExecutionReadiness } from '../../shared/preview';
 import { taskManagerApi } from '../api/taskManagerClient';
@@ -53,8 +45,7 @@ import {
   selectLatestReviewRollup,
   selectLatestMergeSnapshot,
   selectTaskEvents,
-  selectTaskRuns,
-  formatShortId
+  selectTaskRuns
 } from '../model/selectors';
 import { resolveModelExecutionSettings, selectModel } from '../model/agentExecutionSettings';
 import { createUpdateRefreshScheduler } from '../model/updateRefreshScheduler';
@@ -68,22 +59,39 @@ import {
 import {
   buildRepositoryOptions,
   resolveRepositorySetupState,
-  resolveSelectedRepositoryId,
-  type RepositoryOption
+  resolveSelectedRepositoryId
 } from '../model/repositories';
 import { selectPreviewTaskRouteOptions } from '../model/previewBindings';
 import { MainColumn } from './MainColumn';
 import { resolveTheme, type ThemePreference } from './theme';
-import { computeNavCounts, type NavView } from './taskView';
+import { computeNavCounts, type NavView } from '../model/taskView';
 import { NewTaskPanel, type NewTaskTextDraft } from './NewTaskPanel';
-import { RepositoryPicker } from './RepositoryPicker';
 import { RepositorySwitcher } from './RepositorySwitcher';
 import { TaskDetail } from './TaskDetail';
-import { useDialogFocusBoundary } from './dialogFocus';
-import { ImpactList } from './ImpactList';
 import { DiscourseWorkspace } from './DiscourseWorkspace';
 import { DiscourseNavIcon } from './DiscourseIcons';
 import { taskNavigationReturnTarget } from './taskNavigationFocus';
+import {
+  BoardEditorModal,
+  DeleteTaskModal,
+  GlobalNotifier,
+  RepositoryDisconnectModal,
+  type AppNotification,
+  type NotificationTone
+} from './AppOverlays';
+import {
+  ActiveIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  BoardIcon,
+  DoneIcon,
+  InboxIcon,
+  NavItem,
+  PanelIcon,
+  ReviewIcon,
+  SavedViewsFolderIcon,
+  SettingsIcon
+} from './AppNavigation';
 
 const emptySnapshot: TaskSnapshot = {
   schemaVersion: TASK_STORE_SCHEMA_VERSION,
@@ -124,8 +132,6 @@ const emptySnapshot: TaskSnapshot = {
   attachments: []
 };
 
-type NotificationTone = 'info' | 'success' | 'error';
-
 function prefersDarkScheme(): boolean {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
 }
@@ -152,12 +158,6 @@ function isPreviewRecipeGenerationSnapshot(
       String(candidate.status)
     )
   );
-}
-
-interface AppNotification {
-  id: string;
-  tone: NotificationTone;
-  message: string;
 }
 
 const REVIEW_STARTED_NOTICE = 'Review started';
@@ -2120,667 +2120,5 @@ export function App() {
 
       <GlobalNotifier notifications={notifications} />
     </div>
-  );
-}
-
-const BOARD_PHASE_OPTIONS: ReadonlyArray<{ value: WorkflowPhase; label: string }> = [
-  { value: 'BACKLOG', label: 'Backlog' },
-  { value: 'READY', label: 'Ready' },
-  { value: 'IN_PROGRESS', label: 'In progress' },
-  { value: 'REVIEW', label: 'Review' },
-  { value: 'IN_REVIEW', label: 'In review' },
-  { value: 'DONE', label: 'Done' },
-  { value: 'BLOCKED', label: 'Blocked' },
-  { value: 'CANCELED', label: 'Canceled' },
-  { value: 'ARCHIVED', label: 'Archived' }
-];
-
-const BOARD_COLOR_LABELS: Record<BoardColor, string> = {
-  NEUTRAL: 'Neutral',
-  BLUE: 'Blue',
-  AMBER: 'Amber',
-  GREEN: 'Green',
-  ROSE: 'Rose',
-  VIOLET: 'Violet'
-};
-
-function BoardEditorModal({
-  board,
-  repositories,
-  onCancel,
-  onSave,
-  onDelete,
-  fallbackReturnFocusRef
-}: {
-  board?: Board;
-  repositories: RepositoryOption[];
-  onCancel(): void;
-  onSave(input: CreateBoardRequest): Promise<void>;
-  onDelete(boardId: string): Promise<void>;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const [name, setName] = useState(board?.name ?? '');
-  const [color, setColor] = useState<BoardColor>(board?.color ?? 'NEUTRAL');
-  const [repositoryIds, setRepositoryIds] = useState<string[]>(board?.repositoryIds ?? []);
-  const [workflowPhases, setWorkflowPhases] = useState<WorkflowPhase[]>(
-    board?.workflowPhases ?? []
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const panelRef = useRef<HTMLFormElement>(null);
-  const nameInputRef = useRef<HTMLInputElement>(null);
-
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: nameInputRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-
-  const toggleWorkflowPhase = (workflowPhase: WorkflowPhase) => {
-    setWorkflowPhases((current) =>
-      current.includes(workflowPhase)
-        ? current.filter((candidate) => candidate !== workflowPhase)
-        : [...current, workflowPhase]
-    );
-  };
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!name.trim()) {
-      setError('Enter a name for this saved view.');
-      return;
-    }
-    setBusy(true);
-    setError(undefined);
-    try {
-      await onSave({ name, color, repositoryIds, workflowPhases });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not save this view.');
-      setBusy(false);
-    }
-  };
-  const remove = async () => {
-    if (!board) return;
-    setBusy(true);
-    setError(undefined);
-    try {
-      await onDelete(board.id);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Could not delete this view.');
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="board-editor-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <form
-        ref={panelRef}
-        className="tm-modal__panel tm-board-editor"
-        tabIndex={-1}
-        onSubmit={submit}
-      >
-        <h3 id="board-editor-title">{board ? 'Edit saved view' : 'New saved view'}</h3>
-
-        <label className="field">
-          <span>Name</span>
-          <input
-            ref={nameInputRef}
-            value={name}
-            maxLength={80}
-            placeholder="For example, Review across repositories"
-            disabled={busy}
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
-
-        <fieldset className="tm-board-editor__color">
-          <legend>Color</legend>
-          <div className="tm-board-editor__swatches">
-            {BOARD_COLORS.map((option) => (
-              <label
-                className="tm-board-editor__swatch"
-                key={option}
-                title={BOARD_COLOR_LABELS[option]}
-              >
-                <input
-                  type="radio"
-                  name="saved-view-color"
-                  value={option}
-                  checked={color === option}
-                  disabled={busy}
-                  aria-label={`${BOARD_COLOR_LABELS[option]} saved-view color`}
-                  onChange={() => setColor(option)}
-                />
-                <span
-                  className="tm-board-color"
-                  data-board-color={option.toLowerCase()}
-                  aria-hidden="true"
-                />
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <fieldset className="tm-board-editor__filter">
-          <legend>Repositories</legend>
-          <div className="tm-board-editor__filter-head">
-            <small>
-              {repositoryIds.length === 0 ? 'All repositories' : `${repositoryIds.length} selected`}
-            </small>
-            {repositoryIds.length > 0 ? (
-              <button type="button" disabled={busy} onClick={() => setRepositoryIds([])}>
-                Use all
-              </button>
-            ) : null}
-          </div>
-          <RepositoryPicker
-            options={repositories}
-            selectedIds={repositoryIds}
-            disabled={busy}
-            ariaLabel="Saved-view repositories"
-            onChange={setRepositoryIds}
-          />
-        </fieldset>
-
-        <fieldset className="tm-board-editor__filter">
-          <legend>Workflow phases</legend>
-          <div className="tm-board-editor__filter-head">
-            <small>
-              {workflowPhases.length === 0 ? 'All workflow phases' : `${workflowPhases.length} selected`}
-            </small>
-            {workflowPhases.length > 0 ? (
-              <button type="button" disabled={busy} onClick={() => setWorkflowPhases([])}>
-                Use all
-              </button>
-            ) : null}
-          </div>
-          <div className="tm-board-editor__options tm-board-editor__options--phases">
-            {BOARD_PHASE_OPTIONS.map((option) => (
-              <label key={option.value} className="tm-board-editor__option">
-                <input
-                  type="checkbox"
-                  checked={workflowPhases.includes(option.value)}
-                  disabled={busy}
-                  onChange={() => toggleWorkflowPhase(option.value)}
-                />
-                <span>{option.label}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        {error ? <div className="tm-error tm-board-editor__error">{error}</div> : null}
-        <div className="tm-modal__actions tm-board-editor__actions">
-          {board ? (
-            <button
-              type="button"
-              className="danger-button"
-              disabled={busy}
-              onClick={() => void remove()}
-            >
-              Delete view
-            </button>
-          ) : null}
-          <span className="tm-board-editor__actions-spacer" />
-          <button type="button" className="outline-button" disabled={busy} onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="submit" className="primary-button" disabled={busy}>
-            {busy ? 'Saving…' : 'Save view'}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function GlobalNotifier({ notifications }: { notifications: AppNotification[] }) {
-  return (
-    <div className="tm-notifier" aria-live="polite" aria-atomic="false">
-      {notifications.map((notification) => (
-        <div
-          className={`tm-notifier__item tm-notifier__item--${notification.tone}`}
-          key={notification.id}
-        >
-          <span className="tm-notifier__dot" />
-          <strong>{notification.message}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RepositoryDisconnectModal({
-  repository,
-  impact,
-  onCancel,
-  onConfirm,
-  fallbackReturnFocusRef
-}: {
-  repository: Repository;
-  impact: RepositoryImpact;
-  onCancel(): void;
-  onConfirm(): Promise<void>;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const [busy, setBusy] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: cancelRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-  const submit = async () => {
-    if (impact.blockingReason) return;
-    setBusy(true);
-    try {
-      await onConfirm();
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div
-      className="tm-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="disconnect-repository-title"
-    >
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div
-        ref={panelRef}
-        className="tm-modal__panel tm-delete-modal"
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <h3 id="disconnect-repository-title">Disconnect {repository.name}?</h3>
-        <p>
-          Tasks, worktrees, branches, commits, reviews, and delivery evidence stay intact. Task
-          actions that need this checkout remain unavailable until it is reconnected.
-        </p>
-        <ImpactList
-          ariaLabel="Repository disconnect impact"
-          groups={[
-            {
-              kind: 'untouched',
-              items: [
-                `${impact.taskCount} tasks`,
-                `${impact.worktreeCount} worktrees`,
-                `${impact.openPullRequestCount} open pull requests`
-              ]
-            }
-          ]}
-        />
-        {impact.blockingReason ? <div className="tm-error">{impact.blockingReason}</div> : null}
-        <div className="tm-modal__actions">
-          <button
-            ref={cancelRef}
-            type="button"
-            className="outline-button"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="danger-button"
-            disabled={busy || Boolean(impact.blockingReason)}
-            onClick={() => void submit()}
-          >
-            {busy ? 'Disconnecting…' : 'Disconnect repository'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeleteTaskModal({
-  task,
-  worktree,
-  gitSnapshot,
-  onCancel,
-  onConfirm,
-  fallbackReturnFocusRef
-}: {
-  task: Task;
-  worktree?: WorktreeRecord;
-  gitSnapshot?: GitSnapshotRecord;
-  onCancel(): void;
-  onConfirm(removeWorktree: boolean): Promise<DeleteTaskResult>;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const [removeWorktree, setRemoveWorktree] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  const worktreeRemoval = describeWorktreeRemoval(worktree, gitSnapshot);
-  const canRemoveWorktree = worktreeRemoval.status === 'available';
-
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: cancelRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose: onCancel
-  });
-
-  useEffect(() => {
-    setRemoveWorktree(false);
-    setBusy(false);
-  }, [task.id]);
-
-  useEffect(() => {
-    if (!canRemoveWorktree) {
-      setRemoveWorktree(false);
-    }
-  }, [canRemoveWorktree]);
-
-  const submit = () => {
-    setBusy(true);
-    void onConfirm(removeWorktree).catch(() => {
-      setBusy(false);
-    });
-  };
-
-  return (
-    <div className="tm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title">
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onCancel} />
-      <div ref={panelRef} className="tm-modal__panel tm-delete-modal" tabIndex={-1}>
-        <div className="tm-delete-modal__head">
-          <span className="tm-delete-modal__mark" aria-hidden="true">
-            <TrashIcon />
-          </span>
-          <div>
-            <h3 id="delete-task-title">Delete task #{formatShortId(task.id)}</h3>
-            <p>
-              Removes this task, its Task Monki records, and managed attachments. Provider
-              history and external protocol-journal traces may remain.
-            </p>
-          </div>
-        </div>
-
-        <ImpactList
-          ariaLabel="Task deletion impact"
-          groups={[
-            {
-              kind: 'deleted',
-              items: [
-                'Task record and workflow state',
-                'Local run, event, and session records',
-                'Managed attachments, artifacts, and evidence records'
-              ]
-            },
-            {
-              kind: 'kept',
-              items: [
-                'Repository and Git history',
-                'Remote branch, PR, and commits',
-                'Fork alternatives and source tasks',
-                'Provider history and external protocol-journal traces'
-              ]
-            }
-          ]}
-        />
-
-        <label
-          className={`tm-delete-modal__worktree ${
-            canRemoveWorktree ? '' : 'tm-delete-modal__worktree--disabled'
-          } ${worktreeRemoval.status === 'dirty' ? 'tm-delete-modal__worktree--blocked' : ''}`}
-        >
-          <input
-            type="checkbox"
-            checked={removeWorktree}
-            disabled={!canRemoveWorktree || busy}
-            onChange={(event) => setRemoveWorktree(event.target.checked)}
-          />
-          <span>
-            <strong>Also remove local worktree</strong>
-            <small>{worktreeRemoval.detail}</small>
-          </span>
-        </label>
-
-        <div className="tm-modal__actions">
-          <button
-            ref={cancelRef}
-            type="button"
-            className="outline-button"
-            disabled={busy}
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-          <button type="button" className="danger-button" disabled={busy} onClick={submit}>
-            {busy ? 'Deleting…' : 'Delete task'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function describeWorktreeRemoval(
-  worktree: WorktreeRecord | undefined,
-  gitSnapshot: GitSnapshotRecord | undefined
-): { status: 'available' | 'none' | 'unverified' | 'dirty' | 'unavailable'; detail: string } {
-  if (!worktree) {
-    return {
-      status: 'none',
-      detail: 'No local worktree is recorded for this task.'
-    };
-  }
-  if (worktree.status === 'MISSING' || worktree.status === 'REMOVED') {
-    return {
-      status: 'none',
-      detail: 'No removable local worktree exists for this task.'
-    };
-  }
-  if (worktree.status !== 'PRESENT') {
-    return {
-      status: 'unavailable',
-      detail:
-        `The local worktree is ${worktree.status.toLowerCase().replace(/_/g, ' ')}. ` +
-        'Repair or refresh it before removal.'
-    };
-  }
-  if (!gitSnapshot) {
-    return {
-      status: 'unverified',
-      detail: 'Refresh Git evidence before removing the local worktree.'
-    };
-  }
-
-  const dirtyCount =
-    gitSnapshot.stagedCount +
-    gitSnapshot.unstagedCount +
-    gitSnapshot.untrackedCount +
-    gitSnapshot.conflictedCount;
-  if (dirtyCount > 0 || gitSnapshot.status === 'DIRTY' || gitSnapshot.status === 'CONFLICTED') {
-    return {
-      status: 'dirty',
-      detail:
-        'The worktree has uncommitted, untracked, or conflicted files. Commit, stash, or clean it before removal.'
-    };
-  }
-
-  return {
-    status: 'available',
-    detail: `${worktree.worktreePath} will be removed from disk.`
-  };
-}
-
-export function NavItem({
-  label,
-  icon,
-  count,
-  countNoun = 'task',
-  urgent,
-  active,
-  collapsed,
-  onClick
-}: {
-  label: string;
-  icon: ReactNode;
-  count?: number;
-  countNoun?: string;
-  urgent?: boolean;
-  active: boolean;
-  collapsed?: boolean;
-  onClick(): void;
-}) {
-  const descriptionId = useId();
-  const countDescription =
-    count != null && count > 0
-      ? `${count} ${countNoun}${count === 1 ? '' : 's'}`
-      : undefined;
-  return (
-    <button
-      type="button"
-      className={`tm-nav__item ${active ? 'tm-nav__item--active' : ''}`}
-      onClick={onClick}
-      data-tip={collapsed ? label : undefined}
-      aria-label={label}
-      aria-describedby={countDescription ? descriptionId : undefined}
-    >
-      {icon}
-      <span className="tm-nav__label">{label}</span>
-      {count != null && count > 0 ? (
-        <span
-          className={`tm-nav__count ${urgent ? 'tm-nav__count--urgent' : ''}`}
-          aria-hidden="true"
-        >
-          {count}
-        </span>
-      ) : null}
-      {countDescription ? (
-        <span id={descriptionId} className="tm-visually-hidden">
-          {countDescription}
-        </span>
-      ) : null}
-    </button>
-  );
-}
-
-const ICON_PROPS = {
-  width: 16,
-  height: 16,
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.7,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const
-};
-
-function PanelIcon() {
-  return (
-    <svg {...ICON_PROPS} width={17} height={17}>
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <path d="M9 3v18" />
-    </svg>
-  );
-}
-
-function TrashIcon() {
-  return (
-    <svg {...ICON_PROPS} width={18} height={18}>
-      <path d="M4 7h16" />
-      <path d="M10 11v6M14 11v6" />
-      <path d="M5 7l1 13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-13" />
-      <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
-    </svg>
-  );
-}
-
-function ArrowLeftIcon() {
-  return (
-    <svg {...ICON_PROPS} width={17} height={17}>
-      <path d="M19 12H5" />
-      <path d="M12 19l-7-7 7-7" />
-    </svg>
-  );
-}
-
-function ArrowRightIcon() {
-  return (
-    <svg {...ICON_PROPS} width={17} height={17}>
-      <path d="M5 12h14" />
-      <path d="M12 5l7 7-7 7" />
-    </svg>
-  );
-}
-
-function InboxIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-    </svg>
-  );
-}
-
-function BoardIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <rect x="3" y="3" width="7" height="18" rx="1" />
-      <rect x="14" y="3" width="7" height="11" rx="1" />
-    </svg>
-  );
-}
-
-function SavedViewsFolderIcon({ open }: { open: boolean }) {
-  return (
-    <svg {...ICON_PROPS} aria-hidden="true">
-      {open ? (
-        <>
-          <path d="M3 10V6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5V10" />
-          <path d="M3.5 10h17a1.5 1.5 0 0 1 1.45 1.88l-1.5 5.75A3.2 3.2 0 0 1 17.35 20H5.5a2 2 0 0 1-1.94-1.51l-1.5-6A2 2 0 0 1 3.5 10z" />
-        </>
-      ) : (
-        <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H10l2 2h6.5A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z" />
-      )}
-    </svg>
-  );
-}
-
-function ActiveIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-    </svg>
-  );
-}
-
-function ReviewIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M9 11l3 3L22 4" />
-      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-    </svg>
-  );
-}
-
-function DoneIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <rect x="2" y="4" width="20" height="5" rx="1" />
-      <path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9" />
-      <path d="M10 13h4" />
-    </svg>
-  );
-}
-
-function SettingsIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
   );
 }

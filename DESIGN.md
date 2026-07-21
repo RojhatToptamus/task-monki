@@ -3,7 +3,8 @@
 Guidance for agents doing design or frontend work in this repository. Read this
 file before changing a screen, interaction, or component. It is a decision
 framework, not a substitute for inspecting the product: the rendered app,
-nearby components, and `src/renderer/styles.css` remain the source of truth.
+nearby components, the ordered `src/renderer/styles.css` manifest, and its
+`src/renderer/styles/*` sources remain the source of truth.
 
 The goal is a coherent, macOS-native-feeling operational desktop app that
 rewards sustained use. A good Task Monki interface is calm, precise, compact
@@ -103,9 +104,10 @@ require inspection of the nearest established pattern and the affected state.
 
 ## 2. Reuse the product's visual and interaction grammar
 
-Global styles live in `src/renderer/styles.css`. Inspect the real variables,
-classes, components, and nearby compositions before styling anything. Never
-guess a token name; an unresolved `var()` is a bug.
+Global style sources live in `src/renderer/styles/*`, with their intentional
+cascade order declared by `src/renderer/styles.css`. Inspect the real
+variables, classes, components, and nearby compositions before styling
+anything. Never guess a token name; an unresolved `var()` is a bug.
 
 Use this order of preference:
 
@@ -219,7 +221,8 @@ scanning materially benefits and where it does not duplicate an equally clear
 label or control state. If text and hierarchy already communicate the state,
 stop there.
 
-The semantic aliases in `src/renderer/styles.css` answer these questions:
+The semantic aliases in `src/renderer/styles/foundation.css` answer these
+questions:
 
 | Token | Meaning |
 | --- | --- |

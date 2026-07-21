@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection, type RunRecord, type Task } from '../../shared/contracts';
-import { shouldShowMoveToReviewHeaderAction } from './TaskDetail';
+import { shouldShowMoveToReviewHeaderAction } from '../model/taskReviewActions';
 
 describe('TaskDetail Move to review header action', () => {
   it.each(['ANALYSIS', 'COMPACTION'] as const)(

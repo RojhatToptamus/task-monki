@@ -114,6 +114,11 @@ import {
   isTrustedRendererPermissionRequest,
   type RendererTrustPolicy
 } from './rendererTrust';
+import {
+  IPC_UPDATE_CHANNEL,
+  IPC_WINDOW_CHROME_CHANNEL,
+  type IpcInvokeChannel
+} from '../shared/ipcChannels';
 const MAX_PRIVATE_ENV_IMPORT_BYTES = 256 * 1024;
 
 let mainWindow: BrowserWindow | undefined;
@@ -328,7 +333,7 @@ function configureMacDockIcon(): void {
 }
 
 function installIpcHandlers(): void {
-  ipcMain.on('windowChrome:sync', (event: IpcMainEvent) => {
+  ipcMain.on(IPC_WINDOW_CHROME_CHANNEL, (event: IpcMainEvent) => {
     const window = mainWindow;
     const trustPolicy = rendererTrustPolicy;
     if (
@@ -761,7 +766,7 @@ type TrustedIpcHandler<TArgs extends unknown[], TResult> = (
 ) => TResult | Promise<TResult>;
 
 function handleTrustedIpc<TArgs extends unknown[], TResult>(
-  channel: string,
+  channel: IpcInvokeChannel,
   handler: TrustedIpcHandler<TArgs, TResult>
 ): void {
   ipcMain.handle(channel, (event, ...args: TArgs) => {
@@ -780,7 +785,7 @@ function handleTrustedIpc<TArgs extends unknown[], TResult>(
 }
 
 function broadcast(event: AppUpdateEvent): void {
-  mainWindow?.webContents.send('app:update', event);
+  mainWindow?.webContents.send(IPC_UPDATE_CHANNEL, event);
 }
 
 async function readBoundedFile(handle: fs.promises.FileHandle, maximumBytes: number): Promise<Buffer> {

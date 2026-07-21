@@ -2,10 +2,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { createInitialProjection, type Task } from '../../shared/contracts';
 import type { NextActionModel } from '../model/nextAction';
+import { buildReviewFollowUpInstruction } from '../model/reviewFollowUp';
 import {
   NextActionPanel,
   TaskWorkPanels,
-  buildReviewFollowUpInstruction,
   focusRequestedActivityHistory
 } from './TaskDetail';
 

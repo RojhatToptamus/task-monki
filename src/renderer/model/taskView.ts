@@ -13,21 +13,25 @@ import {
   getImplementationRetryReason,
   verifiedChecksMatchMergeHead
 } from '../../shared/contracts';
-import { isImplementationOutcomeBlocked } from '../model/nextAction';
+import { isImplementationOutcomeBlocked } from './nextAction';
 import {
   canCreateDeliveryCommit,
   formatShortId
-} from '../model/selectors';
-import { buildBoardDeliveryParts } from '../model/prStatus';
-import { describeTaskAttention, isAttentionTask, isInFlightTask } from './BoardView';
-import { humanizeEnum } from './display';
+} from './selectors';
+import { buildBoardDeliveryParts } from './prStatus';
+import { describeTaskAttention, isAttentionTask, isInFlightTask } from './taskAttention';
+import { humanizeEnum } from './formatting';
+import type {
+  FinishEvidenceState,
+  FinishEvidenceWarning,
+  FinishRequirement
+} from './taskFinish';
+import type { Tone } from './viewTypes';
 
 /**
  * Tone palette shared by the standard status pill. Each maps to a semantic
  * `--<tone>` CSS variable and the `.status-pill--<tone>` class.
  */
-export type Tone = 'neutral' | 'info' | 'action' | 'success' | 'error';
-
 export interface CardEvidenceItem {
   /** Mono value part (e.g. a PR reference), rendered before the label. */
   value?: string;
@@ -106,23 +110,6 @@ export interface TaskCardOptions {
 export interface TaskCardRepositoryIdentity {
   showRepo: boolean;
   repositoryName: string;
-}
-
-export interface FinishEvidenceWarning {
-  title: string;
-  detail: string;
-}
-
-export interface FinishEvidenceState {
-  mode: 'clean' | 'override' | 'blocked';
-  warnings: FinishEvidenceWarning[];
-}
-
-export interface FinishRequirement {
-  label: string;
-  detail: string;
-  tone: Tone;
-  unresolved: boolean;
 }
 
 export interface FinishPanelAction {

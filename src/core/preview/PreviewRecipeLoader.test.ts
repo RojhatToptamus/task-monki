@@ -3,11 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  activePreviewLocalAttachmentRequirements,
   parsePreviewRecipe,
   PreviewRecipeLoader,
   selectPreviewScenario
 } from './PreviewRecipeLoader';
+import { activePreviewLocalAttachmentRequirements } from './PreviewExecutionAuthority';
 
 const RECIPE = `
 version: 1

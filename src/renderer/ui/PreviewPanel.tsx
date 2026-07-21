@@ -17,29 +17,18 @@ import type {
   PreviewManagedResourceRecord,
   PreviewNodeAttemptRecord,
   PreviewPlanRecord,
-  PreviewRecipeGenerationSnapshot,
-  PreviewRecipeValidation,
   PreviewResolvedAttachmentTarget,
   PreviewResourceRecord,
-  PreviewRouteRecord,
-  ReadPreviewLogResult,
-  ResolvePreviewResult,
-  Task,
-  WorktreeRecord
+  PreviewRouteRecord
 } from '../../shared/contracts';
 import type {
-  PreviewAttachmentPlan,
   PreviewExecutionBlocker,
   PreviewExecutionReadiness,
   PreviewLocalAttachmentRequirement,
   PreviewPrivateInputOperationResult
 } from '../../shared/preview';
 import {
-  buildPreviewPlanGroups,
-  buildPreviewViewModel,
-  selectPreviewActionGeneration,
   selectPreviewOverviewProjection,
-  selectPreviewResetResources,
   shouldShowPreviewOverview,
   type PreviewActionId,
   type PreviewActionModel,
@@ -60,83 +49,22 @@ import {
 } from './menuKeyboard';
 import { useDialogFocusBoundary } from './dialogFocus';
 import { ImpactList } from './ImpactList';
+import type {
+  PreviewConfirmation,
+  PreviewController,
+  PreviewPanelProps
+} from './preview/types';
+import { usePreviewController } from './preview/usePreviewController';
+import { usePreviewLogs } from './preview/usePreviewLogs';
+import {
+  AuthorityRow,
+  PreviewPlanAuthority
+} from './preview/PreviewPlanAuthority';
+import { PreviewRecipeGenerationModal } from './preview/PreviewRecipeGenerationModal';
+import { humanizeEnum } from '../model/formatting';
+import { formatPreviewAttachmentTarget } from '../model/previewPresentation';
 
-export interface PreviewPanelProps {
-  task: Task;
-  worktree?: WorktreeRecord;
-  plans: PreviewPlanRecord[];
-  approvals: PreviewApprovalRecord[];
-  generations: PreviewGenerationRecord[];
-  generationAttachments: PreviewGenerationAttachmentRecord[];
-  attempts: PreviewNodeAttemptRecord[];
-  managedResources: PreviewManagedResourceRecord[];
-  composeProjects: PreviewComposeProjectRecord[];
-  localBindings: PreviewLocalAttachmentBindingRecord[];
-  taskRouteOptions: PreviewTaskRouteOption[];
-  runtimeResources: PreviewResourceRecord[];
-  executionReadiness?: PreviewExecutionReadiness;
-  resolution?: ResolvePreviewResult;
-  recipeGeneration?: PreviewRecipeGenerationSnapshot;
-  onResolve(taskId: string, scenarioId?: string): Promise<void>;
-  onSetLocalBinding(
-    taskId: string,
-    attachmentId: string,
-    target: PreviewResolvedAttachmentTarget,
-    scenarioId: string
-  ): Promise<void>;
-  onGetRecipeGeneration(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onGenerateRecipe(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onValidateRecipeDraft(
-    taskId: string,
-    draftId: string,
-    yaml: string
-  ): Promise<PreviewRecipeValidation>;
-  onAcceptRecipeDraft(
-    taskId: string,
-    draftId: string,
-    yaml: string
-  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
-  onDiscardRecipeDraft(taskId: string): Promise<PreviewRecipeGenerationSnapshot>;
-  onWriteRecipeManually(taskId: string, worktreeId: string): Promise<void>;
-  onApprove(taskId: string, planId: string, executionDigest: string): Promise<void>;
-  onStart(taskId: string, scenarioId?: string): Promise<void>;
-  onOpen(taskId: string, generationId: string, routeId: string): Promise<void>;
-  onStop(taskId: string, generationId: string): Promise<void>;
-  onResetData(taskId: string, generationId: string, resourceId: string, scenarioId: string): Promise<void>;
-  onRetrySetup(taskId: string, generationId: string, scenarioId: string): Promise<void>;
-  onReadLog(taskId: string, artifactId: string, offset: number, maxBytes: number): Promise<ReadPreviewLogResult>;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-  modalRootRef: RefObject<HTMLElement | null>;
-  onModalOpenChange(open: boolean): void;
-}
-
-interface PreviewConfirmation {
-  title: string;
-  body: string;
-  confirmLabel: string;
-  danger: boolean;
-  impacts?: Array<{
-    tone: 'deleted' | 'kept' | 'untouched';
-    detail: string;
-  }>;
-  requireText?: string;
-  returnFocus?: HTMLElement;
-  run(): Promise<void>;
-}
-
-interface PreviewController {
-  view: PreviewViewModel;
-  busy: Set<PreviewActionId>;
-  resetBusy?: string;
-  resettableResources: PreviewPlanRecord['executionPlan']['resources'];
-  confirmation?: PreviewConfirmation;
-  confirmationBusy: boolean;
-  runAction(action: PreviewActionId): Promise<void>;
-  requestAction(action: PreviewActionModel, returnFocus?: HTMLElement): void;
-  requestReset(resourceId: string, returnFocus?: HTMLElement): void;
-  closeConfirmation(): void;
-  confirm(): Promise<void>;
-}
+export type { PreviewPanelProps } from './preview/types';
 
 export function PreviewOverviewCard(
   props: PreviewPanelProps & { onShowDetails(): void }
@@ -710,8 +638,8 @@ function PreviewLocalAttachmentConfiguration({
           {requirement.usages.map((usage, index) => (
             <OperationalRow
               key={`${usage.kind}:${usage.nodeId}:${index}`}
-              title={`${humanize(usage.nodeKind)} · ${usage.nodeId}`}
-              kind={usage.kind === 'READINESS_DEPENDENCY' ? 'STARTUP CHECK' : humanize(usage.recipient)}
+              title={`${humanizeEnum(usage.nodeKind)} · ${usage.nodeId}`}
+              kind={usage.kind === 'READINESS_DEPENDENCY' ? 'STARTUP CHECK' : humanizeEnum(usage.recipient)}
               detail={usage.kind === 'ENVIRONMENT'
                 ? usage.environmentKeys.join(', ')
                 : 'Must pass the declared one-shot attachment check'}
@@ -920,834 +848,6 @@ function PreviewMissingRecipeSetup(props: PreviewPanelProps) {
   );
 }
 
-export function PreviewRecipeGenerationModal({
-  taskId,
-  state,
-  returnFocus,
-  onClose,
-  onRegenerate,
-  onValidate,
-  onAccept,
-  onDiscard,
-  fallbackReturnFocusRef,
-  modalRootRef,
-  onModalOpenChange
-}: {
-  taskId: string;
-  state: PreviewRecipeGenerationSnapshot;
-  returnFocus?: HTMLElement;
-  onClose(): void;
-  onRegenerate(): Promise<void>;
-  onValidate(taskId: string, draftId: string, yaml: string): Promise<PreviewRecipeValidation>;
-  onAccept(
-    taskId: string,
-    draftId: string,
-    yaml: string
-  ): Promise<import('../../shared/contracts').AcceptPreviewRecipeDraftResult>;
-  onDiscard(): Promise<void>;
-  fallbackReturnFocusRef: RefObject<HTMLElement | null>;
-  modalRootRef: RefObject<HTMLElement | null>;
-  onModalOpenChange(open: boolean): void;
-}) {
-  const panelRef = useRef<HTMLDivElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const [yaml, setYaml] = useState(state.draft?.yaml ?? '');
-  const [loadedDraftId, setLoadedDraftId] = useState(state.draft?.id);
-  const [edited, setEdited] = useState(false);
-  const [validation, setValidation] = useState<PreviewRecipeValidation>();
-  const [accepting, setAccepting] = useState(false);
-  const [discarding, setDiscarding] = useState(false);
-  const [regenerateArmed, setRegenerateArmed] = useState(false);
-  const busy = accepting || discarding;
-  const generating = state.status === 'GENERATING';
-  const report = state.report ?? state.draft?.report;
-  const compact = !state.draft && !report;
-
-  useEffect(() => {
-    if (state.draft && state.draft.id !== loadedDraftId) {
-      setYaml(state.draft.yaml);
-      setLoadedDraftId(state.draft.id);
-      setEdited(false);
-      setValidation(state.draft.validation);
-      setRegenerateArmed(false);
-    }
-  }, [loadedDraftId, state.draft]);
-
-  useDialogFocusBoundary({
-    dialogRef: panelRef,
-    initialFocusRef: closeButtonRef,
-    fallbackReturnFocusRef,
-    busy,
-    onClose,
-    returnFocus
-  });
-
-  useLayoutEffect(() => {
-    onModalOpenChange(true);
-    return () => onModalOpenChange(false);
-  }, [onModalOpenChange]);
-
-  const validateAndAccept = async () => {
-    const draft = state.draft;
-    if (!draft || accepting || generating) return;
-    setAccepting(true);
-    try {
-      const nextValidation = await onValidate(taskId, draft.id, yaml);
-      setValidation(nextValidation);
-      if (nextValidation.status !== 'VALID') return;
-      await onAccept(taskId, draft.id, yaml);
-      onClose();
-    } finally {
-      setAccepting(false);
-    }
-  };
-
-  const regenerate = async () => {
-    if (generating) return;
-    if (edited && !regenerateArmed) {
-      setRegenerateArmed(true);
-      return;
-    }
-    setValidation(undefined);
-    setRegenerateArmed(false);
-    await onRegenerate();
-  };
-
-  const discard = async () => {
-    setDiscarding(true);
-    try {
-      await onDiscard();
-    } finally {
-      setDiscarding(false);
-    }
-  };
-
-  const dialog = (
-    <div
-      className="tm-modal tm-preview-recipe-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="preview-recipe-generation-title"
-    >
-      <div className="tm-modal__scrim" onClick={busy ? undefined : onClose} />
-      <div
-        ref={panelRef}
-        className={`tm-modal__panel tm-preview-recipe-review ${
-          compact ? 'tm-preview-recipe-review--compact' : ''
-        }`}
-        tabIndex={-1}
-      >
-        <header className="tm-preview-recipe-review__head">
-          <div>
-            <span className="tm-preview-recipe-review__eyebrow">Agent draft</span>
-            <h3 id="preview-recipe-generation-title">Review Preview configuration</h3>
-            <p>
-              Nothing is written until you accept. Approval and Start remain separate.
-            </p>
-          </div>
-          <button
-            ref={closeButtonRef}
-            type="button"
-            className="tm-preview-recipe-review__close"
-            disabled={busy}
-            aria-label="Close Preview recipe review"
-            onClick={onClose}
-          >
-            ×
-          </button>
-        </header>
-
-        {generating ? (
-          <div className="tm-preview-recipe-progress" role="status" aria-live="polite">
-            <span className="tm-preview-recipe-progress__dot" aria-hidden="true" />
-            <div>
-              <strong>{generationStageLabel(state.stage)}</strong>
-              <p>{generationStageDetail(state.stage)}</p>
-            </div>
-          </div>
-        ) : null}
-
-        {state.status === 'FAILED' || state.status === 'NEEDS_INPUT' ? (
-          <div className="tm-preview-recipe-message" role="status">
-            <strong>{state.status === 'NEEDS_INPUT' ? 'More evidence is needed' : 'Draft not generated'}</strong>
-            <p>{state.message}</p>
-          </div>
-        ) : null}
-
-        {state.draft ? (
-          <div className="tm-preview-recipe-review__body">
-            <section className="tm-preview-recipe-editor" aria-label="Generated Preview YAML">
-              <div className="tm-preview-recipe-editor__head">
-                <div>
-                  <strong>Complete YAML</strong>
-                  <span>{edited ? 'Edited' : 'Generated'} · {yaml.split('\n').length} lines</span>
-                </div>
-                <code>.taskmonki/preview.yaml</code>
-              </div>
-              <textarea
-                aria-label="Preview recipe YAML"
-                value={yaml}
-                disabled={generating || busy}
-                spellCheck={false}
-                onChange={(event) => {
-                  setYaml(event.target.value);
-                  setEdited(event.target.value !== state.draft?.yaml);
-                  setValidation(undefined);
-                  setRegenerateArmed(false);
-                }}
-              />
-              {validation?.status === 'INVALID' ? (
-                <div className="tm-preview-recipe-validation" role="alert">
-                  {validation.issues.map((issue) => (
-                    <p key={issue.code}>{issue.message}</p>
-                  ))}
-                </div>
-              ) : null}
-            </section>
-            {report ? (
-              <PreviewRecipeGenerationReportView report={report} originalDraftOnly={edited} />
-            ) : null}
-          </div>
-        ) : report ? (
-          <PreviewRecipeGenerationReportView report={report} />
-        ) : null}
-
-        <footer className="tm-preview-recipe-review__footer">
-          <div className="tm-preview-recipe-review__secondary">
-            <button type="button" className="outline-button" disabled={busy} onClick={onClose}>
-              Close
-            </button>
-            {state.draft ? (
-              <button
-                type="button"
-                className="tm-preview-recipe-review__discard"
-                disabled={busy}
-                onClick={() => void discard()}
-              >
-                {discarding ? 'Discarding…' : 'Discard'}
-              </button>
-            ) : null}
-          </div>
-          <div className="tm-preview-recipe-review__primary">
-            {state.draft ? (
-              <>
-                {regenerateArmed ? <span>Your edits will be replaced.</span> : null}
-                <button
-                  type="button"
-                  className="outline-button"
-                  disabled={busy || generating}
-                  onClick={() => void regenerate()}
-                >
-                  {regenerateArmed ? 'Replace draft' : 'Regenerate'}
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={busy || generating}
-                  onClick={() => void validateAndAccept()}
-                >
-                  {accepting ? 'Checking…' : 'Accept & save recipe'}
-                </button>
-              </>
-            ) : !generating ? (
-              <button
-                type="button"
-                className="primary-button"
-                disabled={busy}
-                onClick={() => void regenerate()}
-              >
-                {state.status === 'EMPTY' ? 'Generate draft' : 'Try again'}
-              </button>
-            ) : null}
-          </div>
-        </footer>
-      </div>
-    </div>
-  );
-  return modalRootRef.current ? createPortal(dialog, modalRootRef.current) : dialog;
-}
-
-function PreviewRecipeGenerationReportView({
-  report,
-  originalDraftOnly = false
-}: {
-  report: import('../../shared/contracts').PreviewRecipeGenerationReport;
-  originalDraftOnly?: boolean;
-}) {
-  const sections = [
-    ['Evidence', report.evidence.map((item) => `${item.path} — ${item.finding}`)],
-    ['Assumptions', report.assumptions],
-    ['Omissions', report.omissions],
-    ['Public environment', report.publicEnvironmentDecisions.map((item) =>
-      `${item.key} — ${humanize(item.decision)}: ${item.reason}`
-    )],
-    ['Unresolved', report.unresolvedDecisions]
-  ] as const;
-  return (
-    <aside className="tm-preview-recipe-report" aria-label="Generation report">
-      <div>
-        <span>{originalDraftOnly ? 'Generation report · original draft' : 'Generation report'}</span>
-        <strong>{report.summary}</strong>
-      </div>
-      {sections.map(([label, items]) => items.length ? (
-        <section key={label}>
-          <h4>{label}</h4>
-          <ul>
-            {items.map((item, index) => <li key={`${label}-${index}`}>{item}</li>)}
-          </ul>
-        </section>
-      ) : null)}
-    </aside>
-  );
-}
-
-function generationStageLabel(stage?: PreviewRecipeGenerationSnapshot['stage']): string {
-  if (stage === 'GENERATING_DRAFT') return 'Agent is drafting the recipe';
-  if (stage === 'VALIDATING_DRAFT') return 'Validating against Preview';
-  return 'Preparing safe repository evidence';
-}
-
-function generationStageDetail(stage?: PreviewRecipeGenerationSnapshot['stage']): string {
-  if (stage === 'GENERATING_DRAFT') {
-    return 'Reading only the bounded evidence bundle and mapping proven commands, ports, and readiness.';
-  }
-  if (stage === 'VALIDATING_DRAFT') {
-    return 'The existing Preview parser is checking the complete generated YAML.';
-  }
-  return 'Likely secret-bearing, binary, generated, and oversized files are excluded before inspection.';
-}
-
-function usePreviewController(props: PreviewPanelProps): PreviewController {
-  const [busy, setBusy] = useState<Set<PreviewActionId>>(() => new Set());
-  const [resetBusy, setResetBusy] = useState<string>();
-  const [confirmation, setConfirmation] = useState<PreviewConfirmation>();
-  const [confirmationBusy, setConfirmationBusy] = useState(false);
-  const view = buildPreviewViewModel(props);
-  const resetGeneration = view.recoveryGeneration ?? view.activeGeneration ?? view.generation;
-  const resettableResources = selectPreviewResetResources(props, view);
-
-  const runAction = async (action: PreviewActionId) => {
-    if (
-      busy.has(action) ||
-      (busy.size > 0 && !(['OPEN', 'STOP'].includes(action) && busy.has('START')))
-    ) return;
-    setBusy((current) => new Set(current).add(action));
-    try {
-      if (action === 'RESOLVE') await props.onResolve(props.task.id);
-      if (action === 'APPROVE' && view.plan) {
-        await props.onApprove(props.task.id, view.plan.id, view.plan.executionDigest);
-      }
-      if (action === 'START') {
-        await props.onStart(props.task.id, view.plan?.executionPlan.selectedScenarioId);
-      }
-      const retryGeneration = view.recoveryGeneration ?? view.generation;
-      if (action === 'RETRY_SETUP' && retryGeneration && view.plan) {
-        await props.onRetrySetup(
-          props.task.id,
-          retryGeneration.id,
-          view.plan.executionPlan.selectedScenarioId
-        );
-      }
-      const openGeneration = selectPreviewActionGeneration(view, 'OPEN');
-      if (action === 'OPEN' && openGeneration) {
-        const route = openGeneration.routes.find((candidate) => candidate.state === 'ATTACHED');
-        if (route) await props.onOpen(props.task.id, openGeneration.id, route.id);
-      }
-      const stopGeneration = selectPreviewActionGeneration(view, 'STOP');
-      if (action === 'STOP' && stopGeneration) {
-        await props.onStop(props.task.id, stopGeneration.id);
-      }
-    } finally {
-      setBusy((current) => {
-        const next = new Set(current);
-        next.delete(action);
-        return next;
-      });
-    }
-  };
-
-  const runReset = async (resourceId: string) => {
-    const generation = resetGeneration;
-    const scenarioId = view.plan?.executionPlan.selectedScenarioId;
-    if (!generation || !scenarioId || resetBusy) return;
-    setResetBusy(resourceId);
-    try {
-      await props.onResetData(props.task.id, generation.id, resourceId, scenarioId);
-    } finally {
-      setResetBusy(undefined);
-    }
-  };
-
-  const requestAction = (action: PreviewActionModel, returnFocus?: HTMLElement) => {
-    if (action.id !== 'STOP' || action.label === 'Retry cleanup') {
-      void runAction(action.id);
-      return;
-    }
-    const destructive = action.label.includes('Delete Data');
-    const adapter = view.plan?.executionPlan.adapter;
-    const managedResourceIds = view.plan?.executionPlan.resources.map((resource) => resource.id) ?? [];
-    const hasManagedData = managedResourceIds.length > 0;
-    const managedResourceSummary = managedResourceIds.join(', ');
-    const body = destructive
-      ? adapter === 'COMPOSE'
-        ? 'Stops the stable Compose preview and permanently deletes every active or retained Task Monki-owned volume. External resources, images, and build cache are not changed.'
-        : hasManagedData
-          ? `Stops this preview and permanently deletes Task Monki-managed data for ${managedResourceSummary}. Attached dependencies are never changed.`
-          : 'Stops this preview and permanently removes its Task Monki-owned runtime. This plan has no managed database or cache data.'
-      : action.label === 'Cancel replacement'
-        ? 'Stops and verifies only the candidate generation. The current active preview stays available and its managed data is preserved.'
-        : 'Cancels startup and runs the recorded exact cleanup path. Preview-owned runtime and managed data covered by this generation may be deleted.';
-    setConfirmation(() => ({
-      title: destructive ? 'Stop preview & delete data?' : action.label,
-      body,
-      confirmLabel: destructive ? 'Stop & delete' : action.label,
-      danger: destructive || action.label !== 'Cancel replacement',
-      impacts: destructive ? [
-        {
-          tone: 'deleted',
-          detail: adapter === 'COMPOSE'
-            ? 'Task-scoped project containers, owned networks, owned volumes, and their data'
-            : hasManagedData
-              ? `Preview runtime plus managed data for ${managedResourceSummary}`
-              : 'Preview processes, routes, ports, and captured workspace'
-        },
-        {
-          tone: 'kept',
-          detail: 'Worktree, branch, approved plan, public bindings, and retained evidence'
-        },
-        {
-          tone: 'untouched',
-          detail: 'Attached dependencies and resources owned outside this preview'
-        }
-      ] : undefined,
-      requireText: destructive ? 'delete' : undefined,
-      returnFocus,
-      run: () => runAction('STOP')
-    }));
-  };
-
-  const requestReset = (resourceId: string, returnFocus?: HTMLElement) => {
-    setConfirmation(() => ({
-      title: `Reset ${resourceId}?`,
-      body: `Stops the complete preview, permanently deletes only ${resourceId}'s Task Monki-managed data, and cannot restore it if recreation or setup fails. Attached dependencies are never changed.`,
-      confirmLabel: `Reset ${resourceId}`,
-      danger: true,
-      impacts: [
-        { tone: 'deleted', detail: `${resourceId} managed data` },
-        { tone: 'kept', detail: 'Other managed data, worktree, stable route identities, and approval' },
-        { tone: 'untouched', detail: 'Attached dependencies' }
-      ],
-      returnFocus,
-      run: () => runReset(resourceId)
-    }));
-  };
-
-  const closeConfirmation = () => {
-    if (!confirmationBusy) setConfirmation(undefined);
-  };
-  const confirm = async () => {
-    if (!confirmation || confirmationBusy) return;
-    setConfirmationBusy(true);
-    try {
-      await confirmation.run();
-      setConfirmation(undefined);
-    } finally {
-      setConfirmationBusy(false);
-    }
-  };
-
-  return {
-    view,
-    busy,
-    resetBusy,
-    resettableResources,
-    confirmation,
-    confirmationBusy,
-    runAction,
-    requestAction,
-    requestReset,
-    closeConfirmation,
-    confirm
-  };
-}
-
-function usePreviewLogs(props: PreviewPanelProps, view: PreviewViewModel) {
-  const [value, setValue] = useState<string>();
-  const [selectedAttemptId, setSelectedAttemptId] = useState<string>();
-  const [selectedStream, setSelectedStream] = useState<'stdout' | 'stderr'>('stdout');
-  const selectedAttempt = props.attempts.find(
-    (attempt) => attempt.id === (selectedAttemptId ?? view.latestAttempt?.id)
-  );
-  const selectedArtifactId = selectedAttempt
-    ? selectedStream === 'stdout'
-      ? selectedAttempt.stdoutArtifactId
-      : selectedAttempt.stderrArtifactId
-    : undefined;
-  const selectedAttemptTerminal = selectedAttempt
-    ? ['SUCCEEDED', 'FAILED', 'STOPPED', 'RECOVERY_REQUIRED'].includes(selectedAttempt.state)
-    : true;
-  const terminalRef = useRef(selectedAttemptTerminal);
-  terminalRef.current = selectedAttemptTerminal;
-
-  useEffect(() => {
-    if (value === undefined || !selectedArtifactId) return;
-    let canceled = false;
-    let offset = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    setValue('');
-    const poll = async () => {
-      let continuePolling = true;
-      try {
-        const result = await props.onReadLog(props.task.id, selectedArtifactId, offset, 64 * 1024);
-        if (canceled) return;
-        offset = result.nextOffset;
-        if (result.chunk) setValue((current) => `${current ?? ''}${result.chunk}`);
-        if (result.endOfFile && terminalRef.current) continuePolling = false;
-      } catch {
-        continuePolling = false;
-      } finally {
-        if (!canceled && continuePolling) timer = setTimeout(() => void poll(), 750);
-      }
-    };
-    void poll();
-    return () => {
-      canceled = true;
-      if (timer) clearTimeout(timer);
-    };
-    // The selected artifact owns this polling lifecycle; callback identity is intentionally irrelevant.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedArtifactId, value === undefined, props.task.id]);
-
-  return {
-    value,
-    selectedAttempt,
-    selectedStream,
-    setSelectedAttemptId,
-    setSelectedStream,
-    open: () => {
-      if (!view.latestAttempt) return;
-      setSelectedAttemptId(view.latestAttempt.id);
-      setSelectedStream('stdout');
-      setValue('');
-    },
-    openAttempt: (attemptId: string) => {
-      setSelectedAttemptId(attemptId);
-      setSelectedStream('stdout');
-      setValue('');
-    },
-    close: () => setValue(undefined)
-  };
-}
-
-function PreviewPlanAuthority({
-  plan,
-  approval
-}: {
-  plan: PreviewPlanRecord;
-  approval?: PreviewApprovalRecord;
-}) {
-  const groups = buildPreviewPlanGroups(plan);
-  const topology = buildPlanTopology(plan);
-  const warnings = plan.executionPlan.adapter === 'COMPOSE'
-    ? plan.warnings.filter((warning) => !warning.startsWith('Native preview commands run'))
-    : plan.warnings;
-  const exactDetails = (
-    <div className="tm-preview-authority__groups">
-      {groups.map((group) => (
-        <section key={group.id} className="tm-preview-authority__group">
-          <h4>{group.label}</h4>
-          <div className="tm-preview-authority__rows">
-            {group.lines.map((line, index) => (
-              <PlanLine key={`${line.label}-${index}`} label={line.label} value={line.value} />
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
-  );
-
-  if (approval) {
-    return (
-      <section className="tm-preview-approved-plan" aria-label="Approved plan">
-        <details className="tm-preview-disclosure">
-          <summary>Approved plan details</summary>
-          {exactDetails}
-          <PlanWarnings warnings={warnings} />
-        </details>
-      </section>
-    );
-  }
-
-  return (
-    <div className="tm-preview-approval" aria-labelledby="preview-plan-authority">
-      <section className="tm-preview-surface tm-preview-plan-topology">
-        <h3 id="preview-plan-authority" className="tm-preview-surface__title">Execution plan</h3>
-        {topology.map((group) => (
-          <div key={group.id} className="tm-preview-topology-group">
-            <div className="tm-preview-topology-group__head">
-              <span>{group.label}</span>
-              {group.summary ? <small>{group.summary}</small> : null}
-            </div>
-            <div className="tm-preview-topology-group__rows">
-              {group.rows.map((row) => <PlanTopologyRow key={`${group.id}-${row.id}`} {...row} />)}
-            </div>
-          </div>
-        ))}
-        <details className="tm-preview-disclosure tm-preview-plan-topology__exact">
-          <summary>Exact commands, recipients, readiness, and cleanup</summary>
-          {exactDetails}
-        </details>
-      </section>
-      <aside className="tm-preview-approval__side" aria-label="Plan authority and advisories">
-        <PlanAuthorityCard plan={plan} />
-        {warnings.length > 0 ? <PlanAdvisories warnings={warnings} /> : null}
-        <PlanCleanupCard plan={plan} />
-      </aside>
-    </div>
-  );
-}
-
-interface PlanTopologyRowModel {
-  id: string;
-  title: string;
-  value: string;
-  meta?: string;
-}
-
-interface PlanTopologyGroupModel {
-  id: string;
-  label: string;
-  summary?: string;
-  rows: PlanTopologyRowModel[];
-}
-
-function buildPlanTopology(plan: PreviewPlanRecord): PlanTopologyGroupModel[] {
-  const execution = plan.executionPlan;
-  const result: PlanTopologyGroupModel[] = [];
-  if (execution.adapter === 'COMPOSE') {
-    const services = execution.compose?.inspection?.services ?? [];
-    if (services.length > 0) {
-      result.push({
-        id: 'application',
-        label: 'Compose services',
-        summary: `${services.length} ${services.length === 1 ? 'service' : 'services'}`,
-        rows: services.map((service) => ({
-          id: service.id,
-          title: service.id,
-          value: service.image ?? 'Local build',
-          meta: service.dependsOn.length > 0 ? `${service.dependsOn.length} dependencies` : 'root service'
-        }))
-      });
-    }
-  } else {
-    const application = [
-      ...execution.services.map((node) => ({
-        id: `service-${node.id}`,
-        title: node.label ?? node.id,
-        value: formatPlanCommand(node.command),
-        meta: execution.routes.some((route) => route.service === node.id) ? 'service · routed' : 'service'
-      })),
-      ...execution.workers.map((node) => ({
-        id: `worker-${node.id}`,
-        title: node.label ?? node.id,
-        value: formatPlanCommand(node.command),
-        meta: node.overlap === 'exclusive' ? 'worker · exclusive' : 'worker · overlap safe'
-      }))
-    ];
-    if (application.length > 0) {
-      result.push({
-        id: 'application',
-        label: 'Application',
-        summary: [
-          execution.services.length > 0 ? `${execution.services.length} ${execution.services.length === 1 ? 'service' : 'services'}` : undefined,
-          execution.workers.length > 0 ? `${execution.workers.length} ${execution.workers.length === 1 ? 'worker' : 'workers'}` : undefined
-        ].filter(Boolean).join(' · '),
-        rows: application
-      });
-    }
-    const scenario = execution.scenarios.find((candidate) => candidate.id === execution.selectedScenarioId);
-    const activeJobs = execution.jobs.filter(
-      (job) => job.role === 'generic' || scenario?.jobs.includes(job.id)
-    );
-    if (activeJobs.length > 0) {
-      result.push({
-        id: 'setup',
-        label: 'Setup jobs',
-        summary: 'First start only',
-        rows: activeJobs.map((job) => ({
-          id: job.id,
-          title: job.label ?? job.id,
-          value: formatPlanCommand(job.command),
-          meta: `${humanize(job.role)} · ${job.retrySafe ? 'retry-safe' : 'not retry-safe'}`
-        }))
-      });
-    }
-  }
-  if (execution.routes.length > 0) {
-    result.push({
-      id: 'routes',
-      label: 'Routes',
-      summary: 'Stable across replacements',
-      rows: execution.routes.map((route) => ({
-        id: route.id,
-        title: route.id,
-        value: `→ ${route.service}.${route.port}`,
-        meta: route.primary ? 'primary' : undefined
-      }))
-    });
-  }
-  if (execution.adapter === 'COMPOSE') {
-    const volumes = execution.compose?.inspection?.volumes.filter((volume) => !volume.external) ?? [];
-    if (volumes.length > 0) {
-      result.push({
-        id: 'data',
-        label: 'Managed data',
-        summary: 'Project-owned · persistent',
-        rows: volumes.map((volume) => ({
-          id: volume.name,
-          title: volume.name,
-          value: 'Compose volume',
-          meta: 'owned by this preview'
-        }))
-      });
-    }
-  } else {
-    const scenario = execution.scenarios.find((candidate) => candidate.id === execution.selectedScenarioId);
-    const resources = execution.resources.filter((resource) => scenario?.resources.includes(resource.id));
-    if (resources.length > 0) {
-      result.push({
-        id: 'data',
-        label: 'Managed data',
-        summary: 'Preview-owned · persistent',
-        rows: resources.map((resource) => ({
-          id: resource.id,
-          title: resource.id,
-          value: `${resource.type === 'postgres' ? 'PostgreSQL' : 'Redis'} · ${resource.image}`,
-          meta: 'generated credentials'
-        }))
-      });
-    }
-  }
-  if (execution.inputs?.length) {
-    result.push({
-      id: 'inputs',
-      label: 'Private inputs',
-      summary: 'Values excluded from approval',
-      rows: execution.inputs.map((input) => ({
-        id: input.id,
-        title: input.label ?? input.id,
-        value: input.id,
-        meta: 'encrypted · recipient-scoped'
-      }))
-    });
-  }
-  if (execution.attachments?.length) {
-    result.push({
-      id: 'attachments',
-      label: 'Attached dependencies',
-      summary: 'External · never managed',
-      rows: execution.attachments.map((attachment) => ({
-        id: attachment.id,
-        title: attachment.label ?? attachment.id,
-        value: formatAttachmentTarget(attachment),
-        meta: `${attachment.type.toUpperCase()} · non-owned`
-      }))
-    });
-  }
-  return result;
-}
-
-function PlanTopologyRow({ title, value, meta }: PlanTopologyRowModel) {
-  return (
-    <div className="tm-preview-topology-row">
-      <span aria-hidden="true">›</span>
-      <code>{title}</code>
-      <code>{value}</code>
-      {meta ? <small>{meta}</small> : <span />}
-    </div>
-  );
-}
-
-function PlanAuthorityCard({ plan }: { plan: PreviewPlanRecord }) {
-  const identity = plan.ociCapability?.identity;
-  const rows = plan.executionPlan.adapter === 'COMPOSE'
-    ? [
-        { label: 'Engine', value: identity ? `${identity.contextName} · ${identity.operatingSystem}/${identity.architecture}` : 'Selected local OCI engine' },
-        { label: 'Configuration', value: plan.executionPlan.compose?.files.join(', ') ?? 'compose.yaml' },
-        { label: 'Project', value: 'One task-scoped serialized project' },
-        { label: 'Environment', value: 'Repository Compose configuration · approved as inspected' }
-      ]
-    : [
-        { label: 'Engine', value: identity ? `${identity.contextName} · ${identity.operatingSystem}/${identity.architecture}` : 'Native host' },
-        { label: 'Runs as', value: 'Your local user · not sandboxed' },
-        { label: 'Network', value: 'Unrestricted for launched processes' },
-        { label: 'Environment', value: 'Repository literals + generated and private bindings' }
-      ];
-  return (
-    <section className="tm-preview-surface tm-preview-authority-card">
-      <h3 className="tm-preview-surface__title">Authority</h3>
-      <div className="tm-preview-authority-card__rows">
-        {rows.map((row) => <AuthorityRow key={row.label} {...row} />)}
-      </div>
-    </section>
-  );
-}
-
-function PlanAdvisories({ warnings }: { warnings: string[] }) {
-  return (
-    <section className="tm-preview-surface tm-preview-advisories">
-      <h3 className="tm-preview-surface__title">Advisories</h3>
-      <ul className="tm-preview-advisories__list">
-        {warnings.map((warning) => (
-          <li key={warning}>{warning}</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function PlanCleanupCard({ plan }: { plan: PreviewPlanRecord }) {
-  const managedResourceIds = plan.executionPlan.resources.map((resource) => resource.id);
-  const rows = [
-    {
-      label: 'Stop preview',
-      value: plan.executionPlan.adapter === 'COMPOSE'
-        ? 'Deletes the exact task-scoped project and its owned volumes'
-        : managedResourceIds.length > 0
-          ? `Deletes exact preview runtime and managed data for ${managedResourceIds.join(', ')}`
-          : 'Deletes exact preview runtime; this plan has no managed data'
-    },
-    ...(plan.executionPlan.resources.length > 0
-      ? [{ label: 'Reset', value: 'Deletes one selected managed resource and preserves the rest' }]
-      : []),
-    {
-      label: 'Replace',
-      value: plan.executionPlan.adapter === 'COMPOSE'
-        ? 'Serializes project activation after build and inspection'
-        : managedResourceIds.length > 0
-          ? `Keeps managed data for ${managedResourceIds.join(', ')} and cuts routes over only after readiness`
-          : 'Cuts routes over only after readiness; no managed data is involved'
-    },
-    { label: 'Attached', value: 'Never stopped, reset, deleted, or otherwise managed' }
-  ];
-  return (
-    <section className="tm-preview-surface tm-preview-authority-card">
-      <h3 className="tm-preview-surface__title">Cleanup contract</h3>
-      <div className="tm-preview-authority-card__rows">
-        {rows.map((row) => <AuthorityRow key={row.label} {...row} />)}
-      </div>
-    </section>
-  );
-}
-
-function AuthorityRow({ label, value }: { label: string; value: string }) {
-  return <div><span>{label}</span><p>{value}</p></div>;
-}
-
-function formatPlanCommand(argv: string[]): string {
-  return argv.map((argument) => JSON.stringify(argument)).join(' ');
-}
-
 function PreviewApplicationSection({
   plan,
   view,
@@ -1867,7 +967,7 @@ function PreviewApplicationSection({
               <OperationalRow
                 key={attempt.id}
                 title={attempt.nodeId}
-                kind={humanize(attempt.kind)}
+                kind={humanizeEnum(attempt.kind)}
                 state={attempt.state}
                 onLogs={() => onOpenLog(attempt.id)}
               />
@@ -1989,9 +1089,9 @@ function PreviewTechnicalDetails({
         <p>Captured {formatDate(current.createdAt)}.</p>
         <dl className="tm-preview-keyvalues">
           <div><dt>Generation</dt><dd><code>{shortId(current.id)}</code></dd></div>
-          <div><dt>State</dt><dd>{humanize(current.state)}</dd></div>
+          <div><dt>State</dt><dd>{humanizeEnum(current.state)}</dd></div>
           <div><dt>Source</dt><dd><code>{shortId(current.sourceHeadSha)}</code></dd></div>
-          <div><dt>Routing</dt><dd>{humanize(current.routingState)}</dd></div>
+          <div><dt>Routing</dt><dd>{humanizeEnum(current.routingState)}</dd></div>
         </dl>
         {currentRuntime.length > 0 ? (
           <details className="tm-preview-disclosure">
@@ -2016,7 +1116,7 @@ function PreviewTechnicalDetails({
                 <OperationalRow
                   key={generation.id}
                   title={shortId(generation.id)}
-                  kind={humanize(generation.routingState)}
+                  kind={humanizeEnum(generation.routingState)}
                   detail={formatDate(generation.updatedAt)}
                   state={generation.state}
                 />
@@ -2121,12 +1221,12 @@ function PreviewBindingsSection({
               key={attachment.id}
               title={attachment.label ?? attachment.id}
               kind={attachment.type.toUpperCase()}
-              detail={formatAttachmentTarget(
+              detail={formatPreviewAttachmentTarget(
                 attachment,
                 attachment.target.type === 'local' ? localBinding?.target : undefined
               )}
               state={evidence
-                ? evidence.status === 'PASSED' ? 'Startup check passed' : humanize(evidence.failureCode ?? 'Check failed')
+                ? evidence.status === 'PASSED' ? 'Startup check passed' : humanizeEnum(evidence.failureCode ?? 'Check failed')
                 : attachment.check
                   ? startupPending ? 'Checks once at startup' : 'Not checked this generation'
                   : 'No check declared'}
@@ -2842,7 +1942,7 @@ function PreviewLogDock({
           >
             {attempts.map((attempt) => (
               <option key={attempt.id} value={attempt.id}>
-                {attempt.nodeId} · attempt {attempt.attempt} · {humanize(attempt.state)}
+                {attempt.nodeId} · attempt {attempt.attempt} · {humanizeEnum(attempt.state)}
               </option>
             ))}
           </select>
@@ -2872,18 +1972,6 @@ function SectionHeading({ id, title, detail }: { id: string; title: string; deta
   );
 }
 
-function PlanWarnings({ warnings }: { warnings: string[] }) {
-  if (warnings.length === 0) return null;
-  return (
-    <details className="tm-preview-disclosure tm-preview-authority__warning-disclosure">
-      <summary>Plan warnings · {warnings.length}</summary>
-      <div className="tm-preview-authority__warnings">
-        {warnings.map((warning) => <p key={warning}>{warning}</p>)}
-      </div>
-    </details>
-  );
-}
-
 function OperationalRow({
   title,
   kind,
@@ -2904,7 +1992,7 @@ function OperationalRow({
         <span>{kind}</span>
         {detail ? <code>{detail}</code> : null}
       </div>
-      <span className="tm-preview-row__state">{humanize(state)}</span>
+      <span className="tm-preview-row__state">{humanizeEnum(state)}</span>
       {onLogs ? (
         <button
           type="button"
@@ -2916,15 +2004,6 @@ function OperationalRow({
           <TerminalIcon />
         </button>
       ) : null}
-    </div>
-  );
-}
-
-function PlanLine({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="tm-preview-planline">
-      <span>{label}</span>
-      <code>{value}</code>
     </div>
   );
 }
@@ -3090,29 +2169,6 @@ function isActionDisabled(controller: PreviewController, action: PreviewActionId
   );
 }
 
-function formatAttachmentTarget(
-  attachment: PreviewAttachmentPlan,
-  localTarget?: PreviewResolvedAttachmentTarget
-): string {
-  const target = localTarget ?? (attachment.target.type === 'local' ? undefined : attachment.target);
-  const prefix = localTarget ? 'Local binding · ' : '';
-  if (!target) return 'Local public target required';
-  if (target.type === 'task-preview-route') {
-    return `${prefix}Task ${target.targetTaskId} · route ${target.routeId}`;
-  }
-  if (target.type === 'endpoint') {
-    if (
-      'scheme' in target && typeof target.scheme === 'string' &&
-      'basePath' in target && typeof target.basePath === 'string'
-    ) {
-      return `${prefix}${target.scheme}://${target.host}:${target.port}${target.basePath}`;
-    }
-    const database = 'database' in target ? `/${target.database}` : '';
-    return `${prefix}${target.host}:${target.port}${database}`;
-  }
-  return 'Local public target required';
-}
-
 function privateInputRecipients(plan: PreviewPlanRecord, inputId: string): string[] {
   const recipients = new Set<string>();
   for (const job of plan.executionPlan.jobs) {
@@ -3171,10 +2227,6 @@ function uniqueGenerations(
     seen.add(generation.id);
     return true;
   });
-}
-
-function humanize(value: string): string {
-  return value.toLowerCase().replace(/_/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function shortId(value: string): string {

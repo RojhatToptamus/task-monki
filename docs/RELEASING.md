@@ -33,8 +33,10 @@ assets casually; keep the original logo geometry intact.
 Run the full repository checks:
 
 ```sh
+npm run check:architecture
 npm run typecheck
 npm test
+npm run test:renderer:dom
 npm run build
 npm run check:codex-protocol
 git diff --check

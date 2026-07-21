@@ -8,6 +8,7 @@ import {
   spawnPortable,
   terminatePortableProcessTree
 } from '../../process/portableChildProcess';
+import { boundedPreviewFailure as boundedError } from '../PreviewFailure';
 
 const MAX_OCI_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const OCI_COMMAND_TIMEOUT_MS = 15_000;
@@ -422,8 +423,4 @@ function sha256(value: string): string {
 
 function isMissingExecutable(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
-}
-
-function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ').slice(0, 512);
 }

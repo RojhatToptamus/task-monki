@@ -1,10 +1,10 @@
-import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { TITLEBAR_HEIGHT } from '../../electron/windowChrome';
+import { readRendererStyles } from '../../testSupport/rendererStyles';
 
 describe('window chrome layout styles', () => {
   it('keeps app controls centered in the titlebar height used by native chrome', async () => {
-    const css = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+    const css = await readRendererStyles();
     const rule = css.match(/\.tm-titlebar\s*\{(?<body>[^}]*)\}/);
     const body = rule?.groups?.body ?? '';
 
@@ -13,7 +13,7 @@ describe('window chrome layout styles', () => {
   });
 
   it('gives the New Task canvas a full-height header and bounded content row', async () => {
-    const css = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+    const css = await readRendererStyles();
     const panelHeader =
       css.match(/\.slideover__header\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? '';
     const workspace =

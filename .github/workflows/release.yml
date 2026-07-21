@@ -38,9 +38,13 @@ jobs:
 
       - run: npm run check:codex-protocol
 
+      - run: npm run check:architecture
+
       - run: npm run typecheck
 
       - run: npm test
+
+      - run: npm run test:renderer:dom
 
       - name: Build unsigned artifacts
         run: ${{ matrix.command }}

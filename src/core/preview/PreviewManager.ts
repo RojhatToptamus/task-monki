@@ -20,6 +20,7 @@ import type {
 import { AppEventBus } from '../runner/AppEventBus';
 import { FileTaskStore } from '../storage/FileTaskStore';
 import { PreviewApprovalPolicy } from './PreviewApprovalPolicy';
+import { boundedPreviewFailure } from './PreviewFailure';
 import { PreviewGateway } from './PreviewGateway';
 import { cleanupPreviewGenerationRuntime } from './PreviewGenerationCleanup';
 import { PreviewGraph, type RunningPreviewGraph } from './PreviewGraph';
@@ -33,7 +34,7 @@ import { NativeServiceRuntime } from './runtime/NativeServiceRuntime';
 import { PreviewOpenService } from './runtime/PreviewOpenService';
 import { OciResourceRuntime } from './runtime/OciResourceRuntime';
 import { PreviewJobCompletionAmbiguousError } from './runtime/NativeJobRunner';
-import { activePreviewInputIds } from './PreviewRecipeLoader';
+import { activePreviewInputIds } from './PreviewExecutionAuthority';
 import { PreviewPrivateVault, type PreviewPrivateLease } from './private/PreviewPrivateVault';
 import {
   PreviewComposeActivationError,
@@ -1344,7 +1345,7 @@ function stablePreviewKey(taskId: string): string {
 }
 
 function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 1_024);
+  return boundedPreviewFailure(error, { maxLength: 1_024 });
 }
 
 function validateLocalAttachmentTarget(

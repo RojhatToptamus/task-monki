@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/contracts';
 import { canonicalProspectivePath, isPathWithin } from '../PreviewPaths';
 import { buildPreviewEnvironment } from '../PreviewEnvironment';
+import { boundedPreviewFailure } from '../PreviewFailure';
 import { FileTaskStore } from '../../storage/FileTaskStore';
 import {
   digestCommand,
@@ -167,7 +168,7 @@ export class NativeJobRunner {
         ...resource,
         state: 'CLEANUP_INCOMPLETE',
         native: owned.identity,
-        cleanupError: (error instanceof Error ? error.message : String(error)).slice(0, 512),
+        cleanupError: boundedPreviewFailure(error),
         updatedAt: endedAt
       });
       throw new PreviewJobCompletionAmbiguousError(

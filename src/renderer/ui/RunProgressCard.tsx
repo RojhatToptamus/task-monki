@@ -4,7 +4,7 @@ import { PlanList, type PlanListMarker, type PlanStepMarker } from './Plan';
 import { RunActivityTimeline } from './RunActivityTimeline';
 import { RunHeader } from './RunHeader';
 import { dotStyle } from './StatusBadge';
-import type { Tone } from './taskView';
+import type { Tone } from '../model/viewTypes';
 
 export function RunProgressCard({
   progress,

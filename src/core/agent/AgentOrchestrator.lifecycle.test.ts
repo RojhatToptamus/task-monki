@@ -43,7 +43,7 @@ import {
 } from './opencode/opencodeCapabilities';
 import { addTestRepository } from '../../testSupport/repositoryFixture';
 
-describe('AgentOrchestrator Phase 4', () => {
+describe('AgentOrchestrator lifecycle and recovery', () => {
   it('rejects image delivery before creating a run when the selected model is text-only', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-text-model-'));
     const repositoryDir = path.join(dir, 'repository');
@@ -124,14 +124,14 @@ describe('AgentOrchestrator Phase 4', () => {
     expect(adapter.lastStart?.settings?.modelProvider).toBe('openai');
   });
   it('preserves session lineage across steer, continue, and detached review', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-lifecycle-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     const store = new FileTaskStore(path.join(dir, 'store'));
     const adapter = new Phase4Adapter(store);
     const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter);
     const task = await store.createTask({
-      title: 'Phase 4',
+      title: 'Agent lifecycle',
       prompt: 'Implement continuation controls.',
       repositoryId: (await addTestRepository(store, repositoryDir)).id,
       agentSettings: { model: 'test-model', reasoningEffort: 'high' }
@@ -247,7 +247,7 @@ describe('AgentOrchestrator Phase 4', () => {
   });
 
   it('records ambiguous turn submission as recovery-required without false failure', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-phase4-ambiguous-'));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'task-monki-agent-ambiguous-start-'));
     const repositoryDir = path.join(dir, 'repository');
     await fs.mkdir(repositoryDir);
     const store = new FileTaskStore(path.join(dir, 'store'));
@@ -788,7 +788,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter, {
       allowNetworkAccess: false
     });
-    const { task, iteration, worktree } = await createPhase4TaskContext(
+const { task, iteration, worktree } = await createTaskContext(
       store,
       dir,
       safeSettings
@@ -825,7 +825,7 @@ describe('AgentOrchestrator Phase 4', () => {
     const orchestrator = new AgentOrchestrator(store, new AppEventBus(), adapter, {
       allowNetworkAccess: false
     });
-    const { task, iteration, worktree } = await createPhase4TaskContext(
+    const { task, iteration, worktree } = await createTaskContext(
       store,
       dir,
       safeSettings
@@ -876,7 +876,7 @@ describe('AgentOrchestrator Phase 4', () => {
       approvalPolicy: 'never',
       approvalsReviewer: 'user'
     };
-    const { task, iteration, worktree } = await createPhase4TaskContext(
+    const { task, iteration, worktree } = await createTaskContext(
       store,
       dir,
       safeSettings
@@ -1243,12 +1243,12 @@ class Phase4Adapter implements AgentRuntimeAdapter {
     return Promise.resolve({
       runtime: this.descriptor,
       readiness: createRuntimeReadiness('READY', 'Test runtime is ready.'),
-      capabilities: phase4Capabilities(),
+      capabilities: runtimeCapabilities(),
     });
   }
 
   capabilities(): Promise<AgentRuntimeCapabilities> {
-    return Promise.resolve(phase4Capabilities());
+    return Promise.resolve(runtimeCapabilities());
   }
 
   listModels(): Promise<AgentModel[]> {
@@ -1412,7 +1412,7 @@ class Phase4Adapter implements AgentRuntimeAdapter {
   }
 }
 
-function phase4Capabilities(): AgentRuntimeCapabilities {
+function runtimeCapabilities(): AgentRuntimeCapabilities {
   return {
     ...codexCapabilities(),
     promptRefinement: {
@@ -1422,7 +1422,7 @@ function phase4Capabilities(): AgentRuntimeCapabilities {
   };
 }
 
-async function createPhase4TaskContext(
+async function createTaskContext(
   store: FileTaskStore,
   dir: string,
   settings: AgentExecutionSettings

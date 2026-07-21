@@ -5,6 +5,7 @@ import type {
   PreviewOciObjectIdentity,
   PreviewOciResourcePlan
 } from '../../../shared/contracts';
+export { boundedPreviewFailure as boundedError } from '../PreviewFailure';
 
 export type OciObjectKind = 'container' | 'network' | 'volume';
 
@@ -164,10 +165,6 @@ export function createObjectIdentity(input: {
 export function asRecord(value: unknown, context: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${context} is invalid.`);
   return value as Record<string, unknown>;
-}
-
-export function boundedError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ').slice(0, 512);
 }
 
 export function isArchitectureMismatch(error: unknown): boolean {

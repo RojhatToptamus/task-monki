@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { NavItem } from './App';
+import { NavItem } from './AppNavigation';
 
 describe('collapsed navigation semantics', () => {
   it('describes a task count once without putting it in the item name', () => {
