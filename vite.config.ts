@@ -82,7 +82,7 @@ export default defineConfig(() => {
       // real subprocesses. Bound file-level concurrency so the suite tests
       // lifecycle behavior instead of saturating the host process table.
       minWorkers: 1,
-      maxWorkers: 4,
+      maxWorkers: 2,
       include: [
         'src/**/*.{test,spec}.{ts,tsx}',
         'scripts/**/*.{test,spec}.mjs'

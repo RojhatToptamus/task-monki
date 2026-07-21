@@ -95,7 +95,10 @@ import {
   type VerifiedTaskAttachment
 } from './AttachmentFileStore';
 import { validateCurrentStoreRecords } from './currentStoreValidation';
-import { normalizeLoadedState } from './currentStoreNormalization';
+import {
+  normalizeLoadedState,
+  normalizePersistedStateBeforeValidation
+} from './currentStoreNormalization';
 import {
   STORE_OWNERSHIP_LEASE_FILE,
   acquireStoreOwnershipLease,
@@ -688,12 +691,14 @@ export class FileTaskStore {
         await this.persist();
       } else {
         const persisted = JSON.parse(raw) as PersistedState;
-        const normalized = normalizeLoadedState(requireCurrentState(persisted));
+        const repaired = normalizePersistedStateBeforeValidation(persisted);
+        const normalized = normalizeLoadedState(requireCurrentState(repaired.state));
         this.state = normalized.state;
         await this.attachmentFiles.reconcile(this.state.attachments);
         await this.reconcileArtifacts();
         const prunedServerIds = this.pruneUnreferencedTerminalAgentServers();
         if (
+          repaired.changed ||
           normalized.changed ||
           prunedServerIds.length > 0
         ) {

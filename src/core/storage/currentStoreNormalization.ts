@@ -6,6 +6,7 @@ import type {
   Task
 } from '../../shared/contracts';
 import {
+  TASK_STORE_SCHEMA_VERSION,
   getImplementationRetryReason,
   isImplementationRunMode
 } from '../../shared/contracts';
@@ -14,6 +15,51 @@ import {
   agentReviewStatusFromResult,
   parseAgentReviewResult
 } from '../review/AgentReviewContract';
+
+type UnvalidatedCurrentStore = {
+  schemaVersion?: unknown;
+  reviewRollups?: unknown;
+};
+
+/**
+ * Repairs narrowly identified writer defects before current-schema validation.
+ * Unknown shapes and all other malformed records remain fail-closed.
+ */
+export function normalizePersistedStateBeforeValidation<
+  T extends UnvalidatedCurrentStore
+>(state: T): { state: T; changed: boolean } {
+  if (
+    state.schemaVersion !== TASK_STORE_SCHEMA_VERSION ||
+    !Array.isArray(state.reviewRollups)
+  ) {
+    return { state, changed: false };
+  }
+
+  let changed = false;
+  const reviewRollups = state.reviewRollups.map((value) => {
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      (value as Record<string, unknown>).reviewDecision !== ''
+    ) {
+      return value;
+    }
+    changed = true;
+    const { reviewDecision: _blankDecision, ...record } = value as Record<
+      string,
+      unknown
+    >;
+    return record;
+  });
+
+  return changed
+    ? {
+        state: { ...state, reviewRollups } as T,
+        changed: true
+      }
+    : { state, changed: false };
+}
 
 /** Applies explicit, idempotent repairs to a validated current-schema state. */
 export function normalizeLoadedState(

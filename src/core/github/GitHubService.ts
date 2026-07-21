@@ -443,7 +443,7 @@ export function parseReviewRollup(
     pullRequestNumber,
     headSha,
     status,
-    reviewDecision: decision,
+    ...(decision ? { reviewDecision: decision } : {}),
     raw
   };
 }
