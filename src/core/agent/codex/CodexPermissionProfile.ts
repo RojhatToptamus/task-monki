@@ -128,8 +128,10 @@ export function codexPermissionProfileConfig(input: {
   settings: AgentExecutionSettings;
   worktreePath: string;
   attachmentPaths?: readonly string[];
+  additionalReadOnlyPaths?: readonly string[];
 }): Record<string, JsonValue> {
   const attachmentPaths = input.attachmentPaths ?? [];
+  const additionalReadOnlyPaths = input.additionalReadOnlyPaths ?? [];
   if (attachmentPaths.length > 0 && input.settings.sandbox === 'DANGER_FULL_ACCESS') {
     throw new Error(
       'Attachments require Ask for approval, Approve for me, or read-only access. Full access cannot protect managed attachment files.'
@@ -141,6 +143,12 @@ export function codexPermissionProfileConfig(input: {
     ':minimal': 'read',
     [worktreePath]: input.settings.sandbox === 'READ_ONLY' ? 'read' : 'write'
   };
+  for (const candidate of additionalReadOnlyPaths) {
+    const readOnlyPath = requireNarrowAbsolute(candidate, 'read-only root');
+    if (!isSamePath(readOnlyPath, worktreePath)) {
+      filesystem[readOnlyPath] = 'read';
+    }
+  }
   for (const candidate of attachmentPaths) {
     const attachmentPath = requireAbsolute(candidate, 'attachment');
     if (

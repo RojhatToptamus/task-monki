@@ -65,6 +65,36 @@ describe('Codex permission profile', () => {
     });
   });
 
+  it('adds an exact read-only Git common directory without widening the worktree grant', () => {
+    const worktree = nativeAbsolute('worktrees', 'task with spaces');
+    const gitCommonDir = nativeAbsolute('repositories', 'main repo', '.git');
+    const config = codexPermissionProfileConfig({
+      sessionId: 'review-session',
+      settings: { sandbox: 'READ_ONLY', networkAccess: false },
+      worktreePath: worktree,
+      additionalReadOnlyPaths: [gitCommonDir]
+    }) as {
+      permissions: Record<
+        string,
+        { filesystem: Record<string, 'read' | 'write'> }
+      >;
+    };
+
+    expect(config.permissions['task_monki_review-session']?.filesystem).toEqual({
+      ':minimal': 'read',
+      [worktree]: 'read',
+      [gitCommonDir]: 'read'
+    });
+    expect(() =>
+      codexPermissionProfileConfig({
+        sessionId: 'review-session',
+        settings: { sandbox: 'READ_ONLY' },
+        worktreePath: worktree,
+        additionalReadOnlyPaths: ['relative/.git']
+      })
+    ).toThrow('must be absolute');
+  });
+
   it('rejects Full access only for attachments and validates managed paths', () => {
     const worktree = nativeAbsolute('worktrees', 'task-1');
     const attachment = nativeAbsolute('attachments', 'file.txt');

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { RunRecord } from '../../../shared/contracts';
 import { addTestRepository } from '../../../testSupport/repositoryFixture';
+import { git } from '../../git/gitCli';
 import { AgentOrchestrator } from '../AgentOrchestrator';
 import { AgentMutationAmbiguousError } from '../AgentRuntimeAdapter';
 import { createAgentSessionAccessEpoch } from '../AgentRuntimeOwnership';
@@ -3147,7 +3148,8 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await orchestrator.initialize();
     const { task, iteration, worktree } = await createTaskContext(store, dir, {
-      withTextAttachment: true
+      withTextAttachment: true,
+      linkedWorktree: true
     });
     const canonicalReviewAttachmentPath = (await store.verifyTaskAttachments(task.id))[0]!
       .absolutePath;
@@ -3162,7 +3164,11 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
     });
     await sourceTerminal;
 
-    const reviewSettings = { ...task.agentSettings, reasoningEffort: 'low' };
+    const reviewSettings = {
+      ...task.agentSettings,
+      reasoningEffort: 'low',
+      sandbox: 'READ_ONLY' as const
+    };
     const reviewRun = await orchestrator.startReview({
       task,
       iteration,
@@ -3206,6 +3212,53 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
         }
       )?.config?.model_reasoning_effort
     ).toBe('low');
+    const reviewConfig = (
+      reviewFork?.params as {
+        config?: {
+          default_permissions?: string;
+          allow_login_shell?: boolean;
+          shell_environment_policy?: {
+            inherit?: string;
+            set?: Record<string, string>;
+          };
+          permissions?: Record<
+            string,
+            { filesystem?: Record<string, 'read' | 'write'> }
+          >;
+        } | null;
+      }
+    )?.config;
+    const reviewProfileId = reviewConfig?.default_permissions;
+    const canonicalCommonDir = await fs.realpath(
+      path.join(dir, 'repository', '.git')
+    );
+    expect(
+      reviewProfileId
+        ? reviewConfig?.permissions?.[reviewProfileId]?.filesystem
+        : undefined
+    ).toMatchObject({
+      [worktree.worktreePath]: 'read',
+      [canonicalCommonDir]: 'read'
+    });
+    expect(reviewConfig?.allow_login_shell).toBe(false);
+    expect(reviewConfig?.shell_environment_policy).toMatchObject({
+      inherit: 'all',
+      set: {
+        HOME: worktree.worktreePath,
+        XDG_CONFIG_HOME: path.join(worktree.worktreePath, '.config'),
+        GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+        GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'core.excludesFile',
+        GIT_CONFIG_VALUE_0: process.platform === 'win32' ? 'NUL' : '/dev/null'
+      }
+    });
+    const reviewPath = reviewConfig?.shell_environment_policy?.set?.PATH;
+    expect(reviewPath).toEqual(expect.any(String));
+    if (process.platform === 'darwin') {
+      expect(reviewPath?.split(path.delimiter)[0]).not.toBe('/usr/bin');
+    }
     const reviewInstructions = (
       reviewFork?.params as { developerInstructions?: string } | undefined
     )?.developerInstructions;
@@ -3223,6 +3276,60 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 
     await orchestrator.interruptRun(reviewRun.id);
     await waitForRunStatus(store, reviewRun.id, 'INTERRUPTED');
+    await orchestrator.shutdown();
+  });
+
+  it('fails a linked-worktree review before provider launch when Git metadata is missing', async () => {
+    const dir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'task-monki-review-missing-git-metadata-')
+    );
+    const executable = await writeFakeCodexExecutable(
+      dir,
+      'review-interrupt-no-active'
+    );
+    const store = new FileTaskStore(path.join(dir, 'store'));
+    const events = new AppEventBus();
+    const adapter = new CodexAppServerAdapter(store, events, {
+      cwd: dir,
+      executable,
+      requestTimeoutMs: 2_000,
+      restartDelaysMs: []
+    });
+    const orchestrator = new AgentOrchestrator(store, events, adapter);
+    await orchestrator.initialize();
+    const { task, iteration, worktree } = await createTaskContext(store, dir, {
+      linkedWorktree: true
+    });
+    const sourceTerminal = waitForAppEvent(events, 'run.terminal');
+    const sourceRun = await orchestrator.startTurn({
+      task,
+      iteration,
+      worktree,
+      mode: 'IMPLEMENTATION',
+      prompt: task.prompt,
+      settings: task.agentSettings
+    });
+    await sourceTerminal;
+    await fs.unlink(path.join(worktree.worktreePath, '.git'));
+
+    await expect(
+      orchestrator.startReview({
+        task,
+        iteration,
+        worktree,
+        sourceRun,
+        target: { type: 'UNCOMMITTED_CHANGES' },
+        settings: { ...task.agentSettings, sandbox: 'READ_ONLY' }
+      })
+    ).rejects.toThrow('Cannot resolve trusted Git metadata for agent review');
+
+    const server = (await store.snapshot()).agentServers[0];
+    const journal = await fs.readFile(server.protocolJournalPath, 'utf8');
+    const methods = readOutboundMessages(journal).map(
+      (message) => message.method
+    );
+    expect(methods).not.toContain('thread/fork');
+    expect(methods).not.toContain('review/start');
     await orchestrator.shutdown();
   });
 
@@ -4007,10 +4114,38 @@ describe('CodexAppServerAdapter', { timeout: APP_SERVER_INTEGRATION_TIMEOUT_MS }
 async function createTaskContext(
   store: FileTaskStore,
   dir: string,
-  options: { withTextAttachment?: boolean } = {}
+  options: { withTextAttachment?: boolean; linkedWorktree?: boolean } = {}
 ) {
   const repositoryDir = path.join(dir, 'repository');
   await fs.mkdir(repositoryDir, { recursive: true });
+  await git(repositoryDir, ['init']);
+  await git(repositoryDir, [
+    'config',
+    'user.email',
+    'codex-adapter@example.invalid'
+  ]);
+  await git(repositoryDir, ['config', 'user.name', 'Codex Adapter Test']);
+  await fs.writeFile(
+    path.join(repositoryDir, 'README.md'),
+    '# Adapter fixture\n',
+    'utf8'
+  );
+  await git(repositoryDir, ['add', 'README.md']);
+  await git(repositoryDir, ['commit', '-m', 'Initial adapter fixture']);
+  const baseSha = (await git(repositoryDir, ['rev-parse', 'HEAD'])).trim();
+  const worktreePath = options.linkedWorktree
+    ? path.join(dir, 'review worktree')
+    : repositoryDir;
+  if (options.linkedWorktree) {
+    await git(repositoryDir, [
+      'worktree',
+      'add',
+      '-b',
+      'codex/fake-review-worktree',
+      worktreePath,
+      baseSha
+    ]);
+  }
   let attachmentDraftId: string | undefined;
   if (options.withTextAttachment) {
     const draft = await store.createAttachmentDraft();
@@ -4037,8 +4172,8 @@ async function createTaskContext(
   const { iteration, worktree } = await store.createIterationAndWorktree({
     task,
     branchName: 'codex/fake-approval',
-    worktreePath: repositoryDir,
-    baseSha: 'base'
+    worktreePath,
+    baseSha
   });
   return { task, iteration, worktree };
 }

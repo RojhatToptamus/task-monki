@@ -113,6 +113,10 @@ import {
   assertCodexAttachmentExternalToolsDisabled,
   normalizeCodexExternalToolSettings
 } from './CodexToolConfig';
+import {
+  resolveReviewGitExecutablePath,
+  resolveReviewGitMetadata
+} from '../../git/ReviewGitMetadata';
 import type { ServerNotification } from './protocol/generated/ServerNotification';
 import type { ServerRequest } from './protocol/generated/ServerRequest';
 import type { Model } from './protocol/generated/v2/Model';
@@ -129,6 +133,7 @@ import type { CollabAgentStatus } from './protocol/generated/v2/CollabAgentStatu
 import type { SubAgentActivityKind } from './protocol/generated/v2/SubAgentActivityKind';
 import type { TurnStatus } from './protocol/generated/v2/TurnStatus';
 import type { ReviewTarget } from './protocol/generated/v2/ReviewTarget';
+import type { JsonValue } from './protocol/generated/serde_json/JsonValue';
 import {
   describeAccount,
   formatFinalArtifact,
@@ -795,12 +800,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const attachmentPaths = attachments
       .map((attachment) => attachment.path)
       .sort((left, right) => left.localeCompare(right));
-    const config = codexPermissionProfileConfig({
-      sessionId: session.id,
+    const config = await this.permissionProfileConfigForSession(
+      session,
       settings,
-      worktreePath: session.worktreePath,
       attachmentPaths
-    });
+    );
     const inboundFailureGeneration =
       this.inboundMaterializationFailureGeneration;
     let response;
@@ -1334,11 +1338,10 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: target.worktreePath,
         approvalPolicy: toApprovalPolicy(input.settings),
         approvalsReviewer: toApprovalsReviewer(input.settings),
-        config: codexPermissionProfileConfig({
-          sessionId: target.id,
-          settings: input.settings,
-          worktreePath: target.worktreePath
-        }),
+        config: await this.permissionProfileConfigForSession(
+          target,
+          input.settings
+        ),
         ephemeral: false
       });
     } catch (error) {
@@ -1424,14 +1427,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: reviewSession.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        config: codexPermissionProfileConfig({
-          sessionId: reviewSession.id,
+        config: await this.permissionProfileConfigForSession(
+          reviewSession,
           settings,
-          worktreePath: reviewSession.worktreePath,
-          attachmentPaths: attachmentDelivery.attachments.map(
-            (attachment) => attachment.path
-          )
-        }),
+          attachmentDelivery.attachments.map((attachment) => attachment.path)
+        ),
         developerInstructions: attachmentDelivery.prompt,
         ephemeral: false
       });
@@ -4814,12 +4814,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
     const attachmentPaths = attachments
       .map((attachment) => attachment.path)
       .sort((left, right) => left.localeCompare(right));
-    const config = codexPermissionProfileConfig({
-      sessionId: session.id,
+    const config = await this.permissionProfileConfigForSession(
+      session,
       settings,
-      worktreePath: session.worktreePath,
       attachmentPaths
-    });
+    );
     const requiredFingerprint = threadStartProfileFingerprint(settings, config);
     let client = await this.ensureClient();
     let server = this.supervisor.currentServer;
@@ -4937,12 +4936,11 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
         cwd: session.worktreePath,
         approvalPolicy: toApprovalPolicy(settings),
         approvalsReviewer: toApprovalsReviewer(settings),
-        config: codexPermissionProfileConfig({
-          sessionId: session.id,
+        config: await this.permissionProfileConfigForSession(
+          session,
           settings,
-          worktreePath: session.worktreePath,
           attachmentPaths
-        })
+        )
       });
     } catch (error) {
       throw mapMutationError('thread/resume', error);
@@ -4964,6 +4962,54 @@ export class CodexAppServerAdapter implements AgentRuntimeAdapter, AgentScopedRu
       throw new Error(`Agent session not found: ${sessionId}`);
     }
     return session;
+  }
+
+  private async permissionProfileConfigForSession(
+    session: AgentSessionRecord,
+    settings: AgentExecutionSettings,
+    attachmentPaths: readonly string[] = []
+  ) {
+    let additionalReadOnlyPaths: readonly string[] = [];
+    let reviewSubprocessConfig: Record<string, JsonValue> = {};
+    if (session.role === 'REVIEW') {
+      const worktree = await this.store.getWorktree(session.worktreeId);
+      if (
+        !worktree ||
+        worktree.taskId !== session.taskId ||
+        worktree.iterationId !== session.iterationId ||
+        worktree.worktreePath !== session.worktreePath
+      ) {
+        throw new Error(
+          'Cannot resolve trusted Git metadata for agent review: the review session worktree ownership is inconsistent.'
+        );
+      }
+      const repository = await this.store.getRepository(worktree.repositoryId);
+      if (!repository || repository.status !== 'AVAILABLE') {
+        throw new Error(
+          'Cannot resolve trusted Git metadata for agent review: the selected repository is unavailable.'
+        );
+      }
+      const metadata = await resolveReviewGitMetadata({
+        repositoryPath: repository.path,
+        worktreePath: worktree.worktreePath
+      });
+      const gitExecutablePath = await resolveReviewGitExecutablePath();
+      additionalReadOnlyPaths = [metadata.gitCommonDir];
+      reviewSubprocessConfig = codexReviewSubprocessConfig({
+        worktreePath: session.worktreePath,
+        gitExecutablePath
+      });
+    }
+    return {
+      ...codexPermissionProfileConfig({
+        sessionId: session.id,
+        settings,
+        worktreePath: session.worktreePath,
+        attachmentPaths,
+        additionalReadOnlyPaths
+      }),
+      ...reviewSubprocessConfig
+    };
   }
 
   private emitProviderUpdate(): void {
@@ -5345,6 +5391,37 @@ function mapThreadToSubagentStatus(
 
 function hashString(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function codexReviewSubprocessConfig(input: {
+  worktreePath: string;
+  gitExecutablePath: string;
+}): Record<string, JsonValue> {
+  const gitDirectory = path.dirname(input.gitExecutablePath);
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const inheritedPath = (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter((candidate) => candidate && path.resolve(candidate) !== gitDirectory);
+  return {
+    // A login shell can reorder PATH and select macOS's /usr/bin/git xcrun
+    // shim, which requires a writable cache. Reviews intentionally have none.
+    allow_login_shell: false,
+    shell_environment_policy: {
+      inherit: 'all',
+      ignore_default_excludes: false,
+      set: {
+        PATH: [gitDirectory, ...inheritedPath].join(path.delimiter),
+        HOME: input.worktreePath,
+        XDG_CONFIG_HOME: path.join(input.worktreePath, '.config'),
+        GIT_CONFIG_GLOBAL: nullDevice,
+        GIT_CONFIG_SYSTEM: nullDevice,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'core.excludesFile',
+        GIT_CONFIG_VALUE_0: nullDevice
+      }
+    }
+  };
 }
 
 function codexFailureReadiness(error: unknown) {

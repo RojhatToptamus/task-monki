@@ -92,6 +92,24 @@ Expected UI:
 6. Reducer keeps the task workflow phase in Review.
 7. `projection.agentReview.status` becomes `RUNNING`.
 
+Before a Codex review fork or detached review turn is launched, the adapter
+resolves the selected repository and task worktree through Git, canonicalizes
+the worktree Git directory and common Git directory, verifies that the
+worktree is registered to that repository, and adds only the exact common Git
+directory to the review permission profile as read-only. This is required for
+linked worktrees whose `.git` pointer names metadata outside the worktree. The
+review cwd remains the task worktree. Invalid, missing, symlinked, or unrelated
+metadata for the active worktree fails the review before provider input;
+unrelated prunable worktree registrations are ignored. Review subprocesses use
+the resolved Git executable directly, disable login-shell path rewriting, and
+ignore system/user Git configuration so the read-only sandbox does not need
+home-directory or temporary-cache grants.
+
+Review execution is always read-only. Selecting Full access for implementation
+or in submitted overrides does not select Codex's unrestricted profile for the
+review; Task Monki normalizes review settings to `READ_ONLY` and then adds the
+validated Git metadata root.
+
 The review session must carry the configured runtime, model provider, model,
 service tier, cwd, and reasoning effort. Cross-runtime review never reuses a
 model identifier from the implementation runtime.

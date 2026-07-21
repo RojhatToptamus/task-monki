@@ -168,11 +168,28 @@ separately secured extraction or tool boundary.
 For scoped execution, the adapter supplies a complete, collision-resistant
 permission profile through the existing thread-local config layer. It grants
 `:minimal`, the exact worktree, and exact verified task attachment files.
+For a review session, the adapter also resolves and canonicalizes the
+worktree's Git directory and common Git directory, proves that the worktree is
+registered to the selected repository and uses that repository's common Git
+directory, and grants only that exact common directory read-only. The review
+cwd and sole runtime workspace root remain the task worktree. Missing,
+symlinked, or unrelated Git metadata fails before `thread/fork` or
+`review/start` is sent. Unrelated prunable worktree registrations are ignored;
+the active worktree must still resolve and match exactly. Review subprocesses
+use the already resolved concrete Git executable in a non-login shell, ignore
+system and user Git configuration, and resolve Git's excludes file to the null
+device. This avoids home-directory and macOS `xcrun` cache access without
+adding writable roots.
 Full access instead selects Codex's documented `:danger-full-access` built-in;
 Task Monki does not label a worktree-scoped custom profile as unrestricted.
 Multi-agent V1/V2 and memories are disabled in both configurations. Runtime
 discovery proves the custom-profile surface with a disposable ephemeral thread
 before selecting a Codex binary.
+
+Review settings are always normalized to Task Monki's read-only policy. A Full
+access implementation or UI selection therefore does not make the detached
+review unrestricted; the review still uses the restricted profile plus the
+validated read-only Git common directory.
 
 Thread create, resume, fork, each ordinary turn, recovery, and the explicit
 fork-plus-inline review path all require the returned active profile and sole
