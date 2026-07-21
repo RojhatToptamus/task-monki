@@ -42,10 +42,8 @@ describe('resolveReviewGitMetadata', () => {
     expect(metadata.gitCommonDir).toBe(
       await fs.realpath(path.join(fixture.repository, '.git'))
     );
-    expect(metadata.gitDir).toMatch(
-      new RegExp(
-        `${escapeRegExp(path.join(fixture.repository, '.git', 'worktrees'))}${escapeRegExp(path.sep)}`
-      )
+    expect(path.dirname(metadata.gitDir)).toBe(
+      await fs.realpath(path.join(fixture.repository, '.git', 'worktrees'))
     );
   });
 
@@ -59,7 +57,14 @@ describe('resolveReviewGitMetadata', () => {
       await fs.realpath(fixture.worktree),
       await fs.realpath(absoluteGitDir)
     );
-    await fs.writeFile(gitEntry, `gitdir: ${relativeGitDir}\n`, 'utf8');
+    await fs.chmod(gitEntry, 0o600);
+    const gitPointer = await fs.open(gitEntry, 'r+');
+    try {
+      await gitPointer.truncate(0);
+      await gitPointer.writeFile(`gitdir: ${relativeGitDir}\n`, 'utf8');
+    } finally {
+      await gitPointer.close();
+    }
 
     const metadata = await resolveReviewGitMetadata({
       repositoryPath: fixture.repository,
@@ -200,8 +205,4 @@ async function initRepository(repository: string): Promise<void> {
   );
   await git(repository, ['add', 'app.ts']);
   await git(repository, ['commit', '-m', 'Initial commit']);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
