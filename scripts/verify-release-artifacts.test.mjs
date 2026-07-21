@@ -2,9 +2,27 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { verifyReleaseArtifacts } from './verify-release-artifacts.mjs';
+import {
+  verifyPackagedLegalFiles,
+  verifyReleaseArtifacts
+} from './verify-release-artifacts.mjs';
 
 const temporaryDirectories = [];
+const requiredLegalFiles = [
+  'legal/LICENSE',
+  'legal/THIRD_PARTY_NOTICES.md',
+  'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
+  'legal/electron/LICENSE',
+  'legal/electron/LICENSES.chromium.html'
+];
+const resourceDirectoriesByPlatform = {
+  darwin: [
+    'mac/Task Monki.app/Contents/Resources',
+    'mac-arm64/Task Monki.app/Contents/Resources'
+  ],
+  win32: ['win-unpacked/resources'],
+  linux: ['linux-unpacked/resources']
+};
 
 afterEach(async () => {
   await Promise.all(
@@ -30,6 +48,7 @@ describe('release artifact verification', () => {
       path.join(releaseDir, 'latest-linux.yml'),
       `version: ${version}\nfiles:\n  - ${appImage}\n  - ${deb}\n`
     );
+    await writeRequiredLegalFiles(releaseDir, 'linux');
 
     await expect(
       verifyReleaseArtifacts({ platform: 'linux', releaseDir, version })
@@ -56,6 +75,34 @@ describe('release artifact verification', () => {
       verifyReleaseArtifacts({ platform: 'linux', releaseDir, version })
     ).rejects.toThrow('unexpectedly small');
   });
+
+  for (const [platform, resourceDirectories] of Object.entries(
+    resourceDirectoriesByPlatform
+  )) {
+    it(`accepts the required legal files in ${platform} package resources`, async () => {
+      const releaseDir = await temporaryDirectory();
+      await writeRequiredLegalFiles(releaseDir, platform);
+
+      await expect(
+        verifyPackagedLegalFiles({ platform, releaseDir })
+      ).resolves.toBeUndefined();
+    });
+
+    it(`rejects a missing legal file in ${platform} package resources`, async () => {
+      const releaseDir = await temporaryDirectory();
+      await writeRequiredLegalFiles(releaseDir, platform);
+      const missingFile = path.join(
+        releaseDir,
+        resourceDirectories[0],
+        'legal/third-party/OpenAI-Codex-Apache-2.0.txt'
+      );
+      await fs.rm(missingFile);
+
+      await expect(
+        verifyPackagedLegalFiles({ platform, releaseDir })
+      ).rejects.toThrow('legal/third-party/OpenAI-Codex-Apache-2.0.txt');
+    });
+  }
 });
 
 async function temporaryDirectory() {
@@ -83,6 +130,16 @@ async function writeDebianArchive(filePath) {
     arMember('data.tar.xz/', Buffer.alloc(1024 * 1024, 0x61))
   ];
   await fs.writeFile(filePath, Buffer.concat([Buffer.from('!<arch>\n'), ...members]));
+}
+
+async function writeRequiredLegalFiles(releaseDir, platform) {
+  for (const resourceDirectory of resourceDirectoriesByPlatform[platform]) {
+    for (const relativePath of requiredLegalFiles) {
+      const filePath = path.join(releaseDir, resourceDirectory, relativePath);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, `${relativePath}\n`);
+    }
+  }
 }
 
 function arMember(name, contents) {

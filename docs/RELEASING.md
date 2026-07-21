@@ -50,7 +50,8 @@ npm run dist:dir
 
 After building the full release targets for the current platform, verify their
 archive signatures, expected architectures/names, update metadata, minimum
-sizes, compressed archive integrity, and native package payloads:
+sizes, compressed archive integrity, native package payloads, and required
+legal resources:
 
 ```sh
 npm run verify:release-artifacts
@@ -62,6 +63,11 @@ malformed installers even when the packaging command itself exits successfully.
 On macOS it asks `hdiutil` to verify each DMG. On Linux it asks `dpkg-deb` to
 inspect the Debian package and extracts the AppImage without FUSE. ZIP and NSIS
 payloads are tested with the pinned 7-Zip binary used by the build toolchain.
+The legal payload is checked under `Contents/Resources/legal` in each macOS app
+bundle and under `resources/legal` in the Windows and Linux unpacked package
+outputs. It includes Task Monki's MIT license and notices, Electron and
+Chromium license files, and the OpenAI Codex Apache-2.0 license at
+`legal/third-party/OpenAI-Codex-Apache-2.0.txt`.
 
 Also execute the unpacked Electron binary for the current operating system and
 CPU architecture:

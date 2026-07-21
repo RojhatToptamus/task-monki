@@ -13,6 +13,13 @@ const require = createRequire(import.meta.url);
 const { path7za } = require('7zip-bin');
 const MIN_PACKAGE_BYTES = 1024 * 1024;
 const ARCHIVE_TIMEOUT_MS = 120_000;
+const REQUIRED_PACKAGED_LEGAL_FILES = [
+  'legal/LICENSE',
+  'legal/THIRD_PARTY_NOTICES.md',
+  'legal/third-party/OpenAI-Codex-Apache-2.0.txt',
+  'legal/electron/LICENSE',
+  'legal/electron/LICENSES.chromium.html'
+];
 
 async function main() {
   const options = parseOptions(process.argv.slice(2));
@@ -42,17 +49,64 @@ export async function verifyReleaseArtifacts({
 }) {
   if (platform === 'darwin') {
     await verifyMacArtifacts(releaseDir, version, nativeValidation);
-    return;
+  } else if (platform === 'win32') {
+    await verifyWindowsArtifacts(releaseDir, version);
+  } else if (platform === 'linux') {
+    await verifyLinuxArtifacts(releaseDir, version, nativeValidation);
+  } else {
+    throw new Error(`Unsupported release verification platform: ${platform}`);
+  }
+  await verifyPackagedLegalFiles({ platform, releaseDir });
+}
+
+export async function verifyPackagedLegalFiles({ platform, releaseDir }) {
+  const resourceDirectories = packagedResourceDirectories(platform, releaseDir);
+  for (const resourceDirectory of resourceDirectories) {
+    for (const relativePath of REQUIRED_PACKAGED_LEGAL_FILES) {
+      const filePath = path.join(resourceDirectory, relativePath);
+      let stat;
+      try {
+        stat = await fs.stat(filePath);
+      } catch (error) {
+        if (error && error.code === 'ENOENT') {
+          throw new Error(
+            `Required packaged legal file is missing: ${displayPath(releaseDir, filePath)}.`
+          );
+        }
+        throw error;
+      }
+      if (!stat.isFile() || stat.size === 0) {
+        throw new Error(
+          `Required packaged legal file is empty or invalid: ${displayPath(releaseDir, filePath)}.`
+        );
+      }
+    }
+  }
+}
+
+function packagedResourceDirectories(platform, releaseDir) {
+  if (platform === 'darwin') {
+    return ['mac', 'mac-arm64'].map((directory) =>
+      path.join(
+        releaseDir,
+        directory,
+        'Task Monki.app',
+        'Contents',
+        'Resources'
+      )
+    );
   }
   if (platform === 'win32') {
-    await verifyWindowsArtifacts(releaseDir, version);
-    return;
+    return [path.join(releaseDir, 'win-unpacked', 'resources')];
   }
   if (platform === 'linux') {
-    await verifyLinuxArtifacts(releaseDir, version, nativeValidation);
-    return;
+    return [path.join(releaseDir, 'linux-unpacked', 'resources')];
   }
   throw new Error(`Unsupported release verification platform: ${platform}`);
+}
+
+function displayPath(releaseDir, filePath) {
+  return path.relative(releaseDir, filePath).split(path.sep).join('/');
 }
 
 async function verifyMacArtifacts(releaseDir, version, nativeValidation) {

@@ -16,6 +16,18 @@ files:
 extraResources:
   - from: src/core/preview/runtime/native-preview-launcher.mjs
     to: native-preview-launcher.mjs
+  - from: build/icon.png
+    to: icon.png
+  - from: LICENSE
+    to: legal/LICENSE
+  - from: THIRD_PARTY_NOTICES.md
+    to: legal/THIRD_PARTY_NOTICES.md
+  - from: THIRD_PARTY_LICENSES/OpenAI-Codex-Apache-2.0.txt
+    to: legal/third-party/OpenAI-Codex-Apache-2.0.txt
+  - from: node_modules/electron/dist/LICENSE
+    to: legal/electron/LICENSE
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: legal/electron/LICENSES.chromium.html
 
 extraMetadata:
   main: dist-electron/electron/main.js
@@ -37,9 +49,6 @@ mac:
   # the future Developer ID signed and notarized release path.
   hardenedRuntime: false
   sign: scripts/ad-hoc-mac-sign.cjs
-  extraResources:
-    - from: build/icon.png
-      to: icon.png
   extendInfo:
     NSBluetoothAlwaysUsageDescription: Task Monki does not use Bluetooth access.
     NSBluetoothPeripheralUsageDescription: Task Monki does not use Bluetooth access.

@@ -16,10 +16,9 @@
   </a>
 </p>
 
-
 ## Why Task Monki
 
-Task Monki started during the Codex Community Build and continued to grow during Codex Build Week Vienna.
+Task Monki started during the Codex Community Build and continued to grow during OpenAI Build Week in Vienna.
 
 The idea came from a problem I kept running into while working with coding agents. The agents could implement tasks quickly, but managing several of them at the same time was still very manual. I had to open each worktree separately, run the right commands, start local services and containers, check the result, review the changes, and follow the pull request status across different tools.
 
@@ -70,13 +69,19 @@ See the [Discourse workflow](docs/workflows/GENERAL_AGENT_DISCOURSE_LIFECYCLE.md
 
 ## Supported providers
 
-Task Monki currently supports Codex(Recommended provider), OpenCode, Cursor, Grok, and the Claude ACP bridge(Experimental).
+Task Monki currently supports Codex (recommended), OpenCode, Cursor, Grok, and the Claude ACP bridge (experimental).
 
 ## Built with Codex
 
-Task Monki started during the Codex Community Build with GPT-5.5 and continued during Codex Build Week with GPT-5.6. I used the Codex app and separate Git worktrees to build and test larger features in parallel.
+Task Monki started during the Codex Community Build with GPT-5.5 and was meaningfully extended during OpenAI Build Week with GPT-5.6.
 
-With GPT-5.6, I added multi-provider support, Git and GitHub integration, local previews, agent reviews, follow-up fixes, Discourse, and a major UI refactor. I used GPT-5.6 Ultra for the multi-provider implementation because it affected a large part of the codebase. Browser Use, Computer Use, and Playwright were used to test complete workflows in the real application, including the demo recording.
+Between July 13 and July 21, 2026, I used the Codex app and separate Git worktrees to add multi-provider support, local previews, Discourse, major workspace and interaction improvements, repository architecture changes, and additional review and worktree reliability fixes.
+
+I made the main product and technical decisions, while Codex helped me inspect the codebase, implement the features, and verify them across the application.
+
+I used GPT-5.6 Ultra for the multi-provider implementation because it affected a large part of the codebase. I also used Browser Use, Computer Use, and Playwright to test complete workflows in the real application, including the demo recording.
+
+The earlier task board, core Git and GitHub workflow, agent review flow, and follow-up workflow existed before Build Week and served as the foundation for this work.
 
 ## Install
 
@@ -170,3 +175,10 @@ npm run typecheck && npm test && npm run build && npm run check:codex-protocol
 ## Status
 
 Task Monki is experimental and focused on one thing: a reliable local review loop with isolated implementation, inspectable evidence, and human-controlled GitHub delivery. It runs real local processes and Git operations, so use it only with repositories you can recover — never with untrusted prompts or repositories. Interfaces and stored data formats may still change.
+
+## License
+
+Task Monki is released under the [MIT License](LICENSE). Third-party software
+and attributions are described in [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+
+Task Monki is an independent open-source project. References to Codex, OpenAI, GitHub, Docker, Electron, React, and other third-party products are used only to identify compatible products and services and do not imply endorsement.
